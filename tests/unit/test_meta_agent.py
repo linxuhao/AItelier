@@ -77,9 +77,9 @@ class TestConfigLoading:
         assert isinstance(cfg, dict)
         assert "model" in cfg  # falls back to default config
 
-    def test_resolve_provider_minimax(self):
-        model, base, key = _resolve_provider("minimax/MiniMax-M3")
-        assert model == "openai/MiniMax-M3"
+    def test_resolve_provider(self):
+        model, base, key = _resolve_provider("deepseek/deepseek-v4-flash")
+        assert model == "openai/deepseek-v4-flash"
         assert base is not None
 
     def test_resolve_provider_unknown(self):

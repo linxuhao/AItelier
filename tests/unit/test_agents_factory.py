@@ -16,10 +16,10 @@ def registry():
                  template="step1_5_researcher.md",
                  tools=["web_search", "web_fetch"],
                  thinking={"enable": True, "effort": "max"})
-    reg.register("researcher_reviewer", model="minimax/MiniMax-M3",
+    reg.register("researcher_reviewer", model="deepseek/deepseek-v4-flash",
                  template="step1_5_researcher_red.md",
                  tools=[])
-    reg.register("task_implementer", model="minimax/MiniMax-M3",
+    reg.register("task_implementer", model="deepseek/deepseek-v4-flash",
                  template="task_implementer.md",
                  tools=["read_file", "list_tree", "write"],
                  max_tool_turns=15)

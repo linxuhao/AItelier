@@ -9,7 +9,7 @@ from skillflow.agent_registry import AgentRegistry
 @pytest.fixture
 def registry():
     reg = AgentRegistry()
-    reg.register("task_implementer", model="minimax/MiniMax-M3",
+    reg.register("task_implementer", model="deepseek/deepseek-v4-flash",
                  template="task_implementer.md",
                  tools=["read_file", "write"],
                  max_tool_turns=15)

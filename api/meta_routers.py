@@ -641,11 +641,9 @@ def approve_checkpoint(
     # that step finishes, and the client times out (the checkpoint approval
     # timeout). wake_scheduler() already enqueues poll_and_execute on
     # APScheduler, which runs the step decoupled from this request.
-    from core.scheduler import wake_scheduler, _emitted_checkpoints
+    from core.scheduler import wake_scheduler
     import asyncio, json, time, sys
     wake_scheduler()
-    # Clear dedup so checkpoint can re-fire if pipeline loops back
-    _emitted_checkpoints.discard((project_id, _step_id))
 
     # Push the checkpoint_resolved SSE event as a short, non-blocking task.
     try:
@@ -711,11 +709,9 @@ def reject_checkpoint(
     # state and reject_checkpoint would then refuse it.
     sf.reject_checkpoint(run_id, step_id, request.feedback)
 
-    from core.scheduler import wake_scheduler, _emitted_checkpoints
+    from core.scheduler import wake_scheduler
     import asyncio, json, time
     wake_scheduler()
-    # Clear dedup so checkpoint can re-fire when step re-runs
-    _emitted_checkpoints.discard((project_id, step_id))
     # Emit checkpoint_resolved SSE event so TUI clears the ⏳ status
     try:
         loop = asyncio.get_event_loop()

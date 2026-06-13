@@ -59,7 +59,7 @@ steps:
     max_retries: 3
     config:
       template: "step3_pm.md"
-      model: "minimax/MiniMax-M3"
+      model: "deepseek/deepseek-v4-flash"
       output_mode: "content"
       output_schema: "aitelier.schemas.PMOutput"
       output_schema_retries: 2
@@ -87,7 +87,7 @@ steps:
     max_retries: 3
     config:
       template: "task_plan.md"
-      model: "minimax/MiniMax-M3"
+      model: "deepseek/deepseek-v4-flash"
       output_mode: "content"
       fixed_outputs: {plan: "task_plan.md", subtask_manifest: "subtasks_manifest.json"}
       tools: [web_search, web_fetch, read_file, list_tree]
@@ -100,7 +100,7 @@ steps:
     max_retries: 5
     config:
       template: "task_implementer.md"
-      model: "minimax/MiniMax-M3"
+      model: "deepseek/deepseek-v4-flash"
       output_mode: "write"
       tools: [read_file, list_tree, write, web_search, web_fetch]
     transitions:
@@ -114,7 +114,7 @@ steps:
     max_retries: 3
     config:
       template: "task_verify.md"
-      model: "minimax/MiniMax-M3"
+      model: "deepseek/deepseek-v4-flash"
       output_mode: "content"
       fixed_outputs: {report: "task_verify_report.json"}
       tools: [read_file, list_tree, web_search, web_fetch]
@@ -142,7 +142,7 @@ steps:
     max_retries: 1
     config:
       template: "task_error_handler.md"
-      model: "minimax/MiniMax-M3"
+      model: "deepseek/deepseek-v4-flash"
       output_mode: "content"
     transitions:
       - to: "task_loop"

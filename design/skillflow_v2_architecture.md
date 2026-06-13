@@ -465,7 +465,7 @@ researcher:
     effort: "max"
 
 researcher_reviewer:
-  model: "minimax/MiniMax-M3"
+  model: "deepseek/deepseek-v4-flash"
   temperature: 0.1
   template: "step1_5_researcher_red.md"
   tools: []
@@ -482,7 +482,7 @@ architect:
     effort: "max"
 
 architect_reviewer:
-  model: "minimax/MiniMax-M3"
+  model: "deepseek/deepseek-v4-flash"
   temperature: 0.1
   template: "step2_architect_red.md"
   tools: []
@@ -490,7 +490,7 @@ architect_reviewer:
     enable: true
 
 pm:
-  model: "minimax/MiniMax-M3"
+  model: "deepseek/deepseek-v4-flash"
   temperature: 0.2
   template: "step3_pm.md"
   tools: ["web_search", "web_fetch", "read_file", "list_tree"]
@@ -502,7 +502,7 @@ pm_reviewer:
   tools: []
 
 task_planner:
-  model: "minimax/MiniMax-M3"
+  model: "deepseek/deepseek-v4-flash"
   temperature: 0.2
   template: "task_plan.md"
   tools: ["web_search", "web_fetch", "read_file", "list_tree"]
@@ -515,7 +515,7 @@ task_planner_reviewer:
   tools: []
 
 task_implementer:
-  model: "minimax/MiniMax-M3"
+  model: "deepseek/deepseek-v4-flash"
   temperature: 0.2
   template: "task_implementer.md"
   tools: ["read_file", "list_tree", "write"]
@@ -528,7 +528,7 @@ task_implementer_reviewer:
   tools: []
 
 task_verifier:
-  model: "minimax/MiniMax-M3"
+  model: "deepseek/deepseek-v4-flash"
   temperature: 0.2
   template: "task_verify.md"
   tools: ["read_file", "list_tree"]

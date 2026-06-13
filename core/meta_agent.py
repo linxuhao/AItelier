@@ -446,7 +446,7 @@ TOOL_DEFINITIONS = [
 def _load_meta_agent_config(config_path: str = _DEFAULT_CONFIG_PATH) -> dict:
     # Default meta_agent config (was in agent_configs/meta_conversation.yaml)
     default_config = {
-        "model": "minimax/MiniMax-M3",
+        "model": "deepseek/deepseek-v4-flash",
         "template": "meta_conversation.md",
         "tools": ["save_draft_brief", "suggest_submit_project"],
         "max_tool_turns": 20,
@@ -507,7 +507,7 @@ class MetaAgent:
         self.session_id = session_id
 
         cfg = _load_meta_agent_config()
-        raw_model = cfg.get("model", "minimax/MiniMax-M3")
+        raw_model = cfg.get("model", "deepseek/deepseek-v4-flash")
         self._raw_model = raw_model
         self.litellm_model, self.api_base, self.api_key = _resolve_provider(raw_model)
         self.enable_thinking = cfg.get("enable_thinking", False)

@@ -38,7 +38,7 @@ graph TB
         Sched["Scheduler (APScheduler)<br/>poll_and_execute<br/>bridge skillflow ↔ aitelier"]
         Runner["AItelierStepRunner<br/>execute claimed step<br/>green / reviewer dispatch"]
         PE["PipelineEngine<br/>run_step (green LLM)<br/>run_review_step (red LLM)<br/>AgentFactory"]
-        WS["Workspace Manager<br/>Inbox/Outbox dirs<br/>git event sourcing"]
+        WS["Workspace Manager<br/>step staging dirs ({step}.tmp → {step})<br/>git event sourcing"]
         DI["api/dependencies.py<br/>singletons: SkillFlow<br/>ToolLoader / DBManager"]
     end
     class AIT,TUI,API,Meta,Sched,Runner,PE,WS,DI ait

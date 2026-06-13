@@ -294,7 +294,7 @@ steps:
     output:
       mode: "write"
       # 无 fixed → LLM 自由命名文件
-      # 写进 Outbox_Draft_t_impl/
+      # 写进 t_impl.tmp/
     transitions:
       - to: "t_impl_apply"
         # 直接进入 apply，不用 match（无条件）
@@ -302,12 +302,12 @@ steps:
   - id: "t_impl_apply"
     type: "tool"
     tool: "repo_apply"
-    # repo_apply: 将 Outbox_Draft_t_impl/ 的文件
+    # repo_apply: 将 t_impl.tmp/ 的文件
     #             1. 复制到 project/ repo
     #             2. git add + git commit
     #             返回 { applied: true/false, files: [...], error: "..." }
     params:
-      source_dir: "Outbox_Draft_t_impl"
+      source_dir: "t_impl.tmp"
     transitions:
       - to: "t_impl_validate"
         match: { field: "applied", value: true }
@@ -682,7 +682,7 @@ limits:
 # skillflow/tools/repo_apply/tool.yaml
 name: repo_apply
 description: >
-  Apply files from Outbox_Draft to the project repository.
+  Apply files from the step staging dir to the project repository.
   Copies files, performs git add + git commit.
   Returns { applied: true/false, files: [...], commit_hash: "...", error: "..." }
 type: "system"    # "agent" = exposed to LLM, "system" = skillflow internal only
@@ -853,11 +853,11 @@ skillflow/tools/{name}/tool.yaml，动态拼接 tool schema + usage pattern。
 
   如果是 cross-config:
     source: { config: "meta_conversation", output: "brief.md" }
-    → 读 workspace/{project_id}/meta_conversation/Outbox_Final_meta/brief.md
+    → 读 workspace/{project_id}/meta_conversation/meta/brief.md
 
   如果是 previous step:
     source: { step: "2", output: "step2_design.md", mode: "interfaces" }
-    → 读 workspace/{project_id}/dpe_default/Outbox_Final_2/step2_design.md
+    → 读 workspace/{project_id}/dpe_default/2/step2_design.md
     → mode: "full" = 全量, "summary" = 前100行, "interfaces" = 提取 API/接口章节
 
   如果是 tool:
@@ -868,7 +868,7 @@ skillflow/tools/{name}/tool.yaml，动态拼接 tool schema + usage pattern。
 上一轮 reviewer 或 validation 的失败信息
 
 [Step Task Card]
-当前 step 的指令 (Inbox_{step_id}/ 下的内容)
+当前 step 的指令 (由 prompt assembler 注入；Inbox 目录已废弃)
 ```
 
 ---
@@ -915,7 +915,7 @@ This means the agent at `t_impl` re-enters with exactly the validation failure m
 ## 9. Checkpoint Display
 
 Node has `checkpoint: true` → skillflow pauses before proceeding.
-AItelier UI reads `Outbox_Final_{step_id}/` or `Outbox_Draft_{step_id}/` directory, displays all file contents.
+AItelier UI reads `the promoted step dir_{step_id}/` or `the step staging dir_{step_id}/` directory, displays all file contents.
 
 No special logic needed — it's just showing the step's output files.
 
@@ -926,22 +926,19 @@ No special logic needed — it's just showing the step's output files.
 ```
 ~/.AItelier/workspaces/{project_id}/
 ├── meta_conversation/          # meta conversation graph 的 workspace
-│   ├── Inbox_intent_detect/
-│   ├── Inbox_meta/
-│   ├── Outbox_Draft_meta/
+│   ├── meta.tmp/
 │   │   └── brief.md
-│   ├── Outbox_Final_intent_detect/
+│   ├── intent_detect/
 │   │   └── intent_result.json
-│   ├── Outbox_Final_meta/
+│   ├── meta/
 │   │   └── brief.md            # ← 被 dpe_default graph 引用
 │   │   └── step1_goals.json
 │   └── Trace_meta/
 ├── dpe_default/                # dpe_default graph 的 workspace
-│   ├── Inbox_1_5/
-│   ├── Outbox_Draft_1_5/
-│   ├── Outbox_Final_1_5/
+│   ├── 1_5.tmp/
+│   ├── 1_5/
 │   │   └── step1_5_sota.md
-│   ├── Outbox_Final_2/
+│   ├── 2/
 │   ├── Trace_1_5/
 │   └── ...
 ├── project/                    # 共享的 project brief
@@ -956,10 +953,10 @@ No special logic needed — it's just showing the step's output files.
 Cross-config context 查找路径:
 ```
 source: { config: "meta_conversation", output: "brief.md" }
-→ {workspace}/meta_conversation/Outbox_Final_meta/brief.md
+→ {workspace}/meta_conversation/meta/brief.md
 
 source: { step: "2", output: "step2_design.md" }
-→ {workspace}/{current_config}/Outbox_Final_2/step2_design.md
+→ {workspace}/{current_config}/2/step2_design.md
   (当前 config = dpe_default)
 ```
 
@@ -1068,7 +1065,7 @@ steps:
     type: "tool"
     tool: "update_ledger"      # 自定义 tool: 更新角色、情节、设定
     params:
-      inputs: ["chapter_summary.md", "Outbox_Draft_write_chapter/*"]
+      inputs: ["chapter_summary.md", "write_chapter.tmp/*"]
     transitions:
       - to: "submit_chapter"
 
@@ -1076,7 +1073,7 @@ steps:
     type: "tool"
     tool: "submit_to_publisher"  # 自定义 tool
     params:
-      chapter_dir: "Outbox_Final_write_chapter"
+      chapter_dir: "write_chapter"
     transitions:
       - to: null
 

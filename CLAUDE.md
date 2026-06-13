@@ -5,7 +5,7 @@ Under Developpement, no backward compatbility is needed.
 
 ## Project Overview
 
-AItelier is a multi-agent AI system that plans, architects, implements, and verifies software projects autonomously. It uses a Green (Maker) / Red (Checker) adversarial pattern defined as skillflow graph nodes — agents are stateless, read from Inbox files, write to Outbox files. All changes tracked via Git event sourcing.
+AItelier is a multi-agent AI system that plans, architects, implements, and verifies software projects autonomously. It uses a Green (Maker) / Red (Checker) adversarial pattern defined as skillflow graph nodes — agents are stateless: each step reads its context from prior step outputs and writes results into a per-step staging directory (`{step}.tmp/`) that the engine validates and promotes to a final step directory (`{step}/`). All changes tracked via Git event sourcing.
 
 **Pipeline execution is handled by [Skillflow](https://github.com/linxuhao/skillflow)** — a config-agnostic graph executor (PyPI: `skillflow-py`). AItelier is the host application: UI, DB, workspace management, LLM provider config, and pipeline-specific templates/tools.
 
@@ -71,7 +71,7 @@ Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto). Fixtures in `tes
 | `core/prompt_assembler.py` | Assembles system/user prompts from templates + step context |
 | `core/scheduler.py` | Polls skillflow: claim → execute → confirm → advance |
 | `core/dpe_pipeline.py` | Legacy PipelineEngine (being phased out in favor of skillflow runner) |
-| `core/workspace_manager.py` | Physical directory jail, Git operations, Inbox/Outbox lifecycle |
+| `core/workspace_manager.py` | Physical directory jail, Git operations, step staging→final directory lifecycle |
 | `core/db_manager.py` | SQLite persistence (projects, tasks, settings, users) |
 | `core/ai_router.py` | `AIGateway` — LiteLLM wrapper, provider registry from `llm_providers.json` |
 | `core/meta_agent.py` | Autonomous CLI/WebGUI butler agent |

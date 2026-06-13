@@ -1,0 +1,146 @@
+# agent_configs/dpe_default.yaml
+# LLM call parameters indexed by role name (referenced from graph step.agent_config).
+# Context, output, and validation are in the GRAPH config, NOT here.
+# max_output_tokens: LLM completion max tokens (default 8192, increase for high-output steps)
+# native_tool_calling: true = use native function calling instead of JSON-mode dispatch
+# fallback_to_json_mode: true = auto fallback to JSON mode if native fails
+
+researcher:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.2
+  template: "step1_5_researcher.md"
+  tools: ["web_search", "web_fetch", "list_tree"]
+  max_output_tokens: 16384
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+    effort: "max"
+
+researcher_reviewer:
+  model: "minimax/MiniMax-M3"
+  temperature: 0.1
+  template: "step1_5_researcher_red.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+architect:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.2
+  template: "step2_architect.md"
+  tools: ["web_search", "web_fetch", "list_tree"]
+  max_output_tokens: 32768
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+    effort: "max"
+
+architect_reviewer:
+  model: "minimax/MiniMax-M3"
+  temperature: 0.1
+  template: "step2_architect_red.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+pm:
+  model: "minimax/MiniMax-M3"
+  temperature: 0.2
+  template: "step3_pm.md"
+  tools: ["web_search", "web_fetch", "list_tree"]
+  max_output_tokens: 32768
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+pm_reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.1
+  template: "step3_pm_red.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+task_planner:
+  model: "minimax/MiniMax-M3"
+  temperature: 0.2
+  template: "task_plan.md"
+  tools: ["web_search", "web_fetch", "list_tree"]
+  max_output_tokens: 16384
+  max_tool_turns: 10
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+task_planner_reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.1
+  template: "task_plan_red.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+task_implementer:
+  model: "minimax/MiniMax-M3"
+  temperature: 0.2
+  template: "task_implementer.md"
+  tools: ["list_tree", "write"]
+  max_output_tokens: 32768
+  max_tool_turns: 15
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+task_implementer_reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.1
+  template: "task_implementer_red.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+task_verifier:
+  model: "minimax/MiniMax-M3"
+  temperature: 0.2
+  template: "task_verify.md"
+  tools: ["list_tree"]
+  max_output_tokens: 8192
+  max_tool_turns: 10
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+task_verifier_reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.1
+  template: "task_verify_red.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+final_verifier:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.2
+  template: "step5_verifier.md"
+  tools: ["list_tree"]
+  max_output_tokens: 16384
+  max_tool_turns: 10
+  native_tool_calling: true
+  fallback_to_json_mode: true
+
+final_verifier_reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.1
+  template: "step5_verifier_red.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true

@@ -1,0 +1,8 @@
+name: web_search
+description: >
+  Search the web for information. Returns a list of results with titles and URLs.
+parameters:
+  query:
+    type: string
+    description: "Search query string"
+    required: true

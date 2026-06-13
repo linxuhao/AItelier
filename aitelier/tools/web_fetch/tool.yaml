@@ -1,0 +1,8 @@
+name: web_fetch
+description: >
+  Fetch content from a URL and extract text.
+parameters:
+  url:
+    type: string
+    description: "URL to fetch"
+    required: true

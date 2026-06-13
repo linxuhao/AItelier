@@ -1,0 +1,38 @@
+# configs/meta_conversation.yaml
+# Meta conversation as a skillflow graph.
+# AItelier runs this graph first to produce project_brief.md,
+# then runs the main pipeline graph.
+
+name: "meta_conversation"
+description: "Project requirements gathering via natural conversation"
+
+begin: "intent_detect"
+
+steps:
+  - id: "intent_detect"
+    step_type: "agent"
+    agent_config: "intent_detector"
+    context: []
+    output:
+      mode: "content"
+      fixed:
+        result: "intent_result.json"
+    transitions:
+      - to: "meta"
+        match: { field: "intent", value: "new_project" }
+      - to: "meta"
+        match: { field: "intent", value: "existing_code" }
+      - to: null    # rejected — end graph
+        match: { field: "status", value: "rejected" }
+
+  - id: "meta"
+    step_type: "agent"
+    agent_config: "meta_conversation_agent"
+    context: []
+    output:
+      mode: "write"
+    checkpoint: true
+    checkpoint_label: "Review Project Brief"
+    transitions:
+      - to: null    # approved — end graph
+        match: { from: "checkpoint", value: "approved" }

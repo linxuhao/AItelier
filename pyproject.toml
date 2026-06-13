@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aitelier"
+version = "1.0.0"
+requires-python = ">=3.12"
+license = "LicenseRef-FSL-1.1-MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "skillflow-py>=1.0.5",
+    "fastapi>=0.136",
+    "typer>=0.24",
+    "litellm>=1.85",
+    "httpx>=0.28",
+    "pydantic>=2.13",
+    "apscheduler>=3.11",
+    "tenacity>=9.1",
+    "rich>=15.0",
+    "textual>=8.2",
+    "prompt-toolkit>=3.0",
+    "uvicorn>=0.44",
+]
+
+[project.scripts]
+aitelier = "cli.app:_entrypoint"
+
+[tool.setuptools.packages.find]
+include = ["cli*", "api*", "core*", "models*", "aitelier*"]

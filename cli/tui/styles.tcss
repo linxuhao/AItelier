@@ -1,0 +1,108 @@
+/* AItelier TUI Styles */
+
+Screen {
+    layout: vertical;
+    background: $surface;
+}
+
+/* ── Dashboard Zone (Static, display-only) ── */
+
+#dashboard-zone {
+    height: auto;
+    max-height: 14;
+    border: solid $primary;
+    padding: 0 1;
+    margin: 0 1;
+    text-align: left;
+}
+
+/* ── Main area: Chat + Notifications side by side ── */
+
+#main-area {
+    height: 1fr;
+    margin: 0 1;
+}
+
+/* ── Chat Zone ── */
+
+ChatZone {
+    width: 2fr;
+    border: solid $primary;
+    padding: 0 1;
+}
+
+#chat-log {
+    height: 1fr;
+    scrollbar-size: 1 1;
+}
+
+.chat-user {
+    color: $text;
+    text-style: bold;
+}
+
+.chat-agent {
+    color: $success;
+}
+
+.chat-tool {
+    color: $warning;
+}
+
+.chat-error {
+    color: $error;
+}
+
+.chat-system {
+    color: $accent;
+    text-style: italic;
+}
+
+/* ── Completion candidates box ── */
+
+.completion-box {
+    dock: bottom;
+    height: auto;
+    max-height: 10;
+    background: $surface-darken-1;
+    color: $text;
+    padding: 0 1;
+    margin: 0;
+    display: none;
+}
+
+/* ── Chat input ── */
+
+#chat-input {
+    dock: bottom;
+    height: 3;
+    margin: 1 0;
+}
+
+/* ── Notification Zone ── */
+
+#notif-zone {
+    width: 56;
+    min-width: 42;
+    border: solid $primary-darken-1;
+    padding: 0 1;
+    scrollbar-size: 1 1;
+    overflow-y: auto;
+}
+
+#notif-display {
+    width: 100%;
+    height: auto;
+    text-overflow: ellipsis;
+    overflow-y: auto;
+}
+
+/* ── Flash Bar ── */
+
+FlashBar {
+    height: 1;
+    dock: bottom;
+    padding: 0 1;
+    background: $primary-darken-2;
+    color: $text;
+}

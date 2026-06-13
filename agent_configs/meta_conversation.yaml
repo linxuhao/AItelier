@@ -1,0 +1,27 @@
+# agent_configs/meta_conversation.yaml
+# Note: native_tool_calling is not enabled here because the meta conversation
+# uses AItelier custom tools (save_draft_brief, suggest_submit_project) that
+# are registered differently from skillflow tools. JSON mode is sufficient.
+
+intent_detector:
+  model: "minimax/MiniMax-M3"
+  template: "meta_intent_detection.md"
+  tools: []
+  thinking:
+    enable: true
+
+meta_conversation_agent:
+  model: "minimax/MiniMax-M3"
+  template: "meta_conversation.md"
+  tools: ["save_draft_brief", "suggest_submit_project"]
+  max_tool_turns: 20
+  thinking:
+    enable: true
+
+# Autonomous CLI/WebGUI butler agent config
+meta_agent:
+  model: "minimax/MiniMax-M3"
+  template: "meta_conversation.md"
+  tools: ["save_draft_brief", "suggest_submit_project"]
+  max_tool_turns: 20
+  enable_thinking: true

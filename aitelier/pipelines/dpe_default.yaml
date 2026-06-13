@@ -1,0 +1,162 @@
+# AItelier DPE pipeline — default graph shipped with AItelier.
+# This is ONE possible pipeline. Users can define their own.
+name: dpe_default
+description: "AItelier DPE: Research → Architect → PM → Task Loop → Verify"
+begin: "1_5"
+end_conditions:
+  combinator: "or"
+  conditions:
+    - type: "node_reached"
+      node: "5"
+      result: "completed"
+    - type: "max_total_steps"
+      limit: 200
+    - type: "max_run_duration_seconds"
+      limit: 3600
+    - type: "flag_match"
+      flag: {fatal_error: true}
+
+steps:
+  # ── Project planning phase ──
+
+  - id: "1_5"
+    name: "Researcher"
+    step_type: "agent"
+    checkpoint: true
+    checkpoint_label: "SOTA / Codebase Analysis Review"
+    max_retries: 3
+    config:
+      template: "step1_5_researcher.md"
+      model: "deepseek/deepseek-v4-flash"
+      enable_thinking: true
+      thinking_effort: "max"
+      output_mode: "content"
+      fixed_outputs: {sota: "step1_5_sota.md"}
+      tools: [web_search, web_fetch]
+    transitions:
+      - to: "2"
+
+  - id: "2"
+    name: "Architect"
+    step_type: "agent"
+    checkpoint: true
+    checkpoint_label: "Architecture Review"
+    max_retries: 3
+    config:
+      template: "step2_architect.md"
+      model: "deepseek/deepseek-v4-pro"
+      enable_thinking: true
+      thinking_effort: "max"
+      output_mode: "content"
+      fixed_outputs: {design: "step2_design.md"}
+      tools: [web_search, web_fetch, read_file, list_tree]
+    transitions:
+      - to: "3"
+
+  - id: "3"
+    name: "PM"
+    step_type: "agent"
+    max_retries: 3
+    config:
+      template: "step3_pm.md"
+      model: "minimax/MiniMax-M3"
+      output_mode: "content"
+      output_schema: "aitelier.schemas.PMOutput"
+      output_schema_retries: 2
+      fixed_outputs: {tasks_manifest: "tasks_manifest.json", task_card: "tasks/*.json"}
+      tools: [web_search, web_fetch, read_file, list_tree]
+    transitions:
+      - to: "task_gate"
+
+  # ── Gate: task dispatch ──
+
+  - id: "task_gate"
+    name: "Task Dispatch"
+    step_type: "gate"
+    transitions:
+      - to: "t_plan"
+        match: {has_tasks: true}
+      - to: "5"
+        match: {has_tasks: false}
+
+  # ── Task execution ──
+
+  - id: "t_plan"
+    name: "Task Planner"
+    step_type: "agent"
+    max_retries: 3
+    config:
+      template: "task_plan.md"
+      model: "minimax/MiniMax-M3"
+      output_mode: "content"
+      fixed_outputs: {plan: "task_plan.md", subtask_manifest: "subtasks_manifest.json"}
+      tools: [web_search, web_fetch, read_file, list_tree]
+    transitions:
+      - to: "t_impl"
+
+  - id: "t_impl"
+    name: "Task Implementer"
+    step_type: "agent"
+    max_retries: 5
+    config:
+      template: "task_implementer.md"
+      model: "minimax/MiniMax-M3"
+      output_mode: "write"
+      tools: [read_file, list_tree, write, web_search, web_fetch]
+    transitions:
+      - to: "t_verify"
+      - to: "task_error_handler"
+        match: {_error: true}
+
+  - id: "t_verify"
+    name: "Task Verifier"
+    step_type: "agent"
+    max_retries: 3
+    config:
+      template: "task_verify.md"
+      model: "minimax/MiniMax-M3"
+      output_mode: "content"
+      fixed_outputs: {report: "task_verify_report.json"}
+      tools: [read_file, list_tree, web_search, web_fetch]
+    transitions:
+      - to: "task_loop"
+
+  - id: "task_loop"
+    name: "Task Loop Gate"
+    step_type: "gate"
+    transitions:
+      - to: "t_plan"
+        match: {more_tasks: true}
+        max_loop: 200
+      - to: "5"
+        match: {all_done: true}
+      - to: "1_5"
+        match: {refresh_needed: true}
+        max_loop: 5
+
+  # ── Error handler ──
+
+  - id: "task_error_handler"
+    name: "Task Error Handler"
+    step_type: "agent"
+    max_retries: 1
+    config:
+      template: "task_error_handler.md"
+      model: "minimax/MiniMax-M3"
+      output_mode: "content"
+    transitions:
+      - to: "task_loop"
+
+  # ── Final verification ──
+
+  - id: "5"
+    name: "Final Verifier"
+    step_type: "agent"
+    max_retries: 3
+    config:
+      template: "step5_verifier.md"
+      model: "deepseek/deepseek-v4-pro"
+      output_mode: "content"
+      fixed_outputs: {readme: "final/README.md", report: "final/verify_report.json"}
+      tools: [read_file, list_tree, web_search, web_fetch]
+    transitions: []

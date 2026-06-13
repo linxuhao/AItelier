@@ -1,0 +1,223 @@
+# File: api/dependencies.py
+
+import os
+from pathlib import Path
+from fastapi import HTTPException, Request
+from core.db_manager import DBManager
+from core.workspace_manager import WorkspaceManager
+from api.auth import CurrentUser
+
+_AITELIER_HOME = Path(os.getenv("AITELIER_HOME", Path.home() / ".AItelier"))
+_AITELIER_HOME.mkdir(parents=True, exist_ok=True)
+
+# 默认从环境变量读取存储路径，方便在 Docker / 生产环境中复写
+DB_PATH = os.getenv("DPE_DB_PATH", str(_AITELIER_HOME / "aitelier.db"))
+SKILLFLOW_DB_PATH = os.getenv("SKILLFLOW_DB_PATH", str(_AITELIER_HOME / "skillflow.db"))
+WS_PATH = os.getenv("DPE_WS_PATH", str(_AITELIER_HOME / "workspaces"))
+PROJECTS_PATH = os.getenv("DPE_PROJECTS_PATH", str(_AITELIER_HOME / "projects"))
+
+# 单例模式实例化核心管理器
+db_instance = DBManager(DB_PATH)
+ws_instance = WorkspaceManager(WS_PATH)
+
+def get_db_manager() -> DBManager:
+    """FastAPI 依赖注入：获取数据库连接池"""
+    return db_instance
+
+def get_workspace_manager() -> WorkspaceManager:
+    """FastAPI 依赖注入：获取物理工作区管理器"""
+    return ws_instance
+
+
+# ── skillflow integration ────────────────────────────────────────────
+
+_skillflow_instance = None
+_tool_loader_instance = None
+_agent_configs_cache: dict[str, dict] = {}
+
+
+def _load_and_register_agent_configs(sf):
+    """Load agent configs from YAML and register them into skillflow."""
+    import yaml
+    from pathlib import Path
+    conf_dir = Path(__file__).resolve().parent.parent / "agent_configs"
+    if conf_dir.exists():
+        for f in sorted(conf_dir.glob("*.yaml")):
+            data = yaml.safe_load(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for name, cfg in data.items():
+                    if isinstance(cfg, dict):
+                        sf.register_agent_config_from_dict(name, cfg)
+
+
+def _validate_graph_agent_configs(sf):
+    """Verify every agent_config reference in every registered graph
+    resolves to a registered agent config.  Raises RuntimeError at
+    startup if any are missing.
+    """
+    missing: list[str] = []
+    for graph_name, graph in sf._graphs.items():
+        for node in graph.steps:
+            if node.agent_config and node.agent_config not in sf.agent_registry:
+                missing.append(
+                    f"graph='{graph_name}' step='{node.id}' "
+                    f"agent_config='{node.agent_config}'"
+                )
+    if missing:
+        raise RuntimeError(
+            "Startup aborted: agent_config references in registered "
+            "graphs have no matching entry in agent_configs/*.yaml:\n  "
+            + "\n  ".join(missing)
+        )
+
+
+def get_skillflow():
+    """FastAPI dependency injection: get the skillflow orchestrator singleton.
+
+    Created lazily on first access so that the DB and workspace managers
+    are already initialised.
+    """
+    global _skillflow_instance
+    if _skillflow_instance is None:
+        from skillflow import SkillFlow, PipelineGraph
+        from pathlib import Path
+
+        tool_loader = get_tool_loader()
+        sf = SkillFlow(SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
+                     projects_base=PROJECTS_PATH, stale_threshold_seconds=60)
+
+        # Register agent configs into skillflow so graph validation catches
+        # missing agent_config references at startup.
+        _load_and_register_agent_configs(sf)
+
+        project_root = Path(__file__).resolve().parent.parent
+
+        # Register graphs (agent_config refs are now validated)
+        v2_path = project_root / "configs" / "dpe_default.yaml"
+        if v2_path.exists():
+            graph = PipelineGraph.from_yaml(v2_path)
+            sf.register_graph(graph)
+
+        meta_path = project_root / "configs" / "meta_conversation.yaml"
+        if meta_path.exists():
+            meta_graph = PipelineGraph.from_yaml(meta_path)
+            sf.register_graph(meta_graph)
+
+        # Verify all agent_config references resolve (belt-and-suspenders over
+        # skillflow's own _check_agent_configs — gives clearer error messages).
+        _validate_graph_agent_configs(sf)
+
+        _skillflow_instance = sf
+    return _skillflow_instance
+
+
+def get_tool_loader():
+    """FastAPI dependency injection: get the ToolLoader singleton.
+
+    Searches skillflow native tools first, then AItelier custom tools.
+    """
+    global _tool_loader_instance
+    if _tool_loader_instance is None:
+        from skillflow.tool_loader import ToolLoader
+        from pathlib import Path
+
+        import skillflow
+        skillflow_tools = Path(skillflow.__file__).parent / "tools"
+        loader = ToolLoader(skillflow_tools)
+        # AItelier custom tools
+        custom = Path(__file__).resolve().parent.parent / "aitelier" / "tools"
+        if custom.exists():
+            loader.add_tools_dir(custom)
+        _tool_loader_instance = loader
+    return _tool_loader_instance
+
+
+def get_agent_configs() -> dict:
+    """Return merged agent configs from agent_configs/ directory."""
+    global _agent_configs_cache
+    if not _agent_configs_cache:
+        import yaml
+        from pathlib import Path
+        conf_dir = Path(__file__).resolve().parent.parent / "agent_configs"
+        if conf_dir.exists():
+            for f in conf_dir.glob("*.yaml"):
+                data = yaml.safe_load(f.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _agent_configs_cache.update(data)
+    return _agent_configs_cache
+
+
+def enrich_project_status(project: dict | None) -> dict | None:
+    """Augment a project dict with pipeline status from skillflow (source of truth)."""
+    if not project:
+        return None
+    try:
+        sf = get_skillflow()
+        # get_run_by_project excludes completed runs, so a finished project would
+        # otherwise keep its last cached status (e.g. "running:5") forever. Use the
+        # most recent run of ANY status as the source of truth.
+        run = sf.get_run_by_project(project["project_id"])
+        if not run:
+            all_runs = sf.list_runs(project["project_id"])  # newest first
+            run = all_runs[0] if all_runs else None
+        if run:
+            # AT-15: preserve the DB's enriched status (e.g. "running:3")
+            # over skillflow's raw status ("running"). The scheduler writes
+            # the detailed status; only fall back to run["status"] if the DB
+            # column hasn't been synced yet.
+            run_status = run["status"]
+            if run_status == "running" and run.get("current_node"):
+                # AT-28: Pass through the actual step ID. The TUI dashboard
+                # _STEP_LABELS already maps every step (including t_plan,
+                # t_impl, etc.) to human-readable labels — no coarse mapping needed.
+                project["status"] = f"running:{run['current_node']}"
+            else:
+                project["status"] = run_status
+            project["current_project_step"] = run["current_node"] or ""
+            # completed steps from skillflow, not from cached column
+            steps = sf.get_steps(run["id"])
+            project["completed_project_steps"] = [
+                s["step_id"] for s in steps if s["status"] == "completed"
+            ]
+        elif not project.get("status"):
+            project["status"] = "planning"
+    except Exception:
+        pass
+    return project
+
+
+# ── Ownership helpers (auth-optional: no-op when user=None) ──
+
+
+def owner_filter(user: CurrentUser | None, request: Request) -> str | None:
+    """
+    Return the owner_email filter for DB queries.
+    - user=None (CLI): return None (see all rows, defaults to 'cli@local')
+    - user set, normal mode: return user.email
+    - user set, demo mode: return None (see all rows)
+    """
+    if user is None:
+        return None
+    mode = getattr(request.app.state, "mode", "normal")
+    return user.email if mode == "normal" else None
+
+
+def check_write_owner(user: CurrentUser | None, resource: dict):
+    """
+    Raise 404 if user is authenticated and does not own the resource.
+    No-op when user=None (CLI mode — all resources accessible).
+    """
+    if user is not None and resource.get("owner_email") != user.email:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+def check_read_owner(user: CurrentUser | None, request: Request, resource: dict):
+    """
+    Raise 404 if user is authenticated, in normal mode, and does not own the resource.
+    No-op when user=None (CLI) or demo mode.
+    """
+    if user is None:
+        return
+    mode = getattr(request.app.state, "mode", "normal")
+    if mode == "normal" and resource.get("owner_email") != user.email:
+        raise HTTPException(status_code=404, detail="Not found")

@@ -21,6 +21,15 @@ from aitelier.step_labels import COARSE_MAP
 import os as _os
 _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
 
+# Hung-step detection: warn when a claimed step has run longer than
+# timeout_seconds * this multiplier.  Detection runs on a separate periodic
+# job so it fires even when the main scheduler tick is blocked by a hung call.
+_HUNG_WARN_MULTIPLIER = 3
+_HUNG_WARNING_COOLDOWN = 120  # seconds between repeated warnings for same step
+
+# Module-level state: track last warning time to avoid log spam
+_hung_warnings: dict[tuple, float] = {}  # (run_id, step_id, step_instance_id) -> last_warn_time
+
 db = get_db_manager()
 ws = get_workspace_manager()
 
@@ -347,6 +356,119 @@ def _has_active_claim(sf, run_id: str) -> bool:
         return claimed is not None
     except Exception:
         return False
+
+
+# ── Hung-step detection ─────────────────────────────────────────────
+
+async def _check_hung_claims():
+    """Periodic check: warn if any claimed step exceeds its timeout window.
+
+    Runs independently from the main scheduler tick so it fires even when
+    poll_and_execute is blocked awaiting a hung LLM call.
+
+    Detection policy:
+      - A step is "hung" when its claim duration > timeout_seconds * _HUNG_WARN_MULTIPLIER.
+      - We only *detect and surface* — never auto-kill. The user can restart the
+        server to trigger recover_claims_on_startup.
+      - Warnings are rate-limited by _HUNG_WARNING_COOLDOWN to avoid log spam.
+    """
+    import time as _time
+    import datetime as _dt
+    import logging
+    logger = logging.getLogger("aitelier.scheduler")
+
+    try:
+        sf = get_skillflow()
+
+        # Scan all running skillflow runs
+        runs = sf.list_runs(status="running")
+        if not runs:
+            return
+
+        for run in runs:
+            run_id = run["id"]
+            project_id = run.get("project_id", "unknown")
+
+            # Find any claimed step in this run
+            try:
+                row = sf._conn.execute(
+                    "SELECT step_id, claimed_at, step_instance_id "
+                    "FROM skillflow_steps "
+                    "WHERE run_id = ? AND status = 'claimed' LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+            except Exception:
+                continue
+            if not row:
+                continue
+
+            # Look up the step node's configured timeout as the baseline
+            window_s = 600  # default fallback
+            try:
+                resolver = sf._get_resolver_for_run(run_id)
+                node = resolver.get_node(row["step_id"])
+                if node and node.timeout_seconds > 0:
+                    window_s = node.timeout_seconds
+            except Exception:
+                pass
+
+            warn_threshold_s = window_s * _HUNG_WARN_MULTIPLIER
+
+            # Compute claim duration from the ISO 8601 claimed_at timestamp
+            try:
+                claimed_at_dt = _dt.datetime.strptime(
+                    row["claimed_at"], "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=_dt.timezone.utc)
+                now_dt = _dt.datetime.now(_dt.timezone.utc)
+                duration_s = (now_dt - claimed_at_dt).total_seconds()
+            except Exception:
+                continue
+
+            if duration_s <= warn_threshold_s:
+                continue
+
+            # Rate-limit: don't repeat the same warning too often
+            warn_key = (run_id, row["step_id"], row["step_instance_id"])
+            now = _time.time()
+            last_warn = _hung_warnings.get(warn_key, 0)
+            if now - last_warn < _HUNG_WARNING_COOLDOWN:
+                continue
+            _hung_warnings[warn_key] = now
+
+            # Garbage-collect stale entries from _hung_warnings occasioanlly
+            if len(_hung_warnings) > 200:
+                cutoff = now - 3600
+                for k in list(_hung_warnings):
+                    if _hung_warnings[k] < cutoff:
+                        del _hung_warnings[k]
+
+            duration_min = duration_s / 60.0
+            logger.warning(
+                f"Step may be hung: project={project_id} step={row['step_id']} "
+                f"claimed for {duration_min:.0f} min "
+                f"(threshold: {warn_threshold_s}s = {window_s}s timeout "
+                f"× {_HUNG_WARN_MULTIPLIER}). "
+                f"Restart the server if the step does not progress."
+            )
+
+            # Publish event for TUI / API consumers
+            try:
+                eb = _get_event_bus()
+                eb.publish("step_hung_warning", {
+                    "project_id": project_id,
+                    "run_id": run_id,
+                    "step_id": row["step_id"],
+                    "step_instance_id": row["step_instance_id"],
+                    "claimed_at": row["claimed_at"],
+                    "duration_s": round(duration_s, 1),
+                    "timeout_seconds": window_s,
+                    "warn_threshold_s": warn_threshold_s,
+                })
+            except Exception:
+                pass
+
+    except Exception:
+        pass  # Never let hung detection itself break the scheduler
 
 
 async def _execute_skillflow_tick(project_id: str, loop):
@@ -712,6 +834,14 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
                               # (wake-on-confirm + interval both hitting advance_run
                               # caused step version conflicts and infinite retry loops)
         )
+
+    # Hung-step detection: runs on a separate periodic job so it fires even
+    # when the main tick is blocked awaiting a hung LLM call.  Lightweight
+    # (only SQL queries), so a 30 s interval is safe.
+    scheduler.add_job(
+        _check_hung_claims, 'interval', seconds=30,
+        max_instances=1,
+    )
 
 
 # ── Wake-on-confirm hook ──────────────────────────────────────────

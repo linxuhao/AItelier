@@ -179,7 +179,7 @@ class AIGateway:
             # asyncio loop for the litellm default 6000s before failing.
             # 300s (5 min) + tenacity retry (3x exp backoff) caps a single
             # failure burst at ~34s; even worst-case 3 failures = ~15 min.
-            "timeout": 300,
+            "timeout": 300.0,
         }
         if self.api_base:
             kwargs["api_base"] = self.api_base

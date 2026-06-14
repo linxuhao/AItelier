@@ -242,7 +242,8 @@ def test_start_scheduler_reads_interval_from_db(tmp_path, monkeypatch):
 
     async def _test():
         scheduler = core.scheduler.start_scheduler()
-        jobs = scheduler.get_jobs()
+        jobs = [j for j in scheduler.get_jobs()
+                if j.name != '_check_hung_claims']
         assert len(jobs) == 1
         assert jobs[0].trigger.interval.seconds == 30
         scheduler.shutdown(wait=False)
@@ -267,7 +268,8 @@ def test_start_scheduler_reads_cron_from_db(tmp_path, monkeypatch):
 
     async def _test():
         scheduler = core.scheduler.start_scheduler()
-        jobs = scheduler.get_jobs()
+        jobs = [j for j in scheduler.get_jobs()
+                if j.name != '_check_hung_claims']
         assert len(jobs) == 1
         scheduler.shutdown(wait=False)
 
@@ -289,7 +291,8 @@ def test_start_scheduler_defaults_to_5s(tmp_path, monkeypatch):
 
     async def _test():
         scheduler = core.scheduler.start_scheduler()
-        jobs = scheduler.get_jobs()
+        jobs = [j for j in scheduler.get_jobs()
+                if j.name != '_check_hung_claims']
         assert len(jobs) == 1
         assert jobs[0].trigger.interval.seconds == 5
         # T8: misfire_grace_time prevents "missed" warnings when a tick
@@ -317,13 +320,16 @@ def test_reschedule_swaps_job(tmp_path, monkeypatch):
 
     async def _test():
         scheduler = core.scheduler.start_scheduler()
-        assert len(scheduler.get_jobs()) == 1
-        assert scheduler.get_jobs()[0].trigger.interval.seconds == 60
+        main_jobs = [j for j in scheduler.get_jobs()
+                     if j.name != '_check_hung_claims']
+        assert len(main_jobs) == 1
+        assert main_jobs[0].trigger.interval.seconds == 60
 
         db.set_scheduler_setting("scheduler_interval", "15")
         core.scheduler.reschedule_scheduler(scheduler)
 
-        jobs = scheduler.get_jobs()
+        jobs = [j for j in scheduler.get_jobs()
+                if j.name != '_check_hung_claims']
         assert len(jobs) == 1
         assert jobs[0].trigger.interval.seconds == 15
         scheduler.shutdown(wait=False)
@@ -348,13 +354,16 @@ def test_reschedule_from_interval_to_cron(tmp_path, monkeypatch):
 
     async def _test():
         scheduler = core.scheduler.start_scheduler()
-        assert len(scheduler.get_jobs()) == 1
+        main_jobs = [j for j in scheduler.get_jobs()
+                     if j.name != '_check_hung_claims']
+        assert len(main_jobs) == 1
 
         db.set_scheduler_setting("scheduler_type", "cron")
         db.set_scheduler_setting("scheduler_cron", "0 */2 * * *")
         core.scheduler.reschedule_scheduler(scheduler)
 
-        jobs = scheduler.get_jobs()
+        jobs = [j for j in scheduler.get_jobs()
+                if j.name != '_check_hung_claims']
         assert len(jobs) == 1
         from apscheduler.triggers.cron import CronTrigger
         assert isinstance(jobs[0].trigger, CronTrigger)

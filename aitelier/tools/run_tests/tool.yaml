@@ -1,0 +1,14 @@
+name: run_tests
+description: >
+  Run the project's unit tests (pytest) over the consolidated repo and write
+  test_report.json {passed, returncode, summary, failures}. Always succeeds as a
+  step; the test outcome is captured in the report for the verifier to act on.
+parameters:
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Directory to write test_report.json (set to $STEP_DIR)"
+    required: false

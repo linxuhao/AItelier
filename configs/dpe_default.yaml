@@ -141,6 +141,11 @@ steps:
       - source: { step: "1" }
       - source: { step: "2" }
       - source: { step: "3_review" }
+      # Goal-loop inputs (empty on the first pass; present when 5_review loops
+      # back here): PM's own prior manifest, the final verdict, and test failures.
+      - source: { step: "3" }
+      - source: { step: "5" }
+      - source: { step: "5_test" }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"
@@ -257,6 +262,7 @@ steps:
       - source: { config: "meta_conversation", output: "brief.md" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
+      - source: { step: "t_impl" }
       - source: { step: "t_impl_review" }
       - source: { tool: "dir_tree" }
     output:
@@ -274,12 +280,17 @@ steps:
         on_failure: "retry"
         max_retries: 3
       after_deliver:
+        # syntax_lint + py_compile stay fatal — broken code must not advance.
         - tool: "syntax_lint"
           files: ["*.py", "*.js", "*.html"]
         - tool: "py_compile"
           files: ["*.py"]
-        - tool: "pytest"
-          files: ["*_test.py", "test_*.py"]
+        # NOTE: per-task pytest is intentionally NOT a hard gate here. A single
+        # brittle/over-strict self-written test would otherwise fail the whole
+        # build. Testing happens at t_verify and at the final-verifier goal-loop
+        # (see 5_review). To re-enable a hard per-task gate, add:
+        #   - tool: "pytest"
+        #     files: ["*_test.py", "test_*.py"]
     transitions:
       - to: "t_impl_review"
 
@@ -356,6 +367,19 @@ steps:
         readme: "final/README.md"
         report: { file: "final/verify_report.json", format: '{"all_goals_met": bool, "verified_subtasks": [str, ...], "issues": [str, ...], "ready_for_deploy": bool}' }
     transitions:
+      - to: "5_test"
+
+  # ─── Run unit tests (deterministic gate, AFTER the verifier) ───
+  # Runs pytest over the consolidated repo and writes test_report.json. Always
+  # succeeds as a step; the outcome is captured for 5_review to fold into its
+  # verdict, so the verifier's semantic issues AND test failures loop back to PM
+  # together in one change-set.
+  - id: "5_test"
+    step_type: "tool"
+    tool_name: "run_tests"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
       - to: "5_review"
 
   - id: "5_review"
@@ -365,6 +389,7 @@ steps:
       - source: { from: "repository" }
       - source: { config: "meta_conversation", output: "brief.md" }
       - source: { step: "5" }
+      - source: { step: "5_test" }
     output:
       mode: "content"
       fixed:
@@ -381,6 +406,19 @@ steps:
     transitions:
       - to: null    # end — graph terminates here
         match: { from_file: "review_verdict.json", field: "passed", value: true }
-      - to: "5"
+      # ── GOAL-LOOP (configurable) ───────────────────────────────────────────
+      # When final verification fails, loop back and re-do the project WITH the
+      # verifier's feedback (goal-seeking retry), instead of just re-running the
+      # verifier on unchanged code. Skillflow re-runs the whole subgraph from the
+      # target down to here. Tune to taste:
+      #   to:        loop target — "3" (PM: re-plan tasks + re-implement, DEFAULT;
+      #              keeps research+architecture, fixes missing/buggy features),
+      #              "2" (Architect: redesign — more thorough, more expensive,
+      #              use when misses are structural),
+      #              "1" (Researcher: rarely the cause of a goal miss).
+      #   max_loop:  max goal-loop iterations before the run ends as failed.
+      #   feedback:  injects the final verifier's reasons into the target step.
+      # To DISABLE the goal-loop: set `to: "5"` (re-verify only) or delete this edge.
+      - to: "3"
         match: { from_file: "review_verdict.json", field: "passed", value: false }
-        max_loop: 3
+        max_loop: 2

@@ -14,21 +14,26 @@ Most "AI builds software for you" tools are non-deterministic black boxes: you c
 
 ## Install
 
+**Requires Python 3.12+** (check with `python3 --version`; on macOS the system `python3` is often older — use a 3.12 venv).
+
 ```bash
+python3.12 -m venv .venv && source .venv/bin/activate
 # Install AItelier (the skillflow-py framework is pulled from PyPI automatically)
 pip install -e .
 ```
 
 ## Quick Start
 
-First, set up your API keys:
+First, set up your API key. The default pipeline runs on **DeepSeek** (`deepseek-v4-flash` / `deepseek-v4-pro`), so all you need is a `DEEPSEEK_API_KEY`:
 
 ```bash
-# Copy the template and fill in your real keys
+# Copy the template and fill in your real key
 cp .env.example .env
-# edit .env to add your provider keys, then load them
+# edit .env to add DEEPSEEK_API_KEY, then load it
 source .env
 ```
+
+To use a different provider, point the agent configs at it (see [Configuration](#configuration)).
 
 Then run:
 
@@ -42,6 +47,15 @@ aitelier "build me a todo app"
 # Start backend server
 aitelier server
 ```
+
+## See it in action
+
+A typical run with the default DPE pipeline:
+
+1. **Describe what you want.** In `aitelier`, tell the meta agent your goal (e.g. *"build a Python CLI todo app with add/list/done, stored in JSON"*). It asks a few scoping questions, drafts a project brief, and — once you approve — starts the pipeline.
+2. **Watch it work, with checkpoints.** The pipeline moves through Research → Architect → PM → per-task Plan/Implement/Verify → Final Verification. It **pauses at review checkpoints** so you can **approve** the output or **reject it with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
+3. **Inspect the trace.** Every prompt, model response, and tool call is recorded in an append-only audit log — so you can answer "why did it do that?" for any step, after the fact.
+4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.
 
 ## Configuration
 
@@ -80,8 +94,9 @@ Meta Conversation (gather requirements)
 ## Tests
 
 ```bash
-pytest tests/unit/ -v      # 348 unit tests
-pytest tests/skillflow/ -v  # 176 integration tests
+pytest tests/unit/ -v          # ~300 unit tests
+pytest tests/integration/ -v   # ~160 integration tests
+pytest tests/ -v               # full suite (~490 tests)
 ```
 
 ## License

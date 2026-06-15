@@ -45,32 +45,96 @@ async def lifespan(app: FastAPI):
     sf.notifications.set_event_loop(loop)
 
     # ── NotificationBus → SSE bridge (single event path) ──────────
-    # Cache run_id → project_id lookups to avoid per-event DB queries.
-    _pid_cache: dict[str, str] = {}
+    _pid_cache: dict[str, str] = {}        # run_id → project_id
+    _pname_cache: dict[str, str] = {}      # project_id → project name
+    _task_cache: dict[str, str] = {}       # run_id → current task name
     _MAX_PID_CACHE = 2000
+
+    _TASK_LOOP_STEPS = frozenset({
+        "t_plan", "t_plan_review", "t_impl", "t_impl_review",
+        "t_verify", "t_verify_review",
+    })
+
+    def _resolve_project_info(data: dict, rid: str):
+        """Ensure project_id and project name are in the event data."""
+        _resolve_run_info(data, rid)
+        pid = data.get("project_id", "")
+        if pid and pid not in _pname_cache:
+            try:
+                import sqlite3 as _sql
+                _adb = _sql.connect(_os.path.expanduser("~/.AItelier/aitelier.db"))
+                row = _adb.execute(
+                    "SELECT name FROM projects WHERE project_id = ?",
+                    (pid,),
+                ).fetchone()
+                _adb.close()
+                _pname_cache[pid] = row[0] if row else pid
+            except Exception:
+                _pname_cache[pid] = pid
+        if pid:
+            data["_project_name"] = _pname_cache.get(pid, pid)
+
+    def _resolve_task_context(data: dict, rid: str, step_id: str):
+        """If this is a task-loop step, inject the current task name."""
+        if step_id not in _TASK_LOOP_STEPS:
+            return
+        if rid not in _task_cache:
+            try:
+                import sqlite3 as _sql
+                import json as _j
+                _sdb = _sql.connect(_os.path.expanduser("~/.AItelier/skillflow.db"))
+                row = _sdb.execute(
+                    "SELECT items_json, current_index FROM skillflow_loop_state WHERE run_id = ?",
+                    (rid,),
+                ).fetchone()
+                _sdb.close()
+                if row:
+                    # row is a tuple (no row_factory set on this connection)
+                    items = _j.loads(row[0])  # items_json
+                    idx = int(row[1]) if row[1] is not None else 0  # current_index
+                    if 0 <= idx < len(items):
+                        _task_cache[rid] = items[idx]
+            except Exception:
+                pass
+        task = _task_cache.get(rid, "")
+        if task:
+            data["_task_id"] = task
+
+    def _resolve_run_info(data: dict, rid: str):
+        """Ensure project_id from run if not in payload (thread-safe)."""
+        pid = data.get("project_id")
+        if pid:
+            return
+        if rid not in _pid_cache:
+            try:
+                import sqlite3 as _sql
+                _sdb = _sql.connect(_os.path.expanduser("~/.AItelier/skillflow.db"))
+                row = _sdb.execute(
+                    "SELECT project_id FROM skillflow_runs WHERE id = ?",
+                    (rid,),
+                ).fetchone()
+                _sdb.close()
+                _pid_cache[rid] = row[0] if row else ""
+            except Exception:
+                _pid_cache[rid] = ""
+        pid = _pid_cache.get(rid, "")
+        if pid:
+            data["project_id"] = pid
 
     async def _on_skillflow_event(notification):
         """Forward skillflow NotificationBus events to SSE."""
         payload = notification.payload
-        data = {**payload, "type": notification.event_type}
-        # Ensure project_id is present (resolve from run_id if needed)
-        if not data.get("project_id"):
-            rid = notification.run_id
-            if rid:
-                if rid not in _pid_cache:
-                    if len(_pid_cache) >= _MAX_PID_CACHE:
-                        _pid_cache.clear()
-                    try:
-                        row = sf._conn.execute(
-                            "SELECT project_id FROM skillflow_runs WHERE id = ?",
-                            (rid,),
-                        ).fetchone()
-                        _pid_cache[rid] = row["project_id"] if row else ""
-                    except Exception:
-                        _pid_cache[rid] = ""
-                if _pid_cache.get(rid):
-                    data["project_id"] = _pid_cache[rid]
-        # Include metadata from notification if not already in payload
+        step_id = notification.step_id or payload.get("step_id", "")
+        run_id = notification.run_id or payload.get("run_id", "")
+        data = {
+            **payload,
+            "type": notification.event_type,
+            "_ts": notification.timestamp,
+            "_step_id": step_id,
+            "_run_id": run_id,
+        }
+        _resolve_project_info(data, run_id)
+        _resolve_task_context(data, run_id, step_id)
         if notification.step_id and "step_id" not in data:
             data["step_id"] = notification.step_id
         if notification.run_id and "run_id" not in data:

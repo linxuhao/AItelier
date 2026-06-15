@@ -280,7 +280,11 @@ def retry_project(
     from api.dependencies import enrich_project_status
     project = enrich_project_status(project) or project
 
-    if project.get("status") != "failed":
+    # Accept both raw DB "failed" and enriched "running:{node}" (skillflow
+    # run was already reactivated). Check the raw DB column for the definitive
+    # answer — enrichment overrides failed→running:node when reactivate was called.
+    raw_status = db.get_project(project_id).get("status", "")
+    if not raw_status.startswith("failed"):
         raise HTTPException(status_code=400, detail="Only failed projects can be retried")
 
     # Clear project meta_state (error info)

@@ -5,6 +5,7 @@
 
 import json
 import asyncio
+from datetime import datetime, timezone
 from textual.widgets import Static
 from textual.containers import VerticalScroll
 from textual import work
@@ -91,8 +92,13 @@ class NotificationZone(VerticalScroll):
                     # 1. Feed the notification panel
                     self._handle_event(event)
 
-                    # 2. Forward checkpoint events to FlashBar for modal management
                     etype = event.get("type", "")
+
+                    # 2. Refresh dashboard on every event — no more stale status
+                    # during long-running steps (AT-29).
+                    self._poll_repaint()
+
+                    # 3. Forward checkpoint events to FlashBar for modal management
                     if etype in ("checkpoint_reached", "checkpoint_paused",
                                  "checkpoint_resolved", "checkpoint_approved"):
                         try:
@@ -100,19 +106,11 @@ class NotificationZone(VerticalScroll):
                             await flash_bar.handle_checkpoint_event(event)
                         except Exception:
                             pass
-                        # AT-15: force full repaint on checkpoint transitions
-                        self._poll_repaint()
 
-                    # 2.5 Force repaint on step completion/claim for fresh status
-                    if etype in ("step_completed", "step_claimed",
-                                 "run_completed", "run_failed",
-                                 "project_completed", "project_failed"):
-                        self._poll_repaint()
-
-                    # 3. Update status bar (completer.flash_state)
+                    # 4. Update status bar (completer.flash_state)
                     self._update_flash_state(event)
 
-                    # 4. AT-28: optimistic dashboard update (instant, before async fetch)
+                    # 5. AT-28: optimistic dashboard update (instant, before async fetch)
                     if etype in ("step_claimed", "step_completed",
                                  "checkpoint_paused", "run_completed", "run_failed"):
                         self._optimistic_dashboard(event)
@@ -172,73 +170,117 @@ class NotificationZone(VerticalScroll):
         elif etype in ("project_completed", "project_failed", "run_completed", "run_failed"):
             _comp.flash_state = None
 
+    def _format_ctx(self, event: dict) -> str:
+        """Format timestamp + project + step + task context for a notification line."""
+        ts = event.get("_ts", 0)
+        if ts:
+            local_dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+            time_str = local_dt.strftime("%H:%M:%S")
+        else:
+            time_str = "--:--:--"
+
+        # Project name
+        pname = event.get("_project_name", "")
+        pid = event.get("project_id", "")
+        project = pname or pid[:16] if pid else ""
+
+        # Step name
+        step_id = (event.get("_step_id") or event.get("step_id") or
+                    event.get("step") or "")
+        step_name = STEP_NAMES.get(step_id, step_id) if step_id else ""
+
+        # Task ID (for task-loop steps)
+        task_id = event.get("_task_id", "")
+
+        parts = [f"[dim]{time_str}[/]"]
+        if project:
+            parts.append(f"[bold]{project}[/]")
+        if step_name:
+            parts.append(f"[dim]{step_name}[/]")
+        if task_id:
+            parts.append(f"[dim italic]{task_id}[/]")
+        return " ".join(parts)
+
     def _handle_event(self, event: dict):
         etype = event.get("type", "")
         pid = event.get("project_id", "")
         pid_short = pid[:24] if pid else ""
+        ctx = self._format_ctx(event)
 
         if etype == "step_start":
             step = event.get("step", "?")
-            name = step
-            self._add_line(f"[bold yellow]●[/] {name} [dim]({pid_short})[/]")
+            self._add_line(f"{ctx} [bold yellow]●[/] {step}")
         elif etype == "step_end":
             step = event.get("step", "?")
-            name = step
             if event.get("success"):
-                self._add_line(f"[bold green]✓[/] {name} done [dim]({pid_short})[/]")
+                self._add_line(f"{ctx} [bold green]✓[/] {step} done")
             else:
-                self._add_line(f"[bold red]✗[/] {name} failed [dim]({pid_short})[/]")
+                self._add_line(f"{ctx} [bold red]✗[/] {step} failed")
         elif etype == "step_timeout":
             step = event.get("step", "?")
             err = (event.get("error", "") or "timed out")[:80]
-            self._add_line(f"[bold red]⏰[/] {step} timed out — type /retry to re-run")
+            self._add_line(f"{ctx} [bold red]⏰[/] {step} timed out")
         elif etype == "step_failed":
             step = event.get("step", "?")
             err = (event.get("error", "") or "")[:120]
-            self._add_line(f"[bold red]✗[/] {step}: {err}")
+            self._add_line(f"{ctx} [bold red]✗[/] {step}: {err}")
         elif etype in ("checkpoint_reached", "checkpoint_paused"):
             label = event.get("label", "checkpoint")
-            self._add_line(f"[bold cyan]⏳[/] {label} [dim]({pid_short})[/]")
+            self._add_line(f"{ctx} [bold cyan]⏳[/] {label}")
         elif etype in ("checkpoint_resolved", "checkpoint_approved"):
             label = event.get("label", "checkpoint")
             action = event.get("action", "approved")
-            self._add_line(f"[bold green]✓[/] {label} {action} [dim]({pid_short})[/]")
+            self._add_line(f"{ctx} [bold green]✓[/] {label} {action}")
         elif etype == "step_checkpoint_rejected":
             label = event.get("label", "checkpoint")
-            self._add_line(f"[bold yellow]↺[/] {label} rejected — redo [dim]({pid_short})[/]")
+            self._add_line(f"{ctx} [bold yellow]↺[/] {label} rejected — redo")
         elif etype == "agent_message":
             content = (event.get("content", "") or "")[:160]
             level = event.get("level", "info")
             prefix = {"milestone": "!", "warning": "!!"}.get(level, "i")
-            self._add_line(f"  {prefix} {content}")
+            self._add_line(f"{ctx}  {prefix} {content}")
         elif etype == "project_completed":
-            self._add_line(f"[bold green]✓ Project done[/] [dim]({pid_short})[/]")
+            self._add_line(f"{ctx} [bold green]✓ Project done[/]")
         elif etype == "project_failed":
             reason = (event.get("reason", "") or "")[:80]
-            self._add_line(f"[bold red]✗ Project failed[/]: {reason}")
+            self._add_line(f"{ctx} [bold red]✗ Project failed[/]: {reason}")
+        elif etype == "run_failed":
+            reason = (event.get("reason", "") or "")[:120]
+            self._add_line(f"{ctx} [bold red]✗ Run failed[/]: {reason}")
         elif etype == "step_done":
-            # Internal event from PipelineEngine, not from SSE stream
             step = event.get("step_id", "?")
-            name = step
+            name = STEP_NAMES.get(step, step)
             files = event.get("files", [])
             preview = ", ".join(files[:3]) if files else ""
-            self._add_line(f"[bold green]✓[/] {name} → {preview}")
+            self._add_line(f"{ctx} [bold green]✓[/] {name} → {preview}")
         elif etype == "step_completed":
             step = event.get("step_id", "?")
-            self._add_line(f"[bold green]✓[/] {step} completed [dim]({pid_short})[/]")
+            name = STEP_NAMES.get(step, step)
+            self._add_line(f"{ctx} [bold green]✓[/] {name} completed")
         elif etype == "step_claimed":
             step = event.get("step_id", "?")
-            self._add_line(f"[bold yellow]●[/] {step} started [dim]({pid_short})[/]")
+            name = STEP_NAMES.get(step, step)
+            self._add_line(f"{ctx} [bold yellow]●[/] {name} started")
         elif etype == "run_started":
-            self._add_line(f"[bold blue]▶[/] Pipeline started [dim]({pid_short})[/]")
+            self._add_line(f"{ctx} [bold blue]▶[/] Pipeline started")
         elif etype == "files_written":
             files = event.get("files", [])
             preview = ", ".join(files[:3]) if files else "?"
-            self._add_line(f"  ↳ wrote: {preview}")
+            self._add_line(f"{ctx}  ↳ wrote: {preview}")
         elif etype == "lifecycle_hook":
             hook = event.get("hook", "?")
-            if event.get("status") == "completed":
-                return  # too noisy — skip lifecycle completion events
+            status = event.get("status", "")
+            detail = event.get("detail", "")
+            # Skip only empty completed hooks — show completed with detail
+            # (e.g. "5 file(s)", "committed")
+            if status == "completed" and not detail:
+                return
+            status_glyph = {"completed": "✓", "failed": "✗", "warned": "⚠",
+                           "retry": "↺", "skipped": "→"}.get(status, "")
+            if detail:
+                self._add_line(f"{ctx} [dim]{status_glyph} {hook}: {detail}[/]")
+            elif status:
+                self._add_line(f"{ctx} [dim]{status_glyph} {hook} {status}[/]")
 
         # AT-28: do NOT call _refresh_dashboard here. The SSE event loop
         # calls _optimistic_dashboard + _poll_repaint right after _handle_event

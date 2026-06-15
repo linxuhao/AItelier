@@ -52,7 +52,7 @@ architect_reviewer:
     enable: true
 
 pm:
-  model: "deepseek/deepseek-v4-flash"
+  model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "step3_pm.md"
   tools: ["web_search", "web_fetch", "list_tree"]
@@ -113,9 +113,9 @@ task_verifier:
   template: "task_verify.md"
   tools: ["list_tree"]
   max_output_tokens: 8192
-  max_tool_turns: 10
+  max_tool_turns: 30
   native_tool_calling: true
-  fallback_to_json_mode: true
+  fallback_to_json_mode: false
 
 task_verifier_reviewer:
   model: "deepseek/deepseek-v4-flash"
@@ -123,8 +123,9 @@ task_verifier_reviewer:
   template: "task_verify_red.md"
   tools: ["list_tree"]
   max_output_tokens: 4096
+  max_tool_turns: 15
   native_tool_calling: true
-  fallback_to_json_mode: true
+  fallback_to_json_mode: false
 
 final_verifier:
   model: "deepseek/deepseek-v4-pro"
@@ -132,9 +133,9 @@ final_verifier:
   template: "step5_verifier.md"
   tools: ["list_tree"]
   max_output_tokens: 16384
-  max_tool_turns: 10
+  max_tool_turns: 100
   native_tool_calling: true
-  fallback_to_json_mode: true
+  fallback_to_json_mode: false
 
 final_verifier_reviewer:
   model: "deepseek/deepseek-v4-flash"

@@ -91,9 +91,16 @@ steps:
       mode: "content"
       fixed:
         design: "step2_design.md"
+        linter_manifest: "linter_manifest.json"
     validation:
       - files: ["step2_design.md"]
         tool: "file_exists"
+    lifecycle:
+      on_deliver:
+        tool: "repo_apply"
+        params:
+          source_dir: "$STEP_DIR"
+        on_failure: "skip"
     checkpoint: true
     checkpoint_label: "Architecture Review"
     transitions:
@@ -217,7 +224,7 @@ steps:
       # (current_task) so each iteration is scoped to its own task card.
       - source: { from: "repository" }
       - source: { step: "3", file: "tasks/$current_task.json" }
-      - source: { config: "meta_conversation", output: "brief.md" }
+      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "1", mode: "summary" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan_review" }
@@ -252,14 +259,14 @@ steps:
   # Lifecycle hooks:
   #   after_validate → step_commit (built-in default, tmp→step_dir)
   #   on_deliver     → repo_apply (step_dir→project repo)
-  #   after_deliver  → syntax_lint + py_compile + pytest (project checks)
+  #   after_deliver  → lint (project checks, per-extension backends)
   - id: "t_impl"
     step_type: "agent"
     agent_config: "task_implementer"
     context:
       - source: { from: "repository" }
       - source: { step: "3", file: "tasks/$current_task.json" }
-      - source: { config: "meta_conversation", output: "brief.md" }
+      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
@@ -269,9 +276,8 @@ steps:
       mode: "write"
     validation:
       - files: ["*.py"]
-        tool: "syntax_lint"
-      - files: ["*.py"]
-        tool: "py_compile"
+        tool: "lint"
+        manifest_path: "linter_manifest.json"
     lifecycle:
       on_deliver:
         tool: "repo_apply"
@@ -280,17 +286,14 @@ steps:
         on_failure: "retry"
         max_retries: 3
       after_deliver:
-        # syntax_lint + py_compile stay fatal — broken code must not advance.
-        - tool: "syntax_lint"
-          files: ["*.py", "*.js", "*.html"]
-        - tool: "py_compile"
+        - tool: "lint"
           files: ["*.py"]
-        # NOTE: per-task pytest is intentionally NOT a hard gate here. A single
-        # brittle/over-strict self-written test would otherwise fail the whole
-        # build. Testing happens at t_verify and at the final-verifier goal-loop
-        # (see 5_review). To re-enable a hard per-task gate, add:
-        #   - tool: "pytest"
-        #     files: ["*_test.py", "test_*.py"]
+          manifest_path: "linter_manifest.json"
+          on_failure: "fail"
+        - tool: "lint"
+          files: ["*.js", "*.html", "*.css"]
+          manifest_path: "linter_manifest.json"
+          on_failure: "warn"
     transitions:
       - to: "t_impl_review"
 
@@ -299,7 +302,7 @@ steps:
     agent_config: "task_implementer_reviewer"
     context:
       - source: { from: "repository" }
-      - source: { config: "meta_conversation", output: "brief.md" }
+      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
@@ -322,7 +325,7 @@ steps:
     context:
       - source: { from: "repository" }
       - source: { step: "3", file: "tasks/$current_task.json" }
-      - source: { config: "meta_conversation", output: "brief.md" }
+      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "t_plan" }
       - source: { step: "t_verify_review" }
       - source: { tool: "dir_tree" }
@@ -356,7 +359,7 @@ steps:
     agent_config: "final_verifier"
     context:
       - source: { from: "repository" }
-      - source: { config: "meta_conversation", output: "brief.md" }
+      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "1" }
       - source: { step: "2" }
       - source: { step: "5_review" }
@@ -387,7 +390,7 @@ steps:
     agent_config: "final_verifier_reviewer"
     context:
       - source: { from: "repository" }
-      - source: { config: "meta_conversation", output: "brief.md" }
+      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "5" }
       - source: { step: "5_test" }
     output:

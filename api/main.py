@@ -24,6 +24,7 @@ from api.project_routers import router as projects_router
 from api.settings_routers import router as settings_router
 from api.meta_routers import router as meta_router
 from api.agent_routers import router as agent_router
+from api.run_routers import router as run_router
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
 
@@ -171,6 +172,7 @@ app.include_router(projects_router)
 app.include_router(settings_router)
 app.include_router(meta_router)
 app.include_router(agent_router)
+app.include_router(run_router)
 
 
 @app.middleware("http")

@@ -669,6 +669,25 @@ def _project_dashboard():
                 _handle_errors_cmd(_get_client())
                 _should_clear = False
                 continue
+            elif cmd == "/runs":
+                _handle_runs_cmd(_get_client())
+                _should_clear = False
+                continue
+            elif cmd == "/trace":
+                _handle_trace_cmd(rest, _get_client())
+                _should_clear = False
+                continue
+            elif cmd == "/run":
+                _handle_run_cmd(rest, _get_client())
+                continue
+            elif cmd == "/tree":
+                _handle_tree_cmd(rest, _get_client())
+                _should_clear = False
+                continue
+            elif cmd == "/cat":
+                _handle_cat_cmd(rest, _get_client())
+                _should_clear = False
+                continue
             else:
                 console.print(f"[red]Unknown command: {cmd}[/red]  [dim]Type /help for commands[/dim]")
                 _should_clear = False
@@ -1533,6 +1552,28 @@ def _task_dashboard(project_id: str):
             elif cmd == "/errors":
                 _handle_errors_cmd(_get_client())
                 _should_clear = False
+                continue
+            elif cmd == "/runs":
+                _handle_runs_cmd(_get_client())
+                _should_clear = False
+                continue
+            elif cmd == "/trace":
+                _handle_trace_cmd(rest, _get_client())
+                _should_clear = False
+                continue
+            elif cmd == "/run":
+                _handle_run_cmd(rest, _get_client())
+                continue
+            elif cmd == "/tree":
+                _handle_tree_cmd(rest, _get_client())
+                _should_clear = False
+                continue
+            elif cmd == "/cat":
+                _handle_cat_cmd(rest, _get_client())
+                _should_clear = False
+                continue
+            elif cmd == "/rollback":
+                _handle_rollback_cmd(rest, _get_client())
                 continue
             else:
                 console.print(f"[red]Unknown command: {cmd}[/red]  [dim]Type /help for commands[/dim]")
@@ -2403,6 +2444,225 @@ def _handle_cancel_task_cmd(rest: str, client):
             console.print(f"[red]Failed to cancel task: {e}[/red]")
 
 
+# ── /runs, /trace, /run, /tree, /cat, /rollback ─────────────────────
+
+
+def _handle_runs_cmd(client):
+    """Handle /runs command. List pipeline runs for the current project."""
+    project_id = _state["project_id"]
+    try:
+        data = client.list_runs(project_id)
+        runs = data.get("runs", [])
+    except Exception as e:
+        console.print(f"[red]Error fetching runs: {e}[/red]")
+        return
+
+    if not runs:
+        console.print("[dim]No pipeline runs found for this project.[/dim]")
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Run ID", width=24)
+    table.add_column("Graph", width=18)
+    table.add_column("Status", width=12)
+    table.add_column("Steps", width=12)
+    table.add_column("Created", width=20)
+
+    for r in runs:
+        status_color = {
+            "running": "yellow", "completed": "green", "failed": "red",
+            "paused": "dim",
+        }.get(r.get("status", ""), "white")
+        steps_str = f"{r.get('completed_steps', 0)}/{r.get('step_count', 0)}"
+        table.add_row(
+            r.get("id", "")[:22],
+            r.get("graph_name", ""),
+            f"[{status_color}]{r.get('status', '')}[/{status_color}]",
+            steps_str,
+            r.get("created_at", "")[:19],
+        )
+    console.print(table)
+    console.print("[dim]Use /trace <run_id> to view execution traces.[/dim]")
+
+
+def _handle_trace_cmd(rest: str, client):
+    """Handle /trace command. Show execution traces for a run."""
+    project_id = _state["project_id"]
+    parts = rest.split()
+
+    # Resolve run_id
+    if parts:
+        run_id = parts[0]
+    else:
+        # Default: find the latest run for this project
+        try:
+            data = client.list_runs(project_id)
+            runs = data.get("runs", [])
+            if not runs:
+                console.print("[dim]No runs found. Use /runs to list runs.[/dim]")
+                return
+            run_id = runs[0]["id"]
+        except Exception as e:
+            console.print(f"[red]Error fetching runs: {e}[/red]")
+            return
+
+    # Optional step filter (approximate match on step_id in traces)
+    step_filter = parts[1] if len(parts) > 1 else None
+    category_filter = parts[2] if len(parts) > 2 else None
+
+    try:
+        data = client.get_run_trace(run_id, category=category_filter, limit=200)
+        traces = data.get("traces", [])
+    except Exception as e:
+        console.print(f"[red]Error fetching trace: {e}[/red]")
+        return
+
+    if not traces:
+        console.print(f"[dim]No trace entries found for run {run_id}.[/dim]")
+        return
+
+    # Show run overview first
+    try:
+        run = client.get_run(run_id)
+        console.print(f"\n[bold]Run {run_id} — {run.get('graph_name', '?')}[/bold]")
+        console.print(f"Status: [yellow]{run.get('status', '?')}[/yellow]  "
+                      f"Steps: {run.get('completed_steps', 0)}/{run.get('step_count', 0)}")
+    except Exception:
+        pass
+
+    # Show traces
+    shown = 0
+    for t in traces:
+        step_id = t.get("step_id", "")
+        if step_filter and step_filter not in step_id:
+            continue
+        cat = t.get("category", "")
+        event = t.get("event", "")
+        payload = t.get("payload", {})
+
+        if cat == "prompt":
+            # Show prompt summary
+            text = str(payload.get("user", payload.get("system", "")))[:500]
+            if text.strip():
+                console.print(Panel(
+                    text[:400],
+                    title=f"{step_id} / {event}",
+                    border_style="dim",
+                ))
+                shown += 1
+        elif cat == "response":
+            text = str(payload.get("text", ""))[:500]
+            if text.strip():
+                console.print(Panel(
+                    text[:400],
+                    title=f"{step_id} / {event}",
+                    border_style="green",
+                ))
+                shown += 1
+        elif cat == "tool_call":
+            params = payload.get("params", {})
+            console.print(f"  [dim]{step_id}[/dim] [cyan]🔧 {event}[/cyan] — {str(params)[:200]}")
+            shown += 1
+        elif cat == "error":
+            console.print(Panel(
+                str(payload)[:500],
+                title=f"{step_id} / ERROR",
+                border_style="red",
+            ))
+            shown += 1
+
+    if shown == 0:
+        console.print(f"[dim]No matching trace entries.{' Step filter: ' + step_filter if step_filter else ''}[/dim]")
+    console.print(f"\n[dim]{len(traces)} total entries, {shown} shown. Use /trace <run_id> <step> <category> to filter.[/dim]")
+
+
+def _handle_run_cmd(rest: str, client):
+    """Handle /run command. Submit a task to the current project from REPL."""
+    project_id = _state["project_id"]
+    if not rest:
+        console.print("[red]Usage: /run <prompt>[/red]")
+        return
+
+    try:
+        result = client.submit_task(project_id, rest)
+        console.print(f"[green]Task submitted![/green] Task #{result.get('task_id')}")
+    except Exception as e:
+        console.print(f"[red]Error submitting task: {e}[/red]")
+
+
+def _handle_tree_cmd(rest: str, client):
+    """Handle /tree command. Browse workspace directory tree."""
+    project_id = _state["project_id"]
+    subdir = rest if rest else None
+    try:
+        data = client.workspace_tree(project_id, subdir=subdir)
+        tree = data.get("tree", [])
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        return
+
+    if not tree:
+        console.print(f"[dim]Workspace is empty{' in ' + subdir if subdir else ''}.[/dim]")
+        return
+
+    console.print(f"\n[bold]Workspace: {project_id}{'/' + subdir if subdir else ''}[/bold]")
+    for path in tree[:50]:
+        console.print(f"  [dim]{path}[/dim]")
+    if len(tree) > 50:
+        console.print(f"  [dim]... and {len(tree) - 50} more files[/dim]")
+    console.print(f"\n[dim]{len(tree)} files. Use /cat <path> to read a file.[/dim]")
+
+
+def _handle_cat_cmd(rest: str, client):
+    """Handle /cat command. Read a file from workspace."""
+    project_id = _state["project_id"]
+    if not rest:
+        console.print("[red]Usage: /cat <path>[/red]")
+        console.print("[dim]Use /tree to browse available paths.[/dim]")
+        return
+
+    try:
+        data = client.workspace_file(project_id, rest)
+        content = data.get("content", "")
+    except Exception as e:
+        console.print(f"[red]Error reading file: {e}[/red]")
+        return
+
+    # Syntax-highlight if available
+    try:
+        from rich.syntax import Syntax
+        ext = rest.rsplit(".", 1)[-1] if "." in rest else "text"
+        lang_map = {"py": "python", "md": "markdown", "json": "json", "yaml": "yaml",
+                    "yml": "yaml", "js": "javascript", "ts": "typescript", "html": "html",
+                    "css": "css", "sh": "bash", "txt": "text"}
+        lexer = lang_map.get(ext, "text")
+        console.print(Syntax(content[:10000], lexer, line_numbers=True,
+                             theme="monokai"))
+    except Exception:
+        console.print(Panel(content[:5000], title=rest, border_style="dim"))
+
+
+def _handle_rollback_cmd(rest: str, client):
+    """Handle /rollback command. Rollback a task to a specific git commit."""
+    parts = rest.split()
+    if len(parts) < 2:
+        console.print("[red]Usage: /rollback <task_id> <commit_hash>[/red]")
+        return
+
+    try:
+        task_id = int(parts[0])
+    except ValueError:
+        console.print(f"[red]Invalid task ID: {parts[0]}[/red]")
+        return
+    commit_hash = parts[1]
+
+    try:
+        result = client.rollback(task_id, commit_hash)
+        console.print(f"[green]Task #{task_id} rolled back to {commit_hash}.[/green]")
+    except Exception as e:
+        console.print(f"[red]Rollback failed: {e}[/red]")
+
+
 # ── Help and status (original) ─────────────────────────────────────────
 
 
@@ -2416,13 +2676,19 @@ def _print_repl_help():
         "  [cyan]/tasks[/cyan]            Refresh task dashboard\n"
         "  [cyan]/edit <field> <val>[/cyan] Edit project (name, brief, priority, status)\n"
         "  [cyan]/skip[/cyan]             Skip meta conversation, use raw prompt\n"
+        "  [cyan]/run <prompt>[/cyan]      Submit a task to the current project\n"
         "  [cyan]/add-task[/cyan]         Add a new task via meta conversation\n"
         "  [cyan]/resume-task[/cyan]      Resume interrupted task meta conversation\n"
         "  [cyan]/output <id> [step][/cyan] View step output files\n"
-        "  [cyan]/logs [task_id] [step][/cyan] View pipeline execution traces\n"
+        "  [cyan]/logs [task_id] [step][/cyan] View pipeline execution traces (filesystem)\n"
+        "  [cyan]/trace [run_id] [step] [cat][/cyan] View execution traces (API, prompt/response pairs)\n"
+        "  [cyan]/runs[/cyan]             List pipeline runs for current project\n"
         "  [cyan]/errors[/cyan]           View last pipeline error\n"
+        "  [cyan]/tree [subdir][/cyan]     Browse workspace directory tree\n"
+        "  [cyan]/cat <path>[/cyan]        Read a workspace file\n"
         "  [cyan]/refresh[/cyan]          Re-run Researcher + Architect planning steps\n"
         "  [cyan]/retry [task_id][/cyan]   Retry a failed task\n"
+        "  [cyan]/rollback <id> <hash>[/cyan] Rollback task to a git commit\n"
         "  [cyan]/cancel-task [id][/cyan]  Cancel a running or pending task\n"
         "  [cyan]/status[/cyan]           Show project tasks\n"
         "  [cyan]/project <id>[/cyan]      Set project ID\n"

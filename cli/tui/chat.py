@@ -18,24 +18,44 @@ from textual import work, events
 from textual.binding import Binding
 
 _META_DIR = Path.home() / ".AItelier" / "meta"
+_HISTORY_FILE = Path.home() / ".AItelier" / "cmd_history.json"
 
-# Slash commands: (command, description, takes_arg)
+# Slash commands: (command, description, takes_arg, needs_project)
+# needs_project=True means the command is only shown/completed when inside a project.
 _SLASH_COMMANDS = [
-    ("/help", "Show all commands", False),
-    ("/quit", "Exit AItelier", False),
-    ("/clear", "Clear chat history", False),
-    ("/projects", "Back to project list dashboard", False),
-    ("/project", "Enter project by # or ID (e.g. /project 1, /project my-app)", True),
-    ("/status", "Show current project tasks", False),
-    ("/url", "Show/change backend URL", True),
-    ("/frequency", "Scheduler poll interval", True),
-    ("/cron", "Scheduler cron schedule", True),
-    ("/restart", "Restart backend server", False),
-    ("/checkpoint", "View pending checkpoint for review", False),
-    ("/approve", "Approve checkpoint to continue pipeline", False),
-    ("/reject", "Reject checkpoint with feedback", True),
-    ("/delete", "Delete a project (e.g. /delete hello-world)", True),
-    ("/logs", "Show task logs (e.g. /logs 1)", True),
+    # Global commands (always available)
+    ("/help", "Show all commands", False, False),
+    ("/quit", "Exit AItelier", False, False),
+    ("/clear", "Clear chat history", False, False),
+    ("/projects", "Back to project list dashboard", False, False),
+    ("/project", "Enter project by # or ID (e.g. /project 1)", True, False),
+    ("/new", "Create a new project via meta conversation", False, False),
+    ("/url", "Show/change backend URL", True, False),
+    ("/frequency", "Scheduler poll interval", True, False),
+    ("/cron", "Scheduler cron schedule", True, False),
+    ("/restart", "Restart backend server", False, False),
+    ("/delete", "Delete a project (e.g. /delete hello-world)", True, False),
+    # Project-scoped commands (only when inside a project)
+    ("/status", "Show current project tasks", False, True),
+    ("/run", "Submit a task to current project", True, True),
+    ("/add-task", "Add a new task via meta conversation", False, True),
+    ("/output", "View step output files (/output <task_id> [step])", True, True),
+    ("/logs", "Show task logs (e.g. /logs 1)", True, True),
+    ("/trace", "View execution traces (API, prompt/response pairs)", True, True),
+    ("/runs", "List pipeline runs for current project", False, True),
+    ("/errors", "View last pipeline error", False, True),
+    ("/tree", "Browse workspace directory tree", True, True),
+    ("/cat", "Read a workspace file (/cat <path>)", True, True),
+    ("/edit", "Edit project (name, brief, priority, status)", True, True),
+    ("/pause", "Pause the current project", False, True),
+    ("/resume", "Resume the paused project", False, True),
+    ("/refresh", "Re-run Researcher + Architect planning steps", False, True),
+    ("/retry", "Retry a failed task or project", True, True),
+    ("/rollback", "Rollback task to a git commit (/rollback <id> <hash>)", True, True),
+    ("/cancel-task", "Cancel a running or pending task", True, True),
+    ("/checkpoint", "View pending checkpoint for review", False, True),
+    ("/approve", "Approve checkpoint to continue pipeline", False, True),
+    ("/reject", "Reject checkpoint with feedback", True, True),
 ]
 
 
@@ -633,17 +653,25 @@ class ChatZone(Container):
         self._skip_next_submit: bool = False
         self._pipeline_active = False
         self._pipeline_paused = False
+        # Command history (max 100)
+        self._cmd_history: list[str] = []
+        self._history_index: int = -1  # -1 = no history navigation active
+        self._history_search: str = ""  # current ctrl-r search term
+        self._history_search_mode: bool = False
+        self._saved_input: str = ""  # input saved before history navigation
+        self._completion_just_accepted: bool = False  # set on Enter, cleared on next Submit
 
     def compose(self):
         yield VerticalScroll(id="chat-log")
-        yield Static("", id="completion-candidates", classes="completion-box")
         yield Input(
             placeholder="Message the agent... (/ to see commands)",
             id="chat-input",
         )
+        yield Static("", id="completion-candidates", classes="completion-box")
 
     def on_mount(self):
         self.can_focus = False
+        self._load_history()
         self._init_session()
 
     @work(exclusive=True)
@@ -712,18 +740,24 @@ class ChatZone(Container):
 
     def on_input_changed(self, event: Input.Changed):
         """Live completion candidates as user types."""
-        # AT-7: clear completion guard so next Enter isn't swallowed
-        # after user types additional characters post-autocomplete
-        self._skip_next_submit = False
+        # Don't clear skip when completion is active — the value change
+        # came from our own Enter/Tab handler, not from user typing.
+        if not (self.query_one("#completion-candidates").display and self._completion_matches):
+            self._skip_next_submit = False
         text = event.value
         box = self.query_one("#completion-candidates")
 
+        # ── History search mode: filter by input text ──
+        if self._history_search_mode:
+            self._filter_history_matches(text)
+            return
+
+        # ── Slash command completion ──
         if not text.startswith("/"):
             box.display = False
             self._completion_matches = []
             return
 
-        # Don't show completion if user already typed arguments (after space)
         parts = text.split()
         if len(parts) > 1:
             box.display = False
@@ -731,10 +765,11 @@ class ChatZone(Container):
             return
 
         partial = text.split()[0].lower()
+        in_project = bool(self.current_project)
         self._completion_matches = [
             (cmd, desc, has_arg)
-            for cmd, desc, has_arg in _SLASH_COMMANDS
-            if cmd.startswith(partial)
+            for cmd, desc, has_arg, needs_proj in _SLASH_COMMANDS
+            if cmd.startswith(partial) and (in_project or not needs_proj)
         ]
 
         if not self._completion_matches or (
@@ -747,72 +782,235 @@ class ChatZone(Container):
         self._completion_index = 0
         self._render_completion()
 
+    def _filter_history_matches(self, text: str):
+        """Filter command history by text and show in completion box."""
+        box = self.query_one("#completion-candidates")
+        term = text.lower()
+
+        if not self._cmd_history:
+            box.display = False
+            return
+
+        if not term:
+            # Show all history (most recent first)
+            matches = list(enumerate(self._cmd_history))
+            matches.reverse()  # newest first
+            self._completion_matches = [
+                (cmd, f"history #{i}", False)
+                for i, cmd in matches
+            ]
+        else:
+            # Filter by search term (newest first)
+            self._completion_matches = [
+                (cmd, f"history #{i}", False)
+                for i, cmd in enumerate(self._cmd_history)
+                if term in cmd.lower()
+            ]
+            self._completion_matches.reverse()  # newest first
+
+        if not self._completion_matches:
+            box.update("  no matching history")
+            box.display = True
+            return
+
+        self._completion_index = 0
+        self._render_completion()
+
     def _render_completion(self):
         box = self.query_one("#completion-candidates")
         matches = self._completion_matches
         if not matches:
             box.display = False
             return
+
+        idx = self._completion_index
+        total = len(matches)
+        max_height = 10
+
+        if total <= max_height:
+            # All items fit — no indicators needed
+            start, end = 0, total
+            has_above = has_below = False
+        else:
+            # Reserve 2 lines for indicators, cursor centered in remaining space
+            max_items = max_height - 2
+            half = max_items // 2
+            start = idx - half
+            if start < 0:
+                start = 0
+            elif start + max_items > total:
+                start = total - max_items
+            end = start + max_items
+            has_above = start > 0
+            has_below = end < total
+
         lines = []
-        for i, (cmd, desc, has_arg) in enumerate(matches):
-            cursor = "→" if i == self._completion_index else " "
+        if has_above:
+            lines.append(f"  ... {start} more above")
+        for i in range(start, end):
+            cmd, desc, has_arg = matches[i]
+            cursor = "→" if i == idx else " "
             arg_hint = " <arg>" if has_arg else ""
             lines.append(f" {cursor} {cmd}{arg_hint}  — {desc}")
+        if has_below:
+            lines.append(f"  ... {total - end} more below")
+
         box.update("\n".join(lines))
         box.display = True
 
     def on_key(self, event: events.Key) -> None:
-        """Handle Tab completion and Up/Down navigation for slash commands."""
+        """Handle completion navigation, history search, and plain history."""
         box = self.query_one("#completion-candidates")
-        if not box.display or not self._completion_matches:
+        inp = self.query_one("#chat-input", Input)
+
+        # ── Ctrl+R: toggle history search mode ──
+        if event.key == "ctrl+r":
+            if self._history_search_mode:
+                # Already searching — cancel
+                self._history_search_mode = False
+                self._completion_matches = []
+                box.display = False
+            elif self._cmd_history:
+                # Start history search with current input as search term
+                self._history_search_mode = True
+                self._saved_input = inp.value
+                self._filter_history_matches(inp.value)
+            # else: no history — silently ignore
+            event.prevent_default()
             return
 
-        if event.key == "tab":
-            inp = self.query_one("#chat-input", Input)
-            text = inp.value
-            partial = text.split()[0].lower()
-            matches = [cmd for cmd, _, _ in self._completion_matches]
-            if matches:
-                if len(matches) == 1:
-                    inp.value = matches[0] + " "
+        # ── Escape: cancel any completion/search mode ──
+        if event.key == "escape":
+            if self._history_search_mode:
+                self._history_search_mode = False
+                self._completion_matches = []
+                inp.value = self._saved_input
+                inp.cursor_position = len(inp.value)
+                box.display = False
+                event.prevent_default()
+                return
+            if box.display and self._completion_matches:
+                self._completion_matches = []
+                box.display = False
+                event.prevent_default()
+                return
+
+        # ── Completion box is visible: navigate/select matches ──
+        if box.display and self._completion_matches:
+            if event.key == "up":
+                self._completion_index = (self._completion_index - 1) % len(self._completion_matches)
+                self._render_completion()
+                event.prevent_default()
+                return
+
+            if event.key == "down":
+                self._completion_index = (self._completion_index + 1) % len(self._completion_matches)
+                self._render_completion()
+                event.prevent_default()
+                return
+
+            if event.key == "enter":
+                cmd = self._completion_matches[self._completion_index][0]
+                # Set flag so on_input_submitted skips this Submit
+                self._completion_just_accepted = True
+                self._completion_matches = []
+                box.display = False
+                if self._history_search_mode:
+                    self._history_search_mode = False
+                    inp.value = cmd
+                    inp.cursor_position = len(inp.value)
                 else:
+                    inp.value = cmd + " "
+                    inp.cursor_position = len(inp.value)
+                event.prevent_default()
+                return
+
+            if event.key == "tab":
+                matches = [cmd for cmd, _, _ in self._completion_matches]
+                if matches and not self._history_search_mode:
+                    # Tab-complete slash command prefix
+                    partial = inp.value.split()[0].lower()
                     common = os.path.commonprefix(matches)
                     if len(common) > len(partial):
                         inp.value = common
+                        inp.cursor_position = len(inp.value)
+                        self._skip_next_submit = True
+                self._completion_matches = []
+                box.display = False
+                event.prevent_default()
+                return
+
+            # Any other key in search mode: let it through to Input,
+            # on_input_changed will re-filter
+            if self._history_search_mode:
+                return
+
+            return
+
+        # ── Normal mode (no completion box): Up/Down = history ──
+        if event.key == "up":
+            self._navigate_history(-1)
+            event.prevent_default()
+            return
+
+        if event.key == "down":
+            self._navigate_history(1)
+            event.prevent_default()
+            return
+
+    # ── History persistence ────────────────────────────────────────
+
+    def _load_history(self):
+        """Load command history from disk."""
+        try:
+            if _HISTORY_FILE.exists():
+                data = json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    self._cmd_history = [str(x) for x in data[-100:]]
+        except Exception:
+            pass
+
+    def _save_history(self):
+        """Persist command history to disk (max 100)."""
+        try:
+            _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _HISTORY_FILE.write_text(
+                json.dumps(self._cmd_history[-100:], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    # ── History navigation ──────────────────────────────────────────
+
+    def _navigate_history(self, direction: int):
+        """Navigate command history (direction: -1=older, +1=newer)."""
+        inp = self.query_one("#chat-input", Input)
+        if not self._cmd_history:
+            return
+
+        if self._history_index == -1:
+            self._saved_input = inp.value
+            if direction < 0:
+                self._history_index = len(self._cmd_history) - 1
+            else:
+                self._history_index = 0
+        else:
+            self._history_index += direction
+            if self._history_index < 0 or self._history_index >= len(self._cmd_history):
+                self._history_index = -1
+                inp.value = self._saved_input
                 inp.cursor_position = len(inp.value)
-                self._skip_next_submit = True  # prevent auto-submit
-            box.display = False
-            self._completion_matches = []
-            event.prevent_default()
+                return
 
-        elif event.key == "up":
-            self._completion_index = (self._completion_index - 1) % len(self._completion_matches)
-            self._render_completion()
-            event.prevent_default()
-
-        elif event.key == "down":
-            self._completion_index = (self._completion_index + 1) % len(self._completion_matches)
-            self._render_completion()
-            event.prevent_default()
-
-        elif event.key == "enter":
-            if self._completion_matches:
-                cmd = self._completion_matches[self._completion_index][0]
-                inp = self.query_one("#chat-input", Input)
-                inp.value = cmd + " "
-                inp.cursor_position = len(inp.value)
-                self._skip_next_submit = True  # prevent auto-submit
-            box.display = False
-            self._completion_matches = []
-            event.prevent_default()
-
-        elif event.key == "escape":
-            box.display = False
-            self._completion_matches = []
-            event.prevent_default()
+        inp.value = self._cmd_history[self._history_index]
+        inp.cursor_position = len(inp.value)
 
     def on_input_submitted(self, event: Input.Submitted):
-        # Skip if completion just filled the input (Enter/Tab selected a candidate)
+        # Skip if completion just filled the input (Enter selected a candidate)
+        if self._completion_just_accepted:
+            self._completion_just_accepted = False
+            return
         if self._skip_next_submit:
             self._skip_next_submit = False
             return
@@ -820,6 +1018,15 @@ class ChatZone(Container):
         if not text:
             return
         event.input.value = ""
+
+        # Save to command history (deduplicate consecutive, max 100)
+        if not self._cmd_history or self._cmd_history[-1] != text:
+            self._cmd_history.append(text)
+            if len(self._cmd_history) > 100:
+                self._cmd_history.pop(0)
+            self._save_history()
+        self._history_index = -1
+        self._history_search_mode = False
 
         # Hide completion box
         self.query_one("#completion-candidates").display = False
@@ -846,8 +1053,11 @@ class ChatZone(Container):
             self.app.exit()
             return True
         elif cmd == "/help":
+            in_project = bool(self.current_project)
             lines = []
-            for c, desc, has_arg in _SLASH_COMMANDS:
+            for c, desc, has_arg, needs_proj in _SLASH_COMMANDS:
+                if needs_proj and not in_project:
+                    continue
                 arg_hint = " <arg>" if has_arg else ""
                 lines.append(f"  {c}{arg_hint}  — {desc}")
             self._add_system("\n".join(lines))
@@ -885,6 +1095,68 @@ class ChatZone(Container):
             return True
         elif cmd == "/logs":
             self._handle_logs(rest.strip())
+            return True
+        elif cmd == "/new":
+            self._add_system("To create a new project, just describe what you want to build. "
+                             "For example: 'build me a todo app with FastAPI'")
+            return True
+        elif cmd == "/run":
+            self._handle_run_cmd(rest.strip())
+            return True
+        elif cmd == "/runs":
+            self._show_runs()
+            return True
+        elif cmd == "/trace":
+            self._show_trace(rest.strip())
+            return True
+        elif cmd == "/tree":
+            self._show_tree(rest.strip())
+            return True
+        elif cmd == "/cat":
+            self._handle_cat_cmd(rest.strip())
+            return True
+        elif cmd == "/output":
+            self._handle_output_cmd(rest.strip())
+            return True
+        elif cmd == "/errors":
+            self._show_errors()
+            return True
+        elif cmd == "/pause":
+            self._handle_pause_cmd()
+            return True
+        elif cmd == "/resume":
+            self._handle_resume_cmd()
+            return True
+        elif cmd == "/refresh":
+            self._handle_refresh_cmd()
+            return True
+        elif cmd == "/retry":
+            self._handle_retry_cmd(rest.strip())
+            return True
+        elif cmd == "/rollback":
+            self._handle_rollback_cmd(rest.strip())
+            return True
+        elif cmd == "/cancel-task":
+            self._handle_cancel_task_cmd(rest.strip())
+            return True
+        elif cmd == "/edit":
+            self._add_system("Use /edit <field> <value> — fields: name, brief, priority, status")
+            return True
+        elif cmd == "/add-task":
+            self._add_system("To add a task, just describe it. "
+                             "For example: 'add a user authentication feature'")
+            return True
+        elif cmd == "/url":
+            self._handle_url_cmd(rest.strip())
+            return True
+        elif cmd == "/frequency":
+            self._handle_frequency_cmd(rest.strip())
+            return True
+        elif cmd == "/cron":
+            self._handle_cron_cmd(rest.strip())
+            return True
+        elif cmd == "/restart":
+            self._handle_restart_cmd()
             return True
         return False
 
@@ -1082,6 +1354,467 @@ class ChatZone(Container):
                 self._add_system(f"Logs for task #{task_id}:\n{str(logs)[:3000]}")
         except Exception as e:
             self._add_error(f"Failed to fetch logs: {e}")
+
+    # ── New slash command handlers ────────────────────────────────
+
+    @work(exclusive=True)
+    async def _handle_run_cmd(self, arg: str):
+        """Handle /run <prompt> — submit a task to current project."""
+        if not self.current_project:
+            self._add_error("No project selected. Use /project <# or id> first.")
+            return
+        if not arg:
+            self._add_error("Usage: /run <prompt>")
+            return
+        try:
+            resp = await self.app.http.post(
+                "/api/projects/submit-task",
+                json={"project_id": self.current_project, "prompt": arg},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._add_system(f"Task #{data.get('task_id')} submitted to {self.current_project}.")
+            dashboard = self.app.query_one("#dashboard-zone")
+            dashboard._fetch_tasks()
+        except Exception as e:
+            self._add_error(f"Failed to submit task: {e}")
+
+    @work(exclusive=True)
+    async def _show_runs(self):
+        """Handle /runs — list pipeline runs for current project."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        try:
+            resp = await self.app.http.get(
+                f"/api/projects/{self.current_project}/runs", timeout=5.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            runs = data.get("runs", [])
+            if not runs:
+                self._add_system("No pipeline runs found for this project.")
+                return
+            lines = [f"--- Runs for {self.current_project} ---"]
+            for r in runs:
+                status = r.get("status", "?")
+                steps = f"{r.get('completed_steps', 0)}/{r.get('step_count', 0)}"
+                lines.append(
+                    f"  {r.get('id', '?')[:22]} [{status}] steps={steps} "
+                    f"graph={r.get('graph_name', '?')}"
+                )
+            lines.append("Use /trace <run_id> to view execution traces.")
+            self._add_system("\n".join(lines))
+        except Exception as e:
+            self._add_error(f"Failed to fetch runs: {e}")
+
+    @work(exclusive=True)
+    async def _show_trace(self, arg: str):
+        """Handle /trace [run_id] [category] — show execution traces."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        parts = arg.split()
+        category = parts[1] if len(parts) > 1 else None
+
+        # Resolve run_id
+        if parts:
+            run_id = parts[0]
+        else:
+            try:
+                resp = await self.app.http.get(
+                    f"/api/projects/{self.current_project}/runs", timeout=5.0
+                )
+                resp.raise_for_status()
+                runs = resp.json().get("runs", [])
+                if not runs:
+                    self._add_system("No runs found.")
+                    return
+                run_id = runs[0]["id"]
+            except Exception as e:
+                self._add_error(f"Failed to resolve run: {e}")
+                return
+
+        try:
+            params = {"limit": 50}
+            if category:
+                params["category"] = category
+            resp = await self.app.http.get(
+                f"/api/runs/{run_id}/trace", params=params, timeout=10.0
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            traces = data.get("traces", [])
+            if not traces:
+                self._add_system(f"No trace entries for run {run_id}.")
+                return
+            lines = [f"--- Trace for run {run_id} ({len(traces)} entries) ---"]
+            for t in traces[-30:]:
+                cat = t.get("category", "")
+                event = t.get("event", "")
+                step = t.get("step_id", "-")
+                payload = t.get("payload", {})
+                if cat == "prompt":
+                    text = str(payload.get("user", ""))[:120].replace("\n", " ")
+                    lines.append(f"  → [{step}] {event}: {text}")
+                elif cat == "response":
+                    text = str(payload.get("text", ""))[:120].replace("\n", " ")
+                    lines.append(f"  ← [{step}] {event}: {text}")
+                elif cat == "tool_call":
+                    params_str = str(payload.get("params", {}))[:100]
+                    lines.append(f"  🔧 [{step}] {event}: {params_str}")
+                elif cat == "error":
+                    lines.append(f"  ❌ [{step}] {event}: {str(payload)[:150]}")
+            self._add_system("\n".join(lines))
+        except Exception as e:
+            self._add_error(f"Failed to fetch trace: {e}")
+
+    @work(exclusive=True)
+    async def _show_tree(self, arg: str):
+        """Handle /tree [subdir] — browse workspace directory tree."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        params = {}
+        if arg:
+            params["subdir"] = arg
+        try:
+            resp = await self.app.http.get(
+                f"/api/projects/{self.current_project}/workspace/tree",
+                params=params, timeout=5.0,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            tree = data.get("tree", [])
+            if not tree:
+                self._add_system(f"Workspace is empty{' in ' + arg if arg else ''}.")
+                return
+            lines = [f"--- Workspace: {self.current_project}{'/' + arg if arg else ''} ---"]
+            for path in tree[:40]:
+                lines.append(f"  {path}")
+            if len(tree) > 40:
+                lines.append(f"  ... and {len(tree) - 40} more files")
+            self._add_system("\n".join(lines))
+        except Exception as e:
+            self._add_error(f"Failed to fetch tree: {e}")
+
+    @work(exclusive=True)
+    async def _handle_cat_cmd(self, arg: str):
+        """Handle /cat <path> — read a workspace file."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        if not arg:
+            self._add_error("Usage: /cat <path>  (use /tree to browse paths)")
+            return
+        try:
+            resp = await self.app.http.get(
+                f"/api/projects/{self.current_project}/workspace/file",
+                params={"path": arg}, timeout=5.0,
+            )
+            resp.raise_for_status()
+            content = resp.json().get("content", "")
+            self._add_system(f"--- {arg} ---\n{content[:3000]}")
+        except Exception as e:
+            self._add_error(f"Failed to read file: {e}")
+
+    @work(exclusive=True)
+    async def _handle_output_cmd(self, arg: str):
+        """Handle /output <task_id> [step_id] — view step output."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        parts = arg.split()
+        if not parts:
+            self._add_error("Usage: /output <task_id> [step_id]")
+            return
+        try:
+            task_id = int(parts[0])
+        except ValueError:
+            self._add_error(f"Invalid task ID: {parts[0]}")
+            return
+        step_id = parts[1] if len(parts) > 1 else None
+        try:
+            if step_id:
+                resp = await self.app.http.get(
+                    f"/api/tasks/{task_id}/steps/{step_id}/output", timeout=5.0
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                files = data.get("files", {})
+                if not files:
+                    self._add_system(f"No output files for task #{task_id} step {step_id}.")
+                    return
+                lines = [f"--- Output for task #{task_id} step {step_id} ---"]
+                for fname, content in files.items():
+                    lines.append(f"\n[{fname}]\n{str(content)[:2000]}")
+                self._add_system("\n".join(lines))
+            else:
+                # List available steps
+                resp = await self.app.http.get(
+                    f"/api/tasks/{task_id}", timeout=5.0
+                )
+                resp.raise_for_status()
+                task = resp.json()
+                completed = task.get("completed_steps", [])
+                current = task.get("current_step", "")
+                self._add_system(
+                    f"Task #{task_id}: current_step={current}, "
+                    f"completed_steps={completed}\n"
+                    f"Use /output {task_id} <step_id> to view a specific step."
+                )
+        except Exception as e:
+            self._add_error(f"Failed to fetch output: {e}")
+
+    @work(exclusive=True)
+    async def _show_errors(self):
+        """Handle /errors — show last pipeline error."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        try:
+            resp = await self.app.http.get(
+                f"/api/projects/{self.current_project}", timeout=5.0
+            )
+            resp.raise_for_status()
+            project = resp.json()
+            meta_state = project.get("meta_state")
+            if meta_state:
+                import json as _json
+                try:
+                    state = _json.loads(meta_state)
+                    error = state.get("error", "")
+                    step = state.get("step", "?")
+                    tb = state.get("traceback", "")
+                    self._add_system(
+                        f"--- Last Error ({self.current_project}) ---\n"
+                        f"Step: {step}\nError: {error}\n\n{tb[:1500]}"
+                    )
+                    return
+                except Exception:
+                    pass
+            status = project.get("status", "")
+            self._add_system(f"No error details found. Status: {status}")
+        except Exception as e:
+            self._add_error(f"Failed to fetch project: {e}")
+
+    @work(exclusive=True)
+    async def _handle_pause_cmd(self):
+        """Handle /pause — pause the current project."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        try:
+            resp = await self.app.http.patch(
+                f"/api/projects/{self.current_project}",
+                params={"status": "paused"}, timeout=5.0,
+            )
+            resp.raise_for_status()
+            self._add_system(f"Project '{self.current_project}' paused.")
+            self.app.query_one("#dashboard-zone")._fetch_projects()
+        except Exception as e:
+            self._add_error(f"Failed to pause: {e}")
+
+    @work(exclusive=True)
+    async def _handle_resume_cmd(self):
+        """Handle /resume — resume a paused project."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        try:
+            resp = await self.app.http.patch(
+                f"/api/projects/{self.current_project}",
+                params={"status": "executing"}, timeout=5.0,
+            )
+            resp.raise_for_status()
+            self._add_system(f"Project '{self.current_project}' resumed.")
+            self.app.query_one("#dashboard-zone")._fetch_projects()
+        except Exception as e:
+            self._add_error(f"Failed to resume: {e}")
+
+    @work(exclusive=True)
+    async def _handle_refresh_cmd(self):
+        """Handle /refresh — re-run planning steps."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        try:
+            resp = await self.app.http.post(
+                f"/api/projects/{self.current_project}/refresh-planning",
+                timeout=5.0,
+            )
+            resp.raise_for_status()
+            self._add_system(f"Planning refresh triggered for '{self.current_project}'.")
+            self.app.query_one("#dashboard-zone")._fetch_projects()
+        except Exception as e:
+            self._add_error(f"Failed to refresh planning: {e}")
+
+    @work(exclusive=True)
+    async def _handle_retry_cmd(self, arg: str):
+        """Handle /retry [task_id] — retry a failed task or project."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        try:
+            if arg:
+                task_id = int(arg)
+                resp = await self.app.http.post(
+                    f"/api/tasks/{task_id}/retry", timeout=5.0,
+                )
+                resp.raise_for_status()
+                self._add_system(f"Task #{task_id} retry triggered.")
+            else:
+                resp = await self.app.http.post(
+                    f"/api/projects/{self.current_project}/retry", timeout=5.0,
+                )
+                resp.raise_for_status()
+                self._add_system(f"Project '{self.current_project}' retry triggered.")
+            self.app.query_one("#dashboard-zone")._fetch_projects()
+        except Exception as e:
+            self._add_error(f"Failed to retry: {e}")
+
+    @work(exclusive=True)
+    async def _handle_rollback_cmd(self, arg: str):
+        """Handle /rollback <task_id> <commit_hash>."""
+        parts = arg.split()
+        if len(parts) < 2:
+            self._add_error("Usage: /rollback <task_id> <commit_hash>")
+            return
+        try:
+            task_id = int(parts[0])
+        except ValueError:
+            self._add_error(f"Invalid task ID: {parts[0]}")
+            return
+        commit_hash = parts[1]
+        try:
+            resp = await self.app.http.post(
+                f"/api/tasks/{task_id}/rollback",
+                json={"commit_hash": commit_hash}, timeout=10.0,
+            )
+            resp.raise_for_status()
+            self._add_system(f"Task #{task_id} rolled back to {commit_hash}.")
+        except Exception as e:
+            self._add_error(f"Rollback failed: {e}")
+
+    @work(exclusive=True)
+    async def _handle_cancel_task_cmd(self, arg: str):
+        """Handle /cancel-task [task_id]."""
+        if not self.current_project:
+            self._add_error("No project selected.")
+            return
+        if not arg:
+            # List cancellable tasks
+            try:
+                resp = await self.app.http.get(
+                    f"/api/projects/{self.current_project}/tasks", timeout=5.0
+                )
+                resp.raise_for_status()
+                tasks = resp.json()
+                cancellable = [t for t in tasks if t.get("status") in ("pending", "running")]
+                if not cancellable:
+                    self._add_system("No pending or running tasks to cancel.")
+                    return
+                lines = ["Cancellable tasks:"]
+                for t in cancellable:
+                    lines.append(f"  #{t['id']} ({t.get('status')}) — {t.get('prompt', '')[:60]}")
+                lines.append("Use /cancel-task <id> to cancel one.")
+                self._add_system("\n".join(lines))
+                return
+            except Exception as e:
+                self._add_error(f"Failed to list tasks: {e}")
+                return
+        try:
+            task_id = int(arg)
+            resp = await self.app.http.patch(
+                f"/api/tasks/{task_id}", params={"status": "failed"}, timeout=5.0,
+            )
+            resp.raise_for_status()
+            self._add_system(f"Task #{task_id} cancelled.")
+        except Exception as e:
+            self._add_error(f"Failed to cancel task: {e}")
+
+    @work(exclusive=True)
+    async def _handle_url_cmd(self, arg: str):
+        """Handle /url [new_url]."""
+        if arg:
+            # Update server URL
+            from cli import server as _srv
+            self.app.server_url = arg.rstrip("/")
+            # Recreate http client with new base URL
+            import httpx
+            self.app.http = httpx.AsyncClient(base_url=self.app.server_url, timeout=30.0)
+            self.server_url = self.app.server_url
+            self._add_system(f"Server URL set to: {self.app.server_url}")
+        else:
+            self._add_system(f"Server URL: {self.server_url}")
+
+    @work(exclusive=True)
+    async def _handle_frequency_cmd(self, arg: str):
+        """Handle /frequency [slow|medium|high|Xs|Xm]."""
+        freq_map = {"slow": 30, "medium": 10, "high": 5}
+        try:
+            if not arg:
+                resp = await self.app.http.get("/api/settings/scheduler", timeout=5.0)
+                resp.raise_for_status()
+                s = resp.json()
+                self._add_system(
+                    f"Scheduler: {s.get('scheduler_type', '?')} — "
+                    f"interval={s.get('scheduler_interval', '?')}s, "
+                    f"cron={s.get('scheduler_cron', '-')}"
+                )
+                return
+            if arg in freq_map:
+                interval = freq_map[arg]
+                body = {"scheduler_type": "interval", "scheduler_interval": interval}
+            elif arg.endswith("s") and arg[:-1].isdigit():
+                interval = int(arg[:-1])
+                body = {"scheduler_type": "interval", "scheduler_interval": interval}
+            elif arg.endswith("m") and arg[:-1].isdigit():
+                interval = int(arg[:-1]) * 60
+                body = {"scheduler_type": "interval", "scheduler_interval": interval}
+            else:
+                self._add_error("Usage: /frequency slow|medium|high|Xs|Xm")
+                return
+            resp = await self.app.http.post(
+                "/api/settings/scheduler", json=body, timeout=5.0
+            )
+            resp.raise_for_status()
+            self._add_system(f"Scheduler frequency set to {body['scheduler_interval']}s.")
+        except Exception as e:
+            self._add_error(f"Failed to update frequency: {e}")
+
+    @work(exclusive=True)
+    async def _handle_cron_cmd(self, arg: str):
+        """Handle /cron [5-field expression]."""
+        try:
+            if not arg:
+                resp = await self.app.http.get("/api/settings/scheduler", timeout=5.0)
+                resp.raise_for_status()
+                s = resp.json()
+                self._add_system(
+                    f"Scheduler: {s.get('scheduler_type', '?')} — "
+                    f"cron={s.get('scheduler_cron', '-')}"
+                )
+                return
+            body = {"scheduler_type": "cron", "scheduler_cron": arg}
+            resp = await self.app.http.post(
+                "/api/settings/scheduler", json=body, timeout=5.0
+            )
+            resp.raise_for_status()
+            self._add_system(f"Cron schedule set to: {arg}")
+        except Exception as e:
+            self._add_error(f"Failed to set cron: {e}")
+
+    @work(exclusive=True)
+    async def _handle_restart_cmd(self):
+        """Handle /restart — restart backend server."""
+        try:
+            from cli.server import restart_server
+            restart_server()
+            self._add_system("Backend server restart triggered.")
+        except Exception as e:
+            self._add_error(f"Failed to restart server: {e}")
 
     # ── Agent streaming ──────────────────────────────────────────
 

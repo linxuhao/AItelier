@@ -299,3 +299,49 @@ class APIClient:
         t = threading.Thread(target=_sse_consumer, daemon=True)
         t.start()
         return event_queue
+
+    # ── Run / Trace API ──
+
+    def list_runs(self, project_id: str, status: str = None) -> dict:
+        """List all pipeline runs for a project."""
+        params = {}
+        if status:
+            params["status"] = status
+        resp = self._client.get(f"/api/projects/{project_id}/runs", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_run(self, run_id: str) -> dict:
+        """Get a single run with all step statuses."""
+        resp = self._client.get(f"/api/runs/{run_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_run_trace(self, run_id: str, step_instance_id: int = None,
+                      category: str = None, limit: int = 100) -> dict:
+        """Read execution traces for a run. Optionally filter by step_instance_id and/or category."""
+        params = {"limit": limit}
+        if step_instance_id is not None:
+            params["step_instance_id"] = step_instance_id
+        if category:
+            params["category"] = category
+        resp = self._client.get(f"/api/runs/{run_id}/trace", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    # ── Workspace browsing ──
+
+    def workspace_tree(self, project_id: str, subdir: str = None) -> dict:
+        """Get directory tree of a project's DPS workspace."""
+        params = {}
+        if subdir:
+            params["subdir"] = subdir
+        resp = self._client.get(f"/api/projects/{project_id}/workspace/tree", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def workspace_file(self, project_id: str, path: str) -> dict:
+        """Read a file from the project workspace."""
+        resp = self._client.get(f"/api/projects/{project_id}/workspace/file", params={"path": path})
+        resp.raise_for_status()
+        return resp.json()

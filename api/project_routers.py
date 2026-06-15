@@ -174,6 +174,9 @@ def workspace_tree(
 
     tree = []
     for item in sorted(base.rglob("*")):
+        # Skip .git internals
+        if ".git" in item.parts:
+            continue
         if item.is_file():
             tree.append(str(item.relative_to(base)))
     return {"project_id": project_id, "tree": tree[:200]}

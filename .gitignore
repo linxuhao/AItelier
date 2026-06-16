@@ -226,3 +226,4 @@ internal/
 *.sqlite
 *.sqlite3
 .env
+.claude/

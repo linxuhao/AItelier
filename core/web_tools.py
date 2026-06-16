@@ -12,7 +12,7 @@ import httpx
 
 # ── Config ──────────────────────────────────────────────────────────────
 
-SEARXNG_URL = os.getenv("SEARXNG_URL", "http://linxuhaserver:8888")
+SEARXNG_URL = os.getenv("SEARXNG_URL", "").rstrip("/")
 SEARCH_TIMEOUT = int(os.getenv("SEARXNG_TIMEOUT", "10"))
 FETCH_TIMEOUT = int(os.getenv("WEB_FETCH_TIMEOUT", "15"))
 FETCH_MAX_CHARS = int(os.getenv("WEB_FETCH_MAX_CHARS", "10000"))
@@ -111,6 +111,21 @@ class WebSearchTool:
         :return: {"results": [{"title", "url", "snippet"}], "query", "total"}
         """
         max_results = max(1, min(10, max_results))
+
+        # Web search is optional. If no backend is configured, return cleanly
+        # so the pipeline proceeds (agents fall back to model knowledge)
+        # instead of failing on a dead/relative URL.
+        if not SEARXNG_URL:
+            return {
+                "query": query,
+                "total": 0,
+                "results": [],
+                "note": (
+                    "web_search is not configured — set SEARXNG_URL to a "
+                    "SearXNG instance (JSON API) to enable it. The pipeline "
+                    "continues without web results."
+                ),
+            }
 
         params = {
             "q": query,

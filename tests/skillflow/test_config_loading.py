@@ -72,8 +72,11 @@ class TestV2ConfigLoading:
         graph = PipelineGraph.from_yaml(path)
         assert graph.name == "meta_conversation"
         step_ids = {s.id for s in graph.steps}
+        # Conversational redesign (2026-06-17): intent_detect -> gather
+        # (checkpoint loop) -> finalize. The old single "meta" step is gone.
         assert "intent_detect" in step_ids
-        assert "meta" in step_ids
+        assert "gather" in step_ids
+        assert "finalize" in step_ids
 
     def test_red_template_self_contained(self):
         """Red review templates contain review criteria sections."""

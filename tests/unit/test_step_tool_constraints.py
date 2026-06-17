@@ -72,7 +72,7 @@ def _get_tool_schemas_for_step(step_id: str) -> dict:
 
 CONSTRAINED_STEPS = {
     "1": ["write_sota"],
-    "2": ["write_design"],
+    "2": ["write_design", "write_linter_manifest"],
     "3": ["write_tasks_manifest", "write_task_card"],
     "5": ["write_readme", "write_report"],
     "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card"],

@@ -1,8 +1,12 @@
 # tests/integration/test_web_tools_real.py
 # Integration tests for core/web_tools.py — hits real SearXNG server and real URLs.
+# These are non-deterministic (depend on live external services), so the whole
+# module is marked 'network' and deselected by default (run: pytest -m network).
 
 import pytest
 from core.web_tools import WebSearchTool, WebFetchTool, SEARXNG_URL
+
+pytestmark = pytest.mark.network
 
 
 # ── Helpers ──
@@ -108,13 +112,15 @@ class TestWebFetchToolReal:
 
         assert "error" in result
 
-    def test_fetch_404(self):
+    def test_fetch_http_error_status(self):
         tool = WebFetchTool()
-        # This URL is highly unlikely to exist
+        # Request a URL that returns a non-2xx status. httpbin sometimes returns
+        # 503 when rate-limited, so assert the contract (a non-OK status is
+        # surfaced as an "HTTP <code>" error) rather than the exact 404.
         result = tool.fetch("https://httpbin.org/status/404")
 
         assert "error" in result
-        assert "404" in result["error"]
+        assert "HTTP" in result["error"]
 
 
 # ── Combined search + fetch workflow ──

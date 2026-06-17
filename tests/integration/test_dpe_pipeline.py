@@ -50,7 +50,8 @@ class MockWorkspace:
         code_path.mkdir(parents=True, exist_ok=True)
         return code_path
 
-    def write_draft(self, project_id: str, step_id: str, filename: str, content: str):
+    def write_draft(self, project_id: str, step_id: str, filename: str, content: str,
+                    graph_name: str = None):
         self.written_drafts[f"{step_id}/{filename}"] = content
 
     def get_final_path(self, project_id: str, step_id: str) -> Path:
@@ -177,14 +178,19 @@ def test_pipeline_content_step_actions_format(engine):
         "actions": [
             {"tool": "write_tasks_manifest", "params": {"content": '{"total": 2}'}},
             {"tool": "write_task_card", "params": {"content": '{"id": "task_1"}'}},
+            # Step 3 accumulates files across turns; an explicit end_step signals
+            # the decomposition is complete (otherwise it loops until max turns).
+            {"tool": "end_step", "params": {"summary": "decomposition complete"}},
         ]
     }))
 
+    # Step 3 (PM) is constrained to its own write tools.
     result = engine.run_step(task_id=102, step_id="3", workspace=mock_workspace,
                              project_id="default", agent_config_name="pm",
-                             tool_schemas=TS_CONSTRAINED)
+                             tool_schemas={"write_tasks_manifest": {}, "write_task_card": {}})
 
     assert result is True
+    # Each write_* action is dispatched through _exec_tool.
     assert engine._exec_tool.call_count == 2
 
 
@@ -196,6 +202,9 @@ def test_pipeline_content_step_files_fallback(engine):
     _setup_workspace(tmp_path, step_id="3")
 
     engine._exec_tool = MagicMock(return_value={"written": "some_file.json"})
+    # The legacy 'files' shape is a JSON-mode fallback (non-tool-calling models),
+    # so exercise the JSON dispatch path rather than native tool-calling.
+    engine.factory.is_native.return_value = False
 
     engine.factory.get_agent.return_value = _mock_green(json.dumps({
         "thoughts": "Decomposing into subtasks",
@@ -207,10 +216,11 @@ def test_pipeline_content_step_files_fallback(engine):
 
     result = engine.run_step(task_id=103, step_id="3", workspace=mock_workspace,
                              project_id="default", agent_config_name="pm",
-                             tool_schemas=TS_CONSTRAINED)
+                             tool_schemas={"write_tasks_manifest": {}, "write_task_card": {}})
 
     assert result is True
-    # Both files converted to write actions
+    # Each file in the legacy dict is converted to a generic write action and
+    # dispatched through _exec_tool.
     assert engine._exec_tool.call_count == 2
 
 

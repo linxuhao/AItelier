@@ -29,6 +29,24 @@ def get_workspace_manager() -> WorkspaceManager:
     return ws_instance
 
 
+def _existing_repo_code_path(project_id: str) -> str | None:
+    """Code-path resolver handed to skillflow.
+
+    skillflow's default layout keys the code repo by project_id
+    (projects_base/<id>), which cannot point a project at an *existing* repo.
+    For `repo_type='existing'` projects AItelier records the linked repo in the
+    DB (`repo_path`); returning it here makes skillflow's lifecycle hooks
+    (repo_apply commits the fix into the real repo), `from: repository` context,
+    and project-level lint all target that repo. Returns None for new/clone
+    projects so skillflow keeps its default projects_base/<id> location.
+    """
+    try:
+        info = db_instance.get_repo_info(project_id)
+        return info.get("repo_path") or None
+    except Exception:
+        return None
+
+
 # ── skillflow integration ────────────────────────────────────────────
 
 _skillflow_instance = None
@@ -84,7 +102,8 @@ def get_skillflow():
 
         tool_loader = get_tool_loader()
         sf = SkillFlow(SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
-                     projects_base=PROJECTS_PATH, stale_threshold_seconds=60)
+                     projects_base=PROJECTS_PATH, stale_threshold_seconds=60,
+                     code_path_resolver=_existing_repo_code_path)
 
         # Register agent configs into skillflow so graph validation catches
         # missing agent_config references at startup.

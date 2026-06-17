@@ -95,6 +95,8 @@ The flagship DPE pipeline planning, building, and reviewing a real e-commerce ap
 
 **The generated app — customer storefront & admin panel** (from a single goal, pure Python standard library)
 
+**📂 Browse the full generated source: [linxuhao/aitelier-e-commerce-store-demo](https://github.com/linxuhao/aitelier-e-commerce-store-demo)** — every file was produced by the pipeline (the commit history *is* the build log); only its README is hand-written.
+
 | Customer storefront | Admin panel |
 | --- | --- |
 | ![Client](docs/demo/aitelier_client_demo.gif) | ![Admin](docs/demo/aitelier_admin_demo.gif) |

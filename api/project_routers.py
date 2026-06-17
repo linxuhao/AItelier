@@ -341,12 +341,6 @@ class SubmitProjectRequest(BaseModel):
     repo_url: Optional[str] = None
 
 
-class SubmitTaskRequest(BaseModel):
-    project_id: str = Field(..., min_length=1)
-    prompt: str = Field(..., min_length=1)
-    task_spec: Optional[dict] = None
-
-
 @router.post("/submit", status_code=201)
 def submit_project(
     body: SubmitProjectRequest,
@@ -361,9 +355,7 @@ def submit_project(
     If project already exists (e.g. created via /new), seeds brief and goals into it.
     In both cases, sets status to 'planning' and wakes the scheduler.
     """
-    import json
-    from core.meta_conversation import format_brief_as_markdown, brief_to_step1_goals
-    from core.scheduler import wake_scheduler
+    from core.project_submit import seed_and_trigger
 
     owner = user.email if user else "cli@local"
 
@@ -376,35 +368,7 @@ def submit_project(
 
     # ── Project already exists (e.g. created via /new) ──
     if existing:
-        # Check if planning has already completed — don't reset if so
-        raw = existing.get("completed_project_steps", "[]")
-        existing_steps = json.loads(raw) if isinstance(raw, str) else raw
-        planning_done = all(s in existing_steps for s in ["1", "2", "3"])
-
-        if planning_done:
-            # Planning already done — don't re-trigger the planning pipeline
-            return {"status": "already_planned", "project_id": body.project_id}
-
-        # Skip project + workspace creation, just seed brief and goals
-        dps_path = ws._get_secure_path(body.project_id)
-
-        brief_md = format_brief_as_markdown(body.brief)
-        db.set_project_brief(body.project_id, brief_md)
-
-        project_dir = dps_path / "project"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "project_brief.md").write_text(brief_md, encoding="utf-8")
-
-        goals = brief_to_step1_goals(body.brief)
-        goals_json = json.dumps(goals, indent=2, ensure_ascii=False)
-        final_1_dir = ws._final_dir(body.project_id, "1")
-        final_1_dir.mkdir(parents=True, exist_ok=True)
-        (final_1_dir / "step1_goals.json").write_text(goals_json, encoding="utf-8")
-
-        db.set_completed_project_steps(body.project_id, ["1"])
-        wake_scheduler()
-
-        return {"status": "submitted", "project_id": body.project_id, "next_step": "1"}
+        return seed_and_trigger(db, ws, body.project_id, body.brief)
 
     # ── New project (full creation) ──
 
@@ -444,87 +408,6 @@ def submit_project(
         repo_type=body.repo_type, repo_path=repo_path, repo_url=body.repo_url,
     )
 
-    # 5. Write brief markdown to DB + workspace
-    brief_md = format_brief_as_markdown(body.brief)
-    db.set_project_brief(body.project_id, brief_md)
-
-    dps_path = ws._get_secure_path(body.project_id)
-    project_dir = dps_path / "project"
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "project_brief.md").write_text(brief_md, encoding="utf-8")
-
-    # 6. Seed step1_goals.json from brief (populates Step 1 / Nominator output)
-    goals = brief_to_step1_goals(body.brief)
-    goals_json = json.dumps(goals, indent=2, ensure_ascii=False)
-    final_1_dir = ws._final_dir(body.project_id, "1")
-    final_1_dir.mkdir(parents=True, exist_ok=True)
-    (final_1_dir / "step1_goals.json").write_text(goals_json, encoding="utf-8")
-
-    # 7. Mark Step 1 (goals) as completed, set project to planning at step 1_5
-    db.set_completed_project_steps(body.project_id, ["1"])
-
-    # 8. Wake scheduler for immediate pickup
-    wake_scheduler()
-
-    return {
-        "status": "submitted",
-        "project_id": body.project_id,
-        "next_step": "1",
-    }
-
-
-@router.post("/submit-task", status_code=201)
-def submit_task(
-    body: SubmitTaskRequest,
-    request: Request,
-    user: CurrentUser | None = Depends(get_optional_user),
-    db: DBManager = Depends(get_db_manager),
-    ws: WorkspaceManager = Depends(get_workspace_manager),
-):
-    """
-    Submit a task to an existing project with planning already done.
-    Creates a task record and wakes the scheduler.
-    If project planning is already done, fast-forwards to task-level steps.
-    """
-    import json
-    from core.scheduler import wake_scheduler
-    from core.workspace_manager import PROJECT_STEP_SEQUENCE
-
-    project = db.get_project(body.project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    # Enrich with skillflow pipeline status (source of truth)
-    from api.dependencies import enrich_project_status
-    project = enrich_project_status(project) or project
-
-    owner = user.email if user else "cli@local"
-
-    prompt = body.prompt
-    if body.task_spec:
-        from core.meta_conversation import format_task_spec_as_prompt
-        prompt = format_task_spec_as_prompt(body.task_spec)
-
-    task_id = db.push_task(body.project_id, prompt, owner_email=owner)
-
-    # Fast-forward to task-level steps if project planning is done
-    completed_proj = json.loads(project.get("completed_project_steps") or "[]") if isinstance(project.get("completed_project_steps"), str) else (project.get("completed_project_steps") or [])
-    if all(s in completed_proj for s in PROJECT_STEP_SEQUENCE):
-        pre_done = ["1"] + list(PROJECT_STEP_SEQUENCE)
-        db.advance_step(task_id, "t_plan", pre_done, current_subtask=None)
-        # If project is paused at a checkpoint, auto-approve it
-        if project.get("status") == "paused":
-            from api.dependencies import get_skillflow
-            sf = get_skillflow()
-            run = sf.get_run_by_project(body.project_id)
-            if run:
-                sf.resume_run(run["id"])
-            db.set_project_meta_state(body.project_id, "")
-
-    wake_scheduler()
-
-    return {
-        "status": "submitted",
-        "task_id": task_id,
-        "project_id": body.project_id,
-    }
+    # 5-8. Seed brief + step-1 goals, mark planning step 1 complete, wake the
+    # scheduler. Shared with the existing-project path and the chat butler.
+    return seed_and_trigger(db, ws, body.project_id, body.brief)

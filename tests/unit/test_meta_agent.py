@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 22
+        assert len(TOOL_DEFINITIONS) == 20
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -55,11 +55,11 @@ class TestToolDefinitions:
     def test_required_tools_present(self):
         names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         required = {
-            "list_projects", "get_project", "create_project", "delete_project",
-            "save_draft_brief", "edit_draft_brief",
+            "list_projects", "get_project", "update_project",
+            "start_project_conversation", "answer_project_conversation", "approve_project_brief",
             "retry_project", "refresh_planning",
-            "list_tasks", "save_draft_task", "suggest_submit_task",
-            "get_task", "retry_task",
+            "list_tasks", "get_task", "retry_task",
+            "list_code_tree", "read_code_file",
             "list_workspace_tree", "read_workspace_file",
             "retrieve_previous_context",
         }
@@ -121,31 +121,11 @@ class TestToolDispatch:
         result = await agent._execute_tool("get_project", {"project_id": "test-proj"})
         assert "project" in result
 
-    async def test_create_project(self, agent, mock_db, mock_ws):
-        result = await agent._execute_tool("create_project", {
-            "project_id": "new-proj", "name": "New Project"
-        })
-        assert result["status"] == "created"
-        mock_db.ensure_project.assert_called_once()
-        mock_ws.setup_workspace.assert_called_once()
-
-    async def test_create_project_already_exists(self, agent, mock_db):
-        # AT-27: create_project is now idempotent — returns success when project exists
-        mock_db.get_project.return_value = {"project_id": "existing"}
-        result = await agent._execute_tool("create_project", {"project_id": "existing"})
-        assert result["status"] == "already_exists"
-        assert result["project_id"] == "existing"
-
     async def test_update_project(self, agent, mock_db):
         result = await agent._execute_tool("update_project", {
             "project_id": "test-proj", "name": "Updated"
         })
         assert result["status"] == "updated"
-
-    async def test_delete_project(self, agent, mock_db):
-        mock_db.delete_project_cascade.return_value = True
-        result = await agent._execute_tool("delete_project", {"project_id": "test-proj"})
-        assert result["deleted"] is True
 
     async def test_unknown_tool(self, agent):
         result = await agent._execute_tool("nonexistent_tool", {})

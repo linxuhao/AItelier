@@ -13,15 +13,19 @@ intent_detector:
 meta_conversation_agent:
   model: "deepseek/deepseek-v4-flash"
   template: "meta_conversation.md"
-  tools: ["save_draft_brief", "suggest_submit_project"]
+  # Output write-tools (write_gather_state, …) are auto-injected from the
+  # graph's output.fixed; no extra tools needed.
+  tools: []
   max_tool_turns: 20
   thinking:
     enable: true
 
-# Autonomous CLI/WebGUI butler agent config
+# Autonomous CLI/WebGUI butler agent config. The butler's actual tool surface is
+# defined in core/meta_agent.py (TOOL_DEFINITIONS); this `tools` field is unused
+# by MetaAgent and kept empty to avoid confusion.
 meta_agent:
   model: "deepseek/deepseek-v4-flash"
   template: "meta_conversation.md"
-  tools: ["save_draft_brief", "suggest_submit_project"]
+  tools: []
   max_tool_turns: 20
   enable_thinking: true

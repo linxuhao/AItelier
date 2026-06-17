@@ -20,77 +20,50 @@ _META_DIR = Path.home() / ".AItelier" / "meta"
 # ── System Prompt ──────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
-You are the AItelier butler — the user's single point of contact for managing \
-software projects powered by the DPE (Deterministic Pipeline Engine).
+You are the AItelier butler — a helpful, general AI assistant. You can chat about \
+anything, but you ALSO have the ability to build and modify software by running it \
+through AItelier's deterministic pipeline.
 
-You have tools to:
-- List, create, update, and delete projects
-- Draft and edit project briefs (save_draft_brief, edit_draft_brief)
-- Draft tasks for existing projects (save_draft_task, suggest_submit_task)
-- Manage tasks (list, retry)
-- Inspect workspace files (source code, trace logs, architecture docs)
-- Start and resume skillflow pipelines (start_pipeline, approve/reject checkpoint)
+## When the user wants to build or change software
+When the user's message asks to build a new app/tool/library, or to add a feature \
+or fix a bug in an existing project, you do NOT gather requirements yourself and you \
+do NOT write code. Instead you START and RELAY a structured requirements \
+conversation that the pipeline drives:
 
-CRITICAL RULES:
-- ALWAYS route work through the DPE pipeline. Never suggest bypassing the
-  pipeline, writing code directly, or offering code snippets as an alternative.
-  Your purpose is to feed work into the pipeline.
-- NEVER implement code yourself or offer to "just write the code directly."
+1. Decide new vs existing code:
+   - NEW project → repo_type "new".
+   - EXISTING code (continue / add / fix a named or previous project) → first call
+     list_projects to find it; read the real code with list_code_tree /
+     read_code_file to ground the request; then repo_type "existing" with
+     repo_path = that project's repo_path (or ~/.AItelier/projects/<id>/ if null).
+2. Call start_project_conversation(project_id=<short-slug>, initial_message=<the
+   user's request, verbatim>, repo_type=..., repo_path=...). It returns either a
+   clarifying QUESTION, a BRIEF for review, or "rejected".
+3. RELAY the pipeline's question to the user verbatim — do NOT invent your own
+   questions or brief. When the user replies, call
+   answer_project_conversation(run_id, answer=<their reply>).
+4. When a BRIEF is returned, present it and ask the user to approve. On approval
+   call approve_project_brief(run_id) — this starts the build pipeline. If they
+   want changes, call answer_project_conversation(run_id, answer=<their changes>).
 
-PROJECT WORKFLOW (new projects):
-  1. Gather requirements conversationally.
-  2. Call create_project to set up the workspace.
-  3. Call save_draft_brief with the structured brief.
-  4. Present the brief summary in chat. Say something like:
-     "Here's the project brief. Shall I start the pipeline?"
-  5. WAIT for the user to say "approve", "ok", "yes", "同意", "go ahead", etc.
-  6. Once approved, call start_pipeline(project_id, config="dpe_default_v2").
-  7. The pipeline runs until a checkpoint — present it to the user. Wait for
-     approval or feedback before calling approve_checkpoint or reject_checkpoint.
-- To modify a draft brief: call edit_draft_brief, present the changes, wait
-  for user approval, then call start_pipeline.
+When a conversation is already in progress you will see an [ACTIVE PROJECT
+CONVERSATION] note telling you the run_id and exactly which tool to call — follow it
+and do NOT start a new conversation while one is active.
 
-EXISTING CODE WORKFLOW (continue developing or modify existing repos):
-  1. If the user says "continue" / "继续" / "接着开发" or mentions a
-     previous project by name, first call list_projects to find it.
-  2. Check the returned projects for one matching the user's description.
-     Pay attention to repo_type and repo_path fields — projects with
-     repo_type "new" or "clone" are AItelier-managed repos whose code
-     lives under ~/.AItelier/projects/<id>/.
-  3. Call create_project with:
-     - A NEW project_id (append "-v2", "-continue", or similar)
-     - repo_type: "existing"
-     - repo_path: the old project's repo_path
-  4. Then follow the standard PROJECT WORKFLOW from step 3 (save_draft_brief
-     → user approval → start_pipeline).
-  5. If the user says "fix" / "add" but doesn't name a specific project,
-     list existing projects and ask which one they mean.
-  6. To work on external code (not AItelier-managed): prompt for the
-     local repo path or clone URL before calling create_project.
+CRITICAL:
+- NEVER write code or offer code snippets. The pipeline implements; you relay.
+- NEVER invent the brief or the clarifying questions — they come from the pipeline.
+- Only call approve_project_brief after the user has clearly approved the brief.
 
-TASK WORKFLOW (adding to existing projects):
-- Call save_draft_task then suggest_submit_task to present for user approval.
-- NEVER tell the user a task has been submitted unless suggest_submit_task
-  returned a pending_confirm result.
+## After the build pipeline starts
+The DPE pipeline runs in the background and surfaces its own review checkpoints in
+the dashboard. Report progress with get_pipeline_status(run_id); if the user
+explicitly approves/rejects a DPE checkpoint in chat, call approve_checkpoint /
+reject_checkpoint.
 
-PIPELINE ORCHESTRATION:
-- start_pipeline executes steps until a checkpoint or the end.
-- When start_pipeline returns status "checkpoint": present the label and
-  output summary to the user. WAIT for their response.
-- User says "approve"/"ok"/"yes"/"同意"/"LGTM" → call approve_checkpoint(run_id).
-- User gives feedback → call reject_checkpoint(run_id, feedback).
-- After approve/reject, the pipeline continues to the next checkpoint or end.
-- When the pipeline completes (status: "completed"), summarize the results.
-- Use get_pipeline_status(run_id) to check on a run at any time.
-- NEVER call approve_checkpoint unless the user has explicitly indicated
-  approval. If unsure, ask them.
-
-Guidelines:
-- Track which questions you've already asked. Don't repeat yourself.
-- If save returns "no draft found", you forgot to create/save first — fix it.
-- When calling a tool, be concise — one sentence. Let the result speak.
-- Read workspace files when the user asks about code, progress, or errors.
-- Use retrieve_previous_context for previous conversation context.
+## Otherwise
+For anything that isn't a build/modify request (questions, chit-chat, status),
+just respond normally and helpfully.
 
 Current project: {current_project}
 Owner: {owner_email}
@@ -125,25 +98,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "create_project",
-            "description": "Create a new project. Sets up workspace and DB record.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "description": "Unique slug for the project"},
-                    "name": {"type": "string", "description": "Display name"},
-                    "repo_type": {"type": "string", "enum": ["new", "existing", "clone"],
-                                  "description": "Repository type", "default": "new"},
-                    "repo_path": {"type": "string", "description": "Local path (for existing)"},
-                    "repo_url": {"type": "string", "description": "Git URL (for clone)"},
-                },
-                "required": ["project_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "update_project",
             "description": "Update project fields (name, brief, priority, status).",
             "parameters": {
@@ -162,58 +116,57 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "delete_project",
-            "description": "Delete a project and all its tasks and workspace (destructive).",
+            "name": "start_project_conversation",
+            "description": "Begin a structured requirements conversation for a build/modify "
+                           "request. Creates the project + workspace and starts the "
+                           "meta_conversation pipeline, which drives the Q&A and produces the "
+                           "brief. Returns {status: 'question'|'brief_review'|'rejected', "
+                           "question?, brief_markdown?, run_id}. Relay the question/brief to "
+                           "the user; do NOT invent your own.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "project_id": {"type": "string"},
+                    "project_id": {"type": "string", "description": "Short unique slug (e.g. 'habit-tracker')"},
+                    "initial_message": {"type": "string", "description": "The user's request, verbatim"},
+                    "name": {"type": "string", "description": "Optional display name"},
+                    "repo_type": {"type": "string", "enum": ["new", "existing", "clone"],
+                                  "description": "'new' to build from scratch; 'existing' to modify an existing repo"},
+                    "repo_path": {"type": "string", "description": "Required for repo_type='existing' — the code path"},
+                    "repo_url": {"type": "string", "description": "Required for repo_type='clone'"},
                 },
-                "required": ["project_id"],
+                "required": ["project_id", "initial_message"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "save_draft_brief",
-            "description": "Save a draft project brief to disk. Call this AFTER create_project "
-                           "and BEFORE suggest_submit_project. "
-                           "Can be called multiple times to refine the brief.",
+            "name": "answer_project_conversation",
+            "description": "Pass the user's answer (or requested brief changes) to an in-progress "
+                           "project conversation and advance it. Returns the next "
+                           "{status: 'question'|'brief_review'|..., question?, brief_markdown?, run_id}.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "project_id": {"type": "string", "description": "Unique slug (e.g. 'hello-world-app')"},
-                    "name": {"type": "string", "description": "Display name for the project"},
-                    "brief": {
-                        "type": "object",
-                        "description": "Structured project brief with keys: "
-                                       "project_name, description, goals, non_goals, "
-                                       "tech_constraints, user_stories, target_users, success_criteria",
-                    },
+                    "run_id": {"type": "string", "description": "The conversation run_id"},
+                    "answer": {"type": "string", "description": "The user's reply, verbatim"},
                 },
-                "required": ["project_id", "brief"],
+                "required": ["run_id", "answer"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "edit_draft_brief",
-            "description": "Make targeted changes to a saved draft brief without regenerating the entire thing. "
-                           "Reads the existing draft, merges changes, writes back.",
+            "name": "approve_project_brief",
+            "description": "Approve the reviewed project brief and start the build (DPE) pipeline. "
+                           "Call ONLY after the user has clearly approved the brief.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "project_id": {"type": "string", "description": "The project slug whose draft to edit"},
-                    "changes": {
-                        "type": "object",
-                        "description": "Partial brief fields to merge. Any of: name, description, goals, "
-                                       "non_goals, tech_constraints, user_stories, target_users, success_criteria. "
-                                       "For list fields (goals, non_goals, etc.), the new value replaces the old.",
-                    },
+                    "run_id": {"type": "string", "description": "The conversation run_id"},
                 },
-                "required": ["project_id", "changes"],
+                "required": ["run_id"],
             },
         },
     },
@@ -263,35 +216,36 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "save_draft_task",
-            "description": "Save a draft task for an existing project. Call this FIRST before suggest_submit_task.",
+            "name": "list_code_tree",
+            "description": "List the file tree of a project's actual code repository "
+                           "(the live source, via get_code_path). Use this — not "
+                           "list_workspace_tree — to understand existing code.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "project_id": {"type": "string", "description": "Target project ID"},
-                    "prompt": {"type": "string", "description": "Task description / requirements"},
-                    "task_spec": {
-                        "type": "object",
-                        "description": "Optional structured task spec (description, acceptance_criteria, scope)",
-                    },
+                    "project_id": {"type": "string"},
+                    "subdir": {"type": "string",
+                               "description": "Optional subdirectory to scope"},
                 },
-                "required": ["project_id", "prompt"],
+                "required": ["project_id"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "suggest_submit_task",
-            "description": "Read the saved draft task and present it to the user for approval. "
-                           "Does NOT create the task — the user must explicitly approve first. "
-                           "Always call save_draft_task before this.",
+            "name": "read_code_file",
+            "description": "Read a file from a project's actual code repository "
+                           "(the live source, via get_code_path). Use this — not "
+                           "read_workspace_file — to read existing source files.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "project_id": {"type": "string", "description": "Target project ID"},
+                    "project_id": {"type": "string"},
+                    "path": {"type": "string",
+                             "description": "Relative path within the repo (e.g. 'server.py')"},
                 },
-                "required": ["project_id"],
+                "required": ["project_id", "path"],
             },
         },
     },
@@ -395,25 +349,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "start_pipeline",
-            "description": "Start a skillflow pipeline config for a project. "
-                           "Creates a run, executes steps until a checkpoint or end. "
-                           "Returns the current state: checkpoint info, completion, or error. "
-                           "Binds the run to this chat session so checkpoints appear here.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string", "description": "Target project ID"},
-                    "config": {"type": "string", "description": "Skillflow config name (default: dpe_default_v2)",
-                               "default": "dpe_default_v2"},
-                },
-                "required": ["project_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "approve_checkpoint",
             "description": "Approve a pending checkpoint and continue the pipeline. "
                            "Only call when the user has indicated approval.",
@@ -466,7 +401,7 @@ def _load_meta_agent_config(config_path: str = _DEFAULT_CONFIG_PATH) -> dict:
     default_config = {
         "model": "deepseek/deepseek-v4-flash",
         "template": "meta_conversation.md",
-        "tools": ["save_draft_brief", "suggest_submit_project"],
+        "tools": [],
         "max_tool_turns": 20,
         "thinking": {"enable": True},
     }
@@ -546,6 +481,38 @@ class MetaAgent:
         messages.extend(history)
         return messages
 
+    def _active_conversation_note(self) -> str | None:
+        """If a meta_conversation run for this session is paused, return a system
+        note telling the model exactly which tool to call. State-driven relay —
+        this is what keeps the butler from re-deriving / re-starting a conversation."""
+        if not self.session_id:
+            return None
+        try:
+            from api.dependencies import get_skillflow
+            from core.meta_run import read_gather_state, META_GRAPH
+            sf = get_skillflow()
+            for rid in self.db.get_runs_for_session(self.session_id):
+                run = sf.get_run(rid)
+                if not run or run.get("graph_name") != META_GRAPH:
+                    continue
+                if run.get("status") not in ("paused", "running"):
+                    continue
+                pid = run.get("project_id", "")
+                gs = read_gather_state(self.ws, pid) or {}
+                if gs.get("need_input"):
+                    return (f"[ACTIVE PROJECT CONVERSATION] run_id=\"{rid}\", project=\"{pid}\". "
+                            f"You previously asked: \"{gs.get('question', '')}\". The user's message "
+                            f"is their answer — call answer_project_conversation(run_id=\"{rid}\", "
+                            f"answer=<the user's message>). Do NOT start a new conversation.")
+                return (f"[ACTIVE PROJECT CONVERSATION] run_id=\"{rid}\", project=\"{pid}\" — a brief "
+                        f"is ready for review. If the user approves it, call "
+                        f"approve_project_brief(run_id=\"{rid}\"). Otherwise treat their message as "
+                        f"requested changes and call answer_project_conversation(run_id=\"{rid}\", "
+                        f"answer=<the user's message>). Do NOT start a new conversation.")
+        except Exception:
+            return None
+        return None
+
     async def chat(
         self,
         message: str,
@@ -554,6 +521,12 @@ class MetaAgent:
     ) -> AsyncGenerator[dict, None]:
         """Run the agent loop. Yields SSE events."""
         messages = self._build_messages(history, current_project)
+        # Deterministic relay: if a project conversation is paused for this
+        # session, tell the model exactly which tool to call (state-driven, so it
+        # cannot re-derive / re-start the conversation).
+        relay = self._active_conversation_note()
+        if relay:
+            messages.append({"role": "system", "content": relay})
         messages.append({"role": "user", "content": message})
 
         tool_turns = 0
@@ -571,23 +544,6 @@ class MetaAgent:
                         tool_calls = event["tool_calls"]
 
                 if not tool_calls:
-                    # Safety check: model claimed to submit but didn't call any tool
-                    text_lower = full_text.lower()
-                    submit_claimed = any(
-                        p in text_lower
-                        for p in ["task has been submitted", "task submitted", "i've submitted", "i have submitted"]
-                    )
-                    if submit_claimed and "suggest_submit_task" not in str(messages[-1:]).lower():
-                        messages.append({"role": "assistant", "content": full_text})
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "You claimed to submit a task but did not call the suggest_submit_task tool. "
-                                "Please call save_draft_task then suggest_submit_task now."
-                            ),
-                        })
-                        tool_turns += 1
-                        continue
                     yield {"type": "done", "message": {"role": "assistant", "content": full_text}}
                     return
 
@@ -753,7 +709,7 @@ class MetaAgent:
             # AT-27: idempotent — return success so the LLM can continue
             # its flow instead of hitting an error it can't recover from.
             return {"project_id": pid, "status": "already_exists",
-                    "message": f"Project '{pid}' already exists. Proceed to save_draft_brief."}
+                    "message": f"Project '{pid}' already exists."}
         self.db.ensure_project(
             pid, name=args.get("name"),
             owner_email=self.owner_email,
@@ -788,74 +744,200 @@ class MetaAgent:
         ok = self.db.delete_project_cascade(pid)
         return {"project_id": pid, "deleted": ok}
 
-    def _tool_save_draft_brief(self, args: dict) -> dict:
-        """Save a draft project brief to disk."""
-        import json as _json
+    # ── Project-conversation tools (drive the meta_conversation pipeline) ──
 
-        pid = args["project_id"]
-        brief = args["brief"]
-        name = args.get("name") or brief.get("project_name", pid)
+    def _slugify(self, text: str) -> str:
+        import re
+        s = re.sub(r"[^a-z0-9-]", "-", (text or "").lower()).strip("-")[:40]
+        s = re.sub(r"-+", "-", s)
+        return s or "project"
 
-        # Ensure the brief dict includes project_name so downstream formatters
-        # don't show "Untitled" when the model omits it.
-        if not brief.get("project_name"):
-            brief["project_name"] = name
+    def _append_conversation(self, project_id: str, line: str) -> None:
+        """Append a line to the workspace transcript the gather step reads
+        (meta/conversation.md)."""
+        base = self.ws._get_secure_path(project_id) / "meta"
+        base.mkdir(parents=True, exist_ok=True)
+        with open(base / "conversation.md", "a", encoding="utf-8") as fh:
+            fh.write(line if line.endswith("\n") else line + "\n")
 
-        # Write draft to workspace
-        dps_path = self.ws._get_secure_path(pid)
-        dps_path.mkdir(parents=True, exist_ok=True)
-        draft = {
-            "project_id": pid,
-            "name": name,
-            "brief": brief,
-        }
-        (dps_path / "draft_brief.json").write_text(
-            _json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8"
+    def _format_brief_md(self, brief: dict) -> str:
+        try:
+            from core.meta_conversation import format_brief_as_markdown
+            return format_brief_as_markdown(brief or {})
+        except Exception:
+            return json.dumps(brief or {}, indent=2, ensure_ascii=False)
+
+    async def _tool_start_project_conversation(self, args: dict) -> dict:
+        """Create the project + workspace, start the meta_conversation run, drive
+        it to its first pause, and return the question / brief to relay."""
+        from api.dependencies import get_skillflow
+        from core.meta_run import META_GRAPH
+
+        initial = (args.get("initial_message") or "").strip()
+        pid = args.get("project_id") or self._slugify(args.get("name") or initial)
+        repo_type = args.get("repo_type", "new")
+        repo_path = args.get("repo_path")
+        repo_url = args.get("repo_url")
+
+        sf = get_skillflow()
+        if not self.db.get_project(pid):
+            self.db.ensure_project(
+                pid, name=args.get("name") or pid, owner_email=self.owner_email,
+                repo_type=repo_type, repo_path=repo_path, repo_url=repo_url,
+            )
+        self.db.set_project_meta_state(pid, "drafting")
+        try:
+            self.ws.setup_workspace(pid, repo_type=repo_type, repo_path=repo_path, repo_url=repo_url)
+        except Exception as e:
+            return {"status": "error", "message": f"workspace setup failed: {e}"}
+
+        # Seed the transcript the gather step reads as context.
+        self._append_conversation(pid, f"User: {initial}")
+
+        run_id = sf.get_or_create_run(META_GRAPH, pid, {"project_id": pid})
+        run = sf.get_run(run_id)
+        if run and run["status"] == "pending":
+            sf.start_run(run_id)
+        if self.session_id:
+            self.db.link_run_to_session(self.session_id, run_id)
+
+        result = await self._run_meta_until_checkpoint(run_id)
+        if result.get("status") == "question":
+            self._append_conversation(pid, f"Assistant: {result.get('question', '')}")
+        return result
+
+    async def _tool_answer_project_conversation(self, args: dict) -> dict:
+        """Append the user's answer to the transcript, resume the gather step,
+        and return the next question / brief."""
+        from api.dependencies import get_skillflow
+        from core.meta_run import submit_user_answer
+
+        run_id = args["run_id"]
+        answer = (args.get("answer") or "").strip()
+        sf = get_skillflow()
+        run = sf.get_run(run_id)
+        if not run:
+            return {"status": "error", "message": f"Conversation '{run_id}' not found."}
+        pid = run.get("project_id", "")
+
+        self._append_conversation(pid, f"User: {answer}")
+        try:
+            submit_user_answer(sf, run_id, answer)
+        except Exception as e:
+            return {"status": "error", "run_id": run_id, "message": f"could not resume: {e}"}
+
+        result = await self._run_meta_until_checkpoint(run_id)
+        if result.get("status") == "question":
+            self._append_conversation(pid, f"Assistant: {result.get('question', '')}")
+        return result
+
+    async def _tool_approve_project_brief(self, args: dict) -> dict:
+        """Approve the reviewed brief, complete the meta run, and trigger DPE."""
+        from api.dependencies import get_skillflow
+        from core.meta_run import approve_meta, read_gather_state
+        from core.project_submit import seed_and_trigger
+
+        run_id = args["run_id"]
+        sf = get_skillflow()
+        run = sf.get_run(run_id)
+        if not run:
+            return {"status": "error", "message": f"Conversation '{run_id}' not found."}
+        pid = run.get("project_id", "")
+
+        gs = read_gather_state(self.ws, pid) or {}
+        brief = gs.get("brief") or {}
+        stories = brief.get("user_stories")
+        if not (isinstance(stories, list) and any(str(s).strip() for s in stories)):
+            return {"status": "error",
+                    "message": "The brief has no user story yet — keep talking to add one before approving."}
+
+        # Seed the canonical brief + goals and wake the scheduler (starts DPE),
+        # then close the meta run (don't drive it into a terminal — see approve_meta).
+        res = seed_and_trigger(self.db, self.ws, pid, brief)
+        try:
+            approve_meta(sf, run_id)
+        except Exception:
+            pass
+        if res.get("status") not in ("submitted", "already_planned"):
+            res.setdefault("project_id", pid)
+            return res
+
+        # The meta agent now starts the DPE build pipeline and drives it to its
+        # first review checkpoint, surfaced in this chat (reuses the proven
+        # session-bound pipeline driver).
+        dpe = await self._tool_start_pipeline({"project_id": pid, "config": "dpe_default_v2"})
+        dpe.setdefault("project_id", pid)
+        dpe.setdefault("message", f"Brief approved — the build pipeline for '{pid}' has started.")
+        return dpe
+
+    async def _run_meta_until_checkpoint(self, run_id: str) -> dict:
+        """Drive the meta_conversation run until it pauses (gather checkpoint) or
+        completes. Returns {status: 'question'|'brief_review'|'rejected'|'error', ...}."""
+        from api.dependencies import get_skillflow
+        from aitelier.runner import AgentStepRunner
+        from core.event_bus import event_bus
+        from core.meta_run import read_gather_state
+
+        sf = get_skillflow()
+        runner = AgentStepRunner(
+            db_manager=self.db, workspace_manager=self.ws,
+            agent_factory=None, prompt_assembler=None, event_bus=event_bus,
         )
-        return {
-            "status": "draft_saved",
-            "project_id": pid,
-            "message": f"Draft brief saved for '{name}'. Present the brief to the user in chat. "
-                       f"When the user approves, call start_pipeline.",
-        }
-
-    def _tool_edit_draft_brief(self, args: dict) -> dict:
-        """Merge changes into an existing draft brief."""
-        import json as _json
-
-        pid = args["project_id"]
-        changes = args.get("changes", {})
-
-        dps_path = self.ws._get_secure_path(pid)
-        draft_path = dps_path / "draft_brief.json"
-        if not draft_path.exists():
-            return {
-                "status": "error",
-                "message": f"No draft brief found for '{pid}'. Call save_draft_brief first.",
-            }
-
-        draft = _json.loads(draft_path.read_text(encoding="utf-8"))
-        brief = draft.get("brief", {})
-
-        # Merge top-level name
-        if "name" in changes:
-            draft["name"] = changes["name"]
-
-        # Merge brief fields
-        for key in ("description", "project_name", "goals", "non_goals",
-                     "tech_constraints", "user_stories", "target_users", "success_criteria"):
-            if key in changes:
-                brief[key] = changes[key]
-
-        draft["brief"] = brief
-        draft_path.write_text(_json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        return {
-            "status": "draft_updated",
-            "project_id": pid,
-            "message": f"Draft brief updated. Present the updated brief to the user. "
-                       f"When the user approves, call start_pipeline.",
-        }
+        project_id = (sf.get_run(run_id) or {}).get("project_id", "")
+        MAX_STEPS = 30
+        steps_run = 0
+        try:
+            while steps_run < MAX_STEPS:
+                next_node = sf.advance_run(run_id)
+                if next_node is None:
+                    run = sf.get_run(run_id)
+                    status = run["status"]
+                    if status == "paused":
+                        gs = read_gather_state(self.ws, project_id) or {}
+                        if gs.get("need_input"):
+                            return {"status": "question", "run_id": run_id,
+                                    "project_id": project_id,
+                                    "question": gs.get("question")
+                                        or "Could you tell me a bit more about what you want?",
+                                    "message": "Relay this question to the user VERBATIM and then "
+                                               "stop — do not call any tool until the user replies."}
+                        brief = gs.get("brief") or {}
+                        return {"status": "brief_review", "run_id": run_id,
+                                "project_id": project_id, "brief": brief,
+                                "brief_markdown": self._format_brief_md(brief),
+                                "message": "Present this brief to the user and ask them to approve "
+                                           "it. Do NOT invent your own questions. Stop and wait for "
+                                           "their response; on approval call approve_project_brief."}
+                    if status == "completed":
+                        # terminal without a brief = intent classified as rejected
+                        return {"status": "rejected", "run_id": run_id,
+                                "project_id": project_id,
+                                "message": "That doesn't look like a software build request."}
+                    if status == "failed":
+                        return {"status": "error", "run_id": run_id,
+                                "message": run.get("error_reason", "conversation failed")}
+                    return {"status": status, "run_id": run_id}
+                try:
+                    claimed = sf.claim_next_step(run_id)
+                except Exception as e:
+                    return {"status": "error", "run_id": run_id, "message": f"claim failed: {e}"}
+                if claimed is None:
+                    continue
+                try:
+                    result = await runner.execute(claimed)
+                    sf.confirm_step(claimed.token, result)
+                    steps_run += 1
+                except Exception as e:
+                    try:
+                        sf.fail_step(claimed.token, str(e)[:200], retryable=True)
+                    except Exception:
+                        pass
+                    return {"status": "error", "run_id": run_id, "step_id": claimed.step_id,
+                            "message": f"step '{claimed.step_id}' failed: {str(e)[:200]}"}
+            return {"status": "error", "run_id": run_id,
+                    "message": "conversation did not converge (max steps)."}
+        except Exception as e:
+            return {"status": "error", "run_id": run_id, "message": f"conversation error: {e}"}
 
     def _tool_retry_project(self, args: dict) -> dict:
         pid = args["project_id"]
@@ -885,92 +967,36 @@ class MetaAgent:
         tasks = self.db.list_tasks_by_project(args["project_id"])
         return {"tasks": tasks}
 
-    def _tool_save_draft_task(self, args: dict) -> dict:
-        """Save a draft task spec to disk."""
-        from core.meta_conversation import format_task_spec_as_prompt
-        import json as _json
-
+    def _tool_list_code_tree(self, args: dict) -> dict:
+        """List the file tree of a project's actual code repository."""
         pid = args["project_id"]
-        prompt = args["prompt"]
-        task_spec = args.get("task_spec")
-        if task_spec:
-            prompt = format_task_spec_as_prompt(task_spec)
+        base = self.ws.get_code_path(pid)
+        subdir = args.get("subdir")
+        if subdir:
+            base = base / subdir
+        if not base.exists():
+            return {"error": f"Code repo not found for {pid}"}
+        tree = []
+        for item in sorted(base.rglob("*")):
+            if item.is_file() and "/.git/" not in f"/{item}":
+                tree.append(str(item.relative_to(base)))
+        return {"project_id": pid, "tree": tree[:200]}
 
-        # Dedup
-        existing_tasks = self.db.list_tasks_by_project(pid)
-        for t in existing_tasks:
-            if t.get("status") in ("pending", "running"):
-                existing_prompt = (t.get("prompt") or "").strip()
-                if existing_prompt and existing_prompt == prompt.strip():
-                    return {
-                        "status": "already_saved",
-                        "task_id": t["id"],
-                        "project_id": pid,
-                        "message": f"Task #{t['id']} with the same prompt is already {t['status']}.",
-                    }
-
-        dps_path = self.ws._get_secure_path(pid)
-        dps_path.mkdir(parents=True, exist_ok=True)
-
-        draft = {
-            "project_id": pid,
-            "prompt": prompt,
-            "task_spec": task_spec,
-        }
-        draft_path = dps_path / "draft_task.json"
-        draft_path.write_text(_json.dumps(draft, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        return {
-            "status": "draft_saved",
-            "project_id": pid,
-            "message": "Draft task saved. Call suggest_submit_task to present it for approval.",
-        }
-
-    def _tool_suggest_submit_task(self, args: dict) -> dict:
-        """Read the saved draft task and format it for user approval."""
-        import json as _json
-
+    def _tool_read_code_file(self, args: dict) -> dict:
+        """Read a file from a project's actual code repository."""
         pid = args["project_id"]
-
-        dps_path = self.ws._get_secure_path(pid)
-        draft_path = dps_path / "draft_task.json"
-        if not draft_path.exists():
-            return {
-                "status": "error",
-                "message": f"No draft task found for '{pid}'. Call save_draft_task first.",
-            }
-
-        draft = _json.loads(draft_path.read_text(encoding="utf-8"))
-        prompt = draft.get("prompt", "")
-        task_spec = draft.get("task_spec")
-
-        # Check project exists
-        project = self.db.get_project(pid)
-        if not project:
-            return {
-                "status": "error",
-                "message": f"Project '{pid}' not found. Create it first.",
-            }
-
-        task_summary = f"**Project:** {pid}\n**Task:** {prompt[:500]}"
-        if task_spec:
-            if task_spec.get("description"):
-                task_summary += f"\n**Description:** {task_spec['description'][:500]}"
-            if task_spec.get("acceptance_criteria"):
-                ac = task_spec["acceptance_criteria"]
-                if isinstance(ac, list):
-                    task_summary += "\n**Acceptance Criteria:**\n" + "\n".join(f"  - {c}" for c in ac[:10])
-                else:
-                    task_summary += f"\n**Acceptance Criteria:** {str(ac)[:300]}"
-
-        return {
-            "status": "pending_confirm",
-            "project_id": pid,
-            "prompt": prompt,
-            "task_spec": task_spec,
-            "task_summary": task_summary,
-            "message": "Task is ready for review. Please approve to submit.",
-        }
+        path = args["path"]
+        base = self.ws.get_code_path(pid).resolve()
+        target = (base / path).resolve()
+        if not str(target).startswith(str(base)):
+            return {"error": "Path traversal denied"}
+        if not target.is_file():
+            return {"error": f"File not found: {path}"}
+        try:
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return {"error": str(e)}
+        return {"path": path, "content": content[:50000]}
 
     def _tool_get_task(self, args: dict) -> dict:
         with self.db.get_connection() as conn:
@@ -1096,10 +1122,10 @@ class MetaAgent:
                 if next_node is None:
                     run = sf.get_run(run_id)
                     status = run["status"]
+                    steps = sf.get_steps(run_id)
                     if status == "paused":
                         # Checkpoint — surface to user via the agent
                         label = run.get("current_node", "Checkpoint")
-                        steps = sf.get_steps(run_id)
                         # Find the checkpoint step (last completed with checkpoint=True)
                         resolver = sf._get_resolver(run["graph_name"])
                         checkpoint_step_id = ""
@@ -1403,23 +1429,21 @@ class MetaAgent:
 _TOOL_HANDLERS = {
     "list_projects": MetaAgent._tool_list_projects,
     "get_project": MetaAgent._tool_get_project,
-    "create_project": MetaAgent._tool_create_project,
     "update_project": MetaAgent._tool_update_project,
-    "delete_project": MetaAgent._tool_delete_project,
-    "save_draft_brief": MetaAgent._tool_save_draft_brief,
-    "edit_draft_brief": MetaAgent._tool_edit_draft_brief,
+    "start_project_conversation": MetaAgent._tool_start_project_conversation,
+    "answer_project_conversation": MetaAgent._tool_answer_project_conversation,
+    "approve_project_brief": MetaAgent._tool_approve_project_brief,
     "retry_project": MetaAgent._tool_retry_project,
     "refresh_planning": MetaAgent._tool_refresh_planning,
     "list_tasks": MetaAgent._tool_list_tasks,
-    "save_draft_task": MetaAgent._tool_save_draft_task,
-    "suggest_submit_task": MetaAgent._tool_suggest_submit_task,
+    "list_code_tree": MetaAgent._tool_list_code_tree,
+    "read_code_file": MetaAgent._tool_read_code_file,
     "get_task": MetaAgent._tool_get_task,
     "retry_task": MetaAgent._tool_retry_task,
     "get_step_output": MetaAgent._tool_get_step_output,
     "list_workspace_tree": MetaAgent._tool_list_workspace_tree,
     "read_workspace_file": MetaAgent._tool_read_workspace_file,
     "retrieve_previous_context": MetaAgent._tool_retrieve_previous_context,
-    "start_pipeline": MetaAgent._tool_start_pipeline,
     "approve_checkpoint": MetaAgent._tool_approve_checkpoint,
     "reject_checkpoint": MetaAgent._tool_reject_checkpoint,
     "get_pipeline_status": MetaAgent._tool_get_pipeline_status,

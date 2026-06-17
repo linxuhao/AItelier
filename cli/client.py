@@ -111,15 +111,6 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
-    def submit_task(self, project_id: str, prompt: str, task_spec: dict = None) -> dict:
-        """Submit a task to an existing project. Wakes scheduler."""
-        body = {"project_id": project_id, "prompt": prompt}
-        if task_spec:
-            body["task_spec"] = task_spec
-        resp = self._client.post("/api/projects/submit-task", json=body, timeout=30.0)
-        resp.raise_for_status()
-        return resp.json()
-
     def delete_project(self, project_id: str) -> dict:
         resp = self._client.delete(f"/api/projects/{project_id}")
         resp.raise_for_status()

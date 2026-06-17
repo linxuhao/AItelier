@@ -1,10 +1,18 @@
 # configs/meta_conversation.yaml
-# Meta conversation as a skillflow graph.
-# AItelier runs this graph first to produce project_brief.md,
-# then runs the main pipeline graph.
+# Requirements-gathering conversation as a deterministic skillflow graph.
+#
+# The butler (core/meta_agent.py) drives this run synchronously and relays the
+# gather step's question / brief into the chat. The conversation transcript
+# lives in the workspace file `meta/conversation.md` (maintained by the butler).
+# The gather step writes a single `gather_state.json`:
+#   - {"need_input": true,  "question": "...", "analysis_so_far": "..."}  (ask)
+#   - {"need_input": false, "brief": { ...incl. user_stories... }}        (finalize)
+# Looping is driven at runtime by reject_checkpoint(redirect_to="gather")
+# (see core/meta_run.py). On checkpoint approval the gather step terminates the
+# run and the butler triggers the DPE pipeline (core/project_submit.py).
 
 name: "meta_conversation"
-description: "Project requirements gathering via natural conversation"
+description: "Project requirements gathering → brief (butler triggers DPE on approval)"
 
 begin: "intent_detect"
 
@@ -12,27 +20,51 @@ steps:
   - id: "intent_detect"
     step_type: "agent"
     agent_config: "intent_detector"
-    context: []
+    context:
+      - source: { from: "workspace", path: "meta/conversation.md" }
     output:
       mode: "content"
       fixed:
         result: "intent_result.json"
+    validation:
+      - files: ["intent_result.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [intent]
+          properties:
+            intent: { type: string, enum: [new_project, existing_code, rejected] }
     transitions:
-      - to: "meta"
-        match: { field: "intent", value: "new_project" }
-      - to: "meta"
-        match: { field: "intent", value: "existing_code" }
-      - to: null    # rejected — end graph
-        match: { field: "status", value: "rejected" }
+      - to: "gather"
+        match: { from_file: "intent_result.json", field: "intent", value: "new_project" }
+      - to: "gather"
+        match: { from_file: "intent_result.json", field: "intent", value: "existing_code" }
+      - to: null          # not a software project — butler just chats
+        match: { from_file: "intent_result.json", field: "intent", value: "rejected" }
 
-  - id: "meta"
+  - id: "gather"
     step_type: "agent"
     agent_config: "meta_conversation_agent"
-    context: []
-    output:
-      mode: "write"
     checkpoint: true
-    checkpoint_label: "Review Project Brief"
+    checkpoint_label: "Project conversation"
+    context:
+      - source: { from: "workspace", path: "meta/conversation.md" }
+      - source: { from: "repository" }     # best-effort; populated for existing_code
+    output:
+      mode: "content"
+      fixed:
+        gather_state: "gather_state.json"
+    validation:
+      - files: ["gather_state.json"]
+        tool: "user_stories_present"       # ≥1 user story required to finalize
     transitions:
-      - to: null    # approved — end graph
+      # On approval, route to a terminal gate. (A checkpoint step cannot
+      # transition directly `to: null` — skillflow fails it before pausing;
+      # bridging through a non-checkpoint gate is the supported pattern.)
+      - to: "finalize"
         match: { from: "checkpoint", value: "approved" }
+
+  - id: "finalize"
+    step_type: "gate"
+    transitions:
+      - to: null                            # brief approved → run completes

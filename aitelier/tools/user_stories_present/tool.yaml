@@ -1,0 +1,15 @@
+name: user_stories_present
+description: >
+  Validation tool for the meta_conversation gather step. Reads gather_state.json
+  and enforces that a FINALIZED brief contains at least one user story. On a
+  question turn (need_input=true) or when no brief is present, it passes — the
+  rule only applies when the agent finalizes the brief.
+parameters:
+  files:
+    type: array
+    description: "File patterns to check (the engine passes ['gather_state.json'])"
+    required: false
+  workspace_root:
+    type: string
+    description: "Validation directory (auto-injected by the engine)"
+    required: false

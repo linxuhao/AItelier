@@ -37,8 +37,6 @@ _SLASH_COMMANDS = [
     ("/delete", "Delete a project (e.g. /delete hello-world)", True, False),
     # Project-scoped commands (only when inside a project)
     ("/status", "Show current project tasks", False, True),
-    ("/run", "Submit a task to current project", True, True),
-    ("/add-task", "Add a new task via meta conversation", False, True),
     ("/output", "View step output files (/output <task_id> [step])", True, True),
     ("/logs", "Show task logs (e.g. /logs 1)", True, True),
     ("/trace", "View execution traces (API, prompt/response pairs)", True, True),
@@ -83,19 +81,17 @@ def _format_tool_result(name: str, result: dict) -> str:
         return f"Project: {pname} ({pstatus})"
     elif name == "create_project":
         return f"Created project \"{pid}\""
-    elif name == "save_draft_brief":
-        return f"Draft brief saved for \"{pid}\""
-    elif name == "edit_draft_brief":
-        return f"Draft brief updated for \"{pid}\""
+    elif name == "start_project_conversation":
+        st = status or "started"
+        return f"Started project conversation for \"{pid}\" ({st})"
+    elif name == "answer_project_conversation":
+        return f"Answer relayed ({status or 'ok'})"
+    elif name == "approve_project_brief":
+        return (f"Brief approved — pipeline starting for \"{pid}\""
+                if status == "submitted" else f"Approve brief: {status or '?'}")
     elif name == "list_tasks":
         n = len(result.get("tasks", []))
         return f"{n} task(s)" if n else "no tasks"
-    elif name == "save_draft_task":
-        return f"Draft task saved for \"{pid}\""
-    elif name == "suggest_submit_task":
-        if status == "pending_confirm":
-            return f"Task ready for review in \"{pid}\""
-        return f"Task: {status}"
     elif name == "list_workspace_tree":
         n = len(result.get("tree", []))
         return f"Workspace: {n} file(s)"
@@ -576,10 +572,7 @@ class BriefReviewModal(ModalScreen[bool]):
 
     @work(exclusive=True)
     async def _do_approve(self):
-        if self.submit_type == "project":
-            await self._submit_project()
-        else:
-            await self._submit_task()
+        await self._submit_project()
 
     async def _run_async_post(self, path: str, body: dict) -> tuple[bool, str]:
         """Execute HTTP POST using the app's shared async client."""
@@ -605,21 +598,6 @@ class BriefReviewModal(ModalScreen[bool]):
                 self._flash(f"Project '{self.project_id}' submitted — pipeline starting")
             else:
                 self._flash(f"Submit failed: {err}", error=True)
-        except Exception as e:
-            self._flash(f"Submit exception: {e}", error=True)
-        finally:
-            self.dismiss(True)
-
-    async def _submit_task(self):
-        path = "/api/tasks"
-        body = {"project_id": self.project_id, "prompt": self.review_content}
-        # A4 fix: same defensive pattern as _submit_project.
-        try:
-            ok, err = await self._run_async_post(path, body)
-            if ok:
-                self._flash(f"Task submitted to '{self.project_id}'")
-            else:
-                self._flash(f"Task submit failed: {err}", error=True)
         except Exception as e:
             self._flash(f"Submit exception: {e}", error=True)
         finally:
@@ -1100,9 +1078,6 @@ class ChatZone(Container):
             self._add_system("To create a new project, just describe what you want to build. "
                              "For example: 'build me a todo app with FastAPI'")
             return True
-        elif cmd == "/run":
-            self._handle_run_cmd(rest.strip())
-            return True
         elif cmd == "/runs":
             self._show_runs()
             return True
@@ -1141,10 +1116,6 @@ class ChatZone(Container):
             return True
         elif cmd == "/edit":
             self._add_system("Use /edit <field> <value> — fields: name, brief, priority, status")
-            return True
-        elif cmd == "/add-task":
-            self._add_system("To add a task, just describe it. "
-                             "For example: 'add a user authentication feature'")
             return True
         elif cmd == "/url":
             self._handle_url_cmd(rest.strip())
@@ -1356,29 +1327,6 @@ class ChatZone(Container):
             self._add_error(f"Failed to fetch logs: {e}")
 
     # ── New slash command handlers ────────────────────────────────
-
-    @work(exclusive=True)
-    async def _handle_run_cmd(self, arg: str):
-        """Handle /run <prompt> — submit a task to current project."""
-        if not self.current_project:
-            self._add_error("No project selected. Use /project <# or id> first.")
-            return
-        if not arg:
-            self._add_error("Usage: /run <prompt>")
-            return
-        try:
-            resp = await self.app.http.post(
-                "/api/projects/submit-task",
-                json={"project_id": self.current_project, "prompt": arg},
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._add_system(f"Task #{data.get('task_id')} submitted to {self.current_project}.")
-            dashboard = self.app.query_one("#dashboard-zone")
-            dashboard._fetch_tasks()
-        except Exception as e:
-            self._add_error(f"Failed to submit task: {e}")
 
     @work(exclusive=True)
     async def _show_runs(self):
@@ -1828,7 +1776,6 @@ class ChatZone(Container):
         self._agent_streaming = True
         agent_widget = None
         full_agent_text = ""
-        tool_names = []
 
         try:
             async with self.app.http.stream(
@@ -1861,7 +1808,6 @@ class ChatZone(Container):
 
                         elif etype == "tool_call":
                             name = event.get("name", "?")
-                            tool_names.append(name)
                             args = event.get("args", {})
                             summary = ""
                             for key in ("project_id", "task_id", "prompt", "checkpoint", "name"):
@@ -1883,44 +1829,32 @@ class ChatZone(Container):
                             self._add_tool(summary)
                             self._scroll_to_bottom()
 
-                            # Intercept pending_confirm: show review modal
+                            # Intercept pending_confirm: show project review modal
                             if result.get("status") == "pending_confirm":
                                 r_pid = result.get("project_id", "")
-                                submit_type = (
-                                    "project" if "project" in name else "task"
-                                )
-                                content = (
-                                    result.get("brief_markdown")
-                                    or result.get("task_summary")
-                                    or ""
-                                )
-                                brief_data = result.get("brief") if submit_type == "project" else None
+                                content = result.get("brief_markdown") or ""
+                                brief_data = result.get("brief")
                                 approved = await self._show_brief_review_modal(
-                                    submit_type, r_pid, content, brief_data
+                                    "project", r_pid, content, brief_data
                                 )
                                 if approved:
                                     self._add_system(
-                                        f"{submit_type.title()} submitted — pipeline starting."
+                                        "Project submitted — pipeline starting."
                                     )
                                 else:
                                     # Append rejection feedback to history so meta-agent can retry
                                     self.history.append({
                                         "role": "user",
                                         "content": (
-                                            f"The {submit_type} was not approved. "
+                                            "The project was not approved. "
                                             "Please ask what changes the user wants and revise."
                                         ),
                                     })
                                     self._add_system(
-                                        f"{submit_type.title()} review cancelled. "
-                                        "Describe what to change."
+                                        "Project review cancelled. Describe what to change."
                                     )
                                 # Refresh dashboard on either outcome
-                                dashboard = self.app.query_one("#dashboard-zone")
-                                if submit_type == "project":
-                                    dashboard._fetch_projects()
-                                else:
-                                    dashboard._fetch_tasks()
+                                self.app.query_one("#dashboard-zone")._fetch_projects()
 
                         elif etype == "done":
                             msg = event.get("message", {})
@@ -1931,11 +1865,6 @@ class ChatZone(Container):
                                 agent_widget.update(content)
                             self.history.append({"role": "assistant", "content": content})
                             self._scroll_to_bottom()
-                            submit_type = self._detect_submit(tool_names)
-                            if submit_type:
-                                # Project submit: clear history (fresh start).
-                                # Task submit: keep history (user may add more tasks).
-                                self._save_context(clear_history=(submit_type == "project"))
                             # Always refresh dashboard after agent finishes a turn
                             dashboard = self.app.query_one("#dashboard-zone")
                             if self.current_project:
@@ -1972,12 +1901,6 @@ class ChatZone(Container):
 
         self.app.push_screen(modal, callback=on_dismiss)
         return await future
-
-    def _detect_submit(self, tool_names: list[str]) -> str | None:
-        """Return 'task' if suggest_submit_task was used, else None."""
-        if "suggest_submit_task" in tool_names:
-            return "task"
-        return None
 
     def _save_context(self, clear_history: bool = True):
         if not self.history or not self.current_project:

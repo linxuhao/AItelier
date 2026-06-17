@@ -677,9 +677,6 @@ def _project_dashboard():
                 _handle_trace_cmd(rest, _get_client())
                 _should_clear = False
                 continue
-            elif cmd == "/run":
-                _handle_run_cmd(rest, _get_client())
-                continue
             elif cmd == "/tree":
                 _handle_tree_cmd(rest, _get_client())
                 _should_clear = False
@@ -1603,9 +1600,6 @@ def _task_dashboard(project_id: str):
                 _handle_trace_cmd(rest, _get_client())
                 _should_clear = False
                 continue
-            elif cmd == "/run":
-                _handle_run_cmd(rest, _get_client())
-                continue
             elif cmd == "/tree":
                 _handle_tree_cmd(rest, _get_client())
                 _should_clear = False
@@ -1853,24 +1847,14 @@ def _handle_prompt(prompt: str, resume: bool = False):
     client = _get_client()
     project_id = _state["project_id"]
 
-    # Empty project (created via /new, no tasks) → submit_project to seed brief + goals
-    # Project with existing tasks → submit_task to add a new task
-    existing_tasks = client.list_tasks_by_project(project_id)
-
-    with console.status("[bold cyan]Submitting task to pipeline...[/bold cyan]"):
+    with console.status("[bold cyan]Submitting project to pipeline...[/bold cyan]"):
         try:
-            if not existing_tasks and result.get("status") == "complete":
-                submit_result = client.submit_project(
-                    project_id, brief=brief,
-                    name=brief.get("project_name", project_id),
-                )
-            else:
-                submit_result = client.submit_task(
-                    project_id, prompt,
-                    task_spec=brief if result.get("status") == "complete" else None,
-                )
+            submit_result = client.submit_project(
+                project_id, brief=brief,
+                name=brief.get("project_name", project_id),
+            )
         except Exception as e:
-            console.print(f"[red]Failed to submit task: {e}[/red]")
+            console.print(f"[red]Failed to submit project: {e}[/red]")
             return
 
     task_id = submit_result.get("task_id")
@@ -2618,20 +2602,6 @@ def _handle_trace_cmd(rest: str, client):
     console.print(f"\n[dim]{len(traces)} total entries, {shown} shown. Use /trace <run_id> <step> <category> to filter.[/dim]")
 
 
-def _handle_run_cmd(rest: str, client):
-    """Handle /run command. Submit a task to the current project from REPL."""
-    project_id = _state["project_id"]
-    if not rest:
-        console.print("[red]Usage: /run <prompt>[/red]")
-        return
-
-    try:
-        result = client.submit_task(project_id, rest)
-        console.print(f"[green]Task submitted![/green] Task #{result.get('task_id')}")
-    except Exception as e:
-        console.print(f"[red]Error submitting task: {e}[/red]")
-
-
 def _handle_tree_cmd(rest: str, client):
     """Handle /tree command. Browse workspace directory tree."""
     project_id = _state["project_id"]
@@ -2790,25 +2760,6 @@ def _repl_status():
 # ── Typer subcommands ───────────────────────────────────────────
 
 
-@app.command(deprecated=True)
-def run(
-    prompt: str = typer.Argument(..., help="Task prompt for the pipeline"),
-    project_id: str = typer.Option("default", "--project", "-p", help="Project ID"),
-    server_url: str = typer.Option("http://localhost:8000", "--url", "-u", help="Backend URL"),
-    no_server: bool = typer.Option(False, "--no-server", help="Don't auto-start server"),
-):
-    """[DEPRECATED] Use 'aitelier' interactive mode instead. Submit task and monitor via scheduler."""
-    client = _get_client()
-    try:
-        submit_result = client.submit_task(project_id, prompt)
-    except Exception as e:
-        console.print(f"[red]Failed to submit task: {e}[/red]")
-        return
-    task_id = submit_result.get("task_id")
-    console.print(f"[green]Task #{task_id} submitted. Scheduler will execute.[/green]")
-    _monitor_pipeline(project_id, client)
-
-
 @app.command()
 def status(
     task_id: Optional[int] = typer.Argument(None, help="Task ID to inspect"),
@@ -2903,7 +2854,7 @@ def server(
 #   aitelier --oneshot "hello" → one-shot: run pipeline and exit
 #   aitelier status       → subcommand dispatch
 
-_KNOWN_COMMANDS = {"run", "status", "rollback", "server"}
+_KNOWN_COMMANDS = {"status", "rollback", "server"}
 
 
 def _entrypoint():

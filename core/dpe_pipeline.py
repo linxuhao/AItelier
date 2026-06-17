@@ -490,7 +490,7 @@ class PipelineEngine:
                                     if not filename or not content:
                                         continue
                                     safe_content = self._ensure_valid_json_content(filename, str(content))
-                                    workspace.write_draft(project_id, step_id, filename, safe_content)
+                                    workspace.write_draft(project_id, step_id, filename, safe_content, graph_name=self._draft_graph_name())
                                     written_files.append(WorkspaceManager._sanitize_filename(filename, safe_content))
                                 self._emit("files_written", {"files": written_files,
                                             "preview": f"Written {len(written_files)} file(s) (repaired)"})
@@ -555,7 +555,7 @@ class PipelineEngine:
                                         safe_content = parsed["content"]
                                 except json.JSONDecodeError:
                                     pass
-                            workspace.write_draft(project_id, step_id, filename, safe_content)
+                            workspace.write_draft(project_id, step_id, filename, safe_content, graph_name=self._draft_graph_name())
                             written_files.append(WorkspaceManager._sanitize_filename(filename, safe_content))
                     elif isinstance(files_data, list):
                         for entry in files_data:
@@ -566,7 +566,7 @@ class PipelineEngine:
                             if not filename or not content:
                                 continue
                             safe_content = self._ensure_valid_json_content(filename, str(content))
-                            workspace.write_draft(project_id, step_id, filename, safe_content)
+                            workspace.write_draft(project_id, step_id, filename, safe_content, graph_name=self._draft_graph_name())
                             written_files.append(WorkspaceManager._sanitize_filename(filename, safe_content))
                     if written_files:
                         self._emit("files_written", {"files": written_files,
@@ -740,7 +740,7 @@ class PipelineEngine:
                             if f.is_file() and ".git" not in f.relative_to(code_path).parts:
                                 rel = str(f.relative_to(code_path))
                                 content = f.read_text(encoding="utf-8", errors="replace")
-                                workspace.write_draft(project_id, step_id, rel, content)
+                                workspace.write_draft(project_id, step_id, rel, content, graph_name=self._draft_graph_name())
                                 written_files.append(
                                     WorkspaceManager._sanitize_filename(rel, content))
                         if written_files:
@@ -958,7 +958,7 @@ class PipelineEngine:
                             if f.is_file() and ".git" not in f.relative_to(code_path).parts:
                                 rel = str(f.relative_to(code_path))
                                 content = f.read_text(encoding="utf-8", errors="replace")
-                                workspace.write_draft(project_id, step_id, rel, content)
+                                workspace.write_draft(project_id, step_id, rel, content, graph_name=self._draft_graph_name())
                                 written_files.append(
                                     WorkspaceManager._sanitize_filename(rel, content))
                         if written_files:
@@ -1276,6 +1276,18 @@ class PipelineEngine:
         raise MaxRetriesExceeded(
             f"Step {step_id}: Max retries ({max_retries}) exceeded in native mode."
         )
+
+    def _draft_graph_name(self) -> str:
+        """Graph config for draft writes, derived from skillflow's output_dir
+        (workspaces/<pid>/<graph>/<step>.tmp) so outputs land in the RUN's own
+        config dir — not the hardcoded DPE default. For DPE runs this equals
+        dpe_default_v2 (unchanged); for meta_conversation it is meta_conversation."""
+        od = getattr(self, "_output_dir", "")
+        if od:
+            from pathlib import Path
+            return Path(od).parent.name
+        from core.workspace_manager import DPE_GRAPH_NAME
+        return DPE_GRAPH_NAME
 
     # ── Dispatch ─────────────────────────────────────────────────────
 

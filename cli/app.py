@@ -928,6 +928,60 @@ def _prompt_repo_url() -> str:
     return Prompt.ask("Enter repo URL")
 
 
+def _prompt_existing_code_repo(client) -> tuple[str, str | None, str | None]:
+    """
+    Prompt user for repo source when intent is 'existing_code'.
+    Returns (repo_type, repo_path, repo_url).
+
+    If the user has previous AItelier projects, offer them as choices
+    first — the new project will share the same code repo via
+    repo_type="existing" pointing to the old project's repo_path.
+    """
+    from rich.prompt import Prompt
+
+    projects = client.list_projects()
+    # AItelier-managed repos are those created with "new" or "clone" —
+    # their code lives under ~/.AItelier/projects/<id>/ and can be
+    # pointed to by a new project. Exclude projects still running.
+    aitelier_projects = [
+        p for p in projects
+        if p.get("repo_type") in ("new", "clone")
+        and p.get("status") not in ("running",)
+    ]
+
+    if aitelier_projects:
+        console.print("\n[dim]Previous AItelier projects:[/dim]")
+        for i, p in enumerate(aitelier_projects, 1):
+            status = p.get("status", "?")
+            repo_path = p.get("repo_path") or f"~/.AItelier/projects/{p['project_id']}"
+            console.print(f"  [{i}] {p['project_id']}  ({status})  repo: {repo_path}")
+        console.print(f"  [{len(aitelier_projects)+1}] Other (enter path manually)")
+        console.print(f"  [{len(aitelier_projects)+2}] Clone from URL")
+
+        max_choice = len(aitelier_projects) + 2
+        pick = Prompt.ask(
+            "Select repo source",
+            choices=[str(i) for i in range(1, max_choice + 1)],
+            default=str(len(aitelier_projects) + 1),
+        )
+        idx = int(pick)
+        if idx <= len(aitelier_projects):
+            selected = aitelier_projects[idx - 1]
+            repo_path = selected.get("repo_path") or f"~/.AItelier/projects/{selected['project_id']}"
+            console.print(f"[green]Using repo: {repo_path}[/green]")
+            return ("existing", repo_path, None)
+        elif idx == len(aitelier_projects) + 1:
+            return ("existing", _prompt_repo_path(), None)
+        else:
+            return ("clone", None, _prompt_repo_url())
+    else:
+        repo_type = _prompt_repo_type()
+        if repo_type == "existing":
+            return ("existing", _prompt_repo_path(), None)
+        else:
+            return ("clone", None, _prompt_repo_url())
+
+
 def _auto_create_and_run(prompt: str, client):
     """Assess prompt quality, gather requirements via conversation,
     create the project, and run the pipeline (skipping Nominator)."""
@@ -1054,11 +1108,7 @@ def _auto_create_and_run(prompt: str, client):
     if intent == "existing_code":
         reasoning = result.get("message", "")
         console.print(f"[yellow]Detected intent: work on existing code.[/yellow]")
-        repo_type = _prompt_repo_type()
-        if repo_type == "existing":
-            repo_path = _prompt_repo_path()
-        elif repo_type == "clone":
-            repo_url = _prompt_repo_url()
+        repo_type, repo_path, repo_url = _prompt_existing_code_repo(client)
 
     # Generate slug from brief name or prompt
     if brief and brief.get("project_name"):
@@ -1146,11 +1196,7 @@ def _auto_create_and_run_legacy(prompt: str, client):
 
         if intent == "existing_code":
             console.print(f"[yellow]Detected intent: work on existing code. {reasoning}[/yellow]")
-            repo_type = _prompt_repo_type()
-            if repo_type == "existing":
-                repo_path = _prompt_repo_path()
-            elif repo_type == "clone":
-                repo_url = _prompt_repo_url()
+            repo_type, repo_path, repo_url = _prompt_existing_code_repo(client)
         elif intent == "unclear":
             console.print(f"[yellow]Intent unclear. {reasoning}[/yellow]")
             from rich.prompt import Confirm, Prompt
@@ -1159,11 +1205,7 @@ def _auto_create_and_run_legacy(prompt: str, client):
                 choices=["1", "2"], default="1"
             )
             if choice == "2":
-                repo_type = _prompt_repo_type()
-                if repo_type == "existing":
-                    repo_path = _prompt_repo_path()
-                elif repo_type == "clone":
-                    repo_url = _prompt_repo_url()
+                repo_type, repo_path, repo_url = _prompt_existing_code_repo(client)
     except Exception:
         pass
 

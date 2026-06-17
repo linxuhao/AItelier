@@ -1,13 +1,72 @@
 # tests/unit/test_intent_detection.py
-# Tests for the detect_intent() function in core/meta_conversation.py.
+# Tests for detect_intent() and detect_intent_heuristic() in core/meta_conversation.py.
 
 import json
 import pytest
 from unittest.mock import patch, MagicMock
 
 
+class TestDetectIntentHeuristic:
+    """Tests for the keyword-based heuristic intent detection."""
+
+    def test_continue_developing_project(self):
+        """'continue developing my X' → existing_code."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("continue developing my todo app")
+        assert result is not None
+        assert result["intent"] == "existing_code"
+
+    def test_chinese_continue_developing(self):
+        """'继续开发我的 X' → existing_code."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("继续开发我的习惯追踪应用")
+        assert result is not None
+        assert result["intent"] == "existing_code"
+
+    def test_chinese_continue_doing(self):
+        """'接着做 X' → existing_code."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("接着做登录功能")
+        assert result is not None
+        assert result["intent"] == "existing_code"
+
+    def test_chinese_continue_dev(self):
+        """'接着开发 X' → existing_code."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("接着开发那个 dashboard")
+        assert result is not None
+        assert result["intent"] == "existing_code"
+
+    def test_resume_keyword(self):
+        """'resume work on X' → existing_code."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("resume work on the api server")
+        assert result is not None
+        assert result["intent"] == "existing_code"
+
+    def test_add_feature_still_works(self):
+        """Existing keywords still work."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("fix the login bug")
+        assert result is not None
+        assert result["intent"] == "existing_code"
+
+    def test_new_project_still_works(self):
+        """New project keywords still work."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("build me a todo app")
+        assert result is not None
+        assert result["intent"] == "new_project"
+
+    def test_ambiguous_returns_none(self):
+        """Purely ambiguous prompt returns None (LLM fallback)."""
+        from core.meta_conversation import detect_intent_heuristic
+        result = detect_intent_heuristic("software")
+        assert result is None
+
+
 class TestDetectIntent:
-    """Tests for the intent detection function."""
+    """Tests for the LLM-based intent detection function."""
 
     @patch("core.meta_conversation._load_meta_config")
     @patch("core.meta_conversation.AIGateway")

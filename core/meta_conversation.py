@@ -140,6 +140,8 @@ def detect_intent_heuristic(prompt: str) -> dict | None:
         "in the code", "existing", "current implementation", "our codebase",
         "in the repo", "in this project", "the function", "the class",
         "the module", "this file", "error in", "broken", "crash",
+        # Continue / resume development on an existing project
+        "continue", "继续", "接着做", "接着开发", "继续开发", "resume",
     ]
     new_signals = [
         "build me", "create a", "make a", "develop a", "i want to build",

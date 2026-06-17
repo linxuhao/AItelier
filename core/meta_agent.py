@@ -50,6 +50,24 @@ PROJECT WORKFLOW (new projects):
 - To modify a draft brief: call edit_draft_brief, present the changes, wait
   for user approval, then call start_pipeline.
 
+EXISTING CODE WORKFLOW (continue developing or modify existing repos):
+  1. If the user says "continue" / "继续" / "接着开发" or mentions a
+     previous project by name, first call list_projects to find it.
+  2. Check the returned projects for one matching the user's description.
+     Pay attention to repo_type and repo_path fields — projects with
+     repo_type "new" or "clone" are AItelier-managed repos whose code
+     lives under ~/.AItelier/projects/<id>/.
+  3. Call create_project with:
+     - A NEW project_id (append "-v2", "-continue", or similar)
+     - repo_type: "existing"
+     - repo_path: the old project's repo_path
+  4. Then follow the standard PROJECT WORKFLOW from step 3 (save_draft_brief
+     → user approval → start_pipeline).
+  5. If the user says "fix" / "add" but doesn't name a specific project,
+     list existing projects and ask which one they mean.
+  6. To work on external code (not AItelier-managed): prompt for the
+     local repo path or clone URL before calling create_project.
+
 TASK WORKFLOW (adding to existing projects):
 - Call save_draft_task then suggest_submit_task to present for user approval.
 - NEVER tell the user a task has been submitted unless suggest_submit_task

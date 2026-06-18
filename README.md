@@ -132,6 +132,9 @@ To change which models or agents the pipeline uses, edit the config files direct
 - **`llm_providers.json`** — LLM providers (base URLs, API-key env var names). Register a provider here before pointing an agent at it.
 - **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the **chat butler / meta agent** lives in `meta_conversation.yaml` (`meta_agent.model`) — so the conversational front-end is configurable exactly like the pipeline roles.
 - **`templates/`** — the LLM prompt templates each step uses
+- **`AITELIER_HOST_AGENT_MODEL`** (env, default `deepseek/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. The built-in **skill→pipeline converter** (and any pipeline it generates) ship their agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them.
+
+> **Generate pipelines from a skill.** Beyond building software, the chat butler can turn a described skill/workflow into a reusable SkillFlow pipeline — ask it to "make a pipeline that …" and it runs skillflow's `skill_converter` (analyze → design → review checkpoint → lint) and hands back the generated YAML graph.
 
 ## How it works
 

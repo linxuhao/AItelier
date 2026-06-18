@@ -55,11 +55,20 @@ CRITICAL:
 - NEVER invent the brief or the clarifying questions — they come from the pipeline.
 - Only call approve_project_brief after the user has clearly approved the brief.
 
-## After the build pipeline starts
-The DPE pipeline runs in the background and surfaces its own review checkpoints in
-the dashboard. Report progress with get_pipeline_status(run_id); if the user
-explicitly approves/rejects a DPE checkpoint in chat, call approve_checkpoint /
-reject_checkpoint.
+## When the user wants to turn a SKILL or WORKFLOW into a reusable pipeline
+This is different from building software. If the user describes a repeatable
+multi-step *process / skill* and wants it captured as a pipeline they can re-run
+(e.g. "make me a pipeline that researches a topic, drafts, then fact-checks"),
+call generate_pipeline(description=<the skill, verbatim>). It runs the
+skill_converter pipeline and returns a Design Review checkpoint — relay it; on
+approval (approve_checkpoint) it lints and emits the generated pipeline YAML.
+Use start_project_conversation for *software* (apps/tools/bug-fixes);
+generate_pipeline for *converting a skill/workflow into a pipeline graph*.
+
+## After a pipeline starts
+Pipelines run and surface their own review checkpoints. Report progress with
+get_pipeline_status(run_id); when the user explicitly approves/rejects a
+checkpoint in chat, call approve_checkpoint / reject_checkpoint.
 
 ## Otherwise
 For anything that isn't a build/modify request (questions, chit-chat, status),
@@ -388,6 +397,29 @@ TOOL_DEFINITIONS = [
                     "run_id": {"type": "string", "description": "Run ID"},
                 },
                 "required": ["run_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_pipeline",
+            "description": "Turn a SKILL or repeatable WORKFLOW description into a reusable "
+                           "SkillFlow pipeline (a YAML graph) by running the skill_converter "
+                           "pipeline. Use this when the user wants to capture a multi-step "
+                           "process/skill as a pipeline they can re-run — NOT for building an "
+                           "app or fixing code (use start_project_conversation for software). "
+                           "Returns a Design Review checkpoint to relay; on approval it lints "
+                           "and emits the generated pipeline YAML.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string",
+                                    "description": "The skill / workflow to convert into a pipeline."},
+                    "name": {"type": "string",
+                             "description": "Optional short name for the generated pipeline."},
+                },
+                "required": ["description"],
             },
         },
     },
@@ -1426,6 +1458,60 @@ class MetaAgent:
             "total_steps": len(steps),
         }
 
+    async def _tool_generate_pipeline(self, args: dict) -> dict:
+        """Generate a reusable SkillFlow pipeline from a skill description by
+        running skillflow's skill_converter pipeline in framework mode, then
+        relaying its design checkpoint. The converter's host-mode agents resolve
+        to HOST_AGENT_MODEL with their embedded prompts (see core/agents.py)."""
+        from api.dependencies import get_skillflow
+
+        description = (args.get("description") or "").strip()
+        if not description:
+            return {"error": "description is required — the skill/workflow to convert."}
+        name = args.get("name") or description[:40]
+        pid = "convert-" + self._slugify(name)
+        sf = get_skillflow()
+
+        # Project + workspace, kept gated (meta_state set) so the DPE scheduler
+        # never picks this convert project up as a build.
+        if not self.db.get_project(pid):
+            self.db.ensure_project(pid, name=name, owner_email=self.owner_email,
+                                   repo_type="new")
+        self.db.set_project_meta_state(pid, "converting")
+        self.ws.setup_workspace(pid, repo_type="new")
+
+        # Seed the converter's input: analyze_skill reads skill_description.md via
+        # {config: skill_converter, output: ...}, which scans config subdirs.
+        seed_dir = sf._workspace.get_config_path(pid, "skill_converter") / "_seed"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        (seed_dir / "skill_description.md").write_text(description, encoding="utf-8")
+
+        run_id = sf.get_or_create_run("skill_converter", pid, {"project_id": pid})
+        run = sf.get_run(run_id)
+        if run and run["status"] == "pending":
+            sf.start_run(run_id)
+        sid = getattr(self, "session_id", None)
+        if sid:
+            try:
+                self.db.link_run_to_session(sid, run_id)
+            except Exception:
+                pass
+
+        result = await self._run_pipeline_until_checkpoint(run_id)
+        result["project_id"] = pid
+        result["pipeline"] = "skill_converter"
+        if result.get("status") == "completed":
+            try:
+                from skillflow.plugins.skill_converter import get_output_file
+                p = get_output_file(sf, run_id)
+                if p and p.exists():
+                    result["generated_pipeline_path"] = str(p)
+                    result["generated_pipeline_yaml"] = p.read_text(encoding="utf-8")[:4000]
+            except Exception:
+                pass
+        return result
+
+
 _TOOL_HANDLERS = {
     "list_projects": MetaAgent._tool_list_projects,
     "get_project": MetaAgent._tool_get_project,
@@ -1447,4 +1533,5 @@ _TOOL_HANDLERS = {
     "approve_checkpoint": MetaAgent._tool_approve_checkpoint,
     "reject_checkpoint": MetaAgent._tool_reject_checkpoint,
     "get_pipeline_status": MetaAgent._tool_get_pipeline_status,
+    "generate_pipeline": MetaAgent._tool_generate_pipeline,
 }

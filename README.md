@@ -129,8 +129,8 @@ A typical run with the flagship DPE pipeline:
 
 To change which models or agents the pipeline uses, edit the config files directly:
 
-- **`llm_providers.json`** — LLM providers (base URLs, API-key env var names)
-- **`agent_configs/`** — per-role model, template, tools, and thinking settings
+- **`llm_providers.json`** — LLM providers (base URLs, API-key env var names). Register a provider here before pointing an agent at it.
+- **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the **chat butler / meta agent** lives in `meta_conversation.yaml` (`meta_agent.model`) — so the conversational front-end is configurable exactly like the pipeline roles.
 - **`templates/`** — the LLM prompt templates each step uses
 
 ## How it works

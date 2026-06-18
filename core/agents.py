@@ -4,9 +4,16 @@
 # (model, template, tools list, thinking, etc.). No JSON schemas hardcoded.
 # v3: native tool calling support via DPEAgentNative.
 
+import os
 from pathlib import Path
 from typing import Optional
 from core.ai_router import AIGateway, NativeTurn
+
+# Default model for skillflow "host"-delegated agents (e.g. the skill_converter
+# roles, or any generated pipeline's agents). Such configs declare model:"host"
+# with their prompt embedded as system_prompt; AItelier maps that single token to
+# one real model instead of requiring a per-role agent_config. Override via env.
+HOST_AGENT_MODEL = os.getenv("AITELIER_HOST_AGENT_MODEL", "deepseek/deepseek-v4-flash")
 
 
 class DPEAgent:
@@ -75,6 +82,10 @@ class AgentFactory:
         """Build AIGateway from agent config."""
         cfg = self._get_config(name)
         model = cfg.get("model", "")
+        # skillflow host-delegated roles use the sentinel "host"/"default" — map
+        # to one real model so AItelier can run them without a per-role config.
+        if model in ("host", "default", ""):
+            model = HOST_AGENT_MODEL
         cfg_inner = cfg.get("config", {})
         thinking = cfg_inner.get("thinking", {})
         enable_thinking = thinking.get("enable", False) if isinstance(thinking, dict) else False
@@ -104,7 +115,10 @@ class AgentFactory:
         cfg = self._get_config(name)
         cfg_inner = cfg.get("config", {})
         template_file = cfg_inner.get("template", "")
-        template_content = self._load_template(template_file) if template_file else ""
+        # Prefer an AItelier template; fall back to a skillflow host config's
+        # embedded system_prompt (the converter / generated-pipeline roles).
+        template_content = (self._load_template(template_file) if template_file
+                            else cfg_inner.get("system_prompt", ""))
         return DPEAgent(gateway=gateway, system_prompt=template_content)
 
     def get_native_agent(self, name: str) -> DPEAgentNative:
@@ -113,7 +127,10 @@ class AgentFactory:
         cfg = self._get_config(name)
         cfg_inner = cfg.get("config", {})
         template_file = cfg_inner.get("template", "")
-        template_content = self._load_template(template_file) if template_file else ""
+        # Prefer an AItelier template; fall back to a skillflow host config's
+        # embedded system_prompt (the converter / generated-pipeline roles).
+        template_content = (self._load_template(template_file) if template_file
+                            else cfg_inner.get("system_prompt", ""))
         return DPEAgentNative(gateway=gateway, system_prompt=template_content)
 
     def is_native(self, name: str) -> bool:

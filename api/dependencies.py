@@ -128,6 +128,12 @@ def get_skillflow():
         # agent_configs/skill_converter.yaml (framework mode, real models).
         try:
             import skillflow as _sf_pkg
+            # Register skillflow's OWN converter agents (host-mode, prompt embedded
+            # as system_prompt). AItelier maps model:"host" → HOST_AGENT_MODEL and
+            # uses the embedded prompt, so no per-role agent_config/template is
+            # duplicated here.
+            from skillflow.plugins.skill_converter.converter import _register_converter_agents
+            _register_converter_agents(sf)
             conv_path = (Path(_sf_pkg.__file__).parent / "plugins"
                          / "skill_converter" / "skill_converter.yaml")
             if conv_path.exists():

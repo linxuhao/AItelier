@@ -122,6 +122,19 @@ def get_skillflow():
             meta_graph = PipelineGraph.from_yaml(meta_path)
             sf.register_graph(meta_graph)
 
+        # Register skillflow's skill_converter graph so the butler can generate a
+        # new pipeline from a skill description via start_pipeline("skill_converter").
+        # Its agent roles (skill_analyst/graph_designer/…) come from
+        # agent_configs/skill_converter.yaml (framework mode, real models).
+        try:
+            import skillflow as _sf_pkg
+            conv_path = (Path(_sf_pkg.__file__).parent / "plugins"
+                         / "skill_converter" / "skill_converter.yaml")
+            if conv_path.exists():
+                sf.register_graph(PipelineGraph.from_yaml(conv_path))
+        except Exception:
+            pass
+
         # Verify all agent_config references resolve (belt-and-suspenders over
         # skillflow's own _check_agent_configs — gives clearer error messages).
         _validate_graph_agent_configs(sf)

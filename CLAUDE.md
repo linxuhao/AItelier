@@ -21,27 +21,30 @@ aitelier "build me a todo app"
 aitelier server
 
 # Tests
-pytest tests/unit/ -v       # 348 unit tests
-pytest tests/skillflow/ -v   # 176 integration tests (use skillflow lib)
-pytest tests/ -v             # all tests
+pytest tests/unit -v        # 358 unit tests
+pytest tests/ -v            # full suite: 535 passed, 5 skipped, 11 network deselected
+pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake
 ```
 
-Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto). Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient.
+Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient.
 
 ## Architecture
 
 ### Repo Separation
 
 ```
-~/skillflow/                  # Independent library (config-agnostic framework)
-├── src/skillflow/            # graph.py, core.py, tool_loader.py, ...
-└── tools/                   # 12 native tools (read_file, write, web_search, ...)
+~/skillflow/                  # Independent library (config-agnostic framework) — PyPI: skillflow-py 1.1.3
+├── src/skillflow/
+│   ├── core.py, graph.py, workspace.py, tool_loader.py, ...
+│   ├── tools/               # 13 native tools (read_file, write, pytest, repo_apply, ...)
+│   └── plugins/             # linter, skill_runner (runner mode), skill_converter (skill→pipeline)
+└── {run,convert}_cli.py     # skillflow-run / skillflow-convert / skillflow-lint console scripts
 
 ~/AItelier/                  # Host application
 ├── configs/                 # Skillflow graph configs (dpe_default.yaml, meta_conversation.yaml)
 ├── agent_configs/           # LLM agent configs by role name (model, template, tools)
 ├── templates/               # LLM prompt templates (*.md)
-├── aitelier/tools/          # AItelier custom tools (save_draft_brief, suggest_submit_project)
+├── aitelier/tools/          # AItelier custom tools (web_search, web_fetch, run_tests, user_stories_present)
 ├── core/                    # Business logic (agents, scheduler, AI router, DB, workspace)
 ├── api/                     # CLI backend (FastAPI, localhost-only)
 ├── web_api/                 # Web GUI backend (multi-tenant, Cloudflare Access)
@@ -53,7 +56,7 @@ Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto). Fixtures in `tes
 
 ```
 1. Meta Conversation (configs/meta_conversation.yaml)
-   intent_detect → meta → project_brief.md + step1_goals.json
+   intent_detect → gather (Q&A loop, checkpoint) → finalize → project_brief.md + step1_goals.json
 
 2. DPE Pipeline (configs/dpe_default.yaml)
    Researcher (1_5) → 1_5_review → Architect (2) → 2_review
@@ -61,22 +64,30 @@ Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto). Fixtures in `tes
    → [per task] t_plan → t_plan_review → t_impl → t_impl_apply (tool)
    → t_impl_validate (tool) → t_impl_review → t_verify → t_verify_review
    → task_loop → Final Verifier (5) → 5_review
+
+3. Skill → Pipeline conversion (skillflow's skill_converter graph, registered at startup)
+   analyze_skill → design_graph → explain_design (checkpoint) → validate_design (lint) → done
+   Driven in-chat by the butler's `generate_pipeline` tool; host-mode agents → AITELIER_HOST_AGENT_MODEL
 ```
+
+### Existing-repo support
+
+A "fix a bug / add a feature" request on an existing codebase becomes a **new project** with `repo_type="existing"` + `repo_path`. The DPE pipeline runs normally and `repo_apply` commits changes into the real repo via skillflow's `code_path_resolver` (wired in `api/dependencies.py:_existing_repo_code_path`).
 
 ### Key Modules
 
 | Module | Role |
 |--------|------|
-| `core/agents.py` | `AgentFactory` — reads `agent_configs/`, creates DPEAgent with model+template |
+| `core/agents.py` | `AgentFactory` — reads `agent_configs/`, creates DPEAgent with model+template; model `host`/`default` → `AITELIER_HOST_AGENT_MODEL` |
 | `core/prompt_assembler.py` | Assembles system/user prompts from templates + step context |
 | `core/scheduler.py` | Polls skillflow: claim → execute → confirm → advance |
 | `core/dpe_pipeline.py` | Legacy PipelineEngine (being phased out in favor of skillflow runner) |
 | `core/workspace_manager.py` | Physical directory jail, Git operations, step staging→final directory lifecycle |
 | `core/db_manager.py` | SQLite persistence (projects, tasks, settings, users) |
 | `core/ai_router.py` | `AIGateway` — LiteLLM wrapper, provider registry from `llm_providers.json` |
-| `core/meta_agent.py` | Autonomous CLI/WebGUI butler agent |
+| `core/meta_agent.py` | Autonomous CLI/WebGUI butler — drives meta_conversation, DPE & skill_converter runs in-chat; tools incl. `generate_pipeline` |
 | `core/event_bus.py` | In-process pub/sub for pipeline events |
-| `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader, AgentConfigs singletons |
+| `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader, AgentConfigs singletons; registers skillflow's `skill_converter` graph; `code_path_resolver` for existing repos |
 | `aitelier/runner.py` | `AItelierStepRunner` — bridges skillflow StepRunner protocol to PipelineEngine |
 | `cli/tui/dashboard.py` | Rich TUI with project list, chat, checkpoint review |
 
@@ -87,10 +98,14 @@ Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto). Fixtures in `tes
 - **`agent_configs/dpe_default.yaml`** — Agent configs by role: model, template, tools list, thinking settings
 - **`agent_configs/meta_conversation.yaml`** — Meta conversation agent configs + meta_agent
 - **`llm_providers.json`** — LLM provider registry (API base URLs, key env vars)
+- **`AITELIER_HOST_AGENT_MODEL`** (env) — single model that skillflow `host`/`default` agents resolve to (default `deepseek/deepseek-v4-flash`); used by `skill_converter` and any generated pipeline
+- **`skill_converter`** — graph + host agents live in skillflow's plugin; AItelier registers them at startup (`api/dependencies.py`), so no local config/template is duplicated
 - **`templates/`** — Markdown prompt templates (step1_5_researcher.md, task_impl.md, ...)
-- **`aitelier/tools/`** — AItelier custom tools (web_search delegates to SearXNG, etc.)
+- **`aitelier/tools/`** — AItelier custom tools: `web_search` (→ SearXNG), `web_fetch`, `run_tests`, `user_stories_present`
 
 ### Debug Tool (`debugctl.py`)
+
+Drive the system headless — an agent or reviewer can launch the TUI, send a build request, send keys to approve checkpoints, and inspect workspace/diff/log as the pipeline runs end-to-end, no human needed:
 
 ```bash
 python3 debugctl.py start              # Launch CLI in tmux

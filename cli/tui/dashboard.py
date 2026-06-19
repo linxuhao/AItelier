@@ -124,9 +124,13 @@ class DashboardZone(Static):
             return False
         return (time.monotonic() - self._last_optimistic_ts) < self._OPTIMISTIC_DEBOUNCE
 
-    def force_refresh(self):
-        """Immediately re-fetch data and re-render. Used by SSE event handlers."""
-        if self._should_skip_fetch():
+    def force_refresh(self, bypass_debounce: bool = False):
+        """Immediately re-fetch data and re-render. Used by SSE event handlers.
+
+        Set bypass_debounce=True for periodic polling refreshes so that
+        slow-changing fields (task counts, completed counts) are not
+        permanently hidden behind the optimistic-update debounce."""
+        if not bypass_debounce and self._should_skip_fetch():
             return
         self._auto_refresh()
 

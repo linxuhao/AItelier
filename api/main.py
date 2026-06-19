@@ -79,24 +79,22 @@ async def lifespan(app: FastAPI):
         """If this is a task-loop step, inject the current task name."""
         if step_id not in _TASK_LOOP_STEPS:
             return
-        if rid not in _task_cache:
-            try:
-                import sqlite3 as _sql
-                import json as _j
-                _sdb = _sql.connect(_os.path.expanduser("~/.AItelier/skillflow.db"))
-                row = _sdb.execute(
-                    "SELECT items_json, current_index FROM skillflow_loop_state WHERE run_id = ?",
-                    (rid,),
-                ).fetchone()
-                _sdb.close()
-                if row:
-                    # row is a tuple (no row_factory set on this connection)
-                    items = _j.loads(row[0])  # items_json
-                    idx = int(row[1]) if row[1] is not None else 0  # current_index
-                    if 0 <= idx < len(items):
-                        _task_cache[rid] = items[idx]
-            except Exception:
-                pass
+        # Always query — loop state changes every task.  The old cache on
+        # current_index never invalidated, causing notifications to show a
+        # stale task name (e.g. "backend_setup" forever).
+        try:
+            import sqlite3 as _sql
+            _sdb = _sql.connect(_os.path.expanduser("~/.AItelier/skillflow.db"))
+            row = _sdb.execute(
+                "SELECT current_item FROM skillflow_loop_state WHERE run_id = ?",
+                (rid,),
+            ).fetchone()
+            _sdb.close()
+            if row and row[0]:
+                task = row[0]  # current_item — the authoritative field (v2)
+                _task_cache[rid] = task  # still cache for the hot path
+        except Exception:
+            pass
         task = _task_cache.get(rid, "")
         if task:
             data["_task_id"] = task

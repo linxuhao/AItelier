@@ -47,10 +47,11 @@ class NotificationZone(VerticalScroll):
         self._poll_timer = self.set_interval(3.0, self._poll_refresh)  # AT-15
 
     def _poll_refresh(self):
-        """Lightweight poll — only refreshes if dashboard has active projects."""
+        """Lightweight poll — only refreshes if dashboard has active projects.
+        Bypasses the optimistic-update debounce so task counts stay current."""
         try:
             dashboard = self.app.query_one("#dashboard-zone")
-            dashboard.force_refresh()
+            dashboard.force_refresh(bypass_debounce=True)
         except Exception:
             pass
 

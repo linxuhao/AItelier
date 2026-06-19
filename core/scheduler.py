@@ -659,17 +659,25 @@ def _sync_task_statuses(project_id: str, run: dict, sf):
     if run["status"] == "paused":
         return  # leave task states as-is (no task-loop progress to sync)
 
-    # Active run: read the task-loop index.
+    # Active run: read the task-loop state.
+    # Use completed_items (v2 set-based tracking) to compute the index.
+    # current_index is deprecated and may be stale/absent.
     try:
         row = sf._conn.execute(
-            "SELECT current_index, items_json FROM skillflow_loop_state "
+            "SELECT current_index, completed_items, items_json FROM skillflow_loop_state "
             "WHERE run_id = ?", (run["id"],),
         ).fetchone()
     except Exception:
         row = None
     if not row:
         return
-    idx = row[0]
+    # Prefer completed_items (set of done task names) over current_index
+    try:
+        import json as _json
+        completed = _json.loads(row[1]) if row[1] else []
+        idx = len(completed)
+    except Exception:
+        idx = row[0] or 0  # fall back to current_index
     for i, t in enumerate(tasks):
         if i < idx:
             want = TaskStatus.COMPLETED.value

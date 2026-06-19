@@ -450,9 +450,6 @@ class CheckpointModal(ModalScreen[bool]):
             # auto-refresh cycle.
             try:
                 self.app.query_one("#dashboard-zone").force_refresh()
-                # Also refresh the pipeline events panel
-                notif = self.app.query_one("#notif-zone")
-                notif.refresh_from_api()
             except Exception:
                 pass
             self.dismiss(True)

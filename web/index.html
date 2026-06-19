@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AItelier</title>
+
+  <!-- ── CDN CSS ── -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.fluid.classless.min.css">
+
+  <!-- ── Custom CSS ── -->
+  <link rel="stylesheet" href="/web/css/app.css">
+
+  <!-- ── CDN JS (loaded early, used by utils.js later) ── -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+</head>
+<body>
+
+  <!-- ════════════════════════════════════════════════════════════
+       App Bar — navigation bar
+       ════════════════════════════════════════════════════════════ -->
+  <header id="app-bar">
+    <nav>
+      <ul>
+        <li><strong>AItelier</strong></li>
+      </ul>
+      <ul>
+        <li><a href="#/">Dashboard</a></li>
+        <li><a href="#/chat">Chat</a></li>
+      </ul>
+      <ul>
+        <li><span id="connection-status">● Connected</span></li>
+      </ul>
+    </nav>
+  </header>
+
+  <!-- ════════════════════════════════════════════════════════════
+       View Container — three switchable panels
+       ════════════════════════════════════════════════════════════ -->
+  <main id="view-container">
+    <section id="view-dashboard"></section>
+    <section id="view-project"></section>
+    <section id="view-chat"></section>
+  </main>
+
+  <!-- ════════════════════════════════════════════════════════════
+       Notification Sidebar — SSE pipeline events
+       ════════════════════════════════════════════════════════════ -->
+  <aside id="notification-panel"></aside>
+
+  <!-- ════════════════════════════════════════════════════════════
+       Checkpoint Modal — approve / reject with feedback
+       ════════════════════════════════════════════════════════════ -->
+  <dialog id="checkpoint-modal">
+    <article>
+      <header>
+        <h2 id="cp-label">Checkpoint</h2>
+      </header>
+      <div id="cp-content" class="cp-content"></div>
+      <footer>
+        <button id="cp-approve" class="contrast">Approve</button>
+        <button id="cp-reject">Request Changes</button>
+        <textarea id="cp-feedback" placeholder="Describe what needs to change..." hidden></textarea>
+      </footer>
+    </article>
+  </dialog>
+
+  <!-- ════════════════════════════════════════════════════════════
+       Confirm Dialog — generic confirmation
+       ════════════════════════════════════════════════════════════ -->
+  <dialog id="confirm-dialog">
+    <article>
+      <header>
+        <h3 id="confirm-title">Confirm</h3>
+      </header>
+      <p id="confirm-message"></p>
+      <footer>
+        <button id="confirm-yes" class="contrast">Yes</button>
+        <button id="confirm-no" class="outline">No</button>
+      </footer>
+    </article>
+  </dialog>
+
+  <!-- ════════════════════════════════════════════════════════════
+       <template> Elements — cloned by JS views
+       ════════════════════════════════════════════════════════════ -->
+
+  <!-- tpl-project-row — dashboard project table row -->
+  <template id="tpl-project-row">
+    <tr>
+      <td class="col-idx"></td>
+      <td><a class="project-link" href="#"></a></td>
+      <td><span class="status-badge"></span></td>
+      <td class="task-progress"></td>
+      <td class="col-updated"></td>
+    </tr>
+  </template>
+
+  <!-- tpl-task-row — project detail task table row -->
+  <template id="tpl-task-row">
+    <tr>
+      <td class="col-idx"></td>
+      <td class="task-id"></td>
+      <td><span class="status-badge"></span></td>
+      <td class="task-step"></td>
+      <td class="task-prompt"></td>
+    </tr>
+  </template>
+
+  <!-- tpl-chat-msg — chat message bubble -->
+  <template id="tpl-chat-msg">
+    <div class="chat-msg">
+      <div class="msg-content"></div>
+    </div>
+  </template>
+
+  <!-- tpl-notification — notification panel entry -->
+  <template id="tpl-notification">
+    <div class="notification-entry">
+      <span class="notif-time"></span>
+      <span class="notif-text"></span>
+    </div>
+  </template>
+
+  <!-- tpl-workspace-file — workspace file tree item -->
+  <template id="tpl-workspace-file">
+    <li class="workspace-file-item">
+      <span class="file-icon"></span>
+      <span class="file-name"></span>
+    </li>
+  </template>
+
+  <!-- ════════════════════════════════════════════════════════════
+       JS Module Loading (dependency order)
+       ════════════════════════════════════════════════════════════ -->
+
+  <!-- Utilities (pure functions, no deps beyond CDN) -->
+  <script src="/web/js/utils.js"></script>
+
+  <!-- Router (no deps) -->
+  <script src="/web/js/router.js"></script>
+
+  <!-- API client (no deps) -->
+  <script src="/web/js/api.js"></script>
+
+  <!-- SSE manager (no deps) -->
+  <script src="/web/js/sse.js"></script>
+
+  <!-- Views (depend on API client) -->
+  <script src="/web/js/views/dashboard.js"></script>
+  <script src="/web/js/views/project.js"></script>
+  <script src="/web/js/views/chat.js"></script>
+  <script src="/web/js/views/checkpoint.js"></script>
+
+  <!-- App entry (depends on all above) -->
+  <script src="/web/js/app.js"></script>
+
+</body>
+</html>

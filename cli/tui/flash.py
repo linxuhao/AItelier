@@ -45,6 +45,21 @@ class FlashBar(Static):
             pid = event.get("project_id", "")
             label = event.get("label", "checkpoint")
             step = event.get("step") or event.get("step_id", "?")
+            graph_name = event.get("graph_name", "")
+            step_id = event.get("step_id") or event.get("step", "")
+
+            # AT-1: Meta conversation checkpoints are handled exclusively by the
+            # meta agent (chat butler).  Don't push a system CheckpointModal.
+            is_meta = (
+                graph_name == "meta_conversation"
+                or step_id == "gather"
+            )
+            if is_meta:
+                self.flash(
+                    f"Meta: {label} — answer in chat ({pid})",
+                    duration=15.0,
+                )
+                return
 
             # Avoid pushing a duplicate modal over an existing one
             for screen in self.app.screen_stack:

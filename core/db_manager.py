@@ -223,16 +223,18 @@ class DBManager:
         if has_project_fk:
             return  # already migrated
 
-        # Ensure all existing tasks have a project row (FK requires it)
-        orphan_project_ids = conn.execute(
-            "SELECT DISTINCT project_id FROM tasks "
+        # Delete orphan tasks left behind by non-cascade project deletes.
+        # Re-creating empty project shells for them is wrong — the project
+        # was deleted intentionally and has no brief/settings/context.
+        deleted = conn.execute(
+            "DELETE FROM tasks "
             "WHERE project_id NOT IN (SELECT project_id FROM projects)"
-        ).fetchall()
-        for row in orphan_project_ids:
-            name = row["project_id"].replace("-", " ").replace("_", " ").title()
-            conn.execute(
-                "INSERT OR IGNORE INTO projects (project_id, name) VALUES (?, ?)",
-                (row["project_id"], name)
+        )
+        if deleted.rowcount:
+            import logging
+            logging.getLogger("aitelier").warning(
+                "_migrate_tasks_fk: removed %d orphan task(s) with no matching project",
+                deleted.rowcount
             )
 
         # Recreate tasks table with FK + all current columns
@@ -287,8 +289,6 @@ class DBManager:
             )
             conn.commit()
             task_id = cursor.lastrowid
-        # Auto-ensure project row exists
-        self.ensure_project(project_id)
         # Wake scheduler so the new task gets picked up
         try:
             from core.scheduler import wake_scheduler
@@ -584,8 +584,12 @@ class DBManager:
                 from api.dependencies import get_skillflow
                 sf = get_skillflow()
                 sf.delete_project(project_id)
-            except Exception:
-                pass  # skillflow may not be initialized in all contexts
+            except Exception as e:
+                import logging
+                logging.getLogger("aitelier").warning(
+                    "delete_project_cascade: skillflow cleanup failed for '%s': %s",
+                    project_id, e
+                )
 
         return existed
 

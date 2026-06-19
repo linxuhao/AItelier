@@ -1206,6 +1206,14 @@ class ChatZone(Container):
             return
         label = data.get("label", "Checkpoint")
         step = data.get("step", "?")
+        # AT-1: For meta conversation (gather step), tell user to use chat
+        if step == "gather":
+            self._add_system(
+                "This is a requirements conversation checkpoint. "
+                "Answer the question or approve/reject the brief in chat — "
+                "the butler agent handles it."
+            )
+            return
         self.app.push_screen(
             CheckpointModal(self.server_url, self.current_project, label, step)
         )

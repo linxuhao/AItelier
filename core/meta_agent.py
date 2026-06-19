@@ -799,6 +799,40 @@ class MetaAgent:
         except Exception:
             return json.dumps(brief or {}, indent=2, ensure_ascii=False)
 
+    def _find_active_project(self) -> str | None:
+        """Return the project_id of an active (drafting/paused/running) meta
+        conversation in this session, or None.  Used to prevent the agent from
+        spawning duplicate projects when a tool call fails."""
+        if not self.session_id:
+            return None
+        try:
+            run_ids = self.db.get_runs_for_session(self.session_id)
+            from api.dependencies import get_skillflow
+            sf = get_skillflow()
+            for rid in run_ids or []:
+                run = sf.get_run(rid)
+                if not run:
+                    continue
+                pid = run.get("project_id", "")
+                if not pid:
+                    continue
+                proj = self.db.get_project(pid)
+                if not proj:
+                    continue
+                ms = proj.get("meta_state", "")
+                if ms in ("drafting", "paused", "running"):
+                    return pid
+        except Exception:
+            pass
+        return None
+
+    def _log_error(self, msg: str) -> None:
+        """Log an error to the server log for post-mortem debugging.
+        Tool-level errors are often invisible in the chat UI."""
+        import logging
+        logger = logging.getLogger("aitelier.meta")
+        logger.error(msg)
+
     async def _tool_start_project_conversation(self, args: dict) -> dict:
         """Create the project + workspace, start the meta_conversation run, drive
         it to its first pause, and return the question / brief to relay."""
@@ -812,6 +846,25 @@ class MetaAgent:
         repo_url = args.get("repo_url")
 
         sf = get_skillflow()
+
+        # AT-2 guard: if there's already an active meta conversation for this
+        # session (project in drafting/paused/running), don't create a duplicate.
+        # The agent should use answer_project_conversation or approve_project_brief
+        # on the existing project instead of spawning new ones.
+        existing_active = self._find_active_project()
+        if existing_active and existing_active != pid:
+            self._log_error(
+                f"Agent tried to create '{pid}' while '{existing_active}' is still "
+                f"active (meta_state drafting/paused). Directing agent to existing project."
+            )
+            return {"status": "error",
+                    "message": f"An active requirements conversation already exists "
+                               f"for project '{existing_active}'. Do NOT create a new "
+                               f"project — use answer_project_conversation or "
+                               f"approve_project_brief on '{existing_active}' instead. "
+                               f"If the existing project is truly broken, call "
+                               f"retry_project first before starting a new one."}
+
         if not self.db.get_project(pid):
             self.db.ensure_project(
                 pid, name=args.get("name") or pid, owner_email=self.owner_email,
@@ -849,14 +902,30 @@ class MetaAgent:
         sf = get_skillflow()
         run = sf.get_run(run_id)
         if not run:
-            return {"status": "error", "message": f"Conversation '{run_id}' not found."}
+            return {"status": "error",
+                    "message": f"Conversation '{run_id}' not found — "
+                               "the conversation may have already finished. "
+                               "Check the project list for the correct project."}
         pid = run.get("project_id", "")
+
+        # AT-1/AT-2: If the run is already completed, the checkpoint was approved
+        # via the CLI before the meta agent could handle it.  Tell the user what
+        # happened instead of failing silently (which triggers a new-project loop).
+        if run.get("status") == "completed":
+            return {"status": "completed_already",
+                    "run_id": run_id, "project_id": pid,
+                    "message": "The requirements conversation has already been "
+                               "finalized. Use approve_project_brief if you want "
+                               "to start the build pipeline."}
 
         self._append_conversation(pid, f"User: {answer}")
         try:
             submit_user_answer(sf, run_id, answer)
         except Exception as e:
-            return {"status": "error", "run_id": run_id, "message": f"could not resume: {e}"}
+            self._log_error(f"submit_user_answer failed for {run_id}: {e}")
+            return {"status": "error", "run_id": run_id,
+                    "message": f"Could not resume the conversation: {e}. "
+                               "Try starting a new conversation or check the project status."}
 
         result = await self._run_meta_until_checkpoint(run_id)
         if result.get("status") == "question":
@@ -873,25 +942,41 @@ class MetaAgent:
         sf = get_skillflow()
         run = sf.get_run(run_id)
         if not run:
-            return {"status": "error", "message": f"Conversation '{run_id}' not found."}
+            return {"status": "error",
+                    "message": f"Conversation '{run_id}' not found — "
+                               "the conversation may have already ended. "
+                               "Check the project list."}
         pid = run.get("project_id", "")
+
+        # AT-1: If the run is already completed (gate resolved to terminal after
+        # checkpoint approval), skip the approve_meta call — it would call
+        # sf.complete_run() which is idempotent but unnecessary.
+        run_already_completed = run.get("status") == "completed"
 
         gs = read_gather_state(self.ws, pid) or {}
         brief = gs.get("brief") or {}
         stories = brief.get("user_stories")
         if not (isinstance(stories, list) and any(str(s).strip() for s in stories)):
             return {"status": "error",
-                    "message": "The brief has no user story yet — keep talking to add one before approving."}
+                    "message": "The brief has no user stories yet — the conversation "
+                               "has not produced a complete brief. Keep talking to "
+                               "add requirements before approving."}
 
         # Seed the canonical brief + goals and wake the scheduler (starts DPE),
-        # then close the meta run (don't drive it into a terminal — see approve_meta).
+        # then close the meta run.
         res = seed_and_trigger(self.db, self.ws, pid, brief)
-        try:
-            approve_meta(sf, run_id)
-        except Exception:
-            pass
+        if run_already_completed:
+            self._log_error(f"Meta run {run_id} was already completed when approving brief — "
+                           "this is expected if the checkpoint was approved via the CLI")
+        else:
+            try:
+                approve_meta(sf, run_id)
+            except Exception as e:
+                self._log_error(f"approve_meta failed for {run_id}: {e}")
         if res.get("status") not in ("submitted", "already_planned"):
             res.setdefault("project_id", pid)
+            res["message"] = res.get("message",
+                f"Failed to seed the build pipeline: {res.get('status', 'unknown error')}")
             return res
 
         # The meta agent now starts the DPE build pipeline and drives it to its

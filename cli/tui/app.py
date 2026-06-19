@@ -96,6 +96,10 @@ class AItelierApp(App):
                     continue
             except Exception:
                 continue
+            # AT-1: Don't push system CheckpointModal for meta conversation
+            # checkpoints — the meta agent handles them in-chat.
+            if data.get("step") == "gather":
+                return
             self.push_screen(CheckpointModal(
                 self.server_url, pid,
                 data.get("label", "Checkpoint"), data.get("step", "?")))
@@ -159,6 +163,9 @@ class AItelierApp(App):
 
         if len(attachable) == 1:
             info = attachable[0]
+            # AT-1: Don't push system CheckpointModal for meta conversation
+            if info.get("step") == "gather":
+                return
             self.push_screen(
                 CheckpointModal(
                     self.server_url, info["project_id"],

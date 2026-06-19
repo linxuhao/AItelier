@@ -29,8 +29,10 @@ def create_task(
     """接收任务意图，初始化安全沙盒并入队"""
     owner = user.email if user else "cli@local"
 
-    # 1. Auto-ensure project exists
-    db.ensure_project(task.project_id, owner_email=owner)
+    # 1. Verify project exists (do NOT auto-create)
+    project = db.get_project(task.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project '{task.project_id}' not found")
 
     # 2. 动态生成物理沙盒目录
     ws.setup_workspace(task.project_id)

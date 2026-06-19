@@ -623,6 +623,12 @@ def approve_checkpoint(
     next_node = ""
     if run and run["status"] == "paused":
         next_node = sf.approve_checkpoint(run_id)
+        # Sync the project status immediately so the scheduler picks it up.
+        # Without this, the aitelier DB still shows "checkpoint:..." and the
+        # scheduler's status filter (planning/executing/verifying/running)
+        # skips the project entirely.
+        from core.scheduler import _sync_project_status_to_db
+        _sync_project_status_to_db(project_id)
     elif run and run["status"] == "failed":
         sf.reactivate_run(run_id)
         sf.resume_run(run_id)

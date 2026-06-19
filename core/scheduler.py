@@ -476,6 +476,11 @@ async def _execute_skillflow_tick(project_id: str, loop):
     sf = get_skillflow()
     run_id = _get_or_create_skillflow_run(project_id)
     if not run_id:
+        # Self-heal stuck task states when the DPE run is terminal.
+        # _sync_project_status_to_db marks running tasks as completed/failed
+        # and bumps updated_at so the project no longer starves active
+        # projects in get_next_active_project's ORDER BY updated_at ASC.
+        _sync_project_status_to_db(project_id)
         return
 
     # Don't re-enter a run that's actively executing (in-flight guard).
@@ -621,8 +626,12 @@ def _sync_project_status_to_db(project_id: str):
         # Derive per-task status from the skillflow task-loop progress so the
         # dashboard task badge isn't stuck at "pending" after tasks finish.
         _sync_task_statuses(project_id, run, sf)
-    except Exception:
-        pass
+    except Exception as e:
+        import logging
+        logging.getLogger("aitelier.scheduler").error(
+            f"_sync_project_status_to_db failed for {project_id}: {e}",
+            exc_info=True,
+        )
 
 
 def _sync_task_statuses(project_id: str, run: dict, sf):

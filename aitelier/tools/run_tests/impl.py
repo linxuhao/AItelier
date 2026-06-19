@@ -26,13 +26,20 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     if not repo.exists():
         report.update(passed=False, summary=f"Project root not found: {repo}")
     else:
+        # Isolate: do NOT inherit PYTHONPATH from the host process — it may
+        # point to AItelier's own source tree, causing pytest to discover
+        # AItelier's tests instead of the project's.  Only the project root
+        # belongs on the path.
         env = {**os.environ,
-               "PYTHONPATH": os.pathsep.join(
-                   [str(repo), os.environ.get("PYTHONPATH", "")])}
+               "PYTHONPATH": str(repo)}
         try:
+            # --rootdir forces pytest root to the project repo so it doesn't
+            # walk up and find AItelier's pytest.ini (whose testpaths=tests
+            # would cause discovery of AItelier's own test suite).
             r = subprocess.run(
                 [sys.executable, "-m", "pytest", str(repo), "-q", "--tb=short",
-                 "-p", "no:cacheprovider"],
+                 "-p", "no:cacheprovider",
+                 "--rootdir", str(repo)],
                 capture_output=True, text=True, timeout=180, cwd=str(repo), env=env,
             )
             out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()

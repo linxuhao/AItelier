@@ -748,6 +748,18 @@ class DBManager:
                 if pid:
                     active_ids.add(pid)
 
+        # Collect project_ids whose DPE runs are terminal (completed/failed).
+        # Exclude them from the task-subquery fallback so a leftover running
+        # task on a completed project doesn't starve active ones.
+        # The scheduler never reactivates completed runs (NB-5), so clause 2
+        # matching a terminal-run project only creates a starvation loop.
+        terminal_ids: set[str] = set()
+        for status in ('completed', 'failed'):
+            for r in sf.list_runs(status=status):
+                pid = r.get("project_id")
+                if pid and r.get("graph_name") == "dpe_default_v2":
+                    terminal_ids.add(pid)
+
         STATUSES = ('planning', 'executing', 'verifying', 'running')
         ordering = "created_at ASC" if fifo else "priority DESC, updated_at ASC"
         with self.get_connection() as conn:
@@ -760,33 +772,44 @@ class DBManager:
             # project's active run.
             planning_guard = ("(status = 'planning' AND brief IS NOT NULL AND brief != ''"
                              " AND (meta_state IS NULL OR meta_state != 'drafting'))")
+            # Task subquery: projects with pending/running tasks, guarded against
+            # terminal DPE runs whose leftover tasks would starve active projects.
+            if terminal_ids:
+                term_ph = ",".join("?" * len(terminal_ids))
+                task_clause = (
+                    f"(project_id IN ("
+                    f"  SELECT DISTINCT t.project_id FROM tasks t"
+                    f"  WHERE t.status IN ('pending', 'running')"
+                    f") AND project_id NOT IN ({term_ph}))"
+                )
+            else:
+                task_clause = (
+                    "project_id IN ("
+                    "  SELECT DISTINCT t.project_id FROM tasks t"
+                    "  WHERE t.status IN ('pending', 'running')"
+                    ")"
+                )
             if active_ids:
                 placeholders = ",".join("?" * len(active_ids))
                 if owner_email:
                     row = conn.execute(f"""
                         SELECT * FROM projects
                         WHERE (project_id IN ({placeholders})
-                               OR project_id IN (
-                                   SELECT DISTINCT t.project_id FROM tasks t
-                                   WHERE t.status IN ('pending', 'running')
-                               )
+                               OR {task_clause}
                                OR {planning_guard})
                           AND owner_email = ?
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*active_ids, owner_email)).fetchone()
+                    """, (*active_ids, *terminal_ids, owner_email)).fetchone()
                 else:
                     row = conn.execute(f"""
                         SELECT * FROM projects
                         WHERE (project_id IN ({placeholders})
-                               OR project_id IN (
-                                   SELECT DISTINCT t.project_id FROM tasks t
-                                   WHERE t.status IN ('pending', 'running')
-                               )
+                               OR {task_clause}
                                OR {planning_guard})
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*active_ids,)).fetchone()
+                    """, (*active_ids, *terminal_ids)).fetchone()
             # Fallback: no active skillflow runs OR none matched in the local DB
             # (e.g., tests use an isolated DB while skillflow uses production DB).
             if row is None:
@@ -797,27 +820,21 @@ class DBManager:
                     row = conn.execute(f"""
                         SELECT * FROM projects
                         WHERE (status IN ({','.join('?'*len(STATUSES))})
-                               OR project_id IN (
-                                   SELECT DISTINCT t.project_id FROM tasks t
-                                   WHERE t.status IN ('pending', 'running')
-                               ))
+                               OR {task_clause})
                           AND owner_email = ?
                           {drafting_guard}
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*STATUSES, owner_email)).fetchone()
+                    """, (*STATUSES, *terminal_ids, owner_email)).fetchone()
                 else:
                     row = conn.execute(f"""
                         SELECT * FROM projects
                         WHERE (status IN ({','.join('?'*len(STATUSES))})
-                               OR project_id IN (
-                                   SELECT DISTINCT t.project_id FROM tasks t
-                                   WHERE t.status IN ('pending', 'running')
-                               ))
+                               OR {task_clause})
                           {drafting_guard}
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*STATUSES,)).fetchone()
+                    """, (*STATUSES, *terminal_ids)).fetchone()
             return dict(row) if row else None
 
     def advance_project_step(self, project_id: str) -> str | None:

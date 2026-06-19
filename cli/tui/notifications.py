@@ -42,46 +42,61 @@ class NotificationZone(VerticalScroll):
 
     @work(exclusive=True)
     async def _start_sse(self):
-        """Single SSE consumer — dispatches to notification feed, flash bar, status bar."""
-        try:
-            async with self.app.http.stream(
-                "GET", "/api/events/stream", timeout=None
-            ) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        raw = json.loads(line[6:])
-                        log_str = raw.get("log", "")
-                        if log_str == "__END__":
-                            break
-                        event = (
-                            json.loads(log_str)
-                            if isinstance(log_str, str) and log_str.startswith("{")
-                            else {}
-                        )
-                    except json.JSONDecodeError:
-                        continue
-
-                    # 1. Feed the notification panel
-                    self._handle_event(event)
-
-                    etype = event.get("type", "")
-
-                    # 2. Forward checkpoint events to FlashBar
-                    if etype in ("checkpoint_reached", "checkpoint_paused",
-                                 "checkpoint_resolved", "checkpoint_approved"):
+        """SSE consumer with auto-reconnect and idle timeout. Reconnects on
+        disconnect or when no event arrives for 60 seconds (prevents silent
+        buffer stalls that don't trigger a TCP disconnect)."""
+        import asyncio as _aio
+        _IDLE_TIMEOUT = 60  # seconds — reconnect if no event in this window
+        while True:
+            try:
+                async with self.app.http.stream(
+                    "GET", "/api/events/stream", timeout=None
+                ) as resp:
+                    self._add_line("[dim]SSE connected[/]")
+                    ait = resp.aiter_lines()
+                    while True:
                         try:
-                            flash_bar = self.app.query_one("#flash-bar")
-                            await flash_bar.handle_checkpoint_event(event)
-                        except Exception:
-                            pass
+                            line = await _aio.wait_for(ait.__anext__(), _IDLE_TIMEOUT)
+                        except _aio.TimeoutError:
+                            self._add_line("[dim]SSE idle timeout — reconnecting…[/]")
+                            break  # break inner loop → reconnect
+                        except StopAsyncIteration:
+                            break  # stream ended naturally
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            raw = json.loads(line[6:])
+                            log_str = raw.get("log", "")
+                            if log_str == "__END__":
+                                break
+                            event = (
+                                json.loads(log_str)
+                                if isinstance(log_str, str) and log_str.startswith("{")
+                                else {}
+                            )
+                        except json.JSONDecodeError:
+                            continue
 
-                    # 3. Update status bar
-                    self._update_flash_state(event)
+                        # 1. Feed the notification panel
+                        self._handle_event(event)
 
-        except Exception:
-            self._add_line("[dim]SSE disconnected[/dim]")
+                        etype = event.get("type", "")
+
+                        # 2. Forward checkpoint events to FlashBar
+                        if etype in ("checkpoint_reached", "checkpoint_paused",
+                                     "checkpoint_resolved", "checkpoint_approved"):
+                            try:
+                                flash_bar = self.app.query_one("#flash-bar")
+                                await flash_bar.handle_checkpoint_event(event)
+                            except Exception:
+                                pass
+
+                        # 3. Update status bar
+                        self._update_flash_state(event)
+
+            except Exception:
+                self._add_line("[dim]SSE disconnected — reconnecting in 3s…[/]")
+                await _aio.sleep(3)
 
     def _update_flash_state(self, event: dict):
         """Update cli.completer.flash_state for the bottom status bar."""

@@ -1137,12 +1137,13 @@ class ChatZone(Container):
                 self._add_system("No project selected. Use /project <# or id> to enter one.")
             return
 
-        dashboard = self.app.query_one("#dashboard-zone")
-
         # Try as index number (1-based, matching dashboard display)
         try:
             idx = int(arg) - 1
-            projects = dashboard.projects_cache
+            import httpx
+            resp = httpx.get(f"{self.server_url}/api/projects", timeout=5.0)
+            resp.raise_for_status()
+            projects = resp.json()
             if 0 <= idx < len(projects):
                 pid = projects[idx]["project_id"]
                 self.set_current_project(pid)
@@ -1281,12 +1282,14 @@ class ChatZone(Container):
         # Resolve display index to actual project_id
         try:
             idx = int(target)
-            dashboard = self.app.query_one("#dashboard-zone")
-            projects = dashboard.projects_cache
+            import httpx
+            resp = httpx.get(f"{self.server_url}/api/projects", timeout=5.0)
+            resp.raise_for_status()
+            projects = resp.json()
             if 0 <= idx < len(projects):
                 target = projects[idx]["project_id"]
             else:
-                self._add_error(f"Index {arg} out of range (1-{len(projects)})")
+                self._add_error(f"Index {target} out of range (1-{len(projects)})")
                 return
         except ValueError:
             pass  # not an index — treat as literal project_id

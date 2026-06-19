@@ -30,15 +30,14 @@ or fix a bug in an existing project, you do NOT gather requirements yourself and
 do NOT write code. Instead you START and RELAY a structured requirements \
 conversation that the pipeline drives:
 
-1. Decide new vs existing code:
-   - NEW project → repo_type "new".
-   - EXISTING code (continue / add / fix a named or previous project) → first call
-     list_projects to find it; read the real code with list_code_tree /
-     read_code_file to ground the request; then repo_type "existing" with
-     repo_path = that project's repo_path (or ~/.AItelier/projects/<id>/ if null).
-2. Call start_project_conversation(project_id=<short-slug>, initial_message=<the
-   user's request, verbatim>, repo_type=..., repo_path=...). It returns either a
-   clarifying QUESTION, a BRIEF for review, or "rejected".
+1. Decide which API to call:
+   - NEW project (build from scratch) → start_new_project(project_id, initial_message)
+   - EXISTING AItelier project (add feature / fix bug) → list_projects first, then
+     start_from_aitelier_project(existing_project_id, initial_message, new_project_id=...)
+     (new_project_id is optional — it auto-generates like "myapp-2")
+   - EXISTING code at a known path → start_existing_project(project_id, repo_path, initial_message)
+   - Clone a git URL → start_from_git_url(project_id, repo_url, initial_message)
+2. Each returns either a clarifying QUESTION, a BRIEF for review, or "rejected".
 3. RELAY the pipeline's question to the user verbatim — do NOT invent your own
    questions or brief. When the user replies, call
    answer_project_conversation(run_id, answer=<their reply>).
@@ -62,7 +61,7 @@ multi-step *process / skill* and wants it captured as a pipeline they can re-run
 call generate_pipeline(description=<the skill, verbatim>). It runs the
 skill_converter pipeline and returns a Design Review checkpoint — relay it; on
 approval (approve_checkpoint) it lints and emits the generated pipeline YAML.
-Use start_project_conversation for *software* (apps/tools/bug-fixes);
+Use start_new_project / start_from_aitelier_project for *software* (apps/tools/bug-fixes);
 generate_pipeline for *converting a skill/workflow into a pipeline graph*.
 
 ## After a pipeline starts
@@ -122,28 +121,79 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    # ── Four start-project APIs (one per repo source) ──
     {
         "type": "function",
         "function": {
-            "name": "start_project_conversation",
-            "description": "Begin a structured requirements conversation for a build/modify "
-                           "request. Creates the project + workspace and starts the "
-                           "meta_conversation pipeline, which drives the Q&A and produces the "
-                           "brief. Returns {status: 'question'|'brief_review'|'rejected', "
-                           "question?, brief_markdown?, run_id}. Relay the question/brief to "
-                           "the user; do NOT invent your own.",
+            "name": "start_new_project",
+            "description": "Start a NEW project from scratch. No existing code. "
+                           "Returns {status: 'question'|'brief_review', question?, brief_markdown?, run_id}.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "project_id": {"type": "string", "description": "Short unique slug (e.g. 'habit-tracker')"},
                     "initial_message": {"type": "string", "description": "The user's request, verbatim"},
                     "name": {"type": "string", "description": "Optional display name"},
-                    "repo_type": {"type": "string", "enum": ["new", "existing", "clone"],
-                                  "description": "'new' to build from scratch; 'existing' to modify an existing repo"},
-                    "repo_path": {"type": "string", "description": "Required for repo_type='existing' — the code path"},
-                    "repo_url": {"type": "string", "description": "Required for repo_type='clone'"},
                 },
                 "required": ["project_id", "initial_message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_from_aitelier_project",
+            "description": "Add features / fix bugs on an existing AItelier-built project. "
+                           "Finds the original project's code repo automatically. "
+                           "Pass the original project_id and a NEW project_id for this work "
+                           "(or omit new_project_id to auto-generate one). "
+                           "Returns {status: 'question'|'brief_review', ...}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "existing_project_id": {"type": "string", "description": "The original project's ID (from list_projects)"},
+                    "initial_message": {"type": "string", "description": "The user's request, verbatim"},
+                    "new_project_id": {"type": "string", "description": "Optional: new project ID for this work. If omitted, auto-generated as <existing>-2, <existing>-3, etc."},
+                    "name": {"type": "string", "description": "Optional display name for the new project"},
+                },
+                "required": ["existing_project_id", "initial_message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_existing_project",
+            "description": "Work on an existing codebase at a given filesystem path. "
+                           "You MUST provide repo_path. "
+                           "Returns {status: 'question'|'brief_review', ...}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "Short unique slug for this work"},
+                    "repo_path": {"type": "string", "description": "Absolute path to the code repository"},
+                    "initial_message": {"type": "string", "description": "The user's request, verbatim"},
+                    "name": {"type": "string", "description": "Optional display name"},
+                },
+                "required": ["project_id", "repo_path", "initial_message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_from_git_url",
+            "description": "Clone a git repository and start working on it. "
+                           "Returns {status: 'question'|'brief_review', ...}.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "Short unique slug"},
+                    "repo_url": {"type": "string", "description": "Git URL to clone"},
+                    "initial_message": {"type": "string", "description": "The user's request, verbatim"},
+                    "name": {"type": "string", "description": "Optional display name"},
+                },
+                "required": ["project_id", "repo_url", "initial_message"],
             },
         },
     },
@@ -408,7 +458,7 @@ TOOL_DEFINITIONS = [
                            "SkillFlow pipeline (a YAML graph) by running the skill_converter "
                            "pipeline. Use this when the user wants to capture a multi-step "
                            "process/skill as a pipeline they can re-run — NOT for building an "
-                           "app or fixing code (use start_project_conversation for software). "
+                           "app or fixing code (use start_new_project / start_from_aitelier_project for software). "
                            "Returns a Design Review checkpoint to relay; on approval it lints "
                            "and emits the generated pipeline YAML.",
             "parameters": {
@@ -800,9 +850,9 @@ class MetaAgent:
             return json.dumps(brief or {}, indent=2, ensure_ascii=False)
 
     def _find_active_project(self) -> str | None:
-        """Return the project_id of an active (drafting/paused/running) meta
-        conversation in this session, or None.  Used to prevent the agent from
-        spawning duplicate projects when a tool call fails."""
+        """Return the project_id of an active *meta conversation* in this
+        session, or None.  Only considers meta_conversation runs — DPE runs
+        also set meta_state='running' but are NOT conversations."""
         if not self.session_id:
             return None
         try:
@@ -812,6 +862,9 @@ class MetaAgent:
             for rid in run_ids or []:
                 run = sf.get_run(rid)
                 if not run:
+                    continue
+                # Only meta conversations, never DPE runs
+                if run.get("graph_name") != "meta_conversation":
                     continue
                 pid = run.get("project_id", "")
                 if not pid:
@@ -829,9 +882,79 @@ class MetaAgent:
     def _log_error(self, msg: str) -> None:
         """Log an error to the server log for post-mortem debugging.
         Tool-level errors are often invisible in the chat UI."""
-        import logging
+        import logging, sys
         logger = logging.getLogger("aitelier.meta")
         logger.error(msg)
+        # Also write to stderr so it appears in the server log immediately
+        print(f"[meta_agent ERROR] {msg}", file=sys.stderr, flush=True)
+
+    # ── Public API wrappers (hide repo_type/repo_path from the LLM) ──
+
+    async def _tool_start_new_project(self, args: dict) -> dict:
+        return await self._tool_start_project_conversation({
+            "project_id": args["project_id"],
+            "initial_message": args["initial_message"],
+            "name": args.get("name", ""),
+            "repo_type": "new",
+        })
+
+    async def _tool_start_from_aitelier_project(self, args: dict) -> dict:
+        existing_pid = args["existing_project_id"]
+        # Find the original project
+        proj = self.db.get_project(existing_pid)
+        if not proj:
+            return {"status": "error", "message": f"Project '{existing_pid}' not found. Use list_projects first."}
+        repo_path = proj.get("repo_path")
+        # If no explicit repo_path, use the default code location
+        if not repo_path:
+            from pathlib import Path as _Path
+            default = _Path.home() / ".AItelier" / "projects" / existing_pid
+            if default.is_dir():
+                repo_path = str(default)
+            else:
+                return {"status": "error",
+                        "message": f"No repo_path found for '{existing_pid}' and default path does not exist. Try start_existing_project with an explicit repo_path."}
+
+        # Auto-generate new_project_id if not given
+        new_pid = args.get("new_project_id", "")
+        if not new_pid:
+            base = existing_pid
+            # Strip trailing digits to find base name
+            import re
+            m = re.match(r"(.+?)-(\d+)$", base)  # already has a suffix
+            if m:
+                base = m.group(1)
+            # Find next available suffix
+            n = 2
+            while self.db.get_project(f"{base}-{n}"):
+                n += 1
+            new_pid = f"{base}-{n}"
+
+        return await self._tool_start_project_conversation({
+            "project_id": new_pid,
+            "initial_message": args["initial_message"],
+            "name": args.get("name", ""),
+            "repo_type": "existing",
+            "repo_path": repo_path,
+        })
+
+    async def _tool_start_existing_project(self, args: dict) -> dict:
+        return await self._tool_start_project_conversation({
+            "project_id": args["project_id"],
+            "initial_message": args["initial_message"],
+            "name": args.get("name", ""),
+            "repo_type": "existing",
+            "repo_path": args["repo_path"],
+        })
+
+    async def _tool_start_from_git_url(self, args: dict) -> dict:
+        return await self._tool_start_project_conversation({
+            "project_id": args["project_id"],
+            "initial_message": args["initial_message"],
+            "name": args.get("name", ""),
+            "repo_type": "clone",
+            "repo_url": args["repo_url"],
+        })
 
     async def _tool_start_project_conversation(self, args: dict) -> dict:
         """Create the project + workspace, start the meta_conversation run, drive
@@ -847,39 +970,85 @@ class MetaAgent:
 
         sf = get_skillflow()
 
-        # AT-2 guard: if there's already an active meta conversation for this
-        # session (project in drafting/paused/running), don't create a duplicate.
-        # The agent should use answer_project_conversation or approve_project_brief
-        # on the existing project instead of spawning new ones.
-        existing_active = self._find_active_project()
-        if existing_active and existing_active != pid:
-            self._log_error(
-                f"Agent tried to create '{pid}' while '{existing_active}' is still "
-                f"active (meta_state drafting/paused). Directing agent to existing project."
-            )
-            return {"status": "error",
-                    "message": f"An active requirements conversation already exists "
-                               f"for project '{existing_active}'. Do NOT create a new "
-                               f"project — use answer_project_conversation or "
-                               f"approve_project_brief on '{existing_active}' instead. "
-                               f"If the existing project is truly broken, call "
-                               f"retry_project first before starting a new one."}
+        # ── Validation (BEFORE any project creation) ──────────────────
+        # Catch bad args early so we never leave an orphan project.
 
+        # repo_type="existing" requires repo_path — validate BEFORE touching DB
+        if repo_type == "existing":
+            if not repo_path:
+                return {
+                    "status": "error",
+                    "message": (
+                        "repo_type='existing' requires repo_path. "
+                        "Call list_projects first to find the original project, "
+                        "then pass repo_path='~/.AItelier/projects/<original-id>'."
+                    ),
+                }
+            from pathlib import Path as _Path
+            code_path = _Path(repo_path).expanduser().resolve()
+            if not code_path.exists():
+                return {
+                    "status": "error",
+                    "message": (
+                        f"repo_path does not exist: {repo_path}. "
+                        "Call list_projects to find the correct path, "
+                        "or use repo_type='new' for a fresh project."
+                    ),
+                }
+
+        # Prevent overwriting a completed project
+        existing_project = self.db.get_project(pid)
+        if existing_project:
+            dpe_runs = sf.list_runs(pid)
+            has_completed_dpe = any(
+                r["graph_name"] == "dpe_default_v2" and r["status"] == "completed"
+                for r in dpe_runs
+            )
+            if has_completed_dpe:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Project '{pid}' already has a completed build pipeline. "
+                        f"Do NOT reuse this project_id. Instead, pick a NEW "
+                        f"project_id (e.g. '{pid}-v2') and call "
+                        f"start_project_conversation with repo_type='existing' "
+                        f"and repo_path='~/.AItelier/projects/{pid}'."
+                    ),
+                }
+
+        # AT-2: Idempotent guard
+        existing_active = self._find_active_project()
+        if existing_active:
+            existing_run = sf.get_run_by_project(existing_active)
+            if existing_run and existing_run["status"] in ("running", "paused"):
+                result = await self._run_meta_until_checkpoint(existing_run["id"])
+                if result.get("status") in ("question", "brief_review"):
+                    return result
+            self.db.set_project_meta_state(existing_active, None)
+
+        # ── Now safe to create ────────────────────────────────────────
         if not self.db.get_project(pid):
             self.db.ensure_project(
                 pid, name=args.get("name") or pid, owner_email=self.owner_email,
                 repo_type=repo_type, repo_path=repo_path, repo_url=repo_url,
             )
         self.db.set_project_meta_state(pid, "drafting")
+
         try:
             self.ws.setup_workspace(pid, repo_type=repo_type, repo_path=repo_path, repo_url=repo_url)
         except Exception as e:
-            return {"status": "error", "message": f"workspace setup failed: {e}"}
+            return {"status": "error", "project_id": pid,
+                    "message": f"workspace setup failed: {e}"}
 
         # Seed the transcript the gather step reads as context.
         self._append_conversation(pid, f"User: {initial}")
 
-        run_id = sf.get_or_create_run(META_GRAPH, pid, {"project_id": pid})
+        try:
+            run_id = sf.get_or_create_run(META_GRAPH, pid, {"project_id": pid})
+        except Exception as e:
+            self._log_error(f"get_or_create_run failed for {pid}: {e}")
+            return {"status": "error", "project_id": pid,
+                    "message": f"Failed to create conversation run: {e}"}
         run = sf.get_run(run_id)
         if run and run["status"] == "pending":
             sf.start_run(run_id)
@@ -1601,6 +1770,11 @@ _TOOL_HANDLERS = {
     "list_projects": MetaAgent._tool_list_projects,
     "get_project": MetaAgent._tool_get_project,
     "update_project": MetaAgent._tool_update_project,
+    "start_new_project": MetaAgent._tool_start_new_project,
+    "start_from_aitelier_project": MetaAgent._tool_start_from_aitelier_project,
+    "start_existing_project": MetaAgent._tool_start_existing_project,
+    "start_from_git_url": MetaAgent._tool_start_from_git_url,
+    # Legacy — hidden from LLM but kept for backward compat
     "start_project_conversation": MetaAgent._tool_start_project_conversation,
     "answer_project_conversation": MetaAgent._tool_answer_project_conversation,
     "approve_project_brief": MetaAgent._tool_approve_project_brief,

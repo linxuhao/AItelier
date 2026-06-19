@@ -210,11 +210,13 @@ class NotificationZone(VerticalScroll):
         elif etype == "step_completed":
             step = event.get("step_id", "?")
             name = STEP_NAMES.get(step, step)
-            self._add_line(f"{ctx} [bold green]✓[/] {name} completed")
+            self._add_line(f"[dim]──[/]")
+            self._add_line(f"{ctx} [bold green]✓ {name} completed[/]")
         elif etype == "step_claimed":
             step = event.get("step_id", "?")
             name = STEP_NAMES.get(step, step)
-            self._add_line(f"{ctx} [bold yellow]●[/] {name} started")
+            self._add_line(f"[dim]──[/]")
+            self._add_line(f"{ctx} [bold yellow]▶ {name}[/]")
         elif etype == "run_started":
             self._add_line(f"{ctx} [bold blue]▶[/] Pipeline started")
         elif etype == "files_written":

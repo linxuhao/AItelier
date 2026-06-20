@@ -6,7 +6,7 @@
 name: "dpe_default_v2"
 description: "AItelier DPE: Research → Architect → PM → Task Loop → Verify"
 
-begin: "1"
+begin: "git_sync_pre"
 
 end_conditions:
   combinator: or
@@ -24,6 +24,16 @@ end_conditions:
         fatal_error: true
 
 steps:
+  # ─── Pre-flight: git sync ───
+  - id: "git_sync_pre"
+    step_type: "tool"
+    tool_name: "git_sync_pre"
+    tool_params:
+      project_root: "$PROJECT_ROOT"
+    transitions:
+      - to: "1"
+        match: { synced: true }
+
   # ─── Research ───
   - id: "1"
     step_type: "agent"

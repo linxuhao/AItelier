@@ -506,12 +506,22 @@ async def _execute_skillflow_tick(project_id: str, loop):
     # has executed an unreasonable number of steps (e.g. a chronically-failing
     # verify gate cycling t_plan -> t_impl forever), fail the run cleanly instead
     # of hanging the scheduler indefinitely. A normal multi-task DPE run uses well
-    # under this many step rows.
+    # under this many step executions.
+    #
+    # Count step *executions* (claim events from the durable trace), NOT step
+    # rows: an in-place loop re-claims the SAME rows hundreds of times (a tool
+    # gate that never passes pushed 5_review to 479 claims while only ~27 rows
+    # existed), so a row-count guard never trips on exactly the loop it's meant
+    # to catch.
     try:
-        n_steps = len(sf.get_steps(run_id))
-        if n_steps > _MAX_STEPS_PER_RUN:
+        n_exec = sf._conn.execute(
+            "SELECT COUNT(*) FROM skillflow_trace "
+            "WHERE run_id = ? AND event = 'claimed'",
+            (run_id,),
+        ).fetchone()[0]
+        if n_exec > _MAX_STEPS_PER_RUN:
             sf.fail_run(run_id, f"Aborted: exceeded {_MAX_STEPS_PER_RUN} step "
-                                f"executions ({n_steps}) — likely a non-converging "
+                                f"executions ({n_exec}) — likely a non-converging "
                                 f"loop (e.g. a verify gate that never passes).")
             _sync_project_status_to_db(project_id)
             return

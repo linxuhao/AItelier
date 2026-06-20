@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 21
+        assert len(TOOL_DEFINITIONS) == 24
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -56,12 +56,16 @@ class TestToolDefinitions:
         names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         required = {
             "list_projects", "get_project", "update_project",
-            "start_project_conversation", "answer_project_conversation", "approve_project_brief",
+            "start_new_project", "start_from_aitelier_project",
+            "start_existing_project", "start_from_git_url",
+            "answer_project_conversation", "approve_project_brief",
             "retry_project", "refresh_planning",
-            "list_tasks", "get_task", "retry_task",
+            "list_tasks", "get_task", "retry_task", "get_step_output",
             "list_code_tree", "read_code_file",
             "list_workspace_tree", "read_workspace_file",
-            "retrieve_previous_context", "generate_pipeline",
+            "retrieve_previous_context",
+            "approve_checkpoint", "reject_checkpoint", "get_pipeline_status",
+            "generate_pipeline",
         }
         assert required.issubset(names)
 

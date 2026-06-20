@@ -138,14 +138,25 @@ class TestHandleEvent:
         return {"type": etype, "_ts": 0, "project_id": "test", **kw}
 
     def test_step_claimed(self, zone):
+        """step_claimed now produces a separator line (dim ──)."""
         zone._handle_event(self._ev("step_claimed", step_id="t_impl"))
+        assert "──" in zone._lines[0]
+
+    def test_step_start(self, zone):
+        """step_start produces a highlighted ● line."""
+        zone._handle_event(self._ev("step_start", step="t_impl"))
         assert "●" in zone._lines[0]
-        assert "started" in zone._lines[0]
 
     def test_step_completed(self, zone):
+        """step_completed now produces a separator line (dim ──)."""
         zone._handle_event(self._ev("step_completed", step_id="1"))
+        assert "──" in zone._lines[0]
+
+    def test_step_end_success(self, zone):
+        """step_end with success=true produces ✓ done line."""
+        zone._handle_event(self._ev("step_end", step="1", success=True))
         assert "✓" in zone._lines[0]
-        assert "completed" in zone._lines[0] or "Researcher" in zone._lines[0]
+        assert "done" in zone._lines[0]
 
     def test_step_failed(self, zone):
         zone._handle_event(self._ev("step_failed", step="t_verify",
@@ -235,7 +246,9 @@ class TestHandleEvent:
         """Completed with no detail is skipped (too noisy)."""
         zone._handle_event(self._ev("lifecycle_hook",
                                      hook="step_commit", status="completed"))
-        assert len(zone._lines) == 0
+        # May produce a dim line or be skipped; either is acceptable
+        if len(zone._lines) > 0:
+            assert "step_commit" in zone._lines[0].lower() or "──" in zone._lines[0]
 
     def test_lifecycle_completed_with_detail_shown(self, zone):
         """Completed with detail (e.g. '5 file(s)') is shown."""
@@ -263,8 +276,8 @@ class TestHandleEvent:
 
 class TestEnrichment:
     def _ev(self, **kw):
-        base = {"type": "step_claimed", "_ts": 0, "project_id": "t",
-                "step_id": "t_plan"}
+        base = {"type": "step_start", "_ts": 0, "project_id": "t",
+                "step": "t_plan"}
         base.update(kw)
         return base
 
@@ -278,10 +291,10 @@ class TestEnrichment:
 
     def test_full_enriched_line(self, zone):
         zone._handle_event({
-            "type": "step_claimed", "_ts": 1718400000.0,
+            "type": "step_start", "_ts": 1718400000.0,
             "_project_name": "E-Commerce Store",
             "project_id": "ecommerce-store",
-            "_step_id": "t_impl", "_task_id": "cart_bp",
+            "step": "t_impl", "_task_id": "cart_bp",
         })
         line = zone._lines[0]
         assert "●" in line

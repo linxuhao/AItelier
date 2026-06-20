@@ -1,0 +1,889 @@
+/* ══════════════════════════════════════════════════════════════════
+   AItelier Web Frontend — Custom Styles
+   ══════════════════════════════════════════════════════════════════
+   Complements Pico CSS classless framework (pico.fluid.classless).
+   Uses Pico CSS theme variables for dark/light mode compatibility.
+
+   Sections:
+     1.  CSS Custom Properties
+     2.  Responsive Breakpoints (as custom properties)
+     3.  App Bar (#app-bar)
+     4.  Layout — View Container + Notification Panel
+     5.  Chat View (#view-chat)
+     6.  Notification Panel (#notification-panel)
+     7.  Checkpoint Modal (#checkpoint-modal)
+     8.  Confirm Dialog (#confirm-dialog)
+     9.  Dashboard & Project Tables
+    10.  Utility Classes
+    11.  Template Element Styles
+    12.  Responsive Media Queries
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ════════════════════════════════════════════════════════════════════
+   1.  CSS Custom Properties
+   ════════════════════════════════════════════════════════════════════ */
+:root {
+  --ait-appbar-height: 3.5rem;
+  --ait-notif-width: 320px;
+  --ait-chat-max-width: 800px;
+  --ait-z-appbar: 100;
+  --ait-z-notif: 90;
+  --ait-z-reconnect: 200;
+  --ait-z-modal-backdrop: 300;
+
+  /* Notification event type colors */
+  --ait-color-step-start: #f0c040;
+  --ait-color-step-completed: #40c060;
+  --ait-color-checkpoint: #40b0e0;
+  --ait-color-error: #d04040;
+  --ait-color-info: #909090;
+
+  /* Chat bubble colors */
+  --ait-chat-user-bg: var(--primary, #0066cc);
+  --ait-chat-user-text: var(--primary-inverse, #ffffff);
+  --ait-chat-agent-bg: var(--surface, #f0f0f0);
+  --ait-chat-agent-text: var(--text, #333333);
+  --ait-chat-tool-color: var(--muted-color, #888888);
+  --ait-chat-error-bg: #fde8e8;
+  --ait-chat-error-border: #d04040;
+
+  /* Pico CSS spacing reference */
+  --pico-spacing: 1rem;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   2.  Responsive Breakpoints (as custom properties)
+   ════════════════════════════════════════════════════════════════════
+   These are documentation-only constants. Media queries use the
+   actual pixel values below.
+   --breakpoint-desktop: 1024px
+   --breakpoint-tablet:  768px
+   ════════════════════════════════════════════════════════════════════ */
+
+
+/* ════════════════════════════════════════════════════════════════════
+   3.  App Bar (#app-bar)
+   ════════════════════════════════════════════════════════════════════ */
+#app-bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--ait-z-appbar);
+  background: var(--card-background-color, var(--background-color, #ffffff));
+  border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
+  padding: 0 var(--pico-spacing);
+  min-height: var(--ait-appbar-height);
+  display: flex;
+  align-items: center;
+}
+
+#app-bar nav {
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#app-bar nav ul {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#app-bar nav ul:first-child {
+  flex-shrink: 0;
+}
+
+#app-bar nav ul:last-child {
+  flex-shrink: 0;
+}
+
+#app-bar strong {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+/* Connection status indicator */
+#connection-status {
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+#connection-status::before {
+  content: "";
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background-color: #40c060;
+  flex-shrink: 0;
+}
+
+/* Disconnected state — set via JS class toggle */
+#connection-status.disconnected::before {
+  background-color: #d04040;
+  animation: pulse-red 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-red {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(208, 64, 64, 0.5);
+  }
+  50% {
+    opacity: 0.6;
+    box-shadow: 0 0 0 6px rgba(208, 64, 64, 0);
+  }
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   4.  Layout — View Container + Notification Panel
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Desktop layout: main area + notification sidebar side by side */
+body {
+  display: grid;
+  grid-template-columns: 1fr var(--ait-notif-width);
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "appbar appbar"
+    "main   notif";
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+}
+
+#app-bar {
+  grid-area: appbar;
+}
+
+#view-container {
+  grid-area: main;
+  padding: var(--pico-spacing);
+  min-height: calc(100vh - var(--ait-appbar-height));
+  overflow-y: auto;
+}
+
+#notification-panel {
+  grid-area: notif;
+  width: var(--ait-notif-width);
+  border-left: 1px solid var(--muted-border-color, #e0e0e0);
+  overflow-y: auto;
+  max-height: calc(100vh - var(--ait-appbar-height));
+  padding: var(--pico-spacing);
+}
+
+/* View sections are hidden by default; JS shows the active one */
+#view-dashboard,
+#view-project,
+#view-chat {
+  display: none;
+}
+
+#view-dashboard.active,
+#view-project.active,
+#view-chat.active {
+  display: block;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   5.  Chat View (#view-chat)
+   ════════════════════════════════════════════════════════════════════ */
+
+#view-chat {
+  display: flex;
+  flex-direction: column;
+  max-width: var(--ait-chat-max-width);
+  margin: 0 auto;
+  height: 100%;
+}
+
+/* Messages container — scrollable, fills available space */
+#view-chat .chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--pico-spacing) 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* Individual message wrapper */
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Message content bubbles */
+.chat-msg .msg-content {
+  padding: 0.6rem 1rem;
+  border-radius: 0.75rem;
+  line-height: 1.5;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* User message bubble — right-aligned */
+.chat-user {
+  align-items: flex-end;
+}
+
+.chat-user .msg-content {
+  background-color: var(--ait-chat-user-bg);
+  color: var(--ait-chat-user-text);
+  border-bottom-right-radius: 0.25rem;
+  max-width: 70%;
+}
+
+/* Agent message bubble — left-aligned */
+.chat-agent {
+  align-items: flex-start;
+}
+
+.chat-agent .msg-content {
+  background-color: var(--ait-chat-agent-bg);
+  color: var(--ait-chat-agent-text);
+  border-bottom-left-radius: 0.25rem;
+  max-width: 85%;
+}
+
+/* System message — centered, dim */
+.chat-system {
+  align-items: center;
+}
+
+.chat-system .msg-content {
+  background-color: transparent;
+  color: var(--muted-color, #888);
+  font-size: 0.85rem;
+  font-style: italic;
+  text-align: center;
+  max-width: 100%;
+}
+
+/* Tool call indicator — small italic, dim, left-indented */
+.chat-tool {
+  align-items: flex-start;
+}
+
+.chat-tool .msg-content {
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--ait-chat-tool-color);
+  background-color: transparent;
+  padding: 0.25rem 0.5rem;
+  margin-left: 1rem;
+  max-width: 90%;
+}
+
+/* Error bubble — red-tinted background */
+.chat-error {
+  align-items: flex-start;
+}
+
+.chat-error .msg-content {
+  background-color: var(--ait-chat-error-bg);
+  border: 1px solid var(--ait-chat-error-border);
+  color: var(--ait-chat-error-border);
+  max-width: 85%;
+  border-radius: 0.5rem;
+}
+
+/* Markdown rendered content within agent bubbles */
+.chat-agent .msg-content pre,
+.chat-agent .msg-content code {
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.85em;
+}
+
+.chat-agent .msg-content pre {
+  background-color: var(--code-background-color, #f5f5f5);
+  border-radius: 0.4rem;
+  padding: 0.75rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+
+.chat-agent .msg-content code {
+  background-color: var(--code-background-color, #f5f5f5);
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.25rem;
+}
+
+.chat-agent .msg-content pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+.chat-agent .msg-content ul,
+.chat-agent .msg-content ol {
+  padding-left: 1.5rem;
+  margin: 0.5rem 0;
+}
+
+.chat-agent .msg-content a {
+  text-decoration: underline;
+}
+
+/* Chat input area — sticky bottom, flex row */
+#view-chat .chat-input-area {
+  display: flex;
+  flex-direction: row;
+  gap: 0.5rem;
+  padding: var(--pico-spacing) 0;
+  position: sticky;
+  bottom: 0;
+  background: var(--card-background-color, var(--background-color, #ffffff));
+  border-top: 1px solid var(--muted-border-color, #e0e0e0);
+}
+
+#view-chat .chat-input-area input {
+  flex: 1;
+  min-width: 0;
+}
+
+#view-chat .chat-input-area button {
+  flex-shrink: 0;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   6.  Notification Panel (#notification-panel)
+   ════════════════════════════════════════════════════════════════════ */
+
+#notification-panel {
+  font-size: 0.8rem;
+}
+
+#notification-panel .notif-header {
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
+}
+
+/* Each notification entry */
+.notification-entry {
+  display: flex;
+  flex-direction: row;
+  gap: 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border-left: 3px solid var(--ait-color-info);
+  margin-bottom: 0.25rem;
+  line-height: 1.4;
+  font-size: 0.78rem;
+}
+
+/* Monospace timestamps */
+.notification-entry .notif-time {
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  color: var(--muted-color, #888);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.notification-entry .notif-text {
+  flex: 1;
+  min-width: 0;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Event type colors via CSS class on .notification-entry */
+.notification-entry.type-step_start {
+  border-left-color: var(--ait-color-step-start);
+}
+
+.notification-entry.type-step_completed,
+.notification-entry.type-step_done {
+  border-left-color: var(--ait-color-step-completed);
+}
+
+.notification-entry.type-checkpoint_reached,
+.notification-entry.type-checkpoint_paused {
+  border-left-color: var(--ait-color-checkpoint);
+}
+
+.notification-entry.type-error,
+.notification-entry.type-step_failed,
+.notification-entry.type-step_timeout,
+.notification-entry.type-project_failed,
+.notification-entry.type-run_failed {
+  border-left-color: var(--ait-color-error);
+}
+
+.notification-entry.type-info,
+.notification-entry.type-agent_message {
+  border-left-color: var(--ait-color-info);
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   7.  Checkpoint Modal (#checkpoint-modal)
+   ════════════════════════════════════════════════════════════════════ */
+
+#checkpoint-modal {
+  max-width: 70vw;
+  max-height: 80vh;
+  padding: 0;
+  border: none;
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+#checkpoint-modal::backdrop {
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+#checkpoint-modal article {
+  margin: 0;
+  padding: var(--pico-spacing);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+#checkpoint-modal article header {
+  flex-shrink: 0;
+  padding-bottom: var(--pico-spacing);
+}
+
+/* Content area — scrollable */
+#checkpoint-modal .cp-content {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 55vh;
+  padding: 0 0 var(--pico-spacing) 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* Button row in modal footer */
+#checkpoint-modal article footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 0.75rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding-top: var(--pico-spacing);
+  border-top: 1px solid var(--muted-border-color, #e0e0e0);
+}
+
+#checkpoint-modal article footer button {
+  flex-shrink: 0;
+}
+
+/* Approve button — green tint */
+#cp-approve {
+  --button-background-color: #2ea44f;
+  --button-border-color: #2ea44f;
+  --button-color: #ffffff;
+}
+
+/* Reject button — red tint */
+#cp-reject {
+  --button-background-color: #d04040;
+  --button-border-color: #d04040;
+  --button-color: #ffffff;
+}
+
+/* Feedback textarea — full width */
+#cp-feedback {
+  width: 100%;
+  min-height: 4rem;
+  margin-top: 0.5rem;
+}
+
+/* Disabled button state (prevent double-click) */
+#checkpoint-modal button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   8.  Confirm Dialog (#confirm-dialog)
+   ════════════════════════════════════════════════════════════════════ */
+
+#confirm-dialog {
+  max-width: 32rem;
+  max-height: 50vh;
+  padding: 0;
+  border: none;
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+#confirm-dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+#confirm-dialog article {
+  margin: 0;
+  padding: var(--pico-spacing);
+}
+
+#confirm-dialog article footer {
+  display: flex;
+  flex-direction: row;
+  gap: 0.75rem;
+  justify-content: flex-end;
+  padding-top: var(--pico-spacing);
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   9.  Dashboard & Project Tables
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Hover highlight on rows */
+#view-dashboard table tbody tr:hover,
+#view-project table tbody tr:hover {
+  background-color: var(--table-row-hover-background-color, rgba(0, 0, 0, 0.04));
+  cursor: pointer;
+}
+
+/* Status badges — inline colored dots + text */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.status-badge::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Truncated text with ellipsis for long prompts/names */
+.task-prompt,
+.project-link {
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Column widths for tables */
+.col-idx {
+  width: 3rem;
+  text-align: center;
+  color: var(--muted-color, #888);
+}
+
+.col-updated {
+  width: 10rem;
+  font-size: 0.85rem;
+  color: var(--muted-color, #888);
+}
+
+.task-progress {
+  font-size: 0.85rem;
+}
+
+.task-id {
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.85rem;
+}
+
+.task-step {
+  font-size: 0.85rem;
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   10.  Utility Classes
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Status ok — green */
+.status-ok {
+  color: #2ea44f;
+}
+
+.status-ok.status-badge::before {
+  background-color: #2ea44f;
+}
+
+/* Status warn — yellow/amber */
+.status-warn {
+  color: #d49b1a;
+}
+
+.status-warn.status-badge::before {
+  background-color: #d49b1a;
+}
+
+/* Status err — red */
+.status-err {
+  color: #d04040;
+}
+
+.status-err.status-badge::before {
+  background-color: #d04040;
+}
+
+/* Hidden — toggled by JS */
+.hidden {
+  display: none !important;
+}
+
+/* Reconnect banner — fixed top, yellow bg */
+.reconnect-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--ait-z-reconnect);
+  background-color: #fff3cd;
+  color: #856404;
+  text-align: center;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #ffeeba;
+  animation: slide-down 0.3s ease-out;
+}
+
+@keyframes slide-down {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+/* Empty state — centered, dim, padding */
+.empty-state {
+  text-align: center;
+  color: var(--muted-color, #888);
+  padding: 3rem 1rem;
+  font-style: italic;
+}
+
+/* Loading spinner inline */
+.spinner-inline {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--muted-border-color, #e0e0e0);
+  border-top-color: var(--primary, #0066cc);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   11.  Template Element Styles
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Workspace file tree items */
+.workspace-file-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0;
+  cursor: pointer;
+  border-radius: 0.25rem;
+}
+
+.workspace-file-item:hover {
+  background-color: var(--table-row-hover-background-color, rgba(0, 0, 0, 0.04));
+}
+
+.workspace-file-item .file-icon {
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
+.workspace-file-item .file-name {
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   12.  Responsive Media Queries
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── Tablet layout (768px – 1023px) ─────────────────────────────── */
+@media (max-width: 1023px) and (min-width: 768px) {
+  body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas:
+      "appbar"
+      "main"
+      "notif";
+  }
+
+  #notification-panel {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--muted-border-color, #e0e0e0);
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 0.5rem var(--pico-spacing);
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: flex-start;
+  }
+
+  #notification-panel .notif-header {
+    width: 100%;
+  }
+
+  #notification-panel .notification-entry {
+    flex: 0 0 auto;
+    max-width: 45%;
+    font-size: 0.75rem;
+    margin-bottom: 0;
+  }
+
+  #view-container {
+    min-height: auto;
+    padding: 0.75rem var(--pico-spacing);
+  }
+}
+
+/* ── Mobile layout (< 768px) ────────────────────────────────────── */
+@media (max-width: 767px) {
+  body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas:
+      "appbar"
+      "main"
+      "notif";
+  }
+
+  #app-bar nav ul {
+    gap: 0.5rem;
+  }
+
+  #app-bar nav ul li {
+    font-size: 0.9rem;
+  }
+
+  #notification-panel {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--muted-border-color, #e0e0e0);
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 0.5rem var(--pico-spacing);
+  }
+
+  #view-container {
+    min-height: auto;
+    padding: 0.5rem var(--pico-spacing);
+  }
+
+  /* Stack table cells as cards on mobile */
+  #view-dashboard table,
+  #view-project table,
+  #view-dashboard table tbody,
+  #view-project table tbody,
+  #view-dashboard table tr,
+  #view-project table tr {
+    display: block;
+  }
+
+  #view-dashboard table thead,
+  #view-project table thead {
+    display: none;
+  }
+
+  #view-dashboard table tr,
+  #view-project table tr {
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--muted-border-color, #e0e0e0);
+    border-radius: 0.4rem;
+    padding: 0.5rem;
+  }
+
+  #view-dashboard table td,
+  #view-project table td {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+    border: none;
+  }
+
+  #view-dashboard table td::before,
+  #view-project table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--muted-color, #888);
+    flex-shrink: 0;
+    margin-right: 0.5rem;
+  }
+
+  /* Remove column-specific widths on mobile */
+  .col-idx,
+  .col-updated {
+    width: auto;
+  }
+
+  /* Chat bubbles full width on mobile */
+  .chat-user .msg-content {
+    max-width: 85%;
+  }
+
+  .chat-agent .msg-content {
+    max-width: 95%;
+  }
+
+  /* Checkpoint modal full-width on mobile */
+  #checkpoint-modal {
+    max-width: 95vw;
+  }
+
+  #checkpoint-modal article footer {
+    flex-direction: column;
+  }
+
+  #checkpoint-modal article footer button {
+    width: 100%;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Pico CSS override: ensure main doesn't add extra padding in grid
+   ══════════════════════════════════════════════════════════════════ */
+body > main {
+  padding: 0;
+  margin: 0;
+}

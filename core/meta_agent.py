@@ -473,6 +473,29 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_config_run",
+            "description": "Start a run of a registered skillflow config BY NAME (any config "
+                           "other than a DPE software build — use start_new_project for apps). "
+                           "Use when the user asks to run a specific registered pipeline/config. "
+                           "The run appears in the dashboards like any other. Returns the run id "
+                           "(and, for butler-driven configs, the first checkpoint to relay).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string",
+                                    "description": "The registered config name to run."},
+                    "seed_text": {"type": "string",
+                                  "description": "Seed input written to the config's first-step input file."},
+                    "name": {"type": "string",
+                             "description": "Optional human label for this run."},
+                },
+                "required": ["config_name"],
+            },
+        },
+    },
 ]
 
 
@@ -1726,24 +1749,18 @@ class MetaAgent:
         pid = "convert-" + self._slugify(name)
         sf = get_skillflow()
 
-        # Project + workspace, kept gated (meta_state set) so the DPE scheduler
-        # never picks this convert project up as a build.
-        if not self.db.get_project(pid):
-            self.db.ensure_project(pid, name=name, owner_email=self.owner_email,
-                                   repo_type="new")
-        self.db.set_project_meta_state(pid, "converting")
-        self.ws.setup_workspace(pid, repo_type="new")
-
-        # Seed the converter's input: analyze_skill reads skill_description.md via
-        # {config: skill_converter, output: ...}, which scans config subdirs.
-        seed_dir = sf._workspace.get_config_path(pid, "skill_converter") / "_seed"
-        seed_dir.mkdir(parents=True, exist_ok=True)
-        (seed_dir / "skill_description.md").write_text(description, encoding="utf-8")
-
-        run_id = sf.get_or_create_run("skill_converter", pid, {"project_id": pid})
-        run = sf.get_run(run_id)
-        if run and run["status"] == "pending":
-            sf.start_run(run_id)
+        # Launch the skill_converter config via the generic launcher (ensures the
+        # run row tagged config_name='skill_converter', seeds skill_description.md,
+        # creates + starts the run). skill_converter is butler-driven
+        # (scheduler_owned=false), so the polling scheduler never grabs it.
+        from core.run_launcher import start_config_run
+        launch = start_config_run(
+            self.db, self.ws, "skill_converter", pid,
+            seed_text=description, name=name, owner_email=self.owner_email,
+        )
+        if launch.get("status") == "error":
+            return {"error": launch.get("message")}
+        run_id = launch["run_id"]
         sid = getattr(self, "session_id", None)
         if sid:
             try:
@@ -1763,6 +1780,45 @@ class MetaAgent:
                     result["generated_pipeline_yaml"] = p.read_text(encoding="utf-8")[:4000]
             except Exception:
                 pass
+        return result
+
+    async def _tool_start_config_run(self, args: dict) -> dict:
+        """Start a run of any registered skillflow config by name. Scheduler-owned
+        configs are driven by the poller; butler-driven configs are driven inline
+        and their first checkpoint is relayed into the chat."""
+        from api.dependencies import get_config_registry
+        from core.run_launcher import start_config_run, generate_run_id
+
+        config_name = (args.get("config_name") or "").strip()
+        if not config_name:
+            return {"error": "config_name is required."}
+        manifest = get_config_registry().get(config_name)
+        if not manifest:
+            avail = ", ".join(m.config_name for m in get_config_registry().list())
+            return {"error": f"Unknown config '{config_name}'. Available: {avail}"}
+
+        pid = generate_run_id(config_name)
+        result = start_config_run(
+            self.db, self.ws, config_name, pid,
+            seed_text=args.get("seed_text"),
+            name=args.get("name") or config_name,
+            owner_email=self.owner_email,
+        )
+        if result.get("status") == "error":
+            return {"error": result.get("message")}
+        run_id = result.get("run_id")
+        sid = getattr(self, "session_id", None)
+        if sid and run_id:
+            try:
+                self.db.link_run_to_session(sid, run_id)
+            except Exception:
+                pass
+        # Butler-driven config: drive to the first checkpoint and relay it.
+        if run_id and not manifest.scheduler_owned:
+            driven = await self._run_pipeline_until_checkpoint(run_id)
+            driven["project_id"] = pid
+            driven["config_name"] = config_name
+            return driven
         return result
 
 
@@ -1793,4 +1849,5 @@ _TOOL_HANDLERS = {
     "reject_checkpoint": MetaAgent._tool_reject_checkpoint,
     "get_pipeline_status": MetaAgent._tool_get_pipeline_status,
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
+    "start_config_run": MetaAgent._tool_start_config_run,
 }

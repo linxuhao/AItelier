@@ -59,7 +59,10 @@ class UserSchedulerManager:
         for email in list(self._last_seen.keys()):
             last = self._last_seen[email]
             idle_seconds = (now - last).total_seconds()
-            has_work = db.has_incomplete_tasks_for_owner(email)
+            # "Work" = incomplete DPE tasks OR any active run (covers task-less
+            # configs whose runs have no tasks rows).
+            has_work = (db.has_incomplete_tasks_for_owner(email)
+                        or db.has_active_runs_for_owner(email))
             has_scheduler = email in self._schedulers
 
             # Start scheduler for active user with work but no scheduler

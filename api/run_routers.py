@@ -4,11 +4,79 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional
-from api.dependencies import get_skillflow, get_db_manager
+from pydantic import BaseModel
+from api.dependencies import (
+    get_skillflow, get_db_manager, get_config_registry, owner_filter,
+    get_workspace_manager,
+)
 from api.auth import CurrentUser, get_optional_user
 from core.db_manager import DBManager
+from core.workspace_manager import WorkspaceManager
 
 router = APIRouter(prefix="/api", tags=["Runs & Traces"])
+
+
+# ── Start a run of any config ─────────────────────────────────────────
+
+class StartRunRequest(BaseModel):
+    config_name: str
+    project_id: Optional[str] = None     # generated when omitted
+    name: Optional[str] = None
+    seed_text: Optional[str] = None      # written to the config's seed_file
+    priority: int = 0
+
+
+@router.post("/runs", status_code=201)
+def start_run(
+    body: StartRunRequest,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+    registry=Depends(get_config_registry),
+):
+    """Start a run of any registered config (generic launch path)."""
+    if registry.get(body.config_name) is None:
+        raise HTTPException(404, f"Config '{body.config_name}' not found")
+    from core.run_launcher import start_config_run, generate_run_id
+    owner = user.email if user else "cli@local"
+    project_id = body.project_id or generate_run_id(body.config_name)
+    result = start_config_run(
+        db, ws, body.config_name, project_id,
+        seed_text=body.seed_text, name=body.name,
+        owner_email=owner, priority=body.priority,
+    )
+    if result.get("status") == "error":
+        raise HTTPException(400, result.get("message", "failed to start run"))
+    return result
+
+
+# ── Run listing (all configs) ────────────────────────────────────────
+
+@router.get("/runs")
+def list_all_runs(
+    config_name: Optional[str] = Query(None, description="Filter by config name"),
+    status: Optional[str] = Query(None, description="Filter by status prefix (e.g. running)"),
+    request: Request = None,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    registry=Depends(get_config_registry),
+):
+    """List config runs across all configs (newest first), with config label and
+    step labels attached so any config renders generically."""
+    owner = owner_filter(user, request)
+    rows = db.list_projects_with_stats(owner_email=owner)
+    out = []
+    for r in rows:
+        cfg = r.get("config_name") or "dpe_default_v2"
+        if config_name and cfg != config_name:
+            continue
+        if status and (r.get("status") or "").split(":")[0] != status:
+            continue
+        m = registry.get(cfg)
+        r["config_label"] = m.label if m else cfg
+        r["has_task_loop"] = bool(m and m.has_task_loop)
+        out.append(r)
+    return {"runs": out}
 
 
 # ── Run listing (per project) ────────────────────────────────────────
@@ -56,12 +124,20 @@ def list_project_runs(
 def get_run_detail(
     run_id: str,
     user: CurrentUser | None = Depends(get_optional_user),
+    registry=Depends(get_config_registry),
 ):
-    """Get full run detail including all step instances."""
+    """Get full run detail including all step instances + config manifest."""
     sf = get_skillflow()
     run = sf.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+
+    # Attach config identity + manifest so the client can render labels/checkpoints
+    # for any config without hardcoding the DPE step set.
+    cfg = run.get("graph_name") or "dpe_default_v2"
+    run["config_name"] = cfg
+    manifest = registry.get(cfg)
+    run["manifest"] = manifest.to_dict() if manifest else None
 
     steps = sf.get_steps(run_id)
     run["steps"] = [
@@ -115,3 +191,59 @@ def get_run_trace(
         "count": len(traces),
         "traces": traces,
     }
+
+
+# ── Run-id-keyed checkpoints ──────────────────────────────────────────
+# Config-agnostic checkpoint routes keyed by run_id. They resolve run_id →
+# project_id (the run key) and delegate to the canonical project-keyed handlers
+# in meta_routers, so there is ONE implementation behind two routes.
+
+from api.meta_routers import (  # noqa: E402  (avoids a module-load cycle)
+    CheckpointResponse,
+    CheckpointApprovalRequest,
+    CheckpointRejectionRequest,
+)
+
+
+def _run_to_project_id(run_id: str) -> str:
+    sf = get_skillflow()
+    run = sf.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run["project_id"]
+
+
+@router.get("/runs/{run_id}/checkpoint", response_model=CheckpointResponse)
+def get_run_checkpoint(
+    run_id: str,
+    request: Request,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+):
+    """Pending checkpoint for a run (delegates to the project-keyed handler)."""
+    from api.meta_routers import get_pending_checkpoint
+    return get_pending_checkpoint(_run_to_project_id(run_id), request, user, db)
+
+
+@router.post("/runs/{run_id}/checkpoint/approve")
+def approve_run_checkpoint(
+    run_id: str,
+    body: CheckpointApprovalRequest,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+):
+    """Approve a run's checkpoint (delegates to the project-keyed handler)."""
+    from api.meta_routers import approve_checkpoint
+    return approve_checkpoint(_run_to_project_id(run_id), body, user, db)
+
+
+@router.post("/runs/{run_id}/checkpoint/reject")
+def reject_run_checkpoint(
+    run_id: str,
+    body: CheckpointRejectionRequest,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+):
+    """Reject a run's checkpoint (delegates to the project-keyed handler)."""
+    from api.meta_routers import reject_checkpoint
+    return reject_checkpoint(_run_to_project_id(run_id), body, user, db)

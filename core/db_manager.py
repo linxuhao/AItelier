@@ -35,19 +35,45 @@ class DBManager:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA foreign_keys = ON;")
 
-            # ── Create tables in dependency order: projects → tasks → io_logs → subtasks ──
+            # Structural migrations run FIRST so a legacy project-based DB is
+            # renamed to the run-based schema before the CREATE IF NOT EXISTS
+            # below — otherwise they would create an empty parallel `runs` table
+            # alongside the real (still-named `projects`) one.
+            self._apply_versioned_migrations(conn)
 
+            # ── Create tables (current schema) in dependency order ──
+            # `runs` — one row per skillflow config run. DPE "projects" are simply
+            # runs of the dpe_default_v2 config. project_id stays the primary key
+            # and the cross-DB join key into skillflow_runs.project_id.
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS projects (
+                CREATE TABLE IF NOT EXISTS runs (
                     project_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
+                    config_name TEXT NOT NULL DEFAULT 'dpe_default_v2',
                     status TEXT NOT NULL DEFAULT 'planning',
-                    current_project_step TEXT DEFAULT '1',
-                    completed_project_steps TEXT DEFAULT '[]',
-                    brief TEXT DEFAULT NULL,
+                    current_project_step TEXT DEFAULT NULL,
                     priority INTEGER DEFAULT 0,
+                    owner_email TEXT DEFAULT 'cli@local',
+                    meta_state TEXT DEFAULT NULL,
+                    repo_type TEXT DEFAULT 'new',
+                    repo_path TEXT DEFAULT NULL,
+                    repo_url TEXT DEFAULT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_config ON runs(config_name)")
+            # DPE-specific run state, extracted out of `runs` so the run row stays
+            # config-agnostic. 1:1 with runs(project_id).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dpe_run_state (
+                    run_key TEXT PRIMARY KEY,
+                    brief TEXT DEFAULT NULL,
+                    completed_project_steps TEXT DEFAULT '[]',
+                    sota_version INTEGER DEFAULT 1,
+                    sota_updated_at DATETIME DEFAULT NULL,
+                    tasks_since_arch_update INTEGER DEFAULT 0,
+                    FOREIGN KEY (run_key) REFERENCES runs(project_id)
                 )
             """)
             conn.execute("""
@@ -69,7 +95,7 @@ class DBManager:
                     retry_count INTEGER DEFAULT 0,
                     max_retries INTEGER DEFAULT 3,
                     last_error TEXT DEFAULT NULL,
-                    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+                    FOREIGN KEY (project_id) REFERENCES runs(project_id)
                 )
             """)
             conn.execute("""
@@ -128,25 +154,15 @@ class DBManager:
                     FOREIGN KEY (session_id) REFERENCES sessions(id)
                 )
             """)
-            # Idempotent migration — add repo columns to projects
-            repo_migrations = [
-                "ALTER TABLE projects ADD COLUMN repo_type TEXT DEFAULT 'new'",
-                "ALTER TABLE projects ADD COLUMN repo_path TEXT DEFAULT NULL",
-                "ALTER TABLE projects ADD COLUMN repo_url TEXT DEFAULT NULL",
-            ]
-            for sql in repo_migrations:
-                try:
-                    conn.execute(sql)
-                except sqlite3.OperationalError:
-                    pass  # column already exists
-
             # Sentinel CLI user
             conn.execute(
                 "INSERT OR IGNORE INTO users (email, display_name, source) VALUES (?, ?, ?)",
                 ("cli@local", "CLI User", "cli"),
             )
 
-            # Idempotent migration — add columns to pre-existing tables
+            # Idempotent column adds for pre-existing tables that predate a
+            # column. DPE-state columns (brief / completed_project_steps / sota_* /
+            # tasks_since_arch_update) are NOT here — they live in dpe_run_state.
             migrations = [
                 "ALTER TABLE tasks ADD COLUMN current_step TEXT DEFAULT '1'",
                 "ALTER TABLE tasks ADD COLUMN completed_steps TEXT DEFAULT '[]'",
@@ -158,16 +174,15 @@ class DBManager:
                 "ALTER TABLE tasks ADD COLUMN owner_email TEXT DEFAULT 'cli@local'",
                 "ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0",
                 "ALTER TABLE tasks ADD COLUMN max_retries INTEGER DEFAULT 3",
-                "ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'planning'",
-                "ALTER TABLE projects ADD COLUMN current_project_step TEXT DEFAULT '1'",
-                "ALTER TABLE projects ADD COLUMN completed_project_steps TEXT DEFAULT '[]'",
-                "ALTER TABLE projects ADD COLUMN brief TEXT DEFAULT NULL",
-                "ALTER TABLE projects ADD COLUMN priority INTEGER DEFAULT 0",
-                "ALTER TABLE projects ADD COLUMN owner_email TEXT DEFAULT 'cli@local'",
-                "ALTER TABLE projects ADD COLUMN meta_state TEXT DEFAULT NULL",
-                "ALTER TABLE projects ADD COLUMN sota_version INTEGER DEFAULT 1",
-                "ALTER TABLE projects ADD COLUMN sota_updated_at DATETIME DEFAULT NULL",
-                "ALTER TABLE projects ADD COLUMN tasks_since_arch_update INTEGER DEFAULT 0",
+                "ALTER TABLE runs ADD COLUMN config_name TEXT NOT NULL DEFAULT 'dpe_default_v2'",
+                "ALTER TABLE runs ADD COLUMN status TEXT NOT NULL DEFAULT 'planning'",
+                "ALTER TABLE runs ADD COLUMN current_project_step TEXT DEFAULT NULL",
+                "ALTER TABLE runs ADD COLUMN priority INTEGER DEFAULT 0",
+                "ALTER TABLE runs ADD COLUMN owner_email TEXT DEFAULT 'cli@local'",
+                "ALTER TABLE runs ADD COLUMN meta_state TEXT DEFAULT NULL",
+                "ALTER TABLE runs ADD COLUMN repo_type TEXT DEFAULT 'new'",
+                "ALTER TABLE runs ADD COLUMN repo_path TEXT DEFAULT NULL",
+                "ALTER TABLE runs ADD COLUMN repo_url TEXT DEFAULT NULL",
             ]
             for sql in migrations:
                 try:
@@ -178,14 +193,14 @@ class DBManager:
             # Migrate mid-flight task steps from old sequence to new sequence
             self._migrate_task_steps(conn)
 
-            # Migrate existing projects that predate the status column
+            # Migrate existing runs that predate the status column
             conn.execute(
-                "UPDATE projects SET status = 'executing' "
+                "UPDATE runs SET status = 'executing' "
                 "WHERE status = 'planning' AND project_id IN "
                 "(SELECT DISTINCT project_id FROM tasks)"
             )
 
-            # Idempotent migration — add FK: tasks.project_id → projects.project_id
+            # Idempotent migration — add FK: tasks.project_id → runs(project_id)
             # SQLite can't ALTER ADD CONSTRAINT, so recreate the table if FK is missing.
             self._migrate_tasks_fk(conn)
 
@@ -208,27 +223,154 @@ class DBManager:
 
             conn.commit()
 
+    # ── Versioned migration runner ─────────────────────────────────────
+    #
+    # The CREATE TABLE IF NOT EXISTS / ALTER ADD COLUMN block in _init_db is
+    # idempotent and represents the legacy schema (version 0). Structural
+    # migrations that CANNOT be expressed idempotently (RENAME, table rebuild,
+    # column drop) are registered here as numbered steps, recorded in the
+    # schema_migrations table, and applied exactly once. Each entry is
+    # (version:int, name:str, fn(self, conn)). Append new migrations in order.
+    _VERSIONED_MIGRATIONS: list = []
+
+    def _apply_versioned_migrations(self, conn):
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        applied = {
+            r["version"]
+            for r in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        # Record the legacy idempotent schema as version 0.
+        if 0 not in applied:
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (0)")
+            applied.add(0)
+
+        pending = [m for m in self._VERSIONED_MIGRATIONS if m[0] not in applied]
+        if not pending:
+            return
+        # Back up once before any structural migration — but only for a DB that
+        # already has content (skip brand-new databases, which have nothing to
+        # lose and would otherwise litter empty .bak files).
+        has_content = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND name NOT IN ('schema_migrations', 'sqlite_sequence')"
+        ).fetchone()[0]
+        if has_content:
+            self._backup_db(f"premigration-v{pending[0][0]}")
+        for version, _name, fn in pending:
+            fn(self, conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?)", (version,)
+            )
+
+    def _backup_db(self, suffix: str) -> str:
+        """Consistent online backup of the live DB (WAL-safe) to a sibling file.
+
+        Uses a fresh source connection so the backup does not depend on the
+        in-flight migration transaction state.
+        """
+        backup_path = f"{self.db_path}.{suffix}.bak"
+        src = sqlite3.connect(self.db_path)
+        dest = sqlite3.connect(backup_path)
+        try:
+            src.backup(dest)
+        finally:
+            dest.close()
+            src.close()
+        return backup_path
+
+    # DPE-specific columns that move from the run row into dpe_run_state.
+    _DPE_STATE_COLUMNS = (
+        "brief", "completed_project_steps",
+        "sota_version", "sota_updated_at", "tasks_since_arch_update",
+    )
+
+    def _mig_001_projects_to_runs(self, conn):
+        """Schema v1 — generalize the project-based store into the run-based one.
+
+        Renames ``projects`` → ``runs``, tags every existing row with
+        ``config_name='dpe_default_v2'``, and extracts the DPE-only columns into a
+        separate ``dpe_run_state`` table so the run row is config-agnostic.
+
+        Re-entrant: each step is guarded so a partial/interrupted migration
+        completes cleanly on the next open. A brand-new DB (no ``projects`` table)
+        is a no-op — the CREATE block in _init_db builds the current schema.
+        """
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "projects" in tables and "runs" not in tables:
+            conn.execute("ALTER TABLE projects RENAME TO runs")  # FK refs auto-update
+            tables.discard("projects")
+            tables.add("runs")
+        if "runs" not in tables:
+            return  # fresh DB — nothing to transform
+
+        runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        if "config_name" not in runs_cols:
+            conn.execute(
+                "ALTER TABLE runs ADD COLUMN config_name TEXT NOT NULL "
+                "DEFAULT 'dpe_default_v2'"
+            )
+            runs_cols.add("config_name")
+        conn.execute(
+            "UPDATE runs SET config_name = 'dpe_default_v2' "
+            "WHERE config_name IS NULL OR config_name = ''"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_config ON runs(config_name)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dpe_run_state (
+                run_key TEXT PRIMARY KEY,
+                brief TEXT DEFAULT NULL,
+                completed_project_steps TEXT DEFAULT '[]',
+                sota_version INTEGER DEFAULT 1,
+                sota_updated_at DATETIME DEFAULT NULL,
+                tasks_since_arch_update INTEGER DEFAULT 0,
+                FOREIGN KEY (run_key) REFERENCES runs(project_id)
+            )
+        """)
+        dpe_cols = [c for c in self._DPE_STATE_COLUMNS if c in runs_cols]
+        if dpe_cols:
+            sel = ", ".join(["project_id"] + dpe_cols)
+            ins = ", ".join(["run_key"] + dpe_cols)
+            conn.execute(
+                f"INSERT OR IGNORE INTO dpe_run_state ({ins}) SELECT {sel} FROM runs"
+            )
+            for c in dpe_cols:
+                try:
+                    conn.execute(f"ALTER TABLE runs DROP COLUMN {c}")
+                except sqlite3.OperationalError:
+                    pass
+
     def _migrate_tasks_fk(self, conn):
         """
-        Migrate tasks table to add FOREIGN KEY (project_id) REFERENCES projects(project_id).
+        Migrate tasks table to add FOREIGN KEY (project_id) REFERENCES runs(project_id).
         SQLite doesn't support ALTER TABLE ADD CONSTRAINT, so we must recreate the table.
         This is idempotent: it checks whether the FK already exists first.
         """
-        # Check if FK already exists
+        # Check if FK already exists (points at runs; SQLite auto-updates the
+        # reference name when the projects→runs rename migration runs).
         fk_rows = conn.execute("PRAGMA foreign_key_list(tasks)").fetchall()
         has_project_fk = any(
-            row["table"] == "projects" and row["from"] == "project_id"
+            row["table"] == "runs" and row["from"] == "project_id"
             for row in fk_rows
         )
         if has_project_fk:
             return  # already migrated
 
-        # Delete orphan tasks left behind by non-cascade project deletes.
-        # Re-creating empty project shells for them is wrong — the project
+        # Delete orphan tasks left behind by non-cascade run deletes.
+        # Re-creating empty run shells for them is wrong — the run
         # was deleted intentionally and has no brief/settings/context.
         deleted = conn.execute(
             "DELETE FROM tasks "
-            "WHERE project_id NOT IN (SELECT project_id FROM projects)"
+            "WHERE project_id NOT IN (SELECT project_id FROM runs)"
         )
         if deleted.rowcount:
             import logging
@@ -257,7 +399,7 @@ class DBManager:
                 owner_email TEXT DEFAULT 'cli@local',
                 retry_count INTEGER DEFAULT 0,
                 max_retries INTEGER DEFAULT 3,
-                FOREIGN KEY (project_id) REFERENCES projects(project_id)
+                FOREIGN KEY (project_id) REFERENCES runs(project_id)
             )
         """)
         # Ensure _tasks_old has all new columns before copy
@@ -474,43 +616,54 @@ class DBManager:
 
     # ── Project management methods ──
 
+    # Columns surfaced from dpe_run_state on the run dict (with safe defaults)
+    # so consumers that read project["brief"]/["completed_project_steps"] keep
+    # working after the DPE-state extraction.
+    _RUN_SELECT = (
+        "SELECT r.*, "
+        "d.brief AS brief, "
+        "COALESCE(d.completed_project_steps, '[]') AS completed_project_steps, "
+        "COALESCE(d.sota_version, 1) AS sota_version, "
+        "d.sota_updated_at AS sota_updated_at, "
+        "COALESCE(d.tasks_since_arch_update, 0) AS tasks_since_arch_update "
+        "FROM runs r LEFT JOIN dpe_run_state d ON d.run_key = r.project_id"
+    )
+
     def ensure_project(self, project_id: str, name: str = None, owner_email: str = "cli@local",
-                       repo_type: str = "new", repo_path: str = None, repo_url: str = None) -> dict:
+                       repo_type: str = "new", repo_path: str = None, repo_url: str = None,
+                       config_name: str = "dpe_default_v2") -> dict:
         """
-        Idempotently create a project row if it does not exist.
-        Returns the project dict (existing or newly created).
+        Idempotently create a run row if it does not exist.
+        Returns the run dict (existing or newly created).
         """
         if name is None:
             name = project_id.replace("-", " ").replace("_", " ").title()
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+                "SELECT project_id FROM runs WHERE project_id = ?", (project_id,)
             ).fetchone()
-            if row:
-                return dict(row)
-            conn.execute(
-                "INSERT INTO projects (project_id, name, owner_email, repo_type, repo_path, repo_url) VALUES (?, ?, ?, ?, ?, ?)",
-                (project_id, name, owner_email, repo_type, repo_path, repo_url)
-            )
-            conn.commit()
-            row = conn.execute(
-                "SELECT * FROM projects WHERE project_id = ?", (project_id,)
-            ).fetchone()
-            return dict(row)
+            if not row:
+                conn.execute(
+                    "INSERT INTO runs (project_id, name, config_name, owner_email, "
+                    "repo_type, repo_path, repo_url) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (project_id, name, config_name, owner_email, repo_type, repo_path, repo_url)
+                )
+                conn.commit()
+        return self.get_project(project_id)
 
     def get_project(self, project_id: str) -> dict | None:
-        """Return a single project row, or None."""
+        """Return a single run row (with DPE state joined), or None."""
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT * FROM projects WHERE project_id = ?", (project_id,)
+                f"{self._RUN_SELECT} WHERE r.project_id = ?", (project_id,)
             ).fetchone()
             return dict(row) if row else None
 
     def get_repo_info(self, project_id: str) -> dict:
-        """Return repo_type, repo_path, repo_url for a project."""
+        """Return repo_type, repo_path, repo_url for a run."""
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT repo_type, repo_path, repo_url FROM projects WHERE project_id = ?",
+                "SELECT repo_type, repo_path, repo_url FROM runs WHERE project_id = ?",
                 (project_id,)
             ).fetchone()
             if not row:
@@ -521,27 +674,12 @@ class DBManager:
                 "repo_url": row["repo_url"],
             }
 
-    def update_project(self, project_id: str, name: str = None) -> bool:
-        """Update project name and bump updated_at."""
-        with self.get_connection() as conn:
-            sets, params = [], []
-            if name is not None:
-                sets.append("name = ?")
-                params.append(name)
-            sets.append("updated_at = CURRENT_TIMESTAMP")
-            params.append(project_id)
-            cursor = conn.execute(
-                f"UPDATE projects SET {', '.join(sets)} WHERE project_id = ?",
-                params
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-
     def delete_project(self, project_id: str) -> bool:
-        """Delete a project row. Does NOT delete tasks or workspace files."""
+        """Delete a run row. Does NOT delete tasks or workspace files."""
         with self.get_connection() as conn:
+            conn.execute("DELETE FROM dpe_run_state WHERE run_key = ?", (project_id,))
             cursor = conn.execute(
-                "DELETE FROM projects WHERE project_id = ?", (project_id,)
+                "DELETE FROM runs WHERE project_id = ?", (project_id,)
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -565,7 +703,8 @@ class DBManager:
                 conn.execute(f"DELETE FROM io_logs WHERE task_id IN ({placeholders})", task_ids)
 
             conn.execute("DELETE FROM tasks WHERE project_id = ?", (project_id,))
-            cursor = conn.execute("DELETE FROM projects WHERE project_id = ?", (project_id,))
+            conn.execute("DELETE FROM dpe_run_state WHERE run_key = ?", (project_id,))
+            cursor = conn.execute("DELETE FROM runs WHERE project_id = ?", (project_id,))
             conn.commit()
             existed = cursor.rowcount > 0
 
@@ -608,25 +747,38 @@ class DBManager:
                 ).fetchall()
             return [dict(r) for r in rows]
 
+    @staticmethod
+    def _upsert_dpe_state(conn, project_id: str, **fields):
+        """Insert-or-update DPE-specific run state (brief, completed steps, sota…)
+        in the dpe_run_state side table, keyed by the run's project_id."""
+        if not fields:
+            return
+        cols = list(fields.keys())
+        col_list = ", ".join(["run_key"] + cols)
+        placeholders = ", ".join(["?"] * (len(cols) + 1))
+        updates = ", ".join(f"{c} = excluded.{c}" for c in cols)
+        conn.execute(
+            f"INSERT INTO dpe_run_state ({col_list}) VALUES ({placeholders}) "
+            f"ON CONFLICT(run_key) DO UPDATE SET {updates}",
+            [project_id] + [fields[c] for c in cols],
+        )
+
     def update_project(self, project_id: str, name: str = None,
                        brief: str = None, priority: int = None,
                        status: str = None,
                        current_project_step: str = None,
                        completed_project_steps: str = None) -> bool:
-        """Update project fields. Only sets non-None values.
+        """Update run fields. Only sets non-None values.
 
-        A5 fix: accept current_project_step and completed_project_steps
-        so the scheduler sync can push live pipeline progress into the
-        project row (previously these kwargs were silently dropped).
+        Run-level fields (name/priority/status/current_project_step) update the
+        `runs` row; DPE-specific fields (brief, completed_project_steps) are
+        written to the dpe_run_state side table.
         """
         updates = []
         params = []
         if name is not None:
             updates.append("name = ?")
             params.append(name)
-        if brief is not None:
-            updates.append("brief = ?")
-            params.append(brief)
         if priority is not None:
             updates.append("priority = ?")
             params.append(priority)
@@ -636,23 +788,29 @@ class DBManager:
         if current_project_step is not None:
             updates.append("current_project_step = ?")
             params.append(current_project_step)
+
+        dpe_fields = {}
+        if brief is not None:
+            dpe_fields["brief"] = brief
         if completed_project_steps is not None:
-            updates.append("completed_project_steps = ?")
-            params.append(completed_project_steps)
-        if status is not None:
-            updates.append("status = ?")
-            params.append(status)
-        if not updates:
+            dpe_fields["completed_project_steps"] = completed_project_steps
+
+        if not updates and not dpe_fields:
             return False
-        updates.append("updated_at = CURRENT_TIMESTAMP")
-        params.append(project_id)
+        changed = False
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                f"UPDATE projects SET {', '.join(updates)} WHERE project_id = ?",
-                params
-            )
+            if updates:
+                updates.append("updated_at = CURRENT_TIMESTAMP")
+                cursor = conn.execute(
+                    f"UPDATE runs SET {', '.join(updates)} WHERE project_id = ?",
+                    params + [project_id]
+                )
+                changed = cursor.rowcount > 0
+            if dpe_fields:
+                self._upsert_dpe_state(conn, project_id, **dpe_fields)
+                changed = True
             conn.commit()
-            return cursor.rowcount > 0
+            return changed
 
     def list_projects_with_stats(self, owner_email: str = None) -> list[dict]:
         """
@@ -666,6 +824,7 @@ class DBManager:
                     SELECT
                         p.project_id,
                         p.name,
+                        p.config_name,
                         p.status,
                         p.current_project_step,
                         p.priority,
@@ -687,7 +846,7 @@ class DBManager:
                          WHERE t2.project_id = p.project_id
                          ORDER BY t2.created_at DESC LIMIT 1) AS latest_step,
                         COALESCE(MAX(t.created_at), p.created_at) AS last_update
-                    FROM projects p
+                    FROM runs p
                     LEFT JOIN tasks t ON t.project_id = p.project_id
                     WHERE p.owner_email = ?
                     GROUP BY p.project_id
@@ -698,6 +857,7 @@ class DBManager:
                     SELECT
                         p.project_id,
                         p.name,
+                        p.config_name,
                         p.status,
                         p.current_project_step,
                         p.priority,
@@ -719,7 +879,7 @@ class DBManager:
                          WHERE t2.project_id = p.project_id
                          ORDER BY t2.created_at DESC LIMIT 1) AS latest_step,
                         COALESCE(MAX(t.created_at), p.created_at) AS last_update
-                    FROM projects p
+                    FROM runs p
                     LEFT JOIN tasks t ON t.project_id = p.project_id
                     GROUP BY p.project_id
                     ORDER BY last_update DESC
@@ -737,27 +897,36 @@ class DBManager:
         are completed/failed but have pending tasks (will be reactivated
         by the scheduler).
         """
-        from api.dependencies import get_skillflow
+        from api.dependencies import get_skillflow, get_config_registry
         sf = get_skillflow()
+        # Only consider configs whose runs the polling scheduler owns. Butler-
+        # driven configs (meta_conversation, skill_converter) are excluded so the
+        # scheduler never grabs one and runs it as if it were a DPE build.
+        try:
+            owned = {m.config_name for m in get_config_registry().list() if m.scheduler_owned}
+        except Exception:
+            owned = {"dpe_default_v2"}
+        if not owned:
+            return None
+        owned_ph = ",".join("?" * len(owned))
+        owned_clause = f"config_name IN ({owned_ph})"
 
-        # Collect project_ids from active skillflow runs (source of truth)
+        # Collect project_ids from active skillflow runs of owned configs.
         active_ids: set[str] = set()
         for status in ('running', 'paused'):
             for r in sf.list_runs(status=status):
                 pid = r.get("project_id")
-                if pid:
+                if pid and r.get("graph_name") in owned:
                     active_ids.add(pid)
 
-        # Collect project_ids whose DPE runs are terminal (completed/failed).
-        # Exclude them from the task-subquery fallback so a leftover running
-        # task on a completed project doesn't starve active ones.
-        # The scheduler never reactivates completed runs (NB-5), so clause 2
-        # matching a terminal-run project only creates a starvation loop.
+        # Collect project_ids whose owned-config runs are terminal
+        # (completed/failed). Exclude them from the task-subquery fallback so a
+        # leftover running task on a finished run doesn't starve active ones.
         terminal_ids: set[str] = set()
         for status in ('completed', 'failed'):
             for r in sf.list_runs(status=status):
                 pid = r.get("project_id")
-                if pid and r.get("graph_name") == "dpe_default_v2":
+                if pid and r.get("graph_name") in owned:
                     terminal_ids.add(pid)
 
         STATUSES = ('planning', 'executing', 'verifying', 'running')
@@ -770,8 +939,12 @@ class DBManager:
             # spinning the scheduler in an empty-brief loop). This rescues
             # submissions that would otherwise be stuck behind another
             # project's active run.
-            planning_guard = ("(status = 'planning' AND brief IS NOT NULL AND brief != ''"
-                             " AND (meta_state IS NULL OR meta_state != 'drafting'))")
+            planning_guard = (
+                "(status = 'planning'"
+                " AND project_id IN (SELECT run_key FROM dpe_run_state"
+                "                    WHERE brief IS NOT NULL AND brief != '')"
+                " AND (meta_state IS NULL OR meta_state != 'drafting'))"
+            )
             # Task subquery: projects with pending/running tasks, guarded against
             # terminal DPE runs whose leftover tasks would starve active projects.
             if terminal_ids:
@@ -793,23 +966,25 @@ class DBManager:
                 placeholders = ",".join("?" * len(active_ids))
                 if owner_email:
                     row = conn.execute(f"""
-                        SELECT * FROM projects
+                        SELECT * FROM runs
                         WHERE (project_id IN ({placeholders})
                                OR {task_clause}
                                OR {planning_guard})
+                          AND {owned_clause}
                           AND owner_email = ?
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*active_ids, *terminal_ids, owner_email)).fetchone()
+                    """, (*active_ids, *terminal_ids, *owned, owner_email)).fetchone()
                 else:
                     row = conn.execute(f"""
-                        SELECT * FROM projects
+                        SELECT * FROM runs
                         WHERE (project_id IN ({placeholders})
                                OR {task_clause}
                                OR {planning_guard})
+                          AND {owned_clause}
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*active_ids, *terminal_ids)).fetchone()
+                    """, (*active_ids, *terminal_ids, *owned)).fetchone()
             # Fallback: no active skillflow runs OR none matched in the local DB
             # (e.g., tests use an isolated DB while skillflow uses production DB).
             if row is None:
@@ -818,23 +993,25 @@ class DBManager:
                 drafting_guard = "AND (meta_state IS NULL OR meta_state != 'drafting')"
                 if owner_email:
                     row = conn.execute(f"""
-                        SELECT * FROM projects
+                        SELECT * FROM runs
                         WHERE (status IN ({','.join('?'*len(STATUSES))})
                                OR {task_clause})
+                          AND {owned_clause}
                           AND owner_email = ?
                           {drafting_guard}
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*STATUSES, *terminal_ids, owner_email)).fetchone()
+                    """, (*STATUSES, *terminal_ids, *owned, owner_email)).fetchone()
                 else:
                     row = conn.execute(f"""
-                        SELECT * FROM projects
+                        SELECT * FROM runs
                         WHERE (status IN ({','.join('?'*len(STATUSES))})
                                OR {task_clause})
+                          AND {owned_clause}
                           {drafting_guard}
                         ORDER BY {ordering}
                         LIMIT 1
-                    """, (*STATUSES, *terminal_ids)).fetchone()
+                    """, (*STATUSES, *terminal_ids, *owned)).fetchone()
             return dict(row) if row else None
 
     def advance_project_step(self, project_id: str) -> str | None:
@@ -842,11 +1019,12 @@ class DBManager:
         return None
 
     def set_project_brief(self, project_id: str, brief: str):
-        """Store the project brief markdown."""
+        """Store the project brief markdown (DPE run state)."""
         with self.get_connection() as conn:
+            self._upsert_dpe_state(conn, project_id, brief=brief)
             conn.execute(
-                "UPDATE projects SET brief = ?, updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
-                (brief, project_id)
+                "UPDATE runs SET updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                (project_id,)
             )
             conn.commit()
 
@@ -999,6 +1177,34 @@ class DBManager:
             ).fetchone()
             return row["cnt"] > 0
 
+    def has_active_runs_for_owner(self, owner_email: str) -> bool:
+        """True if the owner has any running/paused skillflow run (any config).
+
+        Used by the web scheduler reaper so a task-less config run (no DPE tasks
+        rows) isn't reaped mid-flight — owners with an active run still count as
+        having work even when has_incomplete_tasks_for_owner is False.
+        """
+        try:
+            from api.dependencies import get_skillflow
+            sf = get_skillflow()
+        except Exception:
+            return False
+        active_pids = {
+            r["project_id"]
+            for status in ("running", "paused")
+            for r in sf.list_runs(status=status)
+            if r.get("project_id")
+        }
+        if not active_pids:
+            return False
+        with self.get_connection() as conn:
+            ph = ",".join("?" * len(active_pids))
+            row = conn.execute(
+                f"SELECT 1 FROM runs WHERE owner_email = ? AND project_id IN ({ph}) LIMIT 1",
+                (owner_email, *active_pids)
+            ).fetchone()
+            return row is not None
+
     # ── Meta Orchestrator State ──
 
     def set_project_meta_state(self, project_id: str, state: str | None):
@@ -1009,7 +1215,7 @@ class DBManager:
         """
         with self.get_connection() as conn:
             conn.execute(
-                "UPDATE projects SET meta_state = ? WHERE project_id = ?",
+                "UPDATE runs SET meta_state = ? WHERE project_id = ?",
                 (state, project_id),
             )
             conn.commit()
@@ -1018,7 +1224,7 @@ class DBManager:
         """Get the current meta_state for a project."""
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT meta_state FROM projects WHERE project_id = ?",
+                "SELECT meta_state FROM runs WHERE project_id = ?",
                 (project_id,),
             ).fetchone()
             return row["meta_state"] if row else None
@@ -1031,12 +1237,12 @@ class DBManager:
         with self.get_connection() as conn:
             if owner_email:
                 rows = conn.execute(
-                    "SELECT * FROM projects WHERE status = 'waiting_user_approval' AND owner_email = ?",
+                    "SELECT * FROM runs WHERE status = 'waiting_user_approval' AND owner_email = ?",
                     (owner_email,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM projects WHERE status = 'waiting_user_approval'"
+                    "SELECT * FROM runs WHERE status = 'waiting_user_approval'"
                 ).fetchall()
             return [dict(r) for r in rows]
 
@@ -1133,7 +1339,7 @@ class DBManager:
         # Fallback: legacy tracking
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT completed_project_steps FROM projects WHERE project_id = ?",
+                "SELECT completed_project_steps FROM dpe_run_state WHERE run_key = ?",
                 (project_id,)
             ).fetchone()
             if not row or not row[0]:
@@ -1170,30 +1376,46 @@ class DBManager:
     def increment_tasks_since_update(self, project_id: str):
         """Increment the counter of tasks completed since last arch update."""
         with self.get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE dpe_run_state "
+                "SET tasks_since_arch_update = COALESCE(tasks_since_arch_update, 0) + 1 "
+                "WHERE run_key = ?",
+                (project_id,)
+            )
+            if cur.rowcount == 0:
+                self._upsert_dpe_state(conn, project_id, tasks_since_arch_update=1)
             conn.execute(
-                "UPDATE projects SET tasks_since_arch_update = COALESCE(tasks_since_arch_update, 0) + 1, "
-                "updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                "UPDATE runs SET updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
                 (project_id,)
             )
             conn.commit()
 
     def reset_tasks_since_update(self, project_id: str):
-        """Reset the counter after a planning refresh."""
+        """Reset the counter after a planning refresh; bump the SOTA version."""
         with self.get_connection() as conn:
-            conn.execute(
-                "UPDATE projects SET tasks_since_arch_update = 0, "
+            cur = conn.execute(
+                "UPDATE dpe_run_state "
+                "SET tasks_since_arch_update = 0, "
                 "sota_version = COALESCE(sota_version, 1) + 1, "
-                "sota_updated_at = CURRENT_TIMESTAMP, "
-                "updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
+                "sota_updated_at = CURRENT_TIMESTAMP "
+                "WHERE run_key = ?",
+                (project_id,)
+            )
+            if cur.rowcount == 0:
+                self._upsert_dpe_state(
+                    conn, project_id, tasks_since_arch_update=0, sota_version=2
+                )
+            conn.execute(
+                "UPDATE runs SET updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
                 (project_id,)
             )
             conn.commit()
 
     def should_refresh_planning(self, project_id: str, threshold: int = 5) -> bool:
-        """Check if project-level planning needs refresh based on task count."""
+        """Check if run-level planning needs refresh based on task count."""
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT tasks_since_arch_update FROM projects WHERE project_id = ?",
+                "SELECT tasks_since_arch_update FROM dpe_run_state WHERE run_key = ?",
                 (project_id,)
             ).fetchone()
             if not row:
@@ -1316,3 +1538,10 @@ class DBManager:
                     "UPDATE tasks SET current_step = ?, completed_steps = ? WHERE id = ?",
                     (current, json.dumps(new_completed), task["id"])
                 )
+
+
+# Register structural migrations (applied once, in order, recorded in
+# schema_migrations). Defined here so the migration functions are bound.
+DBManager._VERSIONED_MIGRATIONS = [
+    (1, "projects_to_runs", DBManager._mig_001_projects_to_runs),
+]

@@ -22,6 +22,35 @@
   var _POLL_INTERVAL = 3000;
 
   /** Step ID → human-readable label mapping for status display. */
+  /** Merge config-manifest step labels into _STEP_LABELS (from the shared cache
+   * populated by the dashboard, or fetched here if not yet loaded). Lets any
+   * config's run render proper step names; unknown steps fall back to raw ids. */
+  function _ensureConfigLabels() {
+    try {
+      var cache = window.AItelier && window.AItelier.configManifests;
+      if (cache) {
+        Object.keys(cache).forEach(function (name) {
+          var labels = (cache[name] && cache[name].labels) || {};
+          Object.keys(labels).forEach(function (k) { _STEP_LABELS[k] = labels[k]; });
+        });
+        return;
+      }
+      var api = window.AItelier && window.AItelier.API;
+      if (api && typeof api.getConfigs === "function") {
+        api.getConfigs().then(function (resp) {
+          var configs = (resp && resp.configs) || [];
+          var built = {};
+          configs.forEach(function (m) {
+            built[m.config_name] = m;
+            var labels = m.labels || {};
+            Object.keys(labels).forEach(function (k) { _STEP_LABELS[k] = labels[k]; });
+          });
+          window.AItelier.configManifests = built;
+        }).catch(function () {});
+      }
+    } catch (_e) { /* labels fall back to raw ids */ }
+  }
+
   var _STEP_LABELS = {
     "1": "Researcher",
     "1_review": "Research Review",
@@ -212,11 +241,16 @@
       return;
     }
 
+    // Merge config manifest labels so step names render for any config.
+    _ensureConfigLabels();
+
     // ── 1. Info Card ──
     container.appendChild(_renderInfoCard(project));
 
-    // ── 2. Task List Table ──
-    container.appendChild(_renderTaskTable(tasks));
+    // ── 2. Task List Table (only for task-loop configs like DPE) ──
+    if (project.has_task_loop !== false) {
+      container.appendChild(_renderTaskTable(tasks));
+    }
 
     // ── 3. Workspace File Tree (fetch on render) ──
     var wsSection = document.createElement("div");

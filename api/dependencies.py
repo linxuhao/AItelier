@@ -51,21 +51,44 @@ def _existing_repo_code_path(project_id: str) -> str | None:
 
 _skillflow_instance = None
 _tool_loader_instance = None
+_config_registry_instance = None
 _agent_configs_cache: dict[str, dict] = {}
 
 
 def _load_and_register_agent_configs(sf):
-    """Load agent configs from YAML and register them into skillflow."""
+    """Load agent configs from YAML and register them into skillflow.
+
+    Agent roles are keyed by their YAML map key and must be globally unique
+    across all agent_configs/*.yaml — skillflow's registry is flat, so a
+    collision would silently shadow one config (last-wins). With config
+    registration now a glob, that risk grows, so we fail loudly at startup.
+    """
     import yaml
     from pathlib import Path
     conf_dir = Path(__file__).resolve().parent.parent / "agent_configs"
-    if conf_dir.exists():
-        for f in sorted(conf_dir.glob("*.yaml")):
-            data = yaml.safe_load(f.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                for name, cfg in data.items():
-                    if isinstance(cfg, dict):
-                        sf.register_agent_config_from_dict(name, cfg)
+    if not conf_dir.exists():
+        return
+    seen: dict[str, str] = {}          # role name -> file it was first declared in
+    collisions: list[str] = []
+    for f in sorted(conf_dir.glob("*.yaml")):
+        data = yaml.safe_load(f.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            continue
+        for name, cfg in data.items():
+            if not isinstance(cfg, dict):
+                continue
+            if name in seen and seen[name] != f.name:
+                collisions.append(
+                    f"agent role '{name}' declared in both "
+                    f"'{seen[name]}' and '{f.name}'"
+                )
+            seen.setdefault(name, f.name)
+            sf.register_agent_config_from_dict(name, cfg)
+    if collisions:
+        raise RuntimeError(
+            "Startup aborted: duplicate agent role names across agent_configs/*.yaml "
+            "(roles must be globally unique):\n  " + "\n  ".join(collisions)
+        )
 
 
 def _validate_graph_agent_configs(sf):
@@ -99,6 +122,7 @@ def get_skillflow():
     if _skillflow_instance is None:
         from skillflow import SkillFlow, PipelineGraph
         from pathlib import Path
+        from core.config_registry import ConfigRegistry
 
         tool_loader = get_tool_loader()
         sf = SkillFlow(SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
@@ -111,42 +135,56 @@ def get_skillflow():
 
         project_root = Path(__file__).resolve().parent.parent
 
-        # Register graphs (agent_config refs are now validated)
-        v2_path = project_root / "configs" / "dpe_default.yaml"
-        if v2_path.exists():
-            graph = PipelineGraph.from_yaml(v2_path)
-            sf.register_graph(graph)
-
-        meta_path = project_root / "configs" / "meta_conversation.yaml"
-        if meta_path.exists():
-            meta_graph = PipelineGraph.from_yaml(meta_path)
-            sf.register_graph(meta_graph)
+        # Register every host graph in configs/*.yaml (agent_config refs validated
+        # below). No graph name is special-cased — drop a new config in the dir and
+        # it is registered automatically.
+        configs_dir = project_root / "configs"
+        if configs_dir.exists():
+            for cfg_path in sorted(configs_dir.glob("*.yaml")):
+                sf.register_graph(PipelineGraph.from_yaml(cfg_path))
 
         # Register skillflow's skill_converter graph so the butler can generate a
         # new pipeline from a skill description via start_pipeline("skill_converter").
-        # Its agent roles (skill_analyst/graph_designer/…) come from
-        # agent_configs/skill_converter.yaml (framework mode, real models).
+        # It ships inside the skillflow package (its agents are registered in
+        # Python, not agent_configs/*.yaml), so it is registered explicitly rather
+        # than via the configs/ glob.
         try:
             import skillflow as _sf_pkg
-            # Register skillflow's OWN converter agents (host-mode, prompt embedded
-            # as system_prompt). AItelier maps model:"host" → HOST_AGENT_MODEL and
-            # uses the embedded prompt, so no per-role agent_config/template is
-            # duplicated here.
             from skillflow.plugins.skill_converter.converter import _register_converter_agents
             _register_converter_agents(sf)
             conv_path = (Path(_sf_pkg.__file__).parent / "plugins"
                          / "skill_converter" / "skill_converter.yaml")
             if conv_path.exists():
                 sf.register_graph(PipelineGraph.from_yaml(conv_path))
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "skill_converter graph not registered (skill→pipeline conversion "
+                "will be unavailable): %s", e
+            )
 
         # Verify all agent_config references resolve (belt-and-suspenders over
         # skillflow's own _check_agent_configs — gives clearer error messages).
         _validate_graph_agent_configs(sf)
 
         _skillflow_instance = sf
+        # Build the config registry once skillflow knows every graph.
+        global _config_registry_instance
+        _config_registry_instance = ConfigRegistry.build(sf)
     return _skillflow_instance
+
+
+def get_config_registry():
+    """FastAPI dependency injection: the ConfigRegistry singleton.
+
+    Holds a ConfigManifest per registered graph (labels, checkpoints, scheduler
+    ownership, …) so the scheduler, API and dashboards can drive and render runs
+    of any config generically. Built lazily alongside the skillflow singleton.
+    """
+    global _config_registry_instance
+    if _config_registry_instance is None:
+        get_skillflow()  # builds the registry as a side effect
+    return _config_registry_instance
 
 
 def get_tool_loader():
@@ -199,15 +237,23 @@ def enrich_project_status(project: dict | None) -> dict | None:
             all_runs = sf.list_runs(project["project_id"])  # newest first
             run = all_runs[0] if all_runs else None
         if run:
+            # Surface the run's config identity so clients can tell which config a
+            # run belongs to and render its labels/checkpoints generically.
+            cfg = run.get("graph_name") or project.get("config_name") or "dpe_default_v2"
+            project["config_name"] = cfg
+            try:
+                manifest = get_config_registry().get(cfg)
+            except Exception:
+                manifest = None
+            project["config_label"] = manifest.label if manifest else cfg
+            has_task_loop = bool(manifest and manifest.has_task_loop)
+
             # AT-15: preserve the DB's enriched status (e.g. "running:3")
             # over skillflow's raw status ("running"). The scheduler writes
             # the detailed status; only fall back to run["status"] if the DB
             # column hasn't been synced yet.
             run_status = run["status"]
             if run_status == "running" and run.get("current_node"):
-                # AT-28: Pass through the actual step ID. The TUI dashboard
-                # _STEP_LABELS already maps every step (including t_plan,
-                # t_impl, etc.) to human-readable labels — no coarse mapping needed.
                 project["status"] = f"running:{run['current_node']}"
             else:
                 project["status"] = run_status
@@ -217,6 +263,7 @@ def enrich_project_status(project: dict | None) -> dict | None:
             project["completed_project_steps"] = [
                 s["step_id"] for s in steps if s["status"] == "completed"
             ]
+            project["has_task_loop"] = has_task_loop
         elif not project.get("status"):
             project["status"] = "planning"
     except Exception:

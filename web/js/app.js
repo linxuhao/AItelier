@@ -432,12 +432,21 @@
       return;
     }
 
-    // ── Meta conversation checkpoints — skip system modal ───────────
-    var isMeta = (graphName === "meta_conversation" || step === "gather");
-    if (isMeta) {
-      // Meta conversation checkpoints are handled by the chat view.
-      // Show a flash notification so the user knows.
-      _flashNotification("\uD83D\uDCAC Meta: " + label + " \u2014 answer in chat (" + pid + ")");
+    // ── Conversational checkpoints — skip the file-diff modal ───────
+    // Derive the checkpoint kind from the config manifest; fall back to the
+    // legacy meta_conversation/gather check so DPE behavior is unchanged.
+    var isConversational = (graphName === "meta_conversation" || step === "gather");
+    try {
+      var manifests = window.AItelier && window.AItelier.configManifests;
+      var m = manifests && manifests[graphName];
+      if (m && m.checkpoints && m.checkpoints[step]
+          && m.checkpoints[step].kind === "conversational") {
+        isConversational = true;
+      }
+    } catch (_e) { /* fall back to legacy check */ }
+    if (isConversational) {
+      // Conversational checkpoints are handled by the chat view.
+      _flashNotification("\uD83D\uDCAC " + label + " \u2014 answer in chat (" + pid + ")");
       return;
     }
 
@@ -457,6 +466,7 @@
         checkpoint: step,
         label: label,
         step: step,
+        config_name: graphName,
         step_output: event.step_output || null,
       });
     }

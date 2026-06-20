@@ -14,6 +14,14 @@
 name: "meta_conversation"
 description: "Project requirements gathering → brief (butler triggers DPE on approval)"
 
+# Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
+x-aitelier:
+  label: "Requirements Conversation"
+  scheduler_owned: false          # driven imperatively by the butler, not the poller
+  output_step: "gather"
+  checkpoint_kinds:
+    gather: conversational        # a chat turn, not a file-diff review
+
 begin: "intent_detect"
 
 steps:

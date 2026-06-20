@@ -1,12 +1,36 @@
 # tests/conftest.py
 # Shared fixtures across unit and integration tests.
 
+import os
+import tempfile
+
 import pytest
 from fastapi.testclient import TestClient
 from api.main import app
 from api.dependencies import get_db_manager, get_workspace_manager
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_scheduler_lock():
+    """Point the scheduler advisory lock at an isolated temp file for the whole
+    test session, so the suite never contends with a running/orphaned AItelier
+    scheduler holding the production ~/.AItelier/scheduler.lock (which would make
+    start_scheduler() create 0 jobs and fail the reschedule tests)."""
+    fd, path = tempfile.mkstemp(suffix="-scheduler.lock")
+    os.close(fd)
+    prev = os.environ.get("AITELIER_SCHEDULER_LOCK")
+    os.environ["AITELIER_SCHEDULER_LOCK"] = path
+    yield
+    if prev is None:
+        os.environ.pop("AITELIER_SCHEDULER_LOCK", None)
+    else:
+        os.environ["AITELIER_SCHEDULER_LOCK"] = prev
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 @pytest.fixture(autouse=True)

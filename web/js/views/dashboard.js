@@ -21,7 +21,9 @@
   /** Polling interval in milliseconds. */
   var _POLL_INTERVAL = 10000;  // 10 s (was 3 s — too aggressive, reset form inputs)
 
-  /** Step ID → human-readable label mapping for status display. */
+  /** Step ID → human-readable label map. Seeded with DPE labels and extended
+   * at runtime from every config's manifest (/api/configs) so runs of ANY
+   * config render proper step names. Unknown steps fall back to the raw id. */
   var _STEP_LABELS = {
     "1": "Researcher",
     "1_review": "Research Review",
@@ -40,6 +42,27 @@
     "task_loop": "Task Loop",
     "5_test": "Unit Tests",
   };
+
+  /** Loaded once: merge every config manifest's labels into _STEP_LABELS and
+   * cache the manifests (by config_name) for the project + checkpoint views. */
+  var _configsLoaded = false;
+  function _loadConfigs() {
+    if (_configsLoaded) { return; }
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.getConfigs !== "function") { return; }
+    _configsLoaded = true;
+    api.getConfigs().then(function (resp) {
+      var configs = (resp && resp.configs) || [];
+      var cache = {};
+      configs.forEach(function (m) {
+        cache[m.config_name] = m;
+        var labels = m.labels || {};
+        Object.keys(labels).forEach(function (k) { _STEP_LABELS[k] = labels[k]; });
+      });
+      window.AItelier = window.AItelier || {};
+      window.AItelier.configManifests = cache;
+    }).catch(function () { _configsLoaded = false; });
+  }
 
   /** Status → display CSS class mapping for badge colors. */
   var _STATUS_CLASS_MAP = {
@@ -73,8 +96,16 @@
   /** @type {boolean} true while a refresh is in-flight (prevent stacking). */
   var _isRefreshing = false;
 
-  /** @type {boolean} true if the inline "new project" form is currently open. */
+  /** @type {boolean} true if any inline form (new-project / start-run) is open.
+   * Polling is paused while true so the form's inputs aren't reset. */
   var _formOpen = false;
+
+  /** @type {Object<string,boolean>} config_name → collapsed?, preserved across
+   * re-renders so polling doesn't reopen sections the user collapsed. */
+  var _collapsed = {};
+
+  /** @type {string|null} config_name whose inline start-run form is open. */
+  var _startFormConfig = null;
 
   /** @type {string|null} project_id to delete when confirmation dialog opens. */
   var _pendingDeleteId = null;
@@ -254,55 +285,292 @@
 
   // ── Table rendering ───────────────────────────────────────────────
 
-  /**
-   * Render the full project table into #view-dashboard.
-   * Clears the container, builds table HTML, and appends.
-   *
-   * @param {Array} projects — array of project objects from API
-   */
-  function _renderTable(projects) {
-    var container = document.getElementById("view-dashboard");
-    if (!container) {
+  // ── Grouped rendering (pipelines → runs) ──────────────────────────
+
+  /** Build a single run row (reuses _createRow) with click-to-open + delete. */
+  function _runRow(run, index) {
+    var row = _createRow(run, index);
+    if (!row) { return null; }
+    row.addEventListener("click", function (e) {
+      if (e.target && e.target.classList.contains("btn-delete-project")) { return; }
+      var pid = this.dataset.projectId;
+      if (!pid) { return; }
+      try {
+        var rtr = window.AItelier && window.AItelier.Router;
+        if (rtr && typeof rtr.navigate === "function") {
+          rtr.navigate("#/projects/" + encodeURIComponent(pid));
+          return;
+        }
+      } catch (_e) { /* fall through */ }
+      window.location.hash = "#/projects/" + encodeURIComponent(pid);
+    });
+    var deleteTd = document.createElement("td");
+    deleteTd.style.textAlign = "right";
+    deleteTd.style.width = "3rem";
+    var delBtn = document.createElement("button");
+    delBtn.className = "btn-delete-project";
+    delBtn.textContent = "✗";
+    delBtn.style.background = "none";
+    delBtn.style.border = "none";
+    delBtn.style.color = "var(--muted-color, #888)";
+    delBtn.style.cursor = "pointer";
+    delBtn.style.fontSize = "0.85rem";
+    delBtn.style.padding = "0.25rem 0.5rem";
+    delBtn.title = "Delete run";
+    delBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var pid = this.parentElement.parentElement.dataset.projectId;
+      if (pid) { _confirmDelete(pid); }
+    });
+    deleteTd.appendChild(delBtn);
+    row.appendChild(deleteTd);
+    return row;
+  }
+
+  /** Build the runs table for one pipeline section. */
+  function _buildRunsTable(runs) {
+    var table = document.createElement("table");
+    table.style.width = "100%";
+    table.style.margin = "0";
+    var thead = document.createElement("thead");
+    var htr = document.createElement("tr");
+    var heads = ["#", "Run", "Status", "Tasks", "Last Update", ""];
+    for (var h = 0; h < heads.length; h++) {
+      var th = document.createElement("th");
+      th.textContent = heads[h];
+      if (h === 0) { th.className = "col-idx"; }
+      htr.appendChild(th);
+    }
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    var tbody = document.createElement("tbody");
+    for (var i = 0; i < runs.length; i++) {
+      var row = _runRow(runs[i], i + 1);
+      if (row) { tbody.appendChild(row); }
+    }
+    table.appendChild(tbody);
+    return table;
+  }
+
+  /** Inline start-run form for a non-DPE pipeline (name + seed text → POST /api/runs). */
+  function _buildStartRunForm(cfg) {
+    var wrap = document.createElement("div");
+    wrap.className = "start-run-form";
+    wrap.style.padding = "0.75rem 0.9rem";
+    wrap.style.borderBottom = "1px solid var(--muted-border-color, #eee)";
+
+    var nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.placeholder = "Run name (optional)";
+    nameInput.style.marginBottom = "0.4rem";
+
+    var seed = document.createElement("textarea");
+    seed.placeholder = "Seed input for this run (optional)";
+    seed.rows = 3;
+    seed.style.marginBottom = "0.4rem";
+
+    var errEl = document.createElement("small");
+    errEl.className = "srf-error";
+    errEl.style.color = "var(--del-color, #b00)";
+    errEl.style.display = "none";
+
+    var btnRow = document.createElement("div");
+    btnRow.style.display = "flex";
+    btnRow.style.gap = "0.5rem";
+    var go = document.createElement("button");
+    go.textContent = "Start run";
+    go.style.fontSize = "0.85rem";
+    go.style.padding = "0.25rem 0.75rem";
+    go.addEventListener("click", function () {
+      _submitStartRun(cfg, nameInput.value.trim(), seed.value, errEl);
+    });
+    var cancel = document.createElement("button");
+    cancel.className = "secondary outline";
+    cancel.textContent = "Cancel";
+    cancel.style.fontSize = "0.85rem";
+    cancel.style.padding = "0.25rem 0.75rem";
+    cancel.addEventListener("click", function () {
+      wrap.style.display = "none";
+      _startFormConfig = null;
+      _formOpen = false;
+    });
+    btnRow.appendChild(go);
+    btnRow.appendChild(cancel);
+
+    wrap.appendChild(nameInput);
+    wrap.appendChild(seed);
+    wrap.appendChild(errEl);
+    wrap.appendChild(btnRow);
+    return wrap;
+  }
+
+  function _submitStartRun(cfg, name, seedText, errEl) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.startRun !== "function") { return; }
+    var body = { config_name: cfg.config_name };
+    if (name) { body.name = name; }
+    if (seedText) { body.seed_text = seedText; }
+    api.startRun(body).then(function () {
+      _startFormConfig = null;
+      _formOpen = false;
+      _refresh();
+    }).catch(function (err) {
+      if (errEl) {
+        errEl.textContent = "Failed to start run: " + ((err && err.message) || "error");
+        errEl.style.display = "block";
+      }
+    });
+  }
+
+  /** Handle a pipeline's "Start run" button. DPE reuses the proven New Project
+   * form; other configs toggle an inline seed-input form. */
+  function _onStartRun(cfg) {
+    if (cfg.config_name === "dpe_default_v2") {
+      _startFormConfig = "dpe_default_v2";
+      _toggleForm();
       return;
     }
+    var section = document.querySelector(
+      '.pipeline-section[data-config="' + cfg.config_name + '"]');
+    var srf = section ? section.querySelector(".start-run-form") : null;
+    if (!srf) { return; }
+    var opening = srf.style.display === "none";
+    srf.style.display = opening ? "block" : "none";
+    _startFormConfig = opening ? cfg.config_name : null;
+    _formOpen = opening;
+    if (opening) {
+      var inp = srf.querySelector("input, textarea");
+      if (inp) { setTimeout(function () { inp.focus(); }, 50); }
+    }
+  }
 
-    // Don't destroy the form if it's open — only refresh the table
-    var existingTable = container.querySelector("table");
-    var existingForm = container.querySelector("#new-project-form");
+  /** Build one collapsible pipeline section (header + nested runs). */
+  function _buildPipelineSection(cfg, runs) {
+    var section = document.createElement("section");
+    section.className = "pipeline-section";
+    section.dataset.config = cfg.config_name;
+    section.style.marginBottom = "1rem";
+    section.style.border = "1px solid var(--muted-border-color, #e0e0e0)";
+    section.style.borderRadius = "0.5rem";
+    section.style.overflow = "hidden";
 
-    // Only full rebuild on first render (no table yet)
-    if (!existingTable) {
-      container.innerHTML = "";
+    var collapsed = !!_collapsed[cfg.config_name];
 
-    // ── New Project button ──
+    var header = document.createElement("div");
+    header.className = "pipeline-header";
+    header.style.display = "flex";
+    header.style.alignItems = "center";
+    header.style.justifyContent = "space-between";
+    header.style.padding = "0.6rem 0.9rem";
+    header.style.cursor = "pointer";
+    header.style.background = "var(--card-sectioning-background-color, #f6f8fa)";
+
+    var left = document.createElement("div");
+    left.style.display = "flex";
+    left.style.alignItems = "center";
+    left.style.gap = "0.5rem";
+    var arrow = document.createElement("span");
+    arrow.textContent = collapsed ? "▶" : "▼";
+    var label = document.createElement("strong");
+    label.textContent = cfg.label || cfg.config_name;
+    var count = document.createElement("span");
+    count.style.opacity = "0.6";
+    count.style.fontSize = "0.9em";
+    count.textContent = runs.length === 1 ? "1 run" : runs.length + " runs";
+    left.appendChild(arrow);
+    left.appendChild(label);
+    left.appendChild(count);
+    header.appendChild(left);
+
+    var startBtn = document.createElement("button");
+    startBtn.className = "outline btn-start-run";
+    startBtn.textContent = "+ Start run";
+    startBtn.style.flexShrink = "0";
+    startBtn.style.fontSize = "0.85rem";
+    startBtn.style.padding = "0.2rem 0.6rem";
+    startBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      _onStartRun(cfg);
+    });
+    header.appendChild(startBtn);
+
+    var body = document.createElement("div");
+    body.className = "pipeline-body";
+    body.style.display = collapsed ? "none" : "block";
+
+    if (cfg.config_name !== "dpe_default_v2") {
+      var srf = _buildStartRunForm(cfg);
+      srf.style.display = (_startFormConfig === cfg.config_name) ? "block" : "none";
+      body.appendChild(srf);
+    }
+
+    if (!runs || runs.length === 0) {
+      var empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.style.padding = "0.75rem 0.9rem";
+      empty.style.margin = "0";
+      empty.style.opacity = "0.6";
+      empty.textContent = "No runs yet";
+      body.appendChild(empty);
+    } else {
+      body.appendChild(_buildRunsTable(runs));
+    }
+
+    header.addEventListener("click", function () {
+      var nowCollapsed = !_collapsed[cfg.config_name];
+      _collapsed[cfg.config_name] = nowCollapsed;
+      body.style.display = nowCollapsed ? "none" : "block";
+      arrow.textContent = nowCollapsed ? "▶" : "▼";
+    });
+
+    section.appendChild(header);
+    section.appendChild(body);
+    return section;
+  }
+
+  /**
+   * Render the dashboard grouped by installed pipeline, each with its runs.
+   * @param {Array} configs — installed pipelines from /api/configs
+   * @param {Array} runs — all runs from /api/runs
+   */
+  function _renderTable(configs, runs) {
+    var container = document.getElementById("view-dashboard");
+    if (!container) { return; }
+
+    // Index runs by config_name.
+    var byConfig = {};
+    (runs || []).forEach(function (r) {
+      var c = r.config_name || "dpe_default_v2";
+      (byConfig[c] = byConfig[c] || []).push(r);
+    });
+
+    // Show every installed pipeline (even zero-run ones). Fall back to
+    // synthesizing pipelines from the runs if /api/configs was unavailable.
+    var pipelines = (configs || []).slice();
+    if (pipelines.length === 0) {
+      Object.keys(byConfig).forEach(function (c) {
+        pipelines.push({ config_name: c, label: c });
+      });
+    }
+
+    container.innerHTML = "";
+
     var headerRow = document.createElement("div");
     headerRow.style.display = "flex";
-    headerRow.style.flexDirection = "row";
     headerRow.style.justifyContent = "space-between";
     headerRow.style.alignItems = "center";
     headerRow.style.marginBottom = "var(--pico-spacing, 1rem)";
-
     var title = document.createElement("h3");
-    title.textContent = "Projects";
+    title.textContent = "Pipelines";
     title.style.margin = "0";
     headerRow.appendChild(title);
-
-    var newBtn = document.createElement("button");
-    newBtn.id = "btn-new-project";
-    newBtn.textContent = "+ New Project";
-    newBtn.className = "outline";
-    newBtn.style.flexShrink = "0";
-    newBtn.addEventListener("click", function () {
-      _toggleForm();
-    });
-    headerRow.appendChild(newBtn);
-
     container.appendChild(headerRow);
 
-    // ── Inline new project form (hidden by default) ──
+    // Hidden DPE New Project form, reused by the DPE pipeline's Start-run button.
     var formContainer = document.createElement("div");
     formContainer.id = "new-project-form";
-    formContainer.style.display = "none";
+    formContainer.style.display =
+      (_formOpen && _startFormConfig === "dpe_default_v2") ? "block" : "none";
     formContainer.style.marginBottom = "var(--pico-spacing, 1rem)";
     formContainer.style.padding = "var(--pico-spacing, 1rem)";
     formContainer.style.border = "1px solid var(--muted-border-color, #e0e0e0)";
@@ -310,178 +578,20 @@
     formContainer.appendChild(_buildNewProjectForm());
     container.appendChild(formContainer);
 
-    // ── Reconnect overlay (hidden by default) ──
     var reconnectOverlay = document.createElement("div");
     reconnectOverlay.id = "dashboard-reconnect-overlay";
     reconnectOverlay.style.display = "none";
-    reconnectOverlay.style.position = "relative";
     reconnectOverlay.style.textAlign = "center";
-    reconnectOverlay.style.padding = "2rem 1rem";
-    reconnectOverlay.style.backgroundColor = "rgba(255, 255, 255, 0.85)";
-    reconnectOverlay.style.borderRadius = "0.5rem";
-    reconnectOverlay.style.marginTop = "1rem";
-    reconnectOverlay.textContent = "Reconnecting\u2026";
+    reconnectOverlay.style.padding = "1rem";
+    reconnectOverlay.textContent = "Reconnecting…";
     container.appendChild(reconnectOverlay);
 
-    // ── Empty state ──
-    if (!projects || projects.length === 0) {
-      var emptyMsg = document.createElement("p");
-      emptyMsg.className = "empty-state";
-      emptyMsg.textContent = "No projects yet \u2014 create your first project";
-      container.appendChild(emptyMsg);
-      return;
-    }
+    pipelines.forEach(function (cfg) {
+      container.appendChild(
+        _buildPipelineSection(cfg, byConfig[cfg.config_name] || []));
+    });
 
-    // ── Table ──
-    var table = document.createElement("table");
-    table.style.width = "100%";
-
-    // thead
-    var thead = document.createElement("thead");
-    var headerTr = document.createElement("tr");
-    var headers = ["#", "Project Name", "Status", "Tasks", "Last Update"];
-    for (var h = 0; h < headers.length; h++) {
-      var th = document.createElement("th");
-      th.textContent = headers[h];
-      // Add appropriate class to columns
-      if (h === 0) { th.className = "col-idx"; }
-      if (h === 4) { th.className = "col-updated"; }
-      headerTr.appendChild(th);
-    }
-    thead.appendChild(headerTr);
-    table.appendChild(thead);
-
-    // tbody
-    var tbody = document.createElement("tbody");
-
-    for (var i = 0; i < projects.length; i++) {
-      var row = _createRow(projects[i], i + 1);
-      if (row) {
-        // Row click → navigate to project (except when clicking the delete button)
-        row.addEventListener("click", function (e) {
-          // Ignore clicks on the delete button or its container
-          if (e.target && e.target.classList.contains("btn-delete-project")) {
-            return;
-          }
-          var pid = this.dataset.projectId;
-          if (pid) {
-            try {
-              var router = window.AItelier && window.AItelier.Router;
-              if (router && typeof router.navigate === "function") {
-                router.navigate("#/projects/" + encodeURIComponent(pid));
-              }
-            } catch (_err) {
-              // fallback: set location.hash directly
-              window.location.hash = "#/projects/" + encodeURIComponent(pid);
-            }
-          }
-        });
-
-        // Delete button (small, dim) at the end of the row
-        var deleteTd = document.createElement("td");
-        deleteTd.style.textAlign = "right";
-        deleteTd.style.width = "3rem";
-
-        var delBtn = document.createElement("button");
-        delBtn.className = "btn-delete-project";
-        delBtn.textContent = "\u2717"; // ✗
-        delBtn.style.background = "none";
-        delBtn.style.border = "none";
-        delBtn.style.color = "var(--muted-color, #888)";
-        delBtn.style.cursor = "pointer";
-        delBtn.style.fontSize = "0.85rem";
-        delBtn.style.padding = "0.25rem 0.5rem";
-        delBtn.title = "Delete project";
-
-        delBtn.addEventListener("click", function (e) {
-          e.stopPropagation();
-          var pid = this.parentElement.parentElement.dataset.projectId;
-          if (pid) {
-            _confirmDelete(pid);
-          }
-        });
-
-        deleteTd.appendChild(delBtn);
-        row.appendChild(deleteTd);
-
-        tbody.appendChild(row);
-      }
-    }
-
-    table.appendChild(tbody);
-    container.appendChild(table);
-
-    // ── Update reconnect overlay visibility after everything is rendered ──
     _updateReconnectOverlay();
-
-    } else {
-      // ── Incremental update: only rebuild table body ──
-      var tbody = existingTable.querySelector("tbody");
-      if (!tbody) {
-        tbody = document.createElement("tbody");
-        existingTable.appendChild(tbody);
-      }
-      tbody.innerHTML = "";  // Clear old rows only
-
-      // Preserve form visibility
-      if (_formOpen && existingForm) {
-        existingForm.style.display = "block";
-      }
-
-      if (!projects || projects.length === 0) {
-        // If no projects, fall back to full rebuild next time
-        container.innerHTML = "";
-        return;
-      }
-
-      for (var i2 = 0; i2 < projects.length; i2++) {
-        var row2 = _createRow(projects[i2], i2 + 1);
-        if (row2) {
-          row2.addEventListener("click", function (e) {
-            if (e.target && e.target.classList.contains("btn-delete-project")) {
-              return;
-            }
-            var pid2 = this.dataset.projectId;
-            if (pid2) {
-              try {
-                var rtr = window.AItelier && window.AItelier.Router;
-                if (rtr && typeof rtr.navigate === "function") {
-                  rtr.navigate("#/projects/" + encodeURIComponent(pid2));
-                }
-              } catch (_err2) {
-                window.location.hash = "#/projects/" + encodeURIComponent(pid2);
-              }
-            }
-          });
-
-          var deleteTd2 = document.createElement("td");
-          deleteTd2.style.textAlign = "right";
-          deleteTd2.style.width = "3rem";
-          var delBtn2 = document.createElement("button");
-          delBtn2.className = "btn-delete-project";
-          delBtn2.textContent = "✗";
-          delBtn2.style.background = "none";
-          delBtn2.style.border = "none";
-          delBtn2.style.color = "var(--muted-color, #888)";
-          delBtn2.style.cursor = "pointer";
-          delBtn2.style.fontSize = "0.85rem";
-          delBtn2.style.padding = "0.25rem 0.5rem";
-          delBtn2.title = "Delete project";
-          delBtn2.addEventListener("click", function (e) {
-            e.stopPropagation();
-            var pid3 = this.parentElement.parentElement.dataset.projectId;
-            if (pid3) {
-              _confirmDelete(pid3);
-            }
-          });
-          deleteTd2.appendChild(delBtn2);
-          row2.appendChild(deleteTd2);
-          tbody.appendChild(row2);
-        }
-      }
-
-      _updateReconnectOverlay();
-    }
   }
 
 
@@ -1033,18 +1143,27 @@
     }
 
     var api = window.AItelier && window.AItelier.API;
-    if (!api || typeof api.listProjects !== "function") {
+    if (!api || typeof api.listAllRuns !== "function") {
       return;
     }
 
     _isRefreshing = true;
 
-    api.listProjects().then(function (projects) {
+    // Fetch the installed pipelines (catalog) + all runs, then render grouped.
+    var configsP = (typeof api.getConfigs === "function")
+      ? api.getConfigs().then(function (r) { return (r && r.configs) || []; })
+                        .catch(function () { return []; })
+      : Promise.resolve([]);
+    var runsP = api.listAllRuns()
+      .then(function (r) { return (r && r.runs) || []; })
+      .catch(function () { return []; });
+
+    Promise.all([configsP, runsP]).then(function (res) {
       _isRefreshing = false;
-      _renderTable(projects || []);
+      _renderTable(res[0] || [], res[1] || []);
     }).catch(function (/* err */) {
       _isRefreshing = false;
-      // Keep existing table data on error; update reconnect overlay
+      // Keep existing data on error; update reconnect overlay
       _updateReconnectOverlay();
     });
   }
@@ -1063,6 +1182,9 @@
       // Show the container
       var container = document.getElementById("view-dashboard");
       if (container) container.classList.add("active");
+
+      // Load config manifests once (data-driven step labels for any config).
+      _loadConfigs();
 
       // Render the table (fetch project data)
       _refresh();

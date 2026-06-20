@@ -314,7 +314,7 @@ def test_get_repo_info_defaults(db_manager):
     db_manager.ensure_project("null_repo_proj")
     # Explicitly set repo_type to None to test default
     with db_manager.get_connection() as conn:
-        conn.execute("UPDATE projects SET repo_type = NULL WHERE project_id = 'null_repo_proj'")
+        conn.execute("UPDATE runs SET repo_type = NULL WHERE project_id = 'null_repo_proj'")
         conn.commit()
     info = db_manager.get_repo_info("null_repo_proj")
     assert info["repo_type"] == "new"
@@ -328,7 +328,7 @@ def test_retry_project_resets_failed_project(db_manager):
     db_manager.ensure_project("failed_proj")
     # Set up with direct SQL — set_project_status is no-op (skillflow owns status)
     with db_manager.get_connection() as conn:
-        conn.execute("UPDATE projects SET status = ? WHERE project_id = ?", ("failed", "failed_proj"))
+        conn.execute("UPDATE runs SET status = ? WHERE project_id = ?", ("failed", "failed_proj"))
         conn.commit()
     task_id = db_manager.push_task("failed_proj", "Will retry")
     db_manager.update_task_status(task_id, TaskStatus.FAILED)
@@ -349,7 +349,7 @@ def test_retry_project_non_failed_noop(db_manager):
     """retry_project should return False for non-failed projects."""
     db_manager.ensure_project("active_proj")
     with db_manager.get_connection() as conn:
-        conn.execute("UPDATE projects SET status = ? WHERE project_id = ?", ("executing", "active_proj"))
+        conn.execute("UPDATE runs SET status = ? WHERE project_id = ?", ("executing", "active_proj"))
         conn.commit()
 
     success = db_manager.retry_project("active_proj")
@@ -411,3 +411,174 @@ def test_task_meta_state_preserves_existing(db_manager):
     retrieved = json.loads(db_manager.get_task_meta_state(task_id))
     assert retrieved["error"] == "second"
     assert "traceback" in retrieved
+
+
+# ── Versioned schema-migration runner (Phase 0 scaffolding) ──────────
+
+def test_schema_migrations_records_baseline(db_manager):
+    """A fresh DB records the legacy schema (v0) plus all registered structural
+    migrations (which no-op on a fresh DB)."""
+    with db_manager.get_connection() as conn:
+        versions = sorted(r["version"] for r in conn.execute(
+            "SELECT version FROM schema_migrations").fetchall())
+    assert versions[0] == 0
+    assert 1 in versions   # projects_to_runs recorded (no-op on fresh DB)
+
+
+def test_schema_migrations_idempotent(tmp_path):
+    """Re-opening the DB does not duplicate or re-run recorded migrations."""
+    db_file = str(tmp_path / "idem.db")
+    DBManager(db_file)
+    DBManager(db_file)  # reopen
+    with sqlite3.connect(db_file) as conn:
+        versions = [r[0] for r in conn.execute(
+            "SELECT version FROM schema_migrations").fetchall()]
+    # No duplicates across reopens.
+    assert len(versions) == len(set(versions))
+    assert versions[0] == 0
+
+
+def test_versioned_migration_runs_once(tmp_path, monkeypatch):
+    """A registered numbered migration runs exactly once and records its version;
+    re-opening does not re-run it."""
+    calls = []
+
+    def _fake_mig(self, conn):
+        calls.append(1)
+        conn.execute("CREATE TABLE _mig_marker (x INTEGER)")
+
+    monkeypatch.setattr(DBManager, "_VERSIONED_MIGRATIONS",
+                        [(1, "fake_mig", _fake_mig)])
+    db_file = str(tmp_path / "mig.db")
+    DBManager(db_file)
+    assert calls == [1]
+    with sqlite3.connect(db_file) as conn:
+        versions = sorted(r[0] for r in conn.execute(
+            "SELECT version FROM schema_migrations").fetchall())
+        assert versions == [0, 1]
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='_mig_marker'").fetchone()
+
+    # Re-open: migration must NOT run again.
+    DBManager(db_file)
+    assert calls == [1]
+
+
+# ── Phase 2: projects→runs + config_name + dpe_run_state migration ──
+
+def _seed_legacy_projects_db(path: str):
+    """Create an old project-based schema with data (pre-migration)."""
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE projects (
+            project_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planning',
+            current_project_step TEXT DEFAULT '1',
+            completed_project_steps TEXT DEFAULT '[]',
+            brief TEXT DEFAULT NULL,
+            priority INTEGER DEFAULT 0,
+            owner_email TEXT DEFAULT 'cli@local',
+            meta_state TEXT DEFAULT NULL,
+            sota_version INTEGER DEFAULT 1,
+            sota_updated_at DATETIME DEFAULT NULL,
+            tasks_since_arch_update INTEGER DEFAULT 0,
+            repo_type TEXT DEFAULT 'new',
+            repo_path TEXT DEFAULT NULL,
+            repo_url TEXT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            status TEXT NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(project_id)
+        );
+        INSERT INTO projects (project_id, name, status, completed_project_steps,
+                              brief, priority, tasks_since_arch_update)
+            VALUES ('proj_legacy', 'Legacy', 'executing', '["1","2"]',
+                    'the brief text', 7, 3);
+        INSERT INTO tasks (project_id, prompt, status)
+            VALUES ('proj_legacy', 'do the thing', 'completed');
+    """)
+    conn.commit()
+    conn.close()
+
+
+def test_projects_to_runs_migration_parity(tmp_path):
+    """Opening a legacy projects DB migrates it to the run schema with full
+    field parity, config_name backfill, and DPE-state extraction."""
+    db_file = str(tmp_path / "legacy.db")
+    _seed_legacy_projects_db(db_file)
+
+    db = DBManager(db_file)
+
+    with db.get_connection() as conn:
+        names = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "runs" in names and "projects" not in names
+        assert "dpe_run_state" in names
+
+        run = conn.execute("SELECT * FROM runs WHERE project_id='proj_legacy'").fetchone()
+        assert run is not None
+        assert run["config_name"] == "dpe_default_v2"   # backfilled
+        assert run["name"] == "Legacy"
+        assert run["status"] == "executing"
+        assert run["priority"] == 7
+        # DPE columns extracted off the run row
+        run_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        assert not ({"brief", "completed_project_steps", "sota_version",
+                     "tasks_since_arch_update"} & run_cols)
+
+        state = conn.execute(
+            "SELECT * FROM dpe_run_state WHERE run_key='proj_legacy'").fetchone()
+        assert state["brief"] == "the brief text"
+        assert state["completed_project_steps"] == '["1","2"]'
+        assert state["tasks_since_arch_update"] == 3
+
+        # tasks FK auto-updated to runs, row preserved
+        fk = conn.execute("PRAGMA foreign_key_list(tasks)").fetchall()
+        assert any(r["table"] == "runs" for r in fk)
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+    # get_project surfaces the DPE state back onto the dict (shape preserved)
+    proj = db.get_project("proj_legacy")
+    assert proj["brief"] == "the brief text"
+    assert proj["completed_project_steps"] == '["1","2"]'
+    assert proj["config_name"] == "dpe_default_v2"
+
+    # backup file written, migration recorded, idempotent re-open
+    assert (tmp_path / "legacy.db.premigration-v1.bak").exists()
+    with sqlite3.connect(db_file) as conn:
+        versions = sorted(r[0] for r in conn.execute(
+            "SELECT version FROM schema_migrations").fetchall())
+    assert versions == [0, 1]
+    DBManager(db_file)  # re-open must not error or double-apply
+
+
+def test_dpe_run_state_roundtrip_on_fresh_db(db_manager):
+    """brief / completed steps / tasks-since counters round-trip through
+    dpe_run_state on a fresh run."""
+    db_manager.ensure_project("p_new", config_name="dpe_default_v2")
+    db_manager.set_project_brief("p_new", "hello brief")
+    db_manager.update_project("p_new", completed_project_steps='["1"]', status="executing")
+
+    proj = db_manager.get_project("p_new")
+    assert proj["brief"] == "hello brief"
+    assert proj["completed_project_steps"] == '["1"]'
+    assert proj["status"] == "executing"
+    assert proj["config_name"] == "dpe_default_v2"
+
+    db_manager.increment_tasks_since_update("p_new")
+    db_manager.increment_tasks_since_update("p_new")
+    assert db_manager.should_refresh_planning("p_new", threshold=2) is True
+    db_manager.reset_tasks_since_update("p_new")
+    assert db_manager.should_refresh_planning("p_new", threshold=2) is False
+
+
+def test_ensure_project_records_config_name(db_manager):
+    """A run created for a non-DPE config records its config_name."""
+    db_manager.ensure_project("conv_run", config_name="meta_conversation")
+    assert db_manager.get_project("conv_run")["config_name"] == "meta_conversation"

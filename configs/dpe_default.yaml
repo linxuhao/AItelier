@@ -301,7 +301,8 @@ steps:
           files: ["**/*.py"]
           workspace_root: "$STEP_DIR"
           manifest_path: "linter_manifest.json"
-          on_failure: "fail"
+          on_failure: "retry"
+          max_retries: 3
         - tool: "lint"
           files: ["**/*.js", "**/*.html", "**/*.css"]
           workspace_root: "$STEP_DIR"

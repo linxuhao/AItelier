@@ -89,8 +89,9 @@ class TestStreamManager:
         assert len(b_events) == 1
 
     @pytest.mark.asyncio
-    async def test_get_queue_creates_on_demand(self, manager):
-        """_get_queue should create a queue if it doesn't exist."""
-        q = manager._get_queue("new_task")
+    async def test_get_queues_creates_on_demand(self, manager):
+        """_get_queues should create a set if it doesn't exist."""
+        qs = manager._get_queues("new_task")
         assert "new_task" in manager._queues
-        assert q is manager._queues["new_task"]
+        assert qs is manager._queues["new_task"]
+        assert isinstance(qs, set)

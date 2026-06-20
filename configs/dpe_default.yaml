@@ -6,6 +6,32 @@
 name: "dpe_default_v2"
 description: "AItelier DPE: Research → Architect → PM → Task Loop → Verify"
 
+# Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
+x-aitelier:
+  label: "DPE Pipeline"
+  scheduler_owned: true           # driven by the polling scheduler
+  has_task_loop: true             # PM produces a task manifest → per-task loop
+  seed_file: "project_brief.md"
+  output_step: "5"
+  labels:                         # step_id → dashboard label (source of truth)
+    git_sync_pre: "Sync Repo"
+    "1": "Researcher"
+    "1_review": "Research Review"
+    "2": "Architect"
+    "2_review": "Architecture Review"
+    "3": "PM"
+    "3_review": "PM Review"
+    task_loop: "Task Loop"
+    t_plan: "Task Planner"
+    t_plan_review: "Plan Review"
+    t_impl: "Implementer"
+    t_impl_review: "Impl Review"
+    t_verify: "Verifier"
+    t_verify_review: "Verify Review"
+    "5": "Final Verifier"
+    "5_test": "Final Tests"
+    "5_review": "Final Review"
+
 begin: "git_sync_pre"
 
 end_conditions:

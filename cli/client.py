@@ -77,6 +77,41 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
+    # ── Config-run generic surface ─────────────────────────────────
+
+    def list_configs(self) -> list[dict]:
+        """All registered configs with manifests."""
+        resp = self._client.get("/api/configs")
+        resp.raise_for_status()
+        return resp.json().get("configs", [])
+
+    def get_config_manifest(self, config_name: str) -> dict:
+        resp = self._client.get(f"/api/configs/{config_name}/manifest")
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_all_runs(self, config_name: str = None, status: str = None) -> list[dict]:
+        """All config runs (optionally filtered)."""
+        params = {}
+        if config_name:
+            params["config_name"] = config_name
+        if status:
+            params["status"] = status
+        resp = self._client.get("/api/runs", params=params)
+        resp.raise_for_status()
+        return resp.json().get("runs", [])
+
+    def start_config_run(self, config_name: str, seed_text: str = None,
+                         name: str = None) -> dict:
+        body = {"config_name": config_name}
+        if seed_text is not None:
+            body["seed_text"] = seed_text
+        if name:
+            body["name"] = name
+        resp = self._client.post("/api/runs", json=body)
+        resp.raise_for_status()
+        return resp.json()
+
     def create_project(self, project_id: str, name: str = None,
                        repo_type: str = "new", repo_path: str = None,
                        repo_url: str = None) -> dict:

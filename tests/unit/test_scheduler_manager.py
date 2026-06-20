@@ -96,6 +96,7 @@ def test_reap_inactive_removes_idle_scheduler(mock_start, manager):
     with patch("web_api.scheduler_manager.get_db_manager") as mock_db_fn:
         mock_db = MagicMock()
         mock_db.has_incomplete_tasks_for_owner.return_value = False
+        mock_db.has_active_runs_for_owner.return_value = False
         mock_db_fn.return_value = mock_db
         manager.reap_inactive()
 

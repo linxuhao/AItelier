@@ -47,6 +47,20 @@ _user_scheduler_map: dict[str, AsyncIOScheduler] = {}
 _scheduler_lock_fh = None
 
 
+def _scheduler_lock_path():
+    """Path to the single-scheduler advisory lock file.
+
+    Overridable via the ``AITELIER_SCHEDULER_LOCK`` env var so the test suite
+    (and any isolated deployment) uses its own lock and never contends with a
+    running/orphaned AItelier instance holding the production lock.
+    """
+    override = _os.getenv("AITELIER_SCHEDULER_LOCK")
+    if override:
+        return override
+    from api.dependencies import _AITELIER_HOME
+    return _AITELIER_HOME / "scheduler.lock"
+
+
 def _acquire_scheduler_lock() -> bool:
     """Try to take the single-scheduler advisory lock (non-blocking).
 
@@ -59,9 +73,7 @@ def _acquire_scheduler_lock() -> bool:
         return True  # already held by this process
     try:
         import fcntl
-        from api.dependencies import _AITELIER_HOME
-        lock_path = _AITELIER_HOME / "scheduler.lock"
-        fh = open(lock_path, "w")
+        fh = open(_scheduler_lock_path(), "w")
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError):
@@ -257,7 +269,8 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
     if project.get("meta_state") == "drafting":
         return None
 
-    run_id = sf.get_or_create_run("dpe_default_v2", project_id, {
+    config_name = project.get("config_name") or "dpe_default_v2"
+    run_id = sf.get_or_create_run(config_name, project_id, {
         "project_id": project_id,
         "brief": project.get("brief", ""),
     })
@@ -575,10 +588,17 @@ def _sync_project_status_to_db(project_id: str):
             run = all_runs[0] if all_runs else None
         if not run:
             return
+        # Is this a DPE-style config (task loop, coarse step mapping)?
+        has_task_loop = False
+        try:
+            from api.dependencies import get_config_registry
+            manifest = get_config_registry().get(run["graph_name"])
+            has_task_loop = bool(manifest and manifest.has_task_loop)
+        except Exception:
+            has_task_loop = run["graph_name"] == "dpe_default_v2"
+
         steps = sf.get_steps(run["id"])
         completed = [s["step_id"] for s in steps if s["status"] == "completed"]
-
-        completed_coarse = sorted({COARSE_MAP.get(s, s) for s in completed})
         current_step = run.get("current_node", "")
 
         # Derive a human-readable status label
@@ -603,29 +623,33 @@ def _sync_project_status_to_db(project_id: str):
         elif status == "failed":
             status = f"failed:{run.get('error_reason', 'unknown')[:80]}"
 
-        # Push step + completed into aitelier.db so the TUI sees live progress.
-        # AT-15: use fine-grained step_id (e.g. "t_impl") not coarse ("3")
-        # so the dashboard can show "▶ Implementer" instead of "▶ PM".
-        db.update_project(
-            project_id,
-            status=status,
-            current_project_step=current_step,
-            completed_project_steps=json.dumps(completed_coarse),
-        )
+        # Push step + status into aitelier.db so the UI sees live progress.
+        # AT-15: use fine-grained step_id (e.g. "t_impl") not coarse ("3").
+        if has_task_loop:
+            completed_coarse = sorted({COARSE_MAP.get(s, s) for s in completed})
+            db.update_project(
+                project_id,
+                status=status,
+                current_project_step=current_step,
+                completed_project_steps=json.dumps(completed_coarse),
+            )
+        else:
+            # Generic config: no coarse DPE-step mapping, no task loop.
+            db.update_project(
+                project_id,
+                status=status,
+                current_project_step=current_step,
+            )
         db.set_project_meta_state(project_id, run["status"])
-        # set_completed_project_steps is a deprecated no-op stub; the real
-        # write now happens via update_project above. Call kept for compat
-        # in case external callers rely on its side effects.
-        db.set_completed_project_steps(project_id, completed)
 
-        # Check for tasks created by PM (step 3_review → tasks/ dir)
-        existing_tasks = db.list_tasks_by_project(project_id)
-        if not existing_tasks:
-            _sync_task_manifest_to_db(project_id)
-
-        # Derive per-task status from the skillflow task-loop progress so the
-        # dashboard task badge isn't stuck at "pending" after tasks finish.
-        _sync_task_statuses(project_id, run, sf)
+        if has_task_loop:
+            # Check for tasks created by PM (step 3_review → tasks/ dir)
+            existing_tasks = db.list_tasks_by_project(project_id)
+            if not existing_tasks:
+                _sync_task_manifest_to_db(project_id)
+            # Derive per-task status from the skillflow task-loop progress so the
+            # dashboard task badge isn't stuck at "pending" after tasks finish.
+            _sync_task_statuses(project_id, run, sf)
     except Exception as e:
         import logging
         logging.getLogger("aitelier.scheduler").error(

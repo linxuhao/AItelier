@@ -29,11 +29,19 @@ def web_client_fixture(tmp_path, monkeypatch):
 HEADERS = {"Cf-Access-User-Email": "user@test.com"}
 
 
+def _ensure_project(pid: str):
+    """Seed a run/project row so task creation (which requires an existing
+    project) succeeds. /api/tasks intentionally does NOT auto-create."""
+    db = web_app.dependency_overrides[get_db_manager]()
+    db.ensure_project(pid, owner_email="user@test.com")
+
+
 # ── Create task ──
 
 
 def test_create_task_with_brief_writes_file(web_client, tmp_path):
     """Creating a task with project_brief should write project_brief.md to workspace."""
+    _ensure_project("brief_proj")
     resp = web_client.post(
         "/api/tasks",
         json={
@@ -51,6 +59,7 @@ def test_create_task_with_brief_writes_file(web_client, tmp_path):
 
 def test_create_task_without_brief(web_client):
     """Task creation without project_brief should succeed."""
+    _ensure_project("no_brief")
     resp = web_client.post(
         "/api/tasks",
         json={"project_id": "no_brief", "prompt": "hello"},
@@ -60,17 +69,14 @@ def test_create_task_without_brief(web_client):
     assert resp.json()["project_id"] == "no_brief"
 
 
-def test_create_task_ensures_project(web_client):
-    """Creating a task should auto-ensure the project in DB."""
-    web_client.post(
+def test_create_task_requires_existing_project(web_client):
+    """Creating a task for a non-existent project is rejected (no auto-create)."""
+    resp = web_client.post(
         "/api/tasks",
-        json={"project_id": "auto_proj", "prompt": "test"},
+        json={"project_id": "missing_proj", "prompt": "test"},
         headers=HEADERS,
     )
-    db = web_app.dependency_overrides[get_db_manager]()
-    project = db.get_project("auto_proj")
-    assert project is not None
-    assert project["owner_email"] == "user@test.com"
+    assert resp.status_code == 404
 
 
 # ── List tasks ──
@@ -79,6 +85,7 @@ def test_create_task_ensures_project(web_client):
 def test_list_tasks_with_limit_and_offset(web_client):
     """Pagination should work correctly."""
     for i in range(5):
+        _ensure_project(f"pag_proj_{i}")
         web_client.post(
             "/api/tasks",
             json={"project_id": f"pag_proj_{i}", "prompt": f"task {i}"},
@@ -101,6 +108,7 @@ def test_list_tasks_with_limit_and_offset(web_client):
 
 def test_get_task_returns_full_data(web_client):
     """GET task should return all fields defined in TaskResponse."""
+    _ensure_project("get_proj")
     resp = web_client.post(
         "/api/tasks",
         json={"project_id": "get_proj", "prompt": "test prompt text"},

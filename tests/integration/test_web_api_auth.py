@@ -117,6 +117,7 @@ def test_all_endpoints_require_auth(web_client: TestClient):
 def test_create_task_sets_owner(web_client: TestClient):
     """Created task should have owner_email from auth header."""
     headers = {"Cf-Access-User-Email": "owner@test.com"}
+    web_client.post("/api/projects", json={"project_id": "tenanted_proj"}, headers=headers)
     resp = web_client.post(
         "/api/tasks",
         json={"project_id": "tenanted_proj", "prompt": "hello"},
@@ -143,9 +144,11 @@ def test_user_sees_only_own_tasks(web_client: TestClient):
     alice = {"Cf-Access-User-Email": "alice@t.com"}
     bob = {"Cf-Access-User-Email": "bob@t.com"}
 
-    # Alice creates a task
+    # Alice creates a task (project must exist first)
+    web_client.post("/api/projects", json={"project_id": "a_proj"}, headers=alice)
     web_client.post("/api/tasks", json={"project_id": "a_proj", "prompt": "Alice task"}, headers=alice)
     # Bob creates a task
+    web_client.post("/api/projects", json={"project_id": "b_proj"}, headers=bob)
     web_client.post("/api/tasks", json={"project_id": "b_proj", "prompt": "Bob task"}, headers=bob)
 
     # Alice sees only her task
@@ -183,6 +186,7 @@ def test_user_cannot_access_others_task(web_client: TestClient):
     alice = {"Cf-Access-User-Email": "alice_404@t.com"}
     bob = {"Cf-Access-User-Email": "bob_404@t.com"}
 
+    web_client.post("/api/projects", json={"project_id": "a404_proj"}, headers=alice)
     resp = web_client.post(
         "/api/tasks", json={"project_id": "a404_proj", "prompt": "secret"}, headers=alice
     )
@@ -213,6 +217,7 @@ def test_user_cannot_rollback_others_task(web_client: TestClient):
     alice = {"Cf-Access-User-Email": "alice_rb@t.com"}
     bob = {"Cf-Access-User-Email": "bob_rb@t.com"}
 
+    web_client.post("/api/projects", json={"project_id": "arb_proj"}, headers=alice)
     resp = web_client.post(
         "/api/tasks", json={"project_id": "arb_proj", "prompt": "test"}, headers=alice
     )
@@ -258,6 +263,7 @@ def test_demo_user_can_read_others_tasks(demo_client: TestClient):
     alice = {"Cf-Access-User-Email": "demo_alice_t@t.com"}
     bob = {"Cf-Access-User-Email": "demo_bob_t@t.com"}
 
+    demo_client.post("/api/projects", json={"project_id": "demo_t_proj"}, headers=alice)
     resp = demo_client.post(
         "/api/tasks", json={"project_id": "demo_t_proj", "prompt": "demo task"}, headers=alice
     )
@@ -289,6 +295,7 @@ def test_demo_user_cannot_rollback_others_task(demo_client: TestClient):
     alice = {"Cf-Access-User-Email": "demo_alice_rb@t.com"}
     bob = {"Cf-Access-User-Email": "demo_bob_rb@t.com"}
 
+    demo_client.post("/api/projects", json={"project_id": "demo_rb_proj"}, headers=alice)
     resp = demo_client.post(
         "/api/tasks", json={"project_id": "demo_rb_proj", "prompt": "test"}, headers=alice
     )

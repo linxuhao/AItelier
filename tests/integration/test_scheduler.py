@@ -13,20 +13,39 @@ def test_get_next_active_project_priority(tmp_path):
 
     db.ensure_project("low_proj", name="Low")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'low_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'low_proj'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 1 WHERE project_id = 'low_proj'")
+        conn.execute("UPDATE runs SET priority = 1 WHERE project_id = 'low_proj'")
         conn.commit()
 
     db.ensure_project("high_proj", name="High")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'high_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'high_proj'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 10 WHERE project_id = 'high_proj'")
+        conn.execute("UPDATE runs SET priority = 10 WHERE project_id = 'high_proj'")
         conn.commit()
 
     result = db.get_next_active_project()
     assert result["project_id"] == "high_proj"
+
+
+def test_get_next_active_project_excludes_butler_driven_configs(tmp_path):
+    """A run of a non-scheduler-owned config (e.g. meta_conversation) must never
+    be picked by the polling scheduler, even when it's in an active status."""
+    db = DBManager(str(tmp_path / "owned.db"))
+
+    db.ensure_project("dpe_run", name="DPE", config_name="dpe_default_v2")
+    with db.get_connection() as _c:
+        _c.execute("UPDATE runs SET status = 'executing' WHERE project_id = 'dpe_run'"); _c.commit()
+
+    db.ensure_project("conv_run", name="Conv", config_name="meta_conversation")
+    with db.get_connection() as _c:
+        _c.execute("UPDATE runs SET status = 'executing', priority = 99 WHERE project_id = 'conv_run'"); _c.commit()
+
+    # Even with far higher priority, the butler-driven run is excluded.
+    result = db.get_next_active_project()
+    assert result is not None
+    assert result["project_id"] == "dpe_run"
 
 
 def test_get_next_active_project_skips_completed(tmp_path):
@@ -35,11 +54,11 @@ def test_get_next_active_project_skips_completed(tmp_path):
 
     db.ensure_project("done_proj", name="Done")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'completed' WHERE project_id = 'done_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'completed' WHERE project_id = 'done_proj'"); _c.commit()
 
     db.ensure_project("active_proj", name="Active")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'active_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'active_proj'"); _c.commit()
 
     result = db.get_next_active_project()
     assert result["project_id"] == "active_proj"
@@ -61,16 +80,16 @@ def test_fifo_picks_oldest_project(tmp_path):
 
     db.ensure_project("proj_later", name="Later")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'proj_later'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'proj_later'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 10, created_at = '2026-01-02' WHERE project_id = 'proj_later'")
+        conn.execute("UPDATE runs SET priority = 10, created_at = '2026-01-02' WHERE project_id = 'proj_later'")
         conn.commit()
 
     db.ensure_project("proj_first", name="First")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'proj_first'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'proj_first'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 1, created_at = '2026-01-01' WHERE project_id = 'proj_first'")
+        conn.execute("UPDATE runs SET priority = 1, created_at = '2026-01-01' WHERE project_id = 'proj_first'")
         conn.commit()
 
     result = db.get_next_active_project(fifo=True)
@@ -84,17 +103,17 @@ def test_fifo_ignores_priority(tmp_path):
     # High priority but created later
     db.ensure_project("high_prio_late", name="High Late")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'high_prio_late'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'high_prio_late'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 100, created_at = '2026-01-03' WHERE project_id = 'high_prio_late'")
+        conn.execute("UPDATE runs SET priority = 100, created_at = '2026-01-03' WHERE project_id = 'high_prio_late'")
         conn.commit()
 
     # Low priority but created first
     db.ensure_project("low_prio_early", name="Low Early")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'low_prio_early'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'low_prio_early'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 1, created_at = '2026-01-01' WHERE project_id = 'low_prio_early'")
+        conn.execute("UPDATE runs SET priority = 1, created_at = '2026-01-01' WHERE project_id = 'low_prio_early'")
         conn.commit()
 
     # FIFO picks oldest
@@ -109,16 +128,16 @@ def test_fifo_skips_completed(tmp_path):
 
     db.ensure_project("old_done", name="Old Done")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'completed' WHERE project_id = 'old_done'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'completed' WHERE project_id = 'old_done'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET created_at = '2026-01-01' WHERE project_id = 'old_done'")
+        conn.execute("UPDATE runs SET created_at = '2026-01-01' WHERE project_id = 'old_done'")
         conn.commit()
 
     db.ensure_project("new_active", name="New Active")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'new_active'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'new_active'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET created_at = '2026-01-02' WHERE project_id = 'new_active'")
+        conn.execute("UPDATE runs SET created_at = '2026-01-02' WHERE project_id = 'new_active'")
         conn.commit()
 
     result = db.get_next_active_project(fifo=True)
@@ -131,23 +150,23 @@ def test_fifo_with_owner_filter(tmp_path):
 
     db.ensure_project("alice_old", name="Alice Old", owner_email="alice@t.com")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'alice_old'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'alice_old'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 1, created_at = '2026-01-01' WHERE project_id = 'alice_old'")
+        conn.execute("UPDATE runs SET priority = 1, created_at = '2026-01-01' WHERE project_id = 'alice_old'")
         conn.commit()
 
     db.ensure_project("alice_new", name="Alice New", owner_email="alice@t.com")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'alice_new'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'alice_new'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET priority = 100, created_at = '2026-01-03' WHERE project_id = 'alice_new'")
+        conn.execute("UPDATE runs SET priority = 100, created_at = '2026-01-03' WHERE project_id = 'alice_new'")
         conn.commit()
 
     db.ensure_project("bob_mid", name="Bob Mid", owner_email="bob@t.com")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'bob_mid'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'bob_mid'"); _c.commit()
     with db.get_connection() as conn:
-        conn.execute("UPDATE projects SET created_at = '2026-01-02' WHERE project_id = 'bob_mid'")
+        conn.execute("UPDATE runs SET created_at = '2026-01-02' WHERE project_id = 'bob_mid'")
         conn.commit()
 
     # Alice FIFO: picks her oldest
@@ -177,7 +196,7 @@ def test_retry_project_resets_failed_status(tmp_path):
     db = DBManager(str(tmp_path / "retry_proj.db"))
     db.ensure_project("retry_test_proj", name="Retry Test")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'failed' WHERE project_id = 'retry_test_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'failed' WHERE project_id = 'retry_test_proj'"); _c.commit()
     # Add a failed task so retry_project has work to reset
     t = db.push_task("retry_test_proj", "test task")
     db.update_task_status(t, TaskStatus.FAILED)
@@ -192,7 +211,7 @@ def test_retry_project_resets_failed_tasks_to_pending(tmp_path):
     db = DBManager(str(tmp_path / "retry_tasks.db"))
     db.ensure_project("retry_tasks_proj")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'failed' WHERE project_id = 'retry_tasks_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'failed' WHERE project_id = 'retry_tasks_proj'"); _c.commit()
     t1 = db.push_task("retry_tasks_proj", "Failed task 1")
     t2 = db.push_task("retry_tasks_proj", "Failed task 2")
     db.update_task_status(t1, TaskStatus.FAILED)
@@ -214,7 +233,7 @@ def test_retry_project_returns_false_for_non_failed(tmp_path):
     db = DBManager(str(tmp_path / "not_failed.db"))
     db.ensure_project("active_proj")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'executing' WHERE project_id = 'active_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'executing' WHERE project_id = 'active_proj'"); _c.commit()
 
     result = db.retry_project("active_proj")
     assert result is False
@@ -225,11 +244,11 @@ def test_get_next_active_project_excludes_failed(tmp_path):
     db = DBManager(str(tmp_path / "skip_failed.db"))
     db.ensure_project("failed_proj")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'failed' WHERE project_id = 'failed_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'failed' WHERE project_id = 'failed_proj'"); _c.commit()
 
     db.ensure_project("planning_proj")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'planning' WHERE project_id = 'planning_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'planning' WHERE project_id = 'planning_proj'"); _c.commit()
 
     result = db.get_next_active_project()
     assert result["project_id"] == "planning_proj"
@@ -240,7 +259,7 @@ def test_retry_project_allows_failed_project_to_be_rescheduled(tmp_path):
     db = DBManager(str(tmp_path / "reschedule.db"))
     db.ensure_project("was_failed_proj")
     # set_project_status removed (was no-op); set via direct SQL
-    with db.get_connection() as _c: _c.execute("UPDATE projects SET status = 'failed' WHERE project_id = 'was_failed_proj'"); _c.commit()
+    with db.get_connection() as _c: _c.execute("UPDATE runs SET status = 'failed' WHERE project_id = 'was_failed_proj'"); _c.commit()
 
     db.retry_project("was_failed_proj")
 

@@ -12,7 +12,8 @@ def test_health_check(client: TestClient):
 
 def test_create_and_get_task(client: TestClient):
     """测试流水线 API 任务创建与数据回查闭环"""
-    # 1. 创建任务
+    # 1. 创建任务 (project must exist first — /api/tasks does not auto-create)
+    client.post("/api/projects", json={"project_id": "api_test_proj"})
     payload = {"project_id": "api_test_proj", "prompt": "Scrape github"}
     response = client.post("/api/tasks", json=payload)
 
@@ -45,6 +46,7 @@ def test_get_task_not_found(client: TestClient):
 
 def test_create_task_with_brief(client: TestClient):
     """创建任务时附带 project_brief 应写入 workspace"""
+    client.post("/api/projects", json={"project_id": "brief_proj"})
     payload = {
         "project_id": "brief_proj",
         "prompt": "Build something",

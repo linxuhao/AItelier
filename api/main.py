@@ -27,6 +27,7 @@ from api.settings_routers import router as settings_router
 from api.meta_routers import router as meta_router
 from api.agent_routers import router as agent_router
 from api.run_routers import router as run_router
+from api.config_routers import router as config_router
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
 
@@ -67,7 +68,7 @@ async def lifespan(app: FastAPI):
                 import sqlite3 as _sql
                 _adb = _sql.connect(_os.path.expanduser("~/.AItelier/aitelier.db"))
                 row = _adb.execute(
-                    "SELECT name FROM projects WHERE project_id = ?",
+                    "SELECT name FROM runs WHERE project_id = ?",
                     (pid,),
                 ).fetchone()
                 _adb.close()
@@ -101,26 +102,33 @@ async def lifespan(app: FastAPI):
         if task:
             data["_task_id"] = task
 
+    _graph_cache: dict[str, str] = {}      # run_id → graph_name (config)
+
     def _resolve_run_info(data: dict, rid: str):
-        """Ensure project_id from run if not in payload (thread-safe)."""
-        pid = data.get("project_id")
-        if pid:
-            return
-        if rid not in _pid_cache:
+        """Ensure project_id + graph_name from the run (thread-safe)."""
+        if rid and rid not in _pid_cache:
             try:
                 import sqlite3 as _sql
                 _sdb = _sql.connect(_os.path.expanduser("~/.AItelier/skillflow.db"))
                 row = _sdb.execute(
-                    "SELECT project_id FROM skillflow_runs WHERE id = ?",
+                    "SELECT project_id, graph_name FROM skillflow_runs WHERE id = ?",
                     (rid,),
                 ).fetchone()
                 _sdb.close()
                 _pid_cache[rid] = row[0] if row else ""
+                _graph_cache[rid] = row[1] if row else ""
             except Exception:
                 _pid_cache[rid] = ""
-        pid = _pid_cache.get(rid, "")
-        if pid:
-            data["project_id"] = pid
+                _graph_cache[rid] = ""
+        if not data.get("project_id"):
+            pid = _pid_cache.get(rid, "")
+            if pid:
+                data["project_id"] = pid
+        # Carry the config identity so clients can route/render any config.
+        if not data.get("graph_name"):
+            graph = _graph_cache.get(rid, "")
+            if graph:
+                data["graph_name"] = graph
 
     async def _on_skillflow_event(notification):
         """Forward skillflow NotificationBus events to SSE."""
@@ -160,8 +168,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="AItelier DPE Engine API",
-    description="Deterministic Pipeline Engine (DPE) 控制面",
+    title="AItelier Engine API",
+    description="Skillflow config-run orchestration control plane",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -173,6 +181,7 @@ app.include_router(settings_router)
 app.include_router(meta_router)
 app.include_router(agent_router)
 app.include_router(run_router)
+app.include_router(config_router)
 
 # ── Serve generated web UI static files ──
 _WEB_DIR = _Path(__file__).resolve().parent.parent / "web"

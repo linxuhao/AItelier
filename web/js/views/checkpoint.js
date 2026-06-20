@@ -52,14 +52,6 @@
   var _boundKeydownHandler = null;
 
 
-  // ── DPE checkpoint steps (steps 1, 2, 3).  "gather" is meta — skip. ──
-  var _DPE_CHECKPOINT_STEPS = {
-    "1": true,
-    "2": true,
-    "3": true,
-  };
-
-
   // ── Lazy-access helpers ───────────────────────────────────────────
 
   /**
@@ -1004,17 +996,22 @@
         return;
       }
 
-      // ── DPE-only filter: skip "gather" (meta conversation) checkpoints ──
+      // ── Skip conversational checkpoints (handled in the chat view) ──
+      // Data-driven: read the checkpoint kind from the config manifest, with the
+      // legacy "gather" check as a fallback. Any non-conversational checkpoint of
+      // any config shows the modal (content rendered generically).
       var step = (checkpointData && (checkpointData.step || checkpointData.checkpoint)) || "";
-      if (step === "gather") {
-        // Meta conversation checkpoint — do NOT show modal
-        return;
-      }
-
-      // Also check if the data's step is explicitly not in our DPE set
-      if (step && !_DPE_CHECKPOINT_STEPS.hasOwnProperty(step)) {
-        // step exists but isn't 1, 2, or 3 — could be a non-DPE step.
-        // Still show the modal anyway (display the content) — just log it.
+      var cfgName = (checkpointData && (checkpointData.config_name || checkpointData.graph_name)) || "";
+      var kind = "";
+      try {
+        var manifests = window.AItelier && window.AItelier.configManifests;
+        var m = manifests && manifests[cfgName];
+        if (m && m.checkpoints && m.checkpoints[step]) {
+          kind = m.checkpoints[step].kind || "";
+        }
+      } catch (_e) { /* fall back to legacy check */ }
+      if (kind === "conversational" || step === "gather") {
+        return;  // conversational checkpoint — no file-diff modal
       }
 
       // Reset any previous state

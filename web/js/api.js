@@ -438,6 +438,57 @@
       );
     },
 
+    // ── Config-run generic surface ──────────────────────────────────
+
+    /** GET /api/configs — all registered configs with manifests. */
+    getConfigs: function () {
+      return _get("/api/configs");
+    },
+
+    /** GET /api/configs/{name}/manifest */
+    getConfigManifest: function (name) {
+      return _get("/api/configs/" + encodeURIComponent(name) + "/manifest");
+    },
+
+    /** GET /api/runs — all config runs (optional {configName, status} filters). */
+    listAllRuns: function (opts) {
+      var path = "/api/runs";
+      var params = [];
+      if (opts && opts.configName) {
+        params.push("config_name=" + encodeURIComponent(opts.configName));
+      }
+      if (opts && opts.status) {
+        params.push("status=" + encodeURIComponent(opts.status));
+      }
+      if (params.length > 0) { path += "?" + params.join("&"); }
+      return _get(path);
+    },
+
+    /** GET /api/runs/{runId} — full run detail incl. config manifest. */
+    getRun: function (runId) {
+      return _get("/api/runs/" + encodeURIComponent(runId));
+    },
+
+    /** POST /api/runs — start a run of any config. */
+    startRun: function (body) {
+      return _post("/api/runs", body);
+    },
+
+    /** GET /api/runs/{runId}/checkpoint */
+    getRunCheckpoint: function (runId) {
+      return _get("/api/runs/" + encodeURIComponent(runId) + "/checkpoint");
+    },
+
+    /** POST /api/runs/{runId}/checkpoint/approve */
+    approveRunCheckpoint: function (runId, body) {
+      return _post("/api/runs/" + encodeURIComponent(runId) + "/checkpoint/approve", body || {});
+    },
+
+    /** POST /api/runs/{runId}/checkpoint/reject */
+    rejectRunCheckpoint: function (runId, body) {
+      return _post("/api/runs/" + encodeURIComponent(runId) + "/checkpoint/reject", body || {});
+    },
+
     /**
      * Read execution traces for a pipeline run.
      * GET /api/runs/{runId}/trace

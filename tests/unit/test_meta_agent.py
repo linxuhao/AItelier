@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 24
+        assert len(TOOL_DEFINITIONS) == 25
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:

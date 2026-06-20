@@ -61,6 +61,7 @@ class ProjectResponse(BaseModel):
 class ProjectWithStats(BaseModel):
     project_id: str
     name: str
+    config_name: str = "dpe_default_v2"
     status: str = "planning"
     current_project_step: Optional[str] = None
     priority: int = 0

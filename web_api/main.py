@@ -13,6 +13,8 @@ from api.routers import router as tasks_router
 from api.project_routers import router as projects_router
 from api.settings_routers import router as settings_router
 from api.meta_routers import router as meta_router
+from api.run_routers import router as run_router
+from api.config_routers import router as config_router
 from api.auth import get_optional_user
 from web_api.auth import get_current_user
 from core.scheduler import start_scheduler
@@ -71,6 +73,8 @@ assert get_optional_user in app.dependency_overrides, (
 app.include_router(tasks_router)
 app.include_router(projects_router)
 app.include_router(settings_router)
+app.include_router(run_router)
+app.include_router(config_router)
 app.include_router(meta_router)
 
 

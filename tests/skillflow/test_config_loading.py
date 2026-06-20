@@ -32,7 +32,7 @@ class TestV2ConfigLoading:
         path = ROOT / "configs" / "dpe_default.yaml"
         graph = PipelineGraph.from_yaml(path)
         assert graph.name == "dpe_default_v2"
-        assert graph.begin == "1"
+        assert graph.begin == "git_sync_pre"
         assert len(graph.steps) > 0
 
     def test_v2_graph_has_review_steps(self):

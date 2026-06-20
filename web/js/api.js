@@ -578,7 +578,7 @@
     },
 
     // ════════════════════════════════════════════════════════════════
-    //  Session
+    //  Session & Chat History
     // ════════════════════════════════════════════════════════════════
 
     /**
@@ -588,6 +588,40 @@
      */
     createSession: function () {
       return _post("/api/agent/session/create");
+    },
+
+    /**
+     * Get chat history for a session.
+     * GET /api/agent/chat/history?session_id=...
+     * @param {string} sessionId — session ID
+     * @returns {Promise<object>} — {session_id, messages: [...]}
+     */
+    getChatHistory: function (sessionId) {
+      return _get("/api/agent/chat/history?session_id=" + encodeURIComponent(sessionId));
+    },
+
+    /**
+     * List chat sessions, optionally filtered by project.
+     * GET /api/agent/sessions?project_id=...&limit=20
+     * @param {string|null} projectId — optional project filter (null returns all)
+     * @returns {Promise<object>} — {sessions: [...]}
+     */
+    listSessions: function (projectId) {
+      var path = "/api/agent/sessions?limit=20";
+      if (projectId) {
+        path += "&project_id=" + encodeURIComponent(projectId);
+      }
+      return _get(path);
+    },
+
+    /**
+     * Save a single chat message to the backend immediately.
+     * POST /api/agent/chat/message
+     * @param {object} body — {session_id, project_id, role, content}
+     * @returns {Promise<object>} — {status: "saved"}
+     */
+    saveChatMessage: function (body) {
+      return _post("/api/agent/chat/message", body);
     },
   };
 

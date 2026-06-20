@@ -6,6 +6,11 @@
    * Markdown rendering, tool call indicators, slash commands, and
    * session management.
    *
+   * Enhanced with:
+   *   - History restoration (rehydrate messages on re-entry)
+   *   - Session selector dropdown to switch between past conversations
+   *   - Immediate user message save (fire-and-forget POST)
+   *
    * DOM target: #view-chat
    * Dependencies: AItelier.API, AItelier.Router, AItelier.Utils, AItelier.App (optional)
    *
@@ -520,6 +525,311 @@
 
 
   // ════════════════════════════════════════════════════════════════════
+  //  History Restoration
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Fetch persisted messages for the current session from the backend
+   * and render non-duplicate bubbles.
+   *
+   * Called from show() after _initSession() resolves.
+   * Must not clear existing _history — only append non-duplicate messages.
+   *
+   * @returns {Promise<void>}
+   */
+  function _restoreHistory() {
+    // No session to restore
+    if (!_sessionId) {
+      return Promise.resolve();
+    }
+
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.getChatHistory !== "function") {
+      return Promise.resolve();
+    }
+
+    return api.getChatHistory(_sessionId).then(function (response) {
+      if (!response || !response.messages || !Array.isArray(response.messages)) {
+        return;
+      }
+
+      // Build dedup key set from existing _history
+      var existingKeys = {};
+      for (var i = 0; i < _history.length; i++) {
+        var msg = _history[i];
+        var key = msg.role + "|" + (msg.content || "").slice(0, 100);
+        existingKeys[key] = true;
+      }
+
+      var added = false;
+      for (var j = 0; j < response.messages.length; j++) {
+        var m = response.messages[j];
+        var dedupKey = m.role + "|" + (m.content || "").slice(0, 100);
+
+        // Skip duplicates
+        if (existingKeys[dedupKey]) {
+          continue;
+        }
+
+        // Render the bubble
+        var displayRole = m.role;
+        if (displayRole === "assistant") {
+          displayRole = "agent";
+        }
+        _addMessage(displayRole, m.content);
+        _history.push({ role: m.role, content: m.content });
+        existingKeys[dedupKey] = true;
+        added = true;
+      }
+
+      if (added) {
+        _scrollToBottom();
+      }
+    }).catch(function (/* err */) {
+      // Silently skip — chat still works without history
+    });
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Session Selector
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Build and insert the session selector header at the top of #view-chat,
+   * above the .chat-messages container.
+   *
+   * Creates:
+   *   <div class="chat-header">
+   *     <select id="session-selector">...</select>
+   *     <button id="btn-new-session">+ New</button>
+   *   </div>
+   */
+  function _buildSessionSelector() {
+    var chatView = document.getElementById("view-chat");
+    if (!chatView) {
+      return;
+    }
+
+    // Remove any existing chat-header
+    var existing = chatView.querySelector(".chat-header");
+    if (existing) {
+      existing.parentElement.removeChild(existing);
+    }
+
+    // Find .chat-messages to insert before it
+    var messagesContainer = chatView.querySelector(".chat-messages");
+
+    var header = document.createElement("div");
+    header.className = "chat-header";
+    header.style.display = "inline-flex";
+    header.style.alignItems = "center";
+    header.style.gap = "0.5rem";
+    header.style.padding = "0.5rem 0";
+    header.style.width = "100%";
+
+    // ── <select id="session-selector"> ──
+    var select = document.createElement("select");
+    select.id = "session-selector";
+    select.style.flex = "1";
+
+    var defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Current session";
+    select.appendChild(defaultOption);
+
+    // ── <button id="btn-new-session">+ New</button> ──
+    var newBtn = document.createElement("button");
+    newBtn.id = "btn-new-session";
+    newBtn.textContent = "+ New";
+    newBtn.className = "outline";
+    newBtn.style.flexShrink = "0";
+    newBtn.style.fontSize = "0.85rem";
+    newBtn.style.padding = "0.2rem 0.6rem";
+
+    // ── Change event: load selected session ──
+    select.addEventListener("change", function () {
+      var selectedVal = select.value;
+      if (selectedVal && selectedVal !== _sessionId) {
+        _loadSession(selectedVal);
+      }
+      // Reset the select to show the current session visually
+      // (the _loadSession call will update it to the correct value)
+    });
+
+    // ── Click event: create new session ──
+    newBtn.addEventListener("click", function () {
+      // Reset session state
+      _sessionId = null;
+      _sessionInitiated = false;
+
+      // Clear messages container and history
+      var container = _getMessagesContainer();
+      if (container) {
+        container.innerHTML = "";
+      }
+      _history = [];
+
+      // Create a new session
+      _initSession().then(function () {
+        // Refresh the session selector list
+        _loadSessionList();
+        // Reset the select to default
+        var sel = document.getElementById("session-selector");
+        if (sel) {
+          sel.value = "";
+        }
+      });
+    });
+
+    header.appendChild(select);
+    header.appendChild(newBtn);
+
+    // Insert BEFORE .chat-messages
+    if (messagesContainer) {
+      chatView.insertBefore(header, messagesContainer);
+    } else {
+      chatView.appendChild(header);
+    }
+  }
+
+  /**
+   * Fetch the session list from the backend and populate the
+   * #session-selector dropdown.
+   *
+   * Called from show() after _restoreHistory() completes.
+   *
+   * @returns {Promise<void>}
+   */
+  function _loadSessionList() {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.listSessions !== "function") {
+      return Promise.resolve();
+    }
+
+    var currentProject = _getCurrentProject();
+
+    return api.listSessions(currentProject).then(function (response) {
+      if (!response || !response.sessions || !Array.isArray(response.sessions)) {
+        return;
+      }
+
+      var select = document.getElementById("session-selector");
+      if (!select) {
+        return;
+      }
+
+      // Remember the current value before clearing
+      var currentVal = select.value;
+
+      // Clear all options except the first "Current session" option
+      while (select.options.length > 1) {
+        select.remove(1);
+      }
+
+      // Add each session as an option
+      for (var i = 0; i < response.sessions.length; i++) {
+        var session = response.sessions[i];
+        var sid = session.session_id || "";
+        var pid = session.project_id || "";
+        var lastMsg = session.last_message || "";
+        var count = session.message_count || 0;
+
+        // Truncate last message to 40 chars
+        var preview = lastMsg.length > 40 ? lastMsg.slice(0, 40) + "\u2026" : lastMsg;
+
+        var label = pid + ": " + preview + " (" + count + " msgs)";
+
+        var option = document.createElement("option");
+        option.value = sid;
+        option.textContent = label;
+
+        // Mark current session as selected
+        if (sid === _sessionId) {
+          option.selected = true;
+        }
+
+        select.appendChild(option);
+      }
+    }).catch(function (/* err */) {
+      // Silently skip — dropdown stays with just the default option
+    });
+  }
+
+  /**
+   * Switch the chat view to display a different session's messages.
+   *
+   * @param {string} sessionId — the session ID to load
+   */
+  function _loadSession(sessionId) {
+    if (sessionId === _sessionId) {
+      return; // Already loaded
+    }
+
+    // Abort any in-flight SSE stream
+    _abortStream();
+
+    // Clear the messages container
+    var container = _getMessagesContainer();
+    if (container) {
+      container.innerHTML = "";
+    }
+
+    // Reset in-memory history
+    _history = [];
+
+    // Set the session ID (do NOT call _initSession() — session already exists)
+    _sessionId = sessionId;
+
+    // Update the select element's value
+    var select = document.getElementById("session-selector");
+    if (select) {
+      select.value = sessionId;
+    }
+
+    // Restore history for the new session
+    _restoreHistory();
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  User Message Persistence
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Save a user message to the backend immediately (fire-and-forget).
+   *
+   * Called from _sendMessage() after _addMessage("user", text) and
+   * BEFORE the _history.push() call.
+   *
+   * @param {string} text — the user message text
+   */
+  function _saveUserMessage(text) {
+    // No session — nothing to save to
+    if (!_sessionId) {
+      return;
+    }
+
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.saveChatMessage !== "function") {
+      return;
+    }
+
+    var currentProject = _getCurrentProject();
+
+    // Fire-and-forget: call the API but do NOT await or chain
+    api.saveChatMessage({
+      session_id: _sessionId,
+      project_id: currentProject || "",
+      role: "user",
+      content: text,
+    }).catch(function (/* err */) {
+      // Silently ignore — best-effort save
+    });
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
   //  SSE streaming (fetch + ReadableStream)
   // ════════════════════════════════════════════════════════════════════
 
@@ -568,8 +878,13 @@
     sessionPromise.then(function (sid) {
       _sessionId = sid;
 
-      // Add user message to display and history
+      // Add user message to display
       _addMessage("user", text);
+
+      // Save user message immediately (fire-and-forget) BEFORE history push
+      _saveUserMessage(text);
+
+      // Push to history
       _history.push({ role: "user", content: text });
 
       // Prepare the request
@@ -900,7 +1215,7 @@
 
   /**
    * Render the initial chat UI into #view-chat.
-   * Builds the messages container and input area.
+   * Builds the session selector header, messages container, and input area.
    */
   function _renderUI() {
     var chatView = document.getElementById("view-chat");
@@ -915,6 +1230,9 @@
     var container = document.createElement("div");
     container.className = "chat-messages";
     chatView.appendChild(container);
+
+    // Session selector header (inserted before .chat-messages)
+    _buildSessionSelector();
 
     // Welcome message
     var welcome = "Chat with the Meta Agent. Type /help for commands.";
@@ -950,8 +1268,9 @@
     /**
      * Show the chat view.
      *
-     * Renders the chat UI (messages container + input area), ensures
-     * a session has been created, and starts monitoring connection state.
+     * Renders the chat UI (session selector, messages container, input area),
+     * ensures a session has been created, restores persisted history,
+     * loads the session list, and starts monitoring connection state.
      * Focuses the input field.
      */
     show: function () {
@@ -962,15 +1281,21 @@
       // Render the UI
       _renderUI();
 
-      // Initialize session (lazy: created once on first show)
-      if (!_sessionInitiated) {
-        _initSession().catch(function (/* err */) {
-          // Session creation failure is non-critical; chat works without it
-        });
-      }
-
       // Start monitoring connection state
       _startConnectionMonitor();
+
+      // New flow: init session → restore history → load session list
+      var initPromise = _sessionInitiated
+        ? Promise.resolve(_sessionId)
+        : _initSession();
+
+      initPromise.then(function () {
+        return _restoreHistory();
+      }).then(function () {
+        return _loadSessionList();
+      }).catch(function (/* err */) {
+        // Silently skip — chat still works without history
+      });
 
       // Focus the input field
       var input = document.getElementById("chat-input-field");
@@ -987,6 +1312,9 @@
      * Aborts any in-flight SSE stream, stops timers, and cleans up
      * streaming state.  The DOM is cleared to prevent stale state
      * on subsequent show() calls.
+     *
+     * The _history array is PRESERVED so it can be used for dedup
+     * when the user returns to the chat page.
      */
     hide: function () {
       // Abort any in-flight stream
@@ -998,7 +1326,7 @@
       // Reset sending guard
       _sending = false;
 
-      // Hide and clear the DOM
+      // Hide and clear the DOM (but preserve _history for dedup on re-entry)
       var chatView = document.getElementById("view-chat");
       if (chatView) {
         chatView.classList.remove("active");

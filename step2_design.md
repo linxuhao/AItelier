@@ -1,428 +1,325 @@
-# 技术架构设计 — AItelier Web Frontend
+# 技术架构设计 — AItelier WebUI Chat History Persistence
 
 ## 概述
 
-AItelier Web Frontend 是一个**纯静态单页应用（SPA）**，使用原生 HTML/CSS/JS（零框架依赖）构建，由现有 FastAPI 后端以静态文件形式托管。它提供项目管理仪表盘、实时流水线状态更新（SSE）、检查点审查模态框，以及用于需求澄清的 Meta Agent 聊天界面。
+增强现有 AItelier WebUI 的聊天视图（`web/js/views/chat.js`），使其具备跨页面导航和跨浏览器会话的聊天历史持久化能力。在现有 FastAPI 后端 + SQLite `chat_history` / `sessions` 表、以及前端 session 机制的基础之上，**填补三个缺口**：
 
-SOTA 调研推荐的技术栈全部采用：**Pico CSS**（无类 CSS）、**marked.js + DOMPurify**（Markdown 安全渲染）、**原生 `<dialog>`**（模态框）、**原生 `EventSource`**（SSE 流）、**原生 `fetch()`**（API 通信）、**hash 路由**。
+1. **历史恢复** — 用户返回聊天页面时，从后端加载并渲染持久化的消息
+2. **会话选择器** — 聊天页面提供一个下拉列表，列出过去的会话，可选择并加载
+3. **即时用户消息持久化** — 在用户消息发送后立即保存到后端（不等待流式响应完成）
+
+不引入新框架、新依赖、新数据库表。所有修改均收敛在已有文件内部。
+
+---
 
 ## 架构图
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      AItelier FastAPI Server                      │
-│                                                                   │
-│  GET /                  → serve web/index.html (SPA entry)       │
-│  GET /web/**            → serve static files (js/, css/)         │
-│  GET /api/projects      → project CRUD                           │
-│  POST /api/agent/chat   → meta agent SSE stream                  │
-│  GET /api/events/stream → global pipeline SSE stream             │
-│  GET /api/meta/{pid}/checkpoint → checkpoint state               │
-│  ...                                                              │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                    web/index.html (SPA Shell)                      │
-│                                                                    │
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │ <header>  AppBar — logo, nav links, connection status       ││
-│  ├──────────────────────────────────────────────────────────────┤│
-│  │ <main>                                                        ││
-│  │  ┌─────────────────────────────────────────────────────────┐ ││
-│  │  │  View: Dashboard       (hash: #/ or #/projects)         │ ││
-│  │  │  ┌─────────────────────────────────────────────────┐    │ ││
-│  │  │  │ Project table + create/delete actions            │    │ ││
-│  │  │  └─────────────────────────────────────────────────┘    │ ││
-│  │  └─────────────────────────────────────────────────────────┘ ││
-│  │  ┌─────────────────────────────────────────────────────────┐ ││
-│  │  │  View: Project Detail  (hash: #/projects/{id})         │ ││
-│  │  │  ┌───────────────────────┬───────────────────────────┐  │ ││
-│  │  │  │ Project info + tasks │ Workspace tree browser     │  │ ││
-│  │  │  └───────────────────────┴───────────────────────────┘  │ ││
-│  │  └─────────────────────────────────────────────────────────┘ ││
-│  │  ┌─────────────────────────────────────────────────────────┐ ││
-│  │  │  View: Chat            (hash: #/chat)                   │ ││
-│  │  │  ┌─────────────────────────────────────────────────┐    │ ││
-│  │  │  │ Chat messages (SSE streaming) + input            │    │ ││
-│  │  │  └─────────────────────────────────────────────────┘    │ ││
-│  │  └─────────────────────────────────────────────────────────┘ ││
-│  └──────────────────────────────────────────────────────────────┘│
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │ <dialog> CheckpointModal  — approve/reject with feedback    ││
-│  └──────────────────────────────────────────────────────────────┘│
-│  ┌──────────────────────────────────────────────────────────────┐│
-│  │ <aside> NotificationPanel  — real-time pipeline events (SSE) ││
-│  └──────────────────────────────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                     AItelier FastAPI Server                            │
+│                                                                        │
+│  NEW  GET /api/agent/chat/history?session_id=...                       │
+│       → db.get_chat_history_by_session(session_id) → {messages: [...]} │
+│                                                                        │
+│  NEW  GET /api/agent/sessions?project_id=...&limit=20                  │
+│       → db.list_chat_sessions(project_id, limit) → {sessions: [...]}   │
+│                                                                        │
+│  NEW  POST /api/agent/chat/message                                     │
+│       → db.save_chat_message_with_session(session_id, project_id,      │
+│                                           role, content)               │
+│                                                                        │
+│  EXISTING  POST /api/agent/chat          (SSE streaming + persist)     │
+│  EXISTING  POST /api/agent/session/create                              │
+└───────────────────────────┬──────────────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                     Frontend — Chat View (chat.js)                     │
+│                                                                        │
+│  show()                                                                │
+│    ├── _renderUI()            build DOM structure                      │
+│    │     ├── .chat-header     ★ NEW: session selector bar              │
+│    │     │     ├── <select id="session-selector">                      │
+│    │     │     └── <button id="btn-new-session"> + New                 │
+│    │     ├── .chat-messages   (unchanged)                              │
+│    │     └── .chat-input-area (unchanged)                              │
+│    ├── _initSession()         (unchanged)                              │
+│    ├── _restoreHistory()      ★ NEW: load & render stored messages     │
+│    └── _loadSessionList()     ★ NEW: populate session selector         │
+│                                                                        │
+│  _sendMessage(text)                                                   │
+│    ├── _saveUserMessage(text) ★ NEW: POST /api/agent/chat/message     │
+│    └── ... (existing SSE streaming flow unchanged)                     │
+│                                                                        │
+│  _loadSession(sessionId)      ★ NEW: switch to a different session    │
+│    ├── Clear display & history                                         │
+│    ├── _sessionId = sessionId                                          │
+│    └── _restoreHistory()                                               │
+└──────────────────────────────────────────────────────────────────────┘
 
-Data Flow:
-  ┌──────────┐  fetch()   ┌──────────────┐  SSE   ┌───────────────┐
-  │ API.js   │◄──────────►│ FastAPI       │◄──────►│ sse.js        │
-  │ (fetch   │            │ /api/*        │        │ (EventSource) │
-  │ wrapper) │            └──────────────┘        └───────┬───────┘
-  └────┬─────┘                                            │
-       │                                                  ▼
-       ▼                                          ┌───────────────┐
-  ┌──────────┐    ┌──────────┐    ┌──────────┐    │ Notification  │
-  │Dashboard │    │ Project  │    │  Chat    │    │   Panel       │
-  │  View    │    │  View    │    │  View    │    │ (sidebar)     │
-  └──────────┘    └──────────┘    └──────────┘    └───────────────┘
-       │               │               │
-       └───────────────┴───────────────┘
-                       │
-                       ▼
-               ┌──────────────┐
-               │   Router     │
-               │ (hashchange) │
-               └──────────────┘
+Data Flow — History Restoration:
+  Chat.show()
+    │
+    ├── _initSession() → _sessionId
+    │
+    ├── _restoreHistory()
+    │     │
+    │     └── GET /api/agent/chat/history?session_id=...
+    │           │
+    │           ▼
+    │     messages: [{role, content, created_at}, ...]
+    │           │
+    │           ▼
+    │     _addMessage(role, content) for each → rendered bubbles
+    │     _history = messages (deduped, in-memory copy)
+    │
+    └── _loadSessionList()
+          │
+          └── GET /api/agent/sessions?project_id=...
+                │
+                ▼
+          sessions: [{session_id, project_id, message_count, last_message, updated_at}, ...]
+                │
+                ▼
+          <select id="session-selector"> populated, current _sessionId selected
+
+Data Flow — Session Switch:
+  User selects a different session in <select>
+    │
+    └── _loadSession(newSessionId)
+          ├── Clear .chat-messages DOM
+          ├── Clear _history array
+          ├── _sessionId = newSessionId
+          └── _restoreHistory() → GET history → render
 ```
 
-## 文件结构
-
-所有前端文件位于仓库根目录的 `web/` 目录下，由 FastAPI 以静态文件形式托管：
-
-```
-./                          (仓库根目录)
-├── web/
-│   ├── index.html          SPA 入口 — HTML shell, 所有 view 的 DOM 容器
-│   ├── css/
-│   │   └── app.css         自定义样式（布局、聊天气泡、通知面板、响应式）
-│   └── js/
-│       ├── app.js          应用入口 — 初始化、路由、全局错误处理
-│       ├── router.js       Hash 路由 — 基于 #/path 的视图切换
-│       ├── api.js          API 客户端 — fetch 封装与错误处理
-│       ├── sse.js          SSE 管理器 — EventSource 生命周期与事件分发
-│       ├── utils.js        工具函数 — Markdown 渲染、时间格式化、状态样式
-│       └── views/
-│           ├── dashboard.js   仪表盘视图 — 项目列表、创建/删除
-│           ├── project.js     项目视图 — 项目详情、任务列表、工作区浏览
-│           ├── chat.js        聊天视图 — Meta Agent 对话（SSE 流）
-│           └── checkpoint.js  检查点模态框 — 审批/拒绝 + 反馈
-```
-
-<span style="color:red">**关键规则**：所有写入路径均以仓库根目录 `./` 为基准。JS 模块间通过命名空间全局对象 `AItelier.*` 暴露接口（如 `AItelier.API`、`AItelier.Router`），不使用 ES6 `import/export`，避免对打包工具（webpack/vite）的依赖，保持原生可用。</span>
+---
 
 ## 组件列表
 
-### 1. index.html — SPA Shell
+### 组件 1: `GET /api/agent/chat/history` — 会话历史端点（新增）
 
-- **职责**: 单页入口文件，包含完整 DOM 结构、CDN 依赖、`<template>` 元素
-- **内容**:
-  - `<head>`: Pico CSS CDN、highlight.js CDN（可选）、自定义 `app.css`
-  - `<body>` 顶层容器:
-    - `<header id="app-bar">`: 导航栏 — logo、仪表盘/聊天链接、连接状态指示灯
-    - `<main id="view-container">`: 视图容器，包含三个可切换面板:
-      - `<section id="view-dashboard">`: 仪表盘视图
-      - `<section id="view-project">`: 项目详情视图
-      - `<section id="view-chat">`: 聊天视图
-    - `<aside id="notification-panel">`: 通知侧边栏（SSE 事件流）
-    - `<dialog id="checkpoint-modal">`: 检查点审批模态框
-    - `<dialog id="confirm-dialog">`: 通用确认对话框
-    - `<template id="tpl-project-row">`: 项目表格行模板
-    - `<template id="tpl-task-row">`: 任务表格行模板
-    - `<template id="tpl-chat-msg">`: 聊天消息气泡模板
-    - `<template id="tpl-notification">`: 通知条目模板
-  - `<script>` 标签加载所有 JS 模块（顺序加载）
-- **无需认证**（API 已是 localhost-only）
-
-### 2. app.js — 应用入口
-
-- **职责**: 应用初始化、模块引导、全局状态、错误边界
-- **接口**:
-  - `AItelier.App.init()` — 应用启动入口，注册路由、启动 SSE、初始化视图
-  - `AItelier.App.state` — 全局状态对象:
-    - `currentView: string` — 当前激活的视图名称
-    - `currentProjectId: string|null` — 当前选中的项目 ID
-    - `connectionOk: boolean` — 后端连接状态
-    - `reconnectAttempt: number` — 重连计数（指数退避）
-  - `AItelier.App.showError(message)` — 全局错误提示（顶部 toast）
-  - `AItelier.App.showReconnectBanner()` — 显示重连横幅
-  - `AItelier.App.hideReconnectBanner()` — 隐藏重连横幅
-- **初始加载**:
-  1. 初始化 `Router`
-  2. 初始化 `API` 客户端
-  3. 初始化 `SSE` 管理器并连接 `/api/events/stream`
-  4. 根据当前 hash 渲染对应视图
-  5. 绑定全局 `unhandledrejection` / `error` 处理器
-
-### 3. router.js — Hash 路由器
-
-- **职责**: 基于 `window.onhashchange` 的视图切换
-- **路由表**:
-
-  | Hash 模式 | 视图 | 说明 |
-  |-----------|------|------|
-  | `#/` `#/projects` | Dashboard | 项目列表仪表盘 |
-  | `#/projects/{id}` | ProjectDetail | 单个项目详情 + 任务 |
-  | `#/chat` | Chat | Meta Agent 聊天 |
-
-- **接口**:
-  - `AItelier.Router.init(routes)` — 注册路由表，启动 hashchange 监听
-  - `AItelier.Router.navigate(hash)` — 编程式导航
-  - `AItelier.Router.currentRoute` — 当前匹配的路由对象 `{view, params}`
-- **行为**:
-  - `onhashchange` 触发时解析 hash → 匹配路由 → 调用对应视图的 `show()`/`hide()`
-  - 未匹配路由 → 重定向到 `#/`
-  - 视图切换时清理上一视图的资源（如聊天 SSE 连接的 abort）
-
-### 4. api.js — API 客户端
-
-- **职责**: 封装所有后端 REST API 调用，返回 Promise
-- **接口**: 挂载于 `AItelier.API` 命名空间，每个 endpoint 一个方法:
-
-  | 方法 | HTTP | 路径 | 说明 |
-  |------|------|------|------|
-  | `listProjects()` | GET | `/api/projects` | 获取项目列表 |
-  | `createProject(body)` | POST | `/api/projects` | 创建项目 |
-  | `getProject(id)` | GET | `/api/projects/{id}` | 获取单个项目 |
-  | `patchProject(id, body)` | PATCH | `/api/projects/{id}` | 更新项目 |
-  | `deleteProject(id)` | DELETE | `/api/projects/{id}` | 删除项目 |
-  | `listTasks(projectId)` | GET | `/api/projects/{id}/tasks` | 列出项目任务 |
-  | `submitProject(body)` | POST | `/api/projects/submit` | 提交项目简报 |
-  | `retryProject(id)` | POST | `/api/projects/{id}/retry` | 重试失败项目 |
-  | `getCheckpoint(pid)` | GET | `/api/meta/{pid}/checkpoint` | 获取待审批检查点 |
-  | `approveCheckpoint(pid, cp)` | POST | `/api/meta/{pid}/checkpoint/approve` | 审批检查点 |
-  | `rejectCheckpoint(pid, cp, fb)` | POST | `/api/meta/{pid}/checkpoint/reject` | 拒绝检查点 |
-  | `detectIntent(prompt)` | POST | `/api/meta/detect-intent` | 意图检测 |
-  | `assessPrompt(prompt, h)` | POST | `/api/meta/assess` | 需求评估 |
-  | `listRuns(pid)` | GET | `/api/projects/{pid}/runs` | 列出运行记录 |
-  | `getRunTrace(runId)` | GET | `/api/runs/{run_id}/trace` | 执行追踪 |
-  | `workspaceTree(pid, sub)` | GET | `/api/projects/{pid}/workspace/tree` | 工作区目录 |
-  | `workspaceFile(pid, path)` | GET | `/api/projects/{pid}/workspace/file` | 读取工作区文件 |
-  | `getSchedulerSettings()` | GET | `/api/settings/scheduler` | 调度器设置 |
-  | `updateSchedulerSettings(b)` | POST | `/api/settings/scheduler` | 更新调度器设置 |
-
-- **内部行为**:
-  - 所有请求默认 `timeout: 10000ms`（chat SSE 请求除外）
-  - 40x/50x 响应 → 抛出 `ApiError {status, message}`
-  - 网络错误 → 设置 `App.state.connectionOk = false` → 触发重连横幅
-  - 支持自动重试（幂等 GET 请求在网络错误时重试 1 次）
-  - 请求前检查 `App.state.connectionOk`，断开时排队请求待恢复后重放
-
-### 5. sse.js — SSE 管理器
-
-- **职责**: 管理与 `/api/events/stream` 的 `EventSource` 连接，分发事件到视图
-- **接口**:
-  - `AItelier.SSE.connect()` — 建立 EventSource 连接
-  - `AItelier.SSE.disconnect()` — 断开连接
-  - `AItelier.SSE.on(eventType, handler)` — 订阅事件
-  - `AItelier.SSE.off(eventType, handler)` — 取消订阅
-- **内部行为**:
-  - 自动重连（`EventSource` 内置）
-  - 维护 `_lastSeq` 单调序列号，丢弃乱序事件
-  - `onerror` 触发时 → 设置 `App.state.connectionOk = false` → 显示重连横幅
-  - `onopen` 时 → 恢复连接状态，触发全量状态刷新
-  - 支持与 `/api/agent/chat` 的 SSE 流（聊天专用）并存（独立的 `fetch` + `ReadableStream` 解析，或直接使用 EventSource 模式）
-- **事件分发**:
+- **职责**: 返回指定会话的完整消息历史
+- **HTTP**: `GET /api/agent/chat/history?session_id=<uuid>`
+- **成功响应** (200):
+  ```json
+  {
+    "session_id": "a1b2c3d4e5f6",
+    "messages": [
+      {"role": "user", "content": "Hello", "created_at": "2026-..."},
+      {"role": "assistant", "content": "Hi there!", "created_at": "2026-..."}
+    ]
+  }
   ```
-  SSE events → sse.js
-    ├── checkpoint_reached  → notification panel + checkpoint modal
-    ├── checkpoint_resolved → close modal + refresh dashboard
-    ├── step_start          → notification panel + dashboard status
-    ├── step_completed      → notification panel
-    ├── project_completed   → notification panel + dashboard refresh
-    ├── project_failed      → notification panel + dashboard refresh
-    ├── run_started         → notification panel
-    ├── agent_message       → notification panel
-    └── files_written       → notification panel
+- **错误响应** (422): `session_id` 缺失或为空
+- **实现**: 调用已有的 `db.get_chat_history_by_session(session_id, limit=100)`
+- **位置**: `api/agent_routers.py` — 新增路由函数
+
+### 组件 2: `GET /api/agent/sessions` — 会话列表端点（新增）
+
+- **职责**: 返回会话列表（含元数据），支持按 project_id 过滤
+- **HTTP**: `GET /api/agent/sessions?project_id=<optional>&limit=20`
+- **成功响应** (200):
+  ```json
+  {
+    "sessions": [
+      {
+        "session_id": "a1b2c3d4e5f6",
+        "project_id": "my-project",
+        "message_count": 12,
+        "last_message": "Sure, I can help with that.",
+        "updated_at": "2026-06-15T10:30:00Z"
+      }
+    ]
+  }
   ```
+- **参数**:
+  - `project_id` (optional): 按项目过滤；不传则返回所有会话
+  - `limit` (optional, default 20): 最大返回数
+- **实现**: 调用新方法 `db.list_chat_sessions(project_id, limit)`；后端只返回有消息的会话（`message_count > 0`），过滤掉空会话
+- **位置**: `api/agent_routers.py` — 新增路由函数
 
-### 6. utils.js — 工具函数
+### 组件 3: `POST /api/agent/chat/message` — 单条消息保存端点（新增）
 
-- **职责**: 共享纯函数，无状态
-- **接口**:
-  - `AItelier.Utils.renderMarkdown(text)` → 安全 HTML 字符串（`marked.parse()` + `DOMPurify.sanitize()`）
-  - `AItelier.Utils.formatTime(isoString)` → 相对时间字符串（"2m ago"）
-  - `AItelier.Utils.statusClass(status)` → CSS 类名（"status-ok" / "status-warn" / "status-err"）
-  - `AItelier.Utils.statusIcon(status)` → Unicode 状态图标（✓ / ▶ / ✗ / ○）
-  - `AItelier.Utils.truncate(text, maxLen)` → 截断 + 省略号
-  - `AItelier.Utils.debounce(fn, ms)` → 去抖函数
-  - `AItelier.Utils.escapeHtml(text)` → HTML 转义（防 XSS 的额外防线）
-  - `AItelier.Utils.slugify(text)` → 生成 URL 友好的 slug
+- **职责**: 在用户发送消息后立即保存该消息到数据库（不等流式响应完成）
+- **HTTP**: `POST /api/agent/chat/message`
+- **请求体**:
+  ```json
+  {
+    "session_id": "a1b2c3d4e5f6",
+    "project_id": "my-project",
+    "role": "user",
+    "content": "Hello, agent!"
+  }
+  ```
+- **成功响应** (200): `{"status": "saved"}`
+- **实现**: 调用已有的 `db.save_chat_message_with_session(session_id, project_id, role, content)`
+- **位置**: `api/agent_routers.py` — 新增路由函数
+- **注意**: 此端点仅用于保存用户消息。助手消息仍然在流式响应完成后由 `POST /api/agent/chat` 端点保存（与现有行为一致）。这是一个"安全带"措施，确保用户消息在导航离开前已落盘。
 
-### 7. dashboard.js — 仪表盘视图
+### 组件 4: `DBManager.list_chat_sessions()` — 数据库查询方法（新增）
 
-- **职责**: 项目列表展示、新建项目表单、删除确认
-- **DOM**: `#view-dashboard`
-- **接口**:
-  - `AItelier.Dashboard.show()` — 显示视图，启动 3 秒轮询
-  - `AItelier.Dashboard.hide()` — 隐藏视图，停止轮询
-  - `AItelier.Dashboard.refresh()` — 立即刷新项目列表
-- **行为**:
-  - 每 3 秒调用 `API.listProjects()` 刷新表格
-  - 表格列: 项目名称、状态（带图标）、任务进度（done/total）、最后更新
-  - 空状态: "No projects yet — create your first project"
-  - "New Project" 按钮 → 展开内联表单（project_id, name, repo_type, repo_path/repo_url）
-  - 表单验证: 非空 slug、duplicate 409 处理
-  - 删除按钮 → 弹出 `#confirm-dialog` → 确认后调用 `API.deleteProject(id)`
-  - 点击项目行 → `Router.navigate('#/projects/{id}')`
-  - 连接断开时: 表格保留上次数据且显示 "Reconnecting…" 覆盖层
+- **职责**: 查询会话列表及元数据
+- **SQL**:
+  ```sql
+  SELECT s.id AS session_id,
+         ch.project_id,
+         COUNT(ch.id) AS message_count,
+         (SELECT content FROM chat_history
+          WHERE session_id = s.id
+          ORDER BY id DESC LIMIT 1) AS last_message,
+         MAX(ch.created_at) AS updated_at
+  FROM sessions s
+  JOIN chat_history ch ON ch.session_id = s.id
+  WHERE (? IS NULL OR ch.project_id = ?)
+  GROUP BY s.id
+  HAVING message_count > 0
+  ORDER BY updated_at DESC
+  LIMIT ?
+  ```
+- **位置**: `core/db_manager.py` — 新增方法
+- **参数**: `project_id: str | None`, `limit: int = 20`
+- **返回**: `list[dict]`
 
-### 8. project.js — 项目详情视图
+### 组件 5: `web/js/api.js` — API 客户端扩展（修改）
 
-- **职责**: 单个项目详情、关联任务列表、工作区文件浏览
-- **DOM**: `#view-project`
-- **接口**:
-  - `AItelier.ProjectDetail.show(projectId)` — 显示指定项目的详情
-  - `AItelier.ProjectDetail.hide()` — 隐藏视图
-  - `AItelier.ProjectDetail.refresh()` — 刷新数据和渲染
-- **子区域**:
-  - **项目信息卡片**: 项目名称、状态、当前步骤、完成进度条
-  - **操作按钮**: Retry（失败时）、Refresh Planning、Pause/Resume
-  - **任务列表表格**: 任务 ID、提示文本、状态、当前步骤
-  - **工作区文件树**: 可展开的目录树（调用 `API.workspaceTree()` / `API.workspaceFile()`）
-- **行为**:
-  - 进入视图时调用 `API.getProject(id)` + `API.listTasks(id)`
-  - 工作区文件树: 首次点击展开时懒加载子目录
-  - 点击文件 → 模态框展示内容（带语法高亮，若引入 highlight.js）
-  - 3 秒轮询刷新（与 dashboard 相同策略）
-  - 空任务状态: "No tasks yet — type in chat to add tasks"
+- **职责**: 新增两个 API 包装方法
+- **新增方法**:
+  - `getChatHistory(sessionId)` → `GET /api/agent/chat/history?session_id=...`
+  - `listSessions(projectId)` → `GET /api/agent/sessions?project_id=...&limit=20`
+  - `saveChatMessage(body)` → `POST /api/agent/chat/message`
 
-### 9. chat.js — 聊天视图
+### 组件 6: `web/js/views/chat.js` — 聊天视图增强（修改）
 
-- **职责**: Meta Agent 对话界面，支持 SSE 流式消息、Markdown 渲染、工具调用展示
-- **DOM**: `#view-chat`
-- **接口**:
-  - `AItelier.Chat.show()` — 显示聊天视图
-  - `AItelier.Chat.hide()` — 隐藏视图，abort 进行中的 SSE 流
-  - `AItelier.Chat.sendMessage(text)` — 发送用户消息并流式接收回复
-- **消息类型**（SSE 事件 → 渲染）:
-  | SSE event type | 渲染方式 |
-  |---|---|
-  | `text_delta` | 追加到当前助手消息气泡（增量渲染） |
-  | `tool_call` | 插入工具调用指示器 `🔧 Calling {name}...` |
-  | `tool_result` | 更新工具调用指示器为结果摘要 |
-  | `done` | 最终化助手消息，追加到历史 |
-  | `error` | 显示红色错误气泡 |
-- **行为**:
-  - 消息气泡使用 `<template id="tpl-chat-msg">` 克隆
-  - 助手消息通过 `Utils.renderMarkdown()` 渲染（支持代码块、列表等）
-  - SSE 流使用 `fetch()` + `ReadableStream` 手动解析（需对流有更多控制，如 abort）
-  - 发送按钮 / Enter 键提交消息
-  - 连接断开时输入框禁用并显示 "Chat unavailable — reconnecting…"
-  - 支持 `/help`、`/clear`、`/projects` 等斜杠命令
-  - 从当前 project 上下文自动传递 `current_project` 参数
+- **职责**: 历史恢复、会话选择器、即时用户消息保存
+- **新增私有函数**:
+  - `_restoreHistory()` — 从后端获取当前会话消息并渲染
+  - `_loadSessionList()` — 获取会话列表并填充 `<select>`
+  - `_loadSession(sessionId)` — 切换到指定会话
+  - `_saveUserMessage(text)` — 立即保存用户消息到后端
+  - `_buildSessionSelector()` — 构建会话选择器 DOM
+- **修改的现有函数**:
+  - `_renderUI()` — 新增会话选择器栏（`.chat-header`）
+  - `show()` — 在 `_renderUI()` 后调用 `_restoreHistory()` + `_loadSessionList()`
+  - `_sendMessage()` — 在 `_addMessage("user", text)` 后立即调用 `_saveUserMessage(text)`
+  - `hide()` — 不清空 `_history`（保留以便下次 `show()` 恢复时做去重）
 
-### 10. checkpoint.js — 检查点模态框
-
-- **职责**: 展示步骤输出、审批/拒绝（含反馈）、处理竞态条件
-- **DOM**: `<dialog id="checkpoint-modal">`
-- **接口**:
-  - `AItelier.CheckpointModal.show(projectId, checkpointData)` — 显示模态框
-  - `AItelier.CheckpointModal.close()` — 关闭模态框
-  - `AItelier.CheckpointModal.isOpen()` → boolean
-- **行为**:
-  - SSE 事件 `checkpoint_reached` 或 `checkpoint_paused` 触发自动弹出
-  - 显示: 步骤标签（如 "Architecture Review"）、步骤输出文件列表、文件内容（Markdown 渲染）
-  - 大文件内容放入可滚动容器（`max-height` + `overflow-y: auto`）
-  - "Approve" 按钮 → `API.approveCheckpoint()` → 成功后关闭模态框
-  - "Reject" 按钮 → 展开反馈输入框 → 提交时调用 `API.rejectCheckpoint()` → 关闭
-  - **竞态保护**:
-    - 审批/拒绝按钮点击后立即禁用（防双击）
-    - 后端返回 `"already_advanced"` → 关闭模态框并静默处理（不显示错误）
-    - 每 5 秒轮询 `GET /api/meta/{pid}/checkpoint` — 若返回空（404/无 checkpoint）→ 自动关闭模态框（stale detection）
-  - **筛选**: 仅对 DPE pipeline 步骤（1, 2, 3）触发，Meta conversation 的 gather 检查点**不弹出**此模态框（由聊天界面处理）
-  - Escape 键 → 关闭但不做操作（用户稍后可重新打开）
+---
 
 ## 技术栈
 
-| 层 | 选型 | 方式 | 理由 |
-|----|------|------|------|
-| **样式** | Pico CSS v2 (classless fluid) | CDN | 语义 HTML 自动获得响应式、暗色主题、表单、按钮、表格样式。零 CSS 类名 |
-| **Markdown 渲染** | marked.js | CDN | 快速、成熟，将 Agent 回复中的 Markdown 转为 HTML |
-| **XSS 防护** | DOMPurify | CDN | 对所有 `marked.parse()` 输出进行消毒 |
-| **语法高亮**（可选） | highlight.js | CDN | 代码块着色（检查点文件查看、聊天代码块） |
-| **模态框** | `<dialog>` 元素 | 原生 | `showModal()` / `close()`，所有现代浏览器支持，零依赖 |
-| **SSE** | `EventSource` | 原生 | 自动重连、`data:` 行解析、零依赖 |
-| **HTTP** | `fetch()` | 原生 | Promise-based，支持 `ReadableStream`（聊天 SSE）和 `AbortController` |
-| **路由** | `window.onhashchange` | 原生 | 无服务端配置需求，FastAPI 静态文件直接托管 |
-| **模板** | `<template>` 元素 | 原生 | 高效的 DOM 克隆，避免 innerHTML 拼接 |
-| **模块化** | 全局命名空间 `AItelier.*` | 原生 | 避免 ES6 模块的打包依赖，各 JS 文件通过命名空间暴露接口 |
+| 层 | 选型 | 说明 |
+|----|------|------|
+| **后端 API** | FastAPI native | 在已有 `api/agent_routers.py` 中新增路由，使用已有 `DBManager` |
+| **数据库** | SQLite (WAL) | 已有 `chat_history` + `sessions` 表，无需 schema 变更 |
+| **会话列表查询** | Raw SQL via DBManager | 单条 JOIN + GROUP BY 聚合查询 |
+| **前端** | Vanilla JS | 已有 `web/js/views/chat.js`、`web/js/api.js` |
+| **会话选择器 UI** | `<select>` 原生元素 | Pico CSS 提供响应式样式 |
 
-**总外部体积**: ~23KB（Pico CSS 10KB + marked.js 12KB + DOMPurify 11KB 压缩后的 ~23KB gzip）
-加上 highlight.js（可选）：+~25KB
+无新依赖。
+
+---
 
 ## 接口规范
 
-### API 交互模式
+### 后端 → 前端 API 契约
 
-```
-View ──► API.js ──► fetch() ──► FastAPI /api/*
-  │                              │
-  │         Promise<data>        │
-  ◄──────────────────────────────┘
-  │
-  │ 失败时:
-  │ 网络错误 → API.js 设置 connectionOk=false → App 显示重连横幅
-  │ HTTP 4xx  → 抛出 ApiError → View 显示内联错误
-  │ HTTP 5xx  → 同上 + 自动重试 1 次（仅 GET）
-```
+#### `GET /api/agent/chat/history`
 
-### SSE 事件流模式
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| Query `session_id` | string | 是 | 会话 ID（UUID 前缀） |
 
-```
-FastAPI ──► EventSource ──► sse.js ──► 事件分发
-  /api/events/stream        │
-                            ├──► NotificationPanel (所有事件)
-                            ├──► Dashboard.refresh() (project_*)
-                            ├──► CheckpointModal (checkpoint_*)
-                            └──► App.state (connection status)
-```
+**响应**:
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `session_id` | string | 回显请求的 session_id |
+| `messages` | array | 消息列表，按时间升序 |
+| `messages[].role` | string | `"user"` / `"assistant"` / `"system"` |
+| `messages[].content` | string | 消息文本 |
+| `messages[].created_at` | string | ISO 8601 时间戳 |
 
-### 聊天 SSE 流模式
+#### `GET /api/agent/sessions`
 
-```
-Chat View ──► fetch(POST /api/agent/chat) ──► ReadableStream
-  │                                               │
-  │  text_delta → 增量追加气泡                     │
-  │  tool_call  → 插入工具调用指示器                │
-  │  tool_result→ 更新指示器为结果摘要              │
-  │  done       → 最终化消息                       │
-  │  error      → 错误气泡                         │
-  ◄───────────────────────────────────────────────┘
-```
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| Query `project_id` | string | 否 | 按项目过滤；不传返回所有项目 |
+| Query `limit` | int | 否 | 默认 20 |
 
-### 视图生命周期
+**响应**:
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sessions` | array | 会话列表，按 `updated_at` 降序 |
+| `sessions[].session_id` | string | 会话 ID |
+| `sessions[].project_id` | string | 关联项目 ID |
+| `sessions[].message_count` | int | 消息总数 |
+| `sessions[].last_message` | string | 最后一条消息内容（截断到 100 字符） |
+| `sessions[].updated_at` | string | 最后活动时间 ISO 8601 |
 
-```
-Router.navigate(hash)
-  │
-  ├── 当前视图.hide()  — 清理定时器、abort 请求
-  │
-  ├── 解析路由参数
-  │
-  └── 目标视图.show(params)
-       │
-       ├── 首次: 创建 DOM（从 <template> 克隆）
-       ├── 每次: 获取数据、渲染、启动轮询/SSE
-       └── 后续: hide() → 清理
-```
+#### `POST /api/agent/chat/message`
 
-## 响应式设计
+**请求体**:
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `session_id` | string | 是 | 会话 ID |
+| `project_id` | string | 是 | 项目 ID（可为空字符串 `""`） |
+| `role` | string | 是 | `"user"` / `"assistant"` / `"system"` |
+| `content` | string | 是 | 消息内容 |
 
-Pico CSS 提供响应式容器（`fluid` 变体）。自定义布局通过 CSS 媒体查询实现：
+**响应**: `{"status": "saved"}`
 
-- **宽屏 (>= 1024px)**: 仪表盘表格 + 通知侧边栏并排
-- **中屏 (768-1023px)**: 通知侧边栏折叠为底部条
-- **窄屏 (< 768px)**: 单列布局，表格转卡片，导航栏垂直堆叠
-- 长项目名/任务描述 → `text-overflow: ellipsis` + `max-width`
+### 前端内部接口
 
-## 扩展性考虑
+#### `_restoreHistory()`
+- **输入**: 无（读取 `_sessionId`）
+- **行为**:
+  1. 若 `_sessionId` 为 null，直接返回（无会话可恢复）
+  2. 调用 `API.getChatHistory(_sessionId)`
+  3. 对返回的每条消息调用 `_addMessage(role, content)` 渲染气泡
+  4. 将消息追加到 `_history` 数组（去重：以 `(role, content[:100])` 为键）
+  5. 滚动到底部
 
-1. **认证**: 当 `web_api/` 启用 Cloudflare Access 认证时，前端仅需在请求中携带 `Cf-Access-User-Email` 头（Cloudflare 自动注入）。`api.js` 无需修改
-2. **更多视图**: 路由表在 `router.js` 中集中定义，新增视图只需添加路由条目 + 实现 `show()/hide()` 接口
-3. **暗色模式**: Pico CSS 原生支持 `data-theme="dark"` 属性，切换仅需一行 JS: `document.documentElement.dataset.theme = 'dark'`
-4. **国际化**: 所有 UI 文本集中在视图模块的常量对象中，后续可提取为 i18n 资源文件
-5. **WebSocket 升级**: 若 SSE 不够用，`sse.js` 的接口设计（`on/off` 事件订阅）可直接适配 WebSocket
-6. **离线缓存**: 可添加 Service Worker 实现离线仪表盘缓存（PWA 渐进增强）
+#### `_loadSession(sessionId)`
+- **输入**: `sessionId: string` — 要切换到的会话 ID
+- **行为**:
+  1. 中止任何进行中的 SSE 流
+  2. 清空 `.chat-messages` DOM 和 `_history` 数组
+  3. 设置 `_sessionId = sessionId`
+  4. 调用 `_restoreHistory()`
+  5. 更新 `<select>` 的选中项
 
-## 设计决策记录
+#### `_saveUserMessage(text)`
+- **输入**: `text: string` — 用户消息文本
+- **行为**:
+  1. 若 `_sessionId` 为 null，跳过
+  2. 调用 `API.saveChatMessage({session_id: _sessionId, project_id: ..., role: "user", content: text})`
+  3. 异步执行，不阻塞 SSE 流；失败时静默忽略（best-effort）
+
+---
+
+## 关键设计决策
 
 | 决策 | 理由 |
 |------|------|
-| **多文件 JS 而非单文件** | 单个 app.js 文件会导致 2000+ 行不可维护的代码。多个文件按职责分隔，通过 `<script>` 标签顺序加载，不引入打包工具 |
-| **全局命名空间而非 ES6 模块** | 原生浏览器环境中 `<script>` 标签加载的 JS 不天然支持 `import/export`（需要 `type="module"` 且路径解析复杂）。命名空间模式简单、可靠、无需构建步骤 |
-| **`fetch() + ReadableStream` 用于聊天 SSE** | 聊天需要 abort 能力（用户离开视图时应终止流），而 `EventSource` 不支持手动 abort 控制。全局事件流用 `EventSource`（需要自动重连），聊天流用 `fetch()`（需要 abort 控制） |
-| **不引入 highlight.js 为必需依赖** | 代码高亮是锦上添花。默认使用 `<pre><code>` 标签（Pico CSS 已提供基础样式），highlight.js 作为可选增强 |
-| **template 元素而非 innerHTML 拼接** | `innerHTML` 有 XSS 风险和性能损失（每次重新解析 HTML）。`<template>` 克隆是浏览器原生优化路径 |
+| **会话列表只返回有消息的会话** (`HAVING message_count > 0`) | 避免在 UI 中显示空会话（被创建但从未使用）。用户只关心有实际对话历史的会话 |
+| **即时用户消息保存使用独立端点** | 避免修改现有 SSE 流式端点的复杂逻辑。`POST /api/agent/chat` 保持原有行为（流完成后保存），额外的 `POST /api/agent/chat/message` 提供"安全带"：在用户消息渲染后立即异步保存，确保即使页面在流完成前关闭，用户消息也已持久化 |
+| **`_history` 在 `hide()` 时不清空** | 当用户返回聊天页面时，`_history` 仍保留上次会话的内存副本。`_restoreHistory()` 用它做去重 — 若 DB 中的某条消息已存在于内存 `_history` 中（基于 `role + content[:100]` 去重），则不重复渲染。这与后端 `POST /api/agent/chat` 中的去重逻辑一致 |
+| **会话选择器用原生 `<select>`** | Pico CSS 原生支持 `<select>` 元素的响应式样式，无需自定义组件。满足 MVP 需求 |
+| **`list_chat_sessions()` 新增为 DBManager 方法** | 遵循已有模式：所有 DB 查询集中在 `DBManager` 中，API 路由仅做薄封装 |
+| **会话 ID 仅在内存中** (`_sessionId`) | 跨硬刷新（F5）时，用户获得新会话。可通过会话选择器切换到之前的会话。若后续需要跨刷新的会话持久化，可在 `sessionStorage` 中保存 `_sessionId`（本阶段不做） |
+
+## 扩展性考虑
+
+1. **会话删除**: `GET /api/agent/sessions` 返回的列表可按需扩展删除按钮。后端只需添加 `DELETE /api/agent/sessions/{session_id}` 端点
+2. **跨硬刷新会话恢复**: 在 `sessionStorage` 中存储 `_sessionId`，`_initSession()` 优先读取 `sessionStorage`，若存在则直接使用而不是创建新会话
+3. **会话重命名**: 在 `sessions` 表中增加 `name` 列，前端增加编辑功能
+4. **分页**: 当前 `limit=20` 已足够。若会话数量增长，可增加 `offset` 参数实现分页
+
+## 文件变更清单
+
+| 文件 | 变更类型 | 说明 |
+|------|----------|------|
+| `api/agent_routers.py` | 修改 | 新增 3 个端点 |
+| `core/db_manager.py` | 修改 | 新增 `list_chat_sessions()` 方法 |
+| `web/js/api.js` | 修改 | 新增 3 个 API 方法 |
+| `web/js/views/chat.js` | 修改 | 新增 ~4 个函数，修改 ~3 个现有函数 |

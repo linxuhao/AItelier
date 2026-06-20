@@ -1,5 +1,6 @@
 {
+  ".py": "ruff",
+  ".js": "basic",
   ".html": "djlint",
-  ".css": "basic",
-  ".js": "basic"
+  ".css": "basic"
 }

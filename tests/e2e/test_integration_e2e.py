@@ -284,7 +284,8 @@ def test_resume_from_step3(tmp_path):
         except MaxRetriesExceeded:
             print(f"  Resume test: Step {step_id} hit MaxRetriesExceeded, continuing")
 
-        completed = ["1_5"] + remaining[:remaining.index(step_id) + 1]
+        offset = remaining.index(step_id)
+        completed = ["1_5"] + remaining[:offset + 1]
         next_step = remaining[offset + 1] if offset + 1 < len(remaining) else None
         db.advance_step(task_id, next_step, completed)
 

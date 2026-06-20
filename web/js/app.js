@@ -280,10 +280,69 @@
   //  — a small panel for non-error notifications from pipeline events.
   //  Creates a simple floating list; avoids the full NotificationPanel
   //  which is designed as a sidebar.
-  // ════════════════════════════════════════════════════════════════════
+
+  /** @type {number} max notification items to keep in the sidebar. */
+  var _MAX_NOTIF_ITEMS = 30;
 
   function _flashNotification(message) {
     showFlash(message);
+  }
+
+  /**
+   * Append a pipeline event to the #notification-panel sidebar.
+   * Shows recent step events (claimed, completed, failed) with timestamps.
+   *
+   * @param {object} event — SSE event payload
+   */
+  function _addToNotificationPanel(event) {
+    var list = document.getElementById("notif-list");
+    if (!list) {
+      return;
+    }
+
+    var stepId = event._step_id || event.step_id || "";
+    var type = event.type || "";
+    var task = event._task_id || "";
+
+    // Only show step lifecycle events
+    if (!stepId && type.indexOf("step_") !== 0 && type.indexOf("checkpoint_") !== 0) {
+      return;
+    }
+
+    // Build message
+    var label = stepId || type;
+    var icon = "";
+    if (type === "step_completed") { icon = "✓"; }
+    else if (type === "step_failed") { icon = "✗"; }
+    else if (type === "step_claimed") { icon = "▶"; }
+    else if (type.indexOf("checkpoint_") === 0) { icon = "⏸"; }
+
+    var msg = icon + " " + label;
+    if (task) { msg += " · " + task; }
+
+    var now = new Date();
+    var ts = now.getHours().toString().padStart(2, "0") + ":" +
+             now.getMinutes().toString().padStart(2, "0") + ":" +
+             now.getSeconds().toString().padStart(2, "0");
+
+    var item = document.createElement("div");
+    item.style.fontSize = "0.8rem";
+    item.style.padding = "0.15rem 0.4rem";
+    item.style.borderBottom = "1px solid var(--muted-border-color, #eee)";
+    item.style.color = "var(--muted-color, #666)";
+    item.textContent = ts + " " + msg;
+
+    // Insert at top
+    if (list.firstChild) {
+      list.insertBefore(item, list.firstChild);
+    } else {
+      list.appendChild(item);
+    }
+
+    // Trim old items
+    while (list.children.length > _MAX_NOTIF_ITEMS) {
+      list.removeChild(list.lastChild);
+    }
   }
 
 
@@ -299,6 +358,14 @@
     var sse = window.AItelier && window.AItelier.SSE;
     if (!sse || typeof sse.on !== "function") {
       return;
+    }
+
+    // ── Notification panel: feed all step events ─────────────────────
+    var _notifTypes = ["step_claimed", "step_completed", "step_failed",
+      "checkpoint_reached", "checkpoint_resolved", "checkpoint_approved",
+      "pipeline_started", "project_completed", "project_failed"];
+    for (var nt = 0; nt < _notifTypes.length; nt++) {
+      sse.on(_notifTypes[nt], _addToNotificationPanel);
     }
 
     // ── Checkpoint events ───────────────────────────────────────────

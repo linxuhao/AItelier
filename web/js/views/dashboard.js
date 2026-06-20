@@ -19,7 +19,7 @@
   // ── Constants ──────────────────────────────────────────────────────
 
   /** Polling interval in milliseconds. */
-  var _POLL_INTERVAL = 3000;
+  var _POLL_INTERVAL = 10000;  // 10 s (was 3 s — too aggressive, reset form inputs)
 
   /** Step ID → human-readable label mapping for status display. */
   var _STEP_LABELS = {
@@ -266,8 +266,13 @@
       return;
     }
 
-    // Clear existing content (including form, table, etc.)
-    container.innerHTML = "";
+    // Don't destroy the form if it's open — only refresh the table
+    var existingTable = container.querySelector("table");
+    var existingForm = container.querySelector("#new-project-form");
+
+    // Only full rebuild on first render (no table yet)
+    if (!existingTable) {
+      container.innerHTML = "";
 
     // ── New Project button ──
     var headerRow = document.createElement("div");
@@ -408,6 +413,75 @@
 
     // ── Update reconnect overlay visibility after everything is rendered ──
     _updateReconnectOverlay();
+
+    } else {
+      // ── Incremental update: only rebuild table body ──
+      var tbody = existingTable.querySelector("tbody");
+      if (!tbody) {
+        tbody = document.createElement("tbody");
+        existingTable.appendChild(tbody);
+      }
+      tbody.innerHTML = "";  // Clear old rows only
+
+      // Preserve form visibility
+      if (_formOpen && existingForm) {
+        existingForm.style.display = "block";
+      }
+
+      if (!projects || projects.length === 0) {
+        // If no projects, fall back to full rebuild next time
+        container.innerHTML = "";
+        return;
+      }
+
+      for (var i2 = 0; i2 < projects.length; i2++) {
+        var row2 = _createRow(projects[i2], i2 + 1);
+        if (row2) {
+          row2.addEventListener("click", function (e) {
+            if (e.target && e.target.classList.contains("btn-delete-project")) {
+              return;
+            }
+            var pid2 = this.dataset.projectId;
+            if (pid2) {
+              try {
+                var rtr = window.AItelier && window.AItelier.Router;
+                if (rtr && typeof rtr.navigate === "function") {
+                  rtr.navigate("#/projects/" + encodeURIComponent(pid2));
+                }
+              } catch (_err2) {
+                window.location.hash = "#/projects/" + encodeURIComponent(pid2);
+              }
+            }
+          });
+
+          var deleteTd2 = document.createElement("td");
+          deleteTd2.style.textAlign = "right";
+          deleteTd2.style.width = "3rem";
+          var delBtn2 = document.createElement("button");
+          delBtn2.className = "btn-delete-project";
+          delBtn2.textContent = "✗";
+          delBtn2.style.background = "none";
+          delBtn2.style.border = "none";
+          delBtn2.style.color = "var(--muted-color, #888)";
+          delBtn2.style.cursor = "pointer";
+          delBtn2.style.fontSize = "0.85rem";
+          delBtn2.style.padding = "0.25rem 0.5rem";
+          delBtn2.title = "Delete project";
+          delBtn2.addEventListener("click", function (e) {
+            e.stopPropagation();
+            var pid3 = this.parentElement.parentElement.dataset.projectId;
+            if (pid3) {
+              _confirmDelete(pid3);
+            }
+          });
+          deleteTd2.appendChild(delBtn2);
+          row2.appendChild(deleteTd2);
+          tbody.appendChild(row2);
+        }
+      }
+
+      _updateReconnectOverlay();
+    }
   }
 
 
@@ -949,6 +1023,11 @@
    * Uses _isRefreshing flag to prevent stacked requests.
    */
   function _refresh() {
+    // Never auto-refresh while the user is filling out the create form
+    if (_formOpen) {
+      return;
+    }
+
     if (_isRefreshing) {
       return;
     }
@@ -981,6 +1060,10 @@
      * polling every 3 seconds.
      */
     show: function () {
+      // Show the container
+      var container = document.getElementById("view-dashboard");
+      if (container) container.classList.add("active");
+
       // Render the table (fetch project data)
       _refresh();
 
@@ -998,6 +1081,10 @@
      * section remains in its hidden state with existing data.
      */
     hide: function () {
+      // Hide the container
+      var container = document.getElementById("view-dashboard");
+      if (container) container.classList.remove("active");
+
       // Stop polling
       if (_pollTimer !== null) {
         clearInterval(_pollTimer);

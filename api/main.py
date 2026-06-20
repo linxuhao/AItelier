@@ -17,8 +17,10 @@ if _env_file.exists():
                     _os.environ[_key] = _val
 
 from contextlib import asynccontextmanager
+from pathlib import Path as _Path
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from api.routers import router as tasks_router
 from api.project_routers import router as projects_router
 from api.settings_routers import router as settings_router
@@ -171,6 +173,16 @@ app.include_router(settings_router)
 app.include_router(meta_router)
 app.include_router(agent_router)
 app.include_router(run_router)
+
+# ── Serve generated web UI static files ──
+_WEB_DIR = _Path(__file__).resolve().parent.parent / "web"
+if _WEB_DIR.is_dir():
+    app.mount("/web", StaticFiles(directory=str(_WEB_DIR)), name="web_ui")
+
+    @app.get("/")
+    async def serve_index():
+        """Serve the SPA entry point."""
+        return FileResponse(_WEB_DIR / "index.html")
 
 
 @app.middleware("http")

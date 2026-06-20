@@ -955,6 +955,10 @@
      * Focuses the input field.
      */
     show: function () {
+      // Show the container
+      var chatView = document.getElementById("view-chat");
+      if (chatView) chatView.classList.add("active");
+
       // Render the UI
       _renderUI();
 
@@ -994,9 +998,10 @@
       // Reset sending guard
       _sending = false;
 
-      // Clear the DOM
+      // Hide and clear the DOM
       var chatView = document.getElementById("view-chat");
       if (chatView) {
+        chatView.classList.remove("active");
         chatView.innerHTML = "";
       }
     },

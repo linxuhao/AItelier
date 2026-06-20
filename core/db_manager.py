@@ -1508,6 +1508,56 @@ class DBManager:
             )
             conn.commit()
 
+    def list_chat_sessions(self, project_id: str | None = None, limit: int = 20) -> list[dict]:
+        """List chat sessions with message count and last message preview.
+
+        Args:
+            project_id: Optional project filter. None returns sessions across all projects.
+            limit: Maximum number of sessions to return (default 20).
+
+        Returns:
+            List of dicts, each with keys: session_id, project_id, message_count,
+            last_message, updated_at. Ordered by updated_at DESC.
+            Only returns sessions with message_count > 0.
+        """
+        with self.get_connection() as conn:
+            if project_id:
+                rows = conn.execute(
+                    """SELECT s.id AS session_id,
+                              ch.project_id,
+                              COUNT(ch.id) AS message_count,
+                              (SELECT content FROM chat_history
+                               WHERE session_id = s.id
+                               ORDER BY id DESC LIMIT 1) AS last_message,
+                              MAX(ch.created_at) AS updated_at
+                       FROM sessions s
+                       JOIN chat_history ch ON ch.session_id = s.id
+                       WHERE ch.project_id = ?
+                       GROUP BY s.id
+                       HAVING message_count > 0
+                       ORDER BY updated_at DESC
+                       LIMIT ?""",
+                    (project_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT s.id AS session_id,
+                              MAX(ch.project_id) AS project_id,
+                              COUNT(ch.id) AS message_count,
+                              (SELECT content FROM chat_history
+                               WHERE session_id = s.id
+                               ORDER BY id DESC LIMIT 1) AS last_message,
+                              MAX(ch.created_at) AS updated_at
+                       FROM sessions s
+                       JOIN chat_history ch ON ch.session_id = s.id
+                       GROUP BY s.id
+                       HAVING message_count > 0
+                       ORDER BY updated_at DESC
+                       LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
     def _migrate_task_steps(self, conn):
         """Migrate mid-flight task steps from old sequence (t_sota, t_design) to new (t_plan)."""
         tasks = conn.execute(

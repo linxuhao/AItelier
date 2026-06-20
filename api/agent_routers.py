@@ -1,10 +1,14 @@
 # api/agent_routers.py
 # Streaming SSE endpoint for the Meta Agent chat interface.
+# Also provides REST endpoints for chat history persistence:
+#   GET  /api/agent/chat/history   — session message history
+#   GET  /api/agent/sessions       — session list with metadata
+#   POST /api/agent/chat/message   — save a single message
 
 import json
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from core.meta_agent import MetaAgent
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
@@ -20,6 +24,20 @@ class AgentChatRequest(BaseModel):
     history: list[dict] = []
     current_project: str | None = None
     session_id: str | None = None
+
+
+class AgentSaveMessageRequest(BaseModel):
+    session_id: str
+    project_id: str
+    role: str
+    content: str
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        if v not in ("user", "assistant", "system"):
+            raise ValueError("role must be one of: 'user', 'assistant', 'system'")
+        return v
 
 
 @router.post("/chat")
@@ -97,3 +115,64 @@ async def create_session(
     """Create a new chat session and return its ID."""
     session_id = db.create_session()
     return {"session_id": session_id}
+
+
+# ── Chat history persistence endpoints ─────────────────────────────────
+
+
+@router.get("/chat/history")
+def get_chat_history(
+    session_id: str,
+    db: DBManager = Depends(get_db_manager),
+):
+    """Return the full message history for a session in chronological order.
+
+    The DB stores messages newest-first; this endpoint returns them
+    oldest-first for the frontend to render sequentially.
+    """
+    if not session_id or not session_id.strip():
+        raise HTTPException(status_code=422, detail="session_id is required")
+
+    messages = db.get_chat_history_by_session(session_id, limit=100)
+    # DB returns newest-first (ORDER BY id DESC) — reverse to chronological
+    messages.reverse()
+
+    return {
+        "session_id": session_id,
+        "messages": messages,
+    }
+
+
+@router.get("/sessions")
+def list_sessions(
+    project_id: str | None = None,
+    limit: int = 20,
+    db: DBManager = Depends(get_db_manager),
+):
+    """List chat sessions with message count and last message preview.
+
+    Supports optional project_id filter. Only returns sessions with
+    at least one message. Ordered by most recent activity first.
+    """
+    sessions = db.list_chat_sessions(project_id=project_id, limit=limit)
+    return {"sessions": sessions}
+
+
+@router.post("/chat/message")
+def save_chat_message(
+    request: AgentSaveMessageRequest,
+    db: DBManager = Depends(get_db_manager),
+):
+    """Save a single chat message to the database immediately.
+
+    Used by the frontend to persist user messages right after sending,
+    before the streaming response completes. The existing streaming
+    endpoint also persists; this is an additional safety net.
+    """
+    db.save_chat_message_with_session(
+        request.session_id,
+        request.project_id,
+        request.role,
+        request.content,
+    )
+    return {"status": "saved"}

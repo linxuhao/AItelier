@@ -40,7 +40,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 [sys.executable, "-m", "pytest", str(repo), "-q", "--tb=short",
                  "-p", "no:cacheprovider",
                  "--rootdir", str(repo)],
-                capture_output=True, text=True, timeout=180, cwd=str(repo), env=env,
+                capture_output=True, text=True, timeout=600, cwd=str(repo), env=env,
             )
             out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
             report["returncode"] = r.returncode

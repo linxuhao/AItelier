@@ -33,8 +33,8 @@ Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "no
 ### Repo Separation
 
 ```
-~/stepflow/                   # Independent library (config-agnostic framework) — PyPI: skillflow-py 1.1.4
-# Editable install (pip install -e ~/stepflow) — changes are live immediately
+~/stepflow/  (or ~/skillflow/)  # Independent library (config-agnostic framework) — PyPI: skillflow-py 1.1.4
+# Editable install (pip install -e <path>) — changes are live immediately
 ├── src/skillflow/
 │   ├── core.py, graph.py, workspace.py, tool_loader.py, ...
 │   ├── tools/               # 13 native tools (read_file, write, pytest, repo_apply, ...)

@@ -118,6 +118,22 @@ def list_project_runs(
     return {"project_id": project_id, "runs": enriched}
 
 
+# ── Helpers ────────────────────────────────────────────────────────────
+
+def _resolve_run(run_id: str) -> dict | None:
+    """Resolve a run by internal UUID or human-readable project_id.
+
+    Tries UUID first (skillflow internal id), then falls back to
+    project_id (most recent run for that project).
+    """
+    sf = get_skillflow()
+    run = sf.get_run(run_id)
+    if run:
+        return run
+    runs = sf.list_runs(project_id=run_id)
+    return runs[0] if runs else None
+
+
 # ── Single run detail ─────────────────────────────────────────────────
 
 @router.get("/runs/{run_id}")
@@ -126,11 +142,16 @@ def get_run_detail(
     user: CurrentUser | None = Depends(get_optional_user),
     registry=Depends(get_config_registry),
 ):
-    """Get full run detail including all step instances + config manifest."""
+    """Get full run detail including all step instances + config manifest.
+
+    ``run_id`` accepts both a skillflow internal UUID and a human-readable
+    project_id (e.g. ``aitelier-web-ui-2``).
+    """
     sf = get_skillflow()
-    run = sf.get_run(run_id)
+    run = _resolve_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    internal_id = run["id"]
 
     # Attach config identity + manifest so the client can render labels/checkpoints
     # for any config without hardcoding the DPE step set.
@@ -139,7 +160,7 @@ def get_run_detail(
     manifest = registry.get(cfg)
     run["manifest"] = manifest.to_dict() if manifest else None
 
-    steps = sf.get_steps(run_id)
+    steps = sf.get_steps(internal_id)
     run["steps"] = [
         {
             "step_id": s["step_id"],
@@ -174,11 +195,12 @@ def get_run_trace(
     pipeline execution. Optionally filter by step_instance_id and/or category.
     """
     sf = get_skillflow()
-    run = sf.get_run(run_id)
+    run = _resolve_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    internal_id = run["id"]
 
-    traces = sf.get_trace(run_id, step_instance_id=step_instance_id, category=category)
+    traces = sf.get_trace(internal_id, step_instance_id=step_instance_id, category=category)
 
     # get_trace may return all if no filters given; apply limit
     if len(traces) > limit:
@@ -206,8 +228,7 @@ from api.meta_routers import (  # noqa: E402  (avoids a module-load cycle)
 
 
 def _run_to_project_id(run_id: str) -> str:
-    sf = get_skillflow()
-    run = sf.get_run(run_id)
+    run = _resolve_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run["project_id"]

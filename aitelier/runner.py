@@ -125,7 +125,12 @@ class AgentStepRunner:
 
     @staticmethod
     def _read_review_verdict(output_dir: str) -> tuple[dict, dict]:
-        """Read review_verdict.json (if a review step wrote one) → (outputs, flags)."""
+        """Read review_verdict.json (if a review step wrote one) → (outputs, flags).
+
+        Resilient to trailing content after the JSON object (e.g. markdown
+        appended by an over-eager agent that used a now-removed append_verdict
+        tool). Uses raw_decode to extract just the first JSON value.
+        """
         if not output_dir:
             return {}, {}
         try:
@@ -133,7 +138,9 @@ class AgentStepRunner:
             vf = Path(output_dir) / "review_verdict.json"
             if not vf.exists():
                 return {}, {}
-            data = _json.loads(vf.read_text(encoding="utf-8"))
+            raw = vf.read_text(encoding="utf-8").strip()
+            decoder = _json.JSONDecoder()
+            data, _end = decoder.raw_decode(raw)
             if not isinstance(data, dict):
                 return {}, {}
             passed = data.get("passed")

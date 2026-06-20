@@ -12,7 +12,7 @@ import pytest
 import os
 import json
 from pathlib import Path
-from core.workspace_manager import WorkspaceManager
+from core.workspace_manager import WorkspaceManager, STEP_SEQUENCE
 from core.dpe_pipeline import PipelineEngine, MaxRetriesExceeded
 from core.meta_conversation import MetaConversationAgent, format_brief_as_markdown
 from core.db_manager import DBManager

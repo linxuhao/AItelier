@@ -2368,6 +2368,7 @@ def _handle_errors_cmd(client):
 
     # Check task-level errors from task_meta_state
     import sqlite3
+    from pathlib import Path
     db_path = Path.home() / ".AItelier" / "aitelier.db"
     if db_path.exists():
         try:

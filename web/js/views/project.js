@@ -114,6 +114,10 @@
   /** @type {object|null} cached run detail (manifest + step instances). */
   var _cachedRun = null;
 
+  /** @type {object|null} cached pending checkpoint from GET .../checkpoint
+   * (null when the project is not waiting for approval). */
+  var _cachedCheckpoint = null;
+
   /**
    * Track expanded state for workspace directories.
    * @type {Object<string, boolean>}
@@ -274,6 +278,10 @@
     // refetches the trees mid-interaction (#3).
     var dynamic = document.createElement("div");
     dynamic.id = "project-dynamic";
+    var cpCard = _renderCheckpointCard();
+    if (cpCard) {
+      dynamic.appendChild(cpCard);
+    }
     dynamic.appendChild(_renderInfoCard(project));
     var overview = _renderRunOverview(run);
     if (overview) {
@@ -335,7 +343,28 @@
     var expandedSteps = _expandedOverviewSteps;
     _expandedOverviewSteps = {};
 
+    // Preserve an open rejection-feedback box (text + the step it targets) so a
+    // 3s poll doesn't wipe what the user is typing mid-rejection.
+    var openTa = dynamic.querySelector("#project-checkpoint-card .checkpoint-feedback textarea");
+    var openCard = dynamic.querySelector("#project-checkpoint-card");
+    var fbState = (openTa && openCard)
+      ? { step: openCard.dataset.step || "", value: openTa.value }
+      : null;
+
     dynamic.innerHTML = "";
+    var cpCard = _renderCheckpointCard();
+    if (cpCard) {
+      dynamic.appendChild(cpCard);
+      // Re-open and restore the feedback box if the same checkpoint is still
+      // pending (otherwise it has been resolved and the box should stay closed).
+      if (fbState && cpCard.dataset.step === fbState.step) {
+        _toggleCheckpointFeedback(cpCard, fbState.step);
+        var restored = cpCard.querySelector(".checkpoint-feedback textarea");
+        if (restored) {
+          restored.value = fbState.value;
+        }
+      }
+    }
     dynamic.appendChild(_renderInfoCard(project));
     var overview = _renderRunOverview(run, expandedSteps);
     if (overview) {
@@ -682,6 +711,247 @@
 
     card.appendChild(btnRow);
     return card;
+  }
+
+
+  // ── Inline checkpoint approval ────────────────────────────────────
+
+  /**
+   * Render the inline checkpoint-approval card for a pending checkpoint, or
+   * null when none is pending. Shown at the top of the dynamic region so the
+   * user can approve/reject a paused pipeline directly from the project view
+   * (and open the full file-diff modal) without depending on the chat
+   * transcript, which can scroll away or be lost on navigation.
+   *
+   * @returns {HTMLElement|null}
+   */
+  function _renderCheckpointCard() {
+    var cp = _cachedCheckpoint;
+    if (!cp) {
+      return null;
+    }
+    var step = cp.step || cp.checkpoint || "";
+    if (!step) {
+      return null;
+    }
+    var label = cp.label || "Checkpoint";
+
+    // Conversational checkpoints (the meta-conversation "gather" Q&A) need a
+    // free-text reply, not a binary approve/reject — point the user to chat.
+    // Mirrors the legacy/manifest detection used by app.js and CheckpointModal.
+    var conversational = (step === "gather");
+    try {
+      var cfgName = cp.config_name || cp.graph_name || "";
+      var manifests = window.AItelier && window.AItelier.configManifests;
+      var m = manifests && manifests[cfgName];
+      if (m && m.checkpoints && m.checkpoints[step]
+          && m.checkpoints[step].kind === "conversational") {
+        conversational = true;
+      }
+    } catch (_e) { /* fall back to legacy check */ }
+
+    var card = document.createElement("section");
+    card.id = "project-checkpoint-card";
+    card.dataset.step = step;
+    card.style.marginBottom = "var(--pico-spacing, 1rem)";
+    card.style.padding = "var(--pico-spacing, 1rem)";
+    card.style.border = "1px solid var(--pico-primary, #0172ad)";
+    card.style.borderLeftWidth = "4px";
+    card.style.borderRadius = "0.5rem";
+
+    var heading = document.createElement("h4");
+    heading.textContent = "⏸ " + label + " — awaiting review";
+    heading.style.margin = "0 0 0.5rem 0";
+    card.appendChild(heading);
+
+    var writable = _canWrite();
+
+    if (conversational) {
+      var hint = document.createElement("p");
+      hint.style.margin = "0.25rem 0 0.75rem 0";
+      hint.style.fontSize = "0.9rem";
+      hint.textContent = "This checkpoint is a conversation — answer it in chat to continue.";
+      card.appendChild(hint);
+
+      var chatBtn = document.createElement("button");
+      chatBtn.textContent = "Continue in chat";
+      chatBtn.addEventListener("click", function () {
+        var router = window.AItelier && window.AItelier.Router;
+        if (router && typeof router.navigate === "function") {
+          router.navigate("#/chat");
+        } else {
+          window.location.hash = "#/chat";
+        }
+      });
+      card.appendChild(chatBtn);
+      return card;
+    }
+
+    var hint2 = document.createElement("p");
+    hint2.style.margin = "0.25rem 0 0.75rem 0";
+    hint2.style.fontSize = "0.9rem";
+    hint2.style.color = "var(--muted-color, #888)";
+    hint2.textContent = writable
+      ? "The pipeline is paused. Approve to continue, or reject with feedback to redo this step."
+      : "The pipeline is paused for review. Sign in as a writer to approve or reject.";
+    card.appendChild(hint2);
+
+    var btnRow = document.createElement("div");
+    btnRow.style.display = "flex";
+    btnRow.style.flexDirection = "row";
+    btnRow.style.gap = "0.5rem";
+    btnRow.style.flexWrap = "wrap";
+
+    if (writable) {
+      var approveBtn = document.createElement("button");
+      approveBtn.id = "btn-checkpoint-approve";
+      approveBtn.textContent = "Approve";
+      approveBtn.addEventListener("click", function () {
+        _handleCheckpointApprove(step, this);
+      });
+      btnRow.appendChild(approveBtn);
+
+      var rejectBtn = document.createElement("button");
+      rejectBtn.id = "btn-checkpoint-reject";
+      rejectBtn.textContent = "Reject…";
+      rejectBtn.className = "outline";
+      rejectBtn.addEventListener("click", function () {
+        _toggleCheckpointFeedback(card, step);
+      });
+      btnRow.appendChild(rejectBtn);
+    }
+
+    // "Review full diff" is a read action — open the existing file-diff modal.
+    var reviewBtn = document.createElement("button");
+    reviewBtn.id = "btn-checkpoint-review";
+    reviewBtn.textContent = "Review full diff";
+    reviewBtn.className = "outline";
+    reviewBtn.addEventListener("click", function () {
+      var modal = window.AItelier && window.AItelier.CheckpointModal;
+      if (modal && typeof modal.show === "function") {
+        modal.show(_projectId, cp);
+      }
+    });
+    btnRow.appendChild(reviewBtn);
+
+    card.appendChild(btnRow);
+    return card;
+  }
+
+  /**
+   * Reveal (or hide) the rejection-feedback textarea inside the checkpoint
+   * card. Feedback is required to reject, mirroring the modal's flow.
+   *
+   * @param {HTMLElement} card — the checkpoint card element
+   * @param {string} step — checkpoint step ID
+   */
+  function _toggleCheckpointFeedback(card, step) {
+    var existing = card.querySelector(".checkpoint-feedback");
+    if (existing) {
+      existing.parentElement.removeChild(existing);
+      return;
+    }
+
+    var wrap = document.createElement("div");
+    wrap.className = "checkpoint-feedback";
+    wrap.style.marginTop = "0.75rem";
+
+    var ta = document.createElement("textarea");
+    ta.placeholder = "What should be changed? (required)";
+    ta.rows = 3;
+    ta.style.width = "100%";
+    wrap.appendChild(ta);
+
+    var submit = document.createElement("button");
+    submit.textContent = "Submit rejection";
+    submit.className = "secondary";
+    submit.addEventListener("click", function () {
+      var feedback = (ta.value || "").trim();
+      if (!feedback) {
+        ta.focus();
+        ta.setAttribute("aria-invalid", "true");
+        return;
+      }
+      _handleCheckpointReject(step, feedback, this);
+    });
+    wrap.appendChild(submit);
+
+    card.appendChild(wrap);
+    ta.focus();
+  }
+
+  /**
+   * Approve the pending checkpoint, then refresh the view.
+   *
+   * @param {string} step — checkpoint step ID
+   * @param {HTMLButtonElement} btn — the clicked button
+   */
+  function _handleCheckpointApprove(step, btn) {
+    if (!_projectId) {
+      return;
+    }
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.approveCheckpoint !== "function") {
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Approving…";
+    }
+    api.approveCheckpoint(_projectId, step, "").then(function () {
+      // Clear locally so the card disappears immediately; the next poll
+      // confirms from the server.
+      _cachedCheckpoint = null;
+      _refresh();
+    }).catch(function (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Approve";
+      }
+      _showCheckpointError(err, "Approve failed");
+    });
+  }
+
+  /**
+   * Reject the pending checkpoint with feedback, then refresh the view.
+   *
+   * @param {string} step — checkpoint step ID
+   * @param {string} feedback — required rejection reason
+   * @param {HTMLButtonElement} btn — the clicked button
+   */
+  function _handleCheckpointReject(step, feedback, btn) {
+    if (!_projectId) {
+      return;
+    }
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.rejectCheckpoint !== "function") {
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Submitting…";
+    }
+    api.rejectCheckpoint(_projectId, step, feedback).then(function () {
+      _cachedCheckpoint = null;
+      _refresh();
+    }).catch(function (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Submit rejection";
+      }
+      _showCheckpointError(err, "Reject failed");
+    });
+  }
+
+  /** Surface a checkpoint action error via the App error channel. */
+  function _showCheckpointError(err, fallback) {
+    var msg = (err && err.message) || fallback;
+    try {
+      var app = window.AItelier && window.AItelier.App;
+      if (app && typeof app.showError === "function") {
+        app.showError(msg);
+      }
+    } catch (_e) { /* best-effort */ }
   }
 
 
@@ -1906,15 +2176,26 @@
     var runP = (typeof api.getRun === "function")
       ? api.getRun(_projectId).catch(function () { return null; })
       : Promise.resolve(null);
+    // Pending checkpoint is best-effort: a failure (or no pending checkpoint)
+    // just hides the inline approval card. This is the server-side source of
+    // truth (skillflow run state), so the card persists across navigation —
+    // unlike a checkpoint surfaced only in the chat transcript.
+    var cpP = (typeof api.getCheckpoint === "function")
+      ? api.getCheckpoint(_projectId).catch(function () { return null; })
+      : Promise.resolve(null);
     Promise.all([
       api.getProject(_projectId),
       api.listTasks(_projectId),
       runP,
+      cpP,
     ]).then(function (results) {
       _isRefreshing = false;
       var project = results[0];
       var tasks = results[1] || [];
       var run = results[2] || null;
+      var cp = results[3] || null;
+      // Only treat as pending when the response actually names a checkpoint.
+      _cachedCheckpoint = (cp && (cp.checkpoint || cp.step)) ? cp : null;
 
       if (project) {
         if (dynamic) {

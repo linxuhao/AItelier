@@ -207,8 +207,11 @@ def workspace_file(
     check_read_owner(user, None, project)
 
     base = ws.get_code_path(project_id) if root == "code" else ws._get_secure_path(project_id)
-    target = (base / path).resolve()
-    if not str(target).startswith(str(base.resolve())):
+    base_resolved = base.resolve()
+    target = (base_resolved / path).resolve()
+    # Proper path-component containment. str.startswith would allow a sibling
+    # dir whose name shares the prefix, e.g. ".../proj" vs ".../proj-evil".
+    if not target.is_relative_to(base_resolved):
         raise HTTPException(status_code=403, detail="Path traversal denied")
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")

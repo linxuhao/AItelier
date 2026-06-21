@@ -9,6 +9,33 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 import litellm
+
+
+def _read_secret(name: str) -> str | None:
+    """Resolve a secret value WITHOUT relying on the environment.
+
+    Order: a mounted secret file (/run/secrets/<name> or
+    $AITELIER_SECRETS_DIR/<name>) → then os.getenv as a local-dev fallback.
+    Keeping LLM keys in a file (not env) stops every test/build subprocess that
+    inherits os.environ from accidentally receiving them. (Same-uid code in this
+    container can still read /run/secrets — full isolation needs a separate
+    execution sandbox.)
+    """
+    candidates = [os.path.join("/run/secrets", name)]
+    secrets_dir = os.getenv("AITELIER_SECRETS_DIR")
+    if secrets_dir:
+        candidates.append(os.path.join(secrets_dir, name))
+    for path in candidates:
+        try:
+            if os.path.isfile(path):
+                val = open(path, encoding="utf-8").read().strip()
+                if val:
+                    return val
+        except OSError:
+            pass
+    return os.getenv(name)
+
+
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -128,7 +155,7 @@ class AIGateway:
                 # 动态提取环境变量中的 API Key
                 key_env = cfg.get("api_key_env")
                 if key_env:
-                    self.api_key = os.getenv(key_env)
+                    self.api_key = _read_secret(key_env)
 
                 # Use LiteLLM's native provider when available (minimax, etc.).
                 try:

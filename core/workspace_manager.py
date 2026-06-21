@@ -224,6 +224,181 @@ class WorkspaceManager:
         )
         return res.stdout.strip()
 
+    def repo_status(self, project_id: str, log_limit: int = 20) -> dict:
+        """Read-only snapshot of the project code repo for the web UI.
+
+        Returns whether the path is a git repo, the current branch, working-tree
+        dirtiness, ahead/behind counts vs the tracked upstream, the configured
+        'origin' remote URL (if any), and the most recent commits. Every field
+        degrades gracefully — a non-git or empty repo simply reports is_git=False
+        or empty/None fields rather than raising.
+        """
+        code_path = self.get_code_path(project_id)
+
+        def _git(*args: str) -> tuple[int, str]:
+            res = subprocess.run(
+                ["git", *args], cwd=code_path,
+                capture_output=True, text=True,
+            )
+            return res.returncode, res.stdout.strip()
+
+        rc, _ = _git("rev-parse", "--is-inside-work-tree")
+        if rc != 0:
+            return {"is_git": False, "path": str(code_path)}
+
+        _, branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+        _, porcelain = _git("status", "--porcelain")
+        dirty_files = [ln for ln in porcelain.splitlines() if ln.strip()]
+        _, remote_url = _git("remote", "get-url", "origin")
+
+        # ahead/behind vs the upstream the current branch tracks (if any).
+        ahead = behind = None
+        upstream_rc, upstream = _git(
+            "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"
+        )
+        if upstream_rc == 0 and upstream:
+            counts_rc, counts = _git(
+                "rev-list", "--left-right", "--count", "HEAD...@{upstream}"
+            )
+            if counts_rc == 0 and counts:
+                parts = counts.split()
+                if len(parts) == 2:
+                    ahead, behind = int(parts[0]), int(parts[1])
+
+        # Recent commits: hash | author | ISO date | subject (NUL-delimited).
+        commits: list[dict] = []
+        log_rc, log_out = _git(
+            "log", f"-{max(1, log_limit)}",
+            "--pretty=format:%h%x1f%an%x1f%aI%x1f%s",
+        )
+        if log_rc == 0 and log_out:
+            for line in log_out.splitlines():
+                fields = line.split("\x1f")
+                if len(fields) == 4:
+                    commits.append({
+                        "hash": fields[0], "author": fields[1],
+                        "date": fields[2], "subject": fields[3],
+                    })
+
+        return {
+            "is_git": True,
+            "path": str(code_path),
+            "branch": branch or None,
+            "dirty": bool(dirty_files),
+            "dirty_count": len(dirty_files),
+            "remote_url": remote_url or None,
+            "upstream": upstream if upstream_rc == 0 else None,
+            "ahead": ahead,
+            "behind": behind,
+            "commits": commits,
+        }
+
+    # ── Repo write operations (web UI repository panel) ───────────────
+    #
+    # Each raises RuntimeError(stderr) on git failure so the API layer can map
+    # it to a 400 with a useful message. Auth for clone/push of GitHub remotes
+    # is supplied transparently by the container credential helper (see
+    # docker/git-credential-helper.sh); these methods never handle tokens.
+
+    def _run_git_checked(self, code_path: Path, *args: str) -> str:
+        """Run a git command, raising RuntimeError(stderr) on non-zero exit."""
+        res = subprocess.run(
+            ["git", *args], cwd=code_path, capture_output=True, text=True,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                (res.stderr or res.stdout or f"git {args[0]} failed").strip()
+            )
+        return res.stdout.strip()
+
+    def _require_git_repo(self, project_id: str) -> Path:
+        code_path = self.get_code_path(project_id)
+        res = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=code_path, capture_output=True, text=True,
+        )
+        if res.returncode != 0:
+            raise RuntimeError("Not a git repository")
+        return code_path
+
+    def repo_set_remote(self, project_id: str, url: str,
+                        name: str = "origin") -> dict:
+        """Add the remote, or update its URL if it already exists."""
+        code_path = self._require_git_repo(project_id)
+        existing = subprocess.run(
+            ["git", "remote"], cwd=code_path, capture_output=True, text=True,
+        ).stdout.split()
+        if name in existing:
+            self._run_git_checked(code_path, "remote", "set-url", name, url)
+            action = "updated"
+        else:
+            self._run_git_checked(code_path, "remote", "add", name, url)
+            action = "added"
+        return {"remote": name, "url": url, "action": action}
+
+    def repo_commit(self, project_id: str, message: str) -> dict:
+        """Stage all changes and commit. No-op (not an error) when clean."""
+        code_path = self._require_git_repo(project_id)
+        self._run_git_checked(code_path, "add", "-A")
+        porcelain = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=code_path, capture_output=True, text=True,
+        ).stdout.strip()
+        if not porcelain:
+            return {"committed": False, "message": "Nothing to commit"}
+        self._run_git_checked(code_path, "commit", "-m", message)
+        return {"committed": True, "hash": self._get_git_hash(code_path)}
+
+    def repo_push(self, project_id: str, branch: str | None = None,
+                  set_upstream: bool = True) -> dict:
+        """Push a branch to origin (sets upstream by default)."""
+        code_path = self._require_git_repo(project_id)
+        if not branch:
+            branch = self._run_git_checked(
+                code_path, "rev-parse", "--abbrev-ref", "HEAD")
+        args = ["push"]
+        if set_upstream:
+            args += ["--set-upstream"]
+        args += ["origin", branch]
+        out = self._run_git_checked(code_path, *args)
+        return {"pushed": True, "branch": branch, "detail": out}
+
+    def repo_pull(self, project_id: str) -> dict:
+        """Fast-forward pull from the tracked upstream (no merge commits).
+
+        Refuses (RuntimeError) rather than creating a merge if the branches have
+        diverged — the user should use force-sync deliberately in that case.
+        """
+        code_path = self._require_git_repo(project_id)
+        out = self._run_git_checked(code_path, "pull", "--ff-only")
+        return {"pulled": True, "detail": out}
+
+    def repo_force_sync(self, project_id: str, branch: str,
+                        backup: bool = True) -> dict:
+        """Destructive: fetch origin and hard-reset the working tree to
+        origin/<branch>. A timestamped backup branch is created first (default)
+        so the discarded state is recoverable.
+        """
+        code_path = self._require_git_repo(project_id)
+        backup_ref = None
+        if backup:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_ref = f"backup/{stamp}"
+            # Best-effort: a repo with no commits yet can't be branched.
+            try:
+                self._run_git_checked(code_path, "branch", backup_ref)
+            except RuntimeError:
+                backup_ref = None
+        self._run_git_checked(code_path, "fetch", "origin", branch)
+        self._run_git_checked(
+            code_path, "reset", "--hard", f"origin/{branch}")
+        return {
+            "synced": True,
+            "branch": branch,
+            "backup_branch": backup_ref,
+            "head": self._get_git_hash(code_path),
+        }
+
     def get_project_path(self, project_id: str) -> Path:
         """获取 project 代码仓库路径。"""
         return self.get_code_path(project_id)

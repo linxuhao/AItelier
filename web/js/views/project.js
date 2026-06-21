@@ -145,6 +145,16 @@
     }
   }
 
+  /** @returns {boolean} true if the current user may perform write actions. */
+  function _canWrite() {
+    try {
+      var api = window.AItelier && window.AItelier.API;
+      return (api && typeof api.canWrite === "function") ? api.canWrite() : true;
+    } catch (_e) {
+      return true;
+    }
+  }
+
 
   // ── Status parsing ────────────────────────────────────────────────
 
@@ -277,6 +287,7 @@
     // by default and lazy-loaded on first expand.
     container.appendChild(
       _buildWorkspaceSection("", "Pipeline Artifacts", "dps", true));
+    container.appendChild(_buildRepoSection());
     container.appendChild(
       _buildWorkspaceSection("-code", "Project Repository", "code", false));
 
@@ -590,10 +601,12 @@
     btnRow.style.flexWrap = "wrap";
     btnRow.style.marginTop = "0.75rem";
 
+    var writable = _canWrite();
+
     // Retry — only shown when status contains "failed"
     var isFailed = status.indexOf("failed") !== -1;
 
-    if (isFailed) {
+    if (isFailed && writable) {
       var retryBtn = document.createElement("button");
       retryBtn.id = "btn-project-retry";
       retryBtn.textContent = "Retry";
@@ -604,15 +617,17 @@
       btnRow.appendChild(retryBtn);
     }
 
-    // Refresh Planning — always shown
-    var refreshBtn = document.createElement("button");
-    refreshBtn.id = "btn-project-refresh";
-    refreshBtn.textContent = "Refresh Planning";
-    refreshBtn.className = "outline";
-    refreshBtn.addEventListener("click", function () {
-      _handleActionRefresh(this);
-    });
-    btnRow.appendChild(refreshBtn);
+    // Refresh Planning — write action, shown only to writers
+    if (writable) {
+      var refreshBtn = document.createElement("button");
+      refreshBtn.id = "btn-project-refresh";
+      refreshBtn.textContent = "Refresh Planning";
+      refreshBtn.className = "outline";
+      refreshBtn.addEventListener("click", function () {
+        _handleActionRefresh(this);
+      });
+      btnRow.appendChild(refreshBtn);
+    }
 
     // View Traces — open the execution-trace view for this project
     var traceBtn = document.createElement("button");
@@ -638,7 +653,7 @@
                     status.indexOf("planning") !== -1 ||
                     status.indexOf("executing") !== -1;
 
-    if (isPaused) {
+    if (isPaused && writable) {
       var resumeBtn = document.createElement("button");
       resumeBtn.id = "btn-project-resume";
       resumeBtn.textContent = "Resume";
@@ -647,7 +662,7 @@
         _handleActionPauseResume("executing", this);
       });
       btnRow.appendChild(resumeBtn);
-    } else if (isRunning) {
+    } else if (isRunning && writable) {
       var pauseBtn = document.createElement("button");
       pauseBtn.id = "btn-project-pause";
       pauseBtn.textContent = "Pause";
@@ -1056,6 +1071,325 @@
   // ════════════════════════════════════════════════════════════════════
   //  3.  Workspace File Tree
   // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Build the read-only Repository panel: branch, working-tree state,
+   * ahead/behind vs upstream, remote URL, recent commits, and a Download ZIP
+   * action. All read-only — available to every user. The git snapshot is
+   * fetched lazily on first expand so the project view stays cheap.
+   *
+   * @returns {HTMLElement} the section element
+   */
+  function _buildRepoSection() {
+    var section = document.createElement("div");
+    section.id = "repo-section";
+    section.style.marginTop = "var(--pico-spacing, 1rem)";
+
+    var header = document.createElement("h4");
+    header.style.cursor = "pointer";
+    header.style.userSelect = "none";
+    var caret = document.createElement("span");
+    caret.textContent = "▸ ";
+    header.appendChild(caret);
+    header.appendChild(document.createTextNode("Repository"));
+    section.appendChild(header);
+
+    var body = document.createElement("div");
+    body.style.display = "none";
+    section.appendChild(body);
+
+    var loaded = false;
+    function _loadIfNeeded() {
+      if (loaded) { return; }
+      loaded = true;
+      var loading = document.createElement("p");
+      loading.className = "empty-state";
+      loading.textContent = "Loading…";
+      body.appendChild(loading);
+      _fetchRepoStatus(body);
+    }
+
+    header.addEventListener("click", function () {
+      var isOpen = body.style.display !== "none";
+      body.style.display = isOpen ? "none" : "block";
+      caret.textContent = isOpen ? "▸ " : "▾ ";
+      if (!isOpen) { _loadIfNeeded(); }
+    });
+
+    return section;
+  }
+
+  /**
+   * Fetch repo status into the given panel body and render it.
+   *
+   * @param {HTMLElement} body — the repo section body element
+   */
+  function _fetchRepoStatus(body) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.repoStatus !== "function") {
+      body.innerHTML = "";
+      var na = document.createElement("p");
+      na.className = "empty-state";
+      na.textContent = "Repository status not available";
+      body.appendChild(na);
+      return;
+    }
+
+    api.repoStatus(_projectId).then(function (data) {
+      body.innerHTML = "";
+      body.appendChild(_renderRepoStatus(data || {}, body));
+    }).catch(function () {
+      body.innerHTML = "";
+      var err = document.createElement("p");
+      err.className = "empty-state";
+      err.textContent = "Failed to load repository status";
+      body.appendChild(err);
+    });
+  }
+
+  /** A small "label: value" line for the repo panel. */
+  function _repoLine(label, value) {
+    var p = document.createElement("p");
+    p.style.margin = "0.2rem 0";
+    p.style.fontSize = "0.85rem";
+    var strong = document.createElement("strong");
+    strong.textContent = label + ": ";
+    p.appendChild(strong);
+    p.appendChild(document.createTextNode(value));
+    return p;
+  }
+
+  /** Surface a repo action error via the app's error toast. */
+  function _repoError(err) {
+    var msg = (err && err.message) || "Repository action failed";
+    try {
+      var app = window.AItelier && window.AItelier.App;
+      if (app && typeof app.showError === "function") { app.showError(msg); }
+      else { window.alert(msg); }
+    } catch (_e) { /* swallow */ }
+  }
+
+  /**
+   * Run a repo write action: disable the button, await the promise, then
+   * re-render the whole panel (which re-enables controls and reflects new
+   * state). Errors surface via the toast and re-enable the button.
+   *
+   * @param {HTMLButtonElement} btn — the clicked button
+   * @param {function():Promise} factory — produces the action promise
+   * @param {HTMLElement} panelBody — repo panel body to refresh on success
+   * @param {function(object)} [onOk] — optional success callback (gets result)
+   */
+  function _repoAction(btn, factory, panelBody, onOk) {
+    if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+    factory().then(function (res) {
+      if (onOk) { try { onOk(res); } catch (_e) { /* ignore */ } }
+      _fetchRepoStatus(panelBody);
+    }).catch(function (err) {
+      if (btn) { btn.disabled = false; btn.removeAttribute("aria-busy"); }
+      _repoError(err);
+    });
+  }
+
+  /** Build the write-actions row for the repo panel (writers only). */
+  function _renderRepoActions(data, panelBody) {
+    var api = window.AItelier && window.AItelier.API;
+    var pid = _projectId;
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.flexWrap = "wrap";
+    row.style.gap = "0.5rem";
+    row.style.marginTop = "0.75rem";
+    row.style.paddingTop = "0.75rem";
+    row.style.borderTop = "1px solid var(--muted-border-color, #e0e0e0)";
+
+    function mkBtn(label, handler) {
+      var b = document.createElement("button");
+      b.textContent = label;
+      b.className = "outline";
+      b.style.fontSize = "0.8rem";
+      b.style.margin = "0";
+      b.addEventListener("click", function () { handler(b); });
+      row.appendChild(b);
+      return b;
+    }
+
+    mkBtn(data.remote_url ? "Set Remote" : "Add Remote", function (b) {
+      var url = window.prompt("Remote URL (origin):", data.remote_url || "");
+      if (!url) { return; }
+      _repoAction(b, function () { return api.repoSetRemote(pid, url); }, panelBody);
+    });
+
+    mkBtn("Commit", function (b) {
+      var msg = window.prompt("Commit message:", "");
+      if (!msg) { return; }
+      _repoAction(b, function () { return api.repoCommit(pid, msg); }, panelBody,
+        function (res) { if (res && res.committed === false) { _repoError({ message: res.message }); } });
+    });
+
+    mkBtn("Push", function (b) {
+      _repoAction(b, function () { return api.repoPush(pid); }, panelBody);
+    });
+
+    mkBtn("Pull", function (b) {
+      _repoAction(b, function () { return api.repoPull(pid); }, panelBody);
+    });
+
+    mkBtn("Force Sync", function (b) {
+      var branch = window.prompt(
+        "Force-sync: fetch and HARD RESET the working tree to origin/<branch>.\n" +
+        "Local commits are discarded (a backup branch is created first).\n\n" +
+        "Branch to sync from:", data.branch || "main");
+      if (!branch) { return; }
+      if (!window.confirm(
+        "This DISCARDS uncommitted changes and local commits, resetting to " +
+        "origin/" + branch + ".\nA backup/<timestamp> branch is created first. Continue?")) {
+        return;
+      }
+      _repoAction(b, function () {
+        return api.repoSync(pid, branch, true, true);
+      }, panelBody, function (res) {
+        if (res && res.backup_branch) {
+          window.alert("Synced to origin/" + branch +
+            ".\nPrevious state saved on branch: " + res.backup_branch);
+        }
+      });
+    });
+
+    mkBtn("Make PR", function (b) {
+      var title = window.prompt("Pull request title:", "");
+      if (!title) { return; }
+      var base = window.prompt("Base branch (merge into):", "main");
+      if (!base) { return; }
+      var prBody = window.prompt("PR description (optional):", "") || "";
+      _repoAction(b, function () {
+        return api.repoPR(pid, { title: title, body: prBody, base: base });
+      }, panelBody, function (res) {
+        if (res && res.url) {
+          window.alert("Pull request #" + res.number + " created:\n" + res.url);
+          window.open(res.url, "_blank", "noopener");
+        }
+      });
+    });
+
+    return row;
+  }
+
+  /**
+   * Render a repo status payload into a DOM fragment.
+   *
+   * @param {object} data — payload from API.repoStatus
+   * @param {HTMLElement} [panelBody] — panel body, for action refresh
+   * @returns {HTMLElement}
+   */
+  function _renderRepoStatus(data, panelBody) {
+    var wrap = document.createElement("div");
+
+    // Download ZIP is available regardless of git state (read action).
+    var actions = document.createElement("div");
+    actions.style.margin = "0 0 0.75rem 0";
+    var api = window.AItelier && window.AItelier.API;
+    var dl = document.createElement("a");
+    dl.textContent = "⬇ Download ZIP";
+    dl.setAttribute("role", "button");
+    dl.className = "outline";
+    dl.style.fontSize = "0.85rem";
+    dl.setAttribute("download", "");
+    if (api && typeof api.repoArchiveUrl === "function") {
+      dl.href = api.repoArchiveUrl(_projectId);
+    }
+    actions.appendChild(dl);
+    wrap.appendChild(actions);
+
+    if (!data.is_git) {
+      wrap.appendChild(_repoLine("Status", "Not a git repository"));
+      if (data.path) { wrap.appendChild(_repoLine("Path", data.path)); }
+      return wrap;
+    }
+
+    var writable = _canWrite();
+
+    if (data.branch) { wrap.appendChild(_repoLine("Branch", data.branch)); }
+
+    // Working-tree state badge.
+    var stateLine = document.createElement("p");
+    stateLine.style.margin = "0.2rem 0";
+    stateLine.style.fontSize = "0.85rem";
+    var stateStrong = document.createElement("strong");
+    stateStrong.textContent = "Working tree: ";
+    stateLine.appendChild(stateStrong);
+    var stateBadge = document.createElement("span");
+    stateBadge.className = "status-badge";
+    if (data.dirty) {
+      stateBadge.classList.add("status-warn");
+      stateBadge.textContent = "✗ " + (data.dirty_count || 0) + " uncommitted change(s)";
+    } else {
+      stateBadge.classList.add("status-ok");
+      stateBadge.textContent = "✓ clean";
+    }
+    stateLine.appendChild(stateBadge);
+    wrap.appendChild(stateLine);
+
+    // Remote + upstream sync state.
+    wrap.appendChild(_repoLine("Remote", data.remote_url || "— none configured"));
+    if (data.upstream && (data.ahead != null || data.behind != null)) {
+      wrap.appendChild(_repoLine(
+        "Sync",
+        (data.ahead || 0) + " ahead, " + (data.behind || 0) +
+        " behind " + data.upstream));
+    } else {
+      wrap.appendChild(_repoLine("Sync", "no upstream tracking branch"));
+    }
+
+    // Recent commits.
+    var commits = data.commits || [];
+    var commitsHead = document.createElement("p");
+    commitsHead.style.margin = "0.6rem 0 0.2rem 0";
+    commitsHead.style.fontSize = "0.85rem";
+    var ch = document.createElement("strong");
+    ch.textContent = "Recent commits:";
+    commitsHead.appendChild(ch);
+    wrap.appendChild(commitsHead);
+
+    if (commits.length === 0) {
+      var noCommits = document.createElement("p");
+      noCommits.className = "empty-state";
+      noCommits.textContent = "No commits yet";
+      wrap.appendChild(noCommits);
+    } else {
+      var list = document.createElement("ul");
+      list.style.listStyle = "none";
+      list.style.paddingLeft = "0";
+      list.style.margin = "0";
+      list.style.fontSize = "0.8rem";
+      commits.forEach(function (c) {
+        var li = document.createElement("li");
+        li.style.padding = "0.15rem 0";
+        li.style.borderBottom = "1px solid var(--muted-border-color, #eee)";
+        var hash = document.createElement("code");
+        hash.textContent = c.hash;
+        hash.style.marginRight = "0.5rem";
+        li.appendChild(hash);
+        li.appendChild(document.createTextNode(c.subject || ""));
+        var meta = document.createElement("span");
+        meta.style.color = "var(--muted-color, #888)";
+        meta.style.marginLeft = "0.5rem";
+        meta.textContent = "— " + (c.author || "") +
+          (c.date ? ", " + c.date.slice(0, 10) : "");
+        li.appendChild(meta);
+        list.appendChild(li);
+      });
+      wrap.appendChild(list);
+    }
+
+    // Write actions (remote / commit / push / pull / force-sync / PR) — only
+    // for users with write permission and only when we have a panel body to
+    // refresh into after an action completes.
+    if (writable && panelBody) {
+      wrap.appendChild(_renderRepoActions(data, panelBody));
+    }
+
+    return wrap;
+  }
 
   /**
    * Build a collapsible workspace section with a clickable header.

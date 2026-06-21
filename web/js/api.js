@@ -674,6 +674,77 @@
       return _get("/api/me");
     },
 
+    // ════════════════════════════════════════════════════════════════
+    //  Repository (read-only panel)
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * GET /api/projects/{pid}/repo/status → git snapshot of the code repo.
+     * @param {string} pid — project ID
+     * @returns {Promise<object>} — {is_git, branch, dirty, ahead, behind,
+     *   remote_url, upstream, commits, ...}
+     */
+    repoStatus: function (pid) {
+      return _get("/api/projects/" + encodeURIComponent(pid) + "/repo/status");
+    },
+
+    /**
+     * Same-origin URL for downloading the code repo as a zip. Used directly as
+     * an <a download> href (browser performs the GET with its session cookies).
+     * @param {string} pid — project ID
+     * @returns {string}
+     */
+    repoArchiveUrl: function (pid) {
+      return window.location.origin +
+        "/api/projects/" + encodeURIComponent(pid) + "/repo/archive";
+    },
+
+    /** POST /repo/remote — add/update origin URL. */
+    repoSetRemote: function (pid, url, name) {
+      var body = { url: url };
+      if (name) { body.name = name; }
+      return _post("/api/projects/" + encodeURIComponent(pid) + "/repo/remote", body);
+    },
+
+    /** POST /repo/commit — stage all + commit. */
+    repoCommit: function (pid, message) {
+      return _post("/api/projects/" + encodeURIComponent(pid) + "/repo/commit",
+        { message: message });
+    },
+
+    /** POST /repo/push — push current (or named) branch to origin. */
+    repoPush: function (pid, branch, setUpstream) {
+      var body = {};
+      if (branch) { body.branch = branch; }
+      if (setUpstream != null) { body.set_upstream = !!setUpstream; }
+      return _post("/api/projects/" + encodeURIComponent(pid) + "/repo/push", body);
+    },
+
+    /** POST /repo/pull — fast-forward pull from upstream. */
+    repoPull: function (pid) {
+      return _post("/api/projects/" + encodeURIComponent(pid) + "/repo/pull", {});
+    },
+
+    /** POST /repo/sync — destructive reset to origin/<branch> (needs confirm). */
+    repoSync: function (pid, branch, confirm, backup) {
+      return _post("/api/projects/" + encodeURIComponent(pid) + "/repo/sync", {
+        branch: branch,
+        confirm: !!confirm,
+        backup: backup == null ? true : !!backup,
+      });
+    },
+
+    /** POST /repo/pr — open a GitHub pull request. */
+    repoPR: function (pid, opts) {
+      opts = opts || {};
+      return _post("/api/projects/" + encodeURIComponent(pid) + "/repo/pr", {
+        title: opts.title,
+        body: opts.body || "",
+        base: opts.base || "main",
+        head: opts.head || null,
+      });
+    },
+
     /** Toggle client-side read-only mode (writes short-circuit when false). */
     setCanWrite: function (v) {
       _canWrite = !!v;

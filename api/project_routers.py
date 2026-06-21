@@ -3,6 +3,7 @@
 
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 # ── helpers ────────────────────────────────────────────────────────
 
@@ -220,6 +221,203 @@ def workspace_file(
 
     content = target.read_text(encoding="utf-8", errors="replace")
     return {"path": path, "content": content[:50000]}
+
+
+@router.get("/{project_id}/repo/status")
+def repo_status(
+    project_id: str,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Read-only git snapshot of the project code repo (branch, dirty state,
+    ahead/behind, remote, recent commits) for the repository panel."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    check_read_owner(user, None, project)
+    return ws.repo_status(project_id)
+
+
+@router.get("/{project_id}/repo/archive")
+def repo_archive(
+    project_id: str,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Download the project code repo as a zip (working tree, excluding .git)."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    check_read_owner(user, None, project)
+
+    code_path = ws.get_code_path(project_id).resolve()
+    if not code_path.exists():
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in sorted(code_path.rglob("*")):
+            if ".git" in item.parts:
+                continue
+            if item.is_file():
+                zf.write(item, arcname=str(item.relative_to(code_path)))
+    buf.seek(0)
+
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in project_id)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.zip"'},
+    )
+
+
+# ── Repo write operations (POST → covered by the write-gate middleware) ───────
+
+class RepoRemoteBody(BaseModel):
+    url: str
+    name: str = "origin"
+
+
+class RepoCommitBody(BaseModel):
+    message: str = Field(min_length=1)
+
+
+class RepoPushBody(BaseModel):
+    branch: Optional[str] = None
+    set_upstream: bool = True
+
+
+class RepoSyncBody(BaseModel):
+    branch: str = Field(min_length=1)
+    confirm: bool = False
+    backup: bool = True
+
+
+class RepoPRBody(BaseModel):
+    title: str = Field(min_length=1)
+    body: str = ""
+    base: str = "main"
+    head: Optional[str] = None
+
+
+def _repo_write_project(project_id: str, user, db):
+    """Resolve + ownership-check a project for a repo write action."""
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    check_write_owner(user, project)
+    return project
+
+
+@router.post("/{project_id}/repo/remote")
+def repo_set_remote(
+    project_id: str,
+    body: RepoRemoteBody,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Add or update the project repo's remote URL."""
+    _repo_write_project(project_id, user, db)
+    try:
+        return ws.repo_set_remote(project_id, body.url, body.name)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/repo/commit")
+def repo_commit(
+    project_id: str,
+    body: RepoCommitBody,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Stage all changes and commit them."""
+    _repo_write_project(project_id, user, db)
+    try:
+        return ws.repo_commit(project_id, body.message)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/repo/push")
+def repo_push(
+    project_id: str,
+    body: RepoPushBody,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Push the current (or named) branch to origin."""
+    _repo_write_project(project_id, user, db)
+    try:
+        return ws.repo_push(project_id, body.branch, body.set_upstream)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/repo/pull")
+def repo_pull(
+    project_id: str,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Fast-forward pull from the tracked upstream."""
+    _repo_write_project(project_id, user, db)
+    try:
+        return ws.repo_pull(project_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/repo/sync")
+def repo_sync(
+    project_id: str,
+    body: RepoSyncBody,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Destructive force-sync: reset the working tree to origin/<branch>.
+
+    Requires confirm=true; creates a backup branch first unless backup=false.
+    """
+    _repo_write_project(project_id, user, db)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Force-sync discards local commits — resend with confirm=true",
+        )
+    try:
+        return ws.repo_force_sync(project_id, body.branch, body.backup)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/repo/pr")
+def repo_pr(
+    project_id: str,
+    body: RepoPRBody,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Open a GitHub pull request for the project repo."""
+    _repo_write_project(project_id, user, db)
+    from core.git_ops import create_github_pr
+    code_path = ws.get_code_path(project_id)
+    try:
+        return create_github_pr(
+            code_path, body.title, body.body, body.base, body.head)
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.delete("/{project_id}")

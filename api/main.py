@@ -16,11 +16,13 @@ if _env_file.exists():
                 if _key not in _os.environ:
                     _os.environ[_key] = _val
 
+import hmac as _hmac
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from core import cf_access
 from api.routers import router as tasks_router
 from api.project_routers import router as projects_router
 from api.settings_routers import router as settings_router
@@ -194,10 +196,17 @@ if _WEB_DIR.is_dir():
         return FileResponse(_WEB_DIR / "index.html")
 
 
+# When running in Docker (and fronted by Cloudflare Access), requests arrive
+# from the Docker bridge gateway / the tunnel — never 127.0.0.1 — so the
+# localhost guard is disabled via AITELIER_ALLOW_EXTERNAL=1. Auth is then
+# expected to be enforced at the edge (e.g. Cloudflare Access).
+_ALLOW_EXTERNAL = _os.getenv("AITELIER_ALLOW_EXTERNAL", "").lower() in ("1", "true", "yes")
+
+
 @app.middleware("http")
 async def localhost_only(request: Request, call_next):
-    """Reject requests from non-localhost clients."""
-    if getattr(request.app.state, "_test_mode", False):
+    """Reject requests from non-localhost clients (unless external access is allowed)."""
+    if _ALLOW_EXTERNAL or getattr(request.app.state, "_test_mode", False):
         return await call_next(request)
     client_host = request.client.host if request.client else None
     if client_host not in ("127.0.0.1", "::1", "localhost"):
@@ -205,10 +214,66 @@ async def localhost_only(request: Request, call_next):
     return await call_next(request)
 
 
+# ── Write-gate: reads open (Cloudflare Access guards them at the edge),
+#    mutating requests require an allowlisted Cloudflare identity or the admin
+#    token (used by the host CLI, which reaches the origin without a JWT). Only
+#    enforced when Cloudflare verification is configured. ──────────────────────
+_WRITERS = {
+    e.strip().lower()
+    for e in _os.getenv("AITELIER_WRITERS", "").split(",")
+    if e.strip()
+}
+_ADMIN_TOKEN = _os.getenv("AITELIER_ADMIN_TOKEN", "").strip()
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+_WRITE_GATE_ENABLED = cf_access.is_configured()
+
+
+@app.middleware("http")
+async def write_gate(request: Request, call_next):
+    """Require write authorization for mutating requests."""
+    if getattr(request.app.state, "_test_mode", False) or not _WRITE_GATE_ENABLED:
+        return await call_next(request)
+    if request.method in _SAFE_METHODS or request.url.path == "/health":
+        return await call_next(request)
+
+    # Admin token (host CLI) → full access, but ONLY off-tunnel. Cloudflare
+    # forwards custom headers, so a leaked token must not be usable through the
+    # public edge; requests via Cloudflare carry Cf-Ray / the Access JWT.
+    via_cloudflare = bool(
+        request.headers.get("Cf-Ray")
+        or request.headers.get("Cf-Access-Jwt-Assertion")
+    )
+    token = request.headers.get("X-AItelier-Admin-Token", "")
+    if (not via_cloudflare and _ADMIN_TOKEN and token
+            and _hmac.compare_digest(token, _ADMIN_TOKEN)):
+        return await call_next(request)
+
+    # Otherwise require an allowlisted Cloudflare Access identity.
+    email = cf_access.email_from_request_headers(request.headers, request.cookies)
+    if email and email in _WRITERS:
+        return await call_next(request)
+
+    return JSONResponse(
+        {"detail": "Write access denied — read-only. Sign in as an authorized user."},
+        status_code=403,
+    )
+
+
 @app.get("/health")
 def health_check():
     """系统探针"""
     return {"status": "ok", "engine": "DPE SOTA v3.0"}
+
+
+@app.get("/api/me")
+def whoami(request: Request):
+    """Current identity + write permission (for the web UI to reflect state)."""
+    email = cf_access.email_from_request_headers(request.headers, request.cookies)
+    return {
+        "email": email,
+        "can_write": bool(not _WRITE_GATE_ENABLED or (email and email in _WRITERS)),
+        "gate_enabled": _WRITE_GATE_ENABLED,
+    }
 
 
 @app.get("/api/events/stream")

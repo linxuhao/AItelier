@@ -10,7 +10,25 @@ from typing import Optional
 
 import httpx
 
+# Load .env so AITELIER_ADMIN_TOKEN (write-gate bypass for the CLI) is available.
+_env_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+if os.path.exists(_env_file):
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                _k = _k.strip().removeprefix("export ")
+                _v = _v.strip().strip("\"'")
+                os.environ.setdefault(_k, _v)
+
 _DEFAULT_URL = f"http://localhost:{os.environ.get('AITELIER_PORT', '4444')}"
+
+
+def _auth_headers() -> dict:
+    """Admin-token header so the CLI passes the server's write-gate."""
+    token = os.environ.get("AITELIER_ADMIN_TOKEN", "").strip()
+    return {"X-AItelier-Admin-Token": token} if token else {}
 
 
 class APIClient:
@@ -18,7 +36,9 @@ class APIClient:
 
     def __init__(self, base_url: str = _DEFAULT_URL):
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.Client(base_url=self.base_url, timeout=10.0)
+        self._client = httpx.Client(
+            base_url=self.base_url, timeout=10.0, headers=_auth_headers(),
+        )
 
     def create_task(self, project_id: str, prompt: str,
                     project_brief: Optional[str] = None) -> dict:

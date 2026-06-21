@@ -24,6 +24,11 @@
   /** Default request timeout (10 seconds). */
   var _DEFAULT_TIMEOUT = 10000;
 
+  /** Read-only mode: when false, all mutating requests are short-circuited.
+   *  Set from GET /api/me on app init. Defaults to true (local/dev, no gate). */
+  var _canWrite = true;
+  var _SAFE_METHODS = { GET: 1, HEAD: 1, OPTIONS: 1 };
+
 
   // ── ApiError constructor ──────────────────────────────────────────
 
@@ -73,6 +78,16 @@
    * @throws {ApiError} on HTTP errors or network failures
    */
   function _request(method, path, body, timeout) {
+    // Read-only guard: block every mutating request up front (covers chat,
+    // delete, retry, and any button) with a consistent message. The backend
+    // also enforces this (403); this is the UX layer.
+    if (!_canWrite && !_SAFE_METHODS[method]) {
+      return Promise.reject(new ApiError(
+        403,
+        "Read-only access — sign in as an authorized user to make changes."
+      ));
+    }
+
     var effectiveTimeout = (timeout !== undefined && timeout !== null)
       ? timeout : _DEFAULT_TIMEOUT;
 
@@ -648,6 +663,25 @@
      */
     saveChatMessage: function (body) {
       return _post("/api/agent/chat/message", body);
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    //  Identity / write permission
+    // ════════════════════════════════════════════════════════════════
+
+    /** GET /api/me → { email, can_write, gate_enabled }. */
+    me: function () {
+      return _get("/api/me");
+    },
+
+    /** Toggle client-side read-only mode (writes short-circuit when false). */
+    setCanWrite: function (v) {
+      _canWrite = !!v;
+    },
+
+    /** Current write permission. */
+    canWrite: function () {
+      return _canWrite;
     },
   };
 

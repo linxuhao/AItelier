@@ -1123,3 +1123,30 @@ body > main {
   padding: 0;
   margin: 0;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   Read-only mode (set by app.js when /api/me reports can_write=false)
+   ══════════════════════════════════════════════════════════════════ */
+.readonly-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  padding: 0.5rem 1rem;
+  text-align: center;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #663c00;
+  background: #ffe69c;
+  border-bottom: 1px solid #e0c060;
+}
+
+/* Visually disable the prominent write surfaces. The API client also
+   short-circuits every mutating request, so this is affordance only. */
+body.readonly #form-new-project,
+body.readonly .chat-input-area,
+body.readonly #cp-approve,
+body.readonly #cp-reject {
+  opacity: 0.45;
+  pointer-events: none;
+  filter: grayscale(1);
+}

@@ -100,6 +100,12 @@
       return Promise.resolve(null);
     }
 
+    // Read-only users can't create a session (a write) — skip the doomed POST.
+    if (typeof api.canWrite === "function" && !api.canWrite()) {
+      _sessionInitiated = true;
+      return Promise.resolve(null);
+    }
+
     return api.createSession().then(function (data) {
       _sessionId = (data && data.session_id) || null;
       _sessionInitiated = true;

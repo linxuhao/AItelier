@@ -21,6 +21,7 @@ dependencies = [
     "textual>=8.2",
     "prompt-toolkit>=3.0",
     "uvicorn>=0.44",
+    "pyjwt[crypto]>=2.8",
 ]
 
 [project.scripts]

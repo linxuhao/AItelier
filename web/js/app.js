@@ -49,7 +49,52 @@
 
     /** @type {number} — count of reconnection attempts */
     reconnectAttempt: 0,
+
+    /** @type {boolean} — whether the current user may perform writes */
+    canWrite: true,
   };
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Read-only mode
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Fetch identity from /api/me and apply read-only mode when the user
+   * lacks write permission: short-circuit writes in the API client, mark
+   * <body> for CSS, and show a persistent banner.
+   */
+  function _applyReadOnlyMode() {
+    var API = window.AItelier && window.AItelier.API;
+    if (!API || typeof API.me !== "function") {
+      return;
+    }
+    API.me().then(function (me) {
+      var canWrite = !me || me.can_write !== false;
+      state.canWrite = canWrite;
+      API.setCanWrite(canWrite);
+      if (!canWrite) {
+        document.body.classList.add("readonly");
+        _showReadOnlyBanner(me && me.email);
+      }
+    }).catch(function () {
+      // /api/me unreachable (e.g. local dev without gate) — leave writes on.
+    });
+  }
+
+  /** Insert a one-time persistent read-only banner at the top of the page. */
+  function _showReadOnlyBanner(email) {
+    if (document.getElementById("readonly-banner")) {
+      return;
+    }
+    var bar = document.createElement("div");
+    bar.id = "readonly-banner";
+    bar.className = "readonly-banner";
+    bar.textContent = email
+      ? "Read-only — signed in as " + email + " (not authorized to make changes)."
+      : "Read-only — sign in as an authorized user to make changes.";
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
 
 
   // ════════════════════════════════════════════════════════════════════
@@ -860,6 +905,9 @@
 
     // ── Phase 6: Wire connection monitoring ──
     _wireConnectionMonitoring();
+
+    // ── Phase 7: Apply read-only mode from /api/me ──
+    _applyReadOnlyMode();
 
     console.log("[AItelier] App initialised successfully.");
   }

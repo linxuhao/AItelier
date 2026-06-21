@@ -11,7 +11,6 @@
 | Step 3 | "3" | PM | 任务分解 - 拆分为子任务 |
 | t_plan | "t_plan" | Task Planner | 任务规划 - 为单个任务制定实现计划 |
 | t_impl | "t_impl" | Implementer | 代码实施 - 实现任务 |
-| t_verify | "t_verify" | Task Verifier | 任务验证 - 验证实现结果 |
 | Step 5 | "5" | Final Verifier | 最终验证 - 集成交货 |
 
 你在 Step 2 — 你收到的任务已完成技术调研，需要基于MVP目标设计技术架构。

@@ -132,5 +132,5 @@ class TestStepSequences:
 
     def test_task_step_sequence_order(self):
         """Task steps should follow the correct order."""
-        assert TASK_STEP_SEQUENCE == ["t_plan", "t_impl", "t_verify"]
+        assert TASK_STEP_SEQUENCE == ["t_plan", "t_impl"]
         assert FINAL_STEP == "5"

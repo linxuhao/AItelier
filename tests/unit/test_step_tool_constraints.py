@@ -76,7 +76,6 @@ CONSTRAINED_STEPS = {
     "3": ["write_tasks_manifest", "write_task_card"],
     "5": ["write_readme", "write_report"],
     "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card"],
-    "t_verify": ["write_report"],
 }
 
 
@@ -90,7 +89,7 @@ class TestSkillflowToolSchemas:
         expected = sorted(CONSTRAINED_STEPS[step_id])
         assert write_tools == expected, f"{step_id}: expected {expected}, got {write_tools}"
 
-    @pytest.mark.parametrize("step_id", ["2", "3", "5", "t_plan", "t_verify"])
+    @pytest.mark.parametrize("step_id", ["2", "3", "5", "t_plan"])
     def test_constrained_step_has_read_tools(self, step_id):
         ts = _get_tool_schemas_for_step(step_id)
         read_tools = {k for k in ts if not k.startswith("write")}

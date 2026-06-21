@@ -55,7 +55,6 @@ workspaces/{project_id}/
 | "3"     | Inbox_3, Outbox_Draft_3, Outbox_Final_3 |
 | "t_plan" | Inbox_t_plan, Outbox_Draft_t_plan, Outbox_Final_t_plan |
 | "t_impl" | Inbox_t_impl, Outbox_Draft_t_impl, Outbox_Final_t_impl |
-| "t_verify" | Inbox_t_verify, Outbox_Draft_t_verify, Outbox_Final_t_verify |
 | "5"     | Inbox_5, Outbox_Draft_5, Outbox_Final_5 |
 
 ### 数据库存储 (SQLite WAL)
@@ -74,12 +73,11 @@ workspaces/{project_id}/
 | Step 3 | "3" | PM | 任务分解 - 拆分为子任务 (DAG) |
 | t_plan | "t_plan" | Task Planner | 任务规划 - 为单个任务制定实现计划 |
 | t_impl | "t_impl" | Implementer | 代码实施 - 实现任务 |
-| t_verify | "t_verify" | Task Verifier | 任务验证 - 验证实现结果 |
 | Step 5 | "5" | Final Verifier | 最终验证 - 集成交付 |
 
 ### Task 循环
 Step 3 产出的 `tasks_manifest.json` 定义了任务列表和执行顺序。引擎按执行顺序逐一运行：
-1. task_loop → t_plan → t_plan_review → t_impl → t_impl_review → t_verify → t_verify_review → 循环
+1. task_loop → t_plan → t_plan_review → t_impl → t_impl_review → 循环
 2. Green Agent 生成计划/代码 → Red Agent 审查
 3. Red Agent 拒绝时，反馈自动注入下一轮重试
 4. 最多重试 3 次，超限熔断

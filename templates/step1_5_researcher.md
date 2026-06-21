@@ -11,7 +11,6 @@
 | 3 | PM | Task breakdown — decompose into sub-tasks |
 | t_plan | Task Planner | Task planning — implementation plan for one task |
 | t_impl | Implementer | Code implementation — implement the task |
-| t_verify | Task Verifier | Task verification — verify the implementation |
 | 5 | Final Verifier | Final verification — integration and delivery |
 
 You are in Step 1 — analyze existing tools and technical approaches to provide a foundation for the architecture design. Avoid reinventing the wheel.

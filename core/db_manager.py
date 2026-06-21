@@ -472,7 +472,7 @@ class DBManager:
             conn.commit()
             return cursor.rowcount > 0
 
-    def complete_task(self, task_id: int, last_step: str = "t_verify"):
+    def complete_task(self, task_id: int, last_step: str = "t_impl"):
         """Mark a task as completed with accurate final step info."""
         from core.workspace_manager import TASK_STEP_SEQUENCE
         completed_steps = TASK_STEP_SEQUENCE[:TASK_STEP_SEQUENCE.index(last_step) + 1] if last_step in TASK_STEP_SEQUENCE else [last_step]

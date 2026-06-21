@@ -107,25 +107,6 @@ task_implementer_reviewer:
   native_tool_calling: true
   fallback_to_json_mode: true
 
-task_verifier:
-  model: "deepseek/deepseek-v4-flash"
-  temperature: 0.2
-  template: "task_verify.md"
-  tools: ["list_tree"]
-  max_output_tokens: 8192
-  max_tool_turns: 30
-  native_tool_calling: true
-  fallback_to_json_mode: false
-
-task_verifier_reviewer:
-  model: "deepseek/deepseek-v4-flash"
-  temperature: 0.1
-  template: "task_verify_red.md"
-  tools: ["list_tree"]
-  max_output_tokens: 4096
-  max_tool_turns: 15
-  native_tool_calling: true
-  fallback_to_json_mode: false
 
 final_verifier:
   model: "deepseek/deepseek-v4-pro"

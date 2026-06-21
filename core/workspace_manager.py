@@ -22,7 +22,7 @@ PROJECT_STEP_SEQUENCE = ["1", "2", "3"]
 
 # Task-level execution steps (run per task)
 # t_sota + t_design merged into t_plan
-TASK_STEP_SEQUENCE = ["t_plan", "t_impl", "t_verify"]
+TASK_STEP_SEQUENCE = ["t_plan", "t_impl"]
 
 # Project-level final verification
 FINAL_STEP = "5"

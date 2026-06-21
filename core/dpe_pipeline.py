@@ -1134,13 +1134,25 @@ class PipelineEngine:
                 hoist_design=use_preamble,
             )
 
-            # Inject turn budget so the agent can pace exploration
+            # Inject turn budget so the agent can pace exploration.
+            # NOTE: appended AFTER assemble()'s volatile tail (resolved context /
+            # tree / feedback), so this block is past the cache-prefix boundary —
+            # editing it does NOT perturb prefix caching. Kept native-only.
             user_prompt += (
                 f"\n\n[Turn Budget: {max_turns} turns total, then forced output]\n"
-                "Plan your exploration accordingly. After gathering enough context, "
-                "call write_*/create_* to produce the required output, then "
-                "finish_step to complete. Do not exhaust all turns on exploration — "
-                "leave at least 1 turn for writing."
+                "You are a workflow automation step, not a chat assistant: your "
+                "visible reply text is never shown to anyone and is discarded — "
+                "only tool calls have any effect, and a reply with no tool call "
+                "ends the step immediately.\n"
+                "Plan your exploration, then call write_*/create_* to produce the "
+                "required output. The moment all required files are written, call "
+                "finish_step immediately. Do NOT re-read, re-list, search, or "
+                "otherwise re-verify files you just wrote — writes are trusted and "
+                "already staged, so re-verifying them only burns turns. Never end "
+                "a turn with a plain-text 'done' / 'written successfully' note; "
+                "your final action must be a tool call (the write tool, then "
+                "finish_step). Do not exhaust all turns on exploration — leave at "
+                "least 1 turn for writing."
             )
 
             if use_preamble:

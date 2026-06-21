@@ -282,15 +282,113 @@
   //  which is designed as a sidebar.
 
   /** @type {number} max notification items to keep in the sidebar. */
-  var _MAX_NOTIF_ITEMS = 30;
+  var _MAX_NOTIF_ITEMS = 50;
 
   function _flashNotification(message) {
     showFlash(message);
   }
 
+  /** Built-in DPE step labels; manifest labels (loaded by the dashboard view
+   * into window.AItelier.configManifests) take precedence when present. */
+  var _NOTIF_STEP_LABELS = {
+    "1": "Researcher", "1_review": "Research Review",
+    "2": "Architect", "2_review": "Architecture Review",
+    "3": "PM", "3_review": "PM Review",
+    "5": "Final Verifier", "5_review": "Final Review", "5_test": "Unit Tests",
+    "t_plan": "Task Planner", "t_plan_review": "Plan Review",
+    "t_impl": "Implementer", "t_impl_review": "Impl Review",
+    "t_verify": "Task Verifier", "t_verify_review": "Verify Review",
+    "task_loop": "Task Loop",
+  };
+
+  /** Resolve a step id to a human-readable label for the given config. */
+  function _stepLabel(stepId, graphName) {
+    if (!stepId) { return ""; }
+    try {
+      var cache = window.AItelier && window.AItelier.configManifests;
+      var m = cache && graphName && cache[graphName];
+      if (m && m.labels && m.labels[stepId]) { return m.labels[stepId]; }
+    } catch (_e) { /* fall through */ }
+    return _NOTIF_STEP_LABELS[stepId] || stepId;
+  }
+
+  /** Truncate a string for inline display. */
+  function _truncate(s, n) {
+    s = String(s || "");
+    return s.length > n ? s.slice(0, n) + "…" : s;
+  }
+
   /**
-   * Append a pipeline event to the #notification-panel sidebar.
-   * Shows recent step events (claimed, completed, failed) with timestamps.
+   * Map an SSE pipeline event to a {icon, text, detail} notification, or null
+   * to skip it. Mirrors the detail shown by the CLI notification panel
+   * (cli/tui/notifications.py): human step names, error text, checkpoint
+   * labels, agent messages, and written-file lists — not just raw step ids.
+   *
+   * @param {object} event — SSE event payload
+   * @returns {{icon: string, text: string, detail: string}|null}
+   */
+  function _formatNotification(event) {
+    var type = event.type || "";
+    var graph = event.graph_name || event._graph_name || "";
+    var stepId = event._step_id || event.step_id || event.step || "";
+    var step = _stepLabel(stepId, graph);
+    var files = Array.isArray(event.files) ? event.files : [];
+    var filePreview = files.length
+      ? files.slice(0, 3).join(", ") + (files.length > 3 ? ", …" : "")
+      : "";
+
+    switch (type) {
+      case "run_started":
+      case "pipeline_started":
+        return { icon: "▶", text: "Pipeline started", detail: "" };
+      case "step_claimed":
+      case "step_start":
+        return { icon: "▶", text: step || "step", detail: "" };
+      case "step_completed":
+      case "step_end":
+        return { icon: "✓", text: (step || "step") + " completed", detail: "" };
+      case "step_done":
+        return { icon: "✓", text: (step || "step") + (filePreview ? " → " + filePreview : ""), detail: filePreview };
+      case "files_written":
+        return filePreview
+          ? { icon: "✎", text: "Wrote " + filePreview, detail: files.join(", ") }
+          : null;
+      case "step_timeout":
+        return { icon: "⏰", text: (step || "step") + " timed out", detail: "" };
+      case "step_failed":
+        var err = _truncate(event.error || event.reason || "", 100);
+        return { icon: "✗", text: (step || "step") + (err ? ": " + err : " failed"), detail: event.error || "" };
+      case "checkpoint_reached":
+      case "checkpoint_paused":
+        return { icon: "⏸", text: (event.label || "Checkpoint") + " — awaiting review", detail: "" };
+      case "checkpoint_resolved":
+      case "checkpoint_approved":
+        return { icon: "✓", text: (event.label || "Checkpoint") + " " + (event.action || "approved"), detail: "" };
+      case "checkpoint_rejected":
+      case "step_checkpoint_rejected":
+        return { icon: "↺", text: (event.label || "Checkpoint") + " rejected — redo", detail: "" };
+      case "agent_message":
+        var content = _truncate(event.content || "", 140);
+        if (!content) { return null; }
+        var lvl = event.level || "info";
+        var lvlIcon = lvl === "milestone" ? "★" : (lvl === "warning" ? "⚠" : "ℹ");
+        return { icon: lvlIcon, text: content, detail: event.content || "" };
+      case "project_completed":
+        return { icon: "✓", text: "Project completed", detail: "" };
+      case "project_failed":
+      case "run_failed":
+        var reason = _truncate(event.reason || event.error || "", 100);
+        return { icon: "✗", text: "Project failed" + (reason ? ": " + reason : ""), detail: event.reason || "" };
+      default:
+        // Unknown step-scoped event — show a minimal line rather than dropping it.
+        if (stepId) { return { icon: "·", text: step, detail: "" }; }
+        return null;
+    }
+  }
+
+  /**
+   * Append a pipeline event to the #notification-panel sidebar with timestamp,
+   * project name, human-readable step name, and event-specific detail.
    *
    * @param {object} event — SSE event payload
    */
@@ -300,37 +398,43 @@
       return;
     }
 
-    var stepId = event._step_id || event.step_id || "";
-    var type = event.type || "";
-    var task = event._task_id || "";
-
-    // Only show step lifecycle events
-    if (!stepId && type.indexOf("step_") !== 0 && type.indexOf("checkpoint_") !== 0) {
+    var fmt = _formatNotification(event);
+    if (!fmt) {
       return;
     }
 
-    // Build message
-    var label = stepId || type;
-    var icon = "";
-    if (type === "step_completed") { icon = "✓"; }
-    else if (type === "step_failed") { icon = "✗"; }
-    else if (type === "step_claimed") { icon = "▶"; }
-    else if (type.indexOf("checkpoint_") === 0) { icon = "⏸"; }
+    var task = event._task_id || "";
+    var project = event._project_name || event.project_id || "";
 
-    var msg = icon + " " + label;
-    if (task) { msg += " · " + task; }
-
-    var now = new Date();
-    var ts = now.getHours().toString().padStart(2, "0") + ":" +
-             now.getMinutes().toString().padStart(2, "0") + ":" +
-             now.getSeconds().toString().padStart(2, "0");
+    // Timestamp: prefer the server-provided event time (_ts, seconds) so the
+    // line reflects when the event happened, not when it rendered.
+    var d = event._ts ? new Date(event._ts * 1000) : new Date();
+    var ts = d.getHours().toString().padStart(2, "0") + ":" +
+             d.getMinutes().toString().padStart(2, "0") + ":" +
+             d.getSeconds().toString().padStart(2, "0");
 
     var item = document.createElement("div");
     item.style.fontSize = "0.8rem";
-    item.style.padding = "0.15rem 0.4rem";
+    item.style.padding = "0.25rem 0.4rem";
     item.style.borderBottom = "1px solid var(--muted-border-color, #eee)";
-    item.style.color = "var(--muted-color, #666)";
-    item.textContent = ts + " " + msg;
+    item.style.lineHeight = "1.35";
+
+    // Line 1: time · project · task
+    var meta = document.createElement("div");
+    meta.style.color = "var(--muted-color, #888)";
+    meta.style.fontSize = "0.72rem";
+    var metaParts = [ts];
+    if (project) { metaParts.push(project); }
+    if (task) { metaParts.push(task); }
+    meta.textContent = metaParts.join(" · ");
+    item.appendChild(meta);
+
+    // Line 2: icon + message
+    var body = document.createElement("div");
+    body.style.color = "var(--color, #444)";
+    body.textContent = (fmt.icon ? fmt.icon + " " : "") + fmt.text;
+    if (fmt.detail) { item.title = fmt.detail; }
+    item.appendChild(body);
 
     // Insert at top
     if (list.firstChild) {
@@ -360,10 +464,17 @@
       return;
     }
 
-    // ── Notification panel: feed all step events ─────────────────────
-    var _notifTypes = ["step_claimed", "step_completed", "step_failed",
-      "checkpoint_reached", "checkpoint_resolved", "checkpoint_approved",
-      "pipeline_started", "project_completed", "project_failed"];
+    // ── Notification panel: feed pipeline events (parity with CLI panel) ──
+    var _notifTypes = [
+      "run_started", "pipeline_started",
+      "step_claimed", "step_start",
+      "step_completed", "step_end", "step_done", "files_written",
+      "step_timeout", "step_failed",
+      "checkpoint_reached", "checkpoint_paused",
+      "checkpoint_resolved", "checkpoint_approved",
+      "checkpoint_rejected", "step_checkpoint_rejected",
+      "agent_message",
+      "project_completed", "project_failed", "run_failed"];
     for (var nt = 0; nt < _notifTypes.length; nt++) {
       sse.on(_notifTypes[nt], _addToNotificationPanel);
     }
@@ -686,6 +797,7 @@
     var dashboard = window.AItelier && window.AItelier.Dashboard;
     var projectDetail = window.AItelier && window.AItelier.ProjectDetail;
     var chat = window.AItelier && window.AItelier.Chat;
+    var trace = window.AItelier && window.AItelier.Trace;
 
     // Validate required views
     if (!dashboard || !projectDetail || !chat) {
@@ -693,12 +805,18 @@
       return;
     }
 
-    router.init([
+    var routes = [
       { pattern: "#/", view: dashboard },
       { pattern: "#/projects", view: dashboard },
+      { pattern: "#/projects/{id}/trace", view: trace },
       { pattern: "#/projects/{id}", view: projectDetail },
       { pattern: "#/chat", view: chat },
-    ]);
+    ];
+    // Trace view is optional — only register if it loaded.
+    if (!trace) {
+      routes = routes.filter(function (r) { return r.view !== trace; });
+    }
+    router.init(routes);
 
     // ── Track current view name in global state ──
     // The Router's hashchange handler calls show/hide on views.

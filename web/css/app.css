@@ -183,13 +183,15 @@ body {
 /* View sections are hidden by default; JS shows the active one */
 #view-dashboard,
 #view-project,
-#view-chat {
+#view-chat,
+#view-trace {
   display: none;
 }
 
 #view-dashboard.active,
 #view-project.active,
-#view-chat.active {
+#view-chat.active,
+#view-trace.active {
   display: block;
 }
 
@@ -198,7 +200,11 @@ body {
    5.  Chat View (#view-chat)
    ════════════════════════════════════════════════════════════════════ */
 
-#view-chat {
+/* Gate the flex layout on .active: an ungated `display: flex` here overrode
+   the `#view-chat { display: none }` visibility rule above, so an inactive
+   chat stayed in layout as a height:100% flex block and pushed sibling views
+   (e.g. #view-trace, which follows it in the DOM) off-screen. */
+#view-chat.active {
   display: flex;
   flex-direction: column;
   max-width: var(--ait-chat-max-width);
@@ -354,6 +360,236 @@ body {
 #view-chat .chat-input-area button {
   flex-shrink: 0;
 }
+
+/* Slash-command autocompletion dropdown (anchored above the input row). */
+#view-chat .chat-input-area .slash-completion {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  margin: 0 0 0.25rem 0;
+  padding: 0.25rem;
+  list-style: none;
+  z-index: 20;
+  max-height: 14rem;
+  overflow-y: auto;
+  background: var(--card-background-color, var(--background-color, #ffffff));
+  border: 1px solid var(--muted-border-color, #d0d0d0);
+  border-radius: 0.4rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+#view-chat .slash-completion-item {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 0.3rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+#view-chat .slash-completion-item.is-active,
+#view-chat .slash-completion-item:hover {
+  background: var(--primary-focus, rgba(16, 149, 193, 0.15));
+}
+
+#view-chat .slash-completion-item .slash-cmd {
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+#view-chat .slash-completion-item .slash-desc {
+  color: var(--muted-color, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   8.  Run Overview (pipeline stepper) — #run-overview
+   ════════════════════════════════════════════════════════════════════ */
+.run-overview {
+  margin-bottom: var(--pico-spacing, 1rem);
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--muted-border-color, #e0e0e0);
+  border-radius: 0.5rem;
+}
+
+.run-overview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.run-overview-progress {
+  color: var(--muted-color, #888);
+  font-size: 0.8rem;
+}
+
+.run-strip {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+/* Step pill */
+.run-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.85rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.run-step-clickable { cursor: pointer; }
+.run-step-clickable:hover { filter: brightness(0.97); }
+
+.run-step-future {
+  background: var(--muted-border-color, #eee);
+  color: var(--muted-color, #777);
+}
+.run-step-skipped {
+  background: transparent;
+  color: var(--muted-color, #aaa);
+  border: 1px dashed var(--muted-border-color, #d0d0d0);
+}
+.run-step-active {
+  background: rgba(245, 159, 0, 0.18);
+  color: #9a6700;
+  border-color: rgba(245, 159, 0, 0.5);
+  font-weight: 600;
+}
+.run-step-done {
+  background: rgba(47, 158, 68, 0.15);
+  color: #2b7a3b;
+}
+.run-step-failed {
+  background: rgba(224, 49, 49, 0.15);
+  color: #c92a2a;
+  border-color: rgba(224, 49, 49, 0.45);
+}
+
+.run-step-badge {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0 0.25rem;
+  border-radius: 0.5rem;
+  background: rgba(0, 0, 0, 0.12);
+}
+.run-step-retry { background: rgba(224, 49, 49, 0.25); color: #c92a2a; }
+
+.run-detail-panel:not(:empty) {
+  margin-top: 0.6rem;
+  border-top: 1px solid var(--muted-border-color, #eee);
+  padding-top: 0.5rem;
+}
+.run-detail-block { margin-bottom: 0.5rem; }
+.run-detail-title { font-weight: 600; font-size: 0.8rem; margin-bottom: 0.2rem; }
+.run-inst {
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.76rem;
+  color: var(--muted-color, #666);
+  padding: 0.05rem 0;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   7.  Trace View (#view-trace)
+   ════════════════════════════════════════════════════════════════════ */
+#view-trace .trace-toolbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+#view-trace .trace-toolbar select {
+  width: auto;
+  margin: 0;
+}
+
+#view-trace .trace-entry {
+  border: 1px solid var(--muted-border-color, #e0e0e0);
+  border-left-width: 3px;
+  border-radius: 0.3rem;
+  margin-bottom: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+#view-trace .trace-entry .trace-head {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+#view-trace .trace-entry .trace-cat {
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
+#view-trace .trace-entry .trace-step {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+#view-trace .trace-entry .trace-event {
+  color: var(--muted-color, #777);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+#view-trace .trace-entry .trace-time {
+  color: var(--muted-color, #999);
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+#view-trace .trace-entry .trace-body {
+  margin-top: 0.4rem;
+  padding: 0.5rem;
+  background: var(--code-background-color, rgba(0, 0, 0, 0.04));
+  border-radius: 0.3rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  max-height: 24rem;
+  overflow: auto;
+}
+
+/* Category accent colors (left border + label) */
+#view-trace .trace-entry.cat-prompt { border-left-color: #7048e8; }
+#view-trace .trace-entry.cat-prompt .trace-cat { color: #7048e8; }
+#view-trace .trace-entry.cat-response { border-left-color: #1098ad; }
+#view-trace .trace-entry.cat-response .trace-cat { color: #1098ad; }
+#view-trace .trace-entry.cat-tool_call { border-left-color: #f59f00; }
+#view-trace .trace-entry.cat-tool_call .trace-cat { color: #f59f00; }
+#view-trace .trace-entry.cat-tool_result { border-left-color: #2f9e44; }
+#view-trace .trace-entry.cat-tool_result .trace-cat { color: #2f9e44; }
+#view-trace .trace-entry.cat-error { border-left-color: #e03131; }
+#view-trace .trace-entry.cat-error .trace-cat { color: #e03131; }
+#view-trace .trace-entry.cat-step { border-left-color: #868e96; }
+#view-trace .trace-entry.cat-step .trace-cat { color: #868e96; }
 
 
 /* ════════════════════════════════════════════════════════════════════

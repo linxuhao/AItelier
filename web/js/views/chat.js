@@ -162,6 +162,14 @@
     input.autocomplete = "off";
     inputArea.appendChild(input);
 
+    // Slash-command completion dropdown (hidden until "/" is typed). Anchored
+    // above the input via CSS (.slash-completion { bottom: 100% }).
+    var completion = document.createElement("ul");
+    completion.id = "chat-slash-completion";
+    completion.className = "slash-completion";
+    completion.style.display = "none";
+    inputArea.appendChild(completion);
+
     var sendBtn = document.createElement("button");
     sendBtn.id = "chat-send-btn";
     sendBtn.textContent = "Send";
@@ -169,18 +177,59 @@
       var text = input.value.trim();
       if (text) {
         input.value = "";
+        _hideCompletion(completion);
         _sendMessage(text);
       }
     });
     inputArea.appendChild(sendBtn);
 
-    // Enter key submits (without Shift)
+    // Recompute completion candidates as the user types.
+    input.addEventListener("input", function () {
+      _updateCompletion(input, completion);
+    });
+
     input.addEventListener("keydown", function (e) {
+      var open = completion.style.display !== "none" && _completionMatches.length > 0;
+
+      // ── Completion navigation (only when the dropdown is open) ──
+      if (open) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          _completionIndex = (_completionIndex + 1) % _completionMatches.length;
+          _renderCompletion(completion);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          _completionIndex = (_completionIndex - 1 + _completionMatches.length) % _completionMatches.length;
+          _renderCompletion(completion);
+          return;
+        }
+        if (e.key === "Tab") {
+          e.preventDefault();
+          _applyCompletion(input, completion);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          _hideCompletion(completion);
+          return;
+        }
+        if (e.key === "Enter") {
+          // Enter accepts the highlighted command instead of submitting.
+          e.preventDefault();
+          _applyCompletion(input, completion);
+          return;
+        }
+      }
+
+      // ── Default: Enter submits (without Shift) ──
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         var text = input.value.trim();
         if (text) {
           input.value = "";
+          _hideCompletion(completion);
           _sendMessage(text);
         }
       }
@@ -189,6 +238,117 @@
     chatView.appendChild(inputArea);
 
     return input;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Slash command autocompletion
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Registry of slash commands the web chat understands. Mirrors the CLI's
+   * completion list (cli/tui/chat.py) but limited to commands the web actually
+   * handles in _handleSlash(), so the dropdown never offers a dead command.
+   * @type {Array<{cmd: string, desc: string, arg: boolean}>}
+   */
+  var _SLASH_COMMAND_DEFS = [
+    { cmd: "/help", desc: "Show available commands", arg: false },
+    { cmd: "/clear", desc: "Clear the chat history and visible messages", arg: false },
+    { cmd: "/projects", desc: "Go to the project dashboard", arg: false },
+    { cmd: "/project", desc: "Open a project by id (e.g. /project my-app)", arg: true },
+  ];
+
+  /** @type {Array<{cmd, desc, arg}>} current filtered completion candidates. */
+  var _completionMatches = [];
+
+  /** @type {number} index of the highlighted candidate. */
+  var _completionIndex = 0;
+
+  /** Hide and clear the completion dropdown. */
+  function _hideCompletion(box) {
+    if (box) { box.style.display = "none"; }
+    _completionMatches = [];
+    _completionIndex = 0;
+  }
+
+  /**
+   * Recompute completion candidates from the input value and show/hide the box.
+   *
+   * @param {HTMLInputElement} input
+   * @param {HTMLElement} box — the <ul> dropdown
+   */
+  function _updateCompletion(input, box) {
+    var text = input.value;
+
+    // Only complete a single leading "/word" token (no spaces yet).
+    if (text.charAt(0) !== "/" || /\s/.test(text)) {
+      _hideCompletion(box);
+      return;
+    }
+
+    var partial = text.toLowerCase();
+    _completionMatches = _SLASH_COMMAND_DEFS.filter(function (c) {
+      return c.cmd.indexOf(partial) === 0;
+    });
+
+    // Nothing to suggest, or already fully typed — hide.
+    if (_completionMatches.length === 0 ||
+        (_completionMatches.length === 1 && _completionMatches[0].cmd === partial)) {
+      _hideCompletion(box);
+      return;
+    }
+
+    _completionIndex = 0;
+    _renderCompletion(box);
+  }
+
+  /** Render the current candidates into the dropdown. */
+  function _renderCompletion(box) {
+    if (!box) { return; }
+    box.innerHTML = "";
+    _completionMatches.forEach(function (c, i) {
+      var li = document.createElement("li");
+      li.className = "slash-completion-item" + (i === _completionIndex ? " is-active" : "");
+
+      var cmdSpan = document.createElement("span");
+      cmdSpan.className = "slash-cmd";
+      cmdSpan.textContent = c.cmd;
+      li.appendChild(cmdSpan);
+
+      var descSpan = document.createElement("span");
+      descSpan.className = "slash-desc";
+      descSpan.textContent = c.desc;
+      li.appendChild(descSpan);
+
+      li.addEventListener("mousedown", function (e) {
+        // mousedown (not click) so the input doesn't blur first.
+        e.preventDefault();
+        _completionIndex = i;
+        var input = document.getElementById("chat-input-field");
+        _applyCompletion(input, box);
+        if (input) { input.focus(); }
+      });
+
+      box.appendChild(li);
+    });
+    box.style.display = "block";
+  }
+
+  /**
+   * Apply the highlighted candidate to the input. Commands that take an
+   * argument get a trailing space and stay in the box; argument-less commands
+   * are completed exactly.
+   *
+   * @param {HTMLInputElement} input
+   * @param {HTMLElement} box
+   */
+  function _applyCompletion(input, box) {
+    if (!input || !_completionMatches.length) { return; }
+    var chosen = _completionMatches[_completionIndex] || _completionMatches[0];
+    input.value = chosen.cmd + (chosen.arg ? " " : "");
+    _hideCompletion(box);
+    // Re-open if the command takes an argument? No — once a space is typed the
+    // single-token filter hides it anyway. Just leave the cursor at the end.
+    input.focus();
   }
 
   /**
@@ -446,16 +606,15 @@
    * Show available commands as a system message.
    */
   function _showHelp() {
-    var helpLines = [
-      "Available commands:",
-      "",
-      "  /help      \u2014 show this help message",
-      "  /clear     \u2014 clear the chat history and visible messages",
-      "  /projects  \u2014 navigate to the project dashboard",
-      "  /project <id> \u2014 set current project context and navigate",
-      "",
-      "Any other text will be sent to the Meta Agent.",
-    ];
+    var helpLines = ["Available commands:", ""];
+    _SLASH_COMMAND_DEFS.forEach(function (c) {
+      var name = c.cmd + (c.arg ? " <arg>" : "");
+      // pad to align descriptions
+      while (name.length < 16) { name += " "; }
+      helpLines.push("  " + name + "\u2014 " + c.desc);
+    });
+    helpLines.push("");
+    helpLines.push("Any other text will be sent to the Meta Agent.");
     _addSystem(helpLines.join("\n"));
   }
 

@@ -156,17 +156,23 @@ def list_project_tasks(
 def workspace_tree(
     project_id: str,
     subdir: str = None,
+    root: str = "dps",
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
 ):
-    """Return directory tree of a project's DPS workspace."""
+    """Return directory tree of a project's workspace.
+
+    ``root`` selects which tree to walk:
+      - "dps"  (default): the pipeline staging workspace (step dirs 1/, 2/, ...)
+      - "code": the actual generated project code repository (get_code_path)
+    """
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, None, project)
 
-    base = ws._get_secure_path(project_id)
+    base = ws.get_code_path(project_id) if root == "code" else ws._get_secure_path(project_id)
     if subdir:
         base = base / subdir
     if not base.exists():
@@ -179,24 +185,28 @@ def workspace_tree(
             continue
         if item.is_file():
             tree.append(str(item.relative_to(base)))
-    return {"project_id": project_id, "tree": tree[:200]}
+    return {"project_id": project_id, "root": root, "tree": tree[:200]}
 
 
 @router.get("/{project_id}/workspace/file")
 def workspace_file(
     project_id: str,
     path: str,
+    root: str = "dps",
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
 ):
-    """Read a file from the project workspace (path traversal safe)."""
+    """Read a file from the project workspace (path traversal safe).
+
+    ``root`` selects "dps" (pipeline staging) or "code" (project code repo).
+    """
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, None, project)
 
-    base = ws._get_secure_path(project_id)
+    base = ws.get_code_path(project_id) if root == "code" else ws._get_secure_path(project_id)
     target = (base / path).resolve()
     if not str(target).startswith(str(base.resolve())):
         raise HTTPException(status_code=403, detail="Path traversal denied")

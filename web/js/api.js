@@ -526,17 +526,39 @@
     // ════════════════════════════════════════════════════════════════
 
     /**
-     * Get directory tree of a project's DPS workspace.
+     * Get directory tree of a project's workspace.
      * GET /api/projects/{pid}/workspace/tree
      * @param {string} pid — project ID
+     * @param {string} [root] — "dps" (pipeline staging, default) or "code" (project repo)
      * @param {string} [subdir] — optional subdirectory filter
-     * @returns {Promise<object>} — {project_id, tree: [...]}
+     * @returns {Promise<object>} — {project_id, root, tree: [...]}
      */
-    workspaceTree: function (pid, subdir) {
+    workspaceTree: function (pid, root, subdir) {
       var path = "/api/projects/" + encodeURIComponent(pid) + "/workspace/tree";
-      if (subdir) {
-        path += "?subdir=" + encodeURIComponent(subdir);
+      var qs = [];
+      if (root) { qs.push("root=" + encodeURIComponent(root)); }
+      if (subdir) { qs.push("subdir=" + encodeURIComponent(subdir)); }
+      if (qs.length) { path += "?" + qs.join("&"); }
+      return _get(path);
+    },
+
+    /**
+     * Read durable execution traces for a run (or project).
+     * GET /api/runs/{runId}/trace
+     * @param {string} runId — skillflow run UUID or project_id
+     * @param {object} [opts] — {category, limit, stepInstanceId}
+     * @returns {Promise<object>} — {run_id, count, traces: [...]}
+     */
+    getTrace: function (runId, opts) {
+      opts = opts || {};
+      var qs = [];
+      if (opts.category) { qs.push("category=" + encodeURIComponent(opts.category)); }
+      if (opts.limit) { qs.push("limit=" + encodeURIComponent(opts.limit)); }
+      if (opts.stepInstanceId != null) {
+        qs.push("step_instance_id=" + encodeURIComponent(opts.stepInstanceId));
       }
+      var path = "/api/runs/" + encodeURIComponent(runId) + "/trace";
+      if (qs.length) { path += "?" + qs.join("&"); }
       return _get(path);
     },
 
@@ -545,13 +567,14 @@
      * GET /api/projects/{pid}/workspace/file
      * @param {string} pid — project ID
      * @param {string} filePath — relative file path within workspace
+     * @param {string} [root] — "dps" (default) or "code" (project repo)
      * @returns {Promise<object>} — {path, content}
      */
-    workspaceFile: function (pid, filePath) {
-      return _get(
-        "/api/projects/" + encodeURIComponent(pid) +
-        "/workspace/file?path=" + encodeURIComponent(filePath)
-      );
+    workspaceFile: function (pid, filePath, root) {
+      var path = "/api/projects/" + encodeURIComponent(pid) +
+        "/workspace/file?path=" + encodeURIComponent(filePath);
+      if (root) { path += "&root=" + encodeURIComponent(root); }
+      return _get(path);
     },
 
     // ════════════════════════════════════════════════════════════════

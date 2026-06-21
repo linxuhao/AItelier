@@ -483,10 +483,17 @@ class CheckpointRejectionRequest(BaseModel):
     feedback: str = Field(..., min_length=1, max_length=4000)
 
 
-def _read_step_output(project_id: str, step_id: str) -> Optional[dict]:
-    """Read step output files and rejection history from the workspace."""
+def _read_step_output(project_id: str, step_id: str,
+                      graph_name: str = "dpe_default_v2") -> Optional[dict]:
+    """Read step output files and rejection history from the workspace.
+
+    ``graph_name`` must match the run's config — ``_final_dir`` lays out step
+    dirs under ``{workspace}/{graph_name}/{step_id}/``. Omitting it (the old
+    behavior) silently read the wrong directory for any non-DPE pipeline, so
+    the checkpoint modal showed "no files to review".
+    """
     ws = get_workspace_manager()
-    final_dir = ws._final_dir(project_id, step_id)
+    final_dir = ws._final_dir(project_id, step_id, graph_name)
     if not final_dir.exists():
         return None
     files = {}
@@ -499,9 +506,7 @@ def _read_step_output(project_id: str, step_id: str) -> Optional[dict]:
                 pass
 
     # Read rejection history for this step (migrated from Inbox_{step_id}/ to {step_id}/)
-    ws_path = ws._get_secure_path(project_id)
-    step_dir = ws._final_dir(project_id, step_id)  # skillflow layout
-    rejection_file = step_dir / "user_rejection_history.json"
+    rejection_file = final_dir / "user_rejection_history.json"
     rejection_history = None
     if rejection_file.exists():
         import json
@@ -536,16 +541,32 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:
     label = "Checkpoint"
     if step_id:
         resolver = sf._get_resolver(graph_name)
-        # For checkpoint steps, current_node is the NEXT node after the checkpoint.
-        # Find the checkpoint step — it's the last completed step.
+        # When skillflow pauses at a checkpoint it sets current_node to the
+        # checkpoint's NEXT node (its checkpoint-guarded transition target) and
+        # marks the checkpoint step itself "completed". Identify the exact
+        # checkpoint step we are paused at: the most recent completed step whose
+        # checkpoint transition points at current_node. This is more precise
+        # than "last completed checkpoint step" when a task loop re-runs
+        # checkpoint-bearing steps (e.g. step 3) more than once.
+        next_node = step_id
         steps = sf.get_steps(run_id)
+        matched = None
         for s in reversed(steps):
-            if s["status"] == "completed":
-                node = resolver.get_node(s["step_id"])
-                if node and node.checkpoint:
-                    step_id = s["step_id"]
-                    label = node.checkpoint_label or label
-                    break
+            if s["status"] != "completed":
+                continue
+            node = resolver.get_node(s["step_id"])
+            if not (node and node.checkpoint):
+                continue
+            targets = [t.to for t in node.transitions
+                       if t.match and t.match.get("from") == "checkpoint"]
+            if matched is None:
+                matched = (s["step_id"], node.checkpoint_label)  # heuristic fallback
+            if next_node in targets:
+                matched = (s["step_id"], node.checkpoint_label)
+                break
+        if matched:
+            step_id, _lbl = matched
+            label = _lbl or label
 
     return step_id, label, run_id, graph_name
 
@@ -567,7 +588,7 @@ def get_pending_checkpoint(
     if not step_id:
         return CheckpointResponse()
 
-    step_output = _read_step_output(project_id, step_id)
+    step_output = _read_step_output(project_id, step_id, _graph or "dpe_default_v2")
 
     return CheckpointResponse(
         checkpoint=step_id,

@@ -165,8 +165,13 @@ def get_run_detail(
         {
             "step_id": s["step_id"],
             "status": s["status"],
-            "attempt": s.get("attempt", 1),
-            "error": s.get("error", ""),
+            # skillflow_steps has no "attempt" column; retries live in
+            # retry_count (+ validation_retry_count). Expose them so the UI can
+            # show how many times a step was retried (attempt = retry_count + 1).
+            "retry_count": s.get("retry_count", 0) or 0,
+            "validation_retry_count": s.get("validation_retry_count", 0) or 0,
+            "attempt": (s.get("retry_count", 0) or 0) + 1,
+            "error": s.get("error", "") or s.get("last_error", "") or "",
             "created_at": s.get("created_at", ""),
             "updated_at": s.get("updated_at", ""),
         }

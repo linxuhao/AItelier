@@ -133,9 +133,11 @@ def get_chat_history(
     if not session_id or not session_id.strip():
         raise HTTPException(status_code=422, detail="session_id is required")
 
+    # get_chat_history_by_session already returns oldest-first (chronological):
+    # it queries ORDER BY id DESC then reverses the rows. Do NOT reverse again
+    # here — a second reverse flips restored sessions to newest-first, so old
+    # sessions render agent-answer-before-question while live chat is correct.
     messages = db.get_chat_history_by_session(session_id, limit=100)
-    # DB returns newest-first (ORDER BY id DESC) — reverse to chronological
-    messages.reverse()
 
     return {
         "session_id": session_id,

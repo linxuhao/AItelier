@@ -1529,13 +1529,14 @@ class DBManager:
                               (SELECT content FROM chat_history
                                WHERE session_id = s.id
                                ORDER BY id DESC LIMIT 1) AS last_message,
-                              MAX(ch.created_at) AS updated_at
+                              MAX(ch.created_at) AS updated_at,
+                              MAX(ch.id) AS last_msg_id
                        FROM sessions s
                        JOIN chat_history ch ON ch.session_id = s.id
                        WHERE ch.project_id = ?
                        GROUP BY s.id
                        HAVING message_count > 0
-                       ORDER BY updated_at DESC
+                       ORDER BY last_msg_id DESC
                        LIMIT ?""",
                     (project_id, limit),
                 ).fetchall()
@@ -1547,12 +1548,13 @@ class DBManager:
                               (SELECT content FROM chat_history
                                WHERE session_id = s.id
                                ORDER BY id DESC LIMIT 1) AS last_message,
-                              MAX(ch.created_at) AS updated_at
+                              MAX(ch.created_at) AS updated_at,
+                              MAX(ch.id) AS last_msg_id
                        FROM sessions s
                        JOIN chat_history ch ON ch.session_id = s.id
                        GROUP BY s.id
                        HAVING message_count > 0
-                       ORDER BY updated_at DESC
+                       ORDER BY last_msg_id DESC
                        LIMIT ?""",
                     (limit,),
                 ).fetchall()

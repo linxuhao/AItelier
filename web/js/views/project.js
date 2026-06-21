@@ -111,6 +111,9 @@
   /** @type {Array} cached task data from last fetch. */
   var _cachedTasks = [];
 
+  /** @type {object|null} cached run detail (manifest + step instances). */
+  var _cachedRun = null;
+
   /**
    * Track expanded state for workspace directories.
    * @type {Object<string, boolean>}
@@ -122,6 +125,12 @@
    * @type {Object<number, boolean>}
    */
   var _expandedTaskRows = {};
+
+  /**
+   * Track which run-overview loop steps are expanded to per-instance detail.
+   * @type {Object<string, boolean>}
+   */
+  var _expandedOverviewSteps = {};
 
 
   // ── Lazy-access helpers ───────────────────────────────────────────
@@ -193,9 +202,10 @@
    * @param {object} project — project object from API.getProject()
    * @param {Array} tasks — task array from API.listTasks()
    */
-  function _render(project, tasks) {
+  function _render(project, tasks, run) {
     _cachedProject = project;
     _cachedTasks = tasks || [];
+    _cachedRun = run || null;
 
     var container = document.getElementById("view-project");
     if (!container) {
@@ -244,33 +254,262 @@
     // Merge config manifest labels so step names render for any config.
     _ensureConfigLabels();
 
-    // ── 1. Info Card ──
-    container.appendChild(_renderInfoCard(project));
-
-    // ── 2. Task List Table (only for task-loop configs like DPE) ──
-    if (project.has_task_loop !== false) {
-      container.appendChild(_renderTaskTable(tasks));
+    // ── Dynamic content slot (info card + task table) ──
+    // Wrapped in a dedicated container so the polling refresh can update just
+    // this region in place — the workspace file trees below are built once and
+    // left alone, so a poll never collapses an expanded dir, resets scroll, or
+    // refetches the trees mid-interaction (#3).
+    var dynamic = document.createElement("div");
+    dynamic.id = "project-dynamic";
+    dynamic.appendChild(_renderInfoCard(project));
+    var overview = _renderRunOverview(run);
+    if (overview) {
+      dynamic.appendChild(overview);
     }
+    if (project.has_task_loop !== false) {
+      dynamic.appendChild(_renderTaskTable(tasks));
+    }
+    container.appendChild(dynamic);
 
-    // ── 3. Workspace File Tree (fetch on render) ──
-    var wsSection = document.createElement("div");
-    wsSection.id = "workspace-section";
-    wsSection.style.marginTop = "var(--pico-spacing, 1rem)";
-    var wsTitle = document.createElement("h4");
-    wsTitle.textContent = "Workspace Files";
-    wsSection.appendChild(wsTitle);
-    var wsStatus = document.createElement("p");
-    wsStatus.id = "workspace-loading";
-    wsStatus.textContent = "Loading workspace tree\u2026";
-    wsStatus.className = "empty-state";
-    wsSection.appendChild(wsStatus);
-    container.appendChild(wsSection);
-
-    // Fetch workspace tree asynchronously
-    _fetchWorkspaceTree(wsSection);
+    // ── 3. Workspace File Trees (collapsible) ──
+    // Pipeline Artifacts (DPS staging) is small → expanded by default.
+    // Project Repository (the code repo) can hold hundreds of files → folded
+    // by default and lazy-loaded on first expand.
+    container.appendChild(
+      _buildWorkspaceSection("", "Pipeline Artifacts", "dps", true));
+    container.appendChild(
+      _buildWorkspaceSection("-code", "Project Repository", "code", false));
 
     // ── Update reconnect overlay visibility ──
     _updateReconnectOverlay();
+
+    // Record which project this shell was built for, so a stale poll for a
+    // different project forces a full rebuild instead of an in-place update.
+    container.dataset.renderedPid = _projectId || "";
+  }
+
+  /**
+   * In-place refresh of the dynamic content (info card + task table) only.
+   * Leaves the workspace file trees — and their scroll/expansion/open-file
+   * state — untouched. Falls back to a full _render() when the shell is
+   * missing or was built for a different project.
+   *
+   * @param {object} project — project object from API
+   * @param {Array} tasks — task array from API
+   */
+  function _updateDynamic(project, tasks, run) {
+    var container = document.getElementById("view-project");
+    var dynamic = document.getElementById("project-dynamic");
+    if (!container || !dynamic ||
+        container.dataset.renderedPid !== (_projectId || "")) {
+      _render(project, tasks, run);
+      return;
+    }
+
+    _cachedProject = project;
+    _cachedTasks = tasks || [];
+    _cachedRun = run || null;
+
+    // Remember which task rows are expanded so we can restore them after the
+    // table is rebuilt (expansion is otherwise click-only state).
+    var expandedIds = Object.keys(_expandedTaskRows);
+    // Preserve which loop steps the user expanded in the overview.
+    var expandedSteps = _expandedOverviewSteps;
+    _expandedOverviewSteps = {};
+
+    dynamic.innerHTML = "";
+    dynamic.appendChild(_renderInfoCard(project));
+    var overview = _renderRunOverview(run, expandedSteps);
+    if (overview) {
+      dynamic.appendChild(overview);
+    }
+    if (project.has_task_loop !== false) {
+      dynamic.appendChild(_renderTaskTable(tasks));
+    }
+
+    // Restore task-row expansion. _toggleTaskDetail toggles, so clear the flag
+    // first (it is still set from before the rebuild) and let toggle re-expand.
+    expandedIds.forEach(function (tid) {
+      var row = dynamic.querySelector('tr[data-task-id="' + tid + '"]');
+      if (row) {
+        delete _expandedTaskRows[tid];
+        _toggleTaskDetail(row, isNaN(Number(tid)) ? tid : Number(tid));
+      } else {
+        delete _expandedTaskRows[tid];
+      }
+    });
+
+    _updateReconnectOverlay();
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Run Overview (pipeline stepper)
+  // ════════════════════════════════════════════════════════════════════
+
+  /** Aggregate status across a step's instances → future|active|done|failed|skipped.
+   * A step with no instances is "future" on a live run, but "skipped" once the
+   * run is over (e.g. git_sync_pre only runs for existing/cloned repos). */
+  function _aggStepStatus(insts, terminal) {
+    if (!insts || insts.length === 0) { return terminal ? "skipped" : "future"; }
+    var running = insts.some(function (s) {
+      return s.status === "running" || s.status === "claimed" || s.status === "in_progress";
+    });
+    if (running) { return "active"; }
+    if (insts.every(function (s) { return s.status === "completed"; })) { return "done"; }
+    if (insts.some(function (s) { return s.status === "failed"; })) { return "failed"; }
+    return "active";  // mixed (some done, some pending)
+  }
+
+  /** Unicode glyph for an instance status. */
+  function _statusGlyph(status) {
+    if (status === "completed") { return "✓"; }       // ✓
+    if (status === "failed") { return "✗"; }           // ✗
+    if (status === "running" || status === "claimed") { return "▶"; }  // ▶
+    return "○";                                         // ○
+  }
+
+  /** Render the per-loop-step instance detail panel below the strip. */
+  function _renderOverviewPanel(panel, manifest, byStep) {
+    panel.innerHTML = "";
+    Object.keys(_expandedOverviewSteps).forEach(function (stepId) {
+      var insts = byStep[stepId] || [];
+      if (!insts.length) { return; }
+      var block = document.createElement("div");
+      block.className = "run-detail-block";
+      var h = document.createElement("div");
+      h.className = "run-detail-title";
+      h.textContent = ((manifest.labels && manifest.labels[stepId]) || stepId) +
+        " — " + insts.length + " run(s)";
+      block.appendChild(h);
+      insts.forEach(function (s, i) {
+        var row = document.createElement("div");
+        row.className = "run-inst";
+        var rr = (s.retry_count || 0) + (s.validation_retry_count || 0);
+        row.textContent = "#" + (i + 1) + "  " + _statusGlyph(s.status) + " " + s.status +
+          (rr ? ("  ↻" + rr + " retr" + (rr === 1 ? "y" : "ies")) : "");
+        if (s.error) { row.title = s.error; }
+        block.appendChild(row);
+      });
+      panel.appendChild(block);
+    });
+  }
+
+  /**
+   * Render the pipeline overview stepper: every manifest step in order, marked
+   * done / active / future / failed, with retry (↻) and loop (×N) badges. Loop
+   * steps are clickable to reveal per-instance status in a panel below.
+   *
+   * @param {object} run — run detail (manifest + step instances) from getRun
+   * @param {object} [expandedSteps] — loop steps to keep expanded across refresh
+   * @returns {HTMLElement|null}
+   */
+  function _renderRunOverview(run, expandedSteps) {
+    if (!run || !run.manifest || !Array.isArray(run.manifest.steps) ||
+        run.manifest.steps.length === 0) {
+      return null;
+    }
+    // Seed expansion state from the preserved snapshot (poll refresh).
+    if (expandedSteps) {
+      Object.keys(expandedSteps).forEach(function (k) { _expandedOverviewSteps[k] = true; });
+    }
+
+    var manifest = run.manifest;
+    var byStep = {};
+    (run.steps || []).forEach(function (s) {
+      (byStep[s.step_id] = byStep[s.step_id] || []).push(s);
+    });
+
+    var section = document.createElement("section");
+    section.id = "run-overview";
+    section.className = "run-overview";
+
+    // Header with overall progress. Count only steps that actually ran (have
+    // instances) so a finished run that skipped a conditional step (e.g.
+    // git_sync_pre on a new repo) reads N/N, not N/total.
+    var terminal = run.status === "completed" || run.status === "failed";
+    var done = 0, ran = 0, skipped = 0;
+    manifest.steps.forEach(function (id) {
+      var insts = byStep[id] || [];
+      if (!insts.length) { if (terminal) { skipped++; } return; }
+      ran++;
+      if (insts.every(function (s) { return s.status === "completed"; })) { done++; }
+    });
+    var head = document.createElement("div");
+    head.className = "run-overview-head";
+    var title = document.createElement("strong");
+    title.textContent = "Pipeline";
+    head.appendChild(title);
+    var prog = document.createElement("span");
+    prog.className = "run-overview-progress";
+    // On a live run, future steps still count toward the total; on a finished
+    // run, skipped steps are excluded from the denominator and noted separately.
+    var denom = terminal ? ran : manifest.steps.length;
+    prog.textContent = done + "/" + denom + " steps" +
+      (run.status ? " · " + run.status : "") +
+      (skipped ? " · " + skipped + " skipped" : "");
+    head.appendChild(prog);
+    section.appendChild(head);
+
+    var strip = document.createElement("div");
+    strip.className = "run-strip";
+    var panel = document.createElement("div");
+    panel.className = "run-detail-panel";
+
+    manifest.steps.forEach(function (stepId) {
+      var insts = byStep[stepId] || [];
+      var label = (manifest.labels && manifest.labels[stepId]) || stepId;
+      var st = _aggStepStatus(insts, terminal);
+      var retries = insts.reduce(function (a, s) {
+        return a + (s.retry_count || 0) + (s.validation_retry_count || 0);
+      }, 0);
+      var isCheckpoint = manifest.checkpoints &&
+        Object.prototype.hasOwnProperty.call(manifest.checkpoints, stepId);
+
+      var pill = document.createElement("div");
+      pill.className = "run-step run-step-" + st;
+
+      var lbl = document.createElement("span");
+      lbl.className = "run-step-label";
+      lbl.textContent = (isCheckpoint ? "⏸ " : "") + label;
+      pill.appendChild(lbl);
+
+      if (insts.length > 1) {
+        var loopBadge = document.createElement("span");
+        loopBadge.className = "run-step-badge run-step-loop";
+        loopBadge.textContent = "×" + insts.length;
+        pill.appendChild(loopBadge);
+      }
+      if (retries > 0) {
+        var rb = document.createElement("span");
+        rb.className = "run-step-badge run-step-retry";
+        rb.textContent = "↻" + retries;
+        rb.title = retries + " retr" + (retries === 1 ? "y" : "ies");
+        pill.appendChild(rb);
+      }
+
+      if (insts.length > 1) {
+        pill.classList.add("run-step-clickable");
+        pill.title = "Click to show per-task status";
+        pill.addEventListener("click", function () {
+          if (_expandedOverviewSteps[stepId]) {
+            delete _expandedOverviewSteps[stepId];
+          } else {
+            _expandedOverviewSteps[stepId] = true;
+          }
+          _renderOverviewPanel(panel, manifest, byStep);
+        });
+      } else if (insts.length === 1 && insts[0].error) {
+        pill.title = insts[0].error;
+      }
+
+      strip.appendChild(pill);
+    });
+
+    section.appendChild(strip);
+    _renderOverviewPanel(panel, manifest, byStep);
+    section.appendChild(panel);
+    return section;
   }
 
 
@@ -374,6 +613,23 @@
       _handleActionRefresh(this);
     });
     btnRow.appendChild(refreshBtn);
+
+    // View Traces — open the execution-trace view for this project
+    var traceBtn = document.createElement("button");
+    traceBtn.id = "btn-project-trace";
+    traceBtn.textContent = "View Traces";
+    traceBtn.className = "outline";
+    traceBtn.addEventListener("click", function () {
+      var pid = _projectId;
+      var router = window.AItelier && window.AItelier.Router;
+      var target = "#/projects/" + encodeURIComponent(pid) + "/trace";
+      if (router && typeof router.navigate === "function") {
+        router.navigate(target);
+      } else {
+        window.location.hash = target;
+      }
+    });
+    btnRow.appendChild(traceBtn);
 
     // Pause / Resume — toggle based on status
     var isPaused = status.indexOf("paused") !== -1;
@@ -683,6 +939,9 @@
     row.dataset.taskId = String(taskId);
     row.dataset.taskStatus = status || "";
     row.dataset.completedSteps = task.completed_steps || "[]";
+    // Stash the full (untruncated) prompt so the detail row can show it — the
+    // cell above only holds the 60-char preview.
+    row.dataset.prompt = prompt;
 
     // ── Click handler: toggle detail row ──
     (function (tr, tid) {
@@ -744,6 +1003,22 @@
     var content = document.createElement("div");
     content.style.lineHeight = "1.6";
 
+    // Full task prompt (the row cell only shows a 60-char preview)
+    var fullPrompt = taskRow.dataset.prompt || "";
+    if (fullPrompt) {
+      var promptLabel = document.createElement("strong");
+      promptLabel.textContent = "Prompt:";
+      content.appendChild(promptLabel);
+
+      var promptText = document.createElement("div");
+      promptText.style.marginTop = "0.25rem";
+      promptText.style.marginBottom = "0.5rem";
+      promptText.style.whiteSpace = "pre-wrap";
+      promptText.style.wordBreak = "break-word";
+      promptText.textContent = fullPrompt;
+      content.appendChild(promptText);
+    }
+
     // Completed steps
     if (completedSteps.length > 0) {
       var stepsLabel = document.createElement("strong");
@@ -783,27 +1058,87 @@
   // ════════════════════════════════════════════════════════════════════
 
   /**
-   * Fetch the workspace tree from API and render as expandable tree.
+   * Build a collapsible workspace section with a clickable header.
    *
-   * @param {HTMLElement} section — the workspace section element
+   * The tree is fetched into the section body. When expanded === false the
+   * section starts folded and the (potentially large) tree is fetched lazily
+   * on first expand, so the project view doesn't pull hundreds of repo files
+   * on every render.
+   *
+   * @param {string} idSuffix — appended to "workspace-section" for the id
+   * @param {string} title — section heading text
+   * @param {string} root — "dps" or "code"
+   * @param {boolean} expanded — start expanded (and fetch immediately)?
+   * @returns {HTMLElement} the section element
    */
-  function _fetchWorkspaceTree(section) {
-    if (!_projectId) {
+  function _buildWorkspaceSection(idSuffix, title, root, expanded) {
+    var section = document.createElement("div");
+    section.id = "workspace-section" + idSuffix;
+    section.style.marginTop = "var(--pico-spacing, 1rem)";
+
+    var header = document.createElement("h4");
+    header.style.cursor = "pointer";
+    header.style.userSelect = "none";
+    var caret = document.createElement("span");
+    caret.textContent = expanded ? "▾ " : "▸ ";  // ▾ / ▸
+    header.appendChild(caret);
+    header.appendChild(document.createTextNode(title));
+    section.appendChild(header);
+
+    var body = document.createElement("div");
+    body.className = "workspace-body";
+    body.style.display = expanded ? "block" : "none";
+    section.appendChild(body);
+
+    var loaded = false;
+    function _loadIfNeeded() {
+      if (loaded) { return; }
+      loaded = true;
+      var status = document.createElement("p");
+      status.className = "empty-state";
+      status.textContent = "Loading…";
+      body.appendChild(status);
+      _fetchWorkspaceTree(body, root);
+    }
+
+    header.addEventListener("click", function () {
+      var isOpen = body.style.display !== "none";
+      body.style.display = isOpen ? "none" : "block";
+      caret.textContent = isOpen ? "▸ " : "▾ ";
+      if (!isOpen) { _loadIfNeeded(); }
+    });
+
+    if (expanded) { _loadIfNeeded(); }
+    return section;
+  }
+
+  /**
+   * Fetch a workspace tree from the API and render it as an expandable tree.
+   *
+   * @param {HTMLElement} section — the workspace section (or body) element
+   * @param {string} root — "dps" (pipeline staging) or "code" (project repo)
+   */
+  function _fetchWorkspaceTree(section, root) {
+    if (!_projectId || !section) {
       return;
     }
+    root = root || "dps";
+
+    // The loading/empty placeholder is the <p class="empty-state"> we appended
+    // to this section in _render(). Scope to the section so the two trees
+    // (dps + code) don't fight over a shared element id.
+    var loadingEl = section.querySelector("p.empty-state");
 
     var api = window.AItelier && window.AItelier.API;
     if (!api || typeof api.workspaceTree !== "function") {
-      var errEl = document.getElementById("workspace-loading");
-      if (errEl) {
-        errEl.textContent = "Workspace browsing not available";
+      if (loadingEl) {
+        loadingEl.textContent = "Workspace browsing not available";
       }
       return;
     }
 
-    api.workspaceTree(_projectId).then(function (data) {
-      var loadingEl = document.getElementById("workspace-loading");
-      if (loadingEl) {
+    api.workspaceTree(_projectId, root).then(function (data) {
+      if (loadingEl && loadingEl.parentElement) {
         loadingEl.parentElement.removeChild(loadingEl);
       }
 
@@ -811,15 +1146,14 @@
       if (tree.length === 0) {
         var empty = document.createElement("p");
         empty.className = "empty-state";
-        empty.textContent = "Workspace is empty";
+        empty.textContent = root === "code" ? "Repository is empty" : "Workspace is empty";
         section.appendChild(empty);
         return;
       }
 
-      var treeContainer = _renderFileTree(tree);
+      var treeContainer = _renderFileTree(tree, root);
       section.appendChild(treeContainer);
     }).catch(function (/* err */) {
-      var loadingEl = document.getElementById("workspace-loading");
       if (loadingEl) {
         loadingEl.textContent = "Failed to load workspace tree";
       }
@@ -872,17 +1206,18 @@
    * @param {Array<string>} treeArray — flat path array from API
    * @returns {HTMLElement} the tree <ul> element
    */
-  function _renderFileTree(treeArray) {
+  function _renderFileTree(treeArray, root) {
+    root = root || "dps";
     var nested = _buildTreeIndices(treeArray);
 
     var treeEl = document.createElement("ul");
-    treeEl.id = "workspace-tree";
+    treeEl.id = "workspace-tree-" + root;
     treeEl.style.listStyle = "none";
     treeEl.style.paddingLeft = "0";
     treeEl.style.margin = "0";
     treeEl.style.fontSize = "0.85rem";
 
-    _renderTreeLevel(nested, treeEl, "");
+    _renderTreeLevel(nested, treeEl, "", root);
 
     return treeEl;
   }
@@ -894,10 +1229,11 @@
    * @param {HTMLElement} parentEl — parent <ul> element
    * @param {string} parentPath — accumulated path prefix for this level
    */
-  function _renderTreeLevel(node, parentEl, parentPath) {
+  function _renderTreeLevel(node, parentEl, parentPath, root) {
     if (!node || typeof node !== "object") {
       return;
     }
+    root = root || "dps";
 
     // Collect directory names and sort
     var dirNames = Object.keys(node).filter(function (k) {
@@ -937,7 +1273,7 @@
       (function (path) {
         fileLi.addEventListener("click", function (e) {
           e.stopPropagation();
-          _showFileContent(_projectId, path);
+          _showFileContent(_projectId, path, root);
         });
       })(fullPath);
 
@@ -991,13 +1327,17 @@
       childrenUl.dataset.expanded = "false";
       dirLi.appendChild(childrenUl);
 
-      // Click handler: toggle directory expansion
-      (function (dp, chUl) {
+      // Click handler: toggle directory expansion.
+      // childNode MUST be captured by the IIFE — it is a `var` (function-scoped)
+      // reassigned every loop iteration, so referencing it free would make every
+      // directory's handler see the LAST directory's node (all subfolders would
+      // then render the same files).
+      (function (dp, chUl, node) {
         dirHeader.addEventListener("click", function (e) {
           e.stopPropagation();
-          _toggleDir(dp, chUl, childNode);
+          _toggleDir(dp, chUl, node, root);
         });
-      })(dirPath, childrenUl);
+      })(dirPath, childrenUl, childNode);
 
       parentEl.appendChild(dirLi);
     }
@@ -1010,8 +1350,9 @@
    * @param {string} dirPath — relative path to the directory
    * @param {HTMLElement} childrenEl — the <ul> element for children
    * @param {object} childNode — tree node data with _files and subdirs
+   * @param {string} root — "dps" or "code" (forwarded to child file clicks)
    */
-  function _toggleDir(dirPath, childrenEl, childNode) {
+  function _toggleDir(dirPath, childrenEl, childNode, root) {
     var isExpanded = childrenEl.dataset.expanded === "true";
 
     if (isExpanded) {
@@ -1022,57 +1363,15 @@
       return;
     }
 
-    // Expand: check if children are already rendered
-    if (childrenEl.children.length > 0) {
-      // Already rendered — just show
-      childrenEl.style.display = "block";
-      childrenEl.dataset.expanded = "true";
-      _expandedDirs[dirPath] = true;
-      return;
+    // Expand. The initial tree fetch already returned the full file list and
+    // _buildTreeIndices built the complete nested structure, so childNode holds
+    // everything we need — render straight from it (no extra API round-trip).
+    if (childrenEl.children.length === 0) {
+      _renderTreeLevel(childNode, childrenEl, dirPath, root);
     }
-
-    // Not yet rendered — fetch subdirectory contents via API
-    var api = window.AItelier && window.AItelier.API;
-    if (!api || typeof api.workspaceTree !== "function") {
-      return;
-    }
-
-    // Show a loading indicator
-    var loadingItem = document.createElement("li");
-    loadingItem.textContent = "Loading\u2026";
-    loadingItem.style.fontStyle = "italic";
-    loadingItem.style.color = "var(--muted-color, #888)";
-    loadingItem.style.fontSize = "0.8rem";
-    childrenEl.appendChild(loadingItem);
-
-    api.workspaceTree(_projectId, dirPath).then(function (data) {
-      // Remove loading indicator
-      while (childrenEl.firstChild) {
-        childrenEl.removeChild(childrenEl.firstChild);
-      }
-
-      var subTree = (data && data.tree) || [];
-      // Build a nested structure for the subdirectory contents
-      var nested = _buildTreeIndices(subTree);
-      // Only render children of the directory itself
-      // Recurse with the child node data we already have
-      _renderTreeLevel(childNode, childrenEl, dirPath);
-
-      childrenEl.style.display = "block";
-      childrenEl.dataset.expanded = "true";
-      _expandedDirs[dirPath] = true;
-    }).catch(function () {
-      // On error, remove loading and show error
-      while (childrenEl.firstChild) {
-        childrenEl.removeChild(childrenEl.firstChild);
-      }
-      var errItem = document.createElement("li");
-      errItem.textContent = "Failed to load";
-      errItem.style.fontStyle = "italic";
-      errItem.style.color = "var(--del-color, #d04040)";
-      errItem.style.fontSize = "0.8rem";
-      childrenEl.appendChild(errItem);
-    });
+    childrenEl.style.display = "block";
+    childrenEl.dataset.expanded = "true";
+    _expandedDirs[dirPath] = true;
   }
 
   /**
@@ -1081,11 +1380,13 @@
    *
    * @param {string} pid — project ID
    * @param {string} filePath — relative file path within workspace
+   * @param {string} [root] — "dps" (default) or "code" (project repo)
    */
-  function _showFileContent(pid, filePath) {
+  function _showFileContent(pid, filePath, root) {
     if (!pid || !filePath) {
       return;
     }
+    root = root || "dps";
 
     var api = window.AItelier && window.AItelier.API;
     if (!api || typeof api.workspaceFile !== "function") {
@@ -1197,7 +1498,7 @@
     }
 
     // Fetch file content
-    api.workspaceFile(pid, filePath).then(function (data) {
+    api.workspaceFile(pid, filePath, root).then(function (data) {
       var content = (data && data.content) || "";
       if (codeEl) {
         // Limit to 50000 chars
@@ -1235,8 +1536,11 @@
   /**
    * Fetch project + tasks via API and re-render the view.
    * Uses _isRefreshing flag to prevent stacked requests.
+   *
+   * @param {boolean} [dynamic] — when true, update only the dynamic content
+   *   in place (poll path) instead of rebuilding the whole view.
    */
-  function _refresh() {
+  function _refresh(dynamic) {
     if (_isRefreshing) {
       return;
     }
@@ -1252,17 +1556,28 @@
 
     _isRefreshing = true;
 
-    // Fetch project and tasks in parallel
+    // Fetch project, tasks, and run detail in parallel. The run fetch is
+    // best-effort (a project may not have a run yet) — a failure just hides the
+    // pipeline overview rather than failing the whole refresh.
+    var runP = (typeof api.getRun === "function")
+      ? api.getRun(_projectId).catch(function () { return null; })
+      : Promise.resolve(null);
     Promise.all([
       api.getProject(_projectId),
       api.listTasks(_projectId),
+      runP,
     ]).then(function (results) {
       _isRefreshing = false;
       var project = results[0];
       var tasks = results[1] || [];
+      var run = results[2] || null;
 
       if (project) {
-        _render(project, tasks);
+        if (dynamic) {
+          _updateDynamic(project, tasks, run);
+        } else {
+          _render(project, tasks, run);
+        }
       }
     }).catch(function (err) {
       _isRefreshing = false;
@@ -1313,10 +1628,11 @@
       // Fetch data and render
       _refresh();
 
-      // Start polling
+      // Start polling — dynamic (in-place) refresh so the workspace trees and
+      // any in-progress interaction (scroll, expanded dirs) are preserved.
       if (_pollTimer === null) {
         _pollTimer = setInterval(function () {
-          _refresh();
+          _refresh(true);
         }, _POLL_INTERVAL);
       }
     },
@@ -1342,8 +1658,10 @@
       _projectId = null;
       _cachedProject = null;
       _cachedTasks = [];
+      _cachedRun = null;
       _expandedDirs = {};
       _expandedTaskRows = {};
+      _expandedOverviewSteps = {};
     },
 
     /**

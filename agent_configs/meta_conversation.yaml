@@ -1,12 +1,19 @@
 # agent_configs/meta_conversation.yaml
-# Note: native_tool_calling is not enabled here because the meta conversation
-# uses AItelier custom tools (save_draft_brief, suggest_submit_project) that
-# are registered differently from skillflow tools. JSON mode is sufficient.
+# native_tool_calling is enabled for the two GRAPH agents below: their only
+# tools are the skillflow output-write tools (create_result/write_result/
+# write_gather_state) auto-injected from the graph's output.fixed — the same
+# kind DPE agents call natively. JSON mode was unreliable here (the model would
+# emit the bare result JSON as plain text instead of the tool-call envelope,
+# burning turns without ever writing the output file). The butler's custom
+# tools (save_draft_brief, …) belong to the meta_agent/MetaAgent class below,
+# NOT to these agents, so they don't block native mode.
 
 intent_detector:
   model: "deepseek/deepseek-v4-flash"
   template: "meta_intent_detection.md"
   tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
   thinking:
     enable: true
 
@@ -17,6 +24,8 @@ meta_conversation_agent:
   # graph's output.fixed; no extra tools needed.
   tools: []
   max_tool_turns: 20
+  native_tool_calling: true
+  fallback_to_json_mode: true
   thinking:
     enable: true
 

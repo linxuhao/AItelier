@@ -1,0 +1,87 @@
+# docker-compose.yml — AItelier backend + web UI in Docker.
+#
+#   docker compose up -d        # build (first run) + start
+#   docker compose ps           # status
+#   docker compose logs -f      # tail logs
+#   docker compose down         # stop
+#
+# The CLI (`aitelier`) drives this automatically: it starts the backend if the
+# container is down and reuses it if it is already running (see cli/server.py).
+#
+# State is the host's ~/.AItelier, mounted at the SAME absolute path inside the
+# container (${HOME}/.AItelier) so DB + workspace paths match the host CLI.
+
+services:
+  aitelier:
+    build:
+      context: .
+      args:
+        # Derived from the invoking shell so paths/ownership match the host user.
+        HOME_DIR: ${HOME}
+        APP_UID: ${AITELIER_UID:-1000}
+        APP_GID: ${AITELIER_GID:-1000}
+    image: aitelier:latest
+    container_name: aitelier
+    # Run as the host user → files written into ~/.AItelier keep host ownership.
+    user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
+    environment:
+      # Path.home() resolves from HOME on POSIX → keep it == the host home dir.
+      HOME: ${HOME}
+      # Requests reach the container via the Docker bridge / Cloudflare tunnel,
+      # never 127.0.0.1, so the app-level localhost guard must be relaxed.
+      # Put Cloudflare Access (or equivalent auth) in front of the published port.
+      AITELIER_ALLOW_EXTERNAL: "1"
+    env_file:
+      - .env
+    secrets:
+      # LLM API key delivered as a file (mounted at /run/secrets/DEEPSEEK_API_KEY),
+      # NOT an env var → test/build subprocesses that inherit os.environ never see
+      # it. ai_router._read_secret() reads it. Source lives outside any mounted
+      # path so it isn't visible in the workspace tree.
+      - DEEPSEEK_API_KEY
+    volumes:
+      # Live source: host repo shadows the baked-in copy (no rebuild on edits).
+      - .:/app
+      # Shared state at the identical absolute path the code expects.
+      - ${HOME}/.AItelier:${HOME}/.AItelier
+    networks:
+      # Own network (default) + the gateway/cloudflared network so a single
+      # cloudflared connector resolves http://aitelier:4444 by service name.
+      - default
+      - edge
+    ports:
+      # Loopback-only: the host CLI uses localhost:4444; the public path is via
+      # cloudflared over the 'edge' network (aitelier:4444). Binding to 0.0.0.0
+      # would let any LAN client reach the backend directly, bypassing Cloudflare.
+      - "127.0.0.1:4444:4444"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4444/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Cloudflare ────────────────────────────────────────────────────────────
+  # An existing cloudflared connector (on the 'edge' network below) reaches this
+  # backend by service name. In the Cloudflare Zero Trust dashboard add a public
+  # hostname (a dedicated subdomain — NOT a path, the SPA uses absolute /web and
+  # /api paths) pointing at:  http://aitelier:4444
+
+secrets:
+  # LLM API key, kept out of the environment. Source is outside any path
+  # bind-mounted into the container (not ~/.AItelier, not the repo).
+  #   mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
+  #   printf '%s' "$DEEPSEEK_KEY" > ~/.aitelier-secrets/DEEPSEEK_API_KEY && chmod 600 "$_"
+  DEEPSEEK_API_KEY:
+    file: ${HOME}/.aitelier-secrets/DEEPSEEK_API_KEY
+
+networks:
+  # The backend's own private network.
+  default:
+  # Pre-existing network shared with the cloudflared connector + api gateway,
+  # so a single connector can route to this service. Create/rename as needed:
+  #   docker network ls   → confirm the name
+  edge:
+    external: true
+    name: vip-gateway_default

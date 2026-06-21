@@ -1,0 +1,20 @@
+# Keep the build context small and secrets out of the image.
+# (.env is supplied at runtime via env_file / bind mount, not baked in.)
+.env
+.git
+.venv
+__pycache__/
+*.pyc
+.pytest_cache
+.ruff_cache
+.coverage
+*.db
+*.db-shm
+*.db-wal
+*.log
+node_modules
+tests
+internal
+design
+docs
+project

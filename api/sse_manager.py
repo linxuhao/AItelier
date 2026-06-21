@@ -62,7 +62,16 @@ class StreamManager:
 
         try:
             while True:
-                message = await queue.get()
+                # Heartbeat: if no event arrives within the interval, emit an SSE
+                # comment line. Proxies (e.g. a Cloudflare tunnel) close a
+                # connection that is idle for ~100s; the comment keeps the socket
+                # active so the browser EventSource never sees a spurious drop.
+                # Comments carry no "data:" field, so the frontend ignores them.
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
                 if message == "__END__":
                     break
                 payload = {"log": message}

@@ -151,8 +151,9 @@
 body {
   display: grid;
   grid-template-columns: 1fr var(--ait-notif-width);
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   grid-template-areas:
+    "banner banner"
     "appbar appbar"
     "main   notif";
   min-height: 100vh;
@@ -973,8 +974,9 @@ body {
 @media (max-width: 1023px) and (min-width: 768px) {
   body {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto auto 1fr auto;
     grid-template-areas:
+      "banner"
       "appbar"
       "main"
       "notif";
@@ -1015,8 +1017,9 @@ body {
 @media (max-width: 767px) {
   body {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: auto auto 1fr auto;
     grid-template-areas:
+      "banner"
       "appbar"
       "main"
       "notif";
@@ -1128,8 +1131,7 @@ body > main {
    Read-only mode (set by app.js when /api/me reports can_write=false)
    ══════════════════════════════════════════════════════════════════ */
 .readonly-banner {
-  position: sticky;
-  top: 0;
+  grid-area: banner;
   z-index: 1000;
   padding: 0.5rem 1rem;
   text-align: center;

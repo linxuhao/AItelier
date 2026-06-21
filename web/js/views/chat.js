@@ -872,9 +872,11 @@
       return Promise.resolve();
     }
 
-    var currentProject = _getCurrentProject();
-
-    return api.listSessions(currentProject).then(function (response) {
+    // List ALL sessions, unfiltered. The history dropdown is a global session
+    // switcher; filtering by the incidentally-current project (set when the user
+    // visits a project page) would empty it on return to chat — sessions are
+    // saved with an empty project_id, so the filter matches nothing.
+    return api.listSessions(null).then(function (response) {
       if (!response || !response.sessions || !Array.isArray(response.sessions)) {
         return;
       }

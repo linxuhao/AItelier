@@ -13,6 +13,8 @@ from typing import AsyncGenerator
 import litellm
 import yaml
 
+from core.ai_router import _read_secret
+
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
 _DEFAULT_CONFIG_PATH_V2 = "agent_configs/meta_conversation.yaml"
 _META_DIR = Path.home() / ".AItelier" / "meta"
@@ -547,7 +549,9 @@ def _resolve_provider(model_name: str, config_path: str = "llm_providers.json"):
             api_base = cfg.get("base_url")
             key_env = cfg.get("api_key_env")
             if key_env:
-                api_key = os.getenv(key_env)
+                # Resolve from the mounted secret file (not just env) so the key
+                # works when delivered as a Docker secret. Mirrors ai_router.
+                api_key = _read_secret(key_env)
             litellm_model = f"openai/{actual_model}"
 
     return litellm_model, api_base, api_key

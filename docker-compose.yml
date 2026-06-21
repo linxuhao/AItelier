@@ -31,6 +31,12 @@ services:
       # never 127.0.0.1, so the app-level localhost guard must be relaxed.
       # Put Cloudflare Access (or equivalent auth) in front of the published port.
       AITELIER_ALLOW_EXTERNAL: "1"
+      # Git auth for clone/push of GitHub repos. The credential helper feeds the
+      # GITHUB_TOKEN secret (below) to github.com HTTPS remotes only — the token
+      # stays in the secret file, only the helper *path* is in the environment.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: "credential.helper"
+      GIT_CONFIG_VALUE_0: "/app/docker/git-credential-helper.sh"
     env_file:
       - .env
     secrets:
@@ -39,6 +45,10 @@ services:
       # it. ai_router._read_secret() reads it. Source lives outside any mounted
       # path so it isn't visible in the workspace tree.
       - DEEPSEEK_API_KEY
+      # GitHub token (fine-grained PAT) for private clone + push + PR creation.
+      # Same file-secret model as the LLM key: read by git-credential-helper.sh
+      # (clone/push) and core/git_ops.py (PR REST call), never placed in env.
+      - GITHUB_TOKEN
     volumes:
       # Live source: host repo shadows the baked-in copy (no rebuild on edits).
       - .:/app
@@ -75,6 +85,12 @@ secrets:
   #   printf '%s' "$DEEPSEEK_KEY" > ~/.aitelier-secrets/DEEPSEEK_API_KEY && chmod 600 "$_"
   DEEPSEEK_API_KEY:
     file: ${HOME}/.aitelier-secrets/DEEPSEEK_API_KEY
+  # GitHub fine-grained PAT — scope to the repos you push to (Contents: R/W,
+  # Pull requests: R/W). Create the file before `up` (may be empty to start;
+  # the helper treats an empty file as "no credentials"):
+  #   printf '%s' "$GH_PAT" > ~/.aitelier-secrets/GITHUB_TOKEN && chmod 600 "$_"
+  GITHUB_TOKEN:
+    file: ${HOME}/.aitelier-secrets/GITHUB_TOKEN
 
 networks:
   # The backend's own private network.

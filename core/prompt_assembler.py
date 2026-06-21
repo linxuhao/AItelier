@@ -13,6 +13,28 @@ from core.workspace_manager import DPE_GRAPH_NAME, TASK_STEP_SEQUENCE, PROJECT_S
 # native function calling.  No hardcoded tool descriptions in prompts.
 
 
+# [Workspace Layout] — SF-10: static, project-global boilerplate. Identical for
+# every step, so it lives in the shared system preamble (build_shared_preamble)
+# to land in the cacheable prefix rather than being re-billed per step.
+WORKSPACE_LAYOUT = (
+    "[Workspace Layout]\n"
+    "Files in this pipeline live in three locations:\n"
+    "1. **Project root** — committed/delivered code (e.g., `hello.py` "
+    "after a previous step's `repo_apply`).\n"
+    "2. **Step staging (`.tmp`)** — files you just wrote via `write_*` "
+    "tools go here FIRST. They are promoted to the step output dir when "
+    "the step completes.\n"
+    "3. **Step output** — files from previous retries of this step "
+    "(if any).\n\n"
+    "`read_file` and `list_tree` search in order: "
+    "project root → step staging → step output. "
+    "The `found_in` field tells you which location the file came from. "
+    "When you write a file and need to verify it, use `read_file` — it "
+    "will find your file in the staging directory even though it hasn't "
+    "been committed to the project root yet."
+)
+
+
 class PromptAssembler:
     """
     组装结构化的 Agent 提示词。
@@ -29,29 +51,15 @@ class PromptAssembler:
         """
         self.aitelier_root = aitelier_root or Path.cwd()
         self._repo_type = repo_type
-        self._red_criteria_cache: dict[str, str] = {}
-
-
-    def _get_step_type(step_id: str) -> str:
-        """Get step_type from skillflow graph node. Falls back to 'agent'."""
-        try:
-            from api.dependencies import get_skillflow
-            sf = get_skillflow()
-            for gname in sf._graphs:
-                resolver = sf._get_resolver(gname)
-                node = resolver.get_node(step_id)
-                if node:
-                    return node.step_type or "agent"
-        except Exception:
-            pass
-        return "agent"
 
     def assemble(self, step_id: str, project_path: Path,
                  task_card: str = "", feedback: str = "",
                  task_id: int | None = None, code_path: Path = None,
                  resolved_context: dict | None = None,
                  tool_schemas: dict | None = None,
-                 *, native: bool = False) -> str:
+                 *, native: bool = False,
+                 hoist_globals: bool = False,
+                 hoist_design: bool = False) -> str:
         """
         组装完整的 Agent 提示词。
 
@@ -165,30 +173,48 @@ class PromptAssembler:
                 )
                 sections.append(delivery)
 
-        # [Workspace Layout] — SF-10: tell the agent about the multi-directory
-        # structure so it knows where files live and where read_file searches.
-        sections.append(
-            "[Workspace Layout]\n"
-            "Files in this pipeline live in three locations:\n"
-            "1. **Project root** — committed/delivered code (e.g., `hello.py` "
-            "after a previous step's `repo_apply`).\n"
-            "2. **Step staging (`.tmp`)** — files you just wrote via `write_*` "
-            "tools go here FIRST. They are promoted to the step output dir when "
-            "the step completes.\n"
-            "3. **Step output** — files from previous retries of this step "
-            "(if any).\n\n"
-            "`read_file` and `list_tree` search in order: "
-            "project root → step staging → step output. "
-            "The `found_in` field tells you which location the file came from. "
-            "When you write a file and need to verify it, use `read_file` — it "
-            "will find your file in the staging directory even though it hasn't "
-            "been committed to the project root yet."
-        )
+        # [Workspace Layout] — static boilerplate. When hoist_globals is set the
+        # caller has placed it (and the brief) in the shared system preamble, so
+        # skip it here to avoid duplication.
+        if not hoist_globals:
+            sections.append(WORKSPACE_LAYOUT)
 
-        # [Project Brief] — inject for all steps except verification (handled below)
-        if step_id not in ("t_verify", "5"):
+        # ── STABLE PREFIX ────────────────────────────────────────────────
+        # Prompt-cache ordering (Phase 1): emit the large, slow-changing blocks
+        # FIRST so they form a byte-identical prefix that the provider KV cache
+        # reuses across the N per-task loop steps (t_plan/t_impl/t_verify all
+        # share the same brief + design). Volatile blocks (resolved context,
+        # directory tree, feedback) go AFTER so they never poison the prefix.
+
+        # [Project Brief] — inject for all steps except verification (handled below).
+        # Skipped when hoist_globals: the brief is in the shared system preamble.
+        if step_id not in ("t_verify", "5") and not hoist_globals:
             if brief:
                 sections.append(f"[Project Brief]\n{brief}")
+
+        # [Project Design] — inject project design docs for steps that can read.
+        # Verification steps only get the directory tree; they explore via tools.
+        # Skipped when hoist_design (F2): stable design docs are in the preamble
+        # and agents read code on demand via list_tree/read_file.
+        if step_id not in ("t_verify", "5") and not hoist_design:
+            design_content = self._load_project_docs(code_path)
+            if design_content:
+                sections.append(f"[Project Design]\n{design_content}")
+
+        # [Verification Context] — inject brief + goals for verifier steps
+        if step_id in ("t_verify", "5"):
+            brief = self._load_project_brief(project_path)
+            if brief:
+                sections.append(f"[Project Brief - for Verification]\n{brief}")
+            goals_file = project_path / DPE_GRAPH_NAME / "1" / "step1_goals.json"
+            if goals_file.exists():
+                try:
+                    goals = self._compact_json(goals_file.read_text(encoding='utf-8'))
+                    sections.append(f"[Project Goals Reference]\n{goals}")
+                except Exception:
+                    pass
+
+        # ── VOLATILE SUFFIX ──────────────────────────────────────────────
 
         # [Pre-resolved Context] — context resolved by skillflow from graph specs
         # Includes cross-config reads, step outputs, and tool outputs (e.g. dir_tree).
@@ -208,25 +234,6 @@ class PromptAssembler:
         if tree:
             sections.append(f"[Workspace Directory Tree]\n{tree}")
 
-        # [Project Design] — inject project design docs for steps that can read
-        # Verification steps only get the directory tree; they explore via tools
-        if step_id not in ("t_verify", "5"):
-            design_content = self._load_project_docs(code_path)
-            if design_content:
-                sections.append(f"[Project Design]\n{design_content}")
-
-        # [Verification Context] — inject brief + goals for verifier steps
-        if step_id in ("t_verify", "5"):
-            brief = self._load_project_brief(project_path)
-            if brief:
-                sections.append(f"[Project Brief - for Verification]\n{brief}")
-            goals_file = project_path / DPE_GRAPH_NAME / "1" / "step1_goals.json"
-            if goals_file.exists():
-                try:
-                    sections.append(f"[Project Goals Reference]\n{goals_file.read_text(encoding='utf-8')}")
-                except Exception:
-                    pass
-
         # [Previous Feedback] — 重试时的 Red Agent 反馈
         if feedback:
             sections.append(f"[Previous Feedback — MUST FIX]\n{feedback}")
@@ -238,139 +245,56 @@ class PromptAssembler:
 
         return "\n\n".join(sections)
 
+    def build_shared_preamble(self, project_path: Path, code_path: Path = None,
+                              *, graph_name: str,
+                              preamble_steps: list[str] | None = None,
+                              include_design: bool = False) -> str:
+        """Build the byte-identical, project-global system preamble (F1/F2).
 
-    def assemble_red_prompt_with_context(self, project_path: Path,
-                                         written_files: list[str],
-                                         step_id: str,
-                                         build_result: dict | None = None,
-                                         code_path: Path = None,
-                                         resolved_context: dict | None = None) -> str:
+        Placed at the FRONT of the system message for steps of a config that
+        opts in (``x-aitelier.preamble_steps``), so the provider KV cache reuses
+        it across steps. Contains only content identical across a project's
+        steps: the static workspace-layout boilerplate, the project brief, and
+        (when include_design) the FIXED outputs of ``preamble_steps`` — never the
+        growing code repo, which would make the block volatile.
+
+        Fully config-driven: ``graph_name`` and ``preamble_steps`` come from the
+        host config registry, so any pipeline (not just DPE) can opt in.
         """
-        组装 workspace-aware 的 Red Agent 审查提示词。
-        在 Build & Test 通过后调用，Red Agent 可以看到构建/测试结果，
-        以及代码仓库中完整的文件内容（而非孤立的 draft）。
-
-        :param project_path: DPS workspace 根路径
-        :param written_files: 本次步骤产出的文件路径列表
-        :param step_id: 当前步骤 ID
-        :param build_result: BuildRunner 的检查结果
-        :param code_path: Project 代码仓库路径
-        :return: Red Agent 审查提示词
-        """
-        if code_path is None:
-            code_path = project_path
-
-        sections = []
-
-        # [Project Brief] — Red needs project goals/constraints to judge correctness
-        # Without this, Red reviews files in isolation without knowing what the project IS.
+        parts = [WORKSPACE_LAYOUT]
         brief = self._load_project_brief(project_path)
         if brief:
-            sections.append(f"[Project Brief]\n{brief}")
+            parts.append(f"[Project Brief]\n{brief}")
+        if include_design and preamble_steps:
+            design = self._load_fixed_step_docs(project_path, graph_name,
+                                                preamble_steps)
+            if design:
+                parts.append(f"[Project Design]\n{design}")
+        return "\n\n".join(parts)
 
-        # [Language Instruction] — match Green's language
-        lang_instruction = self._detect_language_instruction(brief)
-        if lang_instruction:
-            sections.append(lang_instruction)
+    def _load_fixed_step_docs(self, project_path: Path, graph_name: str,
+                              steps: list[str]) -> str:
+        """Read the outputs of the given (stable) step ids for a config.
 
-        # [Pre-resolved Context] — context resolved by skillflow from graph specs
-        if resolved_context:
-            ctx_parts = []
-            for label, content in resolved_context.items():
-                if len(content) > 6000:
-                    content = content[:6000] + "\n... [truncated]"
-                ctx_parts.append(f"### {label}\n{content}")
-            if ctx_parts:
-                sections.append("[Pre-resolved Context]\n" + "\n\n".join(ctx_parts))
-
-        # [Project Planning Context] — for task-level steps, Red needs prior planning outputs
-        if step_id in TASK_STEP_SEQUENCE:
-            planning = self._load_step_relevant_context(project_path, step_id=step_id)
-            if planning:
-                sections.append(f"[Project Planning Context]\n{planning}")
-
-        # [Workspace Directory Tree] — Red Agent 也能看到完整的目录结构
-        # For doc steps: skip project/ tree — it's empty and confuses the Red Agent
-        step_type = self._get_step_type(step_id)
-        if step_type != "doc":
-            tree = self._build_workspace_tree(project_path, step_id, for_red=True, code_path=code_path)
-            if tree:
-                sections.append(f"[Workspace Directory Tree]\n{tree}")
-
-        # Inject project design docs for context
-        design_content = self._load_project_docs(code_path)
-        if design_content:
-            sections.append(f"[Project Design]\n{design_content}")
-
-        # Inject build/test results — Red knows the code compiles and tests pass
-        if build_result:
-            sections.append(f"[Build & Test Results]\n{build_result['summary']}")
-            for check in build_result.get("checks", []):
-                status = "PASSED" if check["passed"] else "FAILED"
-                sections.append(f"- {check['name']}: {status}\n  {check['output']}")
-
-        step_type = self._get_step_type(step_id)
-        if step_type != "code":
-            review_intro = (
-                f"[Review Request — Step {step_id}]\n"
-                "The files below were produced by the Green Agent for this documentation step.\n"
-                "They have PASSED structural validation.\n"
-                "The file content is provided IN FULL below under '--- filename (doc output) ---'.\n"
-                "Do NOT expect files in the project/ directory — doc outputs are provided in the context above.\n"
-                "Your job: review the content for correctness, completeness, and adherence to step requirements.\n"
-                "Focus on: relevance to project goals, technical accuracy, completeness of analysis.\n"
-                "Output ONLY your verdict JSON: {\"passed\": true/false, \"feedback\": \"...\", "
-                "\"suggestions\": [\"optional\", \"non-blocking\", \"improvement ideas\"]}"
-            )
-        else:
-            review_intro = (
-                f"[Review Request — Step {step_id}]\n"
-                "The files below were produced by the Green Agent for this step and have been\n"
-                "merged into the project workspace (replacing any prior versions).\n"
-                "They have PASSED deterministic validation (syntax lint + build + tests).\n"
-                "Your job: review the MERGED files in context of the full project.\n"
-                "Focus on: logic correctness, architecture fit, security, edge cases, test quality.\n"
-                "Output ONLY your verdict JSON: {\"passed\": true/false, \"feedback\": \"...\", "
-                "\"suggestions\": [\"optional\", \"non-blocking\", \"improvement ideas\"]}"
-            )
-        sections.append(review_intro)
-
-        # Inject step-specific Red review criteria from template
-        criteria = self._load_red_review_criteria(step_id)
-        if criteria:
-            sections.append(f"[Step-Specific Review Criteria — Step {step_id}]\n{criteria}")
-
-        # Filter out __pycache__, .pyc, .gitignore from review — waste of Red tokens
-        _SKIP_PATTERNS = {"__pycache__", ".pyc", ".gitignore", "_snapshot.json"}
-        filtered_files = [
-            f for f in written_files
-            if not any(pat in str(f) for pat in _SKIP_PATTERNS)
-        ]
-
-        # Read the actual files — source depends on step type:
-        # - code steps: files have been applied to project code repo (code_path)
-        # - doc steps: files stay in {step_id}/ (not applied to code repo)
-        if step_type == "doc":
-            # Doc steps: read from {step_id}/
-            step_dir = project_path / DPE_GRAPH_NAME / step_id
-            for file_path in filtered_files:
-                full_path = step_dir / file_path
-                if full_path.exists():
-                    content = full_path.read_text(encoding="utf-8", errors="replace")
-                    sections.append(f"--- {file_path} (doc output) ---\n```\n{content}\n```")
-                else:
-                    sections.append(f"--- {file_path} --- (file not found in {step_id}/)")
-        else:
-            # Code steps: read from code repo (the merged result)
-            for file_path in filtered_files:
-                full_path = code_path / file_path
-                if full_path.exists():
-                    content = full_path.read_text(encoding="utf-8", errors="replace")
-                    sections.append(f"--- {file_path} (merged into workspace) ---\n```\n{content}\n```")
-                else:
-                    sections.append(f"--- {file_path} --- (file not found in project/)")
-
-        return "\n\n".join(sections)
+        These step outputs are fixed once their steps complete, so they stay
+        byte-stable across all later steps — unlike _load_project_docs, which
+        scans the growing code repo and changes every task. No pipeline-specific
+        step ids are hardcoded: the caller supplies them from config.
+        """
+        docs = []
+        for step_key in steps:
+            step_dir = project_path / graph_name / str(step_key)
+            if not step_dir.is_dir():
+                continue
+            for f in sorted(step_dir.glob("*")):
+                if not f.is_file() or f.name == "_snapshot.json" \
+                        or f.name.startswith("instruction"):
+                    continue
+                try:
+                    docs.append(f"### {f.name}\n{f.read_text(encoding='utf-8')}")
+                except Exception:
+                    pass
+        return "\n\n".join(docs)
 
     def _build_workspace_tree(self, project_path: Path, step_id: str,
                               for_red: bool = False, code_path: Path = None) -> str:
@@ -414,9 +338,9 @@ class PromptAssembler:
                 if item.is_dir():
                     entries.append(f"{indent}{name}/")
                 else:
-                    size = item.stat().st_size
-                    size_str = f"{size}b" if size < 1024 else f"{size // 1024}kb"
-                    entries.append(f"{indent}{name}  ({size_str})")
+                    # No file size: it changes on every edit and would bust the
+                    # prompt-cache prefix; the agent only needs the filename.
+                    entries.append(f"{indent}{name}")
                 count += 1
             if not entries:
                 return []
@@ -598,6 +522,36 @@ class PromptAssembler:
                     sections.append(f"### {label} — {f.name}\n{content}")
 
         return "\n\n".join(sections)
+
+    @staticmethod
+    def drop_preamble_steps(resolved_context: dict | None,
+                            preamble_steps: list[str] | None) -> dict:
+        """Drop resolved_context entries already carried by the shared preamble.
+
+        skillflow labels a ``{step: N}`` context source ``"Step N"``. When F2
+        hoists those step outputs (design docs) into the preamble, their
+        resolved_context copies would duplicate the design in the prompt — so
+        remove them. Driven by ``preamble_steps`` (config), no hardcoding.
+        """
+        if not resolved_context:
+            return resolved_context or {}
+        drop = {f"Step {s}" for s in (preamble_steps or [])}
+        return {k: v for k, v in resolved_context.items() if k not in drop}
+
+    @staticmethod
+    def _compact_json(text: str) -> str:
+        """Lossless format shrink (Phase 4): minify a pretty-printed JSON blob.
+
+        Re-serializes the SAME data with no indentation / no inter-token spaces,
+        which removes pure-whitespace tokens. If the text is not valid JSON it
+        is returned unchanged, so this is safe to call on any injected blob.
+        """
+        import json as _json
+        try:
+            data = _json.loads(text)
+        except (ValueError, TypeError):
+            return text
+        return _json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
     def _summarize(self, content: str, max_lines: int = 100) -> str:
         """Extract a summary by keeping first N lines of content."""

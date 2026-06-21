@@ -6,6 +6,7 @@
 #        DPE 在审查通过后回写 project/。
 #        重构为三路分发：content-only / read+content / full tool，基于 StepProfile。
 
+import os
 import json
 import re
 import time
@@ -14,6 +15,12 @@ from typing import Any, Optional
 from core.agents import AgentFactory
 from core.workspace_manager import WorkspaceManager, DPE_GRAPH_NAME
 from core.prompt_assembler import PromptAssembler
+
+# F2 (default ON): the stable design docs move into the shared system preamble
+# (cached cross-step) and the growing-code-repo dump is dropped from the user
+# message (agents read code on demand). Validated via a full DPE run (86.9%
+# cache-hit ratio, quality preserved). Disable with AITELIER_HOIST_DESIGN=0.
+HOIST_DESIGN = os.getenv("AITELIER_HOIST_DESIGN", "1") == "1"
 
 
 def _repair_json_content(raw: str) -> str | None:
@@ -1087,6 +1094,24 @@ class PipelineEngine:
         max_retries = self.factory.get_max_retries(step_id)
         max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(step_id)
 
+        # Config-driven shared preamble (F1/F2). A config opts in via
+        # x-aitelier.preamble_steps; only then is project-global stable content
+        # hoisted into a byte-identical system preamble. Empirically the design
+        # docs are what make the preamble large enough to cross the provider's
+        # cache-activation threshold, so the whole optimization is gated on
+        # HOIST_DESIGN. Non-opted-in / disabled → original behavior, unchanged.
+        graph_name = self._draft_graph_name()
+        preamble_steps = self._preamble_steps(graph_name)
+        use_preamble = HOIST_DESIGN and bool(preamble_steps)
+
+        # When the preamble carries the design docs of preamble_steps, drop their
+        # resolved_context copies so design isn't duplicated in the prompt.
+        # Conditional: F2-off leaves resolved_context untouched.
+        resolved_ctx = self._resolved_context
+        if use_preamble:
+            resolved_ctx = self.assembler.drop_preamble_steps(
+                resolved_ctx, preamble_steps)
+
         for attempt in range(1, max_retries + 1):
             self._emit("step_attempt", {
                 "step_id": step_id, "attempt": attempt,
@@ -1095,13 +1120,18 @@ class PipelineEngine:
                 "preview": f"Step {step_id} Attempt {attempt}/{max_retries} (native)",
             })
 
-            # Build initial messages
+            # Build initial messages. F1: project-global stable content (workspace
+            # layout + brief [+ design when F2]) goes in a byte-identical system
+            # preamble so the provider KV cache reuses it across every step;
+            # assemble() omits those blocks from the user message (hoist_*).
             user_prompt = self.assembler.assemble(
                 step_id, project_path, "", feedback,
                 task_id=task_id, code_path=code_path,
-                resolved_context=self._resolved_context,
+                resolved_context=resolved_ctx,
                 tool_schemas=self._tool_schemas,
                 native=True,
+                hoist_globals=use_preamble,
+                hoist_design=use_preamble,
             )
 
             # Inject turn budget so the agent can pace exploration
@@ -1113,14 +1143,24 @@ class PipelineEngine:
                 "leave at least 1 turn for writing."
             )
 
+            if use_preamble:
+                preamble = self.assembler.build_shared_preamble(
+                    project_path, code_path, graph_name=graph_name,
+                    preamble_steps=preamble_steps, include_design=True,
+                )
+                system_content = f"{preamble}\n\n{agent.system_prompt}"
+            else:
+                system_content = agent.system_prompt
             messages: list[dict] = [
-                {"role": "system", "content": agent.system_prompt},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_prompt},
             ]
 
             self._trace("prompt", "user_prompt", {
                 "attempt": attempt, "mode": "native",
-                "system": agent.system_prompt, "user": user_prompt,
+                # Trace the ACTUAL system message sent (incl. the shared preamble),
+                # not just the role template, so traces reflect the real request.
+                "system": system_content, "user": user_prompt,
             })
 
             written_files: list[str] = []
@@ -1169,6 +1209,15 @@ class PipelineEngine:
                     "tool_calls": len(result.tool_calls),
                     "preview": result.text[:300] if result.text else f"[{len(result.tool_calls)} tool call(s)]",
                 })
+
+                # Phase 0 cache telemetry: record per-turn token + prompt-cache
+                # usage so a run's cache hit-ratio can be aggregated from traces.
+                usage = getattr(agent.gateway, "last_usage", {}) or {}
+                if usage:
+                    self._trace("usage", "token_usage", {
+                        "step_id": step_id, "attempt": attempt,
+                        "turn": turn_count + 1, **usage,
+                    })
 
                 # Record trace
                 self._trace("response", "agent_response", {
@@ -1288,6 +1337,17 @@ class PipelineEngine:
             return Path(od).parent.name
         from core.workspace_manager import DPE_GRAPH_NAME
         return DPE_GRAPH_NAME
+
+    def _preamble_steps(self, graph_name: str) -> list[str]:
+        """Stable step ids to hoist into the shared preamble, declared by the
+        running config's host metadata (x-aitelier.preamble_steps). Empty for
+        configs that don't opt in — config-agnostic, no pipeline hardcoding."""
+        try:
+            from api.dependencies import get_config_registry
+            manifest = get_config_registry().get(graph_name)
+            return list(manifest.preamble_steps) if manifest else []
+        except Exception:
+            return []
 
     # ── Dispatch ─────────────────────────────────────────────────────
 

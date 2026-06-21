@@ -13,6 +13,8 @@ x-aitelier:
   has_task_loop: true             # PM produces a task manifest → per-task loop
   seed_file: "project_brief.md"
   output_step: "5"
+  preamble_steps: ["1", "2"]      # SOTA + architecture: project-global stable
+                                  # docs hoisted into the shared system preamble
   labels:                         # step_id → dashboard label (source of truth)
     git_sync_pre: "Sync Repo"
     "1": "Researcher"
@@ -67,7 +69,6 @@ steps:
     timeout_seconds: 300
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { config: "meta_conversation", step: "meta", output: "step1_goals.json" }
       - source: { tool: "dir_tree" }
     output:
@@ -89,7 +90,6 @@ steps:
     timeout_seconds: 180
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "1" }
     output:
       mode: "content"
@@ -119,7 +119,6 @@ steps:
     timeout_seconds: 300
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "1" }
       - source: { step: "2_review" }
       - source: { tool: "dir_tree" }
@@ -149,7 +148,6 @@ steps:
     timeout_seconds: 180
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "2" }
     output:
       mode: "content"
@@ -180,7 +178,6 @@ steps:
     max_tool_turns: 20
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "1" }
       - source: { step: "2" }
       - source: { step: "3_review" }
@@ -260,7 +257,6 @@ steps:
       # (current_task) so each iteration is scoped to its own task card.
       - source: { from: "repository" }
       - source: { step: "3", file: "tasks/$current_task.json" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "1", mode: "summary" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan_review" }
@@ -302,7 +298,6 @@ steps:
     context:
       - source: { from: "repository" }
       - source: { step: "3", file: "tasks/$current_task.json" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
@@ -342,7 +337,6 @@ steps:
     agent_config: "task_implementer_reviewer"
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
@@ -365,7 +359,6 @@ steps:
     context:
       - source: { from: "repository" }
       - source: { step: "3", file: "tasks/$current_task.json" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "t_plan" }
       - source: { step: "t_verify_review" }
       - source: { tool: "dir_tree" }
@@ -399,7 +392,6 @@ steps:
     agent_config: "final_verifier"
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "1" }
       - source: { step: "2" }
       - source: { step: "5_review" }
@@ -430,7 +422,6 @@ steps:
     agent_config: "final_verifier_reviewer"
     context:
       - source: { from: "repository" }
-      - source: { from: "workspace", path: "project/project_brief.md" }
       - source: { step: "5" }
       - source: { step: "5_test" }
     output:

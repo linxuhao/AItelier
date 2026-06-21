@@ -40,6 +40,7 @@ _DEFAULTS: dict = {
     "has_task_loop": False,
     "seed_file": None,
     "output_step": None,
+    "preamble_steps": [],
     "checkpoint_kind": "file-review",
     "checkpoint_kinds": {},
     "labels": {},
@@ -71,6 +72,9 @@ class ConfigManifest:
     scheduler_owned: bool = True
     seed_file: str | None = None
     output_step: str | None = None
+    # Step ids whose outputs are project-global & stable (e.g. SOTA/architecture).
+    # The host hoists these into the shared system preamble for prompt caching.
+    preamble_steps: list[str] = field(default_factory=list)
 
     def label_for(self, step_id: str) -> str:
         """Display label for a step, falling back to the raw id (graceful for
@@ -89,6 +93,7 @@ class ConfigManifest:
             "scheduler_owned": self.scheduler_owned,
             "seed_file": self.seed_file,
             "output_step": self.output_step,
+            "preamble_steps": self.preamble_steps,
         }
 
 
@@ -165,6 +170,7 @@ class ConfigRegistry:
                 scheduler_owned=bool(hints.get("scheduler_owned")),
                 seed_file=hints.get("seed_file"),
                 output_step=hints.get("output_step"),
+                preamble_steps=list(hints.get("preamble_steps") or []),
             )
         return reg
 

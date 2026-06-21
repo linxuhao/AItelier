@@ -190,14 +190,17 @@ def get_run_trace(
     run_id: str,
     step_instance_id: Optional[int] = Query(None, description="Filter by step instance ID (int)"),
     category: Optional[str] = Query(None, description="Filter by trace category (prompt, response, tool_call, error)"),
-    limit: int = Query(100, ge=1, le=1000, description="Max trace entries to return"),
+    after_seq: Optional[int] = Query(None, description="Keyset cursor: return records with seq > after_seq (omit for the first page)"),
+    limit: int = Query(100, ge=1, le=1000, description="Max trace entries per page"),
     user: CurrentUser | None = Depends(get_optional_user),
 ):
     """
-    Read durable execution traces for a pipeline run.
+    Read durable execution traces for a pipeline run (oldest-first).
 
-    Returns prompt/response pairs, tool calls, and errors recorded during
-    pipeline execution. Optionally filter by step_instance_id and/or category.
+    Keyset-paginated on ``seq`` (monotonic, unique per run): the first page omits
+    ``after_seq``; each subsequent page passes the previous page's ``next_seq``.
+    This is stateless — no server-side cursor/cache. ``has_more`` tells the
+    client whether another page exists.
     """
     sf = get_skillflow()
     run = _resolve_run(run_id)
@@ -205,11 +208,16 @@ def get_run_trace(
         raise HTTPException(status_code=404, detail="Run not found")
     internal_id = run["id"]
 
-    traces = sf.get_trace(internal_id, step_instance_id=step_instance_id, category=category)
-
-    # get_trace may return all if no filters given; apply limit
-    if len(traces) > limit:
-        traces = traces[-limit:]
+    # Keyset pagination on `seq` via skillflow's get_trace (LIMIT in SQL).
+    # Requires skillflow-py with after_seq/limit support. Fetch one extra row to
+    # detect whether a further page exists.
+    page = sf.get_trace(
+        internal_id, step_instance_id=step_instance_id, category=category,
+        after_seq=after_seq, limit=limit + 1,
+    )
+    has_more = len(page) > limit
+    traces = page[:limit]
+    next_seq = traces[-1]["seq"] if traces else None
 
     return {
         "run_id": run_id,
@@ -217,6 +225,8 @@ def get_run_trace(
         "category_filter": category,
         "count": len(traces),
         "traces": traces,
+        "next_seq": next_seq,
+        "has_more": has_more,
     }
 
 

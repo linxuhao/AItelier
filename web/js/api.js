@@ -546,8 +546,8 @@
      * Read durable execution traces for a run (or project).
      * GET /api/runs/{runId}/trace
      * @param {string} runId — skillflow run UUID or project_id
-     * @param {object} [opts] — {category, limit, stepInstanceId}
-     * @returns {Promise<object>} — {run_id, count, traces: [...]}
+     * @param {object} [opts] — {category, limit, stepInstanceId, afterSeq}
+     * @returns {Promise<object>} — {run_id, count, traces, next_seq, has_more}
      */
     getTrace: function (runId, opts) {
       opts = opts || {};
@@ -556,6 +556,9 @@
       if (opts.limit) { qs.push("limit=" + encodeURIComponent(opts.limit)); }
       if (opts.stepInstanceId != null) {
         qs.push("step_instance_id=" + encodeURIComponent(opts.stepInstanceId));
+      }
+      if (opts.afterSeq != null) {
+        qs.push("after_seq=" + encodeURIComponent(opts.afterSeq));
       }
       var path = "/api/runs/" + encodeURIComponent(runId) + "/trace";
       if (qs.length) { path += "?" + qs.join("&"); }

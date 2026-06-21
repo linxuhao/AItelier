@@ -22,8 +22,20 @@
   /** @type {string} active category filter ("" = all). */
   var _category = "";
 
-  /** @type {number} max entries to fetch. */
-  var _LIMIT = 500;
+  /** @type {number} page size for keyset pagination. */
+  var _PAGE_SIZE = 100;
+
+  /** @type {number|null} keyset cursor — the last seq loaded (null = start). */
+  var _cursor = null;
+
+  /** @type {boolean} whether the server reports more pages after the cursor. */
+  var _hasMore = false;
+
+  /** @type {boolean} guard against overlapping page fetches. */
+  var _loading = false;
+
+  /** @type {number} total records loaded into the list so far. */
+  var _loadedCount = 0;
 
   /** Built-in DPE step labels; manifest labels take precedence when loaded. */
   var _STEP_LABELS = {
@@ -174,7 +186,11 @@
     return entry;
   }
 
-  function _render(traces) {
+  /**
+   * Build the static view shell once: title, toolbar, count line, the
+   * (initially empty) #trace-list, and the footer with the "Load more" button.
+   */
+  function _renderShell() {
     var container = document.getElementById("view-trace");
     if (!container) { return; }
     container.innerHTML = "";
@@ -185,74 +201,106 @@
 
     _renderToolbar(container);
 
-    if (!traces || traces.length === 0) {
-      var empty = document.createElement("p");
-      empty.className = "empty-state";
-      empty.textContent = "No trace records" +
-        (_category ? " for category “" + _category + "”." : " yet.");
-      container.appendChild(empty);
-      return;
-    }
-
     var count = document.createElement("p");
+    count.id = "trace-count";
     count.className = "empty-state";
     count.style.margin = "0 0 0.5rem 0";
-    count.textContent = traces.length + " record(s), oldest first · click a row to expand";
+    count.textContent = "Loading trace…";
     container.appendChild(count);
 
     var list = document.createElement("div");
     list.id = "trace-list";
-    traces.forEach(function (t) { list.appendChild(_renderEntry(t)); });
     container.appendChild(list);
+
+    var footer = document.createElement("div");
+    footer.id = "trace-footer";
+    footer.style.margin = "0.75rem 0";
+    footer.style.textAlign = "center";
+    var btn = document.createElement("button");
+    btn.id = "trace-load-more";
+    btn.className = "outline";
+    btn.textContent = "Load more";
+    btn.style.display = "none";
+    btn.addEventListener("click", function () { _fetchPage(true); });
+    footer.appendChild(btn);
+    container.appendChild(footer);
   }
 
-  function _renderLoading() {
-    var container = document.getElementById("view-trace");
-    if (!container) { return; }
-    container.innerHTML = "";
-    var title = document.createElement("h3");
-    title.textContent = "Execution Trace — " + _projectId;
-    container.appendChild(title);
-    _renderToolbar(container);
-    var loading = document.createElement("p");
-    loading.className = "empty-state";
-    loading.textContent = "Loading trace…";
-    container.appendChild(loading);
-  }
-
-  function _renderError(msg) {
-    var container = document.getElementById("view-trace");
-    if (!container) { return; }
-    container.innerHTML = "";
-    var title = document.createElement("h3");
-    title.textContent = "Execution Trace — " + _projectId;
-    container.appendChild(title);
-    _renderToolbar(container);
-    var err = document.createElement("p");
-    err.className = "empty-state";
-    err.textContent = msg || "Failed to load trace.";
-    container.appendChild(err);
+  /** Update the count line and the Load-more button after a page loads. */
+  function _updateFooter() {
+    var count = document.getElementById("trace-count");
+    var btn = document.getElementById("trace-load-more");
+    if (count) {
+      if (_loadedCount === 0) {
+        count.textContent = "No trace records" +
+          (_category ? " for category “" + _category + "”." : " yet.");
+      } else {
+        count.textContent = _loadedCount + " record(s) loaded, oldest first" +
+          (_hasMore ? " · more available" : " · end of trace") +
+          " · click a row to expand";
+      }
+    }
+    if (btn) {
+      btn.style.display = _hasMore ? "inline-block" : "none";
+      btn.disabled = _loading;
+      btn.textContent = _loading ? "Loading…" : "Load more";
+    }
   }
 
 
   // ── Data ───────────────────────────────────────────────────────────
 
-  function _load() {
-    if (!_projectId) { return; }
+  /**
+   * Fetch one page. When ``append`` is false this is the first page (cursor
+   * reset); when true it continues from the current cursor and appends.
+   */
+  function _fetchPage(append) {
+    if (!_projectId || _loading) { return; }
     var api = window.AItelier && window.AItelier.API;
     if (!api || typeof api.getTrace !== "function") {
-      _renderError("Trace API not available.");
+      var c = document.getElementById("trace-count");
+      if (c) { c.textContent = "Trace API not available."; }
       return;
     }
-    _renderLoading();
-    var opts = { limit: _LIMIT };
+
+    _loading = true;
+    _updateFooter();
+
+    var opts = { limit: _PAGE_SIZE };
     if (_category) { opts.category = _category; }
+    if (append && _cursor != null) { opts.afterSeq = _cursor; }
+
     // run_id accepts a project_id (resolved to its most recent run server-side).
     api.getTrace(_projectId, opts).then(function (data) {
-      _render((data && data.traces) || []);
+      _loading = false;
+      var traces = (data && data.traces) || [];
+      var list = document.getElementById("trace-list");
+      if (list) {
+        traces.forEach(function (t) { list.appendChild(_renderEntry(t)); });
+      }
+      _loadedCount += traces.length;
+      _hasMore = !!(data && data.has_more);
+      if (data && data.next_seq != null) { _cursor = data.next_seq; }
+      _updateFooter();
     }).catch(function (err) {
-      _renderError("Failed to load trace: " + ((err && err.message) || "unknown error"));
+      _loading = false;
+      var count = document.getElementById("trace-count");
+      if (count) {
+        count.textContent = "Failed to load trace: " +
+          ((err && err.message) || "unknown error");
+      }
+      _updateFooter();
     });
+  }
+
+  /** Reset pagination state and (re)load the first page into a fresh shell. */
+  function _load() {
+    _cursor = null;
+    _hasMore = false;
+    _loadedCount = 0;
+    _loading = false;
+    _renderShell();
+    _fetchPage(false);
   }
 
 
@@ -275,6 +323,10 @@
       if (container) { container.classList.remove("active"); }
       _projectId = null;
       _category = "";
+      _cursor = null;
+      _hasMore = false;
+      _loadedCount = 0;
+      _loading = false;
     },
   };
 

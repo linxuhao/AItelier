@@ -75,9 +75,9 @@ pip install -e .
 First, set up your API key. The default pipeline runs on **DeepSeek** (`deepseek-v4-flash` / `deepseek-v4-pro`), so all you need is a `DEEPSEEK_API_KEY`:
 
 ```bash
-# Copy the template and fill in your real key
+# Copy the template (it documents every variable)
 cp .env.example .env
-# edit .env to add DEEPSEEK_API_KEY, then load it
+# Local run: add DEEPSEEK_API_KEY to .env, then load it
 source .env
 ```
 
@@ -88,6 +88,25 @@ aitelier                          # Interactive CLI dashboard
 aitelier "build me a todo app"    # One-shot pipeline
 aitelier server                   # Backend server
 ```
+
+### Run with Docker (+ Cloudflare)
+
+The backend and web UI also ship as a container. The CLI starts it automatically if Docker is running (and reuses it if already up), or you can manage it directly:
+
+```bash
+docker compose up -d              # build (first run) + start; serves API + web UI on :4444
+docker compose logs -f
+```
+
+In Docker the **API key is a secret file, not an env var** (so the pipeline's test/build subprocesses never inherit it). Put the key outside the repo and mount it:
+
+```bash
+mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
+printf '%s' "sk-your-deepseek-key" > ~/.aitelier-secrets/DEEPSEEK_API_KEY
+chmod 600 ~/.aitelier-secrets/DEEPSEEK_API_KEY      # do NOT put this key in .env
+```
+
+State lives in host `~/.AItelier` (bind-mounted). The port is published on loopback only; expose it publicly via a **Cloudflare tunnel**. With Cloudflare Access in front, **reads are open to any logged-in user and writes are restricted to an allowlist** — set `AITELIER_CF_TEAM_DOMAIN`, `AITELIER_CF_AUD`, and `AITELIER_WRITERS` in `.env` (all documented in `.env.example`). The CLI authenticates to its own container with `AITELIER_ADMIN_TOKEN`.
 
 ## Demos
 

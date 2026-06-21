@@ -28,6 +28,22 @@ pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may 
 
 Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient.
 
+### Docker deployment & secrets
+
+The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages it: `cli/server.py:ensure_server_running` starts the container if down and reuses it if up (falls back to a local uvicorn subprocess when Docker is unavailable).
+
+```bash
+docker compose up -d            # build (first run) + start; the CLI does this for you
+docker compose logs -f          # tail
+```
+
+- **Path-consistency:** host `~/.AItelier` is bind-mounted at the **same absolute path** inside the container, and `HOME` is set to the host home, so `Path.home()/.AItelier` and DB-stored absolute paths resolve identically on host (CLI) and in the container (server). Runs as host uid/gid so files keep host ownership.
+- **External access:** the container binds `0.0.0.0`, published as `127.0.0.1:4444` (loopback-only — the public path is a Cloudflare tunnel reaching `aitelier:4444` over the shared `edge` network). `AITELIER_ALLOW_EXTERNAL=1` disables the app-level localhost guard (requests arrive from the bridge/tunnel, never 127.0.0.1).
+- **Reader/writer auth** (`api/main.py:write_gate`): reads (GET) are open; mutating requests require an allowlisted **Cloudflare Access JWT** (`core/cf_access.py`, verified against `AITELIER_CF_TEAM_DOMAIN` + `AITELIER_CF_AUD`, email ∈ `AITELIER_WRITERS`) **or** the CLI's `AITELIER_ADMIN_TOKEN` (`X-AItelier-Admin-Token` header, honored only off-tunnel). The frontend read-only mode (`/api/me` → `can_write`) is UX only — the server gate is the control. Gate is inactive unless `AITELIER_CF_AUD` is set (local dev).
+- **API-key secret:** `DEEPSEEK_API_KEY` is delivered as a Docker **secret file** (`~/.aitelier-secrets/DEEPSEEK_API_KEY` → `/run/secrets/DEEPSEEK_API_KEY`), NOT an env var, so test/build subprocesses that inherit `os.environ` don't receive it. `core/ai_router.py:_read_secret` resolves `/run/secrets/<name>` → `$AITELIER_SECRETS_DIR/<name>` → `os.getenv`. Keep secrets out of `.env`/git (chmod 600).
+
+Env reference lives in `.env.example`.
+
 ## Architecture
 
 ### Repo Separation

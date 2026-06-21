@@ -16,13 +16,15 @@ if _env_file.exists():
                 if _key not in _os.environ:
                     _os.environ[_key] = _val
 
-import hmac as _hmac
+import hashlib as _hashlib
+import re as _re
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from core import cf_access
+from api import authz
 from api.routers import router as tasks_router
 from api.project_routers import router as projects_router
 from api.settings_routers import router as settings_router
@@ -187,13 +189,53 @@ app.include_router(config_router)
 
 # ── Serve generated web UI static files ──
 _WEB_DIR = _Path(__file__).resolve().parent.parent / "web"
+
+# Asset cache-busting: stamp each local /web asset URL in index.html with a short
+# content hash. The HTML is served no-cache, so a deploy is picked up at once;
+# the hashed URLs let Cloudflare/browsers cache the JS/CSS indefinitely yet
+# refetch the instant a file's contents change (a new hash = a new URL). Without
+# this, Cloudflare serves a stale bundle by URL until its TTL expires.
+_ASSET_HASH_CACHE: dict[str, tuple] = {}
+_ASSET_REF_RE = _re.compile(r'(src|href)="(/web/[^"?]+)"')
+
+
+def _asset_version(rel_path: str) -> str | None:
+    """Short content hash for a /web asset, memoised by (mtime, size)."""
+    fp = _WEB_DIR / rel_path
+    try:
+        st = fp.stat()
+    except OSError:
+        return None
+    sig = (st.st_mtime, st.st_size)
+    cached = _ASSET_HASH_CACHE.get(rel_path)
+    if cached and cached[0] == sig:
+        return cached[1]
+    h = _hashlib.sha1(fp.read_bytes()).hexdigest()[:10]
+    _ASSET_HASH_CACHE[rel_path] = (sig, h)
+    return h
+
+
+def _render_index_html() -> str:
+    html = (_WEB_DIR / "index.html").read_text(encoding="utf-8")
+
+    def _stamp(m):
+        attr, url = m.group(1), m.group(2)
+        version = _asset_version(url[len("/web/"):])
+        return f'{attr}="{url}?v={version}"' if version else m.group(0)
+
+    return _ASSET_REF_RE.sub(_stamp, html)
+
+
 if _WEB_DIR.is_dir():
     app.mount("/web", StaticFiles(directory=str(_WEB_DIR)), name="web_ui")
 
     @app.get("/")
     async def serve_index():
-        """Serve the SPA entry point."""
-        return FileResponse(_WEB_DIR / "index.html")
+        """Serve the SPA entry point with content-hashed asset URLs."""
+        return HTMLResponse(
+            _render_index_html(),
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
 
 # When running in Docker (and fronted by Cloudflare Access), requests arrive
@@ -217,42 +259,21 @@ async def localhost_only(request: Request, call_next):
 # ── Write-gate: reads open (Cloudflare Access guards them at the edge),
 #    mutating requests require an allowlisted Cloudflare identity or the admin
 #    token (used by the host CLI, which reaches the origin without a JWT). Only
-#    enforced when Cloudflare verification is configured. ──────────────────────
-_WRITERS = {
-    e.strip().lower()
-    for e in _os.getenv("AITELIER_WRITERS", "").split(",")
-    if e.strip()
-}
-_ADMIN_TOKEN = _os.getenv("AITELIER_ADMIN_TOKEN", "").strip()
+#    enforced when Cloudflare verification is configured. Writer determination
+#    lives in api/authz so the GET-endpoint guard (require_writer) can't diverge
+#    from this middleware. ───────────────────────────────────────────────────
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-_WRITE_GATE_ENABLED = cf_access.is_configured()
 
 
 @app.middleware("http")
 async def write_gate(request: Request, call_next):
     """Require write authorization for mutating requests."""
-    if getattr(request.app.state, "_test_mode", False) or not _WRITE_GATE_ENABLED:
+    if getattr(request.app.state, "_test_mode", False) or not authz.gate_enabled():
         return await call_next(request)
     if request.method in _SAFE_METHODS or request.url.path == "/health":
         return await call_next(request)
-
-    # Admin token (host CLI) → full access, but ONLY off-tunnel. Cloudflare
-    # forwards custom headers, so a leaked token must not be usable through the
-    # public edge; requests via Cloudflare carry Cf-Ray / the Access JWT.
-    via_cloudflare = bool(
-        request.headers.get("Cf-Ray")
-        or request.headers.get("Cf-Access-Jwt-Assertion")
-    )
-    token = request.headers.get("X-AItelier-Admin-Token", "")
-    if (not via_cloudflare and _ADMIN_TOKEN and token
-            and _hmac.compare_digest(token, _ADMIN_TOKEN)):
+    if authz.request_can_write(request):
         return await call_next(request)
-
-    # Otherwise require an allowlisted Cloudflare Access identity.
-    email = cf_access.email_from_request_headers(request.headers, request.cookies)
-    if email and email in _WRITERS:
-        return await call_next(request)
-
     return JSONResponse(
         {"detail": "Write access denied — read-only. Sign in as an authorized user."},
         status_code=403,
@@ -271,8 +292,8 @@ def whoami(request: Request):
     email = cf_access.email_from_request_headers(request.headers, request.cookies)
     return {
         "email": email,
-        "can_write": bool(not _WRITE_GATE_ENABLED or (email and email in _WRITERS)),
-        "gate_enabled": _WRITE_GATE_ENABLED,
+        "can_write": authz.request_can_write(request),
+        "gate_enabled": authz.gate_enabled(),
     }
 
 

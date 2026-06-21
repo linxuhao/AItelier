@@ -28,6 +28,7 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner, enrich_project_status
 from api.auth import CurrentUser, get_optional_user
+from api.authz import require_writer
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -230,8 +231,9 @@ def repo_status(
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
 ):
-    """Read-only git snapshot of the project code repo (branch, dirty state,
-    ahead/behind, remote, recent commits) for the repository panel."""
+    """Git snapshot of the project code repo (branch, dirty state, ahead/behind,
+    remote, recent commits) for the repository panel. Open read — status is
+    metadata only; the archive download and all write ops stay writer-only."""
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -239,14 +241,15 @@ def repo_status(
     return ws.repo_status(project_id)
 
 
-@router.get("/{project_id}/repo/archive")
+@router.get("/{project_id}/repo/archive", dependencies=[Depends(require_writer)])
 def repo_archive(
     project_id: str,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
 ):
-    """Download the project code repo as a zip (working tree, excluding .git)."""
+    """Download the project code repo as a zip (working tree, excluding .git).
+    Writer-only — the archive exposes the whole repo, so it is not a public read."""
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

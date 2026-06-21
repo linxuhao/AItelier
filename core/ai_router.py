@@ -110,6 +110,8 @@ class AIGateway:
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.provider = None
+        # Phase 0 cache telemetry: usage of the most recent completion.
+        self.last_usage: dict = {}
 
         # 读取本地 Provider 注册表
         if os.path.exists(config_path) and '/' in model_name:
@@ -141,6 +143,56 @@ class AIGateway:
         litellm.telemetry = False
         litellm.drop_params = True
 
+    # ── cache telemetry ──────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_usage(response) -> dict:
+        """Pull token + prompt-cache stats from a completion response.
+
+        Normalizes across providers:
+          - DeepSeek: usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
+          - OpenAI-style: usage.prompt_tokens_details.cached_tokens
+        Cache-hit tokens on DeepSeek bill at ~1/10th, so hit_ratio is the
+        key cost lever this telemetry measures. Returns {} if no usage.
+        """
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return {}
+
+        def _num(v):
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+        try:
+            prompt_tokens = _num(getattr(usage, "prompt_tokens", None)) or 0
+            completion_tokens = _num(getattr(usage, "completion_tokens", None)) or 0
+
+            # DeepSeek exposes explicit hit/miss split.
+            hit = _num(getattr(usage, "prompt_cache_hit_tokens", None))
+            miss = _num(getattr(usage, "prompt_cache_miss_tokens", None))
+            # OpenAI-style nests cached count under prompt_tokens_details.
+            if hit is None:
+                details = getattr(usage, "prompt_tokens_details", None)
+                cached = _num(getattr(details, "cached_tokens", None)) if details else None
+                if cached is not None:
+                    hit = cached
+                    miss = prompt_tokens - cached
+
+            if not prompt_tokens and hit is None:
+                return {}
+
+            hit = hit or 0
+            miss = miss if miss is not None else (prompt_tokens - hit)
+            hit_ratio = (hit / prompt_tokens) if prompt_tokens else 0.0
+            return {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cache_hit_tokens": hit,
+                "cache_miss_tokens": max(miss, 0),
+                "hit_ratio": round(hit_ratio, 4),
+            }
+        except (TypeError, ValueError):
+            return {}
+
     # ── shared kwargs builder ────────────────────────────────────────
 
     @staticmethod
@@ -166,6 +218,21 @@ class AIGateway:
             cleaned.append(m)
         return cleaned
 
+    def _cache_control_points(self):
+        """Return LiteLLM cache_control_injection_points for explicit-cache
+        providers (Anthropic family), else None.
+
+        Marks the system message as the breakpoint so everything up to and
+        including it (tools + system) is cached. DeepSeek/Minimax/OpenAI use
+        automatic prefix caching and are intentionally excluded — sending them
+        a cache_control field is at best ignored and at worst rejected.
+        """
+        model = (self.litellm_model or "").lower()
+        is_anthropic = self.provider == "anthropic" or "claude" in model or "anthropic" in model
+        if not is_anthropic:
+            return None
+        return [{"location": "message", "role": "system"}]
+
     def _build_kwargs(self, messages: list[dict], **extra) -> dict:
         """Build litellm completion kwargs from state + extra."""
         messages = self._sanitize_messages(messages)
@@ -185,6 +252,14 @@ class AIGateway:
             kwargs["api_base"] = self.api_base
         if self.api_key:
             kwargs["api_key"] = self.api_key
+
+        # Phase 5: explicit-cache providers (Anthropic family) need a
+        # cache_control breakpoint to cache the prefix; auto-cachers
+        # (DeepSeek/Minimax/OpenAI) rely on prefix stability and must NOT
+        # receive a cache_control field, so this is gated to Anthropic models.
+        points = self._cache_control_points()
+        if points:
+            kwargs["cache_control_injection_points"] = points
 
         # Thinking mode: inject reasoning params, remove incompatible temperature
         if self.enable_thinking:
@@ -234,6 +309,7 @@ class AIGateway:
 
         try:
             response = litellm.completion(**kwargs)
+            self.last_usage = self._extract_usage(response)
             return response.choices[0].message.content.strip()
         except Exception as e:
             raise e
@@ -275,6 +351,7 @@ class AIGateway:
 
         try:
             response = litellm.completion(**kwargs)
+            self.last_usage = self._extract_usage(response)
             msg = response.choices[0].message
         except Exception as e:
             raise e

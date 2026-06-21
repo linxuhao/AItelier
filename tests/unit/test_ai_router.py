@@ -96,3 +96,81 @@ def test_generate_native_salvages_dsml_from_content():
     assert len(turn.tool_calls) == 1
     assert turn.tool_calls[0]["function"]["name"] == "read_file"
     assert turn.text == "Let me read it."  # markup stripped from text
+
+
+# ── Phase 0: prompt-cache usage telemetry ──────────────────────────────
+from types import SimpleNamespace
+
+
+def test_extract_usage_deepseek_hit_miss():
+    """DeepSeek exposes explicit prompt_cache_hit/miss_tokens."""
+    resp = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=1000, completion_tokens=200,
+        prompt_cache_hit_tokens=800, prompt_cache_miss_tokens=200,
+    ))
+    u = AIGateway._extract_usage(resp)
+    assert u["prompt_tokens"] == 1000
+    assert u["cache_hit_tokens"] == 800
+    assert u["cache_miss_tokens"] == 200
+    assert u["hit_ratio"] == 0.8
+
+
+def test_extract_usage_openai_cached_tokens():
+    """OpenAI-style nests cached count under prompt_tokens_details."""
+    resp = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=1000, completion_tokens=50,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=600),
+    ))
+    u = AIGateway._extract_usage(resp)
+    assert u["cache_hit_tokens"] == 600
+    assert u["cache_miss_tokens"] == 400
+    assert u["hit_ratio"] == 0.6
+
+
+def test_extract_usage_no_cache_fields():
+    """No cache info → hit=0, miss=all prompt tokens."""
+    resp = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=500, completion_tokens=20))
+    u = AIGateway._extract_usage(resp)
+    assert u["cache_hit_tokens"] == 0
+    assert u["cache_miss_tokens"] == 500
+    assert u["hit_ratio"] == 0.0
+
+
+def test_extract_usage_missing_usage():
+    """Response without usage → empty dict (no crash)."""
+    assert AIGateway._extract_usage(SimpleNamespace()) == {}
+
+
+def test_generate_sets_last_usage():
+    """generate() records last_usage from the response."""
+    gateway = AIGateway("deepseek/deepseek-v4-flash")
+    resp = MagicMock()
+    resp.choices[0].message.content = "ok"
+    resp.usage = SimpleNamespace(
+        prompt_tokens=100, completion_tokens=10,
+        prompt_cache_hit_tokens=40, prompt_cache_miss_tokens=60)
+    with patch('litellm.completion', return_value=resp):
+        gateway.generate("sys", "user")
+    assert gateway.last_usage["cache_hit_tokens"] == 40
+    assert gateway.last_usage["hit_ratio"] == 0.4
+
+
+# ── Phase 5: explicit-provider cache breakpoint ────────────────────────
+def test_cache_control_points_anthropic():
+    """Anthropic-family models get a system-message cache breakpoint."""
+    gw = AIGateway("anthropic/claude-sonnet-4-6")
+    pts = gw._cache_control_points()
+    assert pts == [{"location": "message", "role": "system"}]
+
+
+def test_cache_control_points_deepseek_none():
+    """Auto-cachers (DeepSeek/Minimax) must NOT get a cache_control field."""
+    assert AIGateway("deepseek/deepseek-v4-flash")._cache_control_points() is None
+    assert AIGateway("minimax/abab6.5")._cache_control_points() is None
+
+
+def test_build_kwargs_omits_cache_control_for_deepseek():
+    gw = AIGateway("deepseek/deepseek-v4-flash")
+    kwargs = gw._build_kwargs([{"role": "user", "content": "hi"}])
+    assert "cache_control_injection_points" not in kwargs

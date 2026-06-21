@@ -145,13 +145,16 @@
     }
   }
 
-  /** @returns {boolean} true if the current user may perform write actions. */
+  /** @returns {boolean} true only once /api/me has confirmed write permission.
+   * Fails closed (no write affordances) until then, so buttons never flash for
+   * a read-only user during the optimistic pre-resolution window. */
   function _canWrite() {
     try {
-      var api = window.AItelier && window.AItelier.API;
-      return (api && typeof api.canWrite === "function") ? api.canWrite() : true;
+      var app = window.AItelier && window.AItelier.App;
+      if (!app || !app.state) { return false; }
+      return !!(app.state.permissionResolved && app.state.canWrite);
     } catch (_e) {
-      return true;
+      return false;
     }
   }
 
@@ -287,6 +290,10 @@
     // by default and lazy-loaded on first expand.
     container.appendChild(
       _buildWorkspaceSection("", "Pipeline Artifacts", "dps", true));
+    // Repository panel: git *status* is an open read shown to everyone; the
+    // Download ZIP button and all write ops inside it stay writer-only (gated in
+    // _renderRepoStatus). Re-rendered on /api/me resolution so a writer's
+    // controls appear once permission is confirmed.
     container.appendChild(_buildRepoSection());
     container.appendChild(
       _buildWorkspaceSection("-code", "Project Repository", "code", false));
@@ -1283,22 +1290,25 @@
    */
   function _renderRepoStatus(data, panelBody) {
     var wrap = document.createElement("div");
-
-    // Download ZIP is available regardless of git state (read action).
-    var actions = document.createElement("div");
-    actions.style.margin = "0 0 0.75rem 0";
     var api = window.AItelier && window.AItelier.API;
-    var dl = document.createElement("a");
-    dl.textContent = "⬇ Download ZIP";
-    dl.setAttribute("role", "button");
-    dl.className = "outline";
-    dl.style.fontSize = "0.85rem";
-    dl.setAttribute("download", "");
-    if (api && typeof api.repoArchiveUrl === "function") {
-      dl.href = api.repoArchiveUrl(_projectId);
+
+    // Download ZIP exposes the whole repo → writer-only (the backend also gates
+    // /repo/archive). Status below is an open read shown to everyone.
+    if (_canWrite()) {
+      var actions = document.createElement("div");
+      actions.style.margin = "0 0 0.75rem 0";
+      var dl = document.createElement("a");
+      dl.textContent = "⬇ Download ZIP";
+      dl.setAttribute("role", "button");
+      dl.className = "outline";
+      dl.style.fontSize = "0.85rem";
+      dl.setAttribute("download", "");
+      if (api && typeof api.repoArchiveUrl === "function") {
+        dl.href = api.repoArchiveUrl(_projectId);
+      }
+      actions.appendChild(dl);
+      wrap.appendChild(actions);
     }
-    actions.appendChild(dl);
-    wrap.appendChild(actions);
 
     if (!data.is_git) {
       wrap.appendChild(_repoLine("Status", "Not a git repository"));

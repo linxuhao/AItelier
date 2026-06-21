@@ -50,8 +50,16 @@
     /** @type {number} — count of reconnection attempts */
     reconnectAttempt: 0,
 
-    /** @type {boolean} — whether the current user may perform writes */
-    canWrite: true,
+    /** @type {boolean} — whether the current user may perform writes. Defaults
+     * FALSE (fail closed) and is flipped true only when /api/me confirms it, so
+     * write controls never flash before permission is known. UX only — the
+     * backend write_gate enforces the actual policy. */
+    canWrite: false,
+
+    /** @type {boolean} — true once /api/me has resolved write permission.
+     * Write affordances gate on this so they fail closed until resolution, then
+     * the active view re-renders to reflect the confirmed permission. */
+    permissionResolved: false,
   };
 
 
@@ -72,13 +80,20 @@
     API.me().then(function (me) {
       var canWrite = !me || me.can_write !== false;
       state.canWrite = canWrite;
+      state.permissionResolved = true;
       API.setCanWrite(canWrite);
       if (!canWrite) {
         document.body.classList.add("readonly");
         _showReadOnlyBanner(me && me.email);
       }
+      // Re-render the active view so any controls rendered during the
+      // pre-resolution window now reflect the confirmed permission.
+      _refreshActiveViewPermissions();
     }).catch(function () {
-      // /api/me unreachable (e.g. local dev without gate) — leave writes on.
+      // /api/me unreachable (e.g. local dev without gate) — leave writes on,
+      // but mark resolved so affordances stop failing closed.
+      state.permissionResolved = true;
+      _refreshActiveViewPermissions();
     });
   }
 
@@ -94,6 +109,26 @@
       ? "Read-only — signed in as " + email + " (not authorized to make changes)."
       : "Read-only — sign in as an authorized user to make changes.";
     document.body.insertBefore(bar, document.body.firstChild);
+  }
+
+  /**
+   * Re-render the currently active view so write affordances pick up the
+   * confirmed permission once /api/me resolves. Best-effort: a missing view
+   * module is simply skipped.
+   */
+  function _refreshActiveViewPermissions() {
+    try {
+      var A = window.AItelier || {};
+      if (state.currentView === "project" && A.ProjectDetail &&
+          typeof A.ProjectDetail.refresh === "function") {
+        A.ProjectDetail.refresh();
+      } else if (state.currentView === "dashboard" && A.Dashboard &&
+          typeof A.Dashboard.refresh === "function") {
+        A.Dashboard.refresh();
+      }
+    } catch (_e) {
+      // Permission re-render is best-effort; views also self-correct on poll.
+    }
   }
 
 

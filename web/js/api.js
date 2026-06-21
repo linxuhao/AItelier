@@ -25,8 +25,11 @@
   var _DEFAULT_TIMEOUT = 10000;
 
   /** Read-only mode: when false, all mutating requests are short-circuited.
-   *  Set from GET /api/me on app init. Defaults to true (local/dev, no gate). */
-  var _canWrite = true;
+   *  Set from GET /api/me on app init. Defaults to FALSE (fail closed): writes
+   *  and write affordances stay off until /api/me confirms permission, so a
+   *  read-only user never sees a flash of write UI in the pre-resolution window.
+   *  Purely a client-side UX flag — the backend write_gate is the real control. */
+  var _canWrite = false;
   var _SAFE_METHODS = { GET: 1, HEAD: 1, OPTIONS: 1 };
 
 

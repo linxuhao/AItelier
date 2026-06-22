@@ -14,6 +14,15 @@
    *   AItelier.ProjectDetail.show({id: "my-proj"});
    *   AItelier.ProjectDetail.hide();
    *   AItelier.ProjectDetail.refresh();
+   *
+   * Template renderer functions are defined inline in this IIFE:
+   *   _renderInfoCardHtml(project, canWrite)
+   *   _renderCheckpointCardHtml(checkpoint, canWrite)
+   *   _renderQuickNavHtml(hasRun, hasTasks)
+   *   _renderRunOverviewHtml(run, expandedSteps)
+   *   _renderTaskTableHtml(tasks)
+   *   _renderRepoStatusHtml(repoData, canWrite)
+   *   _renderFileContentModalHtml(content, path)
    */
 
   // ── Constants ──────────────────────────────────────────────────────
@@ -209,191 +218,6 @@
     };
   }
 
-
-  // ── Render entry point ────────────────────────────────────────────
-
-  /**
-   * Fetch project data + tasks, then re-render the full view.
-   * Called by _refresh() after fetching data.
-   *
-   * @param {object} project — project object from API.getProject()
-   * @param {Array} tasks — task array from API.listTasks()
-   */
-  function _render(project, tasks, run) {
-    _cachedProject = project;
-    _cachedTasks = tasks || [];
-    _cachedRun = run || null;
-
-    var container = document.getElementById("view-project");
-    if (!container) {
-      return;
-    }
-
-    // Clear existing content
-    container.innerHTML = "";
-
-    // ── Back link ──
-    var backLink = document.createElement("a");
-    backLink.href = "#/";
-    backLink.textContent = "\u2190 Back to Dashboard";
-    backLink.style.display = "inline-block";
-    backLink.style.marginBottom = "var(--pico-spacing, 1rem)";
-    backLink.addEventListener("click", function (e) {
-      e.preventDefault();
-      try {
-        var router = window.AItelier && window.AItelier.Router;
-        if (router && typeof router.navigate === "function") {
-          router.navigate("#/");
-        }
-      } catch (_err) {
-        window.location.hash = "#/";
-      }
-    });
-    container.appendChild(backLink);
-
-    // ── Reconnect overlay ──
-    var reconnectOverlay = document.createElement("div");
-    reconnectOverlay.id = "project-reconnect-overlay";
-    reconnectOverlay.style.display = "none";
-    reconnectOverlay.style.position = "relative";
-    reconnectOverlay.style.textAlign = "center";
-    reconnectOverlay.style.padding = "2rem 1rem";
-    reconnectOverlay.style.backgroundColor = "rgba(255, 255, 255, 0.85)";
-    reconnectOverlay.style.borderRadius = "0.5rem";
-    reconnectOverlay.style.marginTop = "1rem";
-    reconnectOverlay.textContent = "Reconnecting\u2026";
-    container.appendChild(reconnectOverlay);
-
-    if (!project) {
-      return;
-    }
-
-    // Merge config manifest labels so step names render for any config.
-    _ensureConfigLabels();
-
-    // ── Dynamic content slot (info card + task table) ──
-    // Wrapped in a dedicated container so the polling refresh can update just
-    // this region in place — the workspace file trees below are built once and
-    // left alone, so a poll never collapses an expanded dir, resets scroll, or
-    // refetches the trees mid-interaction (#3).
-    var dynamic = document.createElement("div");
-    dynamic.id = "project-dynamic";
-    var cpCard = _renderCheckpointCard();
-    if (cpCard) {
-      dynamic.appendChild(cpCard);
-    }
-    dynamic.appendChild(_renderInfoCard(project));
-    var overview = _renderRunOverview(run);
-    if (overview) {
-      dynamic.appendChild(overview);
-    }
-    if (project.has_task_loop !== false) {
-      dynamic.appendChild(_renderTaskTable(tasks));
-    }
-    container.appendChild(dynamic);
-
-    // ── 3. Workspace File Trees (collapsible) ──
-    // Pipeline Artifacts (DPS staging) is small → expanded by default.
-    // Project Repository (the code repo) can hold hundreds of files → folded
-    // by default and lazy-loaded on first expand.
-    container.appendChild(
-      _buildWorkspaceSection("", "Pipeline Artifacts", "dps", true));
-    // Repository panel: git *status* is an open read shown to everyone; the
-    // Download ZIP button and all write ops inside it stay writer-only (gated in
-    // _renderRepoStatus). Re-rendered on /api/me resolution so a writer's
-    // controls appear once permission is confirmed.
-    container.appendChild(_buildRepoSection());
-    container.appendChild(
-      _buildWorkspaceSection("-code", "Project Repository", "code", false));
-
-    // ── Update reconnect overlay visibility ──
-    _updateReconnectOverlay();
-
-    // Record which project this shell was built for, so a stale poll for a
-    // different project forces a full rebuild instead of an in-place update.
-    container.dataset.renderedPid = _projectId || "";
-  }
-
-  /**
-   * In-place refresh of the dynamic content (info card + task table) only.
-   * Leaves the workspace file trees — and their scroll/expansion/open-file
-   * state — untouched. Falls back to a full _render() when the shell is
-   * missing or was built for a different project.
-   *
-   * @param {object} project — project object from API
-   * @param {Array} tasks — task array from API
-   */
-  function _updateDynamic(project, tasks, run) {
-    var container = document.getElementById("view-project");
-    var dynamic = document.getElementById("project-dynamic");
-    if (!container || !dynamic ||
-        container.dataset.renderedPid !== (_projectId || "")) {
-      _render(project, tasks, run);
-      return;
-    }
-
-    _cachedProject = project;
-    _cachedTasks = tasks || [];
-    _cachedRun = run || null;
-
-    // Remember which task rows are expanded so we can restore them after the
-    // table is rebuilt (expansion is otherwise click-only state).
-    var expandedIds = Object.keys(_expandedTaskRows);
-    // Preserve which loop steps the user expanded in the overview.
-    var expandedSteps = _expandedOverviewSteps;
-    _expandedOverviewSteps = {};
-
-    // Preserve an open rejection-feedback box (text + the step it targets) so a
-    // 3s poll doesn't wipe what the user is typing mid-rejection.
-    var openTa = dynamic.querySelector("#project-checkpoint-card .checkpoint-feedback textarea");
-    var openCard = dynamic.querySelector("#project-checkpoint-card");
-    var fbState = (openTa && openCard)
-      ? { step: openCard.dataset.step || "", value: openTa.value }
-      : null;
-
-    dynamic.innerHTML = "";
-    var cpCard = _renderCheckpointCard();
-    if (cpCard) {
-      dynamic.appendChild(cpCard);
-      // Re-open and restore the feedback box if the same checkpoint is still
-      // pending (otherwise it has been resolved and the box should stay closed).
-      if (fbState && cpCard.dataset.step === fbState.step) {
-        _toggleCheckpointFeedback(cpCard, fbState.step);
-        var restored = cpCard.querySelector(".checkpoint-feedback textarea");
-        if (restored) {
-          restored.value = fbState.value;
-        }
-      }
-    }
-    dynamic.appendChild(_renderInfoCard(project));
-    var overview = _renderRunOverview(run, expandedSteps);
-    if (overview) {
-      dynamic.appendChild(overview);
-    }
-    if (project.has_task_loop !== false) {
-      dynamic.appendChild(_renderTaskTable(tasks));
-    }
-
-    // Restore task-row expansion. _toggleTaskDetail toggles, so clear the flag
-    // first (it is still set from before the rebuild) and let toggle re-expand.
-    expandedIds.forEach(function (tid) {
-      var row = dynamic.querySelector('tr[data-task-id="' + tid + '"]');
-      if (row) {
-        delete _expandedTaskRows[tid];
-        _toggleTaskDetail(row, isNaN(Number(tid)) ? tid : Number(tid));
-      } else {
-        delete _expandedTaskRows[tid];
-      }
-    });
-
-    _updateReconnectOverlay();
-  }
-
-
-  // ════════════════════════════════════════════════════════════════════
-  //  Run Overview (pipeline stepper)
-  // ════════════════════════════════════════════════════════════════════
-
   /** Aggregate status across a step's instances → future|active|done|failed|skipped.
    * A step with no instances is "future" on a live run, but "skipped" once the
    * run is over (e.g. git_sync_pre only runs for existing/cloned repos). */
@@ -410,338 +234,168 @@
 
   /** Unicode glyph for an instance status. */
   function _statusGlyph(status) {
-    if (status === "completed") { return "✓"; }       // ✓
-    if (status === "failed") { return "✗"; }           // ✗
-    if (status === "running" || status === "claimed") { return "▶"; }  // ▶
-    return "○";                                         // ○
+    if (status === "completed") { return "\u2713"; }       // ✓
+    if (status === "failed") { return "\u2717"; }           // ✗
+    if (status === "running" || status === "claimed") { return "\u25B6"; }  // ▶
+    return "\u25CB";                                         // ○
   }
 
-  /** Render the per-loop-step instance detail panel below the strip. */
-  function _renderOverviewPanel(panel, manifest, byStep) {
-    panel.innerHTML = "";
-    Object.keys(_expandedOverviewSteps).forEach(function (stepId) {
-      var insts = byStep[stepId] || [];
-      if (!insts.length) { return; }
-      var block = document.createElement("div");
-      block.className = "run-detail-block";
-      var h = document.createElement("div");
-      h.className = "run-detail-title";
-      h.textContent = ((manifest.labels && manifest.labels[stepId]) || stepId) +
-        " — " + insts.length + " run(s)";
-      block.appendChild(h);
-      insts.forEach(function (s, i) {
-        var row = document.createElement("div");
-        row.className = "run-inst";
-        var rr = (s.retry_count || 0) + (s.validation_retry_count || 0);
-        row.textContent = "#" + (i + 1) + "  " + _statusGlyph(s.status) + " " + s.status +
-          (rr ? ("  ↻" + rr + " retr" + (rr === 1 ? "y" : "ies")) : "");
-        if (s.error) { row.title = s.error; }
-        block.appendChild(row);
-      });
-      panel.appendChild(block);
-    });
-  }
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Template-literal HTML Renderer Functions
+  // ════════════════════════════════════════════════════════════════════
+  //
+  //  Pure functions that return HTML strings (or null) for each project
+  //  page section.  Each is self-contained — takes data parameters, no
+  //  closure over _cachedProject / _cachedTasks / _cachedRun / etc.
+  //
+  //  Safety rules (apply to ALL functions):
+  //    1. All user-supplied text (names, prompts, paths, messages) MUST
+  //       be escaped via AItelier.Utils.escapeHtml() before interpolation.
+  //    2. Markdown content (briefs, checkpoint messages) MUST be rendered
+  //       via AItelier.Utils.renderMarkdown() (DOMPurify-internal).
+  //    3. All data-action values must exactly match the event-delegation
+  //       contract defined in the project design.
+  // ════════════════════════════════════════════════════════════════════
+
+  // ────────────────────────────────────────────────────────────────
+  //  1.  Project Info Card  —  _renderInfoCardHtml()
+  // ────────────────────────────────────────────────────────────────
 
   /**
-   * Render the pipeline overview stepper: every manifest step in order, marked
-   * done / active / future / failed, with retry (↻) and loop (×N) badges. Loop
-   * steps are clickable to reveal per-instance status in a panel below.
+   * Build the project info card as an HTML string.
    *
-   * @param {object} run — run detail (manifest + step instances) from getRun
-   * @param {object} [expandedSteps] — loop steps to keep expanded across refresh
-   * @returns {HTMLElement|null}
+   * @param {object|null} project  — project object from API.getProject()
+   * @param {boolean}      canWrite  — true if the current user has write access
+   * @returns {string|null}  HTML for the info card, or null if project is null
    */
-  function _renderRunOverview(run, expandedSteps) {
-    if (!run || !run.manifest || !Array.isArray(run.manifest.steps) ||
-        run.manifest.steps.length === 0) {
+  function _renderInfoCardHtml(project, canWrite) {
+    if (!project) {
       return null;
     }
-    // Seed expansion state from the preserved snapshot (poll refresh).
-    if (expandedSteps) {
-      Object.keys(expandedSteps).forEach(function (k) { _expandedOverviewSteps[k] = true; });
-    }
 
-    var manifest = run.manifest;
-    var byStep = {};
-    (run.steps || []).forEach(function (s) {
-      (byStep[s.step_id] = byStep[s.step_id] || []).push(s);
-    });
+    var utils = window.AItelier && window.AItelier.Utils;
+    var esc   = (utils && typeof utils.escapeHtml === "function")
+                ? function (s) { return utils.escapeHtml(s); }
+                : function (s) { return String(s); };
+    var md    = (utils && typeof utils.renderMarkdown === "function")
+                ? function (s) { return utils.renderMarkdown(s); }
+                : function (s) { return esc(s); };
+    var trunc = (utils && typeof utils.truncate === "function")
+                ? function (s, n) { return utils.truncate(s, n); }
+                : function (s, n) {
+                    return s.length > n ? s.slice(0, n) + "\u2026" : s;
+                  };
 
-    var section = document.createElement("section");
-    section.id = "run-overview";
-    section.className = "run-overview";
-
-    // Header with overall progress. Count only steps that actually ran (have
-    // instances) so a finished run that skipped a conditional step (e.g.
-    // git_sync_pre on a new repo) reads N/N, not N/total.
-    var terminal = run.status === "completed" || run.status === "failed";
-    var done = 0, ran = 0, skipped = 0;
-    manifest.steps.forEach(function (id) {
-      var insts = byStep[id] || [];
-      if (!insts.length) { if (terminal) { skipped++; } return; }
-      ran++;
-      if (insts.every(function (s) { return s.status === "completed"; })) { done++; }
-    });
-    var head = document.createElement("div");
-    head.className = "run-overview-head";
-    var title = document.createElement("strong");
-    title.textContent = "Pipeline";
-    head.appendChild(title);
-    var prog = document.createElement("span");
-    prog.className = "run-overview-progress";
-    // On a live run, future steps still count toward the total; on a finished
-    // run, skipped steps are excluded from the denominator and noted separately.
-    var denom = terminal ? ran : manifest.steps.length;
-    prog.textContent = done + "/" + denom + " steps" +
-      (run.status ? " · " + run.status : "") +
-      (skipped ? " · " + skipped + " skipped" : "");
-    head.appendChild(prog);
-    section.appendChild(head);
-
-    var strip = document.createElement("div");
-    strip.className = "run-strip";
-    var panel = document.createElement("div");
-    panel.className = "run-detail-panel";
-
-    manifest.steps.forEach(function (stepId) {
-      var insts = byStep[stepId] || [];
-      var label = (manifest.labels && manifest.labels[stepId]) || stepId;
-      var st = _aggStepStatus(insts, terminal);
-      var retries = insts.reduce(function (a, s) {
-        return a + (s.retry_count || 0) + (s.validation_retry_count || 0);
-      }, 0);
-      var isCheckpoint = manifest.checkpoints &&
-        Object.prototype.hasOwnProperty.call(manifest.checkpoints, stepId);
-
-      var pill = document.createElement("div");
-      pill.className = "run-step run-step-" + st;
-
-      var lbl = document.createElement("span");
-      lbl.className = "run-step-label";
-      lbl.textContent = (isCheckpoint ? "⏸ " : "") + label;
-      pill.appendChild(lbl);
-
-      if (insts.length > 1) {
-        var loopBadge = document.createElement("span");
-        loopBadge.className = "run-step-badge run-step-loop";
-        loopBadge.textContent = "×" + insts.length;
-        pill.appendChild(loopBadge);
-      }
-      if (retries > 0) {
-        var rb = document.createElement("span");
-        rb.className = "run-step-badge run-step-retry";
-        rb.textContent = "↻" + retries;
-        rb.title = retries + " retr" + (retries === 1 ? "y" : "ies");
-        pill.appendChild(rb);
-      }
-
-      if (insts.length > 1) {
-        pill.classList.add("run-step-clickable");
-        pill.title = "Click to show per-task status";
-        pill.addEventListener("click", function () {
-          if (_expandedOverviewSteps[stepId]) {
-            delete _expandedOverviewSteps[stepId];
-          } else {
-            _expandedOverviewSteps[stepId] = true;
-          }
-          _renderOverviewPanel(panel, manifest, byStep);
-        });
-      } else if (insts.length === 1 && insts[0].error) {
-        pill.title = insts[0].error;
-      }
-
-      strip.appendChild(pill);
-    });
-
-    section.appendChild(strip);
-    _renderOverviewPanel(panel, manifest, byStep);
-    section.appendChild(panel);
-    return section;
-  }
-
-
-  // ════════════════════════════════════════════════════════════════════
-  //  1.  Project Info Card
-  // ════════════════════════════════════════════════════════════════════
-
-  /**
-   * Render the project info card section.
-   *
-   * @param {object} project — project object from API
-   * @returns {HTMLElement} the info card element
-   */
-  function _renderInfoCard(project) {
-    var card = document.createElement("section");
-    card.style.marginBottom = "var(--pico-spacing, 1rem)";
-    card.style.padding = "var(--pico-spacing, 1rem)";
-    card.style.border = "1px solid var(--muted-border-color, #e0e0e0)";
-    card.style.borderRadius = "0.5rem";
-
-    // ── Project name ──
-    var nameEl = document.createElement("h3");
-    nameEl.textContent = project.name || project.project_id || "";
-    nameEl.style.margin = "0 0 0.5rem 0";
-    card.appendChild(nameEl);
-
-    // ── Status badge ──
+    var name   = esc(project.name || project.project_id || "");
     var status = project.status || "planning";
     var parsed = _parseStatus(status);
-    var badge = document.createElement("span");
-    badge.className = "status-badge";
-    if (parsed.className) {
-      badge.classList.add(parsed.className);
-    }
-    badge.textContent = parsed.icon + " " + parsed.text;
-    badge.style.display = "inline-block";
-    badge.style.marginBottom = "0.5rem";
-    card.appendChild(badge);
+    var icon   = parsed.icon || "";
+    var txt    = esc(parsed.text || status);
+    var badgeClass = parsed.className || "";
 
-    // ── Current step ──
-    var step = project.current_project_step || "";
+    // Status badge HTML — single class attribute
+    var badgeHtml = '<span class="status-badge' +
+        (badgeClass ? ' ' + badgeClass : "") +
+        '">' + icon + " " + txt + "</span>";
+
+    // Description (brief, truncated to 200 chars, rendered markdown)
+    var brief      = project.brief || "";
+    var briefHtml  = "";
+    if (brief) {
+      var truncated = trunc(brief, 200);
+      briefHtml = '<p class="project-brief">' + md(truncated) + "</p>";
+    }
+
+    // Current step
+    var step    = project.current_project_step || "";
+    var stepHtml = "";
     if (step) {
       var stepLabel = _STEP_LABELS.hasOwnProperty(step) ? _STEP_LABELS[step] : step;
-      var stepEl = document.createElement("p");
-      stepEl.style.margin = "0.25rem 0";
-      stepEl.style.fontSize = "0.85rem";
-      stepEl.style.color = "var(--muted-color, #888)";
-      stepEl.textContent = "Current step: " + stepLabel;
-      card.appendChild(stepEl);
+      stepHtml = '<p style="margin:0.25rem 0;font-size:0.85rem;color:var(--muted-color,#888)">Current step: ' +
+        esc(stepLabel) + "</p>";
     }
 
-    // ── Brief description (first 200 chars) ──
-    var brief = project.brief || "";
-    if (brief) {
-      var briefEl = document.createElement("p");
-      briefEl.style.margin = "0.5rem 0";
-      briefEl.style.fontSize = "0.9rem";
-      briefEl.style.lineHeight = "1.5";
-      briefEl.textContent = (function () {
-        try {
-          var utils = window.AItelier && window.AItelier.Utils;
-          if (utils && typeof utils.truncate === "function") {
-            return utils.truncate(brief, 200);
-          }
-        } catch (_e) {
-          // fallthrough
-        }
-        return brief.length > 200 ? brief.slice(0, 200) + "\u2026" : brief;
-      })();
-      card.appendChild(briefEl);
-    }
-
-    // ── Action buttons ──
-    var btnRow = document.createElement("div");
-    btnRow.style.display = "flex";
-    btnRow.style.flexDirection = "row";
-    btnRow.style.gap = "0.5rem";
-    btnRow.style.flexWrap = "wrap";
-    btnRow.style.marginTop = "0.75rem";
-
-    var writable = _canWrite();
-
-    // Retry — only shown when status contains "failed"
-    var isFailed = status.indexOf("failed") !== -1;
-
-    if (isFailed && writable) {
-      var retryBtn = document.createElement("button");
-      retryBtn.id = "btn-project-retry";
-      retryBtn.textContent = "Retry";
-      retryBtn.className = "outline";
-      retryBtn.addEventListener("click", function () {
-        _handleActionRetry(this);
-      });
-      btnRow.appendChild(retryBtn);
-    }
-
-    // Refresh Planning — write action, shown only to writers
-    if (writable) {
-      var refreshBtn = document.createElement("button");
-      refreshBtn.id = "btn-project-refresh";
-      refreshBtn.textContent = "Refresh Planning";
-      refreshBtn.className = "outline";
-      refreshBtn.addEventListener("click", function () {
-        _handleActionRefresh(this);
-      });
-      btnRow.appendChild(refreshBtn);
-    }
-
-    // View Traces — open the execution-trace view for this project
-    var traceBtn = document.createElement("button");
-    traceBtn.id = "btn-project-trace";
-    traceBtn.textContent = "View Traces";
-    traceBtn.className = "outline";
-    traceBtn.addEventListener("click", function () {
-      var pid = _projectId;
-      var router = window.AItelier && window.AItelier.Router;
-      var target = "#/projects/" + encodeURIComponent(pid) + "/trace";
-      if (router && typeof router.navigate === "function") {
-        router.navigate(target);
-      } else {
-        window.location.hash = target;
-      }
-    });
-    btnRow.appendChild(traceBtn);
-
-    // Pause / Resume — toggle based on status
-    var isPaused = status.indexOf("paused") !== -1;
+    // Action buttons
+    var buttonsHtml = "";
+    var isFailed  = status.indexOf("failed") !== -1;
+    var isPaused  = status.indexOf("paused") !== -1;
     var isRunning = status.indexOf("running") !== -1 ||
                     status.indexOf("advancing") !== -1 ||
                     status.indexOf("planning") !== -1 ||
                     status.indexOf("executing") !== -1;
 
-    if (isPaused && writable) {
-      var resumeBtn = document.createElement("button");
-      resumeBtn.id = "btn-project-resume";
-      resumeBtn.textContent = "Resume";
-      resumeBtn.className = "outline";
-      resumeBtn.addEventListener("click", function () {
-        _handleActionPauseResume("executing", this);
-      });
-      btnRow.appendChild(resumeBtn);
-    } else if (isRunning && writable) {
-      var pauseBtn = document.createElement("button");
-      pauseBtn.id = "btn-project-pause";
-      pauseBtn.textContent = "Pause";
-      pauseBtn.className = "outline";
-      pauseBtn.addEventListener("click", function () {
-        _handleActionPauseResume("paused", this);
-      });
-      btnRow.appendChild(pauseBtn);
+    if (isFailed && canWrite) {
+      buttonsHtml += '<button data-action="project-retry" class="outline">Retry</button>\n';
     }
 
-    card.appendChild(btnRow);
-    return card;
+    if (canWrite) {
+      buttonsHtml += '<button data-action="project-refresh" class="outline">Refresh Planning</button>\n';
+    }
+
+    // View Traces — always visible (read-only action)
+    buttonsHtml += '<button data-action="project-trace" class="outline">View Traces</button>\n';
+
+    if (isPaused && canWrite) {
+      buttonsHtml += '<button data-action="project-resume" class="outline">Resume</button>\n';
+    } else if (isRunning && canWrite) {
+      buttonsHtml += '<button data-action="project-pause" class="outline">Pause</button>\n';
+    }
+
+    // Assemble card HTML
+    return '<article id="project-info-card" class="project-card">\n' +
+      '  <header class="project-card-header">\n' +
+      '    <h3 style="margin:0">' + name + '</h3>\n' +
+      "    " + badgeHtml + "\n" +
+      "  </header>\n" +
+      '  <div class="project-card-body">\n' +
+      briefHtml + "\n" +
+      stepHtml + "\n" +
+      "  </div>\n" +
+      '  <footer class="project-card-footer">\n' +
+      buttonsHtml +
+      "  </footer>\n" +
+      "</article>";
   }
 
 
-  // ── Inline checkpoint approval ────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────
+  //  2.  Checkpoint Approval Card  —  _renderCheckpointCardHtml()
+  // ────────────────────────────────────────────────────────────────
 
   /**
-   * Render the inline checkpoint-approval card for a pending checkpoint, or
-   * null when none is pending. Shown at the top of the dynamic region so the
-   * user can approve/reject a paused pipeline directly from the project view
-   * (and open the full file-diff modal) without depending on the chat
-   * transcript, which can scroll away or be lost on navigation.
+   * Build the inline checkpoint approval card as an HTML string, or null
+   * when no checkpoint is pending review.
    *
-   * @returns {HTMLElement|null}
+   * @param {object|null} checkpoint  — checkpoint data from API.getCheckpoint()
+   * @param {boolean}      canWrite    — true if the current user has write access
+   * @returns {string|null}
    */
-  function _renderCheckpointCard() {
-    var cp = _cachedCheckpoint;
-    if (!cp) {
+  function _renderCheckpointCardHtml(checkpoint, canWrite) {
+    if (!checkpoint) {
       return null;
     }
-    var step = cp.step || cp.checkpoint || "";
+    var step = checkpoint.step || checkpoint.checkpoint || "";
     if (!step) {
       return null;
     }
-    var label = cp.label || "Checkpoint";
 
-    // Conversational checkpoints (the meta-conversation "gather" Q&A) need a
-    // free-text reply, not a binary approve/reject — point the user to chat.
-    // Mirrors the legacy/manifest detection used by app.js and CheckpointModal.
+    var utils = window.AItelier && window.AItelier.Utils;
+    var esc   = (utils && typeof utils.escapeHtml === "function")
+                ? function (s) { return utils.escapeHtml(s); }
+                : function (s) { return String(s); };
+    var md    = (utils && typeof utils.renderMarkdown === "function")
+                ? function (s) { return utils.renderMarkdown(s); }
+                : function (s) { return esc(s); };
+
+    var label         = checkpoint.label || "Checkpoint";
+    var cpMessage     = checkpoint.checkpoint_message || checkpoint.message || "";
+    var diffSummary   = checkpoint.diff_summary || "";
+
+    // Detect conversational checkpoints
     var conversational = (step === "gather");
     try {
-      var cfgName = cp.config_name || cp.graph_name || "";
+      var cfgName = checkpoint.config_name || checkpoint.graph_name || "";
       var manifests = window.AItelier && window.AItelier.configManifests;
       var m = manifests && manifests[cfgName];
       if (m && m.checkpoints && m.checkpoints[step]
@@ -750,134 +404,1067 @@
       }
     } catch (_e) { /* fall back to legacy check */ }
 
-    var card = document.createElement("section");
-    card.id = "project-checkpoint-card";
-    card.dataset.step = step;
-    card.style.marginBottom = "var(--pico-spacing, 1rem)";
-    card.style.padding = "var(--pico-spacing, 1rem)";
-    card.style.border = "1px solid var(--pico-primary, #0172ad)";
-    card.style.borderLeftWidth = "4px";
-    card.style.borderRadius = "0.5rem";
+    var extraClass = conversational ? " conversational" : "";
 
-    var heading = document.createElement("h4");
-    heading.textContent = "⏸ " + label + " — awaiting review";
-    heading.style.margin = "0 0 0.5rem 0";
-    card.appendChild(heading);
-
-    var writable = _canWrite();
+    var html = '<article id="project-checkpoint-card" class="project-card checkpoint-card' +
+      extraClass + '" data-step="' + esc(step) + '">\n';
+    html += '  <header class="project-card-header">\n';
+    html += '    <h4 style="margin:0">\u23F8 ' + esc(label) + ' — awaiting review</h4>\n';
+    html += "  </header>\n";
+    html += '  <div class="project-card-body">\n';
 
     if (conversational) {
-      var hint = document.createElement("p");
-      hint.style.margin = "0.25rem 0 0.75rem 0";
-      hint.style.fontSize = "0.9rem";
-      hint.textContent = "This checkpoint is a conversation — answer it in chat to continue.";
-      card.appendChild(hint);
-
-      var chatBtn = document.createElement("button");
-      chatBtn.textContent = "Continue in chat";
-      chatBtn.addEventListener("click", function () {
-        var router = window.AItelier && window.AItelier.Router;
-        if (router && typeof router.navigate === "function") {
-          router.navigate("#/chat");
-        } else {
-          window.location.hash = "#/chat";
-        }
-      });
-      card.appendChild(chatBtn);
-      return card;
+      html += '    <p style="margin:0.25rem 0 0.75rem 0;font-size:0.9rem">This checkpoint is a conversation — answer it in chat to continue.</p>\n';
+      html += "  </div>\n";
+      html += '  <footer class="project-card-footer">\n';
+      html += '    <button data-action="checkpoint-chat">Continue in chat</button>\n';
+      html += "  </footer>\n";
+      html += "</article>";
+      return html;
     }
 
-    var hint2 = document.createElement("p");
-    hint2.style.margin = "0.25rem 0 0.75rem 0";
-    hint2.style.fontSize = "0.9rem";
-    hint2.style.color = "var(--muted-color, #888)";
-    hint2.textContent = writable
-      ? "The pipeline is paused. Approve to continue, or reject with feedback to redo this step."
-      : "The pipeline is paused for review. Sign in as a writer to approve or reject.";
-    card.appendChild(hint2);
+    // Standard (non-conversational) checkpoint
+    html += '    <p style="margin:0.25rem 0 0.75rem 0;font-size:0.9rem;color:var(--muted-color,#888)">' +
+      (canWrite
+        ? "The pipeline is paused. Approve to continue, or reject with feedback to redo this step."
+        : "The pipeline is paused for review. Sign in as a writer to approve or reject.") +
+      "</p>\n";
 
-    var btnRow = document.createElement("div");
-    btnRow.style.display = "flex";
-    btnRow.style.flexDirection = "row";
-    btnRow.style.gap = "0.5rem";
-    btnRow.style.flexWrap = "wrap";
-
-    if (writable) {
-      var approveBtn = document.createElement("button");
-      approveBtn.id = "btn-checkpoint-approve";
-      approveBtn.textContent = "Approve";
-      approveBtn.addEventListener("click", function () {
-        _handleCheckpointApprove(step, this);
-      });
-      btnRow.appendChild(approveBtn);
-
-      var rejectBtn = document.createElement("button");
-      rejectBtn.id = "btn-checkpoint-reject";
-      rejectBtn.textContent = "Reject…";
-      rejectBtn.className = "outline";
-      rejectBtn.addEventListener("click", function () {
-        _toggleCheckpointFeedback(card, step);
-      });
-      btnRow.appendChild(rejectBtn);
+    if (cpMessage) {
+      html += '    <div class="checkpoint-message">' + md(cpMessage) + "</div>\n";
     }
 
-    // "Review full diff" is a read action — open the existing file-diff modal.
-    var reviewBtn = document.createElement("button");
-    reviewBtn.id = "btn-checkpoint-review";
-    reviewBtn.textContent = "Review full diff";
-    reviewBtn.className = "outline";
-    reviewBtn.addEventListener("click", function () {
-      var modal = window.AItelier && window.AItelier.CheckpointModal;
-      if (modal && typeof modal.show === "function") {
-        modal.show(_projectId, cp);
-      }
-    });
-    btnRow.appendChild(reviewBtn);
+    if (diffSummary) {
+      html += '    <div class="checkpoint-diff-summary" style="margin-top:0.5rem;font-size:0.85rem;color:var(--muted-color,#888)">' +
+        esc(diffSummary) + "</div>\n";
+    }
 
-    card.appendChild(btnRow);
-    return card;
+    html += "  </div>\n";
+    html += '  <footer class="project-card-footer">\n';
+
+    if (canWrite) {
+      html += '    <button data-action="checkpoint-approve" data-step="' + esc(step) + '">Approve</button>\n';
+      html += '    <button data-action="checkpoint-reject" data-step="' + esc(step) + '" class="outline">Reject\u2026</button>\n';
+    }
+
+    html += '    <button data-action="checkpoint-review" data-step="' + esc(step) + '" class="outline">Review full diff</button>\n';
+    html += "  </footer>\n";
+
+    // Reject feedback block (initially hidden)
+    html += '  <div class="feedback-block hidden" data-step="' + esc(step) + '">\n';
+    html += '    <textarea placeholder="What should be changed? (required)" rows="3" style="width:100%"></textarea>\n';
+    html += '    <button data-action="checkpoint-submit" data-step="' + esc(step) + '" class="secondary" style="margin-top:0.5rem">Submit rejection</button>\n';
+    html += "  </div>\n";
+
+    html += "</article>";
+    return html;
   }
 
+
+  // ────────────────────────────────────────────────────────────────
+  //  3.  Quick Navigation Bar  —  _renderQuickNavHtml()
+  // ────────────────────────────────────────────────────────────────
+
   /**
-   * Reveal (or hide) the rejection-feedback textarea inside the checkpoint
-   * card. Feedback is required to reject, mirroring the modal's flow.
+   * Build the quick-navigation jump-link bar as an HTML string.
    *
-   * @param {HTMLElement} card — the checkpoint card element
-   * @param {string} step — checkpoint step ID
+   * @param {boolean} hasRun    — true if a run overview section will be rendered
+   * @param {boolean} hasTasks  — true if a task table section will be rendered
+   * @returns {string}
    */
-  function _toggleCheckpointFeedback(card, step) {
-    var existing = card.querySelector(".checkpoint-feedback");
-    if (existing) {
-      existing.parentElement.removeChild(existing);
+  function _renderQuickNavHtml(hasRun, hasTasks) {
+    var html = '<nav class="project-quick-nav">\n';
+    html += '  <span>Jump to:</span>\n';
+    if (hasTasks) {
+      html += '  <a class="quick-nav-link" data-action="quick-nav" data-target="project-tasks">Tasks</a>\n';
+    }
+    if (hasRun) {
+      html += '  <a class="quick-nav-link" data-action="quick-nav" data-target="run-overview">Pipeline</a>\n';
+    }
+    html += '  <a class="quick-nav-link" data-action="quick-nav" data-target="workspace-section-dps">Artifacts</a>\n';
+    html += '  <a class="quick-nav-link" data-action="quick-nav" data-target="repo-section">Repository</a>\n';
+    html += "</nav>";
+    return html;
+  }
+
+
+  // ────────────────────────────────────────────────────────────────
+  //  4.  Pipeline Run Overview  —  _renderRunOverviewHtml()
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Build the pipeline run-overview stepper as an HTML string, or null
+   * when no run / manifest is available.
+   *
+   * @param {object|null} run — run detail from API.getRun()
+   * @param {object}      expandedSteps — map of stepId → boolean for loop steps
+   * @returns {string|null}
+   */
+  function _renderRunOverviewHtml(run, expandedSteps) {
+    if (!run || !run.manifest || !Array.isArray(run.manifest.steps) ||
+        run.manifest.steps.length === 0) {
+      return null;
+    }
+
+    var manifest = run.manifest;
+    var terminal = run.status === "completed" || run.status === "failed";
+
+    // Group step instances by step_id
+    var byStep = {};
+    (run.steps || []).forEach(function (s) {
+      (byStep[s.step_id] = byStep[s.step_id] || []).push(s);
+    });
+
+    // Count progress
+    var done = 0, ran = 0, skipped = 0;
+    manifest.steps.forEach(function (id) {
+      var insts = byStep[id] || [];
+      if (!insts.length) {
+        if (terminal) { skipped++; }
+        return;
+      }
+      ran++;
+      if (insts.every(function (s) { return s.status === "completed"; })) { done++; }
+    });
+
+    var denom = terminal ? ran : manifest.steps.length;
+    var progressText = done + "/" + denom + " steps" +
+      (run.status ? " · " + run.status : "") +
+      (skipped ? " · " + skipped + " skipped" : "");
+
+    var esc = (window.AItelier && window.AItelier.Utils &&
+               typeof window.AItelier.Utils.escapeHtml === "function")
+              ? window.AItelier.Utils.escapeHtml
+              : function (s) { return String(s); };
+
+    var html = '<section id="run-overview" class="run-overview">\n';
+
+    // Header
+    html += '  <div class="run-overview-head">\n';
+    html += '    <strong>Pipeline</strong>\n';
+    html += '    <span class="run-overview-progress">' + esc(progressText) + '</span>\n';
+    html += "  </div>\n";
+
+    // Step strip
+    html += '  <div class="run-strip">\n';
+
+    manifest.steps.forEach(function (stepId) {
+      var insts      = byStep[stepId] || [];
+      var label      = (manifest.labels && manifest.labels[stepId]) || stepId;
+      var st         = _aggStepStatus(insts, terminal);
+      var retries    = insts.reduce(function (a, s) {
+        return a + (s.retry_count || 0) + (s.validation_retry_count || 0);
+      }, 0);
+      var isCheckpoint = manifest.checkpoints &&
+        Object.prototype.hasOwnProperty.call(manifest.checkpoints, stepId);
+
+      var pillClass = "run-step run-step-" + st;
+      var isClickable = insts.length > 1;
+
+      if (isClickable) {
+        pillClass += " run-step-clickable";
+      }
+
+      html += '    <div class="' + pillClass + '"';
+      if (isClickable) {
+        html += ' data-action="toggle-overview-step" data-step="' + esc(stepId) + '"';
+        html += ' title="Click to show per-task status"';
+      } else if (insts.length === 1 && insts[0].error) {
+        html += ' title="' + esc(insts[0].error) + '"';
+      }
+      html += ">\n";
+
+      html += '      <span class="run-step-label">' +
+        (isCheckpoint ? "\u23F8 " : "") + esc(label) + '</span>\n';
+
+      if (insts.length > 1) {
+        html += '      <span class="run-step-badge run-step-loop">\u00D7' +
+          insts.length + '</span>\n';
+      }
+      if (retries > 0) {
+        html += '      <span class="run-step-badge run-step-retry" title="' +
+          retries + " retr" + (retries === 1 ? "y" : "ies") + '">\u21BB' +
+          retries + '</span>\n';
+      }
+
+      html += "    </div>\n";
+    });
+
+    html += "  </div>\n";
+
+    // Detail panel — show expanded loop steps
+    var hasDetail = false;
+    var detailHtml = "";
+
+    if (expandedSteps) {
+      Object.keys(expandedSteps).forEach(function (stepId) {
+        if (!expandedSteps[stepId]) { return; }
+        var insts = byStep[stepId] || [];
+        if (!insts.length) { return; }
+        hasDetail = true;
+        var label = (manifest.labels && manifest.labels[stepId]) || stepId;
+        detailHtml += '    <div class="run-detail-block">\n';
+        detailHtml += '      <div class="run-detail-title">' +
+          esc(label) + " — " + insts.length + " run(s)</div>\n";
+
+        insts.forEach(function (s, i) {
+          var rr = (s.retry_count || 0) + (s.validation_retry_count || 0);
+          var glyph = _statusGlyph(s.status);
+          var line = "#" + (i + 1) + "  " + glyph + " " + s.status +
+            (rr ? ("  \u21BB" + rr + " retr" + (rr === 1 ? "y" : "ies")) : "");
+          detailHtml += '      <div class="run-inst"' +
+            (s.error ? ' title="' + esc(s.error) + '"' : "") + ">" +
+            esc(line) + "</div>\n";
+        });
+
+        detailHtml += "    </div>\n";
+      });
+    }
+
+    if (hasDetail) {
+      html += '  <div class="run-detail-panel">\n';
+      html += detailHtml;
+      html += "  </div>\n";
+    }
+
+    html += "</section>";
+    return html;
+  }
+
+
+  // ────────────────────────────────────────────────────────────────
+  //  5.  Task Table  —  _renderTaskTableHtml()
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Build the task list table as an HTML string.
+   *
+   * @param {Array} tasks — array of task objects from API.listTasks()
+   * @returns {string}
+   */
+  function _renderTaskTableHtml(tasks) {
+    var utils = window.AItelier && window.AItelier.Utils;
+    var esc   = (utils && typeof utils.escapeHtml === "function")
+                ? function (s) { return utils.escapeHtml(s); }
+                : function (s) { return String(s); };
+    var timeAgo = (utils && typeof utils.timeAgo === "function")
+                  ? function (t) { return utils.timeAgo(t); }
+                  : function (t) { return String(t); };
+    var truncFn = (utils && typeof utils.truncate === "function")
+                  ? function (s, n) { return utils.truncate(s, n); }
+                  : function (s, n) {
+                      return s.length > n ? s.slice(0, n) + "\u2026" : s;
+                    };
+
+    if (!tasks || tasks.length === 0) {
+      return '<div class="empty-state">No tasks yet</div>';
+    }
+
+    var html = '<section id="project-tasks">\n';
+    html += '  <h4>Tasks</h4>\n';
+    html += '  <table style="width:100%">\n';
+    html += "    <thead>\n";
+    html += "      <tr>\n";
+    html += '        <th class="col-idx">#</th>\n';
+    html += '        <th>Prompt</th>\n';
+    html += '        <th>Status</th>\n';
+    html += '        <th>Steps</th>\n';
+    html += '        <th>Created</th>\n';
+    html += "      </tr>\n";
+    html += "    </thead>\n";
+    html += '    <tbody id="task-tbody">\n';
+
+    for (var i = 0; i < tasks.length; i++) {
+      var task      = tasks[i];
+      var taskId    = task.id || "-";
+      var status    = task.status || "pending";
+      var parsed    = _parseStatus(status);
+      var icon      = parsed.icon || "";
+      var txt       = esc(parsed.text || status);
+      var badgeCls  = parsed.className || "";
+      var prompt    = task.prompt || "";
+      var truncated = truncFn(prompt, 80);
+      // completed_steps comes from the API as a JSON-encoded string
+      // (e.g. '["t_plan","t_impl"]'); parse it so .length is the step count
+      // (not the string length) and data-completed-steps isn't double-encoded.
+      var completedSteps = task.completed_steps || [];
+      if (typeof completedSteps === "string") {
+        try { completedSteps = JSON.parse(completedSteps); }
+        catch (_e) { completedSteps = []; }
+      }
+      if (!Array.isArray(completedSteps)) { completedSteps = []; }
+      var totalSteps     = task.total_steps;
+      var stepsStr = completedSteps.length + "/" +
+        (totalSteps != null ? totalSteps : "?") + " completed";
+      var created   = task.created_at || task.created || "";
+
+      html += '      <tr data-task-id="' + esc(String(taskId)) + '"' +
+        ' data-task-status="' + esc(status) + '"' +
+        ' data-completed-steps="' + esc(JSON.stringify(completedSteps)) + '"' +
+        ' data-prompt="' + esc(prompt) + '">\n';
+      html += '        <td class="col-idx">' + (i + 1) + '</td>\n';
+      html += '        <td class="task-prompt">' +
+        esc(truncated) + '</td>\n';
+      html += '        <td><span class="status-badge' +
+        (badgeCls ? " " + badgeCls : "") + '">' +
+        icon + " " + txt + '</span></td>\n';
+      html += '        <td>' + esc(stepsStr) + '</td>\n';
+      html += '        <td>' + esc(timeAgo(created)) + '</td>\n';
+      html += "      </tr>\n";
+    }
+
+    html += "    </tbody>\n";
+    html += "  </table>\n";
+    html += "</section>";
+
+    return html;
+  }
+
+
+  // ────────────────────────────────────────────────────────────────
+  //  6.  Repository Status Panel  —  _renderRepoStatusHtml()
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Build the repository status panel as an HTML string.
+   *
+   * @param {object}  repoData  — payload from API.repoStatus()
+   * @param {boolean} canWrite  — true if the current user has write access
+   * @returns {string}
+   */
+  function _renderRepoStatusHtml(repoData, canWrite) {
+    var esc = (window.AItelier && window.AItelier.Utils &&
+               typeof window.AItelier.Utils.escapeHtml === "function")
+              ? window.AItelier.Utils.escapeHtml
+              : function (s) { return String(s); };
+
+    var api = window.AItelier && window.AItelier.API;
+
+    var html = '<div class="repo-status-panel">\n';
+
+    // Download ZIP — only for writers
+    if (canWrite) {
+      var archiveUrl = (api && typeof api.repoArchiveUrl === "function")
+                       ? api.repoArchiveUrl(_projectId) : "#";
+      html += '  <div style="margin:0 0 0.75rem 0">\n';
+      html += '    <a href="' + esc(archiveUrl) +
+        '" role="button" class="outline" download="" ' +
+        'style="font-size:0.85rem">\u2B07 Download ZIP</a>\n';
+      html += "  </div>\n";
+    }
+
+    // Not a git repository
+    if (!repoData.is_git) {
+      html += '  <p style="margin:0.2rem 0;font-size:0.85rem"><strong>Status:</strong> Not a git repository</p>\n';
+      if (repoData.path) {
+        html += '  <p style="margin:0.2rem 0;font-size:0.85rem"><strong>Path:</strong> ' + esc(repoData.path) + "</p>\n";
+      }
+      html += "</div>";
+      return html;
+    }
+
+    // Branch
+    if (repoData.branch) {
+      html += '  <p style="margin:0.2rem 0;font-size:0.85rem"><strong>Branch:</strong> ' + esc(repoData.branch) + "</p>\n";
+    }
+
+    // Working tree state
+    html += '  <p style="margin:0.2rem 0;font-size:0.85rem"><strong>Working tree:</strong> ';
+    if (repoData.dirty) {
+      html += '<span class="status-badge status-warn">\u2717 ' +
+        esc(repoData.dirty_count || 0) + " uncommitted change(s)</span>";
+    } else {
+      html += '<span class="status-badge status-ok">\u2713 clean</span>';
+    }
+    html += "</p>\n";
+
+    // Remote + upstream
+    html += '  <p style="margin:0.2rem 0;font-size:0.85rem"><strong>Remote:</strong> ' +
+      esc(repoData.remote_url || "\u2014 none configured") + "</p>\n";
+
+    html += '  <p style="margin:0.2rem 0;font-size:0.85rem"><strong>Sync:</strong> ';
+    if (repoData.upstream && (repoData.ahead != null || repoData.behind != null)) {
+      html += esc((repoData.ahead || 0) + " ahead, " + (repoData.behind || 0) +
+        " behind " + repoData.upstream);
+    } else {
+      html += "no upstream tracking branch";
+    }
+    html += "</p>\n";
+
+    // Recent commits
+    var commits = repoData.commits || [];
+    html += '  <p style="margin:0.6rem 0 0.2rem 0;font-size:0.85rem"><strong>Recent commits:</strong></p>\n';
+
+    if (commits.length === 0) {
+      html += '  <p class="empty-state" style="padding:1rem">No commits yet</p>\n';
+    } else {
+      html += '  <ul class="repo-commit-list">\n';
+      for (var ci = 0; ci < commits.length && ci < 10; ci++) {
+        var c = commits[ci];
+        html += "    <li>\n";
+        html += '      <code>' + esc(c.hash || "") + '</code>\n';
+        html += "      " + esc(c.subject || "") + "\n";
+        html += '      <span style="color:var(--muted-color,#888);margin-left:0.5rem">' +
+          "\u2014 " + esc(c.author || "") +
+          (c.date ? ", " + esc(c.date.slice(0, 10)) : "") + "</span>\n";
+        html += "    </li>\n";
+      }
+      html += "  </ul>\n";
+    }
+
+    // Write action buttons (only for writers)
+    if (canWrite) {
+      html += '  <div class="repo-actions" style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-top:0.75rem;padding-top:0.75rem;border-top:1px solid var(--muted-border-color)">\n';
+
+      var actions = [
+        { label: repoData.remote_url ? "Set Remote" : "Add Remote", action: "repo-set-remote" },
+        { label: "Commit",    action: "repo-commit" },
+        { label: "Push",      action: "repo-push" },
+        { label: "Pull",      action: "repo-pull" },
+        { label: "Force Sync", action: "repo-force-sync" },
+        { label: "Make PR",   action: "repo-make-pr" },
+      ];
+
+      for (var ai = 0; ai < actions.length; ai++) {
+        html += '    <button data-action="' + actions[ai].action +
+          '" class="outline" style="font-size:0.8rem;margin:0">' +
+          esc(actions[ai].label) + "</button>\n";
+      }
+
+      html += "  </div>\n";
+    }
+
+    html += "</div>";
+    return html;
+  }
+
+
+  // ────────────────────────────────────────────────────────────────
+  //  7.  File Content Modal  —  _renderFileContentModalHtml()
+  // ────────────────────────────────────────────────────────────────
+
+  /**
+   * Build a file-content viewer <dialog> as an HTML string.
+   *
+   * @param {string} content  — the file content text
+   * @param {string} path     — the file path (for the title)
+   * @returns {string}
+   */
+  function _renderFileContentModalHtml(content, path) {
+    var esc = (window.AItelier && window.AItelier.Utils &&
+               typeof window.AItelier.Utils.escapeHtml === "function")
+              ? window.AItelier.Utils.escapeHtml
+              : function (s) { return String(s); };
+
+    // Detect binary content (null content or content containing null bytes)
+    var isBinary = (content === null || content === undefined ||
+                    (typeof content === "string" && content.indexOf("\x00") !== -1));
+
+    var displayContent = "";
+    if (isBinary) {
+      displayContent = "Cannot display binary content";
+    } else {
+      // Truncate at 50000 chars
+      displayContent = content.length > 50000
+        ? content.slice(0, 50000) + "\n\n... [truncated at 50000 chars]"
+        : content;
+    }
+
+    var html = '<dialog id="file-content-dialog" open ' +
+      'style="max-width:80vw;max-height:80vh;width:800px;padding:0;' +
+      'border:none;border-radius:0.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.3)">\n';
+
+    html += '  <article style="margin:0;padding:var(--pico-spacing,1rem);' +
+      'display:flex;flex-direction:column;max-height:80vh">\n';
+
+    // Header
+    html += '    <header style="flex-shrink:0;padding-bottom:var(--pico-spacing,1rem)">\n';
+    html += '      <h3 id="file-content-title" style="margin:0">' + esc(path) + '</h3>\n';
+    html += "    </header>\n";
+
+    // Content body
+    html += '    <div id="file-content-body" style="flex:1;overflow-y:auto;max-height:55vh;' +
+      'padding:0 0 var(--pico-spacing,1rem) 0;' +
+      'white-space:pre-wrap;word-wrap:break-word;' +
+      'font-family:\'SF Mono\',\'Consolas\',\'Liberation Mono\',monospace;' +
+      'font-size:0.85rem;line-height:1.5">\n';
+
+    if (isBinary) {
+      html += "      " + esc(displayContent) + "\n";
+    } else {
+      html += '      <pre style="margin:0"><code id="file-content-code">' +
+        esc(displayContent) + "</code></pre>\n";
+    }
+
+    html += "    </div>\n";
+
+    // Footer with close button
+    html += '    <footer style="flex-shrink:0;display:flex;flex-direction:row;' +
+      'justify-content:flex-end;padding-top:var(--pico-spacing,1rem);' +
+      'border-top:1px solid var(--muted-border-color,#e0e0e0)">\n';
+    html += '      <button data-action="close-modal" class="outline">Close</button>\n';
+    html += "    </footer>\n";
+
+    html += "  </article>\n";
+    html += "</dialog>";
+
+    return html;
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  View Shell — _render(), _updateDynamic(), _onDynamicClick()
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Fetch project data + tasks, then re-render the full view.
+   * Called by _refresh() after fetching data.
+   *
+   * Uses template-literal renderer functions (defined above) to build
+   * #project-dynamic content, then appends native <details> accordions
+   * for workspace sections (outside the dynamic region so they survive polling).
+   *
+   * @param {object} project — project object from API.getProject()
+   * @param {Array} tasks — task array from API.listTasks()
+   * @param {object|null} run — run detail from API.getRun()
+   */
+  function _render(project, tasks, run) {
+    _cachedProject = project;
+    _cachedTasks = tasks || [];
+    _cachedRun = run || null;
+
+    var container = document.getElementById("view-project");
+    if (!container) {
       return;
     }
 
-    var wrap = document.createElement("div");
-    wrap.className = "checkpoint-feedback";
-    wrap.style.marginTop = "0.75rem";
+    // Clear everything
+    container.innerHTML = "";
 
-    var ta = document.createElement("textarea");
-    ta.placeholder = "What should be changed? (required)";
-    ta.rows = 3;
-    ta.style.width = "100%";
-    wrap.appendChild(ta);
+    // ── Static shell elements (never change during polling) ──
+    // Back link
+    container.innerHTML += '<a href="#/" style="display:inline-block;margin-bottom:var(--pico-spacing,1rem)">\u2190 Back to Dashboard</a>';
 
-    var submit = document.createElement("button");
-    submit.textContent = "Submit rejection";
-    submit.className = "secondary";
-    submit.addEventListener("click", function () {
-      var feedback = (ta.value || "").trim();
-      if (!feedback) {
-        ta.focus();
-        ta.setAttribute("aria-invalid", "true");
-        return;
-      }
-      _handleCheckpointReject(step, feedback, this);
+    // Reconnect overlay
+    container.innerHTML += '<div id="project-reconnect-overlay" style="display:none;position:relative;text-align:center;padding:2rem 1rem;background-color:rgba(255,255,255,0.85);border-radius:0.5rem;margin-top:1rem">Reconnecting\u2026</div>';
+
+    if (!project) {
+      return;
+    }
+
+    // Merge config manifest labels so step names render for any config.
+    _ensureConfigLabels();
+
+    // ── Dynamic content slot (#project-dynamic) ──
+    var dynamic = document.createElement("div");
+    dynamic.id = "project-dynamic";
+
+    var html = "";
+    var cpHtml = _renderCheckpointCardHtml(_cachedCheckpoint, _canWrite());
+    if (cpHtml) html += cpHtml;
+    html += _renderQuickNavHtml(_cachedRun != null, tasks && tasks.length > 0);
+    html += _renderInfoCardHtml(project, _canWrite());
+    var runHtml = _renderRunOverviewHtml(_cachedRun, _expandedOverviewSteps);
+    if (runHtml) html += runHtml;
+    html += _renderTaskTableHtml(tasks);
+    dynamic.innerHTML = html;
+
+    // Bind event delegation on dynamic container
+    dynamic.addEventListener("click", _onDynamicClick);
+
+    container.appendChild(dynamic);
+
+    // ── <details> accordion sections (outside #project-dynamic) ──
+    // Pipeline Artifacts (DPS staging) is small → expanded by default.
+    // Project Repository (the code repo) can hold hundreds of files → folded
+    // by default and lazy-loaded on first expand.
+    container.appendChild(_buildWorkspaceDetails("workspace-section-dps", "Pipeline Artifacts", "dps", true));
+    container.appendChild(_buildRepoDetails());
+
+    // Attach separate event delegation for repo action buttons
+    // (repo-section is outside #project-dynamic, so _onDynamicClick doesn't cover it)
+    var _repoSection = document.getElementById("repo-section");
+    if (_repoSection) {
+      _repoSection.addEventListener("click", function _onRepoClick(event) {
+        var actionEl = event.target.closest("[data-action]");
+        if (!actionEl) return;
+        var action = actionEl.dataset.action;
+        switch (action) {
+          case "repo-set-remote":
+            event.preventDefault(); _actionRepoSetRemote(actionEl); break;
+          case "repo-commit":
+            event.preventDefault(); _actionRepoCommit(actionEl); break;
+          case "repo-push":
+            event.preventDefault(); _actionRepoPush(actionEl); break;
+          case "repo-pull":
+            event.preventDefault(); _actionRepoPull(actionEl); break;
+          case "repo-force-sync":
+            event.preventDefault(); _actionRepoForceSync(actionEl); break;
+          case "repo-make-pr":
+            event.preventDefault(); _actionRepoMakePR(actionEl); break;
+          case "repo-download":
+            // Let the browser navigate naturally
+            break;
+          case "close-modal":
+            event.preventDefault();
+            var closeDialog = actionEl.closest("dialog");
+            if (closeDialog && typeof closeDialog.close === "function") {
+              closeDialog.close();
+            }
+            break;
+        }
+      });
+    }
+
+    container.appendChild(_buildWorkspaceDetails("workspace-section-code", "Project Repository", "code", false));
+
+    // ── Update reconnect overlay visibility ──
+    _updateReconnectOverlay();
+
+    // Record which project this shell was built for, so a stale poll for a
+    // different project forces a full rebuild instead of an in-place update.
+    container.dataset.renderedPid = _projectId || "";
+  }
+
+  /**
+   * In-place refresh of the dynamic content (info card + task table) only.
+   * Leaves the workspace file trees — and their scroll/expansion/open-file
+   * state — untouched. Falls back to a full _render() when the shell is
+   * missing or was built for a different project.
+   *
+   * Preserves feedback textarea values, expanded task rows, and expanded
+   * overview steps across the innerHTML swap.
+   *
+   * @param {object} project — project object from API
+   * @param {Array} tasks — task array from API
+   * @param {object|null} run — run detail from API
+   */
+  function _updateDynamic(project, tasks, run) {
+    var container = document.getElementById("view-project");
+    var dynamic = document.getElementById("project-dynamic");
+    if (!container || !dynamic ||
+        container.dataset.renderedPid !== (_projectId || "")) {
+      _render(project, tasks, run);
+      return;
+    }
+
+    _cachedProject = project;
+    _cachedTasks = tasks || [];
+    _cachedRun = run || null;
+
+    // ── Snapshot state BEFORE innerHTML swap ──
+
+    // Expanded task row IDs
+    var expandedIds = Object.keys(_expandedTaskRows);
+
+    // Expanded overview steps (deep copy to avoid mutation)
+    var expandedSteps = {};
+    Object.keys(_expandedOverviewSteps).forEach(function (k) {
+      expandedSteps[k] = _expandedOverviewSteps[k];
     });
-    wrap.appendChild(submit);
+    _expandedOverviewSteps = {};
 
-    card.appendChild(wrap);
-    ta.focus();
+    // Feedback textarea state (open rejection box)
+    var fbBlock = dynamic.querySelector("#project-checkpoint-card .feedback-block:not(.hidden)");
+    var fbState = null;
+    if (fbBlock) {
+      var ta = fbBlock.querySelector("textarea");
+      if (ta) fbState = { step: fbBlock.dataset.step, value: ta.value };
+    }
+
+    // ── Rebuild dynamic content ──
+    dynamic.innerHTML = "";
+
+    var html = "";
+    var cpHtml = _renderCheckpointCardHtml(_cachedCheckpoint, _canWrite());
+    if (cpHtml) html += cpHtml;
+    html += _renderQuickNavHtml(run != null, tasks && tasks.length > 0);
+    html += _renderInfoCardHtml(project, _canWrite());
+    var runHtml = _renderRunOverviewHtml(run, expandedSteps);
+    if (runHtml) html += runHtml;
+    html += _renderTaskTableHtml(tasks);
+    dynamic.innerHTML = html;
+
+    // ── Restore state AFTER swap ──
+
+    // Restore feedback if same checkpoint step is still pending
+    if (fbState) {
+      var newBlock = dynamic.querySelector('.feedback-block[data-step="' + fbState.step + '"]');
+      if (newBlock) {
+        newBlock.classList.remove("hidden");
+        var restoredTa = newBlock.querySelector("textarea");
+        if (restoredTa) restoredTa.value = fbState.value;
+      }
+    }
+
+    // Restore task row expansion
+    expandedIds.forEach(function (tid) {
+      delete _expandedTaskRows[tid];
+      var row = dynamic.querySelector('tr[data-task-id="' + tid + '"]');
+      if (row) {
+        _toggleTaskDetail(row, isNaN(Number(tid)) ? tid : Number(tid));
+      }
+    });
+
+    _updateReconnectOverlay();
+  }
+
+  /**
+   * Single event-delegation click handler on #project-dynamic.
+   * Matches event.target.closest('[data-action]') and dispatches via switch.
+   * Also detects task row clicks via closest('tr[data-task-id]').
+   *
+   * @param {Event} event — the click event
+   */
+  function _onDynamicClick(event) {
+    // Check for data-action buttons first
+    var actionEl = event.target.closest("[data-action]");
+    if (actionEl) {
+      var action = actionEl.dataset.action;
+      switch (action) {
+        case "checkpoint-approve":
+          event.preventDefault();
+          _handleCheckpointApprove(actionEl.dataset.step, actionEl);
+          break;
+
+        case "checkpoint-reject":
+          event.preventDefault();
+          _toggleCheckpointFeedback(actionEl);
+          break;
+
+        case "checkpoint-submit":
+          event.preventDefault();
+          var cpStep = actionEl.dataset.step;
+          var cpCard = actionEl.closest("#project-checkpoint-card");
+          var cpFbValue = "";
+          if (cpCard) {
+            var cpFb = cpCard.querySelector(".feedback-block textarea");
+            if (cpFb) cpFbValue = cpFb.value;
+          }
+          _handleCheckpointReject(cpStep, cpFbValue || "", actionEl);
+          break;
+
+        case "checkpoint-review":
+          event.preventDefault();
+          var cp = _cachedCheckpoint;
+          if (cp && window.AItelier && AItelier.CheckpointModal) {
+            AItelier.CheckpointModal.show(_projectId, cp);
+          }
+          break;
+
+        case "checkpoint-chat":
+          event.preventDefault();
+          var cpRouter = window.AItelier && window.AItelier.Router;
+          if (cpRouter && typeof cpRouter.navigate === "function") {
+            cpRouter.navigate("#/chat");
+          } else {
+            window.location.hash = "#/chat";
+          }
+          break;
+
+        case "project-retry":
+          event.preventDefault();
+          _handleActionRetry(actionEl);
+          break;
+
+        case "project-refresh":
+          event.preventDefault();
+          _handleActionRefresh(actionEl);
+          break;
+
+        case "project-pause":
+          event.preventDefault();
+          _handleActionPauseResume("paused", actionEl);
+          break;
+
+        case "project-resume":
+          event.preventDefault();
+          _handleActionPauseResume("executing", actionEl);
+          break;
+
+        case "project-trace":
+          event.preventDefault();
+          var tracePid = _projectId;
+          var traceRouter = window.AItelier && window.AItelier.Router;
+          var traceTarget = "#/projects/" + encodeURIComponent(tracePid) + "/trace";
+          if (traceRouter && typeof traceRouter.navigate === "function") {
+            traceRouter.navigate(traceTarget);
+          } else {
+            window.location.hash = traceTarget;
+          }
+          break;
+
+        case "quick-nav":
+          event.preventDefault();
+          var targetId = actionEl.dataset.target;
+          var targetEl = document.getElementById(targetId);
+          if (targetEl) {
+            targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+          break;
+
+        case "toggle-overview-step":
+          event.preventDefault();
+          var stepKey = actionEl.dataset.step;
+          if (_expandedOverviewSteps[stepKey]) {
+            delete _expandedOverviewSteps[stepKey];
+          } else {
+            _expandedOverviewSteps[stepKey] = true;
+          }
+          // Re-render just the run overview portion in place
+          if (_cachedRun) {
+            var runSection = document.getElementById("run-overview");
+            if (runSection) {
+              var newOvHtml = _renderRunOverviewHtml(_cachedRun, _expandedOverviewSteps);
+              if (newOvHtml) {
+                runSection.outerHTML = newOvHtml;
+              } else {
+                runSection.parentElement.removeChild(runSection);
+              }
+            }
+          }
+          break;
+
+        case "repo-download":
+          // Let the browser navigate — no preventDefault
+          break;
+
+        case "repo-set-remote":
+          event.preventDefault();
+          _actionRepoSetRemote(actionEl);
+          break;
+
+        case "repo-commit":
+          event.preventDefault();
+          _actionRepoCommit(actionEl);
+          break;
+
+        case "repo-push":
+          event.preventDefault();
+          _actionRepoPush(actionEl);
+          break;
+
+        case "repo-pull":
+          event.preventDefault();
+          _actionRepoPull(actionEl);
+          break;
+
+        case "repo-force-sync":
+          event.preventDefault();
+          _actionRepoForceSync(actionEl);
+          break;
+
+        case "repo-make-pr":
+          event.preventDefault();
+          _actionRepoMakePR(actionEl);
+          break;
+
+        case "close-modal":
+          event.preventDefault();
+          var closeDialog = actionEl.closest("dialog");
+          if (closeDialog && typeof closeDialog.close === "function") {
+            closeDialog.close();
+          }
+          break;
+      }
+      return;
+    }
+
+    // Handle task row click
+    var taskRow = event.target.closest("tr[data-task-id]");
+    if (taskRow) {
+      event.preventDefault();
+      _toggleTaskDetail(taskRow, taskRow.dataset.taskId);
+    }
+  }
+
+
+  // ── Repo action helpers for event delegation ─────────────────────
+
+  function _actionRepoSetRemote(btn) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api) return;
+    var url = window.prompt("Remote URL (origin):", "");
+    if (!url) return;
+    _repoAction(btn, function () { return api.repoSetRemote(_projectId, url); }, btn.closest(".repo-status-panel"));
+  }
+
+  function _actionRepoCommit(btn) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api) return;
+    var msg = window.prompt("Commit message:", "");
+    if (!msg) return;
+    _repoAction(btn, function () {
+      return api.repoCommit(_projectId, msg).then(function (res) {
+        if (res && res.committed === false) {
+          throw new Error(res.message || "Nothing to commit");
+        }
+        return res;
+      });
+    }, btn.closest(".repo-status-panel"));
+  }
+
+  function _actionRepoPush(btn) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api) return;
+    _repoAction(btn, function () { return api.repoPush(_projectId); }, btn.closest(".repo-status-panel"));
+  }
+
+  function _actionRepoPull(btn) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api) return;
+    _repoAction(btn, function () { return api.repoPull(_projectId); }, btn.closest(".repo-status-panel"));
+  }
+
+  function _actionRepoForceSync(btn) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api) return;
+    var branch = window.prompt(
+      "Force-sync: fetch and HARD RESET the working tree to origin/<branch>.\n" +
+      "Local commits are discarded (a backup branch is created first).\n\n" +
+      "Branch to sync from:", "");
+    if (!branch) return;
+    if (!window.confirm(
+      "This DISCARDS uncommitted changes and local commits, resetting to " +
+      "origin/" + branch + ".\nA backup/<timestamp> branch is created first. Continue?")) {
+      return;
+    }
+    _repoAction(btn, function () {
+      return api.repoSync(_projectId, branch, true, true).then(function (res) {
+        if (res && res.backup_branch) {
+          window.alert("Synced to origin/" + branch +
+            ".\nPrevious state saved on branch: " + res.backup_branch);
+        }
+        return res;
+      });
+    }, btn.closest(".repo-status-panel"));
+  }
+
+  function _actionRepoMakePR(btn) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api) return;
+    var title = window.prompt("Pull request title:", "");
+    if (!title) return;
+    var base = window.prompt("Base branch (merge into):", "main");
+    if (!base) return;
+    var prBody = window.prompt("PR description (optional):", "") || "";
+    _repoAction(btn, function () {
+      return api.repoPR(_projectId, { title: title, body: prBody, base: base }).then(function (res) {
+        if (res && res.url) {
+          window.alert("Pull request #" + res.number + " created:\n" + res.url);
+          window.open(res.url, "_blank", "noopener");
+        }
+        return res;
+      });
+    }, btn.closest(".repo-status-panel"));
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  <details> Accordion Builders
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Build a workspace file-tree section as a native <details> accordion.
+   * The tree is fetched lazily on first expand.
+   *
+   * @param {string} id — DOM element id
+   * @param {string} summary — visible heading text
+   * @param {string} root — "dps" or "code"
+   * @param {boolean} open — start expanded?
+   * @returns {HTMLDetailsElement}
+   */
+  function _buildWorkspaceDetails(id, summary, root, open) {
+    var details = document.createElement("details");
+    details.id = id;
+    details.className = "workspace-details";
+    if (open) details.open = true;
+
+    var summ = document.createElement("summary");
+    summ.textContent = summary;
+    details.appendChild(summ);
+
+    var body = document.createElement("div");
+    body.className = "workspace-details-body";
+    body.style.padding = "var(--pico-spacing, 1rem)";
+    details.appendChild(body);
+
+    // Lazy load on first expand
+    var loaded = false;
+    details.addEventListener("toggle", function () {
+      if (details.open && !loaded) {
+        loaded = true;
+        var status = document.createElement("p");
+        status.className = "empty-state";
+        status.textContent = "Loading\u2026";
+        body.appendChild(status);
+        _fetchWorkspaceTree(body, root);
+      }
+    });
+
+    return details;
+  }
+
+  /**
+   * Build the Repository panel as a native <details> accordion.
+   * Fetched lazily on first expand.
+   *
+   * @returns {HTMLDetailsElement}
+   */
+  function _buildRepoDetails() {
+    var details = document.createElement("details");
+    details.id = "repo-section";
+    details.className = "workspace-details";
+
+    var summ = document.createElement("summary");
+    summ.textContent = "Repository";
+    details.appendChild(summ);
+
+    var body = document.createElement("div");
+    body.className = "workspace-details-body";
+    body.style.padding = "var(--pico-spacing, 1rem)";
+    details.appendChild(body);
+
+    var loaded = false;
+    details.addEventListener("toggle", function () {
+      if (details.open && !loaded) {
+        loaded = true;
+        var status = document.createElement("p");
+        status.className = "empty-state";
+        status.textContent = "Loading\u2026";
+        body.appendChild(status);
+        _fetchRepoStatus(body);
+      }
+    });
+
+    return details;
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Checkpoint Action Handlers
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Reveal (or hide) the rejection-feedback textarea inside the checkpoint
+   * card. The feedback block is pre-rendered with class "hidden" by the
+   * template renderer; this function toggles that class.
+   *
+   * @param {HTMLElement} btn — the "Reject\u2026" button that was clicked
+   */
+  function _toggleCheckpointFeedback(btn) {
+    var card = btn.closest("#project-checkpoint-card");
+    if (!card) return;
+    var fbBlock = card.querySelector(".feedback-block");
+    if (!fbBlock) return;
+    fbBlock.classList.toggle("hidden");
+    if (!fbBlock.classList.contains("hidden")) {
+      var ta = fbBlock.querySelector("textarea");
+      if (ta) {
+        ta.focus();
+        ta.removeAttribute("aria-invalid");
+      }
+    }
   }
 
   /**
@@ -896,7 +1483,7 @@
     }
     if (btn) {
       btn.disabled = true;
-      btn.textContent = "Approving…";
+      btn.textContent = "Approving\u2026";
     }
     api.approveCheckpoint(_projectId, step, "").then(function () {
       // Clear locally so the card disappears immediately; the next poll
@@ -927,9 +1514,19 @@
     if (!api || typeof api.rejectCheckpoint !== "function") {
       return;
     }
+    feedback = (feedback || "").trim();
+    if (!feedback) {
+      // Focus the textarea if we can find it
+      var card = btn && btn.closest("#project-checkpoint-card");
+      if (card) {
+        var ta = card.querySelector(".feedback-block textarea");
+        if (ta) { ta.focus(); ta.setAttribute("aria-invalid", "true"); }
+      }
+      return;
+    }
     if (btn) {
       btn.disabled = true;
-      btn.textContent = "Submitting…";
+      btn.textContent = "Submitting\u2026";
     }
     api.rejectCheckpoint(_projectId, step, feedback).then(function () {
       _cachedCheckpoint = null;
@@ -1101,160 +1698,15 @@
 
 
   // ════════════════════════════════════════════════════════════════════
-  //  2.  Task List Table
+  //  Task Table — _toggleTaskDetail()
   // ════════════════════════════════════════════════════════════════════
 
   /**
-   * Render the task list table section.
-   *
-   * @param {Array} tasks — array of task objects from API
-   * @returns {HTMLElement} the task section element
-   */
-  function _renderTaskTable(tasks) {
-    var section = document.createElement("section");
-    section.id = "project-tasks";
-    section.style.marginTop = "var(--pico-spacing, 1rem)";
-    section.style.marginBottom = "var(--pico-spacing, 1rem)";
-
-    var title = document.createElement("h4");
-    title.textContent = "Tasks";
-    section.appendChild(title);
-
-    // Empty state
-    if (!tasks || tasks.length === 0) {
-      var emptyMsg = document.createElement("p");
-      emptyMsg.className = "empty-state";
-      emptyMsg.textContent = "No tasks yet \u2014 type in chat to add tasks";
-      section.appendChild(emptyMsg);
-      return section;
-    }
-
-    // Table
-    var table = document.createElement("table");
-    table.style.width = "100%";
-
-    // thead
-    var thead = document.createElement("thead");
-    var headerTr = document.createElement("tr");
-    var headers = ["#", "Task ID", "Status", "Step", "Prompt"];
-    for (var h = 0; h < headers.length; h++) {
-      var th = document.createElement("th");
-      th.textContent = headers[h];
-      if (h === 0) { th.className = "col-idx"; }
-      headerTr.appendChild(th);
-    }
-    thead.appendChild(headerTr);
-    table.appendChild(thead);
-
-    // tbody
-    var tbody = document.createElement("tbody");
-    tbody.id = "task-tbody";
-
-    for (var i = 0; i < tasks.length; i++) {
-      var row = _createTaskRow(tasks[i], i + 1);
-      if (row) {
-        tbody.appendChild(row);
-      }
-    }
-
-    table.appendChild(tbody);
-    section.appendChild(table);
-
-    return section;
-  }
-
-  /**
-   * Create a task table row by cloning the #tpl-task-row template.
-   *
-   * @param {object} task — task object from API
-   * @param {number} index — 1-based row index
-   * @returns {HTMLTableRowElement|null}
-   */
-  function _createTaskRow(task, index) {
-    var template = document.getElementById("tpl-task-row");
-    if (!template) {
-      return null;
-    }
-
-    var row = template.content.cloneNode(true).firstElementChild;
-    if (!row) {
-      return null;
-    }
-
-    var cells = row.children;
-    if (cells.length < 5) {
-      return null;
-    }
-
-    var taskId = task.id || "-";
-
-    // # column
-    cells[0].textContent = String(index);
-
-    // Task ID
-    cells[1].textContent = String(taskId);
-
-    // Status badge
-    var status = task.status || "pending";
-    var parsed = _parseStatus(status);
-    var badge = cells[2].querySelector("span");
-    if (badge) {
-      badge.textContent = parsed.icon + " " + parsed.text;
-      badge.className = "status-badge";
-      if (parsed.className) {
-        badge.classList.add(parsed.className);
-      }
-    } else {
-      cells[2].textContent = parsed.icon + " " + parsed.text;
-    }
-
-    // Current step
-    var step = task.current_step || task.current_project_step || "";
-    cells[3].textContent = step || "-";
-
-    // Prompt (truncated to 60 chars)
-    var prompt = task.prompt || "";
-    cells[4].textContent = (function () {
-      try {
-        var utils = window.AItelier && window.AItelier.Utils;
-        if (utils && typeof utils.truncate === "function") {
-          return utils.truncate(prompt, 60);
-        }
-      } catch (_e) {
-        // fallthrough
-      }
-      return prompt.length > 60 ? prompt.slice(0, 60) + "\u2026" : prompt;
-    })();
-    cells[4].className = "task-prompt";
-
-    // Attach task data for click-to-expand
-    row.dataset.taskId = String(taskId);
-    row.dataset.taskStatus = status || "";
-    row.dataset.completedSteps = task.completed_steps || "[]";
-    // Stash the full (untruncated) prompt so the detail row can show it — the
-    // cell above only holds the 60-char preview.
-    row.dataset.prompt = prompt;
-
-    // ── Click handler: toggle detail row ──
-    (function (tr, tid) {
-      tr.addEventListener("click", function (e) {
-        // Only toggle on row click, not on child button clicks
-        if (e.target && e.target.tagName === "BUTTON") {
-          return;
-        }
-        _toggleTaskDetail(tr, tid);
-      });
-    })(row, taskId);
-
-    return row;
-  }
-
-  /**
    * Toggle the expanded detail row for a task.
-   * Shows completed steps and retry count.
+   * Shows the full prompt and completed steps.
    *
    * @param {HTMLTableRowElement} taskRow — the clicked task row
-   * @param {number} taskId — the task ID
+   * @param {number|string} taskId — the task ID
    */
   function _toggleTaskDetail(taskRow, taskId) {
     var isExpanded = !!_expandedTaskRows[taskId];
@@ -1282,6 +1734,7 @@
     } catch (_e) {
       completedSteps = [];
     }
+    if (!Array.isArray(completedSteps)) { completedSteps = []; }
 
     var detailTr = document.createElement("tr");
     detailTr.className = "task-detail-row";
@@ -1295,7 +1748,7 @@
     var content = document.createElement("div");
     content.style.lineHeight = "1.6";
 
-    // Full task prompt (the row cell only shows a 60-char preview)
+    // Full task prompt (the row cell only shows a short preview)
     var fullPrompt = taskRow.dataset.prompt || "";
     if (fullPrompt) {
       var promptLabel = document.createElement("strong");
@@ -1346,385 +1799,8 @@
 
 
   // ════════════════════════════════════════════════════════════════════
-  //  3.  Workspace File Tree
+  //  Workspace File Tree
   // ════════════════════════════════════════════════════════════════════
-
-  /**
-   * Build the read-only Repository panel: branch, working-tree state,
-   * ahead/behind vs upstream, remote URL, recent commits, and a Download ZIP
-   * action. All read-only — available to every user. The git snapshot is
-   * fetched lazily on first expand so the project view stays cheap.
-   *
-   * @returns {HTMLElement} the section element
-   */
-  function _buildRepoSection() {
-    var section = document.createElement("div");
-    section.id = "repo-section";
-    section.style.marginTop = "var(--pico-spacing, 1rem)";
-
-    var header = document.createElement("h4");
-    header.style.cursor = "pointer";
-    header.style.userSelect = "none";
-    var caret = document.createElement("span");
-    caret.textContent = "▸ ";
-    header.appendChild(caret);
-    header.appendChild(document.createTextNode("Repository"));
-    section.appendChild(header);
-
-    var body = document.createElement("div");
-    body.style.display = "none";
-    section.appendChild(body);
-
-    var loaded = false;
-    function _loadIfNeeded() {
-      if (loaded) { return; }
-      loaded = true;
-      var loading = document.createElement("p");
-      loading.className = "empty-state";
-      loading.textContent = "Loading…";
-      body.appendChild(loading);
-      _fetchRepoStatus(body);
-    }
-
-    header.addEventListener("click", function () {
-      var isOpen = body.style.display !== "none";
-      body.style.display = isOpen ? "none" : "block";
-      caret.textContent = isOpen ? "▸ " : "▾ ";
-      if (!isOpen) { _loadIfNeeded(); }
-    });
-
-    return section;
-  }
-
-  /**
-   * Fetch repo status into the given panel body and render it.
-   *
-   * @param {HTMLElement} body — the repo section body element
-   */
-  function _fetchRepoStatus(body) {
-    var api = window.AItelier && window.AItelier.API;
-    if (!api || typeof api.repoStatus !== "function") {
-      body.innerHTML = "";
-      var na = document.createElement("p");
-      na.className = "empty-state";
-      na.textContent = "Repository status not available";
-      body.appendChild(na);
-      return;
-    }
-
-    api.repoStatus(_projectId).then(function (data) {
-      body.innerHTML = "";
-      body.appendChild(_renderRepoStatus(data || {}, body));
-    }).catch(function () {
-      body.innerHTML = "";
-      var err = document.createElement("p");
-      err.className = "empty-state";
-      err.textContent = "Failed to load repository status";
-      body.appendChild(err);
-    });
-  }
-
-  /** A small "label: value" line for the repo panel. */
-  function _repoLine(label, value) {
-    var p = document.createElement("p");
-    p.style.margin = "0.2rem 0";
-    p.style.fontSize = "0.85rem";
-    var strong = document.createElement("strong");
-    strong.textContent = label + ": ";
-    p.appendChild(strong);
-    p.appendChild(document.createTextNode(value));
-    return p;
-  }
-
-  /** Surface a repo action error via the app's error toast. */
-  function _repoError(err) {
-    var msg = (err && err.message) || "Repository action failed";
-    try {
-      var app = window.AItelier && window.AItelier.App;
-      if (app && typeof app.showError === "function") { app.showError(msg); }
-      else { window.alert(msg); }
-    } catch (_e) { /* swallow */ }
-  }
-
-  /**
-   * Run a repo write action: disable the button, await the promise, then
-   * re-render the whole panel (which re-enables controls and reflects new
-   * state). Errors surface via the toast and re-enable the button.
-   *
-   * @param {HTMLButtonElement} btn — the clicked button
-   * @param {function():Promise} factory — produces the action promise
-   * @param {HTMLElement} panelBody — repo panel body to refresh on success
-   * @param {function(object)} [onOk] — optional success callback (gets result)
-   */
-  function _repoAction(btn, factory, panelBody, onOk) {
-    if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
-    factory().then(function (res) {
-      if (onOk) { try { onOk(res); } catch (_e) { /* ignore */ } }
-      _fetchRepoStatus(panelBody);
-    }).catch(function (err) {
-      if (btn) { btn.disabled = false; btn.removeAttribute("aria-busy"); }
-      _repoError(err);
-    });
-  }
-
-  /** Build the write-actions row for the repo panel (writers only). */
-  function _renderRepoActions(data, panelBody) {
-    var api = window.AItelier && window.AItelier.API;
-    var pid = _projectId;
-    var row = document.createElement("div");
-    row.style.display = "flex";
-    row.style.flexWrap = "wrap";
-    row.style.gap = "0.5rem";
-    row.style.marginTop = "0.75rem";
-    row.style.paddingTop = "0.75rem";
-    row.style.borderTop = "1px solid var(--muted-border-color, #e0e0e0)";
-
-    function mkBtn(label, handler) {
-      var b = document.createElement("button");
-      b.textContent = label;
-      b.className = "outline";
-      b.style.fontSize = "0.8rem";
-      b.style.margin = "0";
-      b.addEventListener("click", function () { handler(b); });
-      row.appendChild(b);
-      return b;
-    }
-
-    mkBtn(data.remote_url ? "Set Remote" : "Add Remote", function (b) {
-      var url = window.prompt("Remote URL (origin):", data.remote_url || "");
-      if (!url) { return; }
-      _repoAction(b, function () { return api.repoSetRemote(pid, url); }, panelBody);
-    });
-
-    mkBtn("Commit", function (b) {
-      var msg = window.prompt("Commit message:", "");
-      if (!msg) { return; }
-      _repoAction(b, function () { return api.repoCommit(pid, msg); }, panelBody,
-        function (res) { if (res && res.committed === false) { _repoError({ message: res.message }); } });
-    });
-
-    mkBtn("Push", function (b) {
-      _repoAction(b, function () { return api.repoPush(pid); }, panelBody);
-    });
-
-    mkBtn("Pull", function (b) {
-      _repoAction(b, function () { return api.repoPull(pid); }, panelBody);
-    });
-
-    mkBtn("Force Sync", function (b) {
-      var branch = window.prompt(
-        "Force-sync: fetch and HARD RESET the working tree to origin/<branch>.\n" +
-        "Local commits are discarded (a backup branch is created first).\n\n" +
-        "Branch to sync from:", data.branch || "main");
-      if (!branch) { return; }
-      if (!window.confirm(
-        "This DISCARDS uncommitted changes and local commits, resetting to " +
-        "origin/" + branch + ".\nA backup/<timestamp> branch is created first. Continue?")) {
-        return;
-      }
-      _repoAction(b, function () {
-        return api.repoSync(pid, branch, true, true);
-      }, panelBody, function (res) {
-        if (res && res.backup_branch) {
-          window.alert("Synced to origin/" + branch +
-            ".\nPrevious state saved on branch: " + res.backup_branch);
-        }
-      });
-    });
-
-    mkBtn("Make PR", function (b) {
-      var title = window.prompt("Pull request title:", "");
-      if (!title) { return; }
-      var base = window.prompt("Base branch (merge into):", "main");
-      if (!base) { return; }
-      var prBody = window.prompt("PR description (optional):", "") || "";
-      _repoAction(b, function () {
-        return api.repoPR(pid, { title: title, body: prBody, base: base });
-      }, panelBody, function (res) {
-        if (res && res.url) {
-          window.alert("Pull request #" + res.number + " created:\n" + res.url);
-          window.open(res.url, "_blank", "noopener");
-        }
-      });
-    });
-
-    return row;
-  }
-
-  /**
-   * Render a repo status payload into a DOM fragment.
-   *
-   * @param {object} data — payload from API.repoStatus
-   * @param {HTMLElement} [panelBody] — panel body, for action refresh
-   * @returns {HTMLElement}
-   */
-  function _renderRepoStatus(data, panelBody) {
-    var wrap = document.createElement("div");
-    var api = window.AItelier && window.AItelier.API;
-
-    // Download ZIP exposes the whole repo → writer-only (the backend also gates
-    // /repo/archive). Status below is an open read shown to everyone.
-    if (_canWrite()) {
-      var actions = document.createElement("div");
-      actions.style.margin = "0 0 0.75rem 0";
-      var dl = document.createElement("a");
-      dl.textContent = "⬇ Download ZIP";
-      dl.setAttribute("role", "button");
-      dl.className = "outline";
-      dl.style.fontSize = "0.85rem";
-      dl.setAttribute("download", "");
-      if (api && typeof api.repoArchiveUrl === "function") {
-        dl.href = api.repoArchiveUrl(_projectId);
-      }
-      actions.appendChild(dl);
-      wrap.appendChild(actions);
-    }
-
-    if (!data.is_git) {
-      wrap.appendChild(_repoLine("Status", "Not a git repository"));
-      if (data.path) { wrap.appendChild(_repoLine("Path", data.path)); }
-      return wrap;
-    }
-
-    var writable = _canWrite();
-
-    if (data.branch) { wrap.appendChild(_repoLine("Branch", data.branch)); }
-
-    // Working-tree state badge.
-    var stateLine = document.createElement("p");
-    stateLine.style.margin = "0.2rem 0";
-    stateLine.style.fontSize = "0.85rem";
-    var stateStrong = document.createElement("strong");
-    stateStrong.textContent = "Working tree: ";
-    stateLine.appendChild(stateStrong);
-    var stateBadge = document.createElement("span");
-    stateBadge.className = "status-badge";
-    if (data.dirty) {
-      stateBadge.classList.add("status-warn");
-      stateBadge.textContent = "✗ " + (data.dirty_count || 0) + " uncommitted change(s)";
-    } else {
-      stateBadge.classList.add("status-ok");
-      stateBadge.textContent = "✓ clean";
-    }
-    stateLine.appendChild(stateBadge);
-    wrap.appendChild(stateLine);
-
-    // Remote + upstream sync state.
-    wrap.appendChild(_repoLine("Remote", data.remote_url || "— none configured"));
-    if (data.upstream && (data.ahead != null || data.behind != null)) {
-      wrap.appendChild(_repoLine(
-        "Sync",
-        (data.ahead || 0) + " ahead, " + (data.behind || 0) +
-        " behind " + data.upstream));
-    } else {
-      wrap.appendChild(_repoLine("Sync", "no upstream tracking branch"));
-    }
-
-    // Recent commits.
-    var commits = data.commits || [];
-    var commitsHead = document.createElement("p");
-    commitsHead.style.margin = "0.6rem 0 0.2rem 0";
-    commitsHead.style.fontSize = "0.85rem";
-    var ch = document.createElement("strong");
-    ch.textContent = "Recent commits:";
-    commitsHead.appendChild(ch);
-    wrap.appendChild(commitsHead);
-
-    if (commits.length === 0) {
-      var noCommits = document.createElement("p");
-      noCommits.className = "empty-state";
-      noCommits.textContent = "No commits yet";
-      wrap.appendChild(noCommits);
-    } else {
-      var list = document.createElement("ul");
-      list.style.listStyle = "none";
-      list.style.paddingLeft = "0";
-      list.style.margin = "0";
-      list.style.fontSize = "0.8rem";
-      commits.forEach(function (c) {
-        var li = document.createElement("li");
-        li.style.padding = "0.15rem 0";
-        li.style.borderBottom = "1px solid var(--muted-border-color, #eee)";
-        var hash = document.createElement("code");
-        hash.textContent = c.hash;
-        hash.style.marginRight = "0.5rem";
-        li.appendChild(hash);
-        li.appendChild(document.createTextNode(c.subject || ""));
-        var meta = document.createElement("span");
-        meta.style.color = "var(--muted-color, #888)";
-        meta.style.marginLeft = "0.5rem";
-        meta.textContent = "— " + (c.author || "") +
-          (c.date ? ", " + c.date.slice(0, 10) : "");
-        li.appendChild(meta);
-        list.appendChild(li);
-      });
-      wrap.appendChild(list);
-    }
-
-    // Write actions (remote / commit / push / pull / force-sync / PR) — only
-    // for users with write permission and only when we have a panel body to
-    // refresh into after an action completes.
-    if (writable && panelBody) {
-      wrap.appendChild(_renderRepoActions(data, panelBody));
-    }
-
-    return wrap;
-  }
-
-  /**
-   * Build a collapsible workspace section with a clickable header.
-   *
-   * The tree is fetched into the section body. When expanded === false the
-   * section starts folded and the (potentially large) tree is fetched lazily
-   * on first expand, so the project view doesn't pull hundreds of repo files
-   * on every render.
-   *
-   * @param {string} idSuffix — appended to "workspace-section" for the id
-   * @param {string} title — section heading text
-   * @param {string} root — "dps" or "code"
-   * @param {boolean} expanded — start expanded (and fetch immediately)?
-   * @returns {HTMLElement} the section element
-   */
-  function _buildWorkspaceSection(idSuffix, title, root, expanded) {
-    var section = document.createElement("div");
-    section.id = "workspace-section" + idSuffix;
-    section.style.marginTop = "var(--pico-spacing, 1rem)";
-
-    var header = document.createElement("h4");
-    header.style.cursor = "pointer";
-    header.style.userSelect = "none";
-    var caret = document.createElement("span");
-    caret.textContent = expanded ? "▾ " : "▸ ";  // ▾ / ▸
-    header.appendChild(caret);
-    header.appendChild(document.createTextNode(title));
-    section.appendChild(header);
-
-    var body = document.createElement("div");
-    body.className = "workspace-body";
-    body.style.display = expanded ? "block" : "none";
-    section.appendChild(body);
-
-    var loaded = false;
-    function _loadIfNeeded() {
-      if (loaded) { return; }
-      loaded = true;
-      var status = document.createElement("p");
-      status.className = "empty-state";
-      status.textContent = "Loading…";
-      body.appendChild(status);
-      _fetchWorkspaceTree(body, root);
-    }
-
-    header.addEventListener("click", function () {
-      var isOpen = body.style.display !== "none";
-      body.style.display = isOpen ? "none" : "block";
-      caret.textContent = isOpen ? "▸ " : "▾ ";
-      if (!isOpen) { _loadIfNeeded(); }
-    });
-
-    if (expanded) { _loadIfNeeded(); }
-    return section;
-  }
 
   /**
    * Fetch a workspace tree from the API and render it as an expandable tree.
@@ -1818,6 +1894,7 @@
    * Render a nested tree structure as an expandable <ul>/<li> element.
    *
    * @param {Array<string>} treeArray — flat path array from API
+   * @param {string} root — "dps" or "code"
    * @returns {HTMLElement} the tree <ul> element
    */
   function _renderFileTree(treeArray, root) {
@@ -1842,6 +1919,7 @@
    * @param {object} node — tree node with _files and child dirs
    * @param {HTMLElement} parentEl — parent <ul> element
    * @param {string} parentPath — accumulated path prefix for this level
+   * @param {string} root — "dps" or "code"
    */
   function _renderTreeLevel(node, parentEl, parentPath, root) {
     if (!node || typeof node !== "object") {
@@ -1942,10 +2020,6 @@
       dirLi.appendChild(childrenUl);
 
       // Click handler: toggle directory expansion.
-      // childNode MUST be captured by the IIFE — it is a `var` (function-scoped)
-      // reassigned every loop iteration, so referencing it free would make every
-      // directory's handler see the LAST directory's node (all subfolders would
-      // then render the same files).
       (function (dp, chUl, node) {
         dirHeader.addEventListener("click", function (e) {
           e.stopPropagation();
@@ -1990,7 +2064,7 @@
 
   /**
    * Show file content in a modal/dialog.
-   * Creates a <dialog> element dynamically if one doesn't exist.
+   * Uses the template renderer _renderFileContentModalHtml() to build the dialog.
    *
    * @param {string} pid — project ID
    * @param {string} filePath — relative file path within workspace
@@ -2007,123 +2081,99 @@
       return;
     }
 
-    // Find or create the file content dialog
-    var dialog = document.getElementById("file-content-dialog");
-    if (!dialog) {
-      dialog = document.createElement("dialog");
-      dialog.id = "file-content-dialog";
-      dialog.style.maxWidth = "80vw";
-      dialog.style.maxHeight = "80vh";
-      dialog.style.width = "800px";
-      dialog.style.padding = "0";
-      dialog.style.border = "none";
-      dialog.style.borderRadius = "0.5rem";
-      dialog.style.boxShadow = "0 8px 32px rgba(0, 0, 0, 0.3)";
+    // Remove any existing file content dialog
+    var existing = document.getElementById("file-content-dialog");
+    if (existing) existing.remove();
 
-      var article = document.createElement("article");
-      article.style.margin = "0";
-      article.style.padding = "var(--pico-spacing, 1rem)";
-      article.style.display = "flex";
-      article.style.flexDirection = "column";
-      article.style.maxHeight = "80vh";
-
-      // Header
-      var header = document.createElement("header");
-      header.style.flexShrink = "0";
-      header.style.paddingBottom = "var(--pico-spacing, 1rem)";
-
-      var titleEl = document.createElement("h3");
-      titleEl.id = "file-content-title";
-      titleEl.style.margin = "0";
-      titleEl.textContent = filePath;
-      header.appendChild(titleEl);
-
-      article.appendChild(header);
-
-      // Content area
-      var contentDiv = document.createElement("div");
-      contentDiv.id = "file-content-body";
-      contentDiv.style.flex = "1";
-      contentDiv.style.overflowY = "auto";
-      contentDiv.style.maxHeight = "55vh";
-      contentDiv.style.padding = "0 0 var(--pico-spacing, 1rem) 0";
-      contentDiv.style.whiteSpace = "pre-wrap";
-      contentDiv.style.wordWrap = "break-word";
-      contentDiv.style.fontFamily = '"SF Mono", "Consolas", "Liberation Mono", monospace';
-      contentDiv.style.fontSize = "0.85rem";
-      contentDiv.style.lineHeight = "1.5";
-
-      var pre = document.createElement("pre");
-      pre.style.margin = "0";
-      var code = document.createElement("code");
-      code.id = "file-content-code";
-      pre.appendChild(code);
-      contentDiv.appendChild(pre);
-
-      article.appendChild(contentDiv);
-
-      // Footer with close button
-      var footer = document.createElement("footer");
-      footer.style.flexShrink = "0";
-      footer.style.display = "flex";
-      footer.style.flexDirection = "row";
-      footer.style.justifyContent = "flex-end";
-      footer.style.paddingTop = "var(--pico-spacing, 1rem)";
-      footer.style.borderTop = "1px solid var(--muted-border-color, #e0e0e0)";
-
-      var closeBtn = document.createElement("button");
-      closeBtn.id = "file-content-close";
-      closeBtn.textContent = "Close";
-      closeBtn.className = "outline";
-      closeBtn.addEventListener("click", function () {
-        if (typeof dialog.close === "function") {
-          dialog.close();
-        }
-      });
-      footer.appendChild(closeBtn);
-
-      article.appendChild(footer);
-      dialog.appendChild(article);
-      document.body.appendChild(dialog);
-
-      // Close on backdrop click
-      dialog.addEventListener("click", function (e) {
-        if (e.target === dialog) {
-          dialog.close();
-        }
-      });
-    }
-
-    // Update title
-    var titleEl = document.getElementById("file-content-title");
-    if (titleEl) {
-      titleEl.textContent = filePath;
-    }
-
-    // Show loading state
-    var codeEl = document.getElementById("file-content-code");
-    if (codeEl) {
-      codeEl.textContent = "Loading\u2026";
-    }
-
-    // Open the dialog
-    if (typeof dialog.showModal === "function") {
-      dialog.showModal();
-    }
-
-    // Fetch file content
+    // Fetch file content then show dialog
     api.workspaceFile(pid, filePath, root).then(function (data) {
       var content = (data && data.content) || "";
-      if (codeEl) {
-        // Limit to 50000 chars
-        if (content.length > 50000) {
-          content = content.slice(0, 50000) + "\n\n... [truncated at 50000 chars]";
+      var dialogHtml = _renderFileContentModalHtml(content, filePath);
+      document.body.insertAdjacentHTML("beforeend", dialogHtml);
+
+      var dialog = document.getElementById("file-content-dialog");
+      if (dialog) {
+        if (typeof dialog.showModal === "function") {
+          dialog.showModal();
         }
-        codeEl.textContent = content;
+        // Close on backdrop click
+        dialog.addEventListener("click", function (e) {
+          if (e.target === dialog && typeof dialog.close === "function") {
+            dialog.close();
+          }
+        });
       }
     }).catch(function (/* err */) {
-      if (codeEl) {
-        codeEl.textContent = "Failed to load file content";
+      // Show error dialog
+      var dialogHtml = _renderFileContentModalHtml("", filePath);
+      document.body.insertAdjacentHTML("beforeend", dialogHtml);
+      var dialog = document.getElementById("file-content-dialog");
+      if (dialog) {
+        var bodyEl = dialog.querySelector("#file-content-body");
+        if (bodyEl) {
+          bodyEl.innerHTML = '<p class="empty-state">Failed to load file content</p>';
+        }
+        if (typeof dialog.showModal === "function") {
+          dialog.showModal();
+        }
+      }
+    });
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Repository Panel
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Fetch repo status into the given panel body and render it using the
+   * template renderer _renderRepoStatusHtml().
+   *
+   * @param {HTMLElement} body — the repo section body element
+   */
+  function _fetchRepoStatus(body) {
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.repoStatus !== "function") {
+      body.innerHTML = '<p class="empty-state">Repository status not available</p>';
+      return;
+    }
+
+    api.repoStatus(_projectId).then(function (data) {
+      body.innerHTML = _renderRepoStatusHtml(data || {}, _canWrite());
+    }).catch(function () {
+      body.innerHTML = '<p class="empty-state">Failed to load repository status</p>';
+    });
+  }
+
+  /** Surface a repo action error via the app's error toast. */
+  function _repoError(err) {
+    var msg = (err && err.message) || "Repository action failed";
+    try {
+      var app = window.AItelier && window.AItelier.App;
+      if (app && typeof app.showError === "function") { app.showError(msg); }
+      else { window.alert(msg); }
+    } catch (_e) { /* swallow */ }
+  }
+
+  /**
+   * Run a repo write action: disable the button, await the promise, then
+   * re-fetch the repo panel (which re-enables controls and reflects new
+   * state). Errors surface via the toast and re-enable the button.
+   *
+   * @param {HTMLButtonElement} btn — the clicked button
+   * @param {function():Promise} factory — produces the action promise
+   * @param {HTMLElement} panelBody — repo panel body to refresh on success
+   * @param {function(object)} [onOk] — optional success callback (gets result)
+   */
+  function _repoAction(btn, factory, panelBody, onOk) {
+    if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+    factory().then(function (res) {
+      if (onOk) { try { onOk(res); } catch (_e) { /* ignore */ } }
+      if (panelBody) { _fetchRepoStatus(panelBody); }
+    }).catch(function (err) {
+      if (btn) { btn.disabled = false; btn.removeAttribute("aria-busy"); }
+      if (err && err.message !== "Cancelled") {
+        _repoError(err);
       }
     });
   }
@@ -2177,9 +2227,7 @@
       ? api.getRun(_projectId).catch(function () { return null; })
       : Promise.resolve(null);
     // Pending checkpoint is best-effort: a failure (or no pending checkpoint)
-    // just hides the inline approval card. This is the server-side source of
-    // truth (skillflow run state), so the card persists across navigation —
-    // unlike a checkpoint surfaced only in the chat transcript.
+    // just hides the inline approval card.
     var cpP = (typeof api.getCheckpoint === "function")
       ? api.getCheckpoint(_projectId).catch(function () { return null; })
       : Promise.resolve(null);

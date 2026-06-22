@@ -1152,3 +1152,134 @@ body.readonly #cp-reject {
   pointer-events: none;
   filter: grayscale(1);
 }
+
+
+/* ════════════════════════════════════════════════════════════════════
+   13.  Project Page Redesign — New CSS Classes
+   ════════════════════════════════════════════════════════════════════
+   These rules support the project page UX redesign (card layout,
+   accordion panels, quick nav, feedback blocks, and scroll-margin
+   anchors). All use Pico CSS theme variables for dark mode compat.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── .project-card — base card container override ────────────── */
+.project-card {
+  margin-bottom: var(--pico-spacing);
+  border: 1px solid var(--muted-border-color, #e0e0e0);
+  border-radius: 0.5rem;
+}
+
+/* ── .project-card-header — card title row (flex, space-between) ── */
+.project-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* ── .project-card-body — card content text ─────────────────── */
+.project-card-body {
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+/* ── .project-card-footer — card action button row ──────────── */
+.project-card-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--muted-border-color);
+}
+
+/* ── .checkpoint-card — highlighted approval card (left border) ── */
+.checkpoint-card {
+  border-left: 4px solid var(--pico-primary);
+}
+
+/* ── .checkpoint-card.conversational — conversational variant ── */
+.checkpoint-card.conversational {
+  border-left-color: var(--pico-secondary, #6c757d);
+}
+
+/* ── .project-quick-nav — quick navigation row ──────────────── */
+.project-quick-nav {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  margin-bottom: var(--pico-spacing);
+  flex-wrap: wrap;
+}
+
+/* ── .quick-nav-link — navigation link style ────────────────── */
+.quick-nav-link {
+  cursor: pointer;
+  color: var(--pico-primary);
+  text-decoration: underline;
+}
+
+/* ── .workspace-details — <details> accordion panel ─────────── */
+.workspace-details {
+  margin-top: var(--pico-spacing);
+}
+
+/* ── .workspace-details summary — accordion summary header ──── */
+.workspace-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 1rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--muted-border-color);
+  user-select: none;
+}
+
+/* ── .workspace-details[open] summary — expanded state ──────── */
+.workspace-details[open] summary {
+  border-bottom-color: var(--pico-primary);
+}
+
+/* ── .workspace-tree — file tree container ──────────────────── */
+.workspace-tree {
+  list-style: none;
+  padding-left: 0;
+  font-size: 0.85rem;
+}
+
+/* ── .task-detail-row — expanded task detail background ─────── */
+.task-detail-row {
+  background-color: var(--table-row-striped-background-color, rgba(0,0,0,0.03));
+}
+
+/* ── .repo-status-panel — git status panel base ─────────────── */
+.repo-status-panel {
+  font-size: 0.85rem;
+}
+
+/* ── .repo-commit-list — commit history list ────────────────── */
+.repo-commit-list {
+  list-style: none;
+  padding-left: 0;
+  font-size: 0.8rem;
+}
+
+/* ── .feedback-block — reject feedback area ─────────────────── */
+.feedback-block {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--muted-border-color);
+}
+
+/* ── .feedback-block.hidden — hidden state ──────────────────── */
+.feedback-block.hidden {
+  display: none;
+}
+
+/* ── Scroll-margin for section anchors (sticky app bar offset) ─── */
+#project-tasks,
+#run-overview,
+#workspace-section-dps,
+#workspace-section-code,
+#repo-section {
+  scroll-margin-top: 4rem;
+}

@@ -870,7 +870,11 @@
         : content;
     }
 
-    var html = '<dialog id="file-content-dialog" open ' +
+    // No `open` attribute: the dialog is opened via showModal() in
+    // _showFileContent() (modal, with backdrop + Escape). Rendering it `open`
+    // makes it a non-modal open dialog, and showModal() then throws
+    // ("already open as a non-modal dialog").
+    var html = '<dialog id="file-content-dialog" ' +
       'style="max-width:80vw;max-height:80vh;width:800px;padding:0;' +
       'border:none;border-radius:0.5rem;box-shadow:0 8px 32px rgba(0,0,0,0.3)">\n';
 
@@ -2088,35 +2092,57 @@
     // Fetch file content then show dialog
     api.workspaceFile(pid, filePath, root).then(function (data) {
       var content = (data && data.content) || "";
-      var dialogHtml = _renderFileContentModalHtml(content, filePath);
-      document.body.insertAdjacentHTML("beforeend", dialogHtml);
-
-      var dialog = document.getElementById("file-content-dialog");
-      if (dialog) {
-        if (typeof dialog.showModal === "function") {
-          dialog.showModal();
-        }
-        // Close on backdrop click
-        dialog.addEventListener("click", function (e) {
-          if (e.target === dialog && typeof dialog.close === "function") {
-            dialog.close();
-          }
-        });
-      }
+      document.body.insertAdjacentHTML(
+        "beforeend", _renderFileContentModalHtml(content, filePath));
+      _openFileDialog(document.getElementById("file-content-dialog"));
     }).catch(function (/* err */) {
       // Show error dialog
-      var dialogHtml = _renderFileContentModalHtml("", filePath);
-      document.body.insertAdjacentHTML("beforeend", dialogHtml);
+      document.body.insertAdjacentHTML(
+        "beforeend", _renderFileContentModalHtml("", filePath));
       var dialog = document.getElementById("file-content-dialog");
       if (dialog) {
         var bodyEl = dialog.querySelector("#file-content-body");
         if (bodyEl) {
           bodyEl.innerHTML = '<p class="empty-state">Failed to load file content</p>';
         }
-        if (typeof dialog.showModal === "function") {
-          dialog.showModal();
-        }
       }
+      _openFileDialog(dialog);
+    });
+  }
+
+  /**
+   * Open a freshly-inserted file-content <dialog> as a modal and wire its
+   * close affordances. The dialog lives on <body>, OUTSIDE #project-dynamic, so
+   * the global _onDynamicClick delegation never sees its close button — close
+   * is wired locally here: the close-modal button, a backdrop click, and
+   * removal of the element once closed (covers native Escape too) so stale
+   * dialogs don't accumulate on <body>.
+   */
+  function _openFileDialog(dialog) {
+    if (!dialog) {
+      return;
+    }
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    }
+    // Close + remove explicitly rather than relying on the dialog 'close' event
+    // (which doesn't fire reliably in all engines here). Covers the close button
+    // and a backdrop click; the leftover node is removed so dialogs don't pile up.
+    function _dismiss() {
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      }
+      dialog.remove();
+    }
+    dialog.addEventListener("click", function (e) {
+      if (e.target.closest('[data-action="close-modal"]') || e.target === dialog) {
+        _dismiss();
+      }
+    });
+    // Native Escape closes the modal; if the 'close' event does fire, drop the
+    // node too (otherwise the next open's existing.remove() cleans it up).
+    dialog.addEventListener("close", function () {
+      dialog.remove();
     });
   }
 

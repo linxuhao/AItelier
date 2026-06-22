@@ -535,8 +535,34 @@ def retry_project(
         run = sf.get_run_by_project(project_id)
         if run and run.get("status") == "failed":
             sf.reactivate_run(run["id"])
+            # Guard against the silent-deadlock case: if the run was pointed at a
+            # step that no longer exists in the (possibly edited) graph — e.g. a
+            # node removed since the run started — advance_run() returns None
+            # forever and the run wedges. Detect it, revert to a clean failed
+            # state, and tell the user to start fresh. (Newer skillflow also
+            # rejects this in reactivate_run → caught as ValueError below; this
+            # post-check keeps the guard working with the pinned skillflow too.)
+            after = sf.get_run(run["id"]) or {}
+            node = after.get("current_node")
+            if node and sf._get_resolver(
+                    after.get("graph_name", "")).get_node(node) is None:
+                with sf._conn:
+                    sf._conn.execute(
+                        "UPDATE skillflow_runs SET status = 'failed', "
+                        "updated_at = datetime('now') WHERE id = ?", (run["id"],))
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"Cannot retry: this run's resume step '{node}' was "
+                            f"removed from the pipeline since the run started. "
+                            f"Start a new project instead."))
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # skillflow.reactivate_run rejected an unrecoverable resume — surface it
+        # instead of swallowing (it would otherwise wedge with advance_run None).
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception:
-        pass  # best-effort; scheduler will still pick up reset tasks
+        pass  # other failures best-effort; scheduler will still pick up reset tasks
 
     wake_scheduler()
 

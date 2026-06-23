@@ -37,6 +37,9 @@ services:
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: "credential.helper"
       GIT_CONFIG_VALUE_0: "/app/docker/git-credential-helper.sh"
+      # C#/Unity projects: the `csharp` lint backend POSTs source dirs here for a
+      # license-free semantic compile. Python projects never call it.
+      UNITY_BUILDER_URL: "http://unity-builder:8080"
     env_file:
       - .env
     secrets:
@@ -71,6 +74,36 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # ── Unity builder sidecar ──────────────────────────────────────────────────
+  # License-free semantic compile of generated Unity C# (editor Roslyn + Unity
+  # reference assemblies behind a tiny HTTP service). Reached only by C# projects
+  # at http://unity-builder:8080. ~5GB editor image — built lazily; pull/build is
+  # skipped for Python-only deployments that never start this service.
+  unity-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.unity
+    image: aitelier-unity:latest
+    container_name: aitelier-unity
+    # Same host user → can read the host-owned workspace files it compiles.
+    user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
+    environment:
+      PORT: "8080"
+    volumes:
+      # Read-only view of the workspace at the IDENTICAL absolute path the main
+      # container uses, so a project_dir passed over HTTP resolves the same here.
+      - ${HOME}/.AItelier:${HOME}/.AItelier:ro
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Cloudflare ────────────────────────────────────────────────────────────
   # An existing cloudflared connector (on the 'edge' network below) reaches this

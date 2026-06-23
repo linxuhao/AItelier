@@ -44,7 +44,7 @@ end_conditions:
     - type: max_total_steps
       limit: 200
     - type: max_run_duration_seconds
-      limit: 3600
+      limit: 10800   # 3 hours
     - type: flag_match
       flag:
         fatal_error: true
@@ -379,6 +379,19 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
+      - to: "5_compile"
+
+  # ─── C#/Unity compile gate (deterministic, AFTER tests) ───
+  # Semantic-compiles every *.cs in the consolidated repo together against
+  # Unity's reference assemblies (via the unity-builder sidecar). No-ops for
+  # non-C# projects. Like 5_test it always succeeds as a step; compile_report.json
+  # is folded into 5_review so compile errors loop back through the goal-loop.
+  - id: "5_compile"
+    step_type: "tool"
+    tool_name: "unity_compile"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
       - to: "5_review"
 
   - id: "5_review"
@@ -388,6 +401,7 @@ steps:
       - source: { from: "repository" }
       - source: { step: "5" }
       - source: { step: "5_test" }
+      - source: { step: "5_compile" }
     output:
       mode: "content"
       fixed:

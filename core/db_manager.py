@@ -91,6 +91,7 @@ class DBManager:
                     dependencies TEXT DEFAULT '[]',
                     task_type TEXT DEFAULT 'normal',
                     task_meta_state TEXT DEFAULT NULL,
+                    manifest_key TEXT DEFAULT NULL,
                     owner_email TEXT DEFAULT 'cli@local',
                     retry_count INTEGER DEFAULT 0,
                     max_retries INTEGER DEFAULT 3,
@@ -171,6 +172,7 @@ class DBManager:
                 "ALTER TABLE tasks ADD COLUMN step_locked INTEGER DEFAULT 0",
                 "ALTER TABLE tasks ADD COLUMN dependencies TEXT DEFAULT '[]'",
                 "ALTER TABLE tasks ADD COLUMN task_type TEXT DEFAULT 'normal'",
+                "ALTER TABLE tasks ADD COLUMN manifest_key TEXT DEFAULT NULL",
                 "ALTER TABLE tasks ADD COLUMN owner_email TEXT DEFAULT 'cli@local'",
                 "ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0",
                 "ALTER TABLE tasks ADD COLUMN max_retries INTEGER DEFAULT 3",
@@ -1085,10 +1087,10 @@ class DBManager:
 
                 cursor = conn.execute(
                     "INSERT INTO tasks (project_id, prompt, status, dependencies, task_type, owner_email, "
-                    "current_step, completed_steps) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "current_step, completed_steps, manifest_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (project_id, full_prompt, TaskStatus.PENDING.value,
                      json.dumps(dep_ints), task_type, owner_email,
-                     "t_plan", json.dumps([]))
+                     "t_plan", json.dumps([]), str(manifest_id))
                 )
                 db_id = cursor.lastrowid
                 id_map[manifest_id] = db_id
@@ -1107,6 +1109,80 @@ class DBManager:
 
             conn.commit()
         return task_ids
+
+    def sync_tasks_from_manifest(self, project_id: str, manifest: dict,
+                                 owner_email: str = "cli@local") -> list[int]:
+        """Merge a (possibly partial) P3 manifest into the tasks table, PRESERVING
+        completed tasks.
+
+        On a goal-loop re-decomposition the PM may emit only the new/changed task
+        cards (e.g. a single remediation task) while earlier tasks are already
+        done. A destructive delete-all + recreate would wipe the completed history
+        from the UI (the symptom: "old tasks disappear, only the new one left").
+        Instead: keep completed tasks (matched by ``manifest_key``), drop only the
+        incomplete ones (they are re-derived from the manifest), and create only
+        the manifest tasks that aren't already completed. New tasks' dependencies
+        on already-completed tasks resolve to the preserved rows.
+
+        Returns the list of newly-created task IDs.
+        """
+        tasks = manifest.get("tasks", [])
+        with self.get_connection() as conn:
+            existing = conn.execute(
+                "SELECT id, status, manifest_key FROM tasks WHERE project_id = ?",
+                (project_id,),
+            ).fetchall()
+            # manifest_key → db_id for completed tasks (preserved across resync)
+            completed_key_to_id = {
+                r["manifest_key"]: r["id"] for r in existing
+                if r["status"] == TaskStatus.COMPLETED.value and r["manifest_key"]
+            }
+            # Drop only incomplete tasks (+ their children); completed rows stay.
+            incomplete_ids = [r["id"] for r in existing
+                              if r["status"] != TaskStatus.COMPLETED.value]
+            if incomplete_ids:
+                ph = ",".join("?" * len(incomplete_ids))
+                conn.execute(f"DELETE FROM subtasks WHERE task_id IN ({ph})", incomplete_ids)
+                conn.execute(f"DELETE FROM io_logs WHERE task_id IN ({ph})", incomplete_ids)
+                conn.execute(f"DELETE FROM tasks WHERE id IN ({ph})", incomplete_ids)
+
+            # Seed id_map with preserved completed tasks so new tasks' deps on them
+            # resolve to the existing rows.
+            id_map = dict(completed_key_to_id)
+            created: list[int] = []
+            for t in tasks:
+                manifest_id = str(t.get("id", "task"))
+                if manifest_id in completed_key_to_id:
+                    continue  # already done — preserve, never recreate
+                deps = t.get("dependencies", [])
+                task_type = t.get("task_type", "normal")
+                prompt = t.get("description", "")
+                detailed = t.get("detailed_requirements", "")
+                full_prompt = f"{prompt}\n\n{detailed}" if detailed else prompt
+                dep_ints = [id_map[d] for d in deps if d in id_map]
+                cur = conn.execute(
+                    "INSERT INTO tasks (project_id, prompt, status, dependencies, task_type, "
+                    "owner_email, current_step, completed_steps, manifest_key) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (project_id, full_prompt, TaskStatus.PENDING.value,
+                     json.dumps(dep_ints), task_type, owner_email,
+                     "t_plan", json.dumps([]), manifest_id),
+                )
+                db_id = cur.lastrowid
+                id_map[manifest_id] = db_id
+                created.append(db_id)
+            # Second pass: resolve deps now that all new IDs are known.
+            for t in tasks:
+                manifest_id = str(t.get("id", "task"))
+                if manifest_id in completed_key_to_id:
+                    continue
+                deps = t.get("dependencies", [])
+                if deps and manifest_id in id_map:
+                    dep_ints = [id_map[d] for d in deps if d in id_map]
+                    conn.execute("UPDATE tasks SET dependencies = ? WHERE id = ?",
+                                 (json.dumps(dep_ints), id_map[manifest_id]))
+            conn.commit()
+        return created
 
     def get_ready_tasks(self, project_id: str) -> list[dict]:
         """

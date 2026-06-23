@@ -42,6 +42,17 @@
 - 覆盖关键功能的测试文件。
 - 文件必须具有适当的扩展名（.py、.json、.md、.html、.css、.js 等）。
 
+## Unity / C# 项目专项约定（仅当任务是 Unity 游戏脚本时适用）
+项目交付为**纯脚本 + 资源说明**：你只写 `.cs` 脚本，美术/场景/预制体由人类按 `RESOURCES.md` 在编辑器里组装。整个仓库的脚本会被**一起编译**校验（Unity 最新稳定 LTS，Unity 6 / `6000.0`），所以下面几条是硬性的：
+
+- **脚本路径**：放在 `Assets/Scripts/` 下，每个文件一个 `public` 类，**类名必须等于文件名**（`Player.cs` → `class Player`）。
+- **API 版本**：只用 Unity 最新稳定 LTS（Unity 6）的 API。不要用已废弃的旧 API。
+- **全平台、不碰平台特性**：**禁止**任何平台专属 API 和条件编译（不要写 `#if UNITY_ANDROID` / `UNITY_IOS` / `UNITY_STANDALONE` 等）。只用跨平台通用功能。
+- **运行时脚本禁止 `UnityEditor`**：运行时脚本（`Assets/Scripts/`）**不得** `using UnityEditor;` 或调用编辑器 API——这会让发布构建编译失败。编辑器专用脚本（如有）放 `Assets/Editor/`。
+- **引用一致**：脚本间互相引用时，类型/命名空间/方法签名必须前后一致——编译是整仓一起编的，任何一个脚本写错 API 名或签名都会让整体编译失败。
+- **不写 PlayMode 测试**：headless 环境无法运行 Unity 运行时测试。纯逻辑如需测试可抽成普通 C# 类，但保持最小。
+- **不需要 `.meta` / `ProjectSettings/`**：交付只含脚本与 `RESOURCES.md`，工程骨架由人类创建，不要手写 `.meta`（GUID 无意义）。
+
 ## 重试处理
 如果这是一次重试，你将看到 `[之前的反馈 — 必须修复]`。请修复所有提到的问题。不要重写所有内容——只修复被拒绝的部分。
 

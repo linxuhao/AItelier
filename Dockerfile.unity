@@ -1,0 +1,26 @@
+# Dockerfile.unity — the `unity-builder` sidecar.
+#
+# A SEPARATE image from the main aitelier backend (which stays python:slim).
+# It exists only to give C#/Unity projects a license-free *semantic* compile
+# check: it wraps the editor's bundled Roslyn `csc` + Unity reference assemblies
+# behind a tiny HTTP service (docker/unity/unity_compile.py, POST /compile).
+#
+# Why a sidecar and not the app's base image: the editor image is ~5GB and pins
+# a Unity version; baking it into the main image would bloat every deploy and
+# every Python project. C# projects reach this service over the compose network;
+# Python projects never touch it. See docker-compose.yml `unity-builder`.
+#
+# Unity version = latest LTS (6000.0.x). `-base` module = editor + managed
+# reference DLLs, no platform player build support (smallest variant; enough to
+# compile-check scripts). Bump the tag to track a newer LTS patch.
+FROM unityci/editor:ubuntu-6000.0.76f1-base-3.2.2
+
+COPY docker/unity/unity_compile.py /srv/unity_compile.py
+
+ENV PORT=8080
+EXPOSE 8080
+
+# Compiling needs no Unity license (only *running* the editor does), so no
+# activation step here. Override the base image's editor entrypoint with the
+# compile server.
+ENTRYPOINT ["python3", "/srv/unity_compile.py", "--serve"]

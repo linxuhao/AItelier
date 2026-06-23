@@ -208,9 +208,11 @@ def _sync_task_manifest_to_db(project_id: str):
         existing = db.list_tasks_by_project(project_id)
         if existing and marker.exists() and marker.read_text(encoding="utf-8").strip() == digest:
             return
-        if existing:
-            db.delete_tasks_by_project(project_id)
-        db.create_tasks_from_manifest(project_id, manifest)
+        # Merge, preserving completed tasks. On a goal-loop re-decomposition the PM
+        # often writes only the new/changed cards; a delete-all+recreate would wipe
+        # the completed history from the UI ("old tasks disappear"). sync_* keeps
+        # completed rows (matched by manifest_key) and only (re)creates the rest.
+        db.sync_tasks_from_manifest(project_id, manifest)
         marker.write_text(digest, encoding="utf-8")
     except Exception:
         pass  # Best-effort; tasks remain file-only
@@ -530,6 +532,23 @@ async def _execute_skillflow_tick(project_id: str, loop):
 
     # Phase A: Resolve next step
     next_node = sf.advance_run(run_id)
+
+    # Drain consecutive inline tool steps. advance_run() executes ONE inline tool
+    # per call (framework mode) and returns the FOLLOWING node; when two tool
+    # steps are adjacent (e.g. 5_test → 5_compile) that returned node is itself an
+    # inline tool. Claiming a tool step would hand it to the agent runner, which
+    # has no agent_config → "Agent config '' not found". skillflow's design is for
+    # the host to re-enter advance_run so the fast-path executes it (see core.py
+    # tool fast-path), so re-advance until the next node is not an inline tool.
+    try:
+        _resolver = sf._get_resolver_for_run(run_id)
+        _drain = 0
+        while next_node is not None and _drain < 20 and _resolver.is_tool(next_node):
+            next_node = sf.advance_run(run_id)
+            _drain += 1
+    except Exception:
+        pass
+
     if next_node is None:
         # Handle terminal states
         run = sf.get_run(run_id)

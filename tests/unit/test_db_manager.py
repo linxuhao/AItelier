@@ -116,6 +116,46 @@ def test_create_tasks_from_manifest(db_manager):
     deps = json.loads(t2["dependencies"])
     assert task_ids[0] in deps
 
+def test_sync_tasks_preserves_completed_on_redecomposition(db_manager):
+    """Goal-loop resync must keep completed tasks, not wipe them (delete-all bug)."""
+    import json
+    db_manager.ensure_project("sync_proj")
+    # First decomposition: 3 tasks.
+    manifest_v1 = {
+        "tasks": [
+            {"id": "a", "description": "Task A", "dependencies": [], "task_type": "normal"},
+            {"id": "b", "description": "Task B", "dependencies": ["a"], "task_type": "normal"},
+            {"id": "c", "description": "Task C", "dependencies": [], "task_type": "normal"},
+        ],
+        "execution_order": [["a"], ["b"], ["c"]],
+    }
+    ids = db_manager.create_tasks_from_manifest("sync_proj", manifest_v1)
+    # Mark a + b completed (as if the loop finished them).
+    for tid in ids[:2]:
+        db_manager.update_task_status(tid, "completed")
+
+    # Goal-loop re-runs PM and emits only a NEW remediation card (partial manifest).
+    manifest_v2 = {
+        "tasks": [
+            {"id": "fix_a", "description": "Fix A", "dependencies": ["a"], "task_type": "normal"},
+        ],
+        "execution_order": [["a"], ["b"], ["c"], ["fix_a"]],
+    }
+    db_manager.sync_tasks_from_manifest("sync_proj", manifest_v2)
+
+    tasks = db_manager.list_tasks_by_project("sync_proj")
+    keys = {t["manifest_key"]: t["status"] for t in tasks}
+    # Completed a + b survive; incomplete c is dropped/re-derived; new fix_a added.
+    assert keys.get("a") == "completed"
+    assert keys.get("b") == "completed"
+    assert "fix_a" in keys
+    assert keys.get("fix_a") == "pending"
+    # New task's dep on completed "a" resolves to the preserved row.
+    fix = [t for t in tasks if t["manifest_key"] == "fix_a"][0]
+    a = [t for t in tasks if t["manifest_key"] == "a"][0]
+    assert a["id"] in json.loads(fix["dependencies"])
+
+
 def test_get_ready_tasks(db_manager):
     """测试就绪任务查询（依赖关系）"""
     db_manager.ensure_project("ready_proj")

@@ -39,6 +39,16 @@ _scheduler_instance: AsyncIOScheduler | None = None
 # Per-user scheduler registry for web_api wake support
 _user_scheduler_map: dict[str, AsyncIOScheduler] = {}
 
+# SF-26: in-flight guard. The interval job and the wake-on-confirm 'date' job are
+# SEPARATE APScheduler jobs, so per-job max_instances=1 does NOT serialize them —
+# a wake tick can advance the same run the interval tick is already advancing,
+# double-executing steps (an architect/PM step running twice with no review
+# between). Track which projects have a tick in flight and skip re-entry. Keyed
+# per project (not global) so multi-tenant ticks on DIFFERENT runs still proceed
+# concurrently. Correctness rests on the check-and-add being atomic: asyncio is
+# single-threaded and there is no `await` between the membership test and the add.
+_ticking_projects: set[str] = set()
+
 # P0-1: cross-process advisory lock so only ONE scheduler runs even if the API
 # is (mis)launched with uvicorn --workers N. Multiple AsyncIOSchedulers polling
 # the same skillflow.db race the optimistic-version UPDATE in confirm_step and
@@ -487,6 +497,24 @@ async def _check_hung_claims():
 
 
 async def _execute_skillflow_tick(project_id: str, loop):
+    """Advance the skillflow pipeline for one project by one step.
+
+    Wraps the real tick in a per-project in-flight guard so the interval job and
+    the wake-on-confirm date job can never advance the same run concurrently
+    (which would double-execute steps). The check-and-add below is atomic — there
+    is no `await` between the test and the add — so a second overlapping tick for
+    the same project returns immediately rather than racing into advance_run.
+    """
+    if project_id in _ticking_projects:
+        return
+    _ticking_projects.add(project_id)
+    try:
+        await _run_skillflow_tick(project_id, loop)
+    finally:
+        _ticking_projects.discard(project_id)
+
+
+async def _run_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step."""
     sf = get_skillflow()
     run_id = _get_or_create_skillflow_run(project_id)

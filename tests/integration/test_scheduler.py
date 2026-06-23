@@ -406,3 +406,80 @@ def test_sync_task_statuses_supersedes_completed_task_on_goal_loop(tmp_path):
               and t["status"] == "pending"]
     assert len(reruns) == 1                              # cloned re-run row
     assert len(tasks) == 3                              # P + superseded + rerun
+
+
+# ── SF-26: in-flight tick guard (interval vs wake-on-confirm overlap) ──
+
+async def test_tick_guard_blocks_concurrent_same_project(monkeypatch):
+    """Two overlapping ticks for the SAME project must NOT both advance the run.
+    Regression: the interval job and the wake-on-confirm date job are separate
+    APScheduler jobs, so per-job max_instances=1 let them race into advance_run
+    and double-execute a step. The per-project guard must admit exactly one.
+    """
+    import asyncio
+    import core.scheduler as sched
+
+    entered = []
+    entered_evt = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_inner(project_id, loop):
+        entered.append(project_id)
+        entered_evt.set()
+        await release.wait()
+
+    monkeypatch.setattr(sched, "_run_skillflow_tick", fake_inner)
+    sched._ticking_projects.discard("P")
+
+    t1 = asyncio.create_task(sched._execute_skillflow_tick("P", None))
+    await entered_evt.wait()                  # t1 is now inside, holding the guard
+    # A second tick for the same project must early-return without entering.
+    await sched._execute_skillflow_tick("P", None)
+    assert entered == ["P"], f"second tick double-entered: {entered}"
+
+    release.set()
+    await t1
+    assert "P" not in sched._ticking_projects  # guard released
+
+
+async def test_tick_guard_allows_different_projects(monkeypatch):
+    """The guard is per-project: ticks on DIFFERENT runs still run concurrently."""
+    import asyncio
+    import core.scheduler as sched
+
+    entered = []
+    evts = {"P": asyncio.Event(), "Q": asyncio.Event()}
+    release = asyncio.Event()
+
+    async def fake_inner(project_id, loop):
+        entered.append(project_id)
+        evts[project_id].set()
+        await release.wait()
+
+    monkeypatch.setattr(sched, "_run_skillflow_tick", fake_inner)
+    sched._ticking_projects.difference_update({"P", "Q"})
+
+    t1 = asyncio.create_task(sched._execute_skillflow_tick("P", None))
+    t2 = asyncio.create_task(sched._execute_skillflow_tick("Q", None))
+    await evts["P"].wait()
+    await evts["Q"].wait()                     # both entered concurrently
+    assert set(entered) == {"P", "Q"}
+
+    release.set()
+    await asyncio.gather(t1, t2)
+
+
+async def test_tick_guard_releases_on_exception(monkeypatch):
+    """A crash inside the tick must still release the guard (finally), else the
+    project would be blocked forever."""
+    import core.scheduler as sched
+
+    async def boom(project_id, loop):
+        raise RuntimeError("tick blew up")
+
+    monkeypatch.setattr(sched, "_run_skillflow_tick", boom)
+    sched._ticking_projects.discard("P")
+
+    with pytest.raises(RuntimeError):
+        await sched._execute_skillflow_tick("P", None)
+    assert "P" not in sched._ticking_projects   # guard released despite exception

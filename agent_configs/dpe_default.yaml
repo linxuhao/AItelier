@@ -59,6 +59,8 @@ pm:
   max_output_tokens: 32768
   native_tool_calling: true
   fallback_to_json_mode: true
+  thinking:
+    enable: true
 
 pm_reviewer:
   model: "deepseek/deepseek-v4-flash"
@@ -68,6 +70,8 @@ pm_reviewer:
   max_output_tokens: 4096
   native_tool_calling: true
   fallback_to_json_mode: true
+  thinking:
+    enable: true
 
 task_planner:
   model: "deepseek/deepseek-v4-flash"
@@ -78,6 +82,8 @@ task_planner:
   max_tool_turns: 10
   native_tool_calling: true
   fallback_to_json_mode: true
+  thinking:
+    enable: true
 
 task_planner_reviewer:
   model: "deepseek/deepseek-v4-flash"
@@ -87,6 +93,8 @@ task_planner_reviewer:
   max_output_tokens: 4096
   native_tool_calling: true
   fallback_to_json_mode: true
+  thinking:
+    enable: true
 
 task_implementer:
   model: "deepseek/deepseek-v4-flash"
@@ -97,6 +105,8 @@ task_implementer:
   max_tool_turns: 15
   native_tool_calling: true
   fallback_to_json_mode: true
+  thinking:
+    enable: true
 
 task_implementer_reviewer:
   model: "deepseek/deepseek-v4-flash"
@@ -106,6 +116,8 @@ task_implementer_reviewer:
   max_output_tokens: 4096
   native_tool_calling: true
   fallback_to_json_mode: true
+  thinking:
+    enable: true
 
 
 final_verifier:
@@ -117,6 +129,8 @@ final_verifier:
   max_tool_turns: 100
   native_tool_calling: true
   fallback_to_json_mode: false
+  thinking:
+    enable: true
 
 final_verifier_reviewer:
   model: "deepseek/deepseek-v4-flash"
@@ -126,3 +140,5 @@ final_verifier_reviewer:
   max_output_tokens: 4096
   native_tool_calling: true
   fallback_to_json_mode: true
+  thinking:
+    enable: true

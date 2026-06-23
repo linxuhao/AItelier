@@ -45,6 +45,7 @@ Step 5 产出的最终交付文件（verify_report.json、README.md 等）。
 有些错误**编译期查不出、但运行时必崩**，编译门槛拦不住，必须人工审：
 - **旧版输入 API**：运行时脚本若出现 `UnityEngine.Input`（`Input.GetKey*`/`Input.GetMouseButton*`/`Input.touch*`/`Input.GetAxis*`），而项目用新 Input System（跨平台模板默认），运行时会抛 `InvalidOperationException` —— 判 passed: false，要求改用 `UnityEngine.InputSystem`。
 - **编辑器脚本未守卫**：`Assets/Editor/` 下若有脚本未整体包在 `#if UNITY_EDITOR` 里，会污染发布构建/编译门槛 —— 应在 feedback 中指出。
+- **孤儿脚本（没接进 `BuildScene()`）—— 全局核查，这是你独有的视角**：你能看到整个项目，逐个核对**每个需要运行时存在的 gameplay `MonoBehaviour`**（`Assets/Scripts/` 下的玩家/敌人/障碍/边界/管理器等）是否在 `SceneBootstrapper.BuildScene()` 里被**实例化或挂载**（grep 该类型名是否在 `BuildScene()`/其调用的方法里出现）。**编译通过但没接进 `BuildScene()` 的脚本运行时形同不存在**（按 Play 没效果），编译门槛查不出——发现遗漏判 passed: false，在 feedback 里列出哪些组件没接线。这是静态读检：只查"有没有接"，不查"接得对不对"（字段绑错不在此列）。
 
 ## 判定标准（三级）
 

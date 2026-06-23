@@ -1,0 +1,16 @@
+name: unity_compile
+description: >
+  Semantic-compile every *.cs in the consolidated repo together (against Unity's
+  reference assemblies, via the unity-builder sidecar) and write
+  compile_report.json {passed, returncode, file_count, errors, summary}. Always
+  succeeds as a step; no-ops for non-C# projects and degrades to pass if the
+  builder is unreachable. The compile outcome is captured for the verifier to act on.
+parameters:
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Directory to write compile_report.json (set to $STEP_DIR)"
+    required: false

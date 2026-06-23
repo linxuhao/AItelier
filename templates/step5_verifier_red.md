@@ -41,6 +41,11 @@ Step 5 产出的最终交付文件（verify_report.json、README.md 等）。
 - 在 feedback 中**逐条列出编译错误**（取自 `errors`：`file` / `line` / `code` / `message`），让 PM 能据此创建修复任务。
 - 若 `summary` 显示 "skipping"（非 C# 项目或编译服务不可达），则此项不构成阻塞，按其它要点判定。
 
+### 6b. Unity 运行时陷阱（编译通过也要查，仅 Unity 项目）
+有些错误**编译期查不出、但运行时必崩**，编译门槛拦不住，必须人工审：
+- **旧版输入 API**：运行时脚本若出现 `UnityEngine.Input`（`Input.GetKey*`/`Input.GetMouseButton*`/`Input.touch*`/`Input.GetAxis*`），而项目用新 Input System（跨平台模板默认），运行时会抛 `InvalidOperationException` —— 判 passed: false，要求改用 `UnityEngine.InputSystem`。
+- **编辑器脚本未守卫**：`Assets/Editor/` 下若有脚本未整体包在 `#if UNITY_EDITOR` 里，会污染发布构建/编译门槛 —— 应在 feedback 中指出。
+
 ## 判定标准（三级）
 
 使用以下三级判定。仅当存在 **阻塞性问题** 时才判定为 false。

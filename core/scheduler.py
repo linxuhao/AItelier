@@ -96,6 +96,51 @@ def _acquire_scheduler_lock() -> bool:
         return True
 
 
+# Whole-process single-instance lock (data-dir scoped). Unlike the scheduler
+# lock above (which gracefully degrades a 2nd uvicorn worker to read-only), this
+# one is meant to FAIL-FAST the entire backend: exactly ONE AItelier backend may
+# run per data directory. Host + Docker bind-mount ~/.AItelier at the same path
+# → same inode → flock is mutually exclusive across host AND container. Held for
+# the process lifetime via a module-level fd; the OS releases it when the process
+# dies. This guarantees a stray/second backend can never silently shadow the real
+# (Cloudflare-fronted) one — if the real one is down, it is unambiguously down.
+_instance_lock_fh = None
+
+
+def _instance_lock_path():
+    """Path to the single-backend lock file (overridable via AITELIER_INSTANCE_LOCK
+    so the test suite uses its own and never contends with a running instance)."""
+    override = _os.getenv("AITELIER_INSTANCE_LOCK")
+    if override:
+        return override
+    from api.dependencies import _AITELIER_HOME
+    return _AITELIER_HOME / "aitelier.lock"
+
+
+def acquire_instance_lock() -> bool:
+    """Take the single-backend lock (non-blocking).
+
+    Returns True if this process is the sole backend, False if another already
+    holds it. Held for the process lifetime (auto-released on death). On platforms
+    without fcntl this is a best-effort no-op that returns True.
+    """
+    global _instance_lock_fh
+    if _instance_lock_fh is not None:
+        return True  # already held by this process (re-entrant)
+    try:
+        import fcntl
+        fh = open(_instance_lock_path(), "w")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            fh.close()
+            return False
+        _instance_lock_fh = fh  # hold for process lifetime
+        return True
+    except Exception:
+        return True
+
+
 def wake_scheduler(owner_email: str = None):
     """Trigger an immediate scheduler tick."""
     if owner_email and owner_email in _user_scheduler_map:

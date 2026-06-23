@@ -483,3 +483,34 @@ async def test_tick_guard_releases_on_exception(monkeypatch):
     with pytest.raises(RuntimeError):
         await sched._execute_skillflow_tick("P", None)
     assert "P" not in sched._ticking_projects   # guard released despite exception
+
+
+# ── Single-backend instance lock (one AItelier backend per data dir) ──
+
+def test_instance_lock_is_exclusive(tmp_path, monkeypatch):
+    """acquire_instance_lock() is re-entrant within a process but blocks a
+    second, independent holder (simulating another backend / the container)."""
+    import fcntl
+    import core.scheduler as sched
+
+    lockfile = str(tmp_path / "aitelier.lock")
+    monkeypatch.setenv("AITELIER_INSTANCE_LOCK", lockfile)
+    sched._instance_lock_fh = None
+
+    assert sched.acquire_instance_lock() is True   # first backend wins
+    assert sched.acquire_instance_lock() is True   # re-entrant in same process
+
+    # A separate fd (stands in for another process) must NOT be able to lock it.
+    other = open(lockfile, "w")
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        other.close()
+
+    # Release → a fresh acquire succeeds again (auto-release on death analog).
+    sched._instance_lock_fh.close()
+    sched._instance_lock_fh = None
+    assert sched.acquire_instance_lock() is True
+    sched._instance_lock_fh.close()
+    sched._instance_lock_fh = None

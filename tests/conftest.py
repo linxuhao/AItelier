@@ -52,6 +52,41 @@ def _release_scheduler_lock():
         _sched._scheduler_lock_fh = None
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_instance_lock():
+    """Point the single-backend instance lock at an isolated temp file for the
+    whole session, so app startup in tests never contends with a running/orphaned
+    AItelier backend holding the production ~/.AItelier/aitelier.lock (which would
+    make the lifespan refuse to start and abort the TestClient)."""
+    fd, path = tempfile.mkstemp(suffix="-aitelier.lock")
+    os.close(fd)
+    prev = os.environ.get("AITELIER_INSTANCE_LOCK")
+    os.environ["AITELIER_INSTANCE_LOCK"] = path
+    yield
+    if prev is None:
+        os.environ.pop("AITELIER_INSTANCE_LOCK", None)
+    else:
+        os.environ["AITELIER_INSTANCE_LOCK"] = prev
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _release_instance_lock():
+    """Release the single-backend instance lock after each test, so a later
+    app-startup test can re-acquire it instead of seeing it held."""
+    yield
+    import core.scheduler as _sched
+    if _sched._instance_lock_fh is not None:
+        try:
+            _sched._instance_lock_fh.close()
+        except Exception:
+            pass
+        _sched._instance_lock_fh = None
+
+
 @pytest.fixture
 def db_manager(tmp_path):
     """Provides an isolated SQLite database for testing."""

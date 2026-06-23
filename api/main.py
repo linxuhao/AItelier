@@ -45,6 +45,31 @@ async def lifespan(app: FastAPI):
 
     loop = asyncio.get_running_loop()
 
+    # Single-instance gate (MUST be first — before the destructive claim
+    # recovery below, which assumes this is the only backend). Exactly one
+    # AItelier backend may run per data directory; the host and the Docker
+    # container share this lock. A second backend refuses to start with an
+    # explicit message rather than silently shadowing the real one.
+    from core.scheduler import acquire_instance_lock, _instance_lock_path
+    if not acquire_instance_lock():
+        import sys as _sys
+        _lock = _instance_lock_path()
+        print(
+            "\n" + "=" * 74 + "\n"
+            "  AItelier backend REFUSING TO START — another instance is running.\n"
+            f"  Single-instance lock already held: {_lock}\n"
+            "  Only ONE backend may run per data directory (host and the Docker\n"
+            "  container share this lock). Stop the other instance — e.g. the\n"
+            "  running `aitelier` container or a stray `uvicorn api.main` — then\n"
+            "  retry. (If the real backend is down, that is what this is telling\n"
+            "  you: nothing is shadowing it.)\n"
+            + "=" * 74 + "\n",
+            file=_sys.stderr, flush=True,
+        )
+        raise RuntimeError(
+            f"AItelier single-instance lock held by another process: {_lock}"
+        )
+
     # Initialize skillflow (lazy singleton, registers DPE pipeline)
     sf = get_skillflow()
     app.state.skillflow = sf

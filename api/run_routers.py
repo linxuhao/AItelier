@@ -190,17 +190,21 @@ def get_run_trace(
     run_id: str,
     step_instance_id: Optional[int] = Query(None, description="Filter by step instance ID (int)"),
     category: Optional[str] = Query(None, description="Filter by trace category (prompt, response, tool_call, error)"),
-    after_seq: Optional[int] = Query(None, description="Keyset cursor: return records with seq > after_seq (omit for the first page)"),
+    after_seq: Optional[int] = Query(None, description="Keyset cursor: the previous page's next_seq (omit for the first page)"),
+    order: str = Query("asc", pattern="^(asc|desc)$", description="Chronological order: 'asc' = oldest first, 'desc' = newest first"),
     limit: int = Query(100, ge=1, le=1000, description="Max trace entries per page"),
     user: CurrentUser | None = Depends(get_optional_user),
 ):
     """
-    Read durable execution traces for a pipeline run (oldest-first).
+    Read durable execution traces for a pipeline run.
 
     Keyset-paginated on ``seq`` (monotonic, unique per run): the first page omits
     ``after_seq``; each subsequent page passes the previous page's ``next_seq``.
-    This is stateless — no server-side cursor/cache. ``has_more`` tells the
-    client whether another page exists.
+    ``order`` controls direction — ``asc`` pages oldest→newest, ``desc`` pages
+    newest→oldest (the cursor is fed to the matching seq bound server-side, so
+    the client treats ``next_seq`` as opaque either way). This is stateless — no
+    server-side cursor/cache. ``has_more`` tells the client whether another page
+    exists.
     """
     sf = get_skillflow()
     run = _resolve_run(run_id)
@@ -208,12 +212,23 @@ def get_run_trace(
         raise HTTPException(status_code=404, detail="Run not found")
     internal_id = run["id"]
 
-    # Keyset pagination on `seq` via skillflow's get_trace (LIMIT in SQL).
-    # Requires skillflow-py with after_seq/limit support. Fetch one extra row to
-    # detect whether a further page exists.
+    # Keyset pagination on `seq` via skillflow's get_trace (LIMIT in SQL). The
+    # opaque cursor maps to seq > after_seq when ascending and seq < before_seq
+    # when descending. Fetch one extra row to detect whether a further page
+    # exists. Descending order needs skillflow-py with order/before_seq support
+    # (>=1.1.8); against an older build we degrade to ascending instead of 500ing.
+    import inspect
+    supports_desc = "order" in inspect.signature(sf.get_trace).parameters
+    effective_order = order if supports_desc else "asc"
+    if effective_order == "desc":
+        cursor_kwarg = {"order": "desc", "before_seq": after_seq}
+    elif supports_desc:
+        cursor_kwarg = {"order": "asc", "after_seq": after_seq}
+    else:
+        cursor_kwarg = {"after_seq": after_seq}
     page = sf.get_trace(
         internal_id, step_instance_id=step_instance_id, category=category,
-        after_seq=after_seq, limit=limit + 1,
+        limit=limit + 1, **cursor_kwarg,
     )
     has_more = len(page) > limit
     traces = page[:limit]
@@ -227,6 +242,7 @@ def get_run_trace(
         "traces": traces,
         "next_seq": next_seq,
         "has_more": has_more,
+        "order": effective_order,
     }
 
 

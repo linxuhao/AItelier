@@ -22,6 +22,9 @@
   /** @type {string} active category filter ("" = all). */
   var _category = "";
 
+  /** @type {"asc"|"desc"} display order: "asc" = oldest first, "desc" = newest first. */
+  var _order = "asc";
+
   /** @type {number} page size for keyset pagination. */
   var _PAGE_SIZE = 100;
 
@@ -49,7 +52,8 @@
     "task_loop": "Task Loop", "git_sync_pre": "Git Sync",
   };
 
-  var _CATEGORIES = ["", "prompt", "response", "tool_call", "tool_result", "error", "step"];
+  var _CATEGORIES = ["", "prompt", "response", "tool_call", "tool_result",
+                     "usage", "step", "lifecycle", "error"];
 
 
   // ── Helpers ────────────────────────────────────────────────────────
@@ -93,8 +97,20 @@
           parts.push("[reasoning]\n" + payload.reasoning_content);
         }
         if (hasToolCalls) {
-          payload.tool_calls.forEach(function (tc) {
-            parts.push("→ " + tc.name + "(" + (tc.arguments || "") + ")");
+          payload.tool_calls.forEach(function (tc, i) {
+            // Two stored shapes: newer traces use [{name, arguments}] objects;
+            // legacy traces store tool_calls as a list of name strings with a
+            // parallel tool_args array. Reading tc.name on a string yields
+            // "undefined()" — handle both.
+            var name, args;
+            if (typeof tc === "string") {
+              name = tc;
+              args = (Array.isArray(payload.tool_args) && payload.tool_args[i]) || "";
+            } else {
+              name = tc.name;
+              args = tc.arguments || "";
+            }
+            parts.push("→ " + name + "(" + args + ")");
           });
         }
         return parts.join("\n\n");
@@ -149,6 +165,31 @@
       _load();
     });
     bar.appendChild(select);
+
+    // ── Order toggle (oldest first ↔ newest first) ──
+    // The trace API pages in the requested direction (asc/desc keyset on seq),
+    // so flipping this re-fetches from the start — the very newest record leads
+    // in "newest first", not just the newest of what was already loaded.
+    var orderLabel = document.createElement("label");
+    orderLabel.textContent = "Order:";
+    orderLabel.style.margin = "0";
+    orderLabel.style.fontSize = "0.85rem";
+    bar.appendChild(orderLabel);
+
+    var orderSelect = document.createElement("select");
+    [["asc", "Oldest first"], ["desc", "Newest first"]].forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o[0];
+      opt.textContent = o[1];
+      if (o[0] === _order) { opt.selected = true; }
+      orderSelect.appendChild(opt);
+    });
+    orderSelect.addEventListener("change", function () {
+      if (orderSelect.value === _order) { return; }
+      _order = orderSelect.value;
+      _load();
+    });
+    bar.appendChild(orderSelect);
 
     var refresh = document.createElement("button");
     refresh.className = "outline";
@@ -252,7 +293,8 @@
         count.textContent = "No trace records" +
           (_category ? " for category “" + _category + "”." : " yet.");
       } else {
-        count.textContent = _loadedCount + " record(s) loaded, oldest first" +
+        count.textContent = _loadedCount + " record(s) loaded, " +
+          (_order === "desc" ? "newest first" : "oldest first") +
           (_hasMore ? " · more available" : " · end of trace") +
           " · click a row to expand";
       }
@@ -283,7 +325,7 @@
     _loading = true;
     _updateFooter();
 
-    var opts = { limit: _PAGE_SIZE };
+    var opts = { limit: _PAGE_SIZE, order: _order };
     if (_category) { opts.category = _category; }
     if (append && _cursor != null) { opts.afterSeq = _cursor; }
 
@@ -293,11 +335,21 @@
       var traces = (data && data.traces) || [];
       var list = document.getElementById("trace-list");
       if (list) {
+        // The server already returns rows in the requested order (asc/desc),
+        // so each page appends in arrival order. The cursor (next_seq) is the
+        // last seq of the page and is opaque to the client.
         traces.forEach(function (t) { list.appendChild(_renderEntry(t)); });
       }
       _loadedCount += traces.length;
       _hasMore = !!(data && data.has_more);
       if (data && data.next_seq != null) { _cursor = data.next_seq; }
+      // Honor the order the server actually applied — an older skillflow without
+      // descending support degrades to ascending; reflect that in the control.
+      if (data && data.order && data.order !== _order) {
+        _order = data.order;
+        var os = document.querySelector(".trace-toolbar select:nth-of-type(2)");
+        if (os) { os.value = _order; }
+      }
       _updateFooter();
     }).catch(function (err) {
       _loading = false;
@@ -340,6 +392,7 @@
       if (container) { container.classList.remove("active"); }
       _projectId = null;
       _category = "";
+      _order = "asc";
       _cursor = null;
       _hasMore = false;
       _loadedCount = 0;

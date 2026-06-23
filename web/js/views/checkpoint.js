@@ -238,8 +238,16 @@
       labelEl.textContent = label;
     }
 
+    // Decide whether we still need to fetch the file content. The SSE
+    // checkpoint event carries step/label but NOT step_output, so a caller
+    // (app.js) passes step_output:null \u2014 rendering that directly leaves the
+    // modal blank. Fetch from the API whenever step_output is absent; the
+    // project page passes a full payload (from getCheckpoint) and renders
+    // directly without a second round-trip.
+    var needsFetch = !checkpointData || !checkpointData.step_output;
+
     // Show loading state if we need to fetch data
-    if (!checkpointData) {
+    if (needsFetch) {
       contentEl.textContent = "Loading checkpoint data\u2026";
 
       var api = window.AItelier && window.AItelier.API;

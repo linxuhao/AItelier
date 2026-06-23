@@ -485,6 +485,32 @@ class DBManager:
             )
             conn.commit()
 
+    def supersede_task(self, task_id: int) -> int | None:
+        """Archive a COMPLETED task as SUPERSEDED and clone it as a fresh PENDING
+        re-run row. Returns the new task id (or None if the task isn't completed).
+
+        Used when a goal-loop re-runs an already-completed task: the prior attempt
+        is preserved for audit (a SUPERSEDED generation) instead of being silently
+        overwritten/deleted. The clone copies the same prompt/deps/manifest_key so
+        the loop's re-run maps onto it.
+        """
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if not row or row["status"] != TaskStatus.COMPLETED.value:
+                return None
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?",
+                         (TaskStatus.SUPERSEDED.value, task_id))
+            cur = conn.execute(
+                "INSERT INTO tasks (project_id, prompt, status, dependencies, task_type, "
+                "owner_email, current_step, completed_steps, manifest_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (row["project_id"], row["prompt"], TaskStatus.PENDING.value,
+                 row["dependencies"], row["task_type"], row["owner_email"],
+                 "t_plan", json.dumps([]), row["manifest_key"]),
+            )
+            conn.commit()
+            return cur.lastrowid
+
     def set_task_last_error(self, task_id: int, error: str) -> bool:
         """记录任务的最后一次错误信息，同时在 status 变更时追踪。"""
         with self.get_connection() as conn:
@@ -1137,9 +1163,11 @@ class DBManager:
                 r["manifest_key"]: r["id"] for r in existing
                 if r["status"] == TaskStatus.COMPLETED.value and r["manifest_key"]
             }
-            # Drop only incomplete tasks (+ their children); completed rows stay.
+            # Drop only incomplete draft tasks (+ their children); COMPLETED and
+            # SUPERSEDED rows are immutable audit history and stay.
             incomplete_ids = [r["id"] for r in existing
-                              if r["status"] != TaskStatus.COMPLETED.value]
+                              if r["status"] not in (TaskStatus.COMPLETED.value,
+                                                     TaskStatus.SUPERSEDED.value)]
             if incomplete_ids:
                 ph = ",".join("?" * len(incomplete_ids))
                 conn.execute(f"DELETE FROM subtasks WHERE task_id IN ({ph})", incomplete_ids)
@@ -1224,8 +1252,9 @@ class DBManager:
         """Check if project has any tasks that aren't completed or failed."""
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND status NOT IN (?, ?)",
-                (project_id, TaskStatus.COMPLETED.value, TaskStatus.FAILED.value)
+                "SELECT COUNT(*) as cnt FROM tasks WHERE project_id = ? AND status NOT IN (?, ?, ?)",
+                (project_id, TaskStatus.COMPLETED.value, TaskStatus.FAILED.value,
+                 TaskStatus.SUPERSEDED.value)
             ).fetchone()
             return row["cnt"] > 0
 
@@ -1248,8 +1277,9 @@ class DBManager:
         """Check if user has any incomplete tasks across all their projects."""
         with self.get_connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) as cnt FROM tasks WHERE owner_email = ? AND status NOT IN (?, ?)",
-                (owner_email, TaskStatus.COMPLETED.value, TaskStatus.FAILED.value)
+                "SELECT COUNT(*) as cnt FROM tasks WHERE owner_email = ? AND status NOT IN (?, ?, ?)",
+                (owner_email, TaskStatus.COMPLETED.value, TaskStatus.FAILED.value,
+                 TaskStatus.SUPERSEDED.value)
             ).fetchone()
             return row["cnt"] > 0
 

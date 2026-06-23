@@ -88,6 +88,7 @@
     paused: "",
     planning: "",
     waiting_user_approval: "",
+    superseded: "",
   };
 
   /** Status → Unicode icon mapping. */
@@ -100,6 +101,7 @@
     pending: "\u25CB",                   // ○
     planning: "\u25CB",                  // ○
     waiting_user_approval: "\u23F8",     // ⏸
+    superseded: "\u2298",                // ⊘ replaced by a goal-loop re-run
   };
 
 

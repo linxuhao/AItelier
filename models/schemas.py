@@ -12,6 +12,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"
+    SUPERSEDED = "superseded"  # completed-then-replaced by a goal-loop re-run; kept for audit
 
 class TaskCreate(BaseModel):
     """

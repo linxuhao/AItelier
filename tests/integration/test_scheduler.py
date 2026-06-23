@@ -350,3 +350,59 @@ def test_sync_task_statuses_returns_early_for_completed(tmp_path):
     tasks = db.list_tasks_by_project("sync_test")
     assert len(tasks) == 1
     assert tasks[0]["status"] == TaskStatus.COMPLETED.value
+
+
+def test_sync_task_statuses_supersedes_completed_task_on_goal_loop(tmp_path):
+    """Regression ('task 120 disappeared'): when a goal-loop re-run drops a
+    still-planned key from completed_items, the prior COMPLETED task must be
+    preserved as SUPERSEDED + a fresh PENDING re-run row cloned — never
+    downgraded to pending (which the old positional sync did, after which the
+    manifest resync deleted it).
+    """
+    from core.scheduler import _sync_task_statuses
+    from unittest.mock import patch
+    import json as _json
+
+    db = DBManager(str(tmp_path / "goal_loop.db"))
+    db.ensure_project("gl_proj")
+    manifest = {
+        "tasks": [
+            {"id": "placeholders", "description": "P", "dependencies": [],
+             "task_type": "normal"},
+            {"id": "scene_bootstrapper", "description": "S",
+             "dependencies": ["placeholders"], "task_type": "normal"},
+        ],
+        "execution_order": [["placeholders"], ["scene_bootstrapper"]],
+    }
+    ids = db.create_tasks_from_manifest("gl_proj", manifest)
+    for tid in ids:            # both t_impl completed (per the trace)
+        db.complete_task(tid)
+    boot_id = ids[1]           # scene_bootstrapper — the "task 120"
+
+    # Goal-loop reset: scene_bootstrapper dropped from completed_items but still
+    # planned (in items_json).
+    class _LoopSF:
+        class _Conn:
+            def execute(self, q, params):
+                return self
+
+            def fetchone(self):
+                return (1,
+                        _json.dumps(["placeholders"]),
+                        _json.dumps(["placeholders", "scene_bootstrapper"]))
+
+        @property
+        def _conn(self):
+            return self._Conn()
+
+    with patch("core.scheduler.db", db):
+        _sync_task_statuses("gl_proj", {"id": "gl-run", "status": "running"}, _LoopSF())
+
+    tasks = db.list_tasks_by_project("gl_proj")
+    by_id = {t["id"]: t for t in tasks}
+    assert by_id[ids[0]]["status"] == "completed"      # never downgraded
+    assert by_id[boot_id]["status"] == "superseded"    # prior attempt preserved
+    reruns = [t for t in tasks if t["manifest_key"] == "scene_bootstrapper"
+              and t["status"] == "pending"]
+    assert len(reruns) == 1                              # cloned re-run row
+    assert len(tasks) == 3                              # P + superseded + rerun

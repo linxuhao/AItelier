@@ -708,7 +708,9 @@ def _sync_task_statuses(project_id: str, run: dict, sf):
 
     if run["status"] == "completed":
         for t in tasks:
-            if t["status"] != TaskStatus.COMPLETED.value:
+            # Don't resurrect SUPERSEDED audit rows into completed.
+            if t["status"] not in (TaskStatus.COMPLETED.value,
+                                   TaskStatus.SUPERSEDED.value):
                 db.complete_task(t["id"])
         return
     if run["status"] == "failed":
@@ -733,20 +735,61 @@ def _sync_task_statuses(project_id: str, run: dict, sf):
         row = None
     if not row:
         return
-    # Prefer completed_items (set of done task names) over current_index
+    # Prefer completed_items (set of done task keys) over current_index.
+    import json as _json
     try:
-        import json as _json
         completed = _json.loads(row[1]) if row[1] else []
-        idx = len(completed)
     except Exception:
-        idx = row[0] or 0  # fall back to current_index
+        completed = []
+    completed_keys = set(completed)
+    idx = len(completed)
+    try:
+        items = _json.loads(row[2]) if row[2] else []
+    except Exception:
+        items = []
+    active_keys = set(items)              # keys in the current loop plan
+    current_key = items[idx] if 0 <= idx < len(items) else None
+
+    # Terminal states are immutable audit history — never downgrade them.
+    # (This is the goal-loop data-loss fix: previously a positional sync
+    # downgraded a COMPLETED task to PENDING when the loop reset
+    # completed_items, after which the manifest resync deleted it.)
+    TERMINAL = {TaskStatus.COMPLETED.value, TaskStatus.SUPERSEDED.value,
+                TaskStatus.FAILED.value}
+
+    # Supersede-and-clone: a COMPLETED task whose key is still planned (in the
+    # loop's item list) but has dropped out of completed_items is being RE-RUN
+    # by a goal-loop. Archive the prior attempt as SUPERSEDED and clone a fresh
+    # PENDING re-run row, so the completed history is preserved (auditable
+    # generations) instead of being overwritten. The clone owns row creation, so
+    # this is correct regardless of when the manifest resync runs.
+    keyed = all(t.get("manifest_key") for t in tasks)
+    if keyed and active_keys:
+        nonterminal_keys = {t["manifest_key"] for t in tasks
+                            if t["status"] in (TaskStatus.PENDING.value,
+                                               TaskStatus.RUNNING.value)}
+        for t in tasks:
+            key = t["manifest_key"]
+            if (t["status"] == TaskStatus.COMPLETED.value
+                    and key in active_keys and key not in completed_keys
+                    and key not in nonterminal_keys):  # idempotent: no live re-run row yet
+                db.supersede_task(t["id"])
+
     for i, t in enumerate(tasks):
-        if i < idx:
-            want = TaskStatus.COMPLETED.value
-        elif i == idx:
-            want = TaskStatus.RUNNING.value
-        else:
-            want = TaskStatus.PENDING.value
+        if t["status"] in TERMINAL:
+            continue  # immutable — never downgrade
+        if keyed:
+            key = t["manifest_key"]
+            if key in completed_keys:
+                want = TaskStatus.COMPLETED.value
+            elif key == current_key:
+                want = TaskStatus.RUNNING.value
+            else:
+                want = TaskStatus.PENDING.value
+        else:  # legacy rows without manifest_key: positional fallback
+            want = (TaskStatus.COMPLETED.value if i < idx
+                    else TaskStatus.RUNNING.value if i == idx
+                    else TaskStatus.PENDING.value)
         if t["status"] != want:
             if want == TaskStatus.COMPLETED.value:
                 db.complete_task(t["id"])

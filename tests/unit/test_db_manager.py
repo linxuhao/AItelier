@@ -156,6 +156,56 @@ def test_sync_tasks_preserves_completed_on_redecomposition(db_manager):
     assert a["id"] in json.loads(fix["dependencies"])
 
 
+def test_supersede_task_archives_and_clones(db_manager):
+    """A goal-loop re-run preserves the completed attempt as SUPERSEDED and
+    clones a fresh PENDING re-run row (same manifest_key/prompt/deps)."""
+    import json
+    db_manager.ensure_project("sup_proj")
+    manifest = {
+        "tasks": [
+            {"id": "boot", "description": "Bootstrapper", "dependencies": [],
+             "task_type": "normal"},
+        ],
+        "execution_order": [["boot"]],
+    }
+    ids = db_manager.create_tasks_from_manifest("sup_proj", manifest)
+    db_manager.complete_task(ids[0])
+
+    new_id = db_manager.supersede_task(ids[0])
+    assert new_id is not None and new_id != ids[0]
+
+    tasks = {t["id"]: t for t in db_manager.list_tasks_by_project("sup_proj")}
+    assert tasks[ids[0]]["status"] == "superseded"   # prior attempt preserved
+    assert tasks[new_id]["status"] == "pending"       # re-run row
+    assert tasks[new_id]["manifest_key"] == "boot"    # same key → loop maps onto it
+    # superseded row is not "incomplete work" (won't block scheduler/gates)
+    assert db_manager.has_incomplete_tasks("sup_proj") is True  # the new pending row
+    db_manager.complete_task(new_id)
+    assert db_manager.has_incomplete_tasks("sup_proj") is False  # superseded ignored
+    # Re-superseding a non-completed row is a no-op.
+    assert db_manager.supersede_task(ids[0]) is None
+
+
+def test_sync_tasks_keeps_superseded_history(db_manager):
+    """A subsequent manifest resync must NOT delete SUPERSEDED audit rows."""
+    db_manager.ensure_project("sup2_proj")
+    manifest = {
+        "tasks": [{"id": "boot", "description": "B", "dependencies": [],
+                   "task_type": "normal"}],
+        "execution_order": [["boot"]],
+    }
+    ids = db_manager.create_tasks_from_manifest("sup2_proj", manifest)
+    db_manager.complete_task(ids[0])
+    new_id = db_manager.supersede_task(ids[0])
+    db_manager.complete_task(new_id)  # re-run finishes before the next re-decompose
+    # A later goal-loop re-decomposition resyncs the same manifest.
+    db_manager.sync_tasks_from_manifest("sup2_proj", manifest)
+    statuses = {t["id"]: t["status"]
+                for t in db_manager.list_tasks_by_project("sup2_proj")}
+    assert statuses.get(ids[0]) == "superseded"  # history survives the resync
+    assert statuses.get(new_id) == "completed"   # live completed re-run survives too
+
+
 def test_get_ready_tasks(db_manager):
     """测试就绪任务查询（依赖关系）"""
     db_manager.ensure_project("ready_proj")

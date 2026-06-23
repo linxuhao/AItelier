@@ -899,11 +899,14 @@
         var session = response.sessions[i];
         var sid = session.session_id || "";
         var pid = session.project_id || "";
-        var lastMsg = session.last_message || "";
+        // Title the session by its opening user message (the question), not the
+        // latest message. Fall back to last_message for older rows that predate
+        // the first_message column.
+        var titleMsg = session.first_message || session.last_message || "";
         var count = session.message_count || 0;
 
-        // Truncate last message to 40 chars
-        var preview = lastMsg.length > 40 ? lastMsg.slice(0, 40) + "\u2026" : lastMsg;
+        // Truncate to 40 chars
+        var preview = titleMsg.length > 40 ? titleMsg.slice(0, 40) + "\u2026" : titleMsg;
 
         var label = pid + ": " + preview + " (" + count + " msgs)";
 

@@ -1517,8 +1517,9 @@ class DBManager:
 
         Returns:
             List of dicts, each with keys: session_id, project_id, message_count,
-            last_message, updated_at. Ordered by updated_at DESC.
-            Only returns sessions with message_count > 0.
+            first_message, last_message, updated_at. Ordered by updated_at DESC.
+            ``first_message`` is the session's opening user message (the question),
+            used as the dropdown title. Only returns sessions with message_count > 0.
         """
         with self.get_connection() as conn:
             if project_id:
@@ -1526,6 +1527,9 @@ class DBManager:
                     """SELECT s.id AS session_id,
                               ch.project_id,
                               COUNT(ch.id) AS message_count,
+                              (SELECT content FROM chat_history
+                               WHERE session_id = s.id AND role = 'user'
+                               ORDER BY id ASC LIMIT 1) AS first_message,
                               (SELECT content FROM chat_history
                                WHERE session_id = s.id
                                ORDER BY id DESC LIMIT 1) AS last_message,
@@ -1545,6 +1549,9 @@ class DBManager:
                     """SELECT s.id AS session_id,
                               MAX(ch.project_id) AS project_id,
                               COUNT(ch.id) AS message_count,
+                              (SELECT content FROM chat_history
+                               WHERE session_id = s.id AND role = 'user'
+                               ORDER BY id ASC LIMIT 1) AS first_message,
                               (SELECT content FROM chat_history
                                WHERE session_id = s.id
                                ORDER BY id DESC LIMIT 1) AS last_message,

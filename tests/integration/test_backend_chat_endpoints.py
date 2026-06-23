@@ -72,6 +72,17 @@ class TestListChatSessions:
         assert len(results) == 1
         assert results[0]["last_message"] == "Third"
 
+    def test_first_message_is_opening_user_question(self, db_manager: DBManager):
+        """first_message holds the session's opening user message (the question)."""
+        _seed_session(db_manager, "sess-first", "proj-f", [
+            ("user", "First"),
+            ("assistant", "Second"),
+            ("user", "Third"),
+        ])
+        results = db_manager.list_chat_sessions()
+        assert len(results) == 1
+        assert results[0]["first_message"] == "First"
+
     def test_filters_by_project_id(self, db_manager: DBManager):
         """When project_id is provided, only sessions for that project."""
         _seed_session(db_manager, "s-a", "proj-1", [("user", "A")])

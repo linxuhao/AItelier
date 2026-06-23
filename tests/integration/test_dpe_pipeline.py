@@ -225,6 +225,67 @@ def test_pipeline_content_step_files_fallback(engine):
 
 
 # ════════════════════════════════════════════════════════════════════════
+# Write-only (no read tools) → _run_content_step ACTIONS path.
+#
+# Coverage gap closed: a write-only agent in JSON mode (is_native=False) takes
+# the single-call _run_content_step path. The 'files' fallback variant is
+# covered above, but the primary 'actions' variant (dpe_pipeline.py:367-382)
+# was exercised by NO test in the suite — a regression there shipped silently.
+# These force that path: write-only tool_schemas + is_native False + 'actions'.
+# ════════════════════════════════════════════════════════════════════════
+
+def test_content_step_actions_path_writes(engine):
+    """Write-only agent, JSON mode, 'actions' format → file written via _exec_tool."""
+    import tempfile
+    tmp_path = Path(tempfile.mkdtemp())
+    mock_workspace = MockWorkspace(tmp_path)
+    _setup_workspace(tmp_path, step_id="1")
+
+    engine._exec_tool = MagicMock(return_value={"written": "step1_sota.md"})
+    engine.factory.is_native.return_value = False  # force JSON dispatch, not native
+
+    engine.factory.get_agent.return_value = _mock_green(json.dumps({
+        "thoughts": "Writing SOTA survey.",
+        "actions": [{"tool": "write_sota", "params": {"content": "# SOTA"}}],
+    }))
+
+    # write-only schema (no read tools) → _run_content_step, not _run_tool_content_step
+    result = engine.run_step(task_id=201, step_id="1", workspace=mock_workspace,
+                             project_id="default", agent_config_name="researcher",
+                             tool_schemas={"write_sota": {}})
+
+    assert result is True
+    # The write action was actually dispatched (guards line 367-382: a regression
+    # that drops `actions` makes this 0 and the step raise MaxRetriesExceeded).
+    assert engine._exec_tool.call_count == 1
+    assert engine._exec_tool.call_args[0][0]["tool"] == "write_sota"
+
+
+def test_content_step_actions_path_no_write_raises(engine):
+    """Write-only agent, JSON mode, but agent emits no write action → MaxRetries."""
+    import tempfile
+    tmp_path = Path(tempfile.mkdtemp())
+    mock_workspace = MockWorkspace(tmp_path)
+    _setup_workspace(tmp_path, step_id="1")
+
+    engine._exec_tool = MagicMock(return_value={"output": "nothing written"})
+    engine.factory.is_native.return_value = False
+    engine.factory.get_max_retries.return_value = 2
+
+    engine.factory.get_agent.return_value = _mock_green(json.dumps({
+        "thoughts": "I have only thoughts, no actions.",
+        "actions": [],
+    }))
+
+    with pytest.raises(MaxRetriesExceeded) as exc_info:
+        engine.run_step(task_id=202, step_id="1", workspace=mock_workspace,
+                        project_id="default", agent_config_name="researcher",
+                        tool_schemas={"write_sota": {}})
+
+    assert "No output" in str(exc_info.value)
+
+
+# ════════════════════════════════════════════════════════════════════════
 # No write → MaxRetriesExceeded
 # ════════════════════════════════════════════════════════════════════════
 

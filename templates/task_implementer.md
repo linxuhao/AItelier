@@ -43,15 +43,22 @@
 - 文件必须具有适当的扩展名（.py、.json、.md、.html、.css、.js 等）。
 
 ## Unity / C# 项目专项约定（仅当任务是 Unity 游戏脚本时适用）
-项目交付为**纯脚本 + 资源说明**：你只写 `.cs` 脚本，美术/场景/预制体由人类按 `RESOURCES.md` 在编辑器里组装。整个仓库的脚本会被**一起编译**校验（Unity 最新稳定 LTS，Unity 6 / `6000.0`），所以下面几条是硬性的：
+项目交付为**纯脚本 + 资源说明**，但目标是**"按 Play 即玩"**：用代码生成的占位视觉 + 一个场景引导器，让用户零美术、零手动搭场景就能跑起来。整个仓库的脚本会被**一起编译**校验（Unity 最新稳定 LTS，Unity 6 / `6000.0`），所以下面几条是硬性的：
 
 - **脚本路径**：放在 `Assets/Scripts/` 下，每个文件一个 `public` 类，**类名必须等于文件名**（`Player.cs` → `class Player`）。
-- **API 版本**：只用 Unity 最新稳定 LTS（Unity 6）的 API。不要用已废弃的旧 API。
+- **API 版本**：只用 Unity 最新稳定 LTS（Unity 6）的 API，不要用已废弃的。常见替换：`Rigidbody2D.velocity`→`linearVelocity`、`Object.FindObjectOfType<T>()`→`FindFirstObjectByType<T>()`。
 - **全平台、不碰平台特性**：**禁止**任何平台专属 API 和条件编译（不要写 `#if UNITY_ANDROID` / `UNITY_IOS` / `UNITY_STANDALONE` 等）。只用跨平台通用功能。
 - **运行时脚本禁止 `UnityEditor`**：运行时脚本（`Assets/Scripts/`）**不得** `using UnityEditor;` 或调用编辑器 API——这会让发布构建编译失败。编辑器专用脚本（如有）放 `Assets/Editor/`。
 - **引用一致**：脚本间互相引用时，类型/命名空间/方法签名必须前后一致——编译是整仓一起编的，任何一个脚本写错 API 名或签名都会让整体编译失败。
 - **不写 PlayMode 测试**：headless 环境无法运行 Unity 运行时测试。纯逻辑如需测试可抽成普通 C# 类，但保持最小。
 - **不需要 `.meta` / `ProjectSettings/`**：交付只含脚本与 `RESOURCES.md`，工程骨架由人类创建，不要手写 `.meta`（GUID 无意义）。
+
+### 占位资源 + "按 Play 即玩"（让游戏零美术可运行）
+- **`Assets/Scripts/Utility/Placeholders.cs`（如任务要求，创建这个工具类）**：纯 `UnityEngine`、运行时生成占位视觉，无导入资源、无 `.meta`。两个静态方法：
+  - `static Sprite Sprite(Color color, Shape shape = Shape.Square, int size = 64, float pixelsPerUnit = 64f)`：建 `Texture2D(size,size,RGBA32,false)`，逐像素填色（圆形按到中心距离 ≤ 半径判定，否则 `Color.clear`），`SetPixels`+`Apply`，返回 `Sprite.Create(...)`；内含 `enum Shape { Square, Circle }`。
+  - `static GameObject Primitive(PrimitiveType type, Color color, string name = null)`：`GameObject.CreatePrimitive` 后给 `Renderer.material` 上色——**同时设 `_BaseColor`(URP/HDRP) 和 `_Color`(built-in)**，用 `material.HasProperty(...)` 判存在再 `SetColor`，兼容各渲染管线。
+- **自供给占位**：每个有视觉的 gameplay 脚本暴露序列化字段（如 `[SerializeField] private Sprite sprite;`），并在 `Awake` 里**未赋值时回退** `Placeholders.Sprite(...)`/`Primitive(...)`——这样不需要预制体/反射，用户在 Inspector 拖入真资源即覆盖。
+- **`SceneBootstrapper.cs`（如任务要求）**：一个 MonoBehaviour，`Awake` 里用代码建相机 + 生成全部实体 GameObject + 挂组件 + 占位视觉，拼出可玩场景。用户新建一个空物体挂上它、按 Play 即玩。按 category 选占位（主角 2D→圆 sprite / 3D→Capsule，障碍→Cube/矩形，地面→Plane，收集品→Sphere/小 sprite，背景→相机纯色，UI→TMP 默认字体）。内置 tag 用 `"Player"`/`"MainCamera"` 即可（无需自定义 tag）。
 
 ## 重试处理
 如果这是一次重试，你将看到 `[之前的反馈 — 必须修复]`。请修复所有提到的问题。不要重写所有内容——只修复被拒绝的部分。

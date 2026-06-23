@@ -23,7 +23,7 @@
   var _category = "";
 
   /** @type {"asc"|"desc"} display order: "asc" = oldest first, "desc" = newest first. */
-  var _order = "asc";
+  var _order = "desc";
 
   /** @type {number} page size for keyset pagination. */
   var _PAGE_SIZE = 100;
@@ -392,7 +392,7 @@
       if (container) { container.classList.remove("active"); }
       _projectId = null;
       _category = "";
-      _order = "asc";
+      _order = "desc";
       _cursor = null;
       _hasMore = false;
       _loadedCount = 0;

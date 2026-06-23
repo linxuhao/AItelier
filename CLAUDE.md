@@ -24,9 +24,12 @@ aitelier server
 pytest tests/unit -v        # 360 unit tests
 pytest tests/ -v            # full suite: 364 unit+integration tests
 pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake
+
+# Web SPA front-end unit tests (Vitest + jsdom) — separate toolchain, not run by pytest
+cd web && npm install && npm test   # tests web/js/{utils,router}.js pure logic
 ```
 
-Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient.
+Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient. The web SPA's pure JS (sanitization, hash routing) is unit-tested separately under `web/js/__tests__/` (Vitest+jsdom); the full DPE pipeline runs end-to-end offline with mocked agents in `tests/integration/test_full_pipeline_real_runner.py`.
 
 ### Docker deployment & secrets
 

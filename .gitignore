@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Web SPA front-end test toolchain (Vitest + jsdom)
+web/node_modules/
+node_modules/
+
 # C extensions
 *.so
 

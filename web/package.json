@@ -1,0 +1,15 @@
+{
+  "name": "aitelier-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AItelier web SPA — front-end unit tests (Vitest + jsdom).",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.8"
+  }
+}

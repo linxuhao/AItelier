@@ -32,18 +32,13 @@ WORKDIR /app
 # Install the package + dependencies. The source is also bind-mounted at runtime
 # (docker-compose) so code edits are live without a rebuild.
 COPY . /app
-# Resolve deps with vendor/wheels/ as an extra local package index (pip's
-# Maven-local-repo equivalent). pip considers BOTH the local dir and PyPI and
-# installs the HIGHEST matching version of skillflow-py>=…:
-#   - DEV: a developer drops a local snapshot wheel there (e.g. 1.1.8.post1,
-#     carrying fixes not yet on PyPI) → post1 > 1.1.8, so the snapshot wins. The
-#     wheel is gitignored & NOT shipped; `COPY . /app` still copies it locally.
-#   - STABLE: a fresh clone has no wheel (the dir is empty/absent) → pip falls
-#     back to PyPI's published skillflow-py.
-# `mkdir -p` guarantees the dir exists so --find-links never points at a missing
-# path. See the skillflow-snapshot note in CLAUDE.md / vendor/wheels/README.md.
-RUN mkdir -p /app/vendor/wheels \
-    && pip install --no-cache-dir --find-links /app/vendor/wheels -e .
+# Resolve deps with vendor/wheels/ as an extra local package index alongside PyPI;
+# pip installs the HIGHEST matching skillflow-py>=… version. See the
+# skillflow-snapshot note in CLAUDE.md.
+#   - DEV: drop a local snapshot wheel there (e.g. 1.1.8.post1, fixes not yet on
+#     PyPI) → post1 > 1.1.8 so it wins. Gitignored & not shipped; COPY copies it.
+#   - STABLE: a clone has no wheel → pip ignores the absent dir and uses PyPI.
+RUN pip install --no-cache-dir --find-links /app/vendor/wheels -e .
 
 # Identity for in-container git commits (workspace_manager commits set no inline
 # identity, and there is no global ~/.gitconfig in the image). Overridable.

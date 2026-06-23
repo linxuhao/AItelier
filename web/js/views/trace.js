@@ -82,6 +82,23 @@
     if (payload == null) { return ""; }
     if (typeof payload === "string") { return payload; }
     if (typeof payload === "object") {
+      // Native response traces carry tool calls / reasoning alongside the
+      // free text. Render all of them — collapsing to .text alone would hide
+      // the tool calls (the substantive part of the turn).
+      var hasToolCalls = Array.isArray(payload.tool_calls) && payload.tool_calls.length;
+      if (hasToolCalls || payload.reasoning_content) {
+        var parts = [];
+        if (payload.text) { parts.push(payload.text); }
+        if (payload.reasoning_content) {
+          parts.push("[reasoning]\n" + payload.reasoning_content);
+        }
+        if (hasToolCalls) {
+          payload.tool_calls.forEach(function (tc) {
+            parts.push("→ " + tc.name + "(" + (tc.arguments || "") + ")");
+          });
+        }
+        return parts.join("\n\n");
+      }
       // Common content-bearing fields for prompt/response/error traces.
       var direct = payload.content || payload.text || payload.message ||
                    payload.response || payload.prompt || payload.error;

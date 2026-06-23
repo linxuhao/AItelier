@@ -1231,12 +1231,18 @@ class PipelineEngine:
                         "turn": turn_count + 1, **usage,
                     })
 
-                # Record trace
+                # Record trace — store the full response (free text + every
+                # tool call with untruncated args + reasoning) so the trace is
+                # a faithful copy of what the model produced, not a lossy digest.
                 self._trace("response", "agent_response", {
                     "attempt": attempt, "turn": turn_count + 1,
                     "text": result.text or "",
-                    "tool_calls": [tc["function"]["name"] for tc in result.tool_calls],
-                    "tool_args": [tc["function"].get("arguments", "")[:500] for tc in result.tool_calls],
+                    "reasoning_content": result.reasoning_content or "",
+                    "tool_calls": [
+                        {"name": tc["function"]["name"],
+                         "arguments": tc["function"].get("arguments", "")}
+                        for tc in result.tool_calls
+                    ],
                 })
 
                 if result.text:

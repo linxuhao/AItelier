@@ -72,7 +72,12 @@
 当项目是 Unity 游戏，按以下方式设计：
 - **版本与平台**：目标为 Unity **最新稳定 LTS（Unity 6 / `6000.0`）**，不兼容旧版本。**只做全平台通用**，不设计任何平台专属功能或条件编译。
 - **交付形态 = 纯脚本 + 资源说明**：只交付 `.cs` 脚本（放 `Assets/Scripts/`）与一份 `RESOURCES.md`。**不要设计 `.meta` / `ProjectSettings/` / 场景文件**——工程骨架由人类在编辑器中创建。
-- **`RESOURCES.md`（必须作为一个交付物列入设计）**：写明 (a) Unity 版本；(b) 需要的 UPM 包（如有）；(c) 需要人类手动创建的场景、GameObject、预制体、精灵/资源；(d) **每个脚本应挂载到哪个 GameObject**、关键 Inspector 字段如何设置。让人类拿到脚本后能照着把游戏拼起来。
+- **"按 Play 即玩"——用占位资源，不要让用户先准备美术**（核心降门槛要求）：
+  - 设计一个 `Placeholders` 工具类（纯 UnityEngine、运行时生成占位视觉，无导入资源）：`Placeholders.Sprite(color, shape)` 生成纯色方/圆 sprite（`Texture2D`+`Sprite.Create`）、`Placeholders.Primitive(type, color)` 生成上色图元。
+  - 设计一个 `SceneBootstrapper`（MonoBehaviour）：在 `Awake` 里**用代码把整个可玩场景拼好**——建相机、生成所有实体 GameObject + 组件 + 占位视觉。用户只需新建一个空物体挂上它、按 Play 就能玩，零手动搭场景。
+  - **按 category 选占位**：主角 2D→生成圆/方 sprite，3D→Capsule；障碍/平台→Cube/Quad 或矩形 sprite；地面→Plane；收集品/子弹→Sphere/小 sprite；背景→相机纯色或 Quad；UI 文字→TMP 默认字体。
+  - **自供给**：每个有视觉的 gameplay 脚本暴露 `[SerializeField] Sprite/Mesh/Material`，并在 `Awake` 里**未赋值时回退到 `Placeholders` 生成占位**——这样 SceneBootstrapper 不需要反射去填私有字段，用户之后在 Inspector 拖入真资源即覆盖。
+- **`RESOURCES.md`（必须作为一个交付物列入设计）**：定位为"**可选的进阶/换皮指南**"，不是"必做的搭建步骤"（占位版已经能 Play）。写明 (a) Unity 版本；(b) 需要的 UPM 包（如有）；(c) 如何把占位换成真美术（在哪个物体/字段拖入 sprite/模型）；(d) 进阶：如何用编辑器把代码拼的场景固化成 prefab/scene。
 - **可编译性**：脚本会被自动**整仓编译**校验（无需许可证）。设计组件时确保脚本间接口（类名/命名空间/公共方法签名）清晰一致。
 - **linter_manifest 说明**：C# 编译由系统自动完成，**`.cs` 不必写进 manifest**；manifest 只需覆盖其它文本文件（如有 `.json`/`.md` 用 `basic`）。若项目只有 C#，manifest 可为 `{}`。
 

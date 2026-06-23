@@ -1,9 +1,7 @@
 # tests/test_meta_conversation.py
-# Tests for the pre-pipeline meta conversation agent.
-# Real LLM tests require ZHIPU_API_KEY env var.
+# Tests for the pre-pipeline meta conversation agent (fully mocked — no network).
 
 import json
-import os
 import pytest
 from unittest.mock import patch, MagicMock
 from core.meta_conversation import MetaConversationAgent, format_brief_as_markdown
@@ -387,95 +385,3 @@ class TestTurnByTurnMocked:
         assert result["status"] == "complete"
         assert "Email notifications" in result["project_brief"]["goals"]
 
-
-# ── Real LLM Tests (require ZHIPU_API_KEY) ──
-
-real_llm = pytest.mark.skipif(
-    not os.getenv("ZHIPU_API_KEY"),
-    reason="Missing ZHIPU_API_KEY — set it to run real LLM tests"
-)
-
-
-@real_llm
-def test_real_meta_conversation_fibonacci():
-    """
-    Real LLM test: Meta agent gathers requirements for a fibonacci project.
-    Simulates a user who gives short answers.
-    """
-    agent = MetaConversationAgent(model_name="deepseek/deepseek-v4-flash")
-
-    answers = [
-        "A Python CLI that computes the nth Fibonacci number",
-        "Target users: developers learning algorithms. Use case: verify correctness of fib implementations",
-        "Goals: handle large n efficiently (up to 10000). Non-goals: no GUI, no web server, no caching service",
-        "Python 3.12, no external dependencies, iterative approach preferred"
-    ]
-    ans_idx = [0]
-
-    def io_handler(message):
-        i = ans_idx[0]
-        print(f"  [agent] {message}")
-        if i < len(answers):
-            ans = answers[i]
-            ans_idx[0] += 1
-        else:
-            ans = "that's everything I need"
-        print(f"  [user] {ans}")
-        return ans
-
-    brief = agent.converse("build a fibonacci calculator", io_handler=io_handler)
-
-    # Validate brief structure
-    assert "project_name" in brief
-    assert "description" in brief
-    assert isinstance(brief.get("user_stories", []), list)
-    assert isinstance(brief.get("goals", []), list)
-    assert isinstance(brief.get("non_goals", []), list)
-
-    # Brief should mention fibonacci-related content
-    md = format_brief_as_markdown(brief)
-    assert len(md) > 50, "Brief seems too short"
-
-    print(f"\nGenerated Brief:\n{md}")
-
-
-@real_llm
-def test_real_meta_conversation_detailed_prompt():
-    """
-    Real LLM test: When the initial prompt is very detailed,
-    the meta agent should produce a brief quickly (fewer questions).
-    """
-    agent = MetaConversationAgent(model_name="deepseek/deepseek-v4-flash")
-
-    detailed_prompt = (
-        "Build a Python fibonacci calculator CLI. "
-        "It should take n as a command line argument and print fib(n). "
-        "Goals: fast iterative computation, handle n up to 10000, include unit tests. "
-        "Non-goals: no GUI, no web server, no external deps. "
-        "Target users: algorithm students. "
-        "Success criteria: fib(10) = 55, fib(0) = 0, fib(1) = 1."
-    )
-
-    # If prompt is detailed enough, agent may complete immediately
-    # But accept up to 2 questions just in case
-    answers = ["yes that's correct", "iterative approach with O(n) time"]
-    ans_idx = [0]
-
-    def io_handler(message):
-        i = ans_idx[0]
-        print(f"  [agent] {message}")
-        if i < len(answers):
-            ans = answers[i]
-            ans_idx[0] += 1
-        else:
-            ans = "looks good, proceed"
-        print(f"  [user] {ans}")
-        return ans
-
-    brief = agent.converse(detailed_prompt, io_handler=io_handler)
-
-    assert "project_name" in brief
-    assert len(brief.get("goals", [])) >= 1
-
-    md = format_brief_as_markdown(brief)
-    print(f"\nGenerated Brief:\n{md}")

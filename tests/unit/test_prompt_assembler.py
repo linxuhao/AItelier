@@ -90,14 +90,16 @@ class TestPromptAssembler:
         # Workspace tree section is always present
         assert "[Workspace Directory Tree]" in result
 
-    def test_assemble_includes_project_design_for_tool_step(self, workspace):
-        """t_impl with tool_schemas — project design SHOULD be injected."""
+    def test_assemble_omits_eager_design_dump(self, workspace):
+        """The whole code repo must NOT be inlined into the prompt — agents read
+        it on demand via the directory tree + skillflow read tools."""
         ws, code_path = workspace
         assembler = PromptAssembler()
         ts = {"read_file": {}, "list_tree": {}, "write": {}}
         result = assembler.assemble("t_impl", ws, "Task", code_path=code_path, tool_schemas=ts)
-        assert "# Design" in result
-        assert "# SOTA" in result
+        assert "[Project Design]" not in result
+        assert "# Design" not in result   # code_path file contents not inlined
+        assert "# SOTA" not in result
 
     def test_assemble_task_step_includes_planning_context(self, workspace):
         ws, code_path = workspace
@@ -168,31 +170,29 @@ class TestPromptAssembler:
         assert "[Output Delivery" not in result
 
 
-class TestLoadProjectDocs:
-    def test_loads_existing_docs(self, tmp_path):
+class TestNoEagerCodeDump:
+    """Regression: the assembler must NOT paste the whole code repo into every
+    step (the old `[Project Design]` dump that ballooned intent_detect to ~4 MB).
+    Agents see the directory tree + read files on demand via skillflow context."""
+
+    def test_assemble_omits_code_repo_contents(self, tmp_path):
+        # A code repo with a big source file the assembler must NOT inline.
         code_path = tmp_path / "code"
         code_path.mkdir()
-        (code_path / "design.md").write_text("# My Design", encoding="utf-8")
+        secret = "SENTINEL_FULL_SOURCE_SHOULD_NOT_BE_INLINED"
+        (code_path / "Big.cs").write_text(
+            "// " + secret + "\n" + "\n".join(f"line {i}" for i in range(2000)),
+            encoding="utf-8",
+        )
+        project_path = tmp_path / "ws"
+        project_path.mkdir()
 
-        assembler = PromptAssembler()
-        result = assembler._load_project_docs(code_path)
-        assert "# My Design" in result
+        assembler = PromptAssembler(repo_type="existing")
+        prompt = assembler.assemble("3", project_path, code_path=code_path)
 
-    def test_missing_project_dir(self, tmp_path):
-        empty_path = tmp_path / "nonexistent"
-        assembler = PromptAssembler()
-        result = assembler._load_project_docs(empty_path)
-        assert result == ""
-
-    def test_truncates_long_doc(self, tmp_path):
-        code_path = tmp_path / "code"
-        code_path.mkdir()
-        long_content = "\n".join(f"Line {i}" for i in range(5000))
-        (code_path / "design.md").write_text(long_content, encoding="utf-8")
-
-        assembler = PromptAssembler()
-        result = assembler._load_project_docs(code_path)
-        assert "truncated" in result
+        assert "[Project Design]" not in prompt        # no eager design dump
+        assert secret not in prompt                    # file contents not inlined
+        # The file NAME may still appear via the directory tree — that's fine.
 
 
 
@@ -225,12 +225,11 @@ class TestCacheOrdering:
             feedback="please fix the bug",
         )
         i_brief = result.index("[Project Brief]")
-        i_design = result.index("[Project Design]")
         i_ctx = result.index("[Pre-resolved Context]")
         i_tree = result.index("[Workspace Directory Tree]")
         i_fb = result.index("[Previous Feedback")
-        # brief → design → resolved context → tree → feedback
-        assert i_brief < i_design < i_ctx < i_tree < i_fb
+        # stable brief → volatile: resolved context → tree → feedback
+        assert i_brief < i_ctx < i_tree < i_fb
 
     def test_directory_tree_drops_file_sizes(self, workspace):
         ws, code_path = workspace

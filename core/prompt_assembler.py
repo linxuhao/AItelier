@@ -192,14 +192,14 @@ class PromptAssembler:
             if brief:
                 sections.append(f"[Project Brief]\n{brief}")
 
-        # [Project Design] — inject project design docs for steps that can read.
-        # Verification steps only get the directory tree; they explore via tools.
-        # Skipped when hoist_design (F2): stable design docs are in the preamble
-        # and agents read code on demand via list_tree/read_file.
-        if step_id not in ("t_verify", "5") and not hoist_design:
-            design_content = self._load_project_docs(code_path)
-            if design_content:
-                sections.append(f"[Project Design]\n{design_content}")
+        # NOTE: the per-step `[Project Design]` code dump was removed. It eagerly
+        # scanned the whole code repo (code_path.rglob) and pasted every file's
+        # full content into every step — redundant with the skillflow context
+        # system (every agent step declares `{ from: "repository" }`, served
+        # lazily via the directory tree + read_file/list_tree tools), and
+        # unbounded on existing projects (it ballooned the meta `intent_detect`
+        # prompt to ~4 MB). The bounded, cache-stable design block lives in
+        # build_shared_preamble (_load_fixed_step_docs) for configs that opt in.
 
         # [Verification Context] — inject brief + goals for verifier steps
         if step_id in ("t_verify", "5"):
@@ -277,9 +277,10 @@ class PromptAssembler:
         """Read the outputs of the given (stable) step ids for a config.
 
         These step outputs are fixed once their steps complete, so they stay
-        byte-stable across all later steps — unlike _load_project_docs, which
-        scans the growing code repo and changes every task. No pipeline-specific
-        step ids are hardcoded: the caller supplies them from config.
+        byte-stable across all later steps (unlike the growing code repo, which
+        agents read on demand via the directory tree + read_file/list_tree). No
+        pipeline-specific step ids are hardcoded: the caller supplies them from
+        config.
         """
         docs = []
         for step_key in steps:
@@ -389,36 +390,6 @@ class PromptAssembler:
                 pass
 
         return "\n".join(trees)
-
-    def _load_project_docs(self, code_path: Path) -> str:
-        """
-        从代码仓库加载项目设计文档。
-        动态扫描所有文件，而非硬编码文件名，以适配 LLM 输出的不同命名。
-        """
-        if not code_path.exists():
-            return ""
-
-        docs = []
-        for doc_path in sorted(code_path.rglob("*")):
-            if not doc_path.is_file():
-                continue
-            if doc_path.name in {".gitkeep", "_snapshot.json"}:
-                continue
-            if any(p.startswith(".") for p in doc_path.relative_to(code_path).parts):
-                continue
-            try:
-                content = doc_path.read_text(encoding="utf-8")
-            except Exception:
-                continue
-            # 截断过长的设计文档 (保留前 3000 行)
-            lines = content.splitlines()
-            if len(lines) > 3000:
-                content = "\n".join(lines[:3000])
-                content += f"\n\n... [design doc truncated at 3000 lines]"
-            rel_name = str(doc_path.relative_to(code_path))
-            docs.append(f"### {rel_name}\n{content}")
-
-        return "\n\n".join(docs)
 
     def _load_project_brief(self, project_path: Path) -> str:
         """

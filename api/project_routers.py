@@ -32,6 +32,10 @@ from api.authz import require_writer
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
+# Default line window for workspace_file when no range is given — replaces the
+# old silent 50000-char truncation with line paging + a `truncated` signal.
+_WORKSPACE_FILE_MAX_LINES = 2000
+
 
 @router.get("", response_model=list[ProjectWithStats])
 def list_projects(
@@ -195,6 +199,8 @@ def workspace_file(
     project_id: str,
     path: str,
     root: str = "dps",
+    start_line: int | None = None,
+    end_line: int | None = None,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
@@ -202,6 +208,9 @@ def workspace_file(
     """Read a file from the project workspace (path traversal safe).
 
     ``root`` selects "dps" (pipeline staging) or "code" (project code repo).
+    Large files are paged by line: pass ``start_line``/``end_line`` (1-based,
+    inclusive) to read a range; the response reports ``total_lines`` and a
+    ``truncated`` flag so callers can page rather than be silently cut off.
     """
     project = db.get_project(project_id)
     if not project:
@@ -220,8 +229,22 @@ def workspace_file(
     if not target.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {path}")
 
-    content = target.read_text(encoding="utf-8", errors="replace")
-    return {"path": path, "content": content[:50000]}
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    total = len(lines)
+    start_idx = (start_line - 1) if start_line and start_line > 0 else 0
+    start_idx = min(start_idx, total)
+    if end_line and end_line > 0:
+        end_idx = min(end_line, total)
+    else:
+        end_idx = min(start_idx + _WORKSPACE_FILE_MAX_LINES, total)
+    return {
+        "path": path,
+        "content": "\n".join(lines[start_idx:end_idx]),
+        "start_line": start_idx + 1,
+        "end_line": end_idx,
+        "total_lines": total,
+        "truncated": end_idx < total,
+    }
 
 
 @router.get("/{project_id}/repo/status")

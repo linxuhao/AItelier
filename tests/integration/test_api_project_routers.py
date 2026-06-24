@@ -108,3 +108,43 @@ class TestProjectAPI:
             "repo_path": str(not_git),
         })
         assert resp.status_code == 400
+
+
+class TestWorkspaceFilePaging:
+    """workspace_file endpoint: line paging replaces silent 50000-char cut."""
+
+    def _make_project_file(self, client, tmp_path, pid, name, body):
+        client.post("/api/projects", json={"project_id": pid, "name": pid})
+        # dps root resolves to <ws_base>/<project_id> (see _get_secure_path)
+        fp = tmp_path / "ws" / pid / name
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_text(body)
+        return fp
+
+    def test_small_file_whole_not_truncated(self, client: TestClient, tmp_path):
+        self._make_project_file(client, tmp_path, "fp_small", "a.txt", "L1\nL2\nL3")
+        resp = client.get("/api/projects/fp_small/workspace/file", params={"path": "a.txt"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_lines"] == 3
+        assert data["truncated"] is False
+        assert data["content"] == "L1\nL2\nL3"  # raw, no line-number prefix
+
+    def test_large_file_paged_and_flagged(self, client: TestClient, tmp_path):
+        body = "\n".join(f"line{i}" for i in range(1, 5001))
+        self._make_project_file(client, tmp_path, "fp_big", "big.txt", body)
+        resp = client.get("/api/projects/fp_big/workspace/file", params={"path": "big.txt"})
+        data = resp.json()
+        assert data["total_lines"] == 5000
+        assert data["truncated"] is True
+        assert data["end_line"] == 2000
+
+    def test_explicit_range(self, client: TestClient, tmp_path):
+        body = "\n".join(f"line{i}" for i in range(1, 101))
+        self._make_project_file(client, tmp_path, "fp_range", "big.txt", body)
+        resp = client.get("/api/projects/fp_range/workspace/file",
+                          params={"path": "big.txt", "start_line": 10, "end_line": 12})
+        data = resp.json()
+        assert data["start_line"] == 10 and data["end_line"] == 12
+        assert data["content"] == "line10\nline11\nline12"
+        assert data["truncated"] is True

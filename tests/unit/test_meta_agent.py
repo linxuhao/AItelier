@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 25
+        assert len(TOOL_DEFINITIONS) == 26
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -61,7 +61,7 @@ class TestToolDefinitions:
             "answer_project_conversation", "approve_project_brief",
             "retry_project", "refresh_planning",
             "list_tasks", "get_task", "retry_task", "get_step_output",
-            "list_code_tree", "read_code_file",
+            "list_code_tree", "read_code_file", "search_code",
             "list_workspace_tree", "read_workspace_file",
             "retrieve_previous_context",
             "approve_checkpoint", "reject_checkpoint", "get_pipeline_status",
@@ -197,6 +197,104 @@ class TestWorkspaceTools:
             "project_id": "test-proj", "path": "../../etc/passwd"
         })
         assert "error" in result
+
+
+class TestCodeReadTools:
+    """read_code_file paging + search_code grep (no-regression)."""
+
+    def _code_repo(self, mock_ws, tmp_path, files: dict):
+        code = tmp_path / "code" / "test-proj"
+        code.mkdir(parents=True)
+        for name, body in files.items():
+            fp = code / name
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(body)
+        mock_ws.get_code_path.return_value = code
+        return code
+
+    async def test_read_code_file_whole_small(self, agent, mock_ws, tmp_path):
+        self._code_repo(mock_ws, tmp_path, {"a.py": "L1\nL2\nL3"})
+        r = await agent._execute_tool("read_code_file",
+                                      {"project_id": "test-proj", "path": "a.py"})
+        assert r["total_lines"] == 3
+        assert r["truncated"] is False
+        assert r["start_line"] == 1 and r["end_line"] == 3
+        # Line-numbered content
+        assert "1\tL1" in r["content"] and "3\tL3" in r["content"]
+
+    async def test_read_code_file_large_not_silently_truncated(self, agent, mock_ws, tmp_path):
+        # The original bug: a >2000-line file returned a fixed prefix with no
+        # signal. Now it must page and flag truncation.
+        body = "\n".join(f"line{i}" for i in range(1, 5001))
+        self._code_repo(mock_ws, tmp_path, {"big.py": body})
+        r = await agent._execute_tool("read_code_file",
+                                      {"project_id": "test-proj", "path": "big.py"})
+        assert r["total_lines"] == 5000
+        assert r["truncated"] is True
+        assert r["end_line"] == 2000  # _MAX_READ_LINES window
+
+    async def test_read_code_file_range(self, agent, mock_ws, tmp_path):
+        body = "\n".join(f"line{i}" for i in range(1, 101))
+        self._code_repo(mock_ws, tmp_path, {"big.py": body})
+        r = await agent._execute_tool("read_code_file", {
+            "project_id": "test-proj", "path": "big.py",
+            "start_line": 90, "end_line": 95,
+        })
+        assert r["start_line"] == 90 and r["end_line"] == 95
+        assert r["truncated"] is True
+        assert "90\tline90" in r["content"]
+        assert "96\tline96" not in r["content"]
+
+    async def test_read_code_file_traversal(self, agent, mock_ws, tmp_path):
+        self._code_repo(mock_ws, tmp_path, {"a.py": "x"})
+        r = await agent._execute_tool("read_code_file", {
+            "project_id": "test-proj", "path": "../../etc/passwd",
+        })
+        assert "error" in r
+
+    async def test_search_code_finds_matches(self, agent, mock_ws, tmp_path):
+        self._code_repo(mock_ws, tmp_path, {
+            "a.py": "def foo():\n    return TARGET\n",
+            "b.py": "x = 1\nTARGET = 2\n",
+        })
+        r = await agent._execute_tool("search_code",
+                                      {"project_id": "test-proj", "pattern": "TARGET"})
+        assert r["truncated"] is False
+        files = {m["file"] for m in r["matches"]}
+        assert files == {"a.py", "b.py"}
+        assert all("line" in m and "text" in m for m in r["matches"])
+
+    async def test_search_code_glob_filter(self, agent, mock_ws, tmp_path):
+        self._code_repo(mock_ws, tmp_path, {
+            "a.py": "TARGET\n", "notes.md": "TARGET\n",
+        })
+        r = await agent._execute_tool("search_code", {
+            "project_id": "test-proj", "pattern": "TARGET", "glob": "*.py",
+        })
+        assert {m["file"] for m in r["matches"]} == {"a.py"}
+
+    async def test_search_code_max_results_truncates(self, agent, mock_ws, tmp_path):
+        body = "\n".join("HIT" for _ in range(50))
+        self._code_repo(mock_ws, tmp_path, {"a.py": body})
+        r = await agent._execute_tool("search_code", {
+            "project_id": "test-proj", "pattern": "HIT", "max_results": 10,
+        })
+        assert len(r["matches"]) == 10
+        assert r["truncated"] is True
+
+    async def test_search_code_literal_fallback_on_bad_regex(self, agent, mock_ws, tmp_path):
+        self._code_repo(mock_ws, tmp_path, {"a.py": "cost = price * (1 + tax)\n"})
+        # "(1 +" is an invalid regex → must fall back to literal substring
+        r = await agent._execute_tool("search_code", {
+            "project_id": "test-proj", "pattern": "(1 +",
+        })
+        assert len(r["matches"]) == 1
+
+    async def test_search_code_repo_not_found(self, agent, mock_ws, tmp_path):
+        mock_ws.get_code_path.return_value = tmp_path / "nope"
+        r = await agent._execute_tool("search_code",
+                                      {"project_id": "test-proj", "pattern": "x"})
+        assert "error" in r
 
 
 class TestContextTools:

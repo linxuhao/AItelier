@@ -6,6 +6,7 @@
 import asyncio
 import json
 import os
+import re
 import traceback
 from pathlib import Path
 from typing import AsyncGenerator
@@ -18,6 +19,15 @@ from core.ai_router import _read_secret
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
 _DEFAULT_CONFIG_PATH_V2 = "agent_configs/meta_conversation.yaml"
 _META_DIR = Path.home() / ".AItelier" / "meta"
+
+# Default line window for read_code_file when no range is given. Large enough
+# that typical source files are returned whole (so the agent isn't blind to the
+# tail), with a `truncated` flag signalling when there's more to page through.
+_MAX_READ_LINES = 2000
+# Suffixes skipped by search_code (binary / compiled artifacts).
+_BINARY_SUFFIXES = {".pyc", ".pyo", ".so", ".o", ".bin", ".png", ".jpg",
+                    ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".woff",
+                    ".woff2", ".ttf", ".eot"}
 
 # ── System Prompt ──────────────────────────────────────────────────
 
@@ -298,15 +308,46 @@ TOOL_DEFINITIONS = [
             "name": "read_code_file",
             "description": "Read a file from a project's actual code repository "
                            "(the live source, via get_code_path). Use this — not "
-                           "read_workspace_file — to read existing source files.",
+                           "read_workspace_file — to read existing source files. "
+                           "Large files are paged: pass start_line/end_line to read "
+                           "a range; check the returned 'truncated'/'total_lines' to "
+                           "page through the rest.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "project_id": {"type": "string"},
                     "path": {"type": "string",
                              "description": "Relative path within the repo (e.g. 'server.py')"},
+                    "start_line": {"type": "integer",
+                                   "description": "1-based first line to read (optional)"},
+                    "end_line": {"type": "integer",
+                                 "description": "1-based last line to read, inclusive (optional)"},
                 },
                 "required": ["project_id", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_code",
+            "description": "Search file contents (grep) in a project's actual code "
+                           "repository, via get_code_path. Returns matching "
+                           "{file, line, text}. Use this to locate code by content "
+                           "instead of reading whole files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "pattern": {"type": "string",
+                                "description": "Regex (case-insensitive) or literal "
+                                               "substring to search for"},
+                    "glob": {"type": "string",
+                             "description": "Optional filename glob filter (e.g. '*.py')"},
+                    "max_results": {"type": "integer",
+                                    "description": "Max matches to return (default 100)"},
+                },
+                "required": ["project_id", "pattern"],
             },
         },
     },
@@ -1296,7 +1337,14 @@ class MetaAgent:
         return {"project_id": pid, "tree": tree[:200]}
 
     def _tool_read_code_file(self, args: dict) -> dict:
-        """Read a file from a project's actual code repository."""
+        """Read a file from a project's actual code repository.
+
+        Supports line-range paging via ``start_line``/``end_line`` (1-based,
+        inclusive) so large files are not silently truncated. When no range is
+        given, returns up to ``_MAX_READ_LINES`` from the top. Always reports
+        ``total_lines`` and a ``truncated`` flag so the agent knows when there
+        is more to page through.
+        """
         pid = args["project_id"]
         path = args["path"]
         base = self.ws.get_code_path(pid).resolve()
@@ -1309,7 +1357,73 @@ class MetaAgent:
             content = target.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             return {"error": str(e)}
-        return {"path": path, "content": content[:50000]}
+        lines = content.splitlines()
+        total = len(lines)
+        start = args.get("start_line")
+        end = args.get("end_line")
+        start_idx = (start - 1) if isinstance(start, int) and start > 0 else 0
+        start_idx = min(start_idx, total)
+        if isinstance(end, int) and end > 0:
+            end_idx = min(end, total)
+        else:
+            end_idx = min(start_idx + _MAX_READ_LINES, total)
+        selected = lines[start_idx:end_idx]
+        body = "\n".join(
+            f"{start_idx + i + 1}\t{ln}" for i, ln in enumerate(selected)
+        )
+        return {
+            "path": path,
+            "content": body,
+            "start_line": start_idx + 1,
+            "end_line": end_idx,
+            "total_lines": total,
+            "truncated": end_idx < total,
+        }
+
+    def _tool_search_code(self, args: dict) -> dict:
+        """Grep file contents in a project's code repository (jailed to it).
+
+        Returns matching ``{file, line, text}`` entries. ``pattern`` is treated
+        as a regex (case-insensitive), falling back to a literal substring if it
+        is not a valid regex. ``glob`` optionally filters filenames (e.g.
+        ``*.py``); ``max_results`` caps matches (default 100).
+        """
+        pid = args["project_id"]
+        pattern = args["pattern"]
+        glob = args.get("glob")
+        max_results = args.get("max_results") or 100
+        base = self.ws.get_code_path(pid).resolve()
+        if not base.exists():
+            return {"error": f"Code repo not found for {pid}"}
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            regex = None  # not a valid regex → literal substring match
+        matches = []
+        truncated = False
+        for item in sorted(base.rglob(glob) if glob else base.rglob("*")):
+            if not item.is_file() or "/.git/" in f"/{item}":
+                continue
+            if item.suffix.lower() in _BINARY_SUFFIXES:
+                continue
+            try:
+                text = item.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for li, line in enumerate(text.splitlines(), 1):
+                hit = regex.search(line) if regex else (pattern.lower() in line.lower())
+                if hit:
+                    matches.append({
+                        "file": str(item.relative_to(base)),
+                        "line": li,
+                        "text": line.strip()[:200],
+                    })
+                    if len(matches) >= max_results:
+                        truncated = True
+                        break
+            if truncated:
+                break
+        return {"project_id": pid, "matches": matches, "truncated": truncated}
 
     def _tool_get_task(self, args: dict) -> dict:
         with self.db.get_connection() as conn:
@@ -1843,6 +1957,7 @@ _TOOL_HANDLERS = {
     "list_tasks": MetaAgent._tool_list_tasks,
     "list_code_tree": MetaAgent._tool_list_code_tree,
     "read_code_file": MetaAgent._tool_read_code_file,
+    "search_code": MetaAgent._tool_search_code,
     "get_task": MetaAgent._tool_get_task,
     "retry_task": MetaAgent._tool_retry_task,
     "get_step_output": MetaAgent._tool_get_step_output,

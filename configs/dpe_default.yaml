@@ -180,9 +180,13 @@ steps:
       - source: { step: "2" }
       - source: { step: "3_review" }
       # Goal-loop inputs (empty on the first pass; present when 5_review loops
-      # back here): PM's own prior manifest, the final verdict, and test failures.
+      # back here): PM's own prior manifest, the final verifier output, the
+      # review verdict (the actual pass/fail feedback the PM must address), and
+      # test failures. Without 5_review the PM can't see WHAT failed, so it can't
+      # author a targeted fix-task — it just re-lists completed tasks (skipped).
       - source: { step: "3" }
       - source: { step: "5" }
+      - source: { step: "5_review" }
       - source: { step: "5_test" }
       - source: { tool: "dir_tree" }
     output:
@@ -211,6 +215,9 @@ steps:
     context:
       - source: { from: "repository" }
       - source: { step: "3" }
+      # Goal-loop: the verifier's verdict the PM was supposed to fix. Lets the
+      # reviewer check each reported issue has a NEW fix-task (empty first pass).
+      - source: { step: "5_review" }
     output:
       mode: "content"
       fixed:

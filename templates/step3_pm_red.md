@@ -5,9 +5,15 @@
 ## 审查对象
 Step 3 产出的 `tasks_manifest.json` 和各 `tasks/{id}.json` 子任务卡片。
 
-> **上下文提示**: 被审查的 Green Agent 输出已包含在你的 prompt 上下文中（以 "Step 3" 章节形式），无需使用工具读取文件。
+> **上下文提示**: 被审查的 Green Agent 输出已包含在你的 prompt 上下文中（以 "Step 3" 章节形式），无需使用工具读取文件。若上下文里有 `5_review` 的 `review_verdict.json`，说明这是**目标循环修复轮**（见下方第 7 点）。
 
 ## 审查要点
+
+### 0. 目标循环修复轮 —— 硬性门槛（仅当上下文存在 `5_review` 的 `review_verdict.json` 且 `passed: false` 时）
+这是上一轮最终验证失败后的**修复轮**，PM 必须为验证反馈里的每条问题新建修复任务。逐条核对：
+- **每条 `feedback` 里的问题，是否都有一个对应的"新任务"在处理它？** 缺了就判 `passed: false`，指出哪条问题没有修复任务。
+- **⚠️ 修复任务必须用全新的 id**：若 PM 把某个**已完成的旧任务 id 原样再列一遍**当作修复手段，判 `passed: false`——引擎会按 `completed_items` 把同名 id **直接跳过、永不重跑**，该"修复"会被静默丢弃。要求 PM 改用新 id（如 `fix_<问题>`）、`artifact_requirement` 指向要改的现有文件。
+- 修复任务的 `detailed_requirements` 是否具体引用了失败根因（文件/行/测试/期望），让实现者无需猜测？
 
 ### 1. 任务独立性
 - 每个子任务是否可以独立执行和验证？

@@ -96,17 +96,52 @@ async def agent_chat(
         # Persist the assistant response if session-scoped
         if request.session_id:
             try:
-                assistant_text = ""
+                # Accumulate ALL streamed prose, not just the final turn. The agent
+                # loop can emit prose across several turns (e.g. it presents the
+                # brief, then makes a tool call, then closes); capturing only the
+                # `done` message dropped the earlier brief, so reload/soft-nav lost
+                # it. `done` content is the last turn's text — already in the
+                # accumulated deltas — so it's only a fallback when no deltas ran.
+                streamed_text = ""
+                final_text = ""
+                surfaced = []  # brief/question text delivered via tool results
+                clean_finish = False  # a `done` event = the loop ended cleanly
                 for evt in collected_events:
-                    if evt.get("type") == "text_delta":
-                        assistant_text += evt.get("content", "")
-                    elif evt.get("type") == "done":
-                        msg = evt.get("message", {})
-                        assistant_text = msg.get("content", "") or assistant_text
-                if assistant_text.strip():
+                    etype = evt.get("type")
+                    if etype == "text_delta":
+                        streamed_text += evt.get("content", "")
+                    elif etype == "done":
+                        final_text = (evt.get("message", {}) or {}).get("content", "") or ""
+                        clean_finish = True
+                    elif etype == "tool_result":
+                        res = evt.get("result", {})
+                        if isinstance(res, dict):
+                            if res.get("status") == "brief_review" and res.get("brief_markdown"):
+                                surfaced.append(res["brief_markdown"])
+                            elif res.get("status") == "question" and res.get("question"):
+                                surfaced.append(res["question"])
+
+                # Fix G: only persist the narrative on a clean finish — a stream
+                # that errored mid-way leaves partial prose we must NOT commit.
+                narrative = (streamed_text or final_text).strip()
+                to_save = []
+                saved_narrative = ""
+                if narrative and clean_finish:
+                    to_save.append(narrative)
+                    saved_narrative = narrative
+                # Safety net: a brief/question surfaced via a completed tool result
+                # is a finished artifact — persist it (deduped against any narrative
+                # we actually saved) so it survives reload even if the model emitted
+                # no prose or the stream later aborted.
+                for content in surfaced:
+                    c = (content or "").strip()
+                    if c and c not in saved_narrative:
+                        to_save.append(c)
+
+                for content in to_save:
                     db.save_chat_message_with_session(
                         request.session_id, request.current_project or "",
-                        "assistant", assistant_text.strip(),
+                        "assistant", content,
                     )
             except Exception:
                 pass  # Best-effort persistence

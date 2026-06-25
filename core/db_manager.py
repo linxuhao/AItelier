@@ -1607,10 +1607,16 @@ class DBManager:
                                        role: str, content: str):
         """Persist a chat message with session scope."""
         with self.get_connection() as conn:
+            # Fix D: ensure the session row exists, so a reused/stale id (e.g. a
+            # localStorage id whose row was pruned or never created) still appears
+            # in the session list instead of silently orphaning the conversation.
+            conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
             conn.execute(
                 "INSERT INTO chat_history (session_id, project_id, role, content) "
                 "VALUES (?, ?, ?, ?)",
-                (session_id, project_id, role, content[:2000]),
+                # Fix C: 2000 → 16000 so a large brief (detailed game rules) is not
+                # silently clipped on reload; still bounded against a huge paste.
+                (session_id, project_id, role, content[:16000]),
             )
             conn.commit()
 

@@ -310,9 +310,9 @@ class TestSaveMessageAPI:
         })
         assert resp.status_code == 200
 
-    def test_content_truncation_to_2000_chars(self, client: TestClient,
-                                               db_manager: DBManager):
-        """Content is truncated to 2000 characters (DB method behavior)."""
+    def test_large_brief_not_truncated_under_cap(self, client: TestClient,
+                                                  db_manager: DBManager):
+        """Fix C: a large brief (>2000 chars) is preserved, not clipped to 2000."""
         _seed_session(db_manager, "trunc-sess", "proj-t", [])
 
         long_content = "x" * 5000
@@ -326,4 +326,77 @@ class TestSaveMessageAPI:
 
         msgs = db_manager.get_chat_history_by_session("trunc-sess", limit=10)
         assert len(msgs) == 1
-        assert len(msgs[0]["content"]) == 2000
+        assert len(msgs[0]["content"]) == 5000  # was clipped to 2000 before the fix
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  POST /api/agent/chat — assistant-response persistence (#3 regression)
+# ═════════════════════════════════════════════════════════════════════════
+
+
+class _FakeAgent:
+    """Stand-in for MetaAgent whose chat() replays a scripted event stream."""
+
+    _events: list = []
+
+    def __init__(self, *a, **k):
+        pass
+
+    async def chat(self, message, history, current_project=None):
+        for ev in self._events:
+            yield ev
+
+
+def _post_chat(client, events, session_id="brief-sess"):
+    from unittest.mock import patch
+    _FakeAgent._events = events
+    with patch("api.agent_routers.MetaAgent", _FakeAgent):
+        return client.post("/api/agent/chat", json={
+            "message": "approve", "session_id": session_id, "history": [],
+        })
+
+
+class TestChatAssistantPersistence:
+    """The brief is often presented in an EARLIER turn (before a tool call);
+    capturing only the final `done` message dropped it, so reload/soft-nav lost
+    it. The full streamed narrative must be persisted."""
+
+    BRIEF = "## User Stories\n- As a player, I want RULE 42 enforced verbatim."
+
+    def test_earlier_turn_prose_is_persisted_not_just_final_done(
+            self, client: TestClient, db_manager: DBManager):
+        _seed_session(db_manager, "brief-sess", "p", [])
+        events = [
+            {"type": "text_delta", "content": "Here is your brief:\n"},
+            {"type": "text_delta", "content": self.BRIEF},
+            {"type": "tool_call", "name": "noop", "args": {}},
+            {"type": "tool_result", "name": "noop", "result": {"status": "ok"}},
+            {"type": "text_delta", "content": "\nLet me know about changes."},
+            {"type": "done", "message": {"role": "assistant",
+                                         "content": "Let me know about changes."}},
+        ]
+        resp = _post_chat(client, events)
+        assert resp.status_code == 200
+
+        msgs = db_manager.get_chat_history_by_session("brief-sess", limit=10)
+        saved = " ".join(m["content"] for m in msgs if m["role"] == "assistant")
+        assert "RULE 42 enforced verbatim" in saved  # earlier-turn brief survived
+
+    def test_tool_surfaced_brief_persisted_when_model_emits_no_prose(
+            self, client: TestClient, db_manager: DBManager):
+        """Safety net: brief delivered only via a tool result still survives."""
+        _seed_session(db_manager, "brief-sess2", "p", [])
+        events = [
+            {"type": "tool_call", "name": "answer_project_conversation", "args": {}},
+            {"type": "tool_result", "name": "answer_project_conversation",
+             "result": {"status": "brief_review", "brief_markdown": self.BRIEF,
+                        "run_id": "r1"}},
+            {"type": "text_delta", "content": "Please review the brief above."},
+            {"type": "done", "message": {"content": "Please review the brief above."}},
+        ]
+        resp = _post_chat(client, events, session_id="brief-sess2")
+        assert resp.status_code == 200
+
+        msgs = db_manager.get_chat_history_by_session("brief-sess2", limit=10)
+        saved = " ".join(m["content"] for m in msgs if m["role"] == "assistant")
+        assert "RULE 42 enforced verbatim" in saved

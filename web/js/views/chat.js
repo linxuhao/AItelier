@@ -31,6 +31,33 @@
   /** @type {string|null} session ID from API.createSession() */
   var _sessionId = null;
 
+  /** localStorage key for the last-active session id, so a page reload
+   *  re-attaches to the same conversation (incl. an un-approved brief) instead
+   *  of minting a fresh empty session and orphaning the old one. */
+  var _SESSION_KEY = "aitelier.chat.sessionId";
+
+  /** Read the persisted session id (null if none / storage unavailable). */
+  function _readStoredSessionId() {
+    try {
+      return window.localStorage.getItem(_SESSION_KEY) || null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** Persist (or clear) the current session id. Best-effort. */
+  function _storeSessionId(id) {
+    try {
+      if (id) {
+        window.localStorage.setItem(_SESSION_KEY, id);
+      } else {
+        window.localStorage.removeItem(_SESSION_KEY);
+      }
+    } catch (_e) {
+      // Storage unavailable (private mode / disabled) — chat still works.
+    }
+  }
+
   /** @type {boolean} true while the agent is streaming a response */
   var _agentStreaming = false;
 
@@ -89,7 +116,7 @@
    *
    * @returns {Promise<string|null>} session_id or null on failure
    */
-  function _initSession() {
+  function _initSession(forceNew) {
     if (_sessionInitiated && _sessionId) {
       return Promise.resolve(_sessionId);
     }
@@ -106,9 +133,22 @@
       return Promise.resolve(null);
     }
 
+    // Re-attach to the last-active session across a reload (unless the caller
+    // explicitly wants a fresh one, e.g. the "+ New" button). The id only ever
+    // comes from a prior createSession, so the server-side row already exists.
+    if (!forceNew) {
+      var stored = _readStoredSessionId();
+      if (stored) {
+        _sessionId = stored;
+        _sessionInitiated = true;
+        return Promise.resolve(_sessionId);
+      }
+    }
+
     return api.createSession().then(function (data) {
       _sessionId = (data && data.session_id) || null;
       _sessionInitiated = true;
+      _storeSessionId(_sessionId);
       return _sessionId;
     }).catch(function (/* err */) {
       _sessionInitiated = true;
@@ -144,7 +184,7 @@
    * Build the chat input area (input field + send button).
    * Returns the input field element for focus management.
    *
-   * @returns {HTMLInputElement|null}
+   * @returns {HTMLTextAreaElement|null}
    */
   function _buildInputArea() {
     var chatView = document.getElementById("view-chat");
@@ -161,10 +201,13 @@
     var inputArea = document.createElement("div");
     inputArea.className = "chat-input-area";
 
-    var input = document.createElement("input");
-    input.type = "text";
+    // A <textarea> (not a single-line <input>) so large pastes — e.g. detailed
+    // game rules — are readable and editable. Enter still submits; Shift+Enter
+    // inserts a newline (handled in the keydown listener below).
+    var input = document.createElement("textarea");
     input.id = "chat-input-field";
-    input.placeholder = "Message the agent... (/ to see commands)";
+    input.rows = 2;
+    input.placeholder = "Message the agent... (Enter to send, Shift+Enter for newline, / for commands)";
     input.autocomplete = "off";
     inputArea.appendChild(input);
 
@@ -835,8 +878,8 @@
       }
       _history = [];
 
-      // Create a new session
-      _initSession().then(function () {
+      // Create a new session (force — bypass the stored-session re-attach)
+      _initSession(true).then(function () {
         // Refresh the session selector list
         _loadSessionList();
         // Reset the select to default
@@ -950,6 +993,7 @@
 
     // Set the session ID (do NOT call _initSession() — session already exists)
     _sessionId = sessionId;
+    _storeSessionId(sessionId);  // reload should return to the viewed session
 
     // Update the select element's value
     var select = document.getElementById("session-selector");

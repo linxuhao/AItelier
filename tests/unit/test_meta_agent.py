@@ -342,6 +342,57 @@ class TestBuildAssistantMsg:
         assert msg["content"] == "hello"
         assert "tool_calls" not in msg
 
+
+class TestActiveMetaRunResolution:
+    """#4: the agent must never have to search for the run_id — the approve/answer
+    tools self-resolve the live meta run for this turn."""
+
+    def test_approve_and_answer_no_longer_require_run_id(self):
+        by_name = {td["function"]["name"]: td["function"] for td in TOOL_DEFINITIONS}
+        assert "run_id" not in by_name["approve_project_brief"]["parameters"]["required"]
+        assert by_name["answer_project_conversation"]["parameters"]["required"] == ["answer"]
+
+    def _agent(self, mock_db, mock_ws):
+        return MetaAgent(mock_db, mock_ws, owner_email="t@local", session_id="sess-1")
+
+    def test_resolves_via_session_link(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        mock_db.get_runs_for_session.return_value = ["run-9"]
+        sf = MagicMock()
+        sf.get_run.return_value = {
+            "id": "run-9", "graph_name": "meta_conversation",
+            "status": "paused", "project_id": "p1"}
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch("core.meta_run.read_gather_state",
+                   return_value={"need_input": False, "brief": {}}):
+            active = agent._active_meta_run()
+        assert active["run_id"] == "run-9"
+        assert active["project_id"] == "p1"
+
+    def test_falls_back_to_project_scope_on_drifted_session(self, mock_db, mock_ws):
+        """Reload minted a new session id → the link is empty; project-scoped
+        lookup recovers the run so approval still works."""
+        agent = self._agent(mock_db, mock_ws)
+        mock_db.get_runs_for_session.return_value = []
+        sf = MagicMock()
+        sf.get_run_by_project.return_value = {"id": "run-7", "status": "paused"}
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch.object(agent, "_find_active_project", return_value="p2"), \
+             patch("core.meta_run.read_gather_state", return_value={}):
+            active = agent._active_meta_run()
+        assert active["run_id"] == "run-7"
+        assert active["project_id"] == "p2"
+        sf.get_run_by_project.assert_called_once_with("p2", "meta_conversation")
+
+    def test_returns_none_when_no_live_run(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        mock_db.get_runs_for_session.return_value = []
+        sf = MagicMock()
+        sf.get_run_by_project.return_value = None
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch.object(agent, "_find_active_project", return_value=None):
+            assert agent._active_meta_run() is None
+
     def test_with_tool_calls(self, agent):
         tcs = [{"id": "tc1", "name": "list_projects", "args": {}}]
         msg = agent._build_assistant_msg("", tcs)

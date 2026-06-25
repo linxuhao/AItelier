@@ -1,0 +1,18 @@
+name: emit_project_artifacts
+description: >
+  Finalize-step tool for the meta_conversation graph. Deterministically promotes
+  the approved requirements into the project's skillflow artifacts:
+  project/project_brief.md and project/spec.md (the project brief slot), plus
+  step1_goals.json into the finalize step dir (consumed by DPE step 1 via a
+  cross-config context source). Reads the gather step's gather_state.json (the
+  brief) and the verbatim meta/conversation.md (the spec). No LLM — pure
+  transform, so the detailed requirements survive un-summarized.
+parameters:
+  workspace_root:
+    type: string
+    description: "DPS workspace root for the project (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "The finalize step's output dir (set to $STEP_DIR) — receives step1_goals.json"
+    required: false

@@ -322,6 +322,56 @@ class TestSharedPreamble:
         assert "[Workspace Layout]" in result
         assert "[Project Brief]" in result
 
+class TestProjectSpec:
+    """Verbatim requirements spec (project/spec.md) injection — detail-heavy
+    requirements (e.g. game rules) must survive un-summarized into the agents."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        ws = tmp_path / "ws"
+        (ws / "project").mkdir(parents=True)
+        (ws / "project" / "project_brief.md").write_text(
+            "# Brief\nBuild a card game", encoding="utf-8")
+        code_path = tmp_path / "code"; code_path.mkdir()
+        return ws, code_path
+
+    _RULES = "RULE 7: a flush beats a straight; ties split the pot exactly."
+
+    def _write_spec(self, ws):
+        (ws / "project" / "spec.md").write_text(
+            "# Project Spec\n\n" + self._RULES, encoding="utf-8")
+
+    def test_spec_injected_into_planning_step(self, workspace):
+        ws, code_path = workspace
+        self._write_spec(ws)
+        result = PromptAssembler().assemble(
+            "t_impl", ws, code_path=code_path,
+            tool_schemas={"write": {"description": "w", "parameters": {}}})
+        assert "[Project Spec" in result
+        assert self._RULES in result  # un-truncated verbatim detail survives
+
+    def test_spec_injected_into_verifier_step(self, workspace):
+        ws, code_path = workspace
+        self._write_spec(ws)
+        result = PromptAssembler().assemble("5", ws, code_path=code_path)
+        assert "[Project Spec" in result and self._RULES in result
+
+    def test_spec_injected_into_shared_preamble(self, workspace):
+        ws, code_path = workspace
+        self._write_spec(ws)
+        pre = PromptAssembler().build_shared_preamble(
+            ws, code_path, graph_name="dpe_default_v2")
+        assert "[Project Spec" in pre and self._RULES in pre
+
+    def test_no_spec_block_when_absent(self, workspace):
+        """Simple projects (no spec.md) must not gain an empty/odd block."""
+        ws, code_path = workspace
+        result = PromptAssembler().assemble(
+            "t_impl", ws, code_path=code_path,
+            tool_schemas={"write": {"description": "w", "parameters": {}}})
+        assert "[Project Spec" not in result
+
+
 class TestDropPreambleSteps:
     """F2 dedup: design hoisted to preamble is removed from resolved_context."""
 

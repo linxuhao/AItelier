@@ -59,11 +59,43 @@ def request_brief_changes(sf, run_id: str, feedback: str) -> None:
 
 
 def approve_meta(sf, run_id: str) -> None:
-    """Close the meta conversation run as completed (brief approved).
+    """Approve the brief and drive the run through its `finalize` tool step.
 
-    We do NOT drive the graph to a terminal: in skillflow a checkpoint/gate
-    transition cannot resolve `to: null` (None reads as "no matching transition"
-    and fails the run). So the host closes the run directly after the brief is
-    seeded. This also stops the run being re-detected as an active conversation.
+    Approving the gather checkpoint routes the run to the `finalize` tool step,
+    which emits the project artifacts (project_brief.md, spec.md, step1_goals.json)
+    inline during ``advance_run``; the graph's node_reached end-condition then
+    completes the run.
+
+    The finalize tool is the SOLE producer of those artifacts, so this does NOT
+    force-complete a stuck run — a meta run that fails to emit must surface that
+    failure (``RuntimeError``) so the caller does not start DPE on missing
+    artifacts. Idempotent if already completed.
     """
-    sf.complete_run(run_id)
+    run = sf.get_run(run_id)
+    if run and run.get("status") == "completed":
+        return
+
+    if run and run.get("status") == "paused":
+        sf.approve_checkpoint(run_id)
+
+    # Drive the now-running graph to terminal (finalize tool runs inline). The
+    # 2-step path (approve → finalize → complete) needs only a couple advances;
+    # the budget is a stall guard, not a normal code path.
+    for _ in range(8):
+        run = sf.get_run(run_id)
+        if not run:
+            raise RuntimeError(f"meta run {run_id} vanished during finalize")
+        status = run.get("status")
+        if status == "completed":
+            return
+        if status == "failed":
+            raise RuntimeError(
+                f"meta run {run_id} failed during finalize: "
+                f"{run.get('error_reason') or 'finalize did not emit artifacts'}")
+        try:
+            sf.advance_run(run_id)
+        except Exception as e:
+            # A raising finalize tool (e.g. an incomplete brief) lands here.
+            raise RuntimeError(f"meta run {run_id} finalize step errored: {e}") from e
+
+    raise RuntimeError(f"meta run {run_id} did not finalize within the step budget")

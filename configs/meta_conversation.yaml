@@ -8,8 +8,10 @@
 #   - {"need_input": true,  "question": "...", "analysis_so_far": "..."}  (ask)
 #   - {"need_input": false, "brief": { ...incl. user_stories... }}        (finalize)
 # Looping is driven at runtime by reject_checkpoint(redirect_to="gather")
-# (see core/meta_run.py). On checkpoint approval the gather step terminates the
-# run and the butler triggers the DPE pipeline (core/project_submit.py).
+# (see core/meta_run.py). On checkpoint approval the run advances into the
+# `finalize` tool step, which emits the project artifacts (project_brief.md,
+# spec.md, step1_goals.json); the node_reached end-condition then completes the
+# run, after which the butler triggers the DPE pipeline (core/project_submit.py).
 
 name: "meta_conversation"
 description: "Project requirements gathering → brief (butler triggers DPE on approval)"
@@ -23,6 +25,18 @@ x-aitelier:
     gather: conversational        # a chat turn, not a file-diff review
 
 begin: "intent_detect"
+
+# Reaching the `finalize` tool step (which emits the project artifacts) completes
+# the run. A tool/gate transition `to: null` alone would fail the run ("no
+# matching transition"); the node_reached end-condition is the supported way to
+# terminate cleanly — the same pattern DPE uses to end at 5_review.
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "finalize"
+      result: "completed"
+      require_completed: true   # the emit tool must actually run before completing
 
 steps:
   - id: "intent_detect"
@@ -73,6 +87,9 @@ steps:
         match: { from: "checkpoint", value: "approved" }
 
   - id: "finalize"
-    step_type: "gate"
+    step_type: "tool"
+    tool_name: "emit_project_artifacts"
+    tool_params:
+      out_dir: "$STEP_DIR"                  # step1_goals.json lands here (DPE cross-config source)
     transitions:
-      - to: null                            # brief approved → run completes
+      - to: null                            # emits artifacts; node_reached end-condition completes the run

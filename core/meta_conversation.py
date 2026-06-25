@@ -569,6 +569,26 @@ def format_brief_as_markdown(brief: dict) -> str:
     return "\n".join(lines)
 
 
+# Header prepended to the verbatim requirements transcript when it is promoted
+# to project/spec.md. Kept here (not duplicated in the emit tool / seed path) so
+# the format stays consistent wherever spec.md is produced.
+_SPEC_HEADER = (
+    "# Project Spec — verbatim requirements conversation\n\n"
+    "> Source: the full user/assistant requirements conversation. "
+    "The Project Brief is a condensed summary of this; when the "
+    "two differ, prefer the explicit detail here.\n\n"
+)
+
+
+def build_spec_markdown(transcript: str) -> str:
+    """Wrap the verbatim requirements transcript as the project spec.md body.
+
+    Returns "" for an empty/whitespace transcript so callers can skip writing.
+    """
+    raw = (transcript or "").strip()
+    return (_SPEC_HEADER + raw) if raw else ""
+
+
 def brief_to_step1_goals(brief: dict) -> dict:
     """Convert a project brief to step1_goals.json format.
 

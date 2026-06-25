@@ -191,6 +191,12 @@ class PromptAssembler:
         if step_id not in ("t_verify", "5") and not hoist_globals:
             if brief:
                 sections.append(f"[Project Brief]\n{brief}")
+            # [Project Spec] — the verbatim requirements, un-truncated and placed
+            # in the stable prefix next to the brief (NOT routed through the
+            # 6000-char-clipped resolved-context block) so detailed rules survive.
+            spec = self._load_project_spec(project_path)
+            if spec:
+                sections.append(f"[Project Spec — verbatim requirements]\n{spec}")
 
         # NOTE: the per-step `[Project Design]` code dump was removed. It eagerly
         # scanned the whole code repo (code_path.rglob) and pasted every file's
@@ -206,13 +212,15 @@ class PromptAssembler:
             brief = self._load_project_brief(project_path)
             if brief:
                 sections.append(f"[Project Brief - for Verification]\n{brief}")
-            goals_file = project_path / DPE_GRAPH_NAME / "1" / "step1_goals.json"
-            if goals_file.exists():
-                try:
-                    goals = self._compact_json(goals_file.read_text(encoding='utf-8'))
-                    sections.append(f"[Project Goals Reference]\n{goals}")
-                except Exception:
-                    pass
+            spec = self._load_project_spec(project_path)
+            if spec:
+                sections.append(f"[Project Spec — verbatim requirements]\n{spec}")
+            # step1_goals.json is delivered to the verifier via skillflow's
+            # declared cross-config context (configs/dpe_default.yaml step "5":
+            # {config: meta_conversation, step: finalize, output: step1_goals.json}),
+            # rendered in the [Pre-resolved Context] block below — no host-side
+            # path read (the old dpe_default_v2/1/ copy was wiped by step-1
+            # promotion before this ran).
 
         # ── VOLATILE SUFFIX ──────────────────────────────────────────────
 
@@ -265,6 +273,9 @@ class PromptAssembler:
         brief = self._load_project_brief(project_path)
         if brief:
             parts.append(f"[Project Brief]\n{brief}")
+        spec = self._load_project_spec(project_path)
+        if spec:
+            parts.append(f"[Project Spec — verbatim requirements]\n{spec}")
         if include_design and preamble_steps:
             design = self._load_fixed_step_docs(project_path, graph_name,
                                                 preamble_steps)
@@ -390,6 +401,22 @@ class PromptAssembler:
                 pass
 
         return "\n".join(trees)
+
+    def _load_project_spec(self, project_path: Path) -> str:
+        """Load the verbatim requirements spec from {DPS workspace}/project/spec.md.
+
+        This is the raw requirements conversation (un-summarized), preserved by
+        ``core/project_submit.py`` so detail the brief omits — e.g. detailed game
+        rules — still reaches the agents. Returns "" when absent (simple projects
+        carry no separate spec, only the brief).
+        """
+        spec_file = project_path / "project" / "spec.md"
+        if spec_file.exists():
+            try:
+                return spec_file.read_text(encoding="utf-8").strip()
+            except Exception:
+                return ""
+        return ""
 
     def _load_project_brief(self, project_path: Path) -> str:
         """

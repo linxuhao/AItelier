@@ -67,7 +67,7 @@ steps:
     timeout_seconds: 300
     context:
       - source: { from: "repository" }
-      - source: { config: "meta_conversation", step: "meta", output: "step1_goals.json" }
+      - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json" }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"
@@ -367,6 +367,9 @@ steps:
       - source: { step: "1" }
       - source: { step: "2" }
       - source: { step: "5_review" }
+      # Goals delivered by skillflow context from the meta run's surviving copy
+      # (DPE step-1 promotion wipes any copy placed in dpe_default_v2/1/).
+      - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json" }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"

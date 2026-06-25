@@ -32,10 +32,50 @@ def test_request_brief_changes_reopens_gather():
         "run-1", "gather", feedback="make it simpler", redirect_to="gather")
 
 
-def test_approve_meta_completes_run():
+def test_approve_meta_drives_finalize_then_self_completes():
+    """Approval routes the run into the finalize tool step; the graph's
+    node_reached end-condition completes it — no host complete_run needed."""
     sf = MagicMock()
+    seq = iter([{"status": "paused"}, {"status": "running"}, {"status": "completed"}])
+    sf.get_run.side_effect = lambda rid: next(seq, {"status": "completed"})
     meta_run.approve_meta(sf, "run-1")
-    sf.complete_run.assert_called_once_with("run-1")
+    sf.approve_checkpoint.assert_called_once_with("run-1")
+    sf.advance_run.assert_called()              # drove the graph through finalize
+    sf.complete_run.assert_not_called()         # graph self-terminated
+
+
+def test_approve_meta_idempotent_when_already_completed():
+    sf = MagicMock()
+    sf.get_run.return_value = {"status": "completed"}
+    meta_run.approve_meta(sf, "run-1")
+    sf.approve_checkpoint.assert_not_called()
+    sf.advance_run.assert_not_called()
+    sf.complete_run.assert_not_called()
+
+
+def test_approve_meta_raises_if_finalize_never_completes():
+    """Single-producer guarantee: finalize is the SOLE artifact producer, so a
+    run that never reaches terminal must RAISE (not be force-completed) — the
+    caller then refuses to start DPE on missing artifacts."""
+    import pytest
+    sf = MagicMock()
+    sf.get_run.return_value = {"status": "paused"}   # never becomes terminal
+    with pytest.raises(RuntimeError):
+        meta_run.approve_meta(sf, "run-1")
+    sf.approve_checkpoint.assert_called_once_with("run-1")
+    assert sf.advance_run.call_count >= 1
+    sf.complete_run.assert_not_called()             # never force-completes
+
+
+def test_approve_meta_raises_when_finalize_tool_errors():
+    """A raising finalize tool (incomplete brief) surfaces as a RuntimeError."""
+    import pytest
+    sf = MagicMock()
+    sf.get_run.return_value = {"status": "running"}
+    sf.advance_run.side_effect = ValueError("brief has no user stories")
+    with pytest.raises(RuntimeError):
+        meta_run.approve_meta(sf, "run-1")
+    sf.complete_run.assert_not_called()
 
 
 def test_read_gather_state_reads_committed_json(tmp_path):

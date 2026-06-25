@@ -219,10 +219,12 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "description": "The conversation run_id"},
+                    "run_id": {"type": "string", "description": "The conversation run_id "
+                               "(optional — resolved automatically from the active conversation "
+                               "if omitted)"},
                     "answer": {"type": "string", "description": "The user's reply, verbatim"},
                 },
-                "required": ["run_id", "answer"],
+                "required": ["answer"],
             },
         },
     },
@@ -235,9 +237,11 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "description": "The conversation run_id"},
+                    "run_id": {"type": "string", "description": "The conversation run_id "
+                               "(optional — resolved automatically from the active conversation "
+                               "if omitted)"},
                 },
-                "required": ["run_id"],
+                "required": [],
             },
         },
     },
@@ -608,6 +612,9 @@ class MetaAgent:
         self.ws = ws
         self.owner_email = owner_email
         self.session_id = session_id
+        # Set per-turn in chat(); lets the approve/answer tools resolve the run
+        # by project even when the session→run link is empty (drifted session).
+        self._current_project = None
 
         cfg = _load_meta_agent_config()
         raw_model = cfg.get("model", "deepseek/deepseek-v4-flash")
@@ -631,37 +638,73 @@ class MetaAgent:
         messages.extend(history)
         return messages
 
+    def _active_meta_run(self, pid_hint: str | None = None) -> dict | None:
+        """Locate the live (paused/running) meta_conversation run for this turn.
+
+        Single source of truth for run_id resolution: the relay note AND the
+        approve/answer tools both call this, so the model never has to search
+        for the run_id. Resolution order:
+          1. the session→run link (the fast common path), then
+          2. a project-scoped lookup (``get_run_by_project``) keyed on an
+             explicit ``pid_hint`` or the session's active project — this
+             recovers a drifted session (e.g. a reload that minted a new
+             session id) where the link points at a dead session.
+
+        Returns ``{"run_id", "project_id", "gather_state"}`` or None.
+        """
+        from api.dependencies import get_skillflow
+        from core.meta_run import read_gather_state, META_GRAPH
+        sf = get_skillflow()
+
+        def _wrap(rid: str, pid: str) -> dict:
+            return {"run_id": rid, "project_id": pid,
+                    "gather_state": read_gather_state(self.ws, pid) or {}}
+
+        # 1. Session-linked live meta run.
+        if self.session_id:
+            try:
+                for rid in self.db.get_runs_for_session(self.session_id) or []:
+                    run = sf.get_run(rid)
+                    if not run or run.get("graph_name") != META_GRAPH:
+                        continue
+                    if run.get("status") not in ("paused", "running"):
+                        continue
+                    return _wrap(rid, run.get("project_id", ""))
+            except Exception:
+                pass
+
+        # 2. Project-scoped fallback (newest non-completed meta run, LIMIT 1 —
+        #    cannot return multiples). Recovers a drifted/empty session link via
+        #    an explicit hint or the current chat project (set in chat()), since
+        #    _find_active_project is itself session-bound and would also miss.
+        pid = pid_hint or self._current_project or self._find_active_project()
+        if pid:
+            try:
+                run = sf.get_run_by_project(pid, META_GRAPH)
+                if run and run.get("status") in ("paused", "running"):
+                    return _wrap(run["id"], pid)
+            except Exception:
+                pass
+        return None
+
     def _active_conversation_note(self) -> str | None:
         """If a meta_conversation run for this session is paused, return a system
         note telling the model exactly which tool to call. State-driven relay —
         this is what keeps the butler from re-deriving / re-starting a conversation."""
-        if not self.session_id:
+        active = self._active_meta_run()
+        if not active:
             return None
-        try:
-            from api.dependencies import get_skillflow
-            from core.meta_run import read_gather_state, META_GRAPH
-            sf = get_skillflow()
-            for rid in self.db.get_runs_for_session(self.session_id):
-                run = sf.get_run(rid)
-                if not run or run.get("graph_name") != META_GRAPH:
-                    continue
-                if run.get("status") not in ("paused", "running"):
-                    continue
-                pid = run.get("project_id", "")
-                gs = read_gather_state(self.ws, pid) or {}
-                if gs.get("need_input"):
-                    return (f"[ACTIVE PROJECT CONVERSATION] run_id=\"{rid}\", project=\"{pid}\". "
-                            f"You previously asked: \"{gs.get('question', '')}\". The user's message "
-                            f"is their answer — call answer_project_conversation(run_id=\"{rid}\", "
-                            f"answer=<the user's message>). Do NOT start a new conversation.")
-                return (f"[ACTIVE PROJECT CONVERSATION] run_id=\"{rid}\", project=\"{pid}\" — a brief "
-                        f"is ready for review. If the user approves it, call "
-                        f"approve_project_brief(run_id=\"{rid}\"). Otherwise treat their message as "
-                        f"requested changes and call answer_project_conversation(run_id=\"{rid}\", "
-                        f"answer=<the user's message>). Do NOT start a new conversation.")
-        except Exception:
-            return None
-        return None
+        rid, pid, gs = active["run_id"], active["project_id"], active["gather_state"]
+        if gs.get("need_input"):
+            return (f"[ACTIVE PROJECT CONVERSATION] run_id=\"{rid}\", project=\"{pid}\". "
+                    f"You previously asked: \"{gs.get('question', '')}\". The user's message "
+                    f"is their answer — call answer_project_conversation(run_id=\"{rid}\", "
+                    f"answer=<the user's message>). Do NOT start a new conversation.")
+        return (f"[ACTIVE PROJECT CONVERSATION] run_id=\"{rid}\", project=\"{pid}\" — a brief "
+                f"is ready for review. If the user approves it, call "
+                f"approve_project_brief(run_id=\"{rid}\"). Otherwise treat their message as "
+                f"requested changes and call answer_project_conversation(run_id=\"{rid}\", "
+                f"answer=<the user's message>). Do NOT start a new conversation.")
 
     async def chat(
         self,
@@ -670,6 +713,7 @@ class MetaAgent:
         current_project: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         """Run the agent loop. Yields SSE events."""
+        self._current_project = current_project
         messages = self._build_messages(history, current_project)
         # Deterministic relay: if a project conversation is paused for this
         # session, tell the model exactly which tool to call (state-driven, so it
@@ -1134,10 +1178,18 @@ class MetaAgent:
         from api.dependencies import get_skillflow
         from core.meta_run import submit_user_answer
 
-        run_id = args["run_id"]
         answer = (args.get("answer") or "").strip()
         sf = get_skillflow()
-        run = sf.get_run(run_id)
+        # Self-resolve the run: the model may omit/lose the run_id (it lives in a
+        # transient relay note). Fall back to the active meta run for this turn so
+        # the agent never has to search for it.
+        run_id = args.get("run_id")
+        run = sf.get_run(run_id) if run_id else None
+        if not run:
+            active = self._active_meta_run(pid_hint=args.get("project_id"))
+            if active:
+                run_id = active["run_id"]
+                run = sf.get_run(run_id)
         if not run:
             return {"status": "error",
                     "message": f"Conversation '{run_id}' not found — "
@@ -1175,9 +1227,17 @@ class MetaAgent:
         from core.meta_run import approve_meta, read_gather_state
         from core.project_submit import seed_and_trigger
 
-        run_id = args["run_id"]
         sf = get_skillflow()
-        run = sf.get_run(run_id)
+        # Self-resolve the run: the model may omit/lose the run_id (it lives in a
+        # transient relay note). Fall back to the active meta run for this turn so
+        # approval never has to search for the run_id.
+        run_id = args.get("run_id")
+        run = sf.get_run(run_id) if run_id else None
+        if not run:
+            active = self._active_meta_run(pid_hint=args.get("project_id"))
+            if active:
+                run_id = active["run_id"]
+                run = sf.get_run(run_id)
         if not run:
             return {"status": "error",
                     "message": f"Conversation '{run_id}' not found — "
@@ -1185,9 +1245,8 @@ class MetaAgent:
                                "Check the project list."}
         pid = run.get("project_id", "")
 
-        # AT-1: If the run is already completed (gate resolved to terminal after
-        # checkpoint approval), skip the approve_meta call — it would call
-        # sf.complete_run() which is idempotent but unnecessary.
+        # AT-1: If the run is already completed (its finalize step already ran),
+        # skip approve_meta — the artifacts have been emitted.
         run_already_completed = run.get("status") == "completed"
 
         gs = read_gather_state(self.ws, pid) or {}
@@ -1199,9 +1258,10 @@ class MetaAgent:
                                "has not produced a complete brief. Keep talking to "
                                "add requirements before approving."}
 
-        # Seed the canonical brief + goals and wake the scheduler (starts DPE),
-        # then close the meta run.
-        res = seed_and_trigger(self.db, self.ws, pid, brief)
+        # Drive the meta run through its finalize tool step — the SOLE producer of
+        # the project artifacts (project_brief.md, spec.md, step1_goals.json). If
+        # it fails to emit, do NOT start DPE (it would run brief-less); surface the
+        # error so the user can retry. Only trigger DPE once finalize has emitted.
         if run_already_completed:
             self._log_error(f"Meta run {run_id} was already completed when approving brief — "
                            "this is expected if the checkpoint was approved via the CLI")
@@ -1210,6 +1270,12 @@ class MetaAgent:
                 approve_meta(sf, run_id)
             except Exception as e:
                 self._log_error(f"approve_meta failed for {run_id}: {e}")
+                return {"status": "error", "project_id": pid,
+                        "message": "I couldn't finalize the brief — the requirements "
+                                   "artifacts weren't produced, so I did not start the "
+                                   "build. Please try approving again or adjust the brief."}
+
+        res = seed_and_trigger(self.db, self.ws, pid, brief)
         if res.get("status") not in ("submitted", "already_planned"):
             res.setdefault("project_id", pid)
             res["message"] = res.get("message",

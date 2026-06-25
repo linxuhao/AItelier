@@ -75,7 +75,7 @@ CONSTRAINED_STEPS = {
     "2": ["write_design", "write_linter_manifest"],
     "3": ["write_tasks_manifest", "write_task_card"],
     "5": ["write_readme", "write_report"],
-    "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card"],
+    "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card", "write_research_notes"],
 }
 
 

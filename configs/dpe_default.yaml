@@ -272,6 +272,7 @@ steps:
         plan: "task_plan.md"
         subtask_manifest: { file: "subtasks_manifest.json", format: '{"subtasks": [subtask, ...], "execution_order": [[str, ...], ...]}' }
         subtask_card: { file: "subtasks/*.json", format: '{"id": str, "description": str, "dependencies": [str, ...], "artifact_requirement": str, "interface_contract": str}' }
+        research_notes: { file: "research_notes.md", format: "Literal external references the implementer needs but cannot look up (it has no web access): exact API signatures, import paths, config keys, and version-specific gotchas for any third-party/unfamiliar library this task uses. Use web_fetch on the official docs and record the verbatim signatures — NOT prose summaries. If the task only uses the standard library or already-known APIs, write a single line: 'No external references needed.'" }
     transitions:
       - to: "t_plan_review"
 

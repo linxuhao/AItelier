@@ -389,11 +389,15 @@ steps:
     transitions:
       - to: "5_compile"
 
-  # ─── C#/Unity compile gate (deterministic, AFTER tests) ───
-  # Semantic-compiles every *.cs in the consolidated repo together against
-  # Unity's reference assemblies (via the unity-builder sidecar). No-ops for
-  # non-C# projects. Like 5_test it always succeeds as a step; compile_report.json
-  # is folded into 5_review so compile errors loop back through the goal-loop.
+  # ─── C#/Unity compile + PlayMode gate (deterministic, AFTER tests) ───
+  # Semantic-compiles every *.cs in the consolidated repo together against Unity's
+  # reference assemblies (via the unity-builder sidecar), THEN — if compile passed
+  # — chains a PlayMode smoke test that runs SceneBootstrapper.BuildScene() in a
+  # real headless editor (catches what compile can't: legacy-Input runtime throws,
+  # orphaned/empty scenes). No-ops for non-C# projects. Always succeeds as a step
+  # (degrades to pass if the builder is unreachable/unlicensed); both
+  # compile_report.json and playtest_report.json are folded into 5_review so
+  # failures loop back through the goal-loop.
   - id: "5_compile"
     step_type: "tool"
     tool_name: "unity_compile"

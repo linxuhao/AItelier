@@ -35,10 +35,11 @@ def _has_cs(repo: Path) -> bool:
 
 def unity_compile(*, project_root: str = "", out_dir: str = "",
                   workspace_root: str = "", **kwargs) -> dict:
-    """Compile the repo's C# via unity-builder; write compile_report.json.
+    """Compile the repo's C# via unity-builder, then (if it passed) play-test it.
 
-    Returns {written, passed}. The report holds {passed, returncode, file_count,
-    errors[], warning_count, summary} for the reviewer to read.
+    Writes compile_report.json always, and playtest_report.json always (an actual
+    PlayMode run when compile passed on a C# project, else a 'skipped' report).
+    Returns {written, passed}. The reports hold the fields the reviewer reads.
     """
     repo = Path(project_root or workspace_root).resolve()
     report = {"passed": True, "returncode": 0, "file_count": 0,
@@ -67,4 +68,26 @@ def unity_compile(*, project_root: str = "", out_dir: str = "",
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "compile_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
-    return {"written": "compile_report.json", "passed": report.get("passed", True)}
+
+    # ── Chain the PlayMode play-test (compile → if passed → playtest) ──
+    # Only run the (slow) editor when compilation passed AND this is a C# project:
+    # play-testing code that didn't compile is pointless — the import would fail
+    # and pile a redundant failure on top of the compile errors. On skip we still
+    # write playtest_report.json so the reviewer's context source always finds it.
+    if report.get("passed", True) and _has_cs(repo):
+        # unity_playtest writes playtest_report.json into target_dir and handles
+        # its own skips (no Assets / unlicensed / builder unreachable).
+        from aitelier.tools.unity_playtest.impl import unity_playtest
+        pt = unity_playtest(project_root=str(repo), out_dir=str(target_dir))
+        pt_passed = pt.get("passed", True)
+    else:
+        reason = ("Compile failed — play-test skipped (fix compile errors first)."
+                  if not report.get("passed", True)
+                  else "No C# (.cs) files — not a Unity project; play-test skipped.")
+        (target_dir / "playtest_report.json").write_text(json.dumps(
+            {"passed": True, "total": 0, "passed_count": 0, "failed_count": 0,
+             "failures": [], "summary": reason}, indent=2), encoding="utf-8")
+        pt_passed = True
+
+    return {"written": ["compile_report.json", "playtest_report.json"],
+            "passed": report.get("passed", True) and pt_passed}

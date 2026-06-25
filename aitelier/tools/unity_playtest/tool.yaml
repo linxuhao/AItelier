@@ -1,0 +1,23 @@
+name: unity_playtest
+# NOTE: not a standalone graph step — it is chained by `unity_compile` after a
+# passing compile (compile → if passed → playtest). Kept as its own tool so the
+# play-test logic stays isolated and unit-tested.
+description: >
+  Run a PlayMode smoke test against the consolidated Unity repo via the
+  unity-builder sidecar and write playtest_report.json
+  {passed, total, passed_count, failed_count, failures, summary}. The sidecar
+  copies the project to a throwaway dir, injects a reflection-based test that
+  drives SceneBootstrapper.BuildScene(), and asserts the scene builds with no
+  runtime exceptions and produces gameplay objects — catching the legacy-Input
+  InvalidOperationException and orphaned/empty scenes the compile gate cannot.
+  Always succeeds as a step; no-ops for non-Unity projects and degrades to pass
+  if the builder is unreachable or unlicensed.
+parameters:
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Directory to write playtest_report.json (set to $STEP_DIR)"
+    required: false

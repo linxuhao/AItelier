@@ -66,6 +66,18 @@ async def agent_chat(
 
     async def event_stream():
         collected_events = []  # persist after streaming
+        # Persist the user message up-front: the backend is the single owner of
+        # chat-history persistence (the frontend no longer fire-and-forgets a
+        # duplicate save). Saving before the stream means it survives a
+        # mid-stream disconnect and works for any client of this endpoint.
+        if request.session_id:
+            try:
+                db.save_chat_message_with_session(
+                    request.session_id, request.current_project or "",
+                    "user", request.message,
+                )
+            except Exception:
+                pass  # Best-effort persistence
         try:
             async for event in agent.chat(
                 request.message, history, request.current_project
@@ -81,15 +93,9 @@ async def agent_chat(
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-        # Persist to chat history if session-scoped
+        # Persist the assistant response if session-scoped
         if request.session_id:
             try:
-                # Save user message
-                db.save_chat_message_with_session(
-                    request.session_id, request.current_project or "",
-                    "user", request.message,
-                )
-                # Save assistant response (last text_delta or done event)
                 assistant_text = ""
                 for evt in collected_events:
                     if evt.get("type") == "text_delta":
@@ -148,7 +154,7 @@ def get_chat_history(
 @router.get("/sessions")
 def list_sessions(
     project_id: str | None = None,
-    limit: int = 20,
+    limit: int = 200,
     db: DBManager = Depends(get_db_manager),
 ):
     """List chat sessions with message count and last message preview.

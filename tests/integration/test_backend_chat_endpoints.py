@@ -109,6 +109,17 @@ class TestListChatSessions:
         unlimited = db_manager.list_chat_sessions()
         assert len(unlimited) == 5
 
+    def test_default_limit_returns_more_than_old_cap(self, db_manager: DBManager):
+        """Regression: the default limit must exceed the old hardcoded cap of 20,
+        so sessions past 20 don't silently vanish from the history dropdown.
+        (Bug: 27 sessions existed but only 20 were ever returned.)"""
+        for i in range(25):
+            _seed_session(db_manager, f"many-{i:02d}", "proj-m", [
+                ("user", f"Question {i}"),
+            ])
+        results = db_manager.list_chat_sessions()  # default limit
+        assert len(results) == 25
+
     def test_ordered_by_updated_at_desc(self, db_manager: DBManager):
         """Sessions ordered by most recent activity first."""
         import time

@@ -652,7 +652,7 @@
      * @returns {Promise<object>} — {sessions: [...]}
      */
     listSessions: function (projectId) {
-      var path = "/api/agent/sessions?limit=20";
+      var path = "/api/agent/sessions?limit=200";
       if (projectId) {
         path += "&project_id=" + encodeURIComponent(projectId);
       }

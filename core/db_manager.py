@@ -1614,7 +1614,7 @@ class DBManager:
             )
             conn.commit()
 
-    def list_chat_sessions(self, project_id: str | None = None, limit: int = 20) -> list[dict]:
+    def list_chat_sessions(self, project_id: str | None = None, limit: int = 200) -> list[dict]:
         """List chat sessions with message count and last message preview.
 
         Args:

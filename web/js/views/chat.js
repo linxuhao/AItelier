@@ -962,42 +962,6 @@
   }
 
 
-  // ════════════════════════════════════════════════════════════════════
-  //  User Message Persistence
-  // ════════════════════════════════════════════════════════════════════
-
-  /**
-   * Save a user message to the backend immediately (fire-and-forget).
-   *
-   * Called from _sendMessage() after _addMessage("user", text) and
-   * BEFORE the _history.push() call.
-   *
-   * @param {string} text — the user message text
-   */
-  function _saveUserMessage(text) {
-    // No session — nothing to save to
-    if (!_sessionId) {
-      return;
-    }
-
-    var api = window.AItelier && window.AItelier.API;
-    if (!api || typeof api.saveChatMessage !== "function") {
-      return;
-    }
-
-    var currentProject = _getCurrentProject();
-
-    // Fire-and-forget: call the API but do NOT await or chain
-    api.saveChatMessage({
-      session_id: _sessionId,
-      project_id: currentProject || "",
-      role: "user",
-      content: text,
-    }).catch(function (/* err */) {
-      // Silently ignore — best-effort save
-    });
-  }
-
 
   // ════════════════════════════════════════════════════════════════════
   //  SSE streaming (fetch + ReadableStream)
@@ -1051,8 +1015,8 @@
       // Add user message to display
       _addMessage("user", text);
 
-      // Save user message immediately (fire-and-forget) BEFORE history push
-      _saveUserMessage(text);
+      // Persistence is owned by the backend /api/agent/chat stream (it saves
+      // the user message up-front), so no duplicate fire-and-forget save here.
 
       // Push to history
       _history.push({ role: "user", content: text });
@@ -1226,6 +1190,11 @@
         _currentAgentBubble = null;
         _currentAgentText = "";
         _scrollToBottom();
+
+        // Refresh the session dropdown so the just-used session's updated
+        // count/preview/ordering appear, and a brand-new session shows up once
+        // it has its first message (it's hidden until message_count > 0).
+        _loadSessionList();
         break;
 
       case "error":

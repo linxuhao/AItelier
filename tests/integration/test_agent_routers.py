@@ -133,3 +133,40 @@ class TestAgentChatEndpoint:
             assert events[2]["type"] == "tool_result"
             assert events[2]["result"]["projects"] == []
             assert events[3]["type"] == "done"
+
+
+class TestChatHistoryPersistence:
+    """Backend is the single owner of chat-history persistence — each exchange
+    writes exactly one user row and one assistant row (no duplicate user save)."""
+
+    def test_no_duplicate_user_message_save(self, client, tmp_path):
+        from core.db_manager import DBManager
+
+        sid = client.post("/api/agent/session/create").json()["session_id"]
+
+        with patch("core.meta_agent.MetaAgent.chat") as mock_chat:
+            async def fake_chat(*args, **kwargs):
+                yield {"type": "text_delta", "content": "Hi there"}
+                yield {"type": "done",
+                       "message": {"role": "assistant", "content": "Hi there"}}
+
+            mock_chat.side_effect = lambda *a, **kw: fake_chat()
+
+            resp = client.post("/api/agent/chat", json={
+                "message": "hello", "history": [],
+                "current_project": "proj-x", "session_id": sid,
+            })
+            assert resp.status_code == 200
+            _ = resp.text  # fully consume the stream so persistence runs
+
+        db = DBManager(str(tmp_path / "test.db"))
+        with db.get_connection() as conn:
+            users = conn.execute(
+                "SELECT COUNT(*) FROM chat_history WHERE session_id=? AND role='user'",
+                (sid,)).fetchone()[0]
+            assistants = conn.execute(
+                "SELECT COUNT(*) FROM chat_history WHERE session_id=? AND role='assistant'",
+                (sid,)).fetchone()[0]
+
+        assert users == 1       # exactly one — backend saves it once, up-front
+        assert assistants == 1  # assistant persisted once at stream end

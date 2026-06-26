@@ -43,8 +43,12 @@ end_conditions:
       require_completed: true  # AT-2: must actually execute before triggering
     - type: max_total_steps
       limit: 200
-    - type: max_run_duration_seconds
-      limit: 10800   # 3 hours
+    # No wall-clock run cap: AItelier is single-instance and human-in-the-loop,
+    # so a run may sit paused on a checkpoint indefinitely. max_run_duration_seconds
+    # counted approval-wait time (started_at is stamped once and never adjusted for
+    # paused state), so a run approved after a long wait failed instantly on resume.
+    # Runaways are already bounded by max_total_steps + per-step timeout_seconds +
+    # the scheduler's hung-step detection.
     - type: flag_match
       flag:
         fatal_error: true

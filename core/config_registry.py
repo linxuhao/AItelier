@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Callable
 
 import yaml
 
@@ -44,7 +45,7 @@ _DEFAULTS: dict = {
     "checkpoint_kind": "file-review",
     "checkpoint_kinds": {},
     "labels": {},
-}
+}  # NB: steps/labels/checkpoints/description are NOT here — derived from the graph.
 
 # Host-declared hints for framework-owned graphs registered from the skillflow
 # package (their YAML lives in the library and carries no x-aitelier block).
@@ -60,14 +61,19 @@ _EXTERNAL_HINTS: dict[str, dict] = {
 
 @dataclass
 class ConfigManifest:
-    """Everything the host needs to schedule and render runs of one config."""
+    """Everything the host needs to schedule and render runs of one config.
+
+    DECLARED fields (``label``, ``scheduler_owned``, ``seed_file`` …) come from
+    the config's ``x-aitelier:`` block and are stored here. DERIVED views
+    (``steps``, ``labels``, ``checkpoints``, ``description``) are computed live
+    from the graph via ``graph_provider`` — never cached — so a re-registered
+    graph is reflected immediately and there is no duplicated step/label state
+    that can fall stale.
+    """
 
     config_name: str
+    graph_provider: Callable[[], Any]   # returns the live PipelineGraph for this config
     label: str = ""
-    description: str = ""
-    steps: list[str] = field(default_factory=list)
-    labels: dict[str, str] = field(default_factory=dict)        # step_id -> display label
-    checkpoints: dict[str, dict] = field(default_factory=dict)  # step_id -> {label, reject_to, kind}
     has_task_loop: bool = False
     scheduler_owned: bool = True
     seed_file: str | None = None
@@ -75,6 +81,43 @@ class ConfigManifest:
     # Step ids whose outputs are project-global & stable (e.g. SOTA/architecture).
     # The host hoists these into the shared system preamble for prompt caching.
     preamble_steps: list[str] = field(default_factory=list)
+    # Declared rendering hints — inputs used to DERIVE labels/checkpoints below.
+    label_overrides: dict[str, str] = field(default_factory=dict)   # step_id -> label
+    checkpoint_kind: str = "file-review"
+    checkpoint_kinds: dict[str, str] = field(default_factory=dict)  # step_id -> kind
+
+    @property
+    def _graph(self):
+        return self.graph_provider()
+
+    @property
+    def description(self) -> str:
+        return self._graph.description or ""
+
+    @property
+    def steps(self) -> list[str]:
+        return [node.id for node in self._graph.steps]
+
+    @property
+    def labels(self) -> dict[str, str]:
+        """step_id -> display label (x-aitelier override, else node name, else id)."""
+        return {
+            node.id: str(self.label_overrides.get(node.id) or node.name or node.id)
+            for node in self._graph.steps
+        }
+
+    @property
+    def checkpoints(self) -> dict[str, dict]:
+        """step_id -> {label, reject_to, kind} for every checkpoint node."""
+        out: dict[str, dict] = {}
+        for node in self._graph.steps:
+            if node.checkpoint:
+                out[node.id] = {
+                    "label": node.checkpoint_label or node.name or node.id,
+                    "reject_to": node.checkpoint_reject_to or "",
+                    "kind": self.checkpoint_kinds.get(node.id, self.checkpoint_kind),
+                }
+        return out
 
     def label_for(self, step_id: str) -> str:
         """Display label for a step, falling back to the raw id (graceful for
@@ -138,39 +181,25 @@ class ConfigRegistry:
         for g in sf.list_graphs():
             name = g["name"]
             try:
-                graph = sf._get_resolver(name).graph
+                sf._get_resolver(name)  # ensure the graph resolves; skip if broken
             except Exception:
                 continue
             hints = {**_DEFAULTS, **_EXTERNAL_HINTS.get(name, {}), **host_hints.get(name, {})}
-            label_overrides: dict = hints.get("labels") or {}
-            per_step_kind: dict = hints.get("checkpoint_kinds") or {}
-            default_kind: str = hints.get("checkpoint_kind") or "file-review"
-
-            steps: list[str] = []
-            labels: dict[str, str] = {}
-            checkpoints: dict[str, dict] = {}
-            for node in graph.steps:
-                steps.append(node.id)
-                labels[node.id] = str(label_overrides.get(node.id) or node.name or node.id)
-                if node.checkpoint:
-                    checkpoints[node.id] = {
-                        "label": node.checkpoint_label or node.name or node.id,
-                        "reject_to": node.checkpoint_reject_to or "",
-                        "kind": per_step_kind.get(node.id, default_kind),
-                    }
-
+            # Derived views (steps/labels/checkpoints/description) are NOT computed
+            # here — the manifest reads them from the live graph on access, so they
+            # stay correct after a re-register without rebuilding the registry.
             reg._manifests[name] = ConfigManifest(
                 config_name=name,
+                graph_provider=(lambda n=name: sf._get_resolver(n).graph),
                 label=hints.get("label") or name,
-                description=g.get("description") or graph.description or "",
-                steps=steps,
-                labels=labels,
-                checkpoints=checkpoints,
                 has_task_loop=bool(hints.get("has_task_loop")),
                 scheduler_owned=bool(hints.get("scheduler_owned")),
                 seed_file=hints.get("seed_file"),
                 output_step=hints.get("output_step"),
                 preamble_steps=list(hints.get("preamble_steps") or []),
+                label_overrides=hints.get("labels") or {},
+                checkpoint_kind=hints.get("checkpoint_kind") or "file-review",
+                checkpoint_kinds=hints.get("checkpoint_kinds") or {},
             )
         return reg
 

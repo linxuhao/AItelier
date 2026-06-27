@@ -72,7 +72,12 @@ multi-step *process / skill* and wants it captured as a pipeline they can re-run
 (e.g. "make me a pipeline that researches a topic, drafts, then fact-checks"),
 call generate_pipeline(description=<the skill, verbatim>). It runs the
 skill_converter pipeline and returns a Design Review checkpoint — relay it; on
-approval (approve_checkpoint) it lints and emits the generated pipeline YAML.
+approval (approve_checkpoint) it lints, emits, and AUTO-REGISTERS the generated
+pipeline under a name like `gen_<slug>` (reported as `registered_config`). Once
+registered you can RUN it immediately with start_config_run(config_name=<that
+gen_ name>, seed_text=<input for its first step>). To UPDATE a generated pipeline,
+call generate_pipeline again with the SAME name — it overwrites in place, and the
+next start_config_run uses the new version.
 Use start_new_project / start_from_aitelier_project for *software* (apps/tools/bug-fixes);
 generate_pipeline for *converting a skill/workflow into a pipeline graph*.
 
@@ -1682,7 +1687,7 @@ class MetaAgent:
                                             outputs[s["step_id"]] = files
                                 except Exception:
                                     pass
-                        return {
+                        result = {
                             "status": "completed",
                             "run_id": run_id,
                             "project_id": run.get("project_id", ""),
@@ -1690,6 +1695,29 @@ class MetaAgent:
                             "outputs": outputs,
                             "message": "Pipeline completed successfully.",
                         }
+                        # A finished skill_converter run produced a pipeline YAML —
+                        # persist + live-register it (gen_<slug>) so the user can
+                        # run it immediately via start_config_run, and re-running
+                        # generate_pipeline with the same name updates it in place.
+                        if run.get("graph_name") == "skill_converter":
+                            try:
+                                from api.dependencies import register_pipeline_from_run
+                                proj = self.db.get_project(run.get("project_id", "")) or {}
+                                pname = proj.get("name") or run.get("project_id", "")
+                                reg = register_pipeline_from_run(run_id, pname)
+                                if reg.get("config_name"):
+                                    result["registered_config"] = reg["config_name"]
+                                    result["registered_action"] = reg.get("action")
+                                    result["message"] = (
+                                        f"Pipeline '{reg['config_name']}' is registered and "
+                                        f"ready ({reg.get('action')}). Start it with "
+                                        f"start_config_run(config_name='{reg['config_name']}')."
+                                    )
+                                elif reg.get("error"):
+                                    result["registration_error"] = reg["error"]
+                            except Exception as e:
+                                result["registration_error"] = str(e)
+                        return result
                     elif status == "failed":
                         return {
                             "status": "failed",
@@ -1930,7 +1958,12 @@ class MetaAgent:
         if not description:
             return {"error": "description is required — the skill/workflow to convert."}
         name = args.get("name") or description[:40]
-        pid = "convert-" + self._slugify(name)
+        # Unique pid per generation so re-running (an "update") always executes a
+        # fresh converter run rather than reusing a prior completed one. The
+        # registered config name is derived from the stable `name` (→ gen_<slug>),
+        # not the pid, so update still overwrites the same config.
+        import uuid as _uuid
+        pid = "convert-" + self._slugify(name) + "-" + _uuid.uuid4().hex[:6]
         sf = get_skillflow()
 
         # Launch the skill_converter config via the generic launcher (ensures the

@@ -171,7 +171,26 @@ def get_skillflow():
         # Build the config registry once skillflow knows every graph.
         global _config_registry_instance
         _config_registry_instance = ConfigRegistry.build(sf)
+
+        # Register previously-generated pipelines (gen_*.yaml in ~/.AItelier/configs)
+        # so they survive restart and are runnable by name. Non-fatal.
+        try:
+            from core.pipeline_registry import load_generated_configs
+            load_generated_configs(sf, _config_registry_instance)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "generated pipelines not loaded: %s", e)
     return _skillflow_instance
+
+
+def register_pipeline_from_run(run_id: str, name: str) -> dict:
+    """Persist + live-register the pipeline a completed skill_converter run made,
+    so it can be launched immediately via ``start_config_run``. Returns
+    ``{config_name, path, action}`` or ``{error}``."""
+    from core.pipeline_registry import register_generated_pipeline
+    return register_generated_pipeline(
+        get_skillflow(), get_config_registry(), run_id, name)
 
 
 def get_config_registry():

@@ -203,6 +203,38 @@ class ConfigRegistry:
             )
         return reg
 
+    def register_one(self, sf, name: str) -> "ConfigManifest | None":
+        """Add (or replace) a single manifest for an already-registered graph.
+
+        Used after a graph is registered into the live skillflow instance at
+        runtime (e.g. a converter-generated ``gen_*`` pipeline) so it becomes
+        immediately runnable without rebuilding the whole registry or restarting.
+        Mirrors :meth:`build`'s per-graph construction; the manifest reads its
+        derived views from the live graph lazily, so a later re-register is
+        reflected automatically. Idempotent. Returns None if the graph is unknown
+        or doesn't resolve.
+        """
+        try:
+            sf._get_resolver(name)  # ensure the graph resolves
+        except Exception:
+            return None
+        hints = {**_DEFAULTS, **_EXTERNAL_HINTS.get(name, {}), **_read_host_hints().get(name, {})}
+        m = ConfigManifest(
+            config_name=name,
+            graph_provider=(lambda n=name: sf._get_resolver(n).graph),
+            label=hints.get("label") or name,
+            has_task_loop=bool(hints.get("has_task_loop")),
+            scheduler_owned=bool(hints.get("scheduler_owned")),
+            seed_file=hints.get("seed_file"),
+            output_step=hints.get("output_step"),
+            preamble_steps=list(hints.get("preamble_steps") or []),
+            label_overrides=hints.get("labels") or {},
+            checkpoint_kind=hints.get("checkpoint_kind") or "file-review",
+            checkpoint_kinds=hints.get("checkpoint_kinds") or {},
+        )
+        self._manifests[name] = m
+        return m
+
     def list(self) -> list[ConfigManifest]:
         return list(self._manifests.values())
 

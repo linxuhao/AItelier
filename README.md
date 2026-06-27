@@ -153,7 +153,14 @@ To change which models or agents the pipeline uses, edit the config files direct
 - **`templates/`** — the LLM prompt templates each step uses
 - **`AITELIER_HOST_AGENT_MODEL`** (env, default `deepseek/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. The built-in **skill→pipeline converter** (and any pipeline it generates) ship their agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them.
 
-> **Generate pipelines from a skill.** Beyond building software, the chat butler can turn a described skill/workflow into a reusable SkillFlow pipeline — ask it to "make a pipeline that …" and it runs skillflow's `skill_converter` (analyze → design → review checkpoint → lint) and hands back the generated YAML graph.
+> **Generate a pipeline from a skill, then run it — in one chat.** Beyond building software, the chat butler can turn a described skill/workflow into a reusable SkillFlow pipeline *and run it*, without editing YAML or restarting the server:
+>
+> 1. Ask it to *"make a pipeline that researches a topic, drafts a summary, then fact-checks it."* It runs skillflow's `skill_converter` (analyze → design → **review checkpoint** → lint).
+> 2. On approval the generated graph is **auto-registered** under a namespaced name like `gen_research_draft_factcheck` (the `gen_` prefix means it can never clash with a built-in config).
+> 3. *"Run it on 'CRISPR gene editing'."* → the butler launches it by name and it appears in the dashboards like any other run.
+> 4. *"Add a citation step and run it again."* → re-describe it under the **same name** and it's **updated in place**; the next run uses the new version.
+>
+> Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. Their agents ship as `model:"host"` (see `AITELIER_HOST_AGENT_MODEL` above), so no per-role config is needed.
 
 ## How it works
 

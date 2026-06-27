@@ -91,9 +91,15 @@ Env reference lives in `.env.example`.
    → t_impl_validate (tool) → t_impl_review → t_verify → t_verify_review
    → task_loop → Final Verifier (5) → 5_review
 
-3. Skill → Pipeline conversion (skillflow's skill_converter graph, registered at startup)
+3. Skill → Pipeline conversion + run (skillflow's skill_converter graph, registered at startup)
    analyze_skill → design_graph → explain_design (checkpoint) → validate_design (lint) → done
-   Driven in-chat by the butler's `generate_pipeline` tool; host-mode agents → AITELIER_HOST_AGENT_MODEL
+   Driven in-chat by the butler's `generate_pipeline` tool; host-mode agents → AITELIER_HOST_AGENT_MODEL.
+   On completion the host BRIDGES the generated graph into a runnable config
+   (`core/pipeline_registry.py`): namespaced `gen_<slug>`, persisted to `~/.AItelier/configs/`
+   (gitignored, boot-scanned), live-registered (invented agent roles auto-registered as
+   host agents), manifest added via `ConfigRegistry.register_one`. The butler can then
+   `start_config_run(config_name="gen_<slug>")`; re-running `generate_pipeline` with the same
+   name UPDATES in place (register_graph overwrites + version-bumps; manifests are lazy).
 ```
 
 ### Existing-repo support
@@ -157,9 +163,10 @@ web/
 | `core/workspace_manager.py` | Physical directory jail, Git operations, step staging→final directory lifecycle |
 | `core/db_manager.py` | SQLite persistence (projects, tasks, settings, users) |
 | `core/ai_router.py` | `AIGateway` — LiteLLM wrapper, provider registry from `llm_providers.json` |
-| `core/meta_agent.py` | Autonomous CLI/WebGUI butler — drives meta_conversation, DPE & skill_converter runs in-chat; tools incl. `generate_pipeline` |
+| `core/meta_agent.py` | Autonomous CLI/WebGUI butler — drives meta_conversation, DPE & skill_converter runs in-chat; tools incl. `generate_pipeline`; converter-completion hook registers + relays the `gen_<slug>` pipeline |
+| `core/pipeline_registry.py` | Bridge that makes a converter-generated pipeline runnable: namespaced `gen_<slug>`, persist to `~/.AItelier/configs/`, live-register (auto-register invented agent roles as host agents), boot-scan; update overwrites in place |
 | `core/event_bus.py` | In-process pub/sub for pipeline events |
-| `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader, AgentConfigs singletons; registers skillflow's `skill_converter` graph; `code_path_resolver` for existing repos |
+| `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader, AgentConfigs singletons; registers skillflow's `skill_converter` graph + boot-scans `~/.AItelier/configs/` for `gen_*` pipelines; `register_pipeline_from_run` wrapper; `code_path_resolver` for existing repos |
 | `aitelier/runner.py` | `AItelierStepRunner` — bridges skillflow StepRunner protocol to PipelineEngine |
 | `cli/tui/dashboard.py` | Rich TUI with project list, chat, checkpoint review |
 

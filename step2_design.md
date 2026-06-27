@@ -1,325 +1,248 @@
-# 技术架构设计 — AItelier WebUI Chat History Persistence
+# 技术架构设计 — Logged User Tracking
 
 ## 概述
 
-增强现有 AItelier WebUI 的聊天视图（`web/js/views/chat.js`），使其具备跨页面导航和跨浏览器会话的聊天历史持久化能力。在现有 FastAPI 后端 + SQLite `chat_history` / `sessions` 表、以及前端 session 机制的基础之上，**填补三个缺口**：
-
-1. **历史恢复** — 用户返回聊天页面时，从后端加载并渲染持久化的消息
-2. **会话选择器** — 聊天页面提供一个下拉列表，列出过去的会话，可选择并加载
-3. **即时用户消息持久化** — 在用户消息发送后立即保存到后端（不等待流式响应完成）
-
-不引入新框架、新依赖、新数据库表。所有修改均收敛在已有文件内部。
+为 AItelier 添加一个"已登录用户跟踪"页面和 API，仅 writer 角色可访问。数据来源为现有的 `users` 表（SQLite），`access_rights` 在查询时从 `AITELIER_WRITERS` 环境变量动态计算。`/api/me` 端点每次调用时 upsert 当前用户的 `last_seen_at`，保证跟踪数据实时性。前端使用动态导航栏，reader 角色的 DOM 中完全不存在 tracking 链接。
 
 ---
 
 ## 架构图
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                     AItelier FastAPI Server                            │
-│                                                                        │
-│  NEW  GET /api/agent/chat/history?session_id=...                       │
-│       → db.get_chat_history_by_session(session_id) → {messages: [...]} │
-│                                                                        │
-│  NEW  GET /api/agent/sessions?project_id=...&limit=20                  │
-│       → db.list_chat_sessions(project_id, limit) → {sessions: [...]}   │
-│                                                                        │
-│  NEW  POST /api/agent/chat/message                                     │
-│       → db.save_chat_message_with_session(session_id, project_id,      │
-│                                           role, content)               │
-│                                                                        │
-│  EXISTING  POST /api/agent/chat          (SSE streaming + persist)     │
-│  EXISTING  POST /api/agent/session/create                              │
-└───────────────────────────┬──────────────────────────────────────────┘
-                            │
-                            ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                     Frontend — Chat View (chat.js)                     │
-│                                                                        │
-│  show()                                                                │
-│    ├── _renderUI()            build DOM structure                      │
-│    │     ├── .chat-header     ★ NEW: session selector bar              │
-│    │     │     ├── <select id="session-selector">                      │
-│    │     │     └── <button id="btn-new-session"> + New                 │
-│    │     ├── .chat-messages   (unchanged)                              │
-│    │     └── .chat-input-area (unchanged)                              │
-│    ├── _initSession()         (unchanged)                              │
-│    ├── _restoreHistory()      ★ NEW: load & render stored messages     │
-│    └── _loadSessionList()     ★ NEW: populate session selector         │
-│                                                                        │
-│  _sendMessage(text)                                                   │
-│    ├── _saveUserMessage(text) ★ NEW: POST /api/agent/chat/message     │
-│    └── ... (existing SSE streaming flow unchanged)                     │
-│                                                                        │
-│  _loadSession(sessionId)      ★ NEW: switch to a different session    │
-│    ├── Clear display & history                                         │
-│    ├── _sessionId = sessionId                                          │
-│    └── _restoreHistory()                                               │
-└──────────────────────────────────────────────────────────────────────┘
-
-Data Flow — History Restoration:
-  Chat.show()
-    │
-    ├── _initSession() → _sessionId
-    │
-    ├── _restoreHistory()
-    │     │
-    │     └── GET /api/agent/chat/history?session_id=...
-    │           │
-    │           ▼
-    │     messages: [{role, content, created_at}, ...]
-    │           │
-    │           ▼
-    │     _addMessage(role, content) for each → rendered bubbles
-    │     _history = messages (deduped, in-memory copy)
-    │
-    └── _loadSessionList()
-          │
-          └── GET /api/agent/sessions?project_id=...
-                │
-                ▼
-          sessions: [{session_id, project_id, message_count, last_message, updated_at}, ...]
-                │
-                ▼
-          <select id="session-selector"> populated, current _sessionId selected
-
-Data Flow — Session Switch:
-  User selects a different session in <select>
-    │
-    └── _loadSession(newSessionId)
-          ├── Clear .chat-messages DOM
-          ├── Clear _history array
-          ├── _sessionId = newSessionId
-          └── _restoreHistory() → GET history → render
+┌────────────────────────────────────────────────────────────────┐
+│                        Browser (SPA)                           │
+│                                                                │
+│  index.html                                                    │
+│  ├─ <nav id="app-bar">                                         │
+│  │   └─ <ul id="nav-links">  ← JS 动态渲染                      │
+│  │       ├─ <a href="#/">Dashboard</a>                          │
+│  │       ├─ <a href="#/chat">Chat</a>                           │
+│  │       └─ <a href="#/tracking">Tracking</a>  ← canWrite 时可见 │
+│  ├─ <section id="view-tracking">  ← UserTracking 渲染目标        │
+│  └─ <script src="/web/js/views/tracking.js">                   │
+│                                                                │
+│  app.js  ──►  state.canWrite  ──►  决定 nav 中是否渲染 Tracking  │
+│  router.js ──► #/tracking → AItelier.UserTracking              │
+│  api.js   ──► getLoggedUsers() → GET /api/admin/logged-users   │
+│  views/tracking.js ──► 渲染 <table> Email / Latest Access /     │
+│                          Access Rights                          │
+└────────────────────────────────────────────────────────────────┘
+        │                              │
+        │  GET /api/me                  │  GET /api/admin/logged-users
+        │  (upsert last_seen_at)        │  (require_writer)
+        ▼                              ▼
+┌────────────────────────────────────────────────────────────────┐
+│                   FastAPI Backend                               │
+│                                                                │
+│  api/main.py                                                   │
+│  ├─ /api/me ──► upsert_user(email) ──► DBManager               │
+│  └─ include_router(admin_router, prefix="/api/admin")           │
+│                                                                │
+│  api/admin_routers.py  (NEW)                                   │
+│  └─ GET /logged-users ──► require_writer ──► authz.py           │
+│                        ──► DBManager.list_logged_users()        │
+│                                                                │
+│  core/db_manager.py                                            │
+│  ├─ upsert_user(email, display_name, source)  (NEW)            │
+│  └─ list_logged_users(limit)                  (NEW)            │
+│       └─ SELECT ... FROM users ORDER BY last_seen_at DESC       │
+│       └─ 逐行计算 access_rights（WRITERS 集合成员 → "writer"）   │
+│                                                                │
+│  api/authz.py  (已有，不变)                                     │
+│  ├─ require_writer → 403 if not request_can_write(request)     │
+│  └─ WRITERS = set(os.getenv("AITELIER_WRITERS").split(","))    │
+└────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌────────────────────────────────────────────────────────────────┐
+│                   SQLite (aitelier.db)                          │
+│                                                                │
+│  users 表 (已有)                                                │
+│  ├─ email        TEXT PRIMARY KEY                               │
+│  ├─ display_name TEXT                                          │
+│  ├─ source       TEXT DEFAULT 'cloudflare'                      │
+│  ├─ created_at   DATETIME DEFAULT CURRENT_TIMESTAMP             │
+│  └─ last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP             │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 组件列表
 
-### 组件 1: `GET /api/agent/chat/history` — 会话历史端点（新增）
+### 1. `api/admin_routers.py` — 新建
 
-- **职责**: 返回指定会话的完整消息历史
-- **HTTP**: `GET /api/agent/chat/history?session_id=<uuid>`
-- **成功响应** (200):
-  ```json
-  {
-    "session_id": "a1b2c3d4e5f6",
-    "messages": [
-      {"role": "user", "content": "Hello", "created_at": "2026-..."},
-      {"role": "assistant", "content": "Hi there!", "created_at": "2026-..."}
-    ]
-  }
-  ```
-- **错误响应** (422): `session_id` 缺失或为空
-- **实现**: 调用已有的 `db.get_chat_history_by_session(session_id, limit=100)`
-- **位置**: `api/agent_routers.py` — 新增路由函数
+- **职责**: 提供 writer-only 的管理 API 端点
+- **接口**:
+  - `GET /api/admin/logged-users?limit=50` → `List[LoggedUser]`
+    - 依赖: `require_writer` (FastAPI Depends)
+    - 返回: `[{email, display_name, source, last_seen_at, access_rights}]`
+- **数据模型**: 新增 `LoggedUser` Pydantic model（或在 `models/schemas.py` 中定义）
+- **文件路径**: `./api/admin_routers.py`
 
-### 组件 2: `GET /api/agent/sessions` — 会话列表端点（新增）
+### 2. `api/main.py` — 修改
 
-- **职责**: 返回会话列表（含元数据），支持按 project_id 过滤
-- **HTTP**: `GET /api/agent/sessions?project_id=<optional>&limit=20`
-- **成功响应** (200):
-  ```json
-  {
-    "sessions": [
-      {
-        "session_id": "a1b2c3d4e5f6",
-        "project_id": "my-project",
-        "message_count": 12,
-        "last_message": "Sure, I can help with that.",
-        "updated_at": "2026-06-15T10:30:00Z"
-      }
-    ]
-  }
-  ```
-- **参数**:
-  - `project_id` (optional): 按项目过滤；不传则返回所有会话
-  - `limit` (optional, default 20): 最大返回数
-- **实现**: 调用新方法 `db.list_chat_sessions(project_id, limit)`；后端只返回有消息的会话（`message_count > 0`），过滤掉空会话
-- **位置**: `api/agent_routers.py` — 新增路由函数
+- **职责**: 注册 admin router；在 `/api/me` 中 upsert 用户
+- **变更点**:
+  1. 导入并 `include_router(admin_router)`
+  2. 在 `whoami()` 处理器中，当 email 非空时调用 `db.upsert_user(email, ...)` 更新 `last_seen_at`
+- **文件路径**: `./api/main.py`
 
-### 组件 3: `POST /api/agent/chat/message` — 单条消息保存端点（新增）
+### 3. `web_api/main.py` — 修改
 
-- **职责**: 在用户发送消息后立即保存该消息到数据库（不等流式响应完成）
-- **HTTP**: `POST /api/agent/chat/message`
-- **请求体**:
-  ```json
-  {
-    "session_id": "a1b2c3d4e5f6",
-    "project_id": "my-project",
-    "role": "user",
-    "content": "Hello, agent!"
-  }
-  ```
-- **成功响应** (200): `{"status": "saved"}`
-- **实现**: 调用已有的 `db.save_chat_message_with_session(session_id, project_id, role, content)`
-- **位置**: `api/agent_routers.py` — 新增路由函数
-- **注意**: 此端点仅用于保存用户消息。助手消息仍然在流式响应完成后由 `POST /api/agent/chat` 端点保存（与现有行为一致）。这是一个"安全带"措施，确保用户消息在导航离开前已落盘。
+- **职责**: Web API 入口也需注册 admin router
+- **变更点**: 导入并 `include_router(admin_router)`
+- **文件路径**: `./web_api/main.py`
 
-### 组件 4: `DBManager.list_chat_sessions()` — 数据库查询方法（新增）
+### 4. `core/db_manager.py` — 修改
 
-- **职责**: 查询会话列表及元数据
-- **SQL**:
-  ```sql
-  SELECT s.id AS session_id,
-         ch.project_id,
-         COUNT(ch.id) AS message_count,
-         (SELECT content FROM chat_history
-          WHERE session_id = s.id
-          ORDER BY id DESC LIMIT 1) AS last_message,
-         MAX(ch.created_at) AS updated_at
-  FROM sessions s
-  JOIN chat_history ch ON ch.session_id = s.id
-  WHERE (? IS NULL OR ch.project_id = ?)
-  GROUP BY s.id
-  HAVING message_count > 0
-  ORDER BY updated_at DESC
-  LIMIT ?
-  ```
-- **位置**: `core/db_manager.py` — 新增方法
-- **参数**: `project_id: str | None`, `limit: int = 20`
-- **返回**: `list[dict]`
-
-### 组件 5: `web/js/api.js` — API 客户端扩展（修改）
-
-- **职责**: 新增两个 API 包装方法
+- **职责**: 新增两个 DB 方法
 - **新增方法**:
-  - `getChatHistory(sessionId)` → `GET /api/agent/chat/history?session_id=...`
-  - `listSessions(projectId)` → `GET /api/agent/sessions?project_id=...&limit=20`
-  - `saveChatMessage(body)` → `POST /api/agent/chat/message`
+  - `upsert_user(email, display_name=None, source='cloudflare')`:
+    ```sql
+    INSERT INTO users (email, display_name, source, last_seen_at)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(email) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP
+    ```
+  - `list_logged_users(limit=50)`:
+    ```sql
+    SELECT email, display_name, source, created_at, last_seen_at
+    FROM users ORDER BY last_seen_at DESC LIMIT ?
+    ```
+    在 Python 层计算每个用户的 `access_rights`（对比 `authz.WRITERS` 集合）
+- **文件路径**: `./core/db_manager.py`
 
-### 组件 6: `web/js/views/chat.js` — 聊天视图增强（修改）
+### 5. `web/js/views/tracking.js` — 新建
 
-- **职责**: 历史恢复、会话选择器、即时用户消息保存
-- **新增私有函数**:
-  - `_restoreHistory()` — 从后端获取当前会话消息并渲染
-  - `_loadSessionList()` — 获取会话列表并填充 `<select>`
-  - `_loadSession(sessionId)` — 切换到指定会话
-  - `_saveUserMessage(text)` — 立即保存用户消息到后端
-  - `_buildSessionSelector()` — 构建会话选择器 DOM
-- **修改的现有函数**:
-  - `_renderUI()` — 新增会话选择器栏（`.chat-header`）
-  - `show()` — 在 `_renderUI()` 后调用 `_restoreHistory()` + `_loadSessionList()`
-  - `_sendMessage()` — 在 `_addMessage("user", text)` 后立即调用 `_saveUserMessage(text)`
-  - `hide()` — 不清空 `_history`（保留以便下次 `show()` 恢复时做去重）
+- **职责**: UserTracking 视图，渲染用户跟踪表格
+- **命名空间**: `window.AItelier.UserTracking`
+- **方法**:
+  - `show(params)` — 从 API 获取数据并渲染到 `#view-tracking`
+  - `hide()` — 清空 `#view-tracking` 内容
+- **渲染内容**:
+  ```html
+  <table>
+    <thead><tr><th>Email</th><th>Latest Access</th><th>Access Rights</th></tr></thead>
+    <tbody>
+      <!-- 每行: email | 格式化 last_seen_at | "writer" 或 "reader" -->
+    </tbody>
+  </table>
+  ```
+  - 空状态: "No users tracked yet."
+  - 错误状态: 红色错误消息
+  - 加载状态: 表格区域显示 loading 文字
+- **遵循模式**: 与 `views/dashboard.js` 一致的自执行 IIFE + `window.AItelier.X = X` 暴露
+- **文件路径**: `./web/js/views/tracking.js`
+
+### 6. `web/js/api.js` — 修改
+
+- **职责**: 新增 `getLoggedUsers()` API 方法
+- **新增方法**:
+  ```js
+  getLoggedUsers: function(limit) {
+    var path = "/api/admin/logged-users";
+    if (limit) { path += "?limit=" + encodeURIComponent(limit); }
+    return _get(path);
+  }
+  ```
+- **文件路径**: `./web/js/api.js`
+
+### 7. `web/js/app.js` — 修改
+
+- **职责**: 注册 tracking 路由 + 动态 nav 渲染 + view 名称映射
+- **变更点**:
+  1. **路由注册**: 在 `routes` 数组中添加 `{ pattern: "#/tracking", view: tracking }`，变量 `tracking` 从 `window.AItelier.UserTracking` 获取（可选，trace 同款模式）
+  2. **动态 nav**: 新增 `_renderNav()` 函数，在 `_applyReadOnlyMode()` 成功后调用：
+     - 获取 `#nav-links` ul 元素
+     - 清空并重建：Dashboard、Chat
+     - 若 `state.canWrite === true`：追加 Tracking 链接
+  3. **`_viewName()`**: 添加 tracking view 映射 → `"tracking"`
+  4. **`_trackView()`**: 添加 `#/tracking` hash 识别 → `state.currentView = "tracking"`
+  5. **`_refreshActiveViewPermissions()`**: 添加 tracking view refresh 路径
+- **HTML 配合**: `index.html` 中第二个 `<ul>` 需添加 `id="nav-links"`，便于 JS 定位和动态填充
+- **文件路径**: `./web/js/app.js`
+
+### 8. `web/index.html` — 修改
+
+- **职责**: 新增 view 容器 + 脚本引用 + nav id
+- **变更点**:
+  1. 在 `<main id="view-container">` 中添加 `<section id="view-tracking"></section>`
+  2. 在 views 脚本区添加 `<script src="/web/js/views/tracking.js"></script>`
+  3. 给第二个 `<ul>`（links 区）添加 `id="nav-links"`，方便 JS 动态填充
+  4. 移除该 `<ul>` 内部的静态 `<li>` 项（改由 JS 生成）
+- **文件路径**: `./web/index.html`
+
+---
+
+## 数据流
+
+```
+[用户加载页面]
+     │
+     ▼
+GET /api/me ──────────────────────────────────────────────┐
+     │  (email from CF JWT headers)                       │
+     │  → db.upsert_user(email)                           │
+     │  → return {email, can_write, gate_enabled}         │
+     ▼                                                    │
+app.js: state.canWrite = me.can_write                      │
+app.js: _renderNav()                                       │
+     │                                                    │
+     ├─ canWrite=true  → nav 包含 "Tracking" 链接          │
+     └─ canWrite=false → nav 不含 "Tracking" 链接          │
+                                                          │
+[Writer 点击 Tracking 链接]                                │
+     │                                                    │
+     ▼                                                    │
+router.js: #/tracking → UserTracking.show()                │
+     │                                                    │
+     ▼                                                    │
+tracking.js: API.getLoggedUsers()                          │
+     │                                                    │
+     ▼                                                    │
+GET /api/admin/logged-users ───────────────────────────────┘
+     │  (require_writer dependency → 403 if reader)
+     │  → db.list_logged_users()
+     │  → compute access_rights per row
+     ▼
+[{email, display_name, last_seen_at, access_rights}, ...]
+     │
+     ▼
+tracking.js: render <table> into #view-tracking
+```
 
 ---
 
 ## 技术栈
 
-| 层 | 选型 | 说明 |
+| 层 | 技术 | 说明 |
 |----|------|------|
-| **后端 API** | FastAPI native | 在已有 `api/agent_routers.py` 中新增路由，使用已有 `DBManager` |
-| **数据库** | SQLite (WAL) | 已有 `chat_history` + `sessions` 表，无需 schema 变更 |
-| **会话列表查询** | Raw SQL via DBManager | 单条 JOIN + GROUP BY 聚合查询 |
-| **前端** | Vanilla JS | 已有 `web/js/views/chat.js`、`web/js/api.js` |
-| **会话选择器 UI** | `<select>` 原生元素 | Pico CSS 提供响应式样式 |
-
-无新依赖。
-
----
-
-## 接口规范
-
-### 后端 → 前端 API 契约
-
-#### `GET /api/agent/chat/history`
-
-| 字段 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| Query `session_id` | string | 是 | 会话 ID（UUID 前缀） |
-
-**响应**:
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `session_id` | string | 回显请求的 session_id |
-| `messages` | array | 消息列表，按时间升序 |
-| `messages[].role` | string | `"user"` / `"assistant"` / `"system"` |
-| `messages[].content` | string | 消息文本 |
-| `messages[].created_at` | string | ISO 8601 时间戳 |
-
-#### `GET /api/agent/sessions`
-
-| 字段 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| Query `project_id` | string | 否 | 按项目过滤；不传返回所有项目 |
-| Query `limit` | int | 否 | 默认 20 |
-
-**响应**:
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `sessions` | array | 会话列表，按 `updated_at` 降序 |
-| `sessions[].session_id` | string | 会话 ID |
-| `sessions[].project_id` | string | 关联项目 ID |
-| `sessions[].message_count` | int | 消息总数 |
-| `sessions[].last_message` | string | 最后一条消息内容（截断到 100 字符） |
-| `sessions[].updated_at` | string | 最后活动时间 ISO 8601 |
-
-#### `POST /api/agent/chat/message`
-
-**请求体**:
-| 字段 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `session_id` | string | 是 | 会话 ID |
-| `project_id` | string | 是 | 项目 ID（可为空字符串 `""`） |
-| `role` | string | 是 | `"user"` / `"assistant"` / `"system"` |
-| `content` | string | 是 | 消息内容 |
-
-**响应**: `{"status": "saved"}`
-
-### 前端内部接口
-
-#### `_restoreHistory()`
-- **输入**: 无（读取 `_sessionId`）
-- **行为**:
-  1. 若 `_sessionId` 为 null，直接返回（无会话可恢复）
-  2. 调用 `API.getChatHistory(_sessionId)`
-  3. 对返回的每条消息调用 `_addMessage(role, content)` 渲染气泡
-  4. 将消息追加到 `_history` 数组（去重：以 `(role, content[:100])` 为键）
-  5. 滚动到底部
-
-#### `_loadSession(sessionId)`
-- **输入**: `sessionId: string` — 要切换到的会话 ID
-- **行为**:
-  1. 中止任何进行中的 SSE 流
-  2. 清空 `.chat-messages` DOM 和 `_history` 数组
-  3. 设置 `_sessionId = sessionId`
-  4. 调用 `_restoreHistory()`
-  5. 更新 `<select>` 的选中项
-
-#### `_saveUserMessage(text)`
-- **输入**: `text: string` — 用户消息文本
-- **行为**:
-  1. 若 `_sessionId` 为 null，跳过
-  2. 调用 `API.saveChatMessage({session_id: _sessionId, project_id: ..., role: "user", content: text})`
-  3. 异步执行，不阻塞 SSE 流；失败时静默忽略（best-effort）
+| 后端框架 | FastAPI (Python) | 已有，不变 |
+| 数据库 | SQLite via `sqlite3` | 已有 `users` 表，无需 migration |
+| 前端框架 | Vanilla JS (IIFE 模块) | 已有模式，无需引入新框架 |
+| CSS | Pico CSS (classless) | 已有 CDN，表格自动获得样式 |
+| 认证 | Cloudflare Access JWT | 已有 `cf_access.py` + `authz.py` |
+| 路由 | Hash-based SPA Router | 已有 `web/js/router.js` |
 
 ---
-
-## 关键设计决策
-
-| 决策 | 理由 |
-|------|------|
-| **会话列表只返回有消息的会话** (`HAVING message_count > 0`) | 避免在 UI 中显示空会话（被创建但从未使用）。用户只关心有实际对话历史的会话 |
-| **即时用户消息保存使用独立端点** | 避免修改现有 SSE 流式端点的复杂逻辑。`POST /api/agent/chat` 保持原有行为（流完成后保存），额外的 `POST /api/agent/chat/message` 提供"安全带"：在用户消息渲染后立即异步保存，确保即使页面在流完成前关闭，用户消息也已持久化 |
-| **`_history` 在 `hide()` 时不清空** | 当用户返回聊天页面时，`_history` 仍保留上次会话的内存副本。`_restoreHistory()` 用它做去重 — 若 DB 中的某条消息已存在于内存 `_history` 中（基于 `role + content[:100]` 去重），则不重复渲染。这与后端 `POST /api/agent/chat` 中的去重逻辑一致 |
-| **会话选择器用原生 `<select>`** | Pico CSS 原生支持 `<select>` 元素的响应式样式，无需自定义组件。满足 MVP 需求 |
-| **`list_chat_sessions()` 新增为 DBManager 方法** | 遵循已有模式：所有 DB 查询集中在 `DBManager` 中，API 路由仅做薄封装 |
-| **会话 ID 仅在内存中** (`_sessionId`) | 跨硬刷新（F5）时，用户获得新会话。可通过会话选择器切换到之前的会话。若后续需要跨刷新的会话持久化，可在 `sessionStorage` 中保存 `_sessionId`（本阶段不做） |
 
 ## 扩展性考虑
 
-1. **会话删除**: `GET /api/agent/sessions` 返回的列表可按需扩展删除按钮。后端只需添加 `DELETE /api/agent/sessions/{session_id}` 端点
-2. **跨硬刷新会话恢复**: 在 `sessionStorage` 中存储 `_sessionId`，`_initSession()` 优先读取 `sessionStorage`，若存在则直接使用而不是创建新会话
-3. **会话重命名**: 在 `sessions` 表中增加 `name` 列，前端增加编辑功能
-4. **分页**: 当前 `limit=20` 已足够。若会话数量增长，可增加 `offset` 参数实现分页
+1. **分页**: 当前 `list_logged_users(limit=50)` 预留 limit 参数；未来可扩展为 offset/limit 分页。
+2. **历史日志**: 当前只记录 `last_seen_at`；若需完整访问历史，可新增 `user_access_log` 表，在 `/api/me` 中追加一条日志记录。
+3. **`access_rights` 持久化**: 当前动态计算；若未来 writer 集合变化频繁且需历史快照，可新增 `access_rights TEXT` 列，在 upsert 时写入。
+4. **WebSocket 实时更新**: 当前为手动刷新；若需实时，可通过 SSE 推送新用户上线事件（tracking 页面订阅）。
+5. **多租户**: `web_api/auth.py` 已有 per-user scheduler 模式；admin router 在 `web_api/main.py` 中注册后自动适配。
 
-## 文件变更清单
+---
 
-| 文件 | 变更类型 | 说明 |
-|------|----------|------|
-| `api/agent_routers.py` | 修改 | 新增 3 个端点 |
-| `core/db_manager.py` | 修改 | 新增 `list_chat_sessions()` 方法 |
-| `web/js/api.js` | 修改 | 新增 3 个 API 方法 |
-| `web/js/views/chat.js` | 修改 | 新增 ~4 个函数，修改 ~3 个现有函数 |
+## 设计决策记录
+
+| 决策 | 理由 |
+|------|------|
+| 使用现有 `users` 表而非新建表 | `users` 表已有 email 和 last_seen_at，无需重复存储 |
+| `access_rights` 查询时计算 | writer 集合来自环境变量，可能动态变化 |
+| 在 `/api/me` 中 upsert `last_seen_at` | `/api/me` 每次页面加载都被调用，无需新增中间件 |
+| 动态 nav（JS 生成）而非 CSS 隐藏 | 满足"reader 看不到按钮"（DOM 中不存在）的硬性要求 |
+| 新建 `api/admin_routers.py` | 隔离 admin 端点，清晰标识访问控制边界 |
+| 不在 DB 中添加 `access_rights` 列 | 避免 env var 与 DB 数据不一致的同步问题 |

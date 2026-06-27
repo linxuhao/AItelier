@@ -85,8 +85,12 @@ def _namespace_agents(data: dict, config_name: str) -> None:
     """
     prefix = config_name + _ROLE_SEP
     for step in data.get("steps", []):
-        if not isinstance(step, dict) or step.get("step_type") != "agent":
+        if not isinstance(step, dict):
             continue
+        # Any step carrying an agent_config is an agent step (skillflow's
+        # step_type defaults to "agent" when omitted), so key off agent_config
+        # rather than step_type — else a step that omits step_type slips through
+        # un-namespaced and re-introduces the collision.
         role = step.get("agent_config")
         if role and not str(role).startswith(prefix):
             step["agent_config"] = prefix + str(role)
@@ -100,7 +104,9 @@ def _inject_seed_context(data: dict, config_name: str) -> None:
     for step in data.get("steps", []):
         if not isinstance(step, dict) or step.get("id") != begin:
             continue
-        if step.get("step_type") != "agent":
+        # step_type defaults to "agent" in skillflow when omitted; only a step
+        # explicitly typed non-agent can't read context.
+        if step.get("step_type", "agent") != "agent":
             return
         ctx = step.setdefault("context", [])
         for c in ctx:

@@ -107,6 +107,45 @@ def test_generated_roles_namespaced_and_dont_clobber_globals(sf, registry, gdir,
     assert ns in roles and "researcher" not in roles
 
 
+def test_namespacing_and_seed_handle_omitted_step_type(sf, registry, gdir,
+                                                       tmp_path, monkeypatch):
+    """skillflow defaults step_type to 'agent' when omitted; an agent step that
+    leaves step_type out must still be namespaced AND seeded."""
+    sf.register_agent_config_from_dict(
+        "researcher", {"model": "deepseek/real", "system_prompt": "DPE"})
+    yml = textwrap.dedent("""
+        name: placeholder
+        begin: process
+        end_conditions:
+          combinator: or
+          conditions:
+            - {type: node_reached, node: done, result: completed}
+        steps:
+          - id: process
+            agent_config: researcher
+            transitions:
+              - to: done
+          - id: done
+            agent_config: summarizer
+    """)  # NOTE: no step_type on either step
+    src = tmp_path / "p.yaml"
+    src.write_text(yml, encoding="utf-8")
+    _patch_output(monkeypatch, src)
+    res = pr.register_generated_pipeline(sf, registry, "n1", "No Type")
+    cn = res["config_name"]
+    assert "error" not in res
+    # collision-prone role got namespaced despite missing step_type
+    assert sf.agent_registry.get("researcher").model == "deepseek/real"  # global intact
+    assert f"{cn}__researcher" in sf.agent_registry
+    data = yaml.safe_load((gdir / f"{cn}.yaml").read_text())
+    roles = [s.get("agent_config") for s in data["steps"]]
+    assert f"{cn}__researcher" in roles and "researcher" not in roles
+    # begin step (no step_type) still got the seed source
+    bstep = next(s for s in data["steps"] if s["id"] == data["begin"])
+    srcs = [(c.get("source", c) or {}) for c in bstep.get("context", [])]
+    assert any(x.get("output") == "seed_input.md" for x in srcs)
+
+
 def test_gen_config_seeds_first_step_and_is_butler_driven(sf, registry, gdir,
                                                           tmp_path, monkeypatch):
     src = tmp_path / "p.yaml"

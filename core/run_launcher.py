@@ -17,7 +17,18 @@ so nothing about the demo-critical build changes.
 """
 
 import json
+import re
 import uuid
+
+
+def slugify(text: str, *, sep: str = "-", maxlen: int = 40,
+            fallback: str = "project") -> str:
+    """Lowercase, collapse every run of non-alphanumerics to *sep*, strip, cap.
+
+    Single source of truth for the project's name→slug logic (callers pick the
+    separator/cap: ``-`` for run ids/pids, ``_`` for config/graph names)."""
+    s = re.sub(r"[^a-z0-9]+", sep, (text or "").lower()).strip(sep)[:maxlen]
+    return s or fallback
 
 
 def generate_run_id(config_name: str) -> str:

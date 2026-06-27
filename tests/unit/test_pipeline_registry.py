@@ -71,10 +71,58 @@ def test_register_text_adds_host_agents_graph_and_manifest(sf, registry):
     assert "summarizer" in sf.agent_registry
     # graph is live under the forced namespaced name
     assert any(g["name"] == "gen_demo" for g in sf.list_graphs())
-    # manifest present + runnable; scheduler-owned by default
+    # manifest present + carries generated-pipeline hints: butler-driven (so
+    # checkpoints relay in-chat) with a seed file (so seed_text reaches step 1).
     m = registry.get("gen_demo")
-    assert m is not None and m.scheduler_owned is True
+    assert m is not None
+    assert m.scheduler_owned is False
+    assert m.seed_file == "seed_input.md"
     assert "process" in m.steps
+
+
+def test_generated_roles_namespaced_and_dont_clobber_globals(sf, registry, gdir,
+                                                             tmp_path, monkeypatch):
+    """A generated role that collides with a real (global) agent name must NOT bind
+    to or overwrite that agent — it's namespaced per-config."""
+    # a pre-existing GLOBAL agent (mimics DPE's 'researcher')
+    sf.register_agent_config_from_dict(
+        "researcher", {"model": "deepseek/real", "system_prompt": "DPE researcher"})
+    yml = GEN_YAML.replace("agent_config: processor", "agent_config: researcher")
+    src = tmp_path / "p.yaml"
+    src.write_text(yml, encoding="utf-8")
+    _patch_output(monkeypatch, src)
+
+    res = pr.register_generated_pipeline(sf, registry, "r1", "My Cool Pipeline")
+    cn = res["config_name"]
+    ns = f"{cn}__researcher"
+    # global 'researcher' untouched (still the DPE agent)
+    assert sf.agent_registry.get("researcher").model == "deepseek/real"
+    # generated step registered under a namespaced host agent
+    assert ns in sf.agent_registry
+    assert sf.agent_registry.get(ns).model == "host"
+    # persisted YAML uses the namespaced role, never the bare global name
+    persisted = yaml.safe_load((gdir / f"{cn}.yaml").read_text())
+    roles = [s.get("agent_config") for s in persisted["steps"]
+             if s.get("step_type") == "agent"]
+    assert ns in roles and "researcher" not in roles
+
+
+def test_gen_config_seeds_first_step_and_is_butler_driven(sf, registry, gdir,
+                                                          tmp_path, monkeypatch):
+    src = tmp_path / "p.yaml"
+    src.write_text(GEN_YAML, encoding="utf-8")
+    _patch_output(monkeypatch, src)
+    res = pr.register_generated_pipeline(sf, registry, "s1", "Seedy")
+    cn = res["config_name"]
+    m = registry.get(cn)
+    assert m.scheduler_owned is False
+    assert m.seed_file == "seed_input.md"
+    # begin step now reads the seed (so start_config_run's seed_text reaches it)
+    data = yaml.safe_load((gdir / f"{cn}.yaml").read_text())
+    bstep = next(s for s in data["steps"] if s["id"] == data["begin"])
+    srcs = [(c.get("source", c) or {}) for c in bstep.get("context", [])]
+    assert any(x.get("config") == cn and x.get("output") == "seed_input.md"
+               for x in srcs)
 
 
 def test_update_overwrites_in_place(sf, registry):

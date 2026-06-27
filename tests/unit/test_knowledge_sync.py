@@ -121,6 +121,19 @@ def test_multiple_projects_accumulate_newest_first(tmp_path):
     assert text.index(newest) < text.index(f"proj{_MAX_SECTIONS}")
 
 
+def test_locates_artifacts_via_out_dir_only(tmp_path):
+    """Production path: skillflow injects out_dir ($STEP_DIR) but NOT workspace_root
+    for tool steps, so the tool must work with workspace_root='' and only out_dir."""
+    repo = _make_repo(tmp_path)
+    ws = _make_workspace(tmp_path, report={"all_goals_met": True,
+                                           "verified_subtasks": ["a"]})
+    res = knowledge_sync(
+        project_root=str(repo), workspace_root="", config_name=GRAPH,
+        project_id="proj1", out_dir=str(ws / GRAPH / "5_knowledge"))
+    assert res["written"] is True
+    assert "goals_met=true" in (repo / ".aitelier" / "knowledge.md").read_text()
+
+
 def test_no_artifacts_writes_nothing(tmp_path):
     repo = _make_repo(tmp_path)
     ws = _make_workspace(tmp_path, design=False, report=None)

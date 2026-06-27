@@ -81,15 +81,21 @@ def knowledge_sync(*, project_root: str = "", workspace_root: str = "",
 
 def _locate_graph_dir(workspace_root: str, config_name: str,
                       out_dir: str) -> Path | None:
-    """Directory holding the per-step output dirs (sibling '2', '5', ...)."""
-    if workspace_root and config_name:
-        d = Path(workspace_root) / config_name
-        if d.exists():
-            return d
+    """Directory holding the per-step output dirs (sibling '2', '5', ...).
+
+    out_dir ($STEP_DIR) is the reliable source: skillflow injects it for tool
+    steps but does NOT inject workspace_root (it stays ""), so its parent is the
+    graph dir. workspace_root/config_name is only a fallback for callers that
+    pass it explicitly.
+    """
     if out_dir:  # $STEP_DIR → parent is the graph dir
         p = Path(out_dir).parent
         if p.exists():
             return p
+    if workspace_root and config_name:
+        d = Path(workspace_root) / config_name
+        if d.exists():
+            return d
     return None
 
 

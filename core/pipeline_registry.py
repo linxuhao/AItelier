@@ -23,13 +23,21 @@ Design (see the chat decision log):
 
 import logging
 import os
-import re
 from pathlib import Path
 
 import yaml
 from skillflow import PipelineGraph
 
 GEN_PREFIX = "gen_"
+# Generated graphs reference invented agent role names; we namespace them per-config
+# (`<config>__<role>`) so they can never collide with a global agent (e.g. DPE's
+# `researcher`). Seed input for a generated pipeline's first step is written here.
+_ROLE_SEP = "__"
+SEED_FILE = "seed_input.md"
+# Host hints applied to every generated pipeline (keeps config_registry generic —
+# it knows nothing about `gen_`): butler-driven so checkpoints relay in-chat, and a
+# seed file so `start_config_run(seed_text=...)` reaches the first step.
+GEN_HINTS = {"scheduler_owned": False, "seed_file": SEED_FILE}
 _log = logging.getLogger(__name__)
 
 
@@ -44,9 +52,8 @@ def generated_configs_dir() -> Path:
 
 
 def _slug(text: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")[:48]
-    s = re.sub(r"_+", "_", s)
-    return s or "pipeline"
+    from core.run_launcher import slugify
+    return slugify(text, sep="_", maxlen=48, fallback="pipeline")
 
 
 def config_name_for(name: str) -> str:
@@ -57,13 +64,52 @@ def config_name_for(name: str) -> str:
     return GEN_PREFIX + _slug(name)
 
 
-def _role_prompt(role: str, step_id: str) -> str:
+def _role_prompt(role: str) -> str:
     return (
         f"You are the '{role}' step in an automated SkillFlow pipeline.\n"
         f"Your inputs are the outputs of the prior steps, provided as context.\n"
         f"Do the work the role name implies and write only the output artifact "
         f"required for this step. Be concise and precise."
     )
+
+
+# ── Graph rewriting (namespacing + seeding) ─────────────────────────────────
+
+def _namespace_agents(data: dict, config_name: str) -> None:
+    """Rewrite every agent step's ``agent_config`` to ``<config_name>__<role>``.
+
+    Generated graphs invent bare role names; left as-is they collide with global
+    agents (e.g. DPE's ``researcher``) — the step would bind to that agent, or
+    re-registering would clobber it. Namespacing makes both impossible. Idempotent:
+    a role already prefixed with this config's namespace is left untouched.
+    """
+    prefix = config_name + _ROLE_SEP
+    for step in data.get("steps", []):
+        if not isinstance(step, dict) or step.get("step_type") != "agent":
+            continue
+        role = step.get("agent_config")
+        if role and not str(role).startswith(prefix):
+            step["agent_config"] = prefix + str(role)
+
+
+def _inject_seed_context(data: dict, config_name: str) -> None:
+    """Ensure the begin step reads the seed file (so start_config_run's seed_text
+    actually reaches the generated pipeline). No-op if begin isn't an agent step or
+    the seed source is already present."""
+    begin = data.get("begin")
+    for step in data.get("steps", []):
+        if not isinstance(step, dict) or step.get("id") != begin:
+            continue
+        if step.get("step_type") != "agent":
+            return
+        ctx = step.setdefault("context", [])
+        for c in ctx:
+            inner = c.get("source", c) if isinstance(c, dict) else {}
+            if isinstance(inner, dict) and inner.get("config") == config_name \
+                    and inner.get("output") == SEED_FILE:
+                return  # already wired
+        ctx.insert(0, {"source": {"config": config_name, "output": SEED_FILE}})
+        return
 
 
 # ── Registration ───────────────────────────────────────────────────────────
@@ -73,7 +119,9 @@ def ensure_host_agents(sf, graph) -> list[str]:
 
     Generated graphs invent descriptive role names with no agent config; without
     this, ``register_graph`` rejects the graph for unresolved agent_config refs and
-    ``AgentFactory`` later can't build the agent. Returns newly added role names.
+    ``AgentFactory`` later can't build the agent. Roles are already namespaced
+    (see :func:`_namespace_agents`), so this never touches a global agent. Returns
+    newly added role names.
     """
     added: list[str] = []
     for node in graph.steps:
@@ -82,15 +130,17 @@ def ensure_host_agents(sf, graph) -> list[str]:
             sf.register_agent_config_from_dict(role, {
                 "model": "host",
                 "tools": ["read_file", "write"],
-                "system_prompt": _role_prompt(role, node.id),
+                "system_prompt": _role_prompt(role),
             })
             added.append(role)
     return added
 
 
 def _register_text(sf, registry, config_name: str, yaml_text: str):
-    """Parse *yaml_text*, force its name to *config_name*, register host agents +
-    the graph live, and add a registry manifest. Raises on validation failure."""
+    """Parse a (already-namespaced, already-seeded) generated pipeline YAML, force
+    its name to *config_name*, register host agents + the graph live, and add a
+    registry manifest with the generated-pipeline host hints. Raises on validation
+    failure."""
     data = yaml.safe_load(yaml_text)
     if not isinstance(data, dict):
         raise ValueError("generated pipeline YAML is not a mapping")
@@ -98,14 +148,16 @@ def _register_text(sf, registry, config_name: str, yaml_text: str):
     graph = PipelineGraph._from_dict(data)
     ensure_host_agents(sf, graph)
     sf.register_graph(graph)            # validates graph + agent_config refs
-    registry.register_one(sf, config_name)
+    registry.register_one(sf, config_name, hint_overrides=GEN_HINTS)
     return graph
 
 
 def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
     """Persist + register the YAML produced by a completed skill_converter run.
 
-    Returns ``{config_name, path, action}`` on success, or ``{error}``.
+    Rewrites the graph to be runnable (namespaced name + agent roles, seed wired)
+    in ONE pass, then registers and persists that exact text so a boot re-scan is a
+    no-op. Returns ``{config_name, path, action}`` on success, or ``{error}``.
     """
     from skillflow.plugins.skill_converter import get_output_file
     src = get_output_file(sf, run_id)
@@ -115,15 +167,16 @@ def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
     config_name = config_name_for(name)
     existed = registry.get(config_name) is not None
 
-    # Normalize the persisted name so the file and the registered graph agree
-    # (and a boot-time re-scan registers under the same name).
-    raw = Path(src).read_text(encoding="utf-8")
     try:
-        data = yaml.safe_load(raw) or {}
+        data = yaml.safe_load(Path(src).read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            return {"error": "generated pipeline YAML is not a mapping"}
         data["name"] = config_name
+        _namespace_agents(data, config_name)
+        _inject_seed_context(data, config_name)
         yaml_text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
-    except yaml.YAMLError:
-        yaml_text = raw
+    except yaml.YAMLError as e:
+        return {"error": f"generated pipeline YAML is invalid: {e}"}
 
     try:
         _register_text(sf, registry, config_name, yaml_text)

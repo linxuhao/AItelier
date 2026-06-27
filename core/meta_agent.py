@@ -946,10 +946,8 @@ class MetaAgent:
     # ── Project-conversation tools (drive the meta_conversation pipeline) ──
 
     def _slugify(self, text: str) -> str:
-        import re
-        s = re.sub(r"[^a-z0-9-]", "-", (text or "").lower()).strip("-")[:40]
-        s = re.sub(r"-+", "-", s)
-        return s or "project"
+        from core.run_launcher import slugify
+        return slugify(text, sep="-", maxlen=40, fallback="project")
 
     def _append_conversation(self, project_id: str, line: str) -> None:
         """Append a line to the workspace transcript the gather step reads
@@ -1695,11 +1693,15 @@ class MetaAgent:
                             "outputs": outputs,
                             "message": "Pipeline completed successfully.",
                         }
-                        # A finished skill_converter run produced a pipeline YAML —
-                        # persist + live-register it (gen_<slug>) so the user can
-                        # run it immediately via start_config_run, and re-running
-                        # generate_pipeline with the same name updates it in place.
-                        if run.get("graph_name") == "skill_converter":
+                        # Configs flagged registers_generated_pipeline (skill_converter)
+                        # produce a pipeline YAML on completion — persist + live-register
+                        # it (gen_<slug>) so the user can run it immediately via
+                        # start_config_run, and re-running with the same name updates it.
+                        # Manifest-driven so this generic waiter doesn't special-case a
+                        # graph name.
+                        from api.dependencies import get_config_registry
+                        _mf = get_config_registry().get(run.get("graph_name", ""))
+                        if _mf and _mf.registers_generated_pipeline:
                             try:
                                 from api.dependencies import register_pipeline_from_run
                                 proj = self.db.get_project(run.get("project_id", "")) or {}

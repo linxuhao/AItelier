@@ -41,6 +41,7 @@ _DEFAULTS: dict = {
     "has_task_loop": False,
     "seed_file": None,
     "output_step": None,
+    "registers_generated_pipeline": False,
     "preamble_steps": [],
     "checkpoint_kind": "file-review",
     "checkpoint_kinds": {},
@@ -55,6 +56,7 @@ _EXTERNAL_HINTS: dict[str, dict] = {
         "scheduler_owned": False,
         "seed_file": "skill_description.md",
         "output_step": "done",
+        "registers_generated_pipeline": True,
     },
 }
 
@@ -78,6 +80,10 @@ class ConfigManifest:
     scheduler_owned: bool = True
     seed_file: str | None = None
     output_step: str | None = None
+    # When True, a completed run of this config emits a pipeline YAML the host
+    # should register as a runnable config (skill_converter). Lets the meta agent's
+    # completion handler stay generic instead of special-casing the graph name.
+    registers_generated_pipeline: bool = False
     # Step ids whose outputs are project-global & stable (e.g. SOTA/architecture).
     # The host hoists these into the shared system preamble for prompt caching.
     preamble_steps: list[str] = field(default_factory=list)
@@ -169,57 +175,20 @@ class ConfigRegistry:
     def __init__(self) -> None:
         self._manifests: dict[str, ConfigManifest] = {}
 
-    @classmethod
-    def build(cls, sf) -> "ConfigRegistry":
-        """Construct manifests for every graph ``sf`` knows about.
-
-        Derives step ids / labels / checkpoint locations from the graph; layers
-        declared hints (host ``x-aitelier`` block, then framework defaults) on top.
-        """
-        reg = cls()
-        host_hints = _read_host_hints()
-        for g in sf.list_graphs():
-            name = g["name"]
-            try:
-                sf._get_resolver(name)  # ensure the graph resolves; skip if broken
-            except Exception:
-                continue
-            hints = {**_DEFAULTS, **_EXTERNAL_HINTS.get(name, {}), **host_hints.get(name, {})}
-            # Derived views (steps/labels/checkpoints/description) are NOT computed
-            # here — the manifest reads them from the live graph on access, so they
-            # stay correct after a re-register without rebuilding the registry.
-            reg._manifests[name] = ConfigManifest(
-                config_name=name,
-                graph_provider=(lambda n=name: sf._get_resolver(n).graph),
-                label=hints.get("label") or name,
-                has_task_loop=bool(hints.get("has_task_loop")),
-                scheduler_owned=bool(hints.get("scheduler_owned")),
-                seed_file=hints.get("seed_file"),
-                output_step=hints.get("output_step"),
-                preamble_steps=list(hints.get("preamble_steps") or []),
-                label_overrides=hints.get("labels") or {},
-                checkpoint_kind=hints.get("checkpoint_kind") or "file-review",
-                checkpoint_kinds=hints.get("checkpoint_kinds") or {},
-            )
-        return reg
-
-    def register_one(self, sf, name: str) -> "ConfigManifest | None":
-        """Add (or replace) a single manifest for an already-registered graph.
-
-        Used after a graph is registered into the live skillflow instance at
-        runtime (e.g. a converter-generated ``gen_*`` pipeline) so it becomes
-        immediately runnable without rebuilding the whole registry or restarting.
-        Mirrors :meth:`build`'s per-graph construction; the manifest reads its
-        derived views from the live graph lazily, so a later re-register is
-        reflected automatically. Idempotent. Returns None if the graph is unknown
-        or doesn't resolve.
-        """
+    @staticmethod
+    def _make_manifest(sf, name: str, host_hints: dict,
+                       hint_overrides: dict | None = None) -> "ConfigManifest | None":
+        """Build one manifest for an already-registered graph, or None if it
+        doesn't resolve. Derived views (steps/labels/checkpoints/description) are
+        NOT computed here — the manifest reads them from the live graph on access,
+        so a re-registered graph is reflected without rebuilding the registry."""
         try:
-            sf._get_resolver(name)  # ensure the graph resolves
+            sf._get_resolver(name)  # ensure the graph resolves; skip if broken
         except Exception:
             return None
-        hints = {**_DEFAULTS, **_EXTERNAL_HINTS.get(name, {}), **_read_host_hints().get(name, {})}
-        m = ConfigManifest(
+        hints = {**_DEFAULTS, **_EXTERNAL_HINTS.get(name, {}),
+                 **host_hints.get(name, {}), **(hint_overrides or {})}
+        return ConfigManifest(
             config_name=name,
             graph_provider=(lambda n=name: sf._get_resolver(n).graph),
             label=hints.get("label") or name,
@@ -227,12 +196,38 @@ class ConfigRegistry:
             scheduler_owned=bool(hints.get("scheduler_owned")),
             seed_file=hints.get("seed_file"),
             output_step=hints.get("output_step"),
+            registers_generated_pipeline=bool(hints.get("registers_generated_pipeline")),
             preamble_steps=list(hints.get("preamble_steps") or []),
             label_overrides=hints.get("labels") or {},
             checkpoint_kind=hints.get("checkpoint_kind") or "file-review",
             checkpoint_kinds=hints.get("checkpoint_kinds") or {},
         )
-        self._manifests[name] = m
+
+    @classmethod
+    def build(cls, sf) -> "ConfigRegistry":
+        """Construct manifests for every graph ``sf`` knows about. Layers declared
+        hints (host ``x-aitelier`` block, then framework defaults) on top."""
+        reg = cls()
+        host_hints = _read_host_hints()  # read once, not per-graph
+        for g in sf.list_graphs():
+            m = cls._make_manifest(sf, g["name"], host_hints)
+            if m is not None:
+                reg._manifests[g["name"]] = m
+        return reg
+
+    def register_one(self, sf, name: str, *, hint_overrides: dict | None = None,
+                     host_hints: dict | None = None) -> "ConfigManifest | None":
+        """Add (or replace) a single manifest for an already-registered graph, so a
+        graph registered at runtime (e.g. a generated ``gen_*`` pipeline) becomes
+        runnable without rebuilding the registry or restarting. ``hint_overrides``
+        lets the caller apply policy the registry shouldn't hard-code (the
+        generated-pipeline hints live in core.pipeline_registry). Idempotent.
+        Returns None if the graph doesn't resolve."""
+        m = self._make_manifest(
+            sf, name, host_hints if host_hints is not None else _read_host_hints(),
+            hint_overrides=hint_overrides)
+        if m is not None:
+            self._manifests[name] = m
         return m
 
     def list(self) -> list[ConfigManifest]:

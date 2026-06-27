@@ -30,6 +30,7 @@ x-aitelier:
     t_impl_review: "Impl Review"
     "5": "Final Verifier"
     "5_test": "Final Tests"
+    "5_knowledge": "Knowledge Sync"
     "5_review": "Final Review"
 
 begin: "git_sync_pre"
@@ -71,6 +72,12 @@ steps:
     timeout_seconds: 300
     context:
       - source: { from: "repository" }
+      # Cross-run memory: distilled, review-verified knowledge left by prior DPE
+      # runs on THIS repo (git-ignored, absent on the first run). Carries design
+      # rationale + known pitfalls so we build on past wisdom without re-deriving
+      # it. Treat its "known issues" as things to avoid; verify any file/symbol it
+      # names still exists before relying on it (it reflects a past run's state).
+      - source: { from: "repository", path: ".aitelier/knowledge.md" }
       - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json" }
       - source: { tool: "dir_tree" }
     output:
@@ -408,6 +415,21 @@ steps:
   - id: "5_compile"
     step_type: "tool"
     tool_name: "unity_compile"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: "5_knowledge"
+
+  # ─── Cross-run knowledge transfer (deterministic, NEVER fails) ───
+  # Distills this run's review-verified knowledge (approved architecture +
+  # what the final verifier confirmed works + the issues it flagged) into a
+  # git-IGNORED `<repo>/.aitelier/knowledge.md`, so the NEXT DPE run on the same
+  # repo starts with the prior run's wisdom. Not committed (added to
+  # .git/info/exclude), safe to `rm` if stale. Runs on every final-verify pass
+  # (incl. goal-loop iterations); each rewrites this project's own section.
+  - id: "5_knowledge"
+    step_type: "tool"
+    tool_name: "knowledge_sync"
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:

@@ -25,6 +25,14 @@ You will receive the project goals in the `[Project Brief]` section.
 
 **Important: The project goals are defined in `[Project Brief]`. Use them as your primary guide. Workspace files (e.g., .gitignore) are project scaffolding — do not infer project direction from them alone.**
 
+## Prior-Run Knowledge (if present)
+If a `.aitelier/knowledge.md` file exists in the repository, a previous DPE run on
+this same repo left distilled, review-verified knowledge there — read it first (use
+the `read_repo_knowledge` tool). Build on its **architecture** and **what works**;
+treat its **known issues / pitfalls** as things to NOT repeat. It reflects a past
+run's state, so verify any file or symbol it names still exists before relying on
+it, and prefer the current code if they disagree.
+
 ## Task Objectives
 1. **Understand**: Read the project brief to understand what kind of project this is (web app, CLI tool, library, etc.).
 2. **Search**: Search for existing frameworks, libraries, and tools relevant to the project type. Check relevant package managers (pip, npm, apt, etc.).

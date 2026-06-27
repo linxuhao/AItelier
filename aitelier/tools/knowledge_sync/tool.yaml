@@ -1,0 +1,28 @@
+name: knowledge_sync
+description: >
+  Distill review-verified knowledge from this run (architecture decisions +
+  what works + known issues) into a git-IGNORED `.aitelier/knowledge.md` in the
+  project repo, so the NEXT DPE run on the same repo starts with the prior run's
+  wisdom. Never committed (added to .git/info/exclude), safe to delete. Always
+  succeeds as a step; writes nothing if no distillable artifacts exist yet.
+parameters:
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  workspace_root:
+    type: string
+    description: "Pipeline workspace root (auto-injected); holds the step dirs"
+    required: false
+  config_name:
+    type: string
+    description: "Graph name (auto-injected); used to locate sibling step dirs"
+    required: false
+  project_id:
+    type: string
+    description: "Project id (auto-injected); keys this run's knowledge section"
+    required: false
+  out_dir:
+    type: string
+    description: "Step dir (set to $STEP_DIR); fallback locator for step outputs"
+    required: false

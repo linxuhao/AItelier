@@ -47,6 +47,7 @@ Step 5 产出的最终交付文件（verify_report.json、README.md 等）。
 - **旧版输入 API**：运行时脚本若出现 `UnityEngine.Input`（`Input.GetKey*`/`Input.GetMouseButton*`/`Input.touch*`/`Input.GetAxis*`），而项目用新 Input System（跨平台模板默认），运行时会抛 `InvalidOperationException` —— 判 passed: false，要求改用 `UnityEngine.InputSystem`。
 - **编辑器脚本未守卫**：`Assets/Editor/` 下若有脚本未整体包在 `#if UNITY_EDITOR` 里，会污染发布构建/编译门槛 —— 应在 feedback 中指出。
 - **孤儿脚本（没接进 `BuildScene()`）—— 全局核查，这是你独有的视角**：你能看到整个项目，逐个核对**每个需要运行时存在的 gameplay `MonoBehaviour`**（`Assets/Scripts/` 下的玩家/敌人/障碍/边界/管理器等）是否在 `SceneBootstrapper.BuildScene()` 里被**实例化或挂载**（grep 该类型名是否在 `BuildScene()`/其调用的方法里出现）。**编译通过但没接进 `BuildScene()` 的脚本运行时形同不存在**（按 Play 没效果），编译门槛查不出——发现遗漏判 passed: false，在 feedback 里列出哪些组件没接线。这是静态读检：只查"有没有接"，不查"接得对不对"（字段绑错不在此列）。
+- **`BuildScene()` 非幂等（重烘焙会重复/抹掉自定义）—— 静态读检**：`BuildScene()` 必须是 **find-or-create**（按稳定名字 `GameObject.Find(...)` 找不到才 `new`、组件 `GetComponent<T>() ?? AddComponent<T>()`），否则用户在已换好美术的场景里再次烘焙时会**重复造一遍对象**、且若 `BuildScene()` 里**直接给序列化美术字段赋值**还会**抹掉用户拖入的真 sprite/模型**。冒烟测试（6c）跑的是空场景，查不出这个缺陷——只能靠你静态读。**冒烟点（smell）**：(a) `new GameObject(...)` 前没有配套 `Find`/存在性判断；(b) `AddComponent` 没有先 `GetComponent ?? `；(c) `BuildScene()` 内对 `[SerializeField]` 美术字段赋值（占位应只走 `Awake` 的"未赋值才回退"）。**判定**：对**既有仓库的改 bug/加功能**任务（重烘焙是真实场景），判 passed: false 并在 feedback 指出哪几处非幂等；对**全新项目**（尚无自定义场景）作为 suggestion 提出、不阻塞。
 
 ### 6c. Unity 运行时冒烟测试（硬性门槛，仅 Unity 项目）
 - 查看你上下文中的 `playtest_report.json`（编译通过后自动接着跑得出）。这是 6b 两条静态检查（旧版输入、孤儿脚本）的**动态确认**：冒烟测试在真实编辑器里挂上 `SceneBootstrapper` 跑了 `BuildScene()`。

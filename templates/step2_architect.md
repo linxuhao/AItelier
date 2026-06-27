@@ -75,8 +75,8 @@
 - **交付形态 = 纯脚本 + 资源说明**：只交付 `.cs` 脚本（放 `Assets/Scripts/`）与一份 `RESOURCES.md`。**不要设计 `.meta` / `ProjectSettings/` / 场景文件**——工程骨架由人类在编辑器中创建。
 - **"按 Play 即玩"——用占位资源，不要让用户先准备美术**（核心降门槛要求）：
   - 设计一个 `Placeholders` 工具类（纯 UnityEngine、运行时生成占位视觉，无导入资源）：`Placeholders.Sprite(color, shape)` 生成纯色方/圆 sprite（`Texture2D`+`Sprite.Create`）、`Placeholders.Primitive(type, color)` 生成上色图元。
-  - 设计一个 `SceneBootstrapper`（MonoBehaviour）：把搭建逻辑放进 `public void BuildScene()`——建相机、生成所有实体 GameObject + 组件 + 占位视觉；`Awake` 仅"未搭建则调用 `BuildScene()`"。用户新建一个空物体挂上它、按 Play 就能玩，零手动搭场景。
-  - **同时设计一个"烘焙到场景"的编辑器入口**（`Assets/Editor/` 下、`#if UNITY_EDITOR` 包裹的菜单命令），在**编辑期**调用同一个 `BuildScene()`，让生成的 GameObject **持久化进场景**供用户在 Inspector 手动替换美术后保存。理由：运行时 `Awake` 生成的对象不会写进场景资产、退出 Play 即消失；只有编辑期搭建才能持久化。运行时与编辑期共用 `BuildScene()`（单一事实来源）。
+  - 设计一个 `SceneBootstrapper`（MonoBehaviour）：把搭建逻辑放进**幂等的** `public void BuildScene()`——建相机、生成所有实体 GameObject + 组件 + 占位视觉，但用"按稳定名字 find-or-create"而非"无条件 new"，使其可重复运行只补缺失、不重复、不覆盖已存在对象；`Awake` 仅"未搭建则调用 `BuildScene()`"。用户新建一个空物体挂上它、按 Play 就能玩，零手动搭场景。
+  - **同时设计一个"烘焙到场景"的编辑器入口**（`Assets/Editor/` 下、`#if UNITY_EDITOR` 包裹的菜单命令），在**编辑期**调用同一个 `BuildScene()`，让生成的 GameObject **持久化进场景**供用户在 Inspector 手动替换美术后保存。理由：运行时 `Awake` 生成的对象不会写进场景资产、退出 Play 即消失；只有编辑期搭建才能持久化。运行时与编辑期共用 `BuildScene()`（单一事实来源）。因 `BuildScene()` 幂等，此菜单**可重复运行**：修 bug 新增组件后，用户在已换好美术的场景里再烘焙一次即补入新增对象/组件，既有自定义美术原样保留，无需手动重新换皮（这是修既有项目"零手工再定制"的关键）。
   - **`BuildScene()` 是唯一的场景集成点——每个新增的运行时组件都要在这里被实例化+接线**：设计时明确列出本次新增的每个 `MonoBehaviour`/组件挂在哪个 GameObject 上、需要哪些引用/字段，并要求实现者把它们接进 `BuildScene()`。任何"写了脚本但没接进 `BuildScene()`"的组件运行时形同不存在（编译通过却没效果）。bake 菜单与 bootstrap 共用 `BuildScene()`，接进去即两条路都覆盖。改既有 Unity 项目（加功能/修 bug）时，把新组件并入现有 `BuildScene()`，不要再写一份。
   - **按 category 选占位**：主角 2D→生成圆/方 sprite，3D→Capsule；障碍/平台→Cube/Quad 或矩形 sprite；地面→Plane；收集品/子弹→Sphere/小 sprite；背景→相机纯色或 Quad；UI 文字→TMP 默认字体。
   - **自供给**：每个有视觉的 gameplay 脚本暴露 `[SerializeField] Sprite/Mesh/Material`，并在 `Awake` 里**未赋值时回退到 `Placeholders` 生成占位**——这样 SceneBootstrapper 不需要反射去填私有字段，用户之后在 Inspector 拖入真资源即覆盖。

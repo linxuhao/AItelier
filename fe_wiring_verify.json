@@ -1,0 +1,119 @@
+{
+  "task_id": "fe_wiring_verify",
+  "passed": true,
+  "verification_items": [
+    {
+      "id": 1,
+      "description": "nav-links ul exists and empty (no static <li> children)",
+      "file": "web/index.html",
+      "line": 28,
+      "status": "PASS",
+      "detail": "<ul id=\"nav-links\"> contains only a comment, no static <li> items"
+    },
+    {
+      "id": 2,
+      "description": "view-tracking container exists",
+      "file": "web/index.html",
+      "line": 45,
+      "status": "PASS",
+      "detail": "<section id=\"view-tracking\"></section> present inside <main id=\"view-container\">"
+    },
+    {
+      "id": 3,
+      "description": "tracking.js script tag exists before app.js",
+      "file": "web/index.html",
+      "line": 141,
+      "status": "PASS",
+      "detail": "<script src=\"/web/js/views/tracking.js\"></script> at line 141, immediately after trace.js (line 140) and before app.js (line 144)"
+    },
+    {
+      "id": 4,
+      "description": "_renderNav includes Tracking link when state.canWrite is true",
+      "file": "web/js/app.js",
+      "line": 85,
+      "status": "PASS",
+      "detail": "Line 85-86: `if (state.canWrite) { links.push({ href: \"#/tracking\", label: \"Tracking\" }); }`"
+    },
+    {
+      "id": 5,
+      "description": "_renderNav does NOT include Tracking link when state.canWrite is false",
+      "file": "web/js/app.js",
+      "line": 85,
+      "status": "PASS",
+      "detail": "Tracking link is inside the `if (state.canWrite)` branch only; no other code path adds it"
+    },
+    {
+      "id": 6,
+      "description": "_renderNav called in both .then() and .catch() paths of _applyReadOnlyMode",
+      "file": "web/js/app.js",
+      "line": 119,
+      "status": "PASS",
+      "detail": "Line 119 (.then path): `_renderNav();` — Line 127 (.catch path): `_renderNav();`"
+    },
+    {
+      "id": 7,
+      "description": "Route registration for #/tracking is optional (guarded by userTracking)",
+      "file": "web/js/app.js",
+      "line": 943,
+      "status": "PASS",
+      "detail": "Lines 943-946: `if (userTracking) { routes.push({ pattern: \"#/tracking\", view: userTracking }); }`"
+    },
+    {
+      "id": 8,
+      "description": "_trackView recognizes #/tracking hash and sets state.currentView",
+      "file": "web/js/app.js",
+      "line": 965,
+      "status": "PASS",
+      "detail": "Lines 965-966: `else if (hash.indexOf(\"#/tracking\") === 0) { state.currentView = \"tracking\"; }`"
+    },
+    {
+      "id": 9,
+      "description": "_viewName maps AItelier.UserTracking to \"tracking\"",
+      "file": "web/js/app.js",
+      "line": 389,
+      "status": "PASS",
+      "detail": "Lines 389-391: `if (viewObj === window.AItelier.UserTracking) { return \"tracking\"; }`"
+    },
+    {
+      "id": 10,
+      "description": "_refreshActiveViewPermissions includes tracking view re-render",
+      "file": "web/js/app.js",
+      "line": 160,
+      "status": "PASS",
+      "detail": "Lines 160-163: `else if (state.currentView === \"tracking\" && A.UserTracking && typeof A.UserTracking.show === \"function\") { A.UserTracking.show(); }`"
+    },
+    {
+      "id": 11,
+      "description": "_refreshCurrentView includes tracking view for SSE reconnection refresh",
+      "file": "web/js/app.js",
+      "line": 747,
+      "status": "PASS",
+      "detail": "Lines 747-752: `else if (currentView === \"tracking\") { var tracking = ...; if (tracking && typeof tracking.show === \"function\") { tracking.show(); } }`"
+    },
+    {
+      "id": 12,
+      "description": "tracking.js exports UserTracking to window.AItelier global namespace",
+      "file": "web/js/views/tracking.js",
+      "line": 120,
+      "status": "PASS",
+      "detail": "Lines 120-121: `window.AItelier = window.AItelier || {}; window.AItelier.UserTracking = UserTracking;`"
+    },
+    {
+      "id": 13,
+      "description": "tracking.js show() handles loading, empty, and error states",
+      "file": "web/js/views/tracking.js",
+      "line": 53,
+      "status": "PASS",
+      "detail": "Loading: line 53 (`<p>Loading users…</p>`); Empty: line 65 (`<p>No users tracked yet.</p>`); Error: lines 98-101 (red error message with _escapeHtml); API guard: line 57-58 (`API not available.`)"
+    },
+    {
+      "id": 14,
+      "description": "API.getLoggedUsers() method exists in web/js/api.js",
+      "file": "web/js/api.js",
+      "line": 687,
+      "status": "PASS",
+      "detail": "Line 687-692: `getLoggedUsers: function (limit) { var path = \"/api/admin/logged-users\"; if (limit) { path += \"?limit=\" + encodeURIComponent(String(limit)); } return _get(path); }`"
+    }
+  ],
+  "summary": "All 14 verification items PASS. The SPA wiring for the tracking view is correctly integrated: web/index.html has the view container, script reference, and empty nav-links ul; web/js/app.js has dynamic nav rendering with conditional Tracking link, optional route registration, hash-based view tracking, view name mapping, permission-based refresh, SSE reconnection refresh, and both success/error path nav rendering in _applyReadOnlyMode; web/js/views/tracking.js exports the view module with full loading/empty/error state handling; web/js/api.js provides the getLoggedUsers method."
+}

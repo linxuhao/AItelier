@@ -242,6 +242,18 @@
     return "\u25CB";                                         // ○
   }
 
+  /**
+   * Format a token count for human-readable display.
+   * Values below 1000 are shown as raw numbers; 1000+ as "k" shorthand.
+   *
+   * @param {number} n — token count
+   * @returns {string} formatted string, e.g. "123", "12.5k"
+   */
+  function _fmtTokens(n) {
+    if (typeof n !== "number" || n < 1000) return String(n);
+    return (n / 1000).toFixed(1) + "k";
+  }
+
 
   // ════════════════════════════════════════════════════════════════════
   //  Template-literal HTML Renderer Functions
@@ -591,11 +603,15 @@
       var cs = run.cache_stats_by_step && run.cache_stats_by_step[stepId];
       if (cs && cs.hit_ratio != null && cs.hit_ratio !== undefined) {
         var pct = (cs.hit_ratio * 100).toFixed(1) + "%";
+        var badgeText = pct;
+        if (cs.total_tokens != null && cs.total_tokens !== undefined) {
+          badgeText += " \u00B7 " + _fmtTokens(cs.total_tokens);
+        }
         var badgeClass = "run-step-badge run-step-cache";
         if (cs.hit_ratio >= 0.7) badgeClass += " cache-badge-high";
         else if (cs.hit_ratio >= 0.3) badgeClass += " cache-badge-mid";
         else badgeClass += " cache-badge-low";
-        html += '      <span class="' + badgeClass + '">' + pct + '</span>\n';
+        html += '      <span class="' + badgeClass + '">' + badgeText + '</span>\n';
       }
 
       html += "    </div>\n";
@@ -1998,95 +2014,64 @@
       dirLi.style.paddingLeft = "0";
       dirLi.style.cursor = "pointer";
       dirLi.style.display = "flex";
-      dirLi.style.flexDirection = "column";
-      dirLi.style.alignItems = "stretch";
-      dirLi.style.padding = "0.1rem 0";
-
-      // Directory header (clickable)
-      var dirHeader = document.createElement("div");
-      dirHeader.style.display = "flex";
-      dirHeader.style.flexDirection = "row";
-      dirHeader.style.alignItems = "center";
-      dirHeader.style.gap = "0.4rem";
-      dirHeader.style.padding = "0.2rem 0";
+      dirLi.style.flexDirection = "row";
+      dirLi.style.alignItems = "center";
+      dirLi.style.gap = "0.4rem";
+      dirLi.style.padding = "0.2rem 0";
 
       var dirIcon = document.createElement("span");
       dirIcon.className = "file-icon";
       dirIcon.textContent = "\uD83D\uDCC1"; // 📁
       dirIcon.style.fontSize = "0.85rem";
-      dirHeader.appendChild(dirIcon);
+      dirLi.appendChild(dirIcon);
 
       var dirNameSpan = document.createElement("span");
       dirNameSpan.className = "file-name";
-      dirNameSpan.textContent = dirName + "/";
-      dirNameSpan.style.fontWeight = "600";
-      dirHeader.appendChild(dirNameSpan);
+      dirNameSpan.textContent = dirName;
+      dirLi.appendChild(dirNameSpan);
 
-      dirLi.appendChild(dirHeader);
+      dirLi.dataset.path = dirPath;
 
-      // Children container (hidden by default)
-      var childrenUl = document.createElement("ul");
-      childrenUl.style.listStyle = "none";
-      childrenUl.style.paddingLeft = "1rem";
-      childrenUl.style.margin = "0";
-      childrenUl.style.display = "none";
-      childrenUl.dataset.dirPath = dirPath;
-      childrenUl.dataset.expanded = "false";
-      dirLi.appendChild(childrenUl);
+      if (childNode && typeof childNode === "object") {
+        var childList = document.createElement("ul");
+        childList.style.listStyle = "none";
+        childList.style.paddingLeft = "1.2rem";
+        childList.style.margin = "0";
+        childList.style.display = "none";
+        dirLi.appendChild(childList);
 
-      // Click handler: toggle directory expansion.
-      (function (dp, chUl, node) {
-        dirHeader.addEventListener("click", function (e) {
-          e.stopPropagation();
-          _toggleDir(dp, chUl, node, root);
-        });
-      })(dirPath, childrenUl, childNode);
+        _renderTreeLevel(childNode, childList, dirPath, root);
+
+        // Toggle on click
+        (function (list) {
+          dirLi.addEventListener("click", function (e) {
+            if (e.target === dirIcon || e.target === dirNameSpan ||
+                e.target === dirLi) {
+              e.stopPropagation();
+              list.style.display = list.style.display === "none" ? "block" : "none";
+            }
+          });
+        })(childList);
+      }
 
       parentEl.appendChild(dirLi);
     }
   }
 
-  /**
-   * Toggle expansion of a directory node.
-   * On first expand, renders children. On subsequent toggles, shows/hides.
-   *
-   * @param {string} dirPath — relative path to the directory
-   * @param {HTMLElement} childrenEl — the <ul> element for children
-   * @param {object} childNode — tree node data with _files and subdirs
-   * @param {string} root — "dps" or "code" (forwarded to child file clicks)
-   */
-  function _toggleDir(dirPath, childrenEl, childNode, root) {
-    var isExpanded = childrenEl.dataset.expanded === "true";
 
-    if (isExpanded) {
-      // Collapse: hide children
-      childrenEl.style.display = "none";
-      childrenEl.dataset.expanded = "false";
-      delete _expandedDirs[dirPath];
-      return;
-    }
-
-    // Expand. The initial tree fetch already returned the full file list and
-    // _buildTreeIndices built the complete nested structure, so childNode holds
-    // everything we need — render straight from it (no extra API round-trip).
-    if (childrenEl.children.length === 0) {
-      _renderTreeLevel(childNode, childrenEl, dirPath, root);
-    }
-    childrenEl.style.display = "block";
-    childrenEl.dataset.expanded = "true";
-    _expandedDirs[dirPath] = true;
-  }
+  // ════════════════════════════════════════════════════════════════════
+  //  File Content Viewer
+  // ════════════════════════════════════════════════════════════════════
 
   /**
-   * Show file content in a modal/dialog.
-   * Uses the template renderer _renderFileContentModalHtml() to build the dialog.
+   * Show the content of a file in a modal dialog.
    *
-   * @param {string} pid — project ID
-   * @param {string} filePath — relative file path within workspace
-   * @param {string} [root] — "dps" (default) or "code" (project repo)
+   * @param {string} projectId — project ID
+   * @param {string} path — file path relative to workspace root
+   * @param {string} root — "dps" or "code"
    */
-  function _showFileContent(pid, filePath, root) {
-    if (!pid || !filePath) {
+  function _showFileContent(projectId, path, root) {
+    if (!projectId || !path) {
       return;
     }
     root = root || "dps";
@@ -2096,296 +2081,275 @@
       return;
     }
 
-    // Remove any existing file content dialog
-    var existing = document.getElementById("file-content-dialog");
-    if (existing) existing.remove();
-
-    // Fetch file content then show dialog
-    api.workspaceFile(pid, filePath, root).then(function (data) {
-      var content = (data && data.content) || "";
-      document.body.insertAdjacentHTML(
-        "beforeend", _renderFileContentModalHtml(content, filePath));
-      _openFileDialog(document.getElementById("file-content-dialog"));
-    }).catch(function (/* err */) {
-      // Show error dialog
-      document.body.insertAdjacentHTML(
-        "beforeend", _renderFileContentModalHtml("", filePath));
-      var dialog = document.getElementById("file-content-dialog");
-      if (dialog) {
-        var bodyEl = dialog.querySelector("#file-content-body");
-        if (bodyEl) {
-          bodyEl.innerHTML = '<p class="empty-state">Failed to load file content</p>';
-        }
-      }
-      _openFileDialog(dialog);
-    });
-  }
-
-  /**
-   * Open a freshly-inserted file-content <dialog> as a modal and wire its
-   * close affordances. The dialog lives on <body>, OUTSIDE #project-dynamic, so
-   * the global _onDynamicClick delegation never sees its close button — close
-   * is wired locally here: the close-modal button, a backdrop click, and
-   * removal of the element once closed (covers native Escape too) so stale
-   * dialogs don't accumulate on <body>.
-   */
-  function _openFileDialog(dialog) {
-    if (!dialog) {
-      return;
+    // Show loading modal immediately
+    var existingDialog = document.getElementById("file-content-dialog");
+    if (existingDialog) {
+      existingDialog.remove();
     }
+
+    var loadingHtml = _renderFileContentModalHtml("Loading\u2026", path);
+    var tempContainer = document.createElement("div");
+    tempContainer.innerHTML = loadingHtml;
+    var dialog = tempContainer.firstElementChild;
+    document.body.appendChild(dialog);
+
     if (typeof dialog.showModal === "function") {
       dialog.showModal();
     }
-    // Close + remove explicitly rather than relying on the dialog 'close' event
-    // (which doesn't fire reliably in all engines here). Covers the close button
-    // and a backdrop click; the leftover node is removed so dialogs don't pile up.
-    function _dismiss() {
-      if (typeof dialog.close === "function") {
-        dialog.close();
+
+    // Fetch actual content
+    api.workspaceFile(projectId, path, root).then(function (data) {
+      var content = (data && data.content) || "";
+      var contentPath = data.path || path;
+      // Replace dialog content in-place
+      var titleEl = document.getElementById("file-content-title");
+      if (titleEl) { titleEl.textContent = contentPath; }
+      var bodyCode = document.getElementById("file-content-code");
+      if (bodyCode) {
+        var esc = (window.AItelier && window.AItelier.Utils &&
+                   typeof window.AItelier.Utils.escapeHtml === "function")
+                  ? window.AItelier.Utils.escapeHtml
+                  : function (s) { return String(s); };
+        bodyCode.textContent = esc(content);
       }
-      dialog.remove();
-    }
-    dialog.addEventListener("click", function (e) {
-      if (e.target.closest('[data-action="close-modal"]') || e.target === dialog) {
-        _dismiss();
+    }).catch(function (/* err */) {
+      var bodyEl = document.getElementById("file-content-body");
+      if (bodyEl) {
+        bodyEl.innerHTML = '<p class="empty-state">Failed to load file content</p>';
       }
-    });
-    // Native Escape closes the modal; if the 'close' event does fire, drop the
-    // node too (otherwise the next open's existing.remove() cleans it up).
-    dialog.addEventListener("close", function () {
-      dialog.remove();
     });
   }
 
 
   // ════════════════════════════════════════════════════════════════════
-  //  Repository Panel
+  //  Utility: repo action (disable, call, refresh, enable)
   // ════════════════════════════════════════════════════════════════════
 
   /**
-   * Fetch repo status into the given panel body and render it using the
-   * template renderer _renderRepoStatusHtml().
+   * Shared wrapper for repo action buttons: disable, call API, refresh, re-enable.
    *
-   * @param {HTMLElement} body — the repo section body element
+   * @param {HTMLElement} btn — the clicked button
+   * @param {function} call — returns a Promise for the API call
+   * @param {HTMLElement} panel — the repo-status-panel to refresh
    */
-  function _fetchRepoStatus(body) {
+  function _repoAction(btn, call, panel) {
+    if (!btn || !call) { return; }
+    btn.disabled = true;
+    var orig = btn.textContent;
+    btn.textContent = "\u2026";
+
+    call().then(function () {
+      btn.disabled = false;
+      btn.textContent = orig;
+      if (panel) {
+        _fetchRepoStatus(panel);
+      }
+    }).catch(function (err) {
+      btn.disabled = false;
+      btn.textContent = orig;
+      var msg = (err && err.message) || "Action failed";
+      try {
+        var app = window.AItelier && window.AItelier.App;
+        if (app && typeof app.showError === "function") {
+          app.showError(msg);
+        }
+      } catch (_e) {
+        window.alert(msg);
+      }
+    });
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
+  //  Repo Status — _fetchRepoStatus()
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Fetch repo status for the current project and render the repo-status-panel.
+   *
+   * @param {HTMLElement} section — the repo section body element to populate
+   */
+  function _fetchRepoStatus(section) {
+    if (!_projectId || !section) {
+      return;
+    }
+
+    var loadingEl = section.querySelector("p.empty-state");
+
     var api = window.AItelier && window.AItelier.API;
     if (!api || typeof api.repoStatus !== "function") {
-      body.innerHTML = '<p class="empty-state">Repository status not available</p>';
+      if (loadingEl) {
+        loadingEl.textContent = "Repository browsing not available";
+      }
       return;
     }
 
     api.repoStatus(_projectId).then(function (data) {
-      body.innerHTML = _renderRepoStatusHtml(data || {}, _canWrite());
-    }).catch(function () {
-      body.innerHTML = '<p class="empty-state">Failed to load repository status</p>';
-    });
-  }
+      if (loadingEl && loadingEl.parentElement) {
+        loadingEl.parentElement.removeChild(loadingEl);
+      }
 
-  /** Surface a repo action error via the app's error toast. */
-  function _repoError(err) {
-    var msg = (err && err.message) || "Repository action failed";
-    try {
-      var app = window.AItelier && window.AItelier.App;
-      if (app && typeof app.showError === "function") { app.showError(msg); }
-      else { window.alert(msg); }
-    } catch (_e) { /* swallow */ }
-  }
+      var html = _renderRepoStatusHtml(data || {}, _canWrite());
 
-  /**
-   * Run a repo write action: disable the button, await the promise, then
-   * re-fetch the repo panel (which re-enables controls and reflects new
-   * state). Errors surface via the toast and re-enable the button.
-   *
-   * @param {HTMLButtonElement} btn — the clicked button
-   * @param {function():Promise} factory — produces the action promise
-   * @param {HTMLElement} panelBody — repo panel body to refresh on success
-   * @param {function(object)} [onOk] — optional success callback (gets result)
-   */
-  function _repoAction(btn, factory, panelBody, onOk) {
-    if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
-    factory().then(function (res) {
-      if (onOk) { try { onOk(res); } catch (_e) { /* ignore */ } }
-      if (panelBody) { _fetchRepoStatus(panelBody); }
-    }).catch(function (err) {
-      if (btn) { btn.disabled = false; btn.removeAttribute("aria-busy"); }
-      if (err && err.message !== "Cancelled") {
-        _repoError(err);
+      // Create a wrapper to convert HTML string to DOM nodes
+      var wrapper = document.createElement("div");
+      wrapper.innerHTML = html;
+      while (wrapper.firstChild) {
+        section.appendChild(wrapper.firstChild);
+      }
+    }).catch(function (/* err */) {
+      if (loadingEl) {
+        loadingEl.textContent = "Failed to load repository status";
       }
     });
   }
 
 
-  // ── Reconnect overlay ────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  //  Reconnect Overlay — _updateReconnectOverlay()
+  // ════════════════════════════════════════════════════════════════════
 
   /**
-   * Show or hide the reconnection overlay based on App.state.connectionOk.
+   * Update the reconnect overlay visibility based on connection state.
+   * Shows the overlay when connection is lost during polling, hides when
+   * connection is restored.
    */
   function _updateReconnectOverlay() {
     var overlay = document.getElementById("project-reconnect-overlay");
-    if (!overlay) {
-      return;
-    }
-
-    var connected = _isConnectionOk();
-    overlay.style.display = connected ? "none" : "block";
+    if (!overlay) { return; }
+    overlay.style.display = _isConnectionOk() ? "none" : "block";
   }
 
 
-  // ── Refresh ──────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  //  Refresh / Polling — _refresh(), show(), hide()
+  // ════════════════════════════════════════════════════════════════════
 
   /**
-   * Fetch project + tasks via API and re-render the view.
-   * Uses _isRefreshing flag to prevent stacked requests.
+   * Fetch project data + tasks from the API, then call _render() or
+   * _updateDynamic() depending on whether the view shell exists.
    *
-   * @param {boolean} [dynamic] — when true, update only the dynamic content
-   *   in place (poll path) instead of rebuilding the whole view.
+   * Skips if _isRefreshing is already true (prevents stacking).
    */
-  function _refresh(dynamic) {
+  function _refresh() {
     if (_isRefreshing) {
       return;
     }
+    _isRefreshing = true;
 
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.getProject !== "function") {
+      _isRefreshing = false;
+      return;
+    }
+
+    var pid = _projectId;
+    if (!pid) {
+      _isRefreshing = false;
+      return;
+    }
+
+    // Fetch project, tasks, and run detail in parallel
+    Promise.all([
+      api.getProject(pid),
+      api.listTasks(pid).catch(function () { return []; }),
+      api.getRun(pid).catch(function () { return null; }),
+      api.getCheckpoint(pid).catch(function () { return null; }),
+    ]).then(function (results) {
+      if (!_projectId || _projectId !== pid) {
+        // Navigated away; discard results
+        _isRefreshing = false;
+        return;
+      }
+
+      var project = results[0] || null;
+      var tasks = results[1] || [];
+      var run = results[2] || null;
+      _cachedCheckpoint = results[3] || null;
+
+      var dynamic = document.getElementById("project-dynamic");
+      if (dynamic) {
+        _updateDynamic(project, tasks, run);
+      } else {
+        _render(project, tasks, run);
+      }
+
+      _isRefreshing = false;
+    }).catch(function () {
+      _isRefreshing = false;
+    });
+  }
+
+  /**
+   * Show the project detail view for a given project ID.
+   * Starts polling.
+   *
+   * @param {{id: string}} params — route parameters containing the project ID
+   */
+  function show(params) {
+    _projectId = (params && params.id) || null;
     if (!_projectId) {
       return;
     }
 
-    var api = window.AItelier && window.AItelier.API;
-    if (!api || typeof api.getProject !== "function" || typeof api.listTasks !== "function") {
-      return;
+    // Clear previous state
+    _expandedTaskRows = {};
+    _expandedOverviewSteps = {};
+    _expandedDirs = {};
+
+    // Merge manifest labels before first render
+    _ensureConfigLabels();
+
+    // Build the static shell (empty project-dynamic container),
+    // then the first data fetch triggers a render into it.
+    var container = document.getElementById("view-project");
+    if (container) {
+      container.innerHTML = "";
+      container.innerHTML += '<a href="#/" style="display:inline-block;margin-bottom:var(--pico-spacing,1rem)">\u2190 Back to Dashboard</a>';
+      container.innerHTML += '<div id="project-reconnect-overlay" style="display:none;position:relative;text-align:center;padding:2rem 1rem;background-color:rgba(255,255,255,0.85);border-radius:0.5rem;margin-top:1rem">Loading\u2026</div>';
+      // Create empty #project-dynamic so _updateDynamic sees it
+      var dynamicDiv = document.createElement("div");
+      dynamicDiv.id = "project-dynamic";
+      container.appendChild(dynamicDiv);
     }
 
-    _isRefreshing = true;
+    _refresh();
 
-    // Fetch project, tasks, and run detail in parallel. The run fetch is
-    // best-effort (a project may not have a run yet) — a failure just hides the
-    // pipeline overview rather than failing the whole refresh.
-    var runP = (typeof api.getRun === "function")
-      ? api.getRun(_projectId).catch(function () { return null; })
-      : Promise.resolve(null);
-    // Pending checkpoint is best-effort: a failure (or no pending checkpoint)
-    // just hides the inline approval card.
-    var cpP = (typeof api.getCheckpoint === "function")
-      ? api.getCheckpoint(_projectId).catch(function () { return null; })
-      : Promise.resolve(null);
-    Promise.all([
-      api.getProject(_projectId),
-      api.listTasks(_projectId),
-      runP,
-      cpP,
-    ]).then(function (results) {
-      _isRefreshing = false;
-      var project = results[0];
-      var tasks = results[1] || [];
-      var run = results[2] || null;
-      var cp = results[3] || null;
-      // Only treat as pending when the response actually names a checkpoint.
-      _cachedCheckpoint = (cp && (cp.checkpoint || cp.step)) ? cp : null;
+    // Start polling
+    if (_pollTimer) {
+      clearInterval(_pollTimer);
+    }
+    _pollTimer = setInterval(_refresh, _POLL_INTERVAL);
+  }
 
-      if (project) {
-        if (dynamic) {
-          _updateDynamic(project, tasks, run);
-        } else {
-          _render(project, tasks, run);
-        }
-      }
-    }).catch(function (err) {
-      _isRefreshing = false;
-
-      // 404 → project doesn't exist anymore → navigate back to dashboard
-      if (err && (err.status === 404 || (err.message && err.message.indexOf("404") !== -1))) {
-        try {
-          var router = window.AItelier && window.AItelier.Router;
-          if (router && typeof router.navigate === "function") {
-            router.navigate("#/");
-          }
-        } catch (_e) {
-          window.location.hash = "#/";
-        }
-        return;
-      }
-
-      // Network error → update overlay
-      _updateReconnectOverlay();
-    });
+  /**
+   * Hide the project detail view and stop polling.
+   */
+  function hide() {
+    if (_pollTimer) {
+      clearInterval(_pollTimer);
+      _pollTimer = null;
+    }
+    _projectId = null;
+    _cachedProject = null;
+    _cachedTasks = [];
+    _cachedRun = null;
+    _cachedCheckpoint = null;
+    _expandedTaskRows = {};
+    _expandedOverviewSteps = {};
+    _expandedDirs = {};
+    _isRefreshing = false;
   }
 
 
-  // ── Public API ────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════
+  //  Public API — export to AItelier.ProjectDetail
+  // ════════════════════════════════════════════════════════════════════
 
-  var ProjectDetail = {
-
-    /**
-     * Show the project detail view for a given project ID.
-     * Fetches project data + tasks, renders the view, and starts polling.
-     *
-     * @param {object} params — route parameters, expected {id: "project-id"}
-     */
-    show: function (params) {
-      var pid = params && params.id;
-      if (!pid) {
-        return;
-      }
-
-      _projectId = pid;
-
-      // Make #view-project visible
-      var container = document.getElementById("view-project");
-      if (container) {
-        container.classList.add("active");
-      }
-
-      // Fetch data and render
-      _refresh();
-
-      // Start polling — dynamic (in-place) refresh so the workspace trees and
-      // any in-progress interaction (scroll, expanded dirs) are preserved.
-      if (_pollTimer === null) {
-        _pollTimer = setInterval(function () {
-          _refresh(true);
-        }, _POLL_INTERVAL);
-      }
-    },
-
-    /**
-     * Hide the project detail view.
-     * Stops the polling interval and cleans up state.
-     */
-    hide: function () {
-      // Stop polling
-      if (_pollTimer !== null) {
-        clearInterval(_pollTimer);
-        _pollTimer = null;
-      }
-
-      // Hide the section
-      var container = document.getElementById("view-project");
-      if (container) {
-        container.classList.remove("active");
-      }
-
-      // Reset state
-      _projectId = null;
-      _cachedProject = null;
-      _cachedTasks = [];
-      _cachedRun = null;
-      _expandedDirs = {};
-      _expandedTaskRows = {};
-      _expandedOverviewSteps = {};
-    },
-
-    /**
-     * Immediately refresh the project data and re-render.
-     * Can be called externally (e.g. after a checkpoint resolution).
-     */
-    refresh: function () {
-      _refresh();
-    },
+  AItelier.ProjectDetail = {
+    show: show,
+    hide: hide,
+    refresh: _refresh,
   };
 
-
-  // ── Expose globally ───────────────────────────────────────────────
-
-  window.AItelier = window.AItelier || {};
-  window.AItelier.ProjectDetail = ProjectDetail;
 })();

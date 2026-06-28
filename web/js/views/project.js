@@ -588,6 +588,15 @@
           retries + " retr" + (retries === 1 ? "y" : "ies") + '">\u21BB' +
           retries + '</span>\n';
       }
+      var cs = run.cache_stats_by_step && run.cache_stats_by_step[stepId];
+      if (cs && cs.hit_ratio != null && cs.hit_ratio !== undefined) {
+        var pct = (cs.hit_ratio * 100).toFixed(1) + "%";
+        var badgeClass = "run-step-badge run-step-cache";
+        if (cs.hit_ratio >= 0.7) badgeClass += " cache-badge-high";
+        else if (cs.hit_ratio >= 0.3) badgeClass += " cache-badge-mid";
+        else badgeClass += " cache-badge-low";
+        html += '      <span class="' + badgeClass + '">' + pct + '</span>\n';
+      }
 
       html += "    </div>\n";
     });

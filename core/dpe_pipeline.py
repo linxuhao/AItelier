@@ -411,8 +411,10 @@ class PipelineEngine:
         self._step_start = time.time()
         max_retries = self.factory.get_max_retries(step_id)
         for attempt in range(1, max_retries + 1):
-    # Priority: step config > agent config > default
-            max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(step_id)
+    # Priority: step config > agent config > default. Resolve by
+            # agent_config_name (role) — the registry is keyed by role, not
+            # step_id, so passing step_id silently fell back to DEFAULT.
+            max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(agent_config_name)
 
             # Pre-compute step-aware feedback templates so error messages
             # reference the actual expected output files, not a hardcoded
@@ -824,7 +826,9 @@ class PipelineEngine:
         MAX_MESSAGES_PER_STEP = 3
 
         for attempt in range(1, max_retries + 1):
-            max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(step_id)
+            # Resolve budget by role (agent_config_name); step_id is not a
+            # registry key so it silently fell back to DEFAULT_MAX_TOOL_TURNS.
+            max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(agent_config_name)
 
             self._emit("step_attempt", {"step_id": step_id, "attempt": attempt, "max_attempts": max_retries,
                                         "preview": f"Step {step_id} Attempt {attempt}/{max_retries}"})
@@ -1068,6 +1072,11 @@ class PipelineEngine:
         self._code_path = code_path
 
         feedback = ""
+        # Carryover across attempts (parity with JSON mode): exploration results
+        # and feedback are re-injected into later attempts so a retry does not
+        # restart cold and re-read the same files, repeating the same failure.
+        cached_exploration: list[str] = []
+        feedback_history: list[str] = []
         self._current_step = step_id
         self._step_start = time.time()
         # Tool schemas → OpenAI format.
@@ -1092,7 +1101,10 @@ class PipelineEngine:
         native_tools = self._to_openai_tools(self._tool_schemas)
 
         max_retries = self.factory.get_max_retries(step_id)
-        max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(step_id)
+        # Resolve budget by role (agent_config_name); the registry is keyed by
+        # role, not step_id, so passing step_id silently capped every native
+        # step at DEFAULT_MAX_TOOL_TURNS regardless of its configured budget.
+        max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(agent_config_name)
 
         # Config-driven shared preamble (F1/F2). A config opts in via
         # x-aitelier.preamble_steps; only then is project-global stable content
@@ -1155,6 +1167,28 @@ class PipelineEngine:
                 "least 1 turn for writing."
             )
 
+            # Parity with JSON mode: on a retry, re-inject what prior attempts
+            # already explored (deduped) and every prior feedback message, so
+            # the agent builds on that context instead of re-exploring from
+            # scratch. Appended after the volatile tail → no cache-prefix impact.
+            if attempt > 1 and cached_exploration:
+                seen: set[str] = set()
+                deduped: list[str] = []
+                for entry in cached_exploration:
+                    if entry not in seen:
+                        seen.add(entry)
+                        deduped.append(entry)
+                user_prompt += (
+                    "\n\n[Cached Exploration Results from Previous Attempt(s) — "
+                    "do NOT re-read these; use them and write your output]\n"
+                    + "\n".join(deduped)
+                )
+            if attempt > 1 and feedback_history:
+                user_prompt += (
+                    "\n\n[Previous Attempt Feedback]\n"
+                    + "\n---\n".join(feedback_history)
+                )
+
             if use_preamble:
                 preamble = self.assembler.build_shared_preamble(
                     project_path, code_path, graph_name=graph_name,
@@ -1184,16 +1218,25 @@ class PipelineEngine:
                 if remaining > 1:
                     tool_choice = "auto"
                 elif not written_files and write_tool_names:
-                    # Final turn and the step still has no output: FORCE the
-                    # write tool rather than forbidding tools. Exploration-heavy
-                    # models (e.g. deepseek) otherwise burn the whole budget on
+                    # Final turn and the step still has no output. Exploration-
+                    # heavy models (e.g. deepseek) burn the whole budget on
                     # read/search tools and reach the last turn with nothing
-                    # written; tool_choice="none" then makes writing impossible,
-                    # so the step ends empty and fails validation. Forcing the
-                    # write tool guarantees the step produces its output file.
-                    forced = sorted(write_tool_names)[0]
-                    tool_choice = {"type": "function",
-                                   "function": {"name": forced}}
+                    # written. Do NOT force a specific function via tool_choice
+                    # — forcing a named function crashes native tool calling for
+                    # some providers (the call raises, the loop breaks, and the
+                    # step dies empty). Keep "auto" and inject a hard nudge so
+                    # the model writes on its own initiative.
+                    tool_choice = "auto"
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "[Turn budget nearly exhausted] You have not "
+                            "written any output yet. Your VERY NEXT action MUST "
+                            "be a write_/create_ tool call to produce the "
+                            "required file(s), then finish_step. Do not read, "
+                            "search, or list."
+                        ),
+                    })
                 else:
                     tool_choice = "none"
 
@@ -1253,6 +1296,50 @@ class PipelineEngine:
                     })
 
                 if not result.tool_calls:
+                    # A reply with no tool call produces no output. This is the
+                    # only "the agent is done / has nothing more" signal, and is
+                    # handled in parity with JSON mode:
+                    if not written_files and write_tool_names:
+                        if turn_count < max_turns - 1:
+                            # Budget remains: nudge to WRITE rather than ending
+                            # empty (the step likely has real output to produce).
+                            salvage_msg: dict = {"role": "assistant",
+                                                 "content": result.text or None}
+                            if result.reasoning_content:
+                                last_reasoning = result.reasoning_content
+                            if last_reasoning:
+                                salvage_msg["reasoning_content"] = last_reasoning
+                            messages.append(salvage_msg)
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "Your reply contained no tool call, so it "
+                                    "produced no output and was discarded. You "
+                                    "MUST call write_/create_ tools now to "
+                                    "produce the required file(s), then "
+                                    "finish_step."
+                                ),
+                            })
+                            self._emit("exploration", {
+                                "turn": turn_count + 1, "mode": "native",
+                                "preview": "No tool call — nudging agent to write",
+                            })
+                            continue
+                        # Budget exhausted and the agent still won't write — a
+                        # genuine no-op signal. Floor with existing files so an
+                        # existing-repo step that needs no changes completes
+                        # (parity with JSON mode's no-op path). Pure exploration
+                        # exhaustion never reaches here (it keeps making tool
+                        # calls), so a real failure still raises below.
+                        floor = self._copy_existing_to_draft(
+                            workspace, project_id, step_id, code_path)
+                        if floor:
+                            written_files.extend(floor)
+                            self._emit("files_written", {
+                                "files": floor,
+                                "preview": (f"No-op floor: copied {len(floor)} "
+                                            "existing file(s) (native)"),
+                            })
                     # Agent signalled completion (no more tool calls)
                     break
 
@@ -1301,6 +1388,12 @@ class PipelineEngine:
                     wf = tool_result.get("written", "")
                     if wf:
                         written_files.append(wf)
+                    elif tool_name not in ("finish_step", "ask_more_turns"):
+                        # Cache exploration (read/search/list) results so a later
+                        # attempt can reuse them instead of re-exploring cold.
+                        params_str = json.dumps(params, ensure_ascii=False)
+                        cached_exploration.append(
+                            f"Tool: {tool_name}({params_str})\nResult: {result_str}")
 
 
                 # Apply ask_more_turns budget extension after all tool calls
@@ -1331,6 +1424,7 @@ class PipelineEngine:
                 )
                 if turn_count >= max_turns - 1:
                     feedback = f"Max turns ({max_turns}) exceeded. " + feedback
+                feedback_history.append(f"Attempt {attempt}: {feedback}")
                 self._emit("step_retry", {"attempt": attempt, "error": feedback[:200]})
                 continue
 
@@ -1343,6 +1437,24 @@ class PipelineEngine:
         raise MaxRetriesExceeded(
             f"Step {step_id}: Max retries ({max_retries}) exceeded in native mode."
         )
+
+    def _copy_existing_to_draft(self, workspace: Any, project_id: str,
+                                step_id: str, code_path) -> list[str]:
+        """No-op floor shared by the JSON and native paths: copy existing
+        project files into the step draft so a step that legitimately needs no
+        changes still produces output. Returns the draft filenames written
+        (empty when there is nothing to copy)."""
+        written: list[str] = []
+        project_files = (list(code_path.rglob("*"))
+                         if code_path and code_path.exists() else [])
+        for f in project_files:
+            if f.is_file() and ".git" not in f.relative_to(code_path).parts:
+                rel = str(f.relative_to(code_path))
+                content = f.read_text(encoding="utf-8", errors="replace")
+                workspace.write_draft(project_id, step_id, rel, content,
+                                      graph_name=self._draft_graph_name())
+                written.append(WorkspaceManager._sanitize_filename(rel, content))
+        return written
 
     def _draft_graph_name(self) -> str:
         """Graph config for draft writes, derived from skillflow's output_dir

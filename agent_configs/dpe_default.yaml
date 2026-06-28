@@ -128,7 +128,9 @@ final_verifier:
   max_output_tokens: 16384
   max_tool_turns: 100
   native_tool_calling: true
-  fallback_to_json_mode: false
+  # Was false: native exhaustion then hard-failed the whole run. Enable JSON
+  # fallback so the final verifier degrades gracefully like every other step.
+  fallback_to_json_mode: true
   thinking:
     enable: true
 

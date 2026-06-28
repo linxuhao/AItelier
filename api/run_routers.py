@@ -12,7 +12,7 @@ from api.dependencies import (
 from api.auth import CurrentUser, get_optional_user
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
-from api._cache_stats import compute_cache_stats_per_step
+from api._cache_stats import compute_cache_stats_per_step, compute_cache_stats_batch
 
 router = APIRouter(prefix="/api", tags=["Runs & Traces"])
 
@@ -77,6 +77,25 @@ def list_all_runs(
         r["config_label"] = m.label if m else cfg
         r["has_task_loop"] = bool(m and m.has_task_loop)
         out.append(r)
+
+    # Attach cache hit ratio stats per run (batch query)
+    sf = get_skillflow()
+    pid_to_uuid = {}
+    for r in out:
+        pid = r["project_id"]
+        runs = sf.list_runs(project_id=pid)
+        if runs:
+            pid_to_uuid[pid] = runs[0]["id"]
+    uuid_list = list(pid_to_uuid.values())
+    if uuid_list:
+        batch_stats = compute_cache_stats_batch(uuid_list)
+        for r in out:
+            uuid = pid_to_uuid.get(r["project_id"])
+            r["cache_stats"] = batch_stats.get(uuid)  # None if no trace data
+    else:
+        for r in out:
+            r["cache_stats"] = None
+
     return {"runs": out}
 
 

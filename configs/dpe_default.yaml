@@ -272,6 +272,9 @@ steps:
   - id: "t_plan"
     step_type: "agent"
     agent_config: "task_planner"
+    # Bound a stuck/conflicting loop-body claim so it times out cleanly instead
+    # of churning (defense-in-depth for the loop-progression fix).
+    timeout_seconds: 300
     context:
       # The current task being planned — resolved from the task_loop item
       # (current_task) so each iteration is scoped to its own task card.
@@ -316,6 +319,9 @@ steps:
   - id: "t_impl"
     step_type: "agent"
     agent_config: "task_implementer"
+    # Bound a stuck/conflicting loop-body claim so it times out cleanly instead
+    # of churning (defense-in-depth for the loop-progression fix).
+    timeout_seconds: 300
     context:
       - source: { from: "repository" }
       - source: { step: "3", file: "tasks/$current_task.json" }

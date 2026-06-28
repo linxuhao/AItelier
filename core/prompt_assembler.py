@@ -97,16 +97,37 @@ class PromptAssembler:
             )
             if write_tools:
                 tool_list = ", ".join(f"`{t}`" for t in write_tools)
-                delivery = (
-                    "[Output Delivery — REQUIRED]\n"
-                    "You are in native tool-calling mode. Produce every output "
-                    f"file by CALLING the matching write tool ({tool_list}). "
-                    "Do NOT paste file contents as text, Markdown, or a JSON "
-                    "object in your reply — anything not written via a tool call "
-                    "is discarded and the step will fail validation. The step is "
-                    "complete only once you have called the write tool(s) for all "
-                    "required files."
+                # Role-aware framing: a CHECKER step (reviewer/verifier) only
+                # writes a verdict/report — telling it to "produce every output
+                # file" pulls it toward authoring/implementing. Classify by its
+                # write tools: verdict/report-only → checker; anything else →
+                # maker.
+                is_checker = all(
+                    ("verdict" in t or "report" in t) for t in write_tools
                 )
+                if is_checker:
+                    delivery = (
+                        "[Output Delivery — REQUIRED]\n"
+                        "You are in native tool-calling mode. You are a CHECKER "
+                        "step: assess the work, then record your judgment by "
+                        f"CALLING the matching tool ({tool_list}). Do NOT modify "
+                        "project files, write code, or author documentation — "
+                        "only emit your verdict/report via the tool. Anything not "
+                        "written via a tool call is discarded and the step will "
+                        "fail validation. The step is complete only once you have "
+                        "called the tool(s) for all required outputs."
+                    )
+                else:
+                    delivery = (
+                        "[Output Delivery — REQUIRED]\n"
+                        "You are in native tool-calling mode. Produce every output "
+                        f"file by CALLING the matching write tool ({tool_list}). "
+                        "Do NOT paste file contents as text, Markdown, or a JSON "
+                        "object in your reply — anything not written via a tool call "
+                        "is discarded and the step will fail validation. The step is "
+                        "complete only once you have called the write tool(s) for all "
+                        "required files."
+                    )
                 if "write" in write_tools:
                     # AT-9: pin one canonical root for the generic write(file, …).
                     delivery += (
@@ -171,6 +192,14 @@ class PromptAssembler:
                     "The step is complete only once you have written ALL required "
                     "output files."
                 )
+                # Role-aware: a checker (verdict/report-only) shouldn't be nudged
+                # toward authoring/implementing.
+                if all(("verdict" in t or "report" in t) for t in write_tools):
+                    delivery += (
+                        "\nNOTE: You are a CHECKER step — only emit your "
+                        "verdict/report via the tool above; do NOT modify project "
+                        "files, write code, or author documentation."
+                    )
                 sections.append(delivery)
 
         # [Workspace Layout] — static boilerplate. When hoist_globals is set the

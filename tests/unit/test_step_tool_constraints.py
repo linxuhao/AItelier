@@ -73,8 +73,10 @@ def _get_tool_schemas_for_step(step_id: str) -> dict:
 CONSTRAINED_STEPS = {
     "1": ["write_sota"],
     "2": ["write_design", "write_linter_manifest"],
-    "3": ["write_tasks_manifest", "write_task_card"],
-    "5": ["write_readme", "write_report"],
+    # PM owns the project README (moved here from the verifier so step 5 stays
+    # purely verification — emits only its verdict).
+    "3": ["write_tasks_manifest", "write_task_card", "write_readme"],
+    "5": ["write_report"],
     "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card", "write_research_notes"],
 }
 

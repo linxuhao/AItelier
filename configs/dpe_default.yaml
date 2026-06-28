@@ -205,6 +205,10 @@ steps:
       fixed:
         tasks_manifest: { file: "tasks_manifest.json", format: '{"execution_order": [[str, ...], ...]}' }
         task_card: { file: "tasks/*.json", format: '{"id": str, "description": "ONE-LINE summary (max 80 chars)", "detailed_requirements": str, "artifact_requirement": str, "dependencies": [str, ...], "task_type": str, "interface_contract": str}' }
+        # The PM owns project documentation: create the README for a new project,
+        # or update the existing one to reflect what this run adds. (Moved here
+        # from the final verifier so step 5 stays purely verification.)
+        readme: "README.md"
     validation:
       - files: ["tasks_manifest.json"]
         tool: "file_exists"
@@ -385,7 +389,9 @@ steps:
     output:
       mode: "content"
       fixed:
-        readme: "final/README.md"
+        # The verifier ONLY emits its verdict — no README authoring (that is the
+        # PM's job, step 3). This keeps step 5 framed as verification, not
+        # implementation.
         report: { file: "final/verify_report.json", format: '{"all_goals_met": bool, "verified_subtasks": [str, ...], "issues": [str, ...], "ready_for_deploy": bool}' }
     transitions:
       - to: "5_test"

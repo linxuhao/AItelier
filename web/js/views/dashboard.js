@@ -259,6 +259,19 @@
       cells[2].textContent = parsed.icon + " " + parsed.text;
     }
 
+    // Cache hit ratio inline badge
+    var cs = project.cache_stats;
+    if (cs && cs.hit_ratio != null && cs.hit_ratio !== undefined) {
+      var pct = (cs.hit_ratio * 100).toFixed(1) + "%";
+      var cacheSpan = document.createElement("span");
+      cacheSpan.className = "cache-inline-badge";
+      if (cs.hit_ratio >= 0.7) cacheSpan.classList.add("cache-badge-high");
+      else if (cs.hit_ratio >= 0.3) cacheSpan.classList.add("cache-badge-mid");
+      else cacheSpan.classList.add("cache-badge-low");
+      cacheSpan.textContent = " \u00B7 Cache " + pct;
+      cells[2].appendChild(cacheSpan);
+    }
+
     // Task progress
     cells[3].textContent = _formatTaskProgress(project);
 
@@ -470,7 +483,7 @@
     left.style.alignItems = "center";
     left.style.gap = "0.5rem";
     var arrow = document.createElement("span");
-    arrow.textContent = collapsed ? "▶" : "▼";
+    arrow.textContent = collapsed ? "\u25B6" : "\u25BC";
     var label = document.createElement("strong");
     label.textContent = cfg.label || cfg.config_name;
     var count = document.createElement("span");
@@ -520,7 +533,7 @@
       var nowCollapsed = !_collapsed[cfg.config_name];
       _collapsed[cfg.config_name] = nowCollapsed;
       body.style.display = nowCollapsed ? "none" : "block";
-      arrow.textContent = nowCollapsed ? "▶" : "▼";
+      arrow.textContent = nowCollapsed ? "\u25B6" : "\u25BC";
     });
 
     section.appendChild(header);
@@ -583,7 +596,7 @@
     reconnectOverlay.style.display = "none";
     reconnectOverlay.style.textAlign = "center";
     reconnectOverlay.style.padding = "1rem";
-    reconnectOverlay.textContent = "Reconnecting…";
+    reconnectOverlay.textContent = "Reconnecting\u2026";
     container.appendChild(reconnectOverlay);
 
     pipelines.forEach(function (cfg) {

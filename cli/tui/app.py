@@ -33,8 +33,12 @@ class AItelierApp(App):
         super().__init__(**kwargs)
         self.server_url = server_url or _DEFAULT_URL
         self._first_prompt = first_prompt
-        # Shared async HTTP client — all components reuse this
-        self.http = httpx.AsyncClient(base_url=self.server_url.rstrip("/"), timeout=30.0)
+        # Shared async HTTP client — all components reuse this. Carry the admin
+        # token so butler chat (/api/agent/*) passes the server write-gate.
+        from cli.client import _auth_headers
+        self.http = httpx.AsyncClient(
+            base_url=self.server_url.rstrip("/"), timeout=30.0,
+            headers=_auth_headers())
 
     def compose(self) -> ComposeResult:
         yield DashboardZone(self.server_url, id="dashboard-zone")

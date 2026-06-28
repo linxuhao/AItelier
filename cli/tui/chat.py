@@ -1699,7 +1699,10 @@ class ChatZone(Container):
             self.app.server_url = arg.rstrip("/")
             # Recreate http client with new base URL
             import httpx
-            self.app.http = httpx.AsyncClient(base_url=self.app.server_url, timeout=30.0)
+            from cli.client import _auth_headers
+            self.app.http = httpx.AsyncClient(
+                base_url=self.app.server_url, timeout=30.0,
+                headers=_auth_headers())
             self.server_url = self.app.server_url
             self._add_system(f"Server URL set to: {self.app.server_url}")
         else:

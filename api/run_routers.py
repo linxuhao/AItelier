@@ -12,6 +12,7 @@ from api.dependencies import (
 from api.auth import CurrentUser, get_optional_user
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
+from api._cache_stats import compute_cache_stats_per_step
 
 router = APIRouter(prefix="/api", tags=["Runs & Traces"])
 
@@ -180,6 +181,19 @@ def get_run_detail(
     run["step_count"] = len(steps)
     run["completed_steps"] = sum(1 for s in steps if s["status"] == "completed")
     run["failed_steps"] = sum(1 for s in steps if s["status"] == "failed")
+
+    # Compute cache hit ratio stats from skillflow_trace
+    per_step = compute_cache_stats_per_step(internal_id)
+    total_hit = sum(v["cache_hit_tokens"] for v in per_step.values())
+    total_miss = sum(v["cache_miss_tokens"] for v in per_step.values())
+    total = total_hit + total_miss
+    run_hit_ratio = total_hit / total if total > 0 else None
+    run["cache_stats"] = {
+        "cache_hit_tokens": total_hit,
+        "cache_miss_tokens": total_miss,
+        "hit_ratio": run_hit_ratio,
+    }
+    run["cache_stats_by_step"] = per_step
     return run
 
 

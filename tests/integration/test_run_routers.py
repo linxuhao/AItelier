@@ -1,4 +1,3 @@
-# tests/integration/test_run_routers.py
 # Phase 4: generic /api/runs surface + run-id-keyed checkpoint delegation.
 
 
@@ -46,6 +45,12 @@ def test_start_run_unknown_config_404(client):
 def test_run_detail_includes_cache_stats(client):
     """GET /api/runs/{run_id} includes cache_stats at run and step level."""
     client.post("/api/projects", json={"project_id": "cache_test_proj", "name": "CacheTest"})
+    # Start a run so skillflow has a run to query.
+    start_resp = client.post("/api/runs", json={
+        "config_name": "dpe_default_v2",
+        "project_id": "cache_test_proj",
+    })
+    assert start_resp.status_code == 201, start_resp.text
     resp = client.get("/api/runs/cache_test_proj")
     assert resp.status_code == 200
     data = resp.json()

@@ -43,27 +43,6 @@
     "5_test": "Unit Tests",
   };
 
-  /** Loaded once: merge every config manifest's labels into _STEP_LABELS and
-   * cache the manifests (by config_name) for the project + checkpoint views. */
-  var _configsLoaded = false;
-  function _loadConfigs() {
-    if (_configsLoaded) { return; }
-    var api = window.AItelier && window.AItelier.API;
-    if (!api || typeof api.getConfigs !== "function") { return; }
-    _configsLoaded = true;
-    api.getConfigs().then(function (resp) {
-      var configs = (resp && resp.configs) || [];
-      var cache = {};
-      configs.forEach(function (m) {
-        cache[m.config_name] = m;
-        var labels = m.labels || {};
-        Object.keys(labels).forEach(function (k) { _STEP_LABELS[k] = labels[k]; });
-      });
-      window.AItelier = window.AItelier || {};
-      window.AItelier.configManifests = cache;
-    }).catch(function () { _configsLoaded = false; });
-  }
-
   /** Status → display CSS class mapping for badge colors. */
   var _STATUS_CLASS_MAP = {
     completed: "status-ok",
@@ -204,6 +183,21 @@
   }
 
 
+  // ── Token count formatting ────────────────────────────────────────
+
+  /**
+   * Format a token count for human-readable display.
+   * Values below 1000 are shown as raw numbers; 1000+ as "k" shorthand.
+   *
+   * @param {number} n — token count
+   * @returns {string} formatted string, e.g. "123", "12.5k"
+   */
+  function _fmtTokens(n) {
+    if (typeof n !== "number" || n < 1000) return String(n);
+    return (n / 1000).toFixed(1) + "k";
+  }
+
+
   // ── Row creation ──────────────────────────────────────────────────
 
   /**
@@ -268,7 +262,11 @@
       if (cs.hit_ratio >= 0.7) cacheSpan.classList.add("cache-badge-high");
       else if (cs.hit_ratio >= 0.3) cacheSpan.classList.add("cache-badge-mid");
       else cacheSpan.classList.add("cache-badge-low");
-      cacheSpan.textContent = " \u00B7 Cache " + pct;
+      var tokensText = "";
+      if (cs.total_tokens != null && cs.total_tokens !== undefined) {
+        tokensText = " \u00B7 " + _fmtTokens(cs.total_tokens);
+      }
+      cacheSpan.textContent = " \u00B7 Cache " + pct + tokensText;
       cells[2].appendChild(cacheSpan);
     }
 
@@ -448,657 +446,351 @@
     var srf = section ? section.querySelector(".start-run-form") : null;
     if (!srf) { return; }
     var opening = srf.style.display === "none";
-    srf.style.display = opening ? "block" : "none";
-    _startFormConfig = opening ? cfg.config_name : null;
-    _formOpen = opening;
+    // Close any other open forms first
+    _closeAllStartForms();
     if (opening) {
-      var inp = srf.querySelector("input, textarea");
-      if (inp) { setTimeout(function () { inp.focus(); }, 50); }
+      srf.style.display = "block";
+      _startFormConfig = cfg.config_name;
+      _formOpen = true;
     }
   }
 
-  /** Build one collapsible pipeline section (header + nested runs). */
-  function _buildPipelineSection(cfg, runs) {
-    var section = document.createElement("section");
-    section.className = "pipeline-section";
-    section.dataset.config = cfg.config_name;
-    section.style.marginBottom = "1rem";
-    section.style.border = "1px solid var(--muted-border-color, #e0e0e0)";
-    section.style.borderRadius = "0.5rem";
-    section.style.overflow = "hidden";
-
-    var collapsed = !!_collapsed[cfg.config_name];
-
-    var header = document.createElement("div");
-    header.className = "pipeline-header";
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.padding = "0.6rem 0.9rem";
-    header.style.cursor = "pointer";
-    header.style.background = "var(--card-sectioning-background-color, #f6f8fa)";
-
-    var left = document.createElement("div");
-    left.style.display = "flex";
-    left.style.alignItems = "center";
-    left.style.gap = "0.5rem";
-    var arrow = document.createElement("span");
-    arrow.textContent = collapsed ? "\u25B6" : "\u25BC";
-    var label = document.createElement("strong");
-    label.textContent = cfg.label || cfg.config_name;
-    var count = document.createElement("span");
-    count.style.opacity = "0.6";
-    count.style.fontSize = "0.9em";
-    count.textContent = runs.length === 1 ? "1 run" : runs.length + " runs";
-    left.appendChild(arrow);
-    left.appendChild(label);
-    left.appendChild(count);
-    header.appendChild(left);
-
-    var startBtn = document.createElement("button");
-    startBtn.className = "outline btn-start-run";
-    startBtn.textContent = "+ Start run";
-    startBtn.style.flexShrink = "0";
-    startBtn.style.fontSize = "0.85rem";
-    startBtn.style.padding = "0.2rem 0.6rem";
-    startBtn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      _onStartRun(cfg);
-    });
-    header.appendChild(startBtn);
-
-    var body = document.createElement("div");
-    body.className = "pipeline-body";
-    body.style.display = collapsed ? "none" : "block";
-
-    if (cfg.config_name !== "dpe_default_v2") {
-      var srf = _buildStartRunForm(cfg);
-      srf.style.display = (_startFormConfig === cfg.config_name) ? "block" : "none";
-      body.appendChild(srf);
+  /** Closes all inline start-run forms across pipeline sections. */
+  function _closeAllStartForms() {
+    var forms = document.querySelectorAll(".start-run-form");
+    for (var i = 0; i < forms.length; i++) {
+      forms[i].style.display = "none";
     }
-
-    if (!runs || runs.length === 0) {
-      var empty = document.createElement("p");
-      empty.className = "empty-state";
-      empty.style.padding = "0.75rem 0.9rem";
-      empty.style.margin = "0";
-      empty.style.opacity = "0.6";
-      empty.textContent = "No runs yet";
-      body.appendChild(empty);
-    } else {
-      body.appendChild(_buildRunsTable(runs));
-    }
-
-    header.addEventListener("click", function () {
-      var nowCollapsed = !_collapsed[cfg.config_name];
-      _collapsed[cfg.config_name] = nowCollapsed;
-      body.style.display = nowCollapsed ? "none" : "block";
-      arrow.textContent = nowCollapsed ? "\u25B6" : "\u25BC";
-    });
-
-    section.appendChild(header);
-    section.appendChild(body);
-    return section;
+    _startFormConfig = null;
+    _formOpen = false;
   }
+
+
+  // ── Pipeline grouping ─────────────────────────────────────────────
 
   /**
-   * Render the dashboard grouped by installed pipeline, each with its runs.
-   * @param {Array} configs — installed pipelines from /api/configs
-   * @param {Array} runs — all runs from /api/runs
+   * Group runs by config_name, preserving the catalog order from /api/configs.
+   * Also returns the set of configs that have no runs (hidden by default).
+   */
+  function _groupRunsByConfig(configs, runs) {
+    var groups = [];
+    var seen = {};
+
+    // Configs in catalog order (only those with runs)
+    for (var i = 0; i < configs.length; i++) {
+      var name = configs[i].config_name || configs[i].name;
+      if (!name) { continue; }
+      var cfgLabel = configs[i].label || name;
+      var match = [];
+      for (var j = 0; j < runs.length; j++) {
+        if ((runs[j].config_name || "dpe_default_v2") === name) {
+          match.push(runs[j]);
+        }
+      }
+      if (match.length > 0) {
+        groups.push({
+          config_name: name,
+          label: cfgLabel,
+          manifest: configs[i],
+          runs: match,
+        });
+        seen[name] = true;
+      }
+    }
+
+    // Runs whose config is no longer installed — orphan bucket
+    var orphanRuns = [];
+    for (var k = 0; k < runs.length; k++) {
+      var cfgName = runs[k].config_name || "dpe_default_v2";
+      if (!seen[cfgName]) {
+        orphanRuns.push(runs[k]);
+      }
+    }
+    if (orphanRuns.length > 0) {
+      groups.push({
+        config_name: "_orphan_",
+        label: "Other Runs",
+        manifest: null,
+        runs: orphanRuns,
+      });
+    }
+
+    return groups;
+  }
+
+
+  // ── Main render ───────────────────────────────────────────────────
+
+  /**
+   * Render the dashboard: cycle through each pipeline (config category)
+   * and render a section with its runs table.
+   *
+   * @param {Array} configs — list of config manifests from /api/configs
+   * @param {Array} runs — list of run objects from /api/runs
    */
   function _renderTable(configs, runs) {
     var container = document.getElementById("view-dashboard");
     if (!container) { return; }
 
-    // Index runs by config_name.
-    var byConfig = {};
-    (runs || []).forEach(function (r) {
-      var c = r.config_name || "dpe_default_v2";
-      (byConfig[c] = byConfig[c] || []).push(r);
-    });
-
-    // Show every installed pipeline (even zero-run ones). Fall back to
-    // synthesizing pipelines from the runs if /api/configs was unavailable.
-    var pipelines = (configs || []).slice();
-    if (pipelines.length === 0) {
-      Object.keys(byConfig).forEach(function (c) {
-        pipelines.push({ config_name: c, label: c });
-      });
+    // Store all runs (with config labels) for the table views
+    var allConfigLabels = {};
+    for (var c = 0; c < configs.length; c++) {
+      allConfigLabels[configs[c].config_name || configs[c].name] = configs[c].label || configs[c].name;
+    }
+    // Attach label to each run
+    for (var r = 0; r < runs.length; r++) {
+      var cfgName = runs[r].config_name || "dpe_default_v2";
+      runs[r].config_label = allConfigLabels[cfgName] || cfgName;
     }
 
-    container.innerHTML = "";
+    var groups = _groupRunsByConfig(configs, runs);
 
-    var headerRow = document.createElement("div");
-    headerRow.style.display = "flex";
-    headerRow.style.justifyContent = "space-between";
-    headerRow.style.alignItems = "center";
-    headerRow.style.marginBottom = "var(--pico-spacing, 1rem)";
-    var title = document.createElement("h3");
-    title.textContent = "Pipelines";
-    title.style.margin = "0";
-    headerRow.appendChild(title);
-    container.appendChild(headerRow);
+    // Build inner content
+    var html = "";
 
-    // Hidden DPE New Project form, reused by the DPE pipeline's Start-run button.
-    var formContainer = document.createElement("div");
-    formContainer.id = "new-project-form";
-    formContainer.style.display =
-      (_formOpen && _startFormConfig === "dpe_default_v2") ? "block" : "none";
-    formContainer.style.marginBottom = "var(--pico-spacing, 1rem)";
-    formContainer.style.padding = "var(--pico-spacing, 1rem)";
-    formContainer.style.border = "1px solid var(--muted-border-color, #e0e0e0)";
-    formContainer.style.borderRadius = "0.5rem";
-    formContainer.appendChild(_buildNewProjectForm());
-    container.appendChild(formContainer);
+    if (groups.length === 0) {
+      html += '<div style="padding: 2em; text-align: center; color: var(--muted-color, #888);">';
+      html += "No runs yet. Click &ldquo;New Run&rdquo; on any pipeline below to start one.";
+      html += "</div>";
+    } else {
+      for (var g = 0; g < groups.length; g++) {
+        var grp = groups[g];
+        // Skip orphan runs if there are named groups (orphans are appended at the end)
+        if (grp.config_name === "_orphan_" && groups.length > 1) {
+          continue;
+        }
 
-    var reconnectOverlay = document.createElement("div");
-    reconnectOverlay.id = "dashboard-reconnect-overlay";
-    reconnectOverlay.style.display = "none";
-    reconnectOverlay.style.textAlign = "center";
-    reconnectOverlay.style.padding = "1rem";
-    reconnectOverlay.textContent = "Reconnecting\u2026";
-    container.appendChild(reconnectOverlay);
+        var collapsibleId = "psec-" + (grp.config_name || "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+        var isCollapsed = _collapsed[grp.config_name] === true;
 
-    pipelines.forEach(function (cfg) {
-      container.appendChild(
-        _buildPipelineSection(cfg, byConfig[cfg.config_name] || []));
-    });
+        html += '<div class="pipeline-section" data-config="' + escapeAttr(grp.config_name) + '">';
 
+        // Section header (pipeline name + controls)
+        html += '<div class="pipeline-header" style="display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--muted-border-color, #eee); cursor: pointer;" onclick="var e=document.getElementById(\'' + collapsibleId + '\');if(e){var c=e.style.display===\'none\';e.style.display=c?\'\':\'none\';var ic=this.querySelector(\'.collapse-icon\');if(ic)ic.textContent=c?\'\u25BC\':\'\u25B6\';}">';
+        html += '<span class="collapse-icon" style="font-size:0.7rem;color:var(--muted-color,#888)">' + (isCollapsed ? "\u25B6" : "\u25BC") + "</span>";
+
+        // Pipeline label & badge of count
+        html += '<strong style="flex:1">' + escapeHtml(grp.label) + "</strong>";
+        html += '<span style="font-size:0.8rem;color:var(--muted-color,#888)">' + grp.runs.length + " run" + (grp.runs.length !== 1 ? "s" : "") + "</span>";
+
+        var isDpe = grp.config_name === "dpe_default_v2";
+        var startBtnLabel = isDpe ? "New Project" : "Start run";
+        html += '<button class="start-run-btn" style="font-size:0.8rem;padding:0.2rem 0.6rem;cursor:pointer" onclick="var D=window.AItelier&&window.AItelier.Dashboard;if(D)D._onStartRun&&D._onStartRun(' + JSON.stringify(grp.manifest || grp) + ');event.stopPropagation();">' + startBtnLabel + "</button>";
+
+        html += "</div>";
+
+        // Collapsible body
+        html += '<div id="' + collapsibleId + '" class="pipeline-body" style="' + (isCollapsed ? "display:none" : "") + '">';
+        html += "</div>"; // placeholder — replaced below
+        html += "</div>";
+      }
+    }
+
+    // If there are orphan runs and more than one group, show them at the bottom
+    var orphanGroup = null;
+    for (var og = 0; og < groups.length; og++) {
+      if (groups[og].config_name === "_orphan_") {
+        orphanGroup = groups[og];
+        break;
+      }
+    }
+    if (orphanGroup && groups.length > 1) {
+      html += '<div class="pipeline-section" data-config="_orphan_">';
+      html += '<div class="pipeline-header" style="display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--muted-border-color, #eee);">';
+      html += '<strong style="flex:1; color: var(--muted-color, #888);">Other Runs</strong>';
+      html += '<span style="font-size:0.8rem;color:var(--muted-color,#888)">' + orphanGroup.runs.length + " run" + (orphanGroup.runs.length !== 1 ? "s" : "") + "</span>";
+      html += "</div>";
+      html += '<div class="pipeline-body"></div>';
+      html += "</div>";
+    }
+
+    container.innerHTML = html;
+
+    // Now attach the actual table DOM elements (so each row can have event listeners)
+    var bodyDivs = container.querySelectorAll(".pipeline-body");
+    var bodyIdx = 0;
+    for (var gi = 0; gi < groups.length; gi++) {
+      if (groups[gi].config_name === "_orphan_" && groups.length > 1) {
+        continue; // handled separately below
+      }
+      var bd = bodyDivs[bodyIdx];
+      if (bd) {
+        var tbl = _buildRunsTable(groups[gi].runs);
+        bd.appendChild(tbl);
+      }
+      bodyIdx++;
+    }
+    // Orphan runs group
+    if (orphanGroup && groups.length > 1) {
+      var orphanBody = container.querySelector('.pipeline-section[data-config="_orphan_"] .pipeline-body');
+      if (orphanBody) {
+        var otbl = _buildRunsTable(orphanGroup.runs);
+        orphanBody.appendChild(otbl);
+      }
+    }
+
+    // Show reconnect overlay if needed
     _updateReconnectOverlay();
   }
 
 
-  // ── New Project Form ──────────────────────────────────────────────
+  // ── HTML helpers ──────────────────────────────────────────────────
 
-  /**
-   * Build the inline "new project" form HTML elements.
-   * Returns a DocumentFragment or HTMLElement containing the form.
-   *
-   * @returns {HTMLElement} the form element
-   */
-  function _buildNewProjectForm() {
-    var form = document.createElement("form");
-    form.id = "form-new-project";
-    form.style.display = "flex";
-    form.style.flexDirection = "column";
-    form.style.gap = "0.75rem";
-
-    // Row 1: project_id (required) + name (optional)
-    var row1 = document.createElement("div");
-    row1.style.display = "flex";
-    row1.style.flexDirection = "row";
-    row1.style.gap = "0.75rem";
-    row1.style.flexWrap = "wrap";
-
-    // project_id field
-    var idGroup = document.createElement("div");
-    idGroup.style.flex = "1";
-    idGroup.style.minWidth = "200px";
-
-    var idLabel = document.createElement("label");
-    idLabel.htmlFor = "f-project-id";
-    idLabel.textContent = "Project ID (slug) *";
-    idGroup.appendChild(idLabel);
-
-    var idInput = document.createElement("input");
-    idInput.type = "text";
-    idInput.id = "f-project-id";
-    idInput.name = "project_id";
-    idInput.required = true;
-    idInput.placeholder = "e.g. my-todo-app";
-    idInput.autocomplete = "off";
-    idGroup.appendChild(idInput);
-
-    // Validation error for project_id
-    var idError = document.createElement("small");
-    idError.id = "f-project-id-error";
-    idError.style.color = "var(--del-color, #d04040)";
-    idError.style.display = "none";
-    idGroup.appendChild(idError);
-
-    row1.appendChild(idGroup);
-
-    // name field
-    var nameGroup = document.createElement("div");
-    nameGroup.style.flex = "1";
-    nameGroup.style.minWidth = "200px";
-
-    var nameLabel = document.createElement("label");
-    nameLabel.htmlFor = "f-name";
-    nameLabel.textContent = "Display Name (optional)";
-    nameGroup.appendChild(nameLabel);
-
-    var nameInput = document.createElement("input");
-    nameInput.type = "text";
-    nameInput.id = "f-name";
-    nameInput.name = "name";
-    nameInput.placeholder = "e.g. My Todo App";
-    nameInput.autocomplete = "off";
-    nameGroup.appendChild(nameInput);
-
-    row1.appendChild(nameGroup);
-    form.appendChild(row1);
-
-    // Row 2: repo_type select
-    var row2 = document.createElement("div");
-
-    var repoLabel = document.createElement("label");
-    repoLabel.htmlFor = "f-repo-type";
-    repoLabel.textContent = "Repository Type";
-    row2.appendChild(repoLabel);
-
-    var repoSelect = document.createElement("select");
-    repoSelect.id = "f-repo-type";
-    repoSelect.name = "repo_type";
-
-    var optNew = document.createElement("option");
-    optNew.value = "new";
-    optNew.textContent = "New (create fresh repo)";
-    repoSelect.appendChild(optNew);
-
-    var optExisting = document.createElement("option");
-    optExisting.value = "existing";
-    optExisting.textContent = "Existing (use local repo)";
-    repoSelect.appendChild(optExisting);
-
-    var optClone = document.createElement("option");
-    optClone.value = "clone";
-    optClone.textContent = "Clone (from URL)";
-    repoSelect.appendChild(optClone);
-
-    row2.appendChild(repoSelect);
-    form.appendChild(row2);
-
-    // Row 3: repo_path (shown when "existing" is selected)
-    var row3 = document.createElement("div");
-    row3.id = "f-repo-path-group";
-    row3.style.display = "none";
-
-    var pathLabel = document.createElement("label");
-    pathLabel.htmlFor = "f-repo-path";
-    pathLabel.textContent = "Local Repo Path";
-    row3.appendChild(pathLabel);
-
-    var pathInput = document.createElement("input");
-    pathInput.type = "text";
-    pathInput.id = "f-repo-path";
-    pathInput.name = "repo_path";
-    pathInput.placeholder = "/home/user/projects/my-app";
-    pathInput.autocomplete = "off";
-    row3.appendChild(pathInput);
-
-    form.appendChild(row3);
-
-    // Row 4: repo_url (shown when "clone" is selected)
-    var row4 = document.createElement("div");
-    row4.id = "f-repo-url-group";
-    row4.style.display = "none";
-
-    var urlLabel = document.createElement("label");
-    urlLabel.htmlFor = "f-repo-url";
-    urlLabel.textContent = "Git URL";
-    row4.appendChild(urlLabel);
-
-    var urlInput = document.createElement("input");
-    urlInput.type = "text";
-    urlInput.id = "f-repo-url";
-    urlInput.name = "repo_url";
-    urlInput.placeholder = "https://github.com/user/repo.git";
-    urlInput.autocomplete = "off";
-    row4.appendChild(urlInput);
-
-    form.appendChild(row4);
-
-    // Row 5: Error message area
-    var errorArea = document.createElement("div");
-    errorArea.id = "f-form-error";
-    errorArea.style.color = "var(--del-color, #d04040)";
-    errorArea.style.display = "none";
-    form.appendChild(errorArea);
-
-    // Row 6: Action buttons
-    var buttonRow = document.createElement("div");
-    buttonRow.style.display = "flex";
-    buttonRow.style.flexDirection = "row";
-    buttonRow.style.gap = "0.5rem";
-
-    var submitBtn = document.createElement("button");
-    submitBtn.type = "submit";
-    submitBtn.textContent = "Create Project";
-    buttonRow.appendChild(submitBtn);
-
-    var cancelBtn = document.createElement("button");
-    cancelBtn.type = "button";
-    cancelBtn.className = "outline";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", function () {
-      _toggleForm();
-    });
-    buttonRow.appendChild(cancelBtn);
-
-    form.appendChild(buttonRow);
-
-    // ── Conditional repo fields on select change ──
-    repoSelect.addEventListener("change", function () {
-      var val = this.value;
-      var pathGroup = document.getElementById("f-repo-path-group");
-      var urlGroup = document.getElementById("f-repo-url-group");
-      if (pathGroup) { pathGroup.style.display = val === "existing" ? "block" : "none"; }
-      if (urlGroup) { urlGroup.style.display = val === "clone" ? "block" : "none"; }
-    });
-
-    // ── Form submit handler ──
-    form.addEventListener("submit", function (e) {
-      e.preventDefault();
-      _handleFormSubmit();
-    });
-
-    return form;
+  function escapeHtml(str) {
+    if (typeof str !== "string") return "";
+    return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function escapeAttr(str) {
+    if (typeof str !== "string") return "";
+    return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
 
-  // ── Form toggle ───────────────────────────────────────────────────
+  // ── Config manifest loading ───────────────────────────────────────
 
-  /**
-   * Show or hide the inline "new project" form.
-   * Resets form fields when opening.
-   */
-  function _toggleForm() {
-    _formOpen = !_formOpen;
-    var formContainer = document.getElementById("new-project-form");
-    if (!formContainer) {
-      return;
-    }
-
-    if (_formOpen) {
-      formContainer.style.display = "block";
-      // Reset form fields
-      var form = document.getElementById("form-new-project");
-      if (form) {
-        form.reset();
-      }
-      // Hide conditional fields
-      var pathGroup = document.getElementById("f-repo-path-group");
-      var urlGroup = document.getElementById("f-repo-url-group");
-      if (pathGroup) { pathGroup.style.display = "none"; }
-      if (urlGroup) { urlGroup.style.display = "none"; }
-      // Hide errors
-      _hideFormError();
-      _hideFieldError("f-project-id-error");
-      // Focus the project_id field
-      var idInput = document.getElementById("f-project-id");
-      if (idInput) {
-        setTimeout(function () { idInput.focus(); }, 100);
-      }
-    } else {
-      formContainer.style.display = "none";
-    }
-  }
-
-
-  // ── Form validation ──────────────────────────────────────────────
-
-  /**
-   * Collect and validate form data.
-   *
-   * @returns {{valid: boolean, errors: object, data: object}}
-   *   errors is a field-name → error-message mapping.
-   *   data contains trimmed field values (only populated when valid).
-   */
-  function _validateForm() {
-    var idInput = document.getElementById("f-project-id");
-    var nameInput = document.getElementById("f-name");
-    var repoSelect = document.getElementById("f-repo-type");
-    var pathInput = document.getElementById("f-repo-path");
-    var urlInput = document.getElementById("f-repo-url");
-
-    var errors = {};
-    var data = {};
-
-    // project_id: required, non-empty after trim
-    var projectId = idInput ? idInput.value.trim() : "";
-    if (!projectId) {
-      errors.project_id = "Project ID is required";
-    } else if (!/^[a-z0-9][a-z0-9_-]*$/.test(projectId)) {
-      // Allow alphanumeric, hyphens, underscores — must start with alnum
-      errors.project_id = "Project ID must start with a letter or digit, and contain only letters, digits, hyphens, or underscores";
-    } else {
-      data.project_id = projectId;
-    }
-
-    // name (optional)
-    var name = nameInput ? nameInput.value.trim() : "";
-    if (name) {
-      data.name = name;
-    }
-
-    // repo_type (default "new")
-    var repoType = repoSelect ? repoSelect.value : "new";
-    data.repo_type = repoType;
-
-    // repo_path (required for "existing")
-    if (repoType === "existing") {
-      var repoPath = pathInput ? pathInput.value.trim() : "";
-      if (!repoPath) {
-        errors.repo_path = "Local repo path is required when using existing repository";
-      } else {
-        data.repo_path = repoPath;
-      }
-    }
-
-    // repo_url (required for "clone")
-    if (repoType === "clone") {
-      var repoUrl = urlInput ? urlInput.value.trim() : "";
-      if (!repoUrl) {
-        errors.repo_url = "Git URL is required when cloning a repository";
-      } else {
-        data.repo_url = repoUrl;
-      }
-    }
-
-    return {
-      valid: Object.keys(errors).length === 0,
-      errors: errors,
-      data: data,
-    };
-  }
-
-
-  /**
-   * Show a field-level validation error message.
-   *
-   * @param {string} errorId — element ID of the error <small>
-   * @param {string} message — error text to show
-   */
-  function _showFieldError(errorId, message) {
-    var el = document.getElementById(errorId);
-    if (el) {
-      el.textContent = message;
-      el.style.display = "block";
-    }
-  }
-
-  /**
-   * Hide a field-level validation error message.
-   *
-   * @param {string} errorId — element ID of the error <small>
-   */
-  function _hideFieldError(errorId) {
-    var el = document.getElementById(errorId);
-    if (el) {
-      el.textContent = "";
-      el.style.display = "none";
-    }
-  }
-
-  /**
-   * Show a form-level error message.
-   *
-   * @param {string} message — error text
-   */
-  function _showFormError(message) {
-    var el = document.getElementById("f-form-error");
-    if (el) {
-      el.textContent = message;
-      el.style.display = "block";
-    }
-  }
-
-  /**
-   * Hide the form-level error message.
-   */
-  function _hideFormError() {
-    var el = document.getElementById("f-form-error");
-    if (el) {
-      el.textContent = "";
-      el.style.display = "none";
-    }
-  }
-
-
-  // ── Form submit handling ─────────────────────────────────────────
-
-  /**
-   * Handle the new-project form submission.
-   * Validates → calls API.createProject() → handles 409/success/error.
-   */
-  function _handleFormSubmit() {
-    var result = _validateForm();
-    if (!result.valid) {
-      // Show inline validation errors
-      _hideFormError();
-      for (var field in result.errors) {
-        if (result.errors.hasOwnProperty(field)) {
-          if (field === "project_id") {
-            _showFieldError("f-project-id-error", result.errors[field]);
-          } else if (field === "repo_path") {
-            _showFieldError("f-repo-path-error", result.errors[field]);
-          } else if (field === "repo_url") {
-            _showFieldError("f-repo-url-error", result.errors[field]);
-          } else {
-            _showFormError(result.errors[field]);
-          }
-        }
-      }
-      return;
-    }
-
-    // Clear errors
-    _hideFieldError("f-project-id-error");
-    _hideFormError();
+  var _configsLoaded = false;
+  function _loadConfigs() {
+    if (_configsLoaded) { return; }
 
     var api = window.AItelier && window.AItelier.API;
-    if (!api || typeof api.createProject !== "function") {
-      _showFormError("API client not available");
-      return;
+    if (!api || typeof api.getConfigs !== "function") { return; }
+
+    api.getConfigs().then(function (resp) {
+      if (!resp || !resp.configs) { return; }
+      // Keep a cache of manifests for other views
+      var cache = {};
+      resp.configs.forEach(function (m) {
+        cache[m.config_name] = m;
+        var labels = m.labels || {};
+        Object.keys(labels).forEach(function (k) { _STEP_LABELS[k] = labels[k]; });
+      });
+      window.AItelier = window.AItelier || {};
+      window.AItelier.configManifests = cache;
+    }).catch(function () { _configsLoaded = false; });
+  }
+
+
+  // ── New Project / DPE form ────────────────────────────────────────
+
+  /** Toggle the DPE new-project inline create form. */
+  function _toggleForm() {
+    var form = document.getElementById("new-project-form");
+    if (!form) { return; }
+
+    var opening = form.style.display === "none" || !form.style.display;
+    if (opening) {
+      // Close any other start-run forms
+      _closeAllStartForms();
+      form.style.display = "block";
+      _formOpen = true;
+      var nameInput = form.querySelector("[name=project_name]");
+      if (nameInput) { nameInput.focus(); }
+    } else {
+      form.style.display = "none";
+      _formOpen = false;
+    }
+  }
+
+  /** Wire the new-project form elements. */
+  function _initNewProjectForm() {
+    var form = document.getElementById("new-project-form");
+    if (!form) { return; }
+
+    var nameInput = form.querySelector("[name=project_name]");
+    var textInput = form.querySelector("[name=seed_text]");
+    var submitBtn = form.querySelector("button[type=submit]");
+    var cancelBtn = form.querySelector(".btn-cancel");
+
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", function (e) {
+        e.preventDefault();
+        form.style.display = "none";
+        _formOpen = false;
+      });
     }
 
-    // Disable submit button to prevent double-submit
-    var submitBtn = document.querySelector("#form-new-project button[type='submit']");
-    if (submitBtn) {
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (!submitBtn) { return; }
+
+      var name = nameInput ? nameInput.value.trim() : "";
+      var seed = textInput ? textInput.value.trim() : "";
+
+      if (!name) {
+        // Try to auto-generate a name from seed text
+        if (seed) {
+          name = seed.slice(0, 48).replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "") || "project";
+        }
+        if (!name) {
+          // Highlight the name input
+          if (nameInput) { nameInput.style.borderColor = "red"; nameInput.focus(); }
+          return;
+        }
+      }
+
+      var api = window.AItelier && window.AItelier.API;
+      if (!api || typeof api.startRun !== "function") { return; }
+
       submitBtn.disabled = true;
-      submitBtn.textContent = "Creating\u2026";
-    }
+      submitBtn.textContent = "Starting\u2026";
 
-    api.createProject(result.data).then(function () {
-      // Success — close form and refresh
-      _toggleForm();
-      if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Create Project";
-      }
-      _refresh();
-    }).catch(function (err) {
-      if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Create Project";
-      }
-
-      if (err && err.status === 409) {
-        _showFormError("Project already exists");
-      } else if (err && err.status === 400) {
-        _showFormError(err.message || "Invalid input");
-      } else {
-        var msg = (err && err.message) || "Failed to create project";
-        _showFormError(msg);
-      }
+      api.startRun({ config_name: "dpe_default_v2", name: name, seed_text: seed || undefined })
+        .then(function () {
+          form.style.display = "none";
+          _formOpen = false;
+          if (nameInput) { nameInput.value = ""; }
+          if (textInput) { textInput.value = ""; }
+          _refresh();
+        })
+        .catch(function (err) {
+          var msg = (err && err.message) || "Failed to start DPE run";
+          try {
+            var app = window.AItelier && window.AItelier.App;
+            if (app && typeof app.showError === "function") {
+              app.showError(msg);
+            }
+          } catch (_e) {
+            window.alert(msg);
+          }
+        })
+        .finally(function () {
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Start";
+        });
     });
   }
 
 
-  // ── Delete confirmation ──────────────────────────────────────────
+  // ── Confirmation dialog ───────────────────────────────────────────
 
-  /**
-   * Show the confirm dialog for deleting a project.
-   *
-   * @param {string} projectId — the project to delete
-   */
   function _confirmDelete(projectId) {
-    if (!projectId) {
-      return;
-    }
+    if (!projectId) { return; }
 
-    _pendingDeleteId = projectId;
+    // Find the run name from local data
+    var name = projectId;
 
-    var dialog = document.getElementById("confirm-dialog");
-    if (!dialog) {
-      return;
-    }
-
-    // Set dialog title and message
-    var titleEl = document.getElementById("confirm-title");
-    if (titleEl) {
-      titleEl.textContent = "Delete Project";
-    }
-
-    var msgEl = document.getElementById("confirm-message");
-    if (msgEl) {
-      msgEl.textContent = 'Are you sure you want to delete "' + projectId + '"? This will permanently remove all tasks, files, and workspace data.';
-    }
-
-    // Bind confirm button event
-    var yesBtn = document.getElementById("confirm-yes");
-    var noBtn = document.getElementById("confirm-no");
-
-    function cleanUp() {
-      if (yesBtn) { yesBtn.removeEventListener("click", _onConfirm); }
-      if (noBtn) { noBtn.removeEventListener("click", _onCancel); }
-      dialog.removeEventListener("close", _onCancel);
-    }
-
-    function _onConfirm() {
-      cleanUp();
-      _executeDelete(_pendingDeleteId);
-      _pendingDeleteId = null;
-      if (typeof dialog.close === "function") {
-        dialog.close();
+    // Try to use a proper modal if available
+    try {
+      var app = window.AItelier && window.AItelier.App;
+      if (app && typeof app.confirm === "function") {
+        app.confirm(
+          "Delete Run",
+          "Are you sure you want to delete this run? This cannot be undone.",
+          function (ok) {
+            if (ok) { _doDelete(projectId); }
+          }
+        );
+        return;
       }
-    }
+    } catch (_e) { /* fall through */ }
 
-    function _onCancel() {
-      cleanUp();
-      _pendingDeleteId = null;
-    }
-
-    yesBtn.addEventListener("click", _onConfirm);
-    noBtn.addEventListener("click", _onCancel);
-    dialog.addEventListener("close", _onCancel);
-
-    // Show the dialog
-    if (typeof dialog.showModal === "function") {
-      dialog.showModal();
+    if (window.confirm("Delete this run permanently?")) {
+      _doDelete(projectId);
     }
   }
 
-  /**
-   * Execute the delete API call and refresh on success.
-   *
-   * @param {string} projectId
-   */
-  function _executeDelete(projectId) {
-    if (!projectId) {
-      return;
-    }
+  function _doDelete(projectId) {
+    if (!projectId) { return; }
 
     var api = window.AItelier && window.AItelier.API;
     if (!api || typeof api.deleteProject !== "function") {
@@ -1242,4 +934,16 @@
 
   window.AItelier = window.AItelier || {};
   window.AItelier.Dashboard = Dashboard;
+
+  // Expose internal helpers for inline onclick handlers in rendered HTML
+  Dashboard._onStartRun = _onStartRun;
+  Dashboard._closeAllStartForms = _closeAllStartForms;
+
+  // Init the new-project form after DOM ready
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", _initNewProjectForm);
+  } else {
+    _initNewProjectForm();
+  }
+
 })();

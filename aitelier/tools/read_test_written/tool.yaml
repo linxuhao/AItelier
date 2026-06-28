@@ -1,0 +1,10 @@
+name: read_test_written
+description: >
+  Read back a SCRATCH file previously written with test_write (from your private
+  per-step temp folder). Returns {content} on success or {error} if the scratch
+  file does not exist.
+parameters:
+  filename:
+    type: string
+    description: "Scratch file name to read (the same name you used with test_write)."
+    required: true

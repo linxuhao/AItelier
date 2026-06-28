@@ -100,7 +100,7 @@ task_implementer:
   model: "deepseek/deepseek-v4-flash"
   temperature: 0.2
   template: "task_implementer.md"
-  tools: ["list_tree", "write"]
+  tools: ["list_tree", "write", "test_write", "read_test_written"]
   max_output_tokens: 32768
   max_tool_turns: 15
   native_tool_calling: true

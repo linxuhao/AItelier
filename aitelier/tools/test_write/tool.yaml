@@ -1,0 +1,16 @@
+name: test_write
+description: >
+  Write a SCRATCH file to your private per-step temp folder (NOT the project
+  repo and NOT step output — scratch files are never committed or delivered).
+  Use it for throwaway notes, intermediate data, or to check that writing works.
+  Read it back with read_test_written. Never write scratch/test files into the
+  project repo itself.
+parameters:
+  filename:
+    type: string
+    description: "Scratch file name, e.g. notes.txt (relative path; no '..' or absolute paths)."
+    required: true
+  content:
+    type: string
+    description: "Text content to write."
+    required: true

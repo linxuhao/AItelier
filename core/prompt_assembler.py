@@ -52,6 +52,23 @@ class PromptAssembler:
         self.aitelier_root = aitelier_root or Path.cwd()
         self._repo_type = repo_type
 
+    @staticmethod
+    def _is_checker(write_tools, step_id: str = "") -> bool:
+        """Whether a step is a CHECKER (reviewer/verifier) vs a MAKER, for
+        role-aware output-delivery framing. Reviewers are identified
+        structurally (step_id ends in ``_review``); other checkers (e.g. the
+        final verifier, step "5") by having only verdict/report write tools.
+
+        NOTE: an explicit per-step role flag would be more robust than the
+        tool-name substring fallback — deferred; no current step is
+        misclassified.
+        """
+        if step_id and step_id.endswith("_review"):
+            return True
+        return bool(write_tools) and all(
+            ("verdict" in t or "report" in t) for t in write_tools
+        )
+
     def assemble(self, step_id: str, project_path: Path,
                  task_card: str = "", feedback: str = "",
                  task_id: int | None = None, code_path: Path = None,
@@ -99,12 +116,8 @@ class PromptAssembler:
                 tool_list = ", ".join(f"`{t}`" for t in write_tools)
                 # Role-aware framing: a CHECKER step (reviewer/verifier) only
                 # writes a verdict/report — telling it to "produce every output
-                # file" pulls it toward authoring/implementing. Classify by its
-                # write tools: verdict/report-only → checker; anything else →
-                # maker.
-                is_checker = all(
-                    ("verdict" in t or "report" in t) for t in write_tools
-                )
+                # file" pulls it toward authoring/implementing.
+                is_checker = self._is_checker(write_tools, step_id)
                 if is_checker:
                     delivery = (
                         "[Output Delivery — REQUIRED]\n"
@@ -192,9 +205,9 @@ class PromptAssembler:
                     "The step is complete only once you have written ALL required "
                     "output files."
                 )
-                # Role-aware: a checker (verdict/report-only) shouldn't be nudged
+                # Role-aware: a checker (reviewer/verifier) shouldn't be nudged
                 # toward authoring/implementing.
-                if all(("verdict" in t or "report" in t) for t in write_tools):
+                if self._is_checker(write_tools, step_id):
                     delivery += (
                         "\nNOTE: You are a CHECKER step — only emit your "
                         "verdict/report via the tool above; do NOT modify project "

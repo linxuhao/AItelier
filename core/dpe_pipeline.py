@@ -1072,11 +1072,14 @@ class PipelineEngine:
         self._code_path = code_path
 
         feedback = ""
-        # Carryover across attempts (parity with JSON mode): exploration results
-        # and feedback are re-injected into later attempts so a retry does not
-        # restart cold and re-read the same files, repeating the same failure.
-        cached_exploration: list[str] = []
-        feedback_history: list[str] = []
+        # Carryover across attempts (parity with JSON mode) done the cache-optimal
+        # way: a retry CONTINUES the prior attempt's message list (byte-identical
+        # prefix → KV-cache hit) and just appends a corrective nudge, rather than
+        # rebuilding a fresh prompt with the exploration re-summarised as novel
+        # (cache-missing) text. `messages` and `last_reasoning` therefore persist
+        # across attempts.
+        messages: list[dict] = []
+        last_reasoning = ""  # cached for deepseek: replay on tool-only turns
         self._current_step = step_id
         self._step_start = time.time()
         # Tool schemas → OpenAI format.
@@ -1132,86 +1135,82 @@ class PipelineEngine:
                 "preview": f"Step {step_id} Attempt {attempt}/{max_retries} (native)",
             })
 
-            # Build initial messages. F1: project-global stable content (workspace
-            # layout + brief [+ design when F2]) goes in a byte-identical system
-            # preamble so the provider KV cache reuses it across every step;
-            # assemble() omits those blocks from the user message (hoist_*).
-            user_prompt = self.assembler.assemble(
-                step_id, project_path, "", feedback,
-                task_id=task_id, code_path=code_path,
-                resolved_context=resolved_ctx,
-                tool_schemas=self._tool_schemas,
-                native=True,
-                hoist_globals=use_preamble,
-                hoist_design=use_preamble,
-            )
+            if attempt == 1:
+                # Build initial messages. F1: project-global stable content
+                # (workspace layout + brief [+ design when F2]) goes in a
+                # byte-identical system preamble so the provider KV cache reuses
+                # it across every step; assemble() omits those blocks from the
+                # user message (hoist_*).
+                user_prompt = self.assembler.assemble(
+                    step_id, project_path, "", feedback,
+                    task_id=task_id, code_path=code_path,
+                    resolved_context=resolved_ctx,
+                    tool_schemas=self._tool_schemas,
+                    native=True,
+                    hoist_globals=use_preamble,
+                    hoist_design=use_preamble,
+                )
 
-            # Inject turn budget so the agent can pace exploration.
-            # NOTE: appended AFTER assemble()'s volatile tail (resolved context /
-            # tree / feedback), so this block is past the cache-prefix boundary —
-            # editing it does NOT perturb prefix caching. Kept native-only.
-            user_prompt += (
-                f"\n\n[Turn Budget: {max_turns} turns total, then forced output]\n"
-                "You are a workflow automation step, not a chat assistant: your "
-                "visible reply text is never shown to anyone and is discarded — "
-                "only tool calls have any effect, and a reply with no tool call "
-                "ends the step immediately.\n"
-                "Plan your exploration, then call write_*/create_* to produce the "
-                "required output. The moment all required files are written, call "
-                "finish_step immediately. Do NOT re-read, re-list, search, or "
-                "otherwise re-verify files you just wrote — writes are trusted and "
-                "already staged, so re-verifying them only burns turns. Never end "
-                "a turn with a plain-text 'done' / 'written successfully' note; "
-                "your final action must be a tool call (the write tool, then "
-                "finish_step). Do not exhaust all turns on exploration — leave at "
-                "least 1 turn for writing."
-            )
-
-            # Parity with JSON mode: on a retry, re-inject what prior attempts
-            # already explored (deduped) and every prior feedback message, so
-            # the agent builds on that context instead of re-exploring from
-            # scratch. Appended after the volatile tail → no cache-prefix impact.
-            if attempt > 1 and cached_exploration:
-                seen: set[str] = set()
-                deduped: list[str] = []
-                for entry in cached_exploration:
-                    if entry not in seen:
-                        seen.add(entry)
-                        deduped.append(entry)
+                # Inject turn budget so the agent can pace exploration.
+                # NOTE: appended AFTER assemble()'s volatile tail (resolved
+                # context / tree / feedback), past the cache-prefix boundary —
+                # editing it does NOT perturb prefix caching. Kept native-only.
                 user_prompt += (
-                    "\n\n[Cached Exploration Results from Previous Attempt(s) — "
-                    "do NOT re-read these; use them and write your output]\n"
-                    + "\n".join(deduped)
-                )
-            if attempt > 1 and feedback_history:
-                user_prompt += (
-                    "\n\n[Previous Attempt Feedback]\n"
-                    + "\n---\n".join(feedback_history)
+                    f"\n\n[Turn Budget: {max_turns} turns total, then forced output]\n"
+                    "You are a workflow automation step, not a chat assistant: your "
+                    "visible reply text is never shown to anyone and is discarded — "
+                    "only tool calls have any effect, and a reply with no tool call "
+                    "ends the step immediately.\n"
+                    "Plan your exploration, then call write_*/create_* to produce the "
+                    "required output. The moment all required files are written, call "
+                    "finish_step immediately. Do NOT re-read, re-list, search, or "
+                    "otherwise re-verify files you just wrote — writes are trusted and "
+                    "already staged, so re-verifying them only burns turns. Never end "
+                    "a turn with a plain-text 'done' / 'written successfully' note; "
+                    "your final action must be a tool call (the write tool, then "
+                    "finish_step). Do not exhaust all turns on exploration — leave at "
+                    "least 1 turn for writing."
                 )
 
-            if use_preamble:
-                preamble = self.assembler.build_shared_preamble(
-                    project_path, code_path, graph_name=graph_name,
-                    preamble_steps=preamble_steps, include_design=True,
-                )
-                system_content = f"{preamble}\n\n{agent.system_prompt}"
+                if use_preamble:
+                    preamble = self.assembler.build_shared_preamble(
+                        project_path, code_path, graph_name=graph_name,
+                        preamble_steps=preamble_steps, include_design=True,
+                    )
+                    system_content = f"{preamble}\n\n{agent.system_prompt}"
+                else:
+                    system_content = agent.system_prompt
+                messages = [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_prompt},
+                ]
+                self._trace("prompt", "user_prompt", {
+                    "attempt": attempt, "mode": "native",
+                    # Trace the ACTUAL system message sent (incl. the shared
+                    # preamble), not just the role template.
+                    "system": system_content, "user": user_prompt,
+                })
             else:
-                system_content = agent.system_prompt
-            messages: list[dict] = [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_prompt},
-            ]
-
-            self._trace("prompt", "user_prompt", {
-                "attempt": attempt, "mode": "native",
-                # Trace the ACTUAL system message sent (incl. the shared preamble),
-                # not just the role template, so traces reflect the real request.
-                "system": system_content, "user": user_prompt,
-            })
+                # Retry: CONTINUE the prior attempt's conversation. Everything
+                # already in `messages` is byte-identical to what the provider
+                # cached during the previous attempt, so the whole exploration
+                # prefix is a KV-cache HIT — far cheaper than rebuilding the
+                # prompt with the exploration re-summarised as novel tokens.
+                # Just append a corrective nudge.
+                nudge = (
+                    (f"{feedback}\n\n" if feedback else "")
+                    + "[Retry] Your previous attempt produced NO output file. "
+                    "Do not re-read or re-explore — you already have everything "
+                    "above. Your VERY NEXT action MUST be write_/create_ tool "
+                    "call(s) to produce the required file(s), then finish_step."
+                )
+                messages.append({"role": "user", "content": nudge})
+                self._trace("prompt", "user_prompt", {
+                    "attempt": attempt, "mode": "native", "user": nudge,
+                })
 
             written_files: list[str] = []
             turn_count = 0
-            last_reasoning = ""  # cached for deepseek: replay on tool-only turns
 
             for turn_count in range(max_turns):
                 remaining = max_turns - turn_count
@@ -1388,12 +1387,6 @@ class PipelineEngine:
                     wf = tool_result.get("written", "")
                     if wf:
                         written_files.append(wf)
-                    elif tool_name not in ("finish_step", "ask_more_turns"):
-                        # Cache exploration (read/search/list) results so a later
-                        # attempt can reuse them instead of re-exploring cold.
-                        params_str = json.dumps(params, ensure_ascii=False)
-                        cached_exploration.append(
-                            f"Tool: {tool_name}({params_str})\nResult: {result_str}")
 
 
                 # Apply ask_more_turns budget extension after all tool calls
@@ -1424,7 +1417,6 @@ class PipelineEngine:
                 )
                 if turn_count >= max_turns - 1:
                     feedback = f"Max turns ({max_turns}) exceeded. " + feedback
-                feedback_history.append(f"Attempt {attempt}: {feedback}")
                 self._emit("step_retry", {"attempt": attempt, "error": feedback[:200]})
                 continue
 

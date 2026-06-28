@@ -127,3 +127,43 @@ def test_exploration_exhaustion_still_raises(engine):
     with pytest.raises(MaxRetriesExceeded):
         _run(engine, ws)
     assert not ws.written_drafts  # floor did not trigger
+
+
+def test_retry_continues_conversation_for_cache_reuse(engine):
+    """Cache-friendly carryover: a retry CONTINUES the prior attempt's message
+    list (so the cached prefix is reused) instead of rebuilding a fresh prompt.
+    Verified by checking the retry's first turn already sees attempt-1's
+    assistant/tool messages, and the system+initial-user prompt is unchanged."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"output": "read result"})
+    engine.factory.get_max_tool_turns.return_value = 2
+    engine.factory.get_max_retries.return_value = 2  # allow a retry
+
+    snapshots = []  # (roles tuple, first-user-content) per turn
+
+    def rec(messages, tools, tool_choice):
+        roles = tuple(m["role"] for m in messages)
+        snapshots.append((roles, messages[1]["content"] if len(messages) > 1 else None))
+        # attempt 1: explore (read) both turns → no write → retry.
+        # attempt 2 (4th turn overall): write, then finish.
+        if len(snapshots) <= 2:
+            return _turn(tool_calls=[_tc("read_file", {"path": "README.md"})])
+        if len(snapshots) == 3:
+            return _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})])
+        return _turn(tool_calls=[_tc("finish_step")])
+
+    engine._exec_tool = MagicMock(side_effect=lambda a: (
+        {"written": "main.py"} if a["tool"] == "write" else {"output": "r"}))
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.side_effect = rec
+    assert _run(engine, ws) is True
+
+    # The retry's first turn (snapshot index 2) must have MORE messages than
+    # attempt-1 turn-1 (continuation, not a 2-message rebuild) and include a
+    # 'tool' role from the prior exploration.
+    a1_first_roles = snapshots[0][0]
+    retry_first_roles = snapshots[2][0]
+    assert len(retry_first_roles) > len(a1_first_roles)
+    assert "tool" in retry_first_roles
+    # The cached prefix (system + initial user prompt) is byte-identical.
+    assert snapshots[2][1] == snapshots[0][1]

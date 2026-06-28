@@ -211,6 +211,7 @@ def get_run_detail(
         "cache_hit_tokens": total_hit,
         "cache_miss_tokens": total_miss,
         "hit_ratio": run_hit_ratio,
+        "total_tokens": total,
     }
     run["cache_stats_by_step"] = per_step
     return run

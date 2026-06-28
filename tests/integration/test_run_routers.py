@@ -60,9 +60,11 @@ def test_run_detail_includes_cache_stats(client):
     assert "cache_hit_tokens" in data["cache_stats"]
     assert "cache_miss_tokens" in data["cache_stats"]
     assert "hit_ratio" in data["cache_stats"]
-    # With no usage traces, hit_ratio should be None
+    assert "total_tokens" in data["cache_stats"]
+    # With no usage traces, hit_ratio should be None, total_tokens 0
     assert data["cache_stats"]["hit_ratio"] is None
     assert data["cache_stats"]["cache_hit_tokens"] == 0
+    assert data["cache_stats"]["total_tokens"] == 0
     # Per-step map must be present
     assert "cache_stats_by_step" in data
     assert isinstance(data["cache_stats_by_step"], dict)
@@ -82,3 +84,4 @@ def test_list_all_runs_includes_cache_stats(client):
         assert "cache_hit_tokens" in our_run["cache_stats"]
         assert "cache_miss_tokens" in our_run["cache_stats"]
         assert "hit_ratio" in our_run["cache_stats"]
+        assert "total_tokens" in our_run["cache_stats"]

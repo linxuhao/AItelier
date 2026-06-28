@@ -25,6 +25,7 @@ def _build_stats_dict(
         "cache_hit_tokens": cache_hit_tokens,
         "cache_miss_tokens": cache_miss_tokens,
         "hit_ratio": hit_ratio,
+        "total_tokens": total,
     }
 
 
@@ -39,7 +40,7 @@ def compute_cache_stats_per_step(run_id: str) -> Dict[str, Dict[str, Any]]:
         run_id: The skillflow internal run UUID (not project_id).
 
     Returns:
-        Dict mapping step_id -> {cache_hit_tokens, cache_miss_tokens, hit_ratio}.
+        Dict mapping step_id -> {cache_hit_tokens, cache_miss_tokens, hit_ratio, total_tokens}.
         Steps with no token_usage traces are absent from the dict (callers treat
         missing keys as zero/no-data).
     """
@@ -76,7 +77,7 @@ def compute_cache_stats_batch(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         run_ids: List of skillflow internal run UUIDs.
 
     Returns:
-        Dict mapping internal run UUID -> {cache_hit_tokens, cache_miss_tokens, hit_ratio}.
+        Dict mapping internal run UUID -> {cache_hit_tokens, cache_miss_tokens, hit_ratio, total_tokens}.
         Run IDs with no token_usage traces are absent from the dict (callers treat
         missing keys as zero/no-data).
     """

@@ -18,10 +18,32 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+def _kill_group(proc) -> None:
+    """SIGKILL the process's whole session/group, then reap it.
+
+    pytest spawns child processes (e.g. git subprocesses from the project's own
+    test suite). subprocess timeout only kills the direct child, leaving the
+    grandchildren orphaned → reparented to PID 1 → zombies. Launching pytest with
+    start_new_session=True puts it in its own process group so we can take the
+    whole tree down here.
+    """
+    if proc is None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
 
 
 def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | None]:
@@ -86,29 +108,41 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # AItelier's tests instead of the project's.  Only the project root
             # belongs on the path.
             env = {**os.environ, "PYTHONPATH": str(repo)}
+            # start_new_session=True → pytest leads its own process group so we
+            # can SIGKILL the whole tree (incl. git subprocesses it spawns) on
+            # timeout or any error; otherwise those grandchildren leak as zombies.
+            proc = None
             try:
                 # --rootdir forces pytest root to the project repo so it doesn't
                 # walk up and find AItelier's pytest.ini (whose testpaths=tests
                 # would cause discovery of AItelier's own test suite).
-                r = subprocess.run(
+                proc = subprocess.Popen(
                     [py, "-m", "pytest", str(repo), "-q", "--tb=short",
                      "-p", "no:cacheprovider",
                      "--rootdir", str(repo)],
-                    capture_output=True, text=True, timeout=180, cwd=str(repo), env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    cwd=str(repo), env=env, start_new_session=True,
                 )
-                out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
-                report["returncode"] = r.returncode
+                stdout, stderr = proc.communicate(timeout=180)
+                out = ((stdout or "") + "\n" + (stderr or "")).strip()
+                report["returncode"] = proc.returncode
                 # pytest: 0=all passed, 5=no tests collected (not a failure), 1=failures
-                report["passed"] = r.returncode in (0, 5)
+                report["passed"] = proc.returncode in (0, 5)
                 report["failures"] = [ln.strip() for ln in out.splitlines()
                                       if ln.startswith("FAILED") or " FAILED " in ln][:50]
-                report["summary"] = ("No tests were collected." if r.returncode == 5
+                report["summary"] = ("No tests were collected." if proc.returncode == 5
                                      else out[-3000:])
             except subprocess.TimeoutExpired:
+                _kill_group(proc)
                 report.update(passed=False, summary="pytest timed out after 180s")
             except Exception as e:  # never raise — the step must not fail
+                _kill_group(proc)
                 report.update(passed=False, summary=f"Error running pytest: {e}")
             finally:
+                # Belt-and-suspenders: even on the success path pytest may leave
+                # stray children — take the group down before cleaning up.
+                if proc is not None:
+                    _kill_group(proc)
                 if venv_dir:
                     shutil.rmtree(venv_dir, ignore_errors=True)
 

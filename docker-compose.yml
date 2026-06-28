@@ -22,6 +22,11 @@ services:
         APP_GID: ${AITELIER_GID:-1000}
     image: aitelier:latest
     container_name: aitelier
+    # PID 1 = a minimal init (tini) that reaps orphaned grandchildren. The
+    # run_tests tool shells out to pytest, which spawns git subprocesses; if a
+    # run is killed/times out the git children get reparented to PID 1, and a
+    # bare uvicorn PID 1 never wait()s on them → zombie pile-up → PID exhaustion.
+    init: true
     # Run as the host user → files written into ~/.AItelier keep host ownership.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
     environment:

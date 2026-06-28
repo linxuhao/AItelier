@@ -697,9 +697,9 @@ class DBManager:
             if not row:
                 raise ValueError(f"Project {project_id} not found")
             return {
+                "repo_path": row["repo_path"] or "",
+                "repo_url": row["repo_url"] or "",
                 "repo_type": row["repo_type"] or "new",
-                "repo_path": row["repo_path"],
-                "repo_url": row["repo_url"],
             }
 
     def delete_project(self, project_id: str) -> bool:
@@ -1398,135 +1398,20 @@ class DBManager:
         run = sf.get_run_by_project(project_id)
         run_reactivated = run and run["status"] in ("failed", "completed")
         if run_reactivated:
-            sf.reactivate_run(run["id"])
+            sf.reactivate_run(project_id)
 
+        # Reset all FAILED tasks to PENDING
         with self.get_connection() as conn:
+            from core.workspace_manager import TASK_STEP_SEQUENCE
+            first_step = TASK_STEP_SEQUENCE[0] if TASK_STEP_SEQUENCE else "t_plan"
             cursor = conn.execute(
-                "UPDATE tasks SET status = ?, current_step = 't_plan', completed_steps = '[]', "
-                "retry_count = COALESCE(retry_count, 0) + 1 "
+                "UPDATE tasks SET status = ?, current_step = ?, completed_steps = '[]' "
                 "WHERE project_id = ? AND status = ?",
-                (TaskStatus.PENDING.value, project_id, TaskStatus.FAILED.value)
+                (TaskStatus.PENDING.value, first_step, project_id, TaskStatus.FAILED.value)
             )
             conn.commit()
-            return run_reactivated or cursor.rowcount > 0
-
-    def is_project_planning_complete(self, project_id: str) -> bool:
-        """Check if project planning phase (steps 1_5, 2, 3) is fully complete.
-
-        Reads from skillflow_steps via public API (source of truth).
-        Falls back to legacy completed_project_steps for backward compatibility.
-        """
-        from core.workspace_manager import PROJECT_STEP_SEQUENCE
-        import json as _json
-
-        # Primary: check skillflow state via public API
-        meta = self.get_project_meta_state(project_id)
-        run_id = None
-        if meta:
-            try:
-                ms = _json.loads(meta)
-                run_id = ms.get("skillflow_run_id")
-            except (_json.JSONDecodeError, ValueError):
-                pass
-
-        if run_id:
-            try:
-                from api.dependencies import get_skillflow
-                sf = get_skillflow()
-                steps = sf.get_steps(run_id)
-                step_status = {s["step_id"]: s["status"] for s in steps}
-                if step_status and all(
-                    step_status.get(s) == "completed" for s in PROJECT_STEP_SEQUENCE
-                ):
-                    return True
-            except Exception:
-                pass
-
-        # Fallback: legacy tracking
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT completed_project_steps FROM dpe_run_state WHERE run_key = ?",
-                (project_id,)
-            ).fetchone()
-            if not row or not row[0]:
-                return False
-            completed = _json.loads(row[0])
-            return all(s in completed for s in PROJECT_STEP_SEQUENCE)
-
-    def get_planning_pre_done_steps(self, project_id: str) -> list[str]:
-        """Return the completed-step list a new task inherits from a fully-planned project."""
-        from core.workspace_manager import PROJECT_STEP_SEQUENCE
-        return ["1"] + list(PROJECT_STEP_SEQUENCE)
-
-    def set_task_meta_state(self, task_id: int, meta_state: str):
-        """Store error details in task meta_state for retrieval by /errors."""
-        with self.get_connection() as conn:
-            conn.execute(
-                "UPDATE tasks SET task_meta_state = ? WHERE id = ?",
-                (meta_state, task_id)
-            )
-            conn.commit()
-
-    def get_task_meta_state(self, task_id: int) -> str | None:
-        """Retrieve error details from task meta_state."""
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT task_meta_state FROM tasks WHERE id = ?",
-                (task_id,)
-            ).fetchone()
-            return row[0] if row else None
-
-    def set_completed_project_steps(self, project_id: str, steps: list[str]):
-        """Deprecated: skillflow tracks this in skillflow_steps."""
-
-    def increment_tasks_since_update(self, project_id: str):
-        """Increment the counter of tasks completed since last arch update."""
-        with self.get_connection() as conn:
-            cur = conn.execute(
-                "UPDATE dpe_run_state "
-                "SET tasks_since_arch_update = COALESCE(tasks_since_arch_update, 0) + 1 "
-                "WHERE run_key = ?",
-                (project_id,)
-            )
-            if cur.rowcount == 0:
-                self._upsert_dpe_state(conn, project_id, tasks_since_arch_update=1)
-            conn.execute(
-                "UPDATE runs SET updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
-                (project_id,)
-            )
-            conn.commit()
-
-    def reset_tasks_since_update(self, project_id: str):
-        """Reset the counter after a planning refresh; bump the SOTA version."""
-        with self.get_connection() as conn:
-            cur = conn.execute(
-                "UPDATE dpe_run_state "
-                "SET tasks_since_arch_update = 0, "
-                "sota_version = COALESCE(sota_version, 1) + 1, "
-                "sota_updated_at = CURRENT_TIMESTAMP "
-                "WHERE run_key = ?",
-                (project_id,)
-            )
-            if cur.rowcount == 0:
-                self._upsert_dpe_state(
-                    conn, project_id, tasks_since_arch_update=0, sota_version=2
-                )
-            conn.execute(
-                "UPDATE runs SET updated_at = CURRENT_TIMESTAMP WHERE project_id = ?",
-                (project_id,)
-            )
-            conn.commit()
-
-    def should_refresh_planning(self, project_id: str, threshold: int = 5) -> bool:
-        """Check if run-level planning needs refresh based on task count."""
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT tasks_since_arch_update FROM dpe_run_state WHERE run_key = ?",
-                (project_id,)
-            ).fetchone()
-            if not row:
-                return False
-            return (row["tasks_since_arch_update"] or 0) >= threshold
+            tasks_reset = cursor.rowcount > 0
+        return run_reactivated or tasks_reset
 
     # ── Chat history persistence ─────────────────────────────────────
 
@@ -1678,6 +1563,54 @@ class DBManager:
                     (limit,),
                 ).fetchall()
             return [dict(r) for r in rows]
+
+    # ── User tracking ──
+
+    def upsert_user(self, email: str, display_name: str | None = None, source: str = "cloudflare"):
+        """Upsert a user row, updating last_seen_at to CURRENT_TIMESTAMP.
+
+        Args:
+            email: User's email address (primary key).
+            display_name: Optional display name. Falls back to email if None.
+            source: Origin of the user record (default 'cloudflare').
+        """
+        if display_name is None:
+            display_name = email  # column is NOT NULL
+        with self.get_connection() as conn:
+            conn.execute(
+                "INSERT INTO users (email, display_name, source, last_seen_at) "
+                "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(email) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP",
+                (email, display_name, source),
+            )
+            conn.commit()
+
+    def list_logged_users(self, limit: int = 50) -> list[dict]:
+        """Return users ordered by last_seen_at DESC, with computed access_rights.
+
+        Each result dict includes: email, display_name, source, created_at,
+        last_seen_at, access_rights ("writer" or "reader").
+
+        Args:
+            limit: Maximum number of users to return (default 50).
+
+        Returns:
+            List of dicts, empty list if no users tracked yet.
+        """
+        # Local import to avoid circular dependency (api.authz imports from core)
+        from api.authz import WRITERS
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT email, display_name, source, created_at, last_seen_at "
+                "FROM users ORDER BY last_seen_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                d["access_rights"] = "writer" if d["email"].lower() in WRITERS else "reader"
+                result.append(d)
+            return result
 
     def _migrate_task_steps(self, conn):
         """Migrate mid-flight task steps from old sequence (t_sota, t_design) to new (t_plan)."""

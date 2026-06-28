@@ -25,9 +25,8 @@
       <ul>
         <li><strong>AItelier</strong></li>
       </ul>
-      <ul>
-        <li><a href="#/">Dashboard</a></li>
-        <li><a href="#/chat">Chat</a></li>
+      <ul id="nav-links">
+        <!-- Dynamically rendered by App._renderNav() -->
       </ul>
       <ul>
         <li><span id="connection-status">● Connected</span></li>
@@ -36,13 +35,14 @@
   </header>
 
   <!-- ════════════════════════════════════════════════════════════
-       View Container — three switchable panels
+       View Container — switchable panels
        ════════════════════════════════════════════════════════════ -->
   <main id="view-container">
     <section id="view-dashboard"></section>
     <section id="view-project"></section>
     <section id="view-chat"></section>
     <section id="view-trace"></section>
+    <section id="view-tracking"></section>
   </main>
 
   <!-- ════════════════════════════════════════════════════════════
@@ -138,6 +138,7 @@
   <script src="/web/js/views/chat.js"></script>
   <script src="/web/js/views/checkpoint.js"></script>
   <script src="/web/js/views/trace.js"></script>
+  <script src="/web/js/views/tracking.js"></script>
 
   <!-- App entry (depends on all above) -->
   <script src="/web/js/app.js"></script>

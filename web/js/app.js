@@ -64,6 +64,35 @@
 
 
   // ════════════════════════════════════════════════════════════════════
+  //  Navigation Bar (dynamic — reader safe)
+  // ════════════════════════════════════════════════════════════════════
+
+  /**
+   * Render the navigation bar links dynamically based on write permission.
+   * The Tracking link is ONLY added when state.canWrite is true — it is
+   * absent from the DOM for readers.
+   */
+  function _renderNav() {
+    var navUl = document.getElementById("nav-links");
+    if (!navUl) { return; }
+
+    var links = [
+      { href: "#/", label: "Dashboard" },
+      { href: "#/chat", label: "Chat" },
+    ];
+
+    // Only writers see the Tracking link
+    if (state.canWrite) {
+      links.push({ href: "#/tracking", label: "Tracking" });
+    }
+
+    navUl.innerHTML = links.map(function (l) {
+      return '<li><a href="' + l.href + '">' + l.label + '</a></li>';
+    }).join("");
+  }
+
+
+  // ════════════════════════════════════════════════════════════════════
   //  Read-only mode
   // ════════════════════════════════════════════════════════════════════
 
@@ -86,6 +115,8 @@
         document.body.classList.add("readonly");
         _showReadOnlyBanner(me && me.email);
       }
+      // Re-render nav to conditionally include Tracking link
+      _renderNav();
       // Re-render the active view so any controls rendered during the
       // pre-resolution window now reflect the confirmed permission.
       _refreshActiveViewPermissions();
@@ -93,6 +124,7 @@
       // /api/me unreachable (e.g. local dev without gate) — leave writes on,
       // but mark resolved so affordances stop failing closed.
       state.permissionResolved = true;
+      _renderNav();
       _refreshActiveViewPermissions();
     });
   }
@@ -125,6 +157,9 @@
       } else if (state.currentView === "dashboard" && A.Dashboard &&
           typeof A.Dashboard.refresh === "function") {
         A.Dashboard.refresh();
+      } else if (state.currentView === "tracking" && A.UserTracking &&
+          typeof A.UserTracking.show === "function") {
+        A.UserTracking.show();
       }
     } catch (_e) {
       // Permission re-render is best-effort; views also self-correct on poll.
@@ -351,6 +386,9 @@
     if (viewObj === window.AItelier.Chat) {
       return "chat";
     }
+    if (viewObj === window.AItelier.UserTracking) {
+      return "tracking";
+    }
     return "";
   }
 
@@ -395,7 +433,7 @@
   /** Truncate a string for inline display. */
   function _truncate(s, n) {
     s = String(s || "");
-    return s.length > n ? s.slice(0, n) + "…" : s;
+    return s.length > n ? s.slice(0, n) + "\u2026" : s;
   }
 
   /**
@@ -414,54 +452,54 @@
     var step = _stepLabel(stepId, graph);
     var files = Array.isArray(event.files) ? event.files : [];
     var filePreview = files.length
-      ? files.slice(0, 3).join(", ") + (files.length > 3 ? ", …" : "")
+      ? files.slice(0, 3).join(", ") + (files.length > 3 ? ", \u2026" : "")
       : "";
 
     switch (type) {
       case "run_started":
       case "pipeline_started":
-        return { icon: "▶", text: "Pipeline started", detail: "" };
+        return { icon: "\u25B6", text: "Pipeline started", detail: "" };
       case "step_claimed":
       case "step_start":
-        return { icon: "▶", text: step || "step", detail: "" };
+        return { icon: "\u25B6", text: step || "step", detail: "" };
       case "step_completed":
       case "step_end":
-        return { icon: "✓", text: (step || "step") + " completed", detail: "" };
+        return { icon: "\u2713", text: (step || "step") + " completed", detail: "" };
       case "step_done":
-        return { icon: "✓", text: (step || "step") + (filePreview ? " → " + filePreview : ""), detail: filePreview };
+        return { icon: "\u2713", text: (step || "step") + (filePreview ? " \u2192 " + filePreview : ""), detail: filePreview };
       case "files_written":
         return filePreview
-          ? { icon: "✎", text: "Wrote " + filePreview, detail: files.join(", ") }
+          ? { icon: "\u270E", text: "Wrote " + filePreview, detail: files.join(", ") }
           : null;
       case "step_timeout":
-        return { icon: "⏰", text: (step || "step") + " timed out", detail: "" };
+        return { icon: "\u23F0", text: (step || "step") + " timed out", detail: "" };
       case "step_failed":
         var err = _truncate(event.error || event.reason || "", 100);
-        return { icon: "✗", text: (step || "step") + (err ? ": " + err : " failed"), detail: event.error || "" };
+        return { icon: "\u2717", text: (step || "step") + (err ? ": " + err : " failed"), detail: event.error || "" };
       case "checkpoint_reached":
       case "checkpoint_paused":
-        return { icon: "⏸", text: (event.label || "Checkpoint") + " — awaiting review", detail: "" };
+        return { icon: "\u23F8", text: (event.label || "Checkpoint") + " \u2014 awaiting review", detail: "" };
       case "checkpoint_resolved":
       case "checkpoint_approved":
-        return { icon: "✓", text: (event.label || "Checkpoint") + " " + (event.action || "approved"), detail: "" };
+        return { icon: "\u2713", text: (event.label || "Checkpoint") + " " + (event.action || "approved"), detail: "" };
       case "checkpoint_rejected":
       case "step_checkpoint_rejected":
-        return { icon: "↺", text: (event.label || "Checkpoint") + " rejected — redo", detail: "" };
+        return { icon: "\u21BA", text: (event.label || "Checkpoint") + " rejected \u2014 redo", detail: "" };
       case "agent_message":
         var content = _truncate(event.content || "", 140);
         if (!content) { return null; }
         var lvl = event.level || "info";
-        var lvlIcon = lvl === "milestone" ? "★" : (lvl === "warning" ? "⚠" : "ℹ");
+        var lvlIcon = lvl === "milestone" ? "\u2605" : (lvl === "warning" ? "\u26A0" : "\u2139");
         return { icon: lvlIcon, text: content, detail: event.content || "" };
       case "project_completed":
-        return { icon: "✓", text: "Project completed", detail: "" };
+        return { icon: "\u2713", text: "Project completed", detail: "" };
       case "project_failed":
       case "run_failed":
         var reason = _truncate(event.reason || event.error || "", 100);
-        return { icon: "✗", text: "Project failed" + (reason ? ": " + reason : ""), detail: event.reason || "" };
+        return { icon: "\u2717", text: "Project failed" + (reason ? ": " + reason : ""), detail: event.reason || "" };
       default:
         // Unknown step-scoped event — show a minimal line rather than dropping it.
-        if (stepId) { return { icon: "·", text: step, detail: "" }; }
+        if (stepId) { return { icon: "\u00B7", text: step, detail: "" }; }
         return null;
     }
   }
@@ -506,7 +544,7 @@
     var metaParts = [ts];
     if (project) { metaParts.push(project); }
     if (task) { metaParts.push(task); }
-    meta.textContent = metaParts.join(" · ");
+    meta.textContent = metaParts.join(" \u00B7 ");
     item.appendChild(meta);
 
     // Line 2: icon + message
@@ -706,6 +744,11 @@
       if (detail && typeof detail.refresh === "function") {
         detail.refresh();
       }
+    } else if (currentView === "tracking") {
+      var tracking = window.AItelier && window.AItelier.UserTracking;
+      if (tracking && typeof tracking.show === "function") {
+        tracking.show();
+      }
     }
     // Chat view doesn't need automatic refresh from SSE — it's
     // conversation-driven.
@@ -878,6 +921,7 @@
     var projectDetail = window.AItelier && window.AItelier.ProjectDetail;
     var chat = window.AItelier && window.AItelier.Chat;
     var trace = window.AItelier && window.AItelier.Trace;
+    var userTracking = window.AItelier && window.AItelier.UserTracking;
 
     // Validate required views
     if (!dashboard || !projectDetail || !chat) {
@@ -895,6 +939,10 @@
     // Trace view is optional — only register if it loaded.
     if (!trace) {
       routes = routes.filter(function (r) { return r.view !== trace; });
+    }
+    // UserTracking view is optional (writer-only) — register if loaded.
+    if (userTracking) {
+      routes.push({ pattern: "#/tracking", view: userTracking });
     }
     router.init(routes);
 
@@ -914,6 +962,8 @@
         if (match && match[1]) {
           state.currentProjectId = decodeURIComponent(match[1]);
         }
+      } else if (hash.indexOf("#/tracking") === 0) {
+        state.currentView = "tracking";
       } else {
         state.currentView = "dashboard";
       }

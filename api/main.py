@@ -32,6 +32,7 @@ from api.meta_routers import router as meta_router
 from api.agent_routers import router as agent_router
 from api.run_routers import router as run_router
 from api.config_routers import router as config_router
+from api.admin_routers import router as admin_router
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
 
@@ -211,6 +212,7 @@ app.include_router(meta_router)
 app.include_router(agent_router)
 app.include_router(run_router)
 app.include_router(config_router)
+app.include_router(admin_router)
 
 # ── Serve generated web UI static files ──
 _WEB_DIR = _Path(__file__).resolve().parent.parent / "web"
@@ -315,6 +317,9 @@ def health_check():
 def whoami(request: Request):
     """Current identity + write permission (for the web UI to reflect state)."""
     email = cf_access.email_from_request_headers(request.headers, request.cookies)
+    if email:
+        from api.dependencies import db_instance
+        db_instance.upsert_user(email)
     return {
         "email": email,
         "can_write": authz.request_can_write(request),

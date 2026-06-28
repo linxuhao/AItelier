@@ -15,6 +15,7 @@ from api.settings_routers import router as settings_router
 from api.meta_routers import router as meta_router
 from api.run_routers import router as run_router
 from api.config_routers import router as config_router
+from api.admin_routers import router as admin_router
 from api.auth import get_optional_user
 from web_api.auth import get_current_user
 from core.scheduler import start_scheduler
@@ -76,6 +77,7 @@ app.include_router(settings_router)
 app.include_router(run_router)
 app.include_router(config_router)
 app.include_router(meta_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

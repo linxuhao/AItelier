@@ -48,6 +48,6 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     # skillflow brief slot, emitted by the finalize tool step.
     db.set_project_brief(project_id, format_brief_as_markdown(brief))
 
-    db.set_completed_project_steps(project_id, ["1"])
+    db.update_project(project_id, completed_project_steps=json.dumps(["1"]))
     wake_scheduler()
     return {"status": "submitted", "project_id": project_id, "next_step": "1"}

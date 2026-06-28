@@ -498,6 +498,25 @@ body {
 }
 .run-step-retry { background: rgba(224, 49, 49, 0.25); color: #c92a2a; }
 
+/* Cache hit ratio badge (pipeline stepper) */
+.run-step-cache {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0 0.25rem;
+  border-radius: 0.5rem;
+  margin-left: 0.2rem;
+}
+.cache-badge-high { color: #2e7d32; background: rgba(46, 125, 50, 0.12); }
+.cache-badge-mid  { color: #f57f17; background: rgba(245, 127, 23, 0.12); }
+.cache-badge-low  { color: #c62828; background: rgba(198, 40, 40, 0.12); }
+
+/* Cache inline badge (dashboard status cell) */
+.cache-inline-badge {
+  font-size: 0.8rem;
+  font-weight: 600;
+  margin-left: 0.3rem;
+}
+
 .run-detail-panel:not(:empty) {
   margin-top: 0.6rem;
   border-top: 1px solid var(--muted-border-color, #eee);

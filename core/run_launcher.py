@@ -42,7 +42,10 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
                      seed_inputs: dict | None = None,
                      name: str | None = None,
                      owner_email: str = "cli@local",
-                     priority: int = 0) -> dict:
+                     priority: int = 0,
+                     repo_type: str = "new",
+                     repo_url: str | None = None,
+                     repo_path: str | None = None) -> dict:
     """Start a run of ``config_name`` keyed by ``project_id``.
 
     ``seed_text`` is written to the config's ``manifest.seed_file``; ``seed_inputs``
@@ -59,21 +62,24 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
     if not db.get_project(project_id):
         db.ensure_project(project_id, name=name, owner_email=owner_email,
-                          config_name=config_name)
+                          repo_type=repo_type, repo_path=repo_path,
+                          repo_url=repo_url, config_name=config_name)
     if priority:
         db.update_project(project_id, priority=priority)
 
     # DPE keeps its proven brief→step-1 seeding ritual.
     seed_inputs = seed_inputs or {}
     if config_name == "dpe_default_v2" and isinstance(seed_inputs.get("brief"), dict):
-        ws.setup_workspace(project_id, repo_type=seed_inputs.get("repo_type", "new"))
+        ws.setup_workspace(project_id, repo_type=seed_inputs.get("repo_type", repo_type),
+                           repo_path=repo_path, repo_url=repo_url)
         from core.project_submit import seed_and_trigger
         result = seed_and_trigger(db, ws, project_id, seed_inputs["brief"])
         result.setdefault("config_name", config_name)
         result["scheduler_owned"] = manifest.scheduler_owned
         return result
 
-    ws.setup_workspace(project_id, repo_type="new")
+    ws.setup_workspace(project_id, repo_type=repo_type,
+                       repo_path=repo_path, repo_url=repo_url)
     sf = get_skillflow()
 
     # Write seeds into the config's seed dir (read by the first step's

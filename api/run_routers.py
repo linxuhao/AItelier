@@ -25,6 +25,9 @@ class StartRunRequest(BaseModel):
     name: Optional[str] = None
     seed_text: Optional[str] = None      # written to the config's seed_file
     priority: int = 0
+    repo_type: str = "new"               # 'new' | 'existing' | 'clone'
+    repo_url: Optional[str] = None       # required for 'clone'
+    repo_path: Optional[str] = None      # required for 'existing'
 
 
 @router.post("/runs", status_code=201)
@@ -45,6 +48,8 @@ def start_run(
         db, ws, body.config_name, project_id,
         seed_text=body.seed_text, name=body.name,
         owner_email=owner, priority=body.priority,
+        repo_type=body.repo_type, repo_url=body.repo_url,
+        repo_path=body.repo_path,
     )
     if result.get("status") == "error":
         raise HTTPException(400, result.get("message", "failed to start run"))

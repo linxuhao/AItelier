@@ -606,6 +606,28 @@
 
     container.innerHTML = html;
 
+    // Mount the DPE new-project form + reconnect overlay at the top. Rebuilt
+    // every render so they survive polling; the form's open state is restored
+    // from _formOpen/_startFormConfig (polling is paused while _formOpen).
+    var reconnectOverlay = document.createElement("div");
+    reconnectOverlay.id = "dashboard-reconnect-overlay";
+    reconnectOverlay.style.display = "none";
+    reconnectOverlay.style.textAlign = "center";
+    reconnectOverlay.style.padding = "1rem";
+    reconnectOverlay.textContent = "Reconnecting…";
+    container.insertBefore(reconnectOverlay, container.firstChild);
+
+    var formContainer = document.createElement("div");
+    formContainer.id = "new-project-form";
+    formContainer.style.display =
+      (_formOpen && _startFormConfig === "dpe_default_v2") ? "block" : "none";
+    formContainer.style.marginBottom = "var(--pico-spacing, 1rem)";
+    formContainer.style.padding = "var(--pico-spacing, 1rem)";
+    formContainer.style.border = "1px solid var(--muted-border-color, #e0e0e0)";
+    formContainer.style.borderRadius = "0.5rem";
+    formContainer.appendChild(_buildNewProjectForm());
+    container.insertBefore(formContainer, container.firstChild);
+
     // Now attach the actual table DOM elements (so each row can have event listeners)
     var bodyDivs = container.querySelectorAll(".pipeline-body");
     var bodyIdx = 0;
@@ -672,120 +694,397 @@
 
   // ── New Project / DPE form ────────────────────────────────────────
 
-  /** Toggle the DPE new-project inline create form. */
-  function _toggleForm() {
-    var form = document.getElementById("new-project-form");
-    if (!form) { return; }
+  // Recovered from git (pre-92078f8) and grafted onto the runs model. The form
+  // is rebuilt with its own wiring by _renderTable on every render, so it
+  // survives polling. The only adaptation from the original: submit goes to the
+  // generic run-launch path (startRun \u2192 POST /api/runs) instead of createProject,
+  // and that path now honors repo_type/repo_url/repo_path (see run_launcher.py),
+  // so new / existing / clone repos can all be launched from the dashboard.
 
-    var opening = form.style.display === "none" || !form.style.display;
-    if (opening) {
-      // Close any other start-run forms
-      _closeAllStartForms();
-      form.style.display = "block";
-      _formOpen = true;
-      var nameInput = form.querySelector("[name=project_name]");
-      if (nameInput) { nameInput.focus(); }
-    } else {
-      form.style.display = "none";
-      _formOpen = false;
-    }
-  }
+  /** Build the inline "new project" form (DOM, self-wired). */
+  function _buildNewProjectForm() {
+    var form = document.createElement("form");
+    form.id = "form-new-project";
+    form.style.display = "flex";
+    form.style.flexDirection = "column";
+    form.style.gap = "0.75rem";
 
-  /** Wire the new-project form elements. */
-  function _initNewProjectForm() {
-    var form = document.getElementById("new-project-form");
-    if (!form) { return; }
+    // Row 1: project_id (optional slug) + name (optional)
+    var row1 = document.createElement("div");
+    row1.style.display = "flex";
+    row1.style.flexDirection = "row";
+    row1.style.gap = "0.75rem";
+    row1.style.flexWrap = "wrap";
 
-    var nameInput = form.querySelector("[name=project_name]");
-    var textInput = form.querySelector("[name=seed_text]");
-    var submitBtn = form.querySelector("button[type=submit]");
-    var cancelBtn = form.querySelector(".btn-cancel");
+    var idGroup = document.createElement("div");
+    idGroup.style.flex = "1";
+    idGroup.style.minWidth = "200px";
+    var idLabel = document.createElement("label");
+    idLabel.htmlFor = "f-project-id";
+    idLabel.textContent = "Project ID (slug, optional)";
+    idGroup.appendChild(idLabel);
+    var idInput = document.createElement("input");
+    idInput.type = "text";
+    idInput.id = "f-project-id";
+    idInput.name = "project_id";
+    idInput.placeholder = "auto-generated if blank";
+    idInput.autocomplete = "off";
+    idGroup.appendChild(idInput);
+    var idError = document.createElement("small");
+    idError.id = "f-project-id-error";
+    idError.style.color = "var(--del-color, #d04040)";
+    idError.style.display = "none";
+    idGroup.appendChild(idError);
+    row1.appendChild(idGroup);
 
-    if (cancelBtn) {
-      cancelBtn.addEventListener("click", function (e) {
-        e.preventDefault();
-        form.style.display = "none";
-        _formOpen = false;
-      });
-    }
+    var nameGroup = document.createElement("div");
+    nameGroup.style.flex = "1";
+    nameGroup.style.minWidth = "200px";
+    var nameLabel = document.createElement("label");
+    nameLabel.htmlFor = "f-name";
+    nameLabel.textContent = "Display Name (optional)";
+    nameGroup.appendChild(nameLabel);
+    var nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.id = "f-name";
+    nameInput.name = "name";
+    nameInput.placeholder = "e.g. My Todo App";
+    nameInput.autocomplete = "off";
+    nameGroup.appendChild(nameInput);
+    row1.appendChild(nameGroup);
+    form.appendChild(row1);
+
+    // Build request (seed text) \u2014 what DPE works from.
+    var seedGroup = document.createElement("div");
+    var seedLabel = document.createElement("label");
+    seedLabel.htmlFor = "f-seed-text";
+    seedLabel.textContent = "Build request";
+    seedGroup.appendChild(seedLabel);
+    var seedInput = document.createElement("textarea");
+    seedInput.id = "f-seed-text";
+    seedInput.name = "seed_text";
+    seedInput.rows = 3;
+    seedInput.placeholder = "Describe what to build, or the change to make on the repo";
+    seedGroup.appendChild(seedInput);
+    form.appendChild(seedGroup);
+
+    // Row 2: repo_type select
+    var row2 = document.createElement("div");
+    var repoLabel = document.createElement("label");
+    repoLabel.htmlFor = "f-repo-type";
+    repoLabel.textContent = "Repository Type";
+    row2.appendChild(repoLabel);
+    var repoSelect = document.createElement("select");
+    repoSelect.id = "f-repo-type";
+    repoSelect.name = "repo_type";
+    var optNew = document.createElement("option");
+    optNew.value = "new";
+    optNew.textContent = "New (create fresh repo)";
+    repoSelect.appendChild(optNew);
+    var optExisting = document.createElement("option");
+    optExisting.value = "existing";
+    optExisting.textContent = "Existing (use local repo)";
+    repoSelect.appendChild(optExisting);
+    var optClone = document.createElement("option");
+    optClone.value = "clone";
+    optClone.textContent = "Clone (from URL)";
+    repoSelect.appendChild(optClone);
+    row2.appendChild(repoSelect);
+    form.appendChild(row2);
+
+    // Row 3: repo_path (shown when "existing")
+    var row3 = document.createElement("div");
+    row3.id = "f-repo-path-group";
+    row3.style.display = "none";
+    var pathLabel = document.createElement("label");
+    pathLabel.htmlFor = "f-repo-path";
+    pathLabel.textContent = "Local Repo Path";
+    row3.appendChild(pathLabel);
+    var pathInput = document.createElement("input");
+    pathInput.type = "text";
+    pathInput.id = "f-repo-path";
+    pathInput.name = "repo_path";
+    pathInput.placeholder = "/home/user/projects/my-app";
+    pathInput.autocomplete = "off";
+    row3.appendChild(pathInput);
+    var pathError = document.createElement("small");
+    pathError.id = "f-repo-path-error";
+    pathError.style.color = "var(--del-color, #d04040)";
+    pathError.style.display = "none";
+    row3.appendChild(pathError);
+    form.appendChild(row3);
+
+    // Row 4: repo_url (shown when "clone")
+    var row4 = document.createElement("div");
+    row4.id = "f-repo-url-group";
+    row4.style.display = "none";
+    var urlLabel = document.createElement("label");
+    urlLabel.htmlFor = "f-repo-url";
+    urlLabel.textContent = "Git URL";
+    row4.appendChild(urlLabel);
+    var urlInput = document.createElement("input");
+    urlInput.type = "text";
+    urlInput.id = "f-repo-url";
+    urlInput.name = "repo_url";
+    urlInput.placeholder = "https://github.com/user/repo.git";
+    urlInput.autocomplete = "off";
+    row4.appendChild(urlInput);
+    var urlError = document.createElement("small");
+    urlError.id = "f-repo-url-error";
+    urlError.style.color = "var(--del-color, #d04040)";
+    urlError.style.display = "none";
+    row4.appendChild(urlError);
+    form.appendChild(row4);
+
+    // Form-level error
+    var errorArea = document.createElement("div");
+    errorArea.id = "f-form-error";
+    errorArea.style.color = "var(--del-color, #d04040)";
+    errorArea.style.display = "none";
+    form.appendChild(errorArea);
+
+    // Action buttons
+    var buttonRow = document.createElement("div");
+    buttonRow.style.display = "flex";
+    buttonRow.style.flexDirection = "row";
+    buttonRow.style.gap = "0.5rem";
+    var submitBtn = document.createElement("button");
+    submitBtn.type = "submit";
+    submitBtn.textContent = "Create Project";
+    buttonRow.appendChild(submitBtn);
+    var cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "outline";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", function () { _toggleForm(); });
+    buttonRow.appendChild(cancelBtn);
+    form.appendChild(buttonRow);
+
+    // Conditional repo fields on select change
+    repoSelect.addEventListener("change", function () {
+      var val = this.value;
+      var pathGroup = document.getElementById("f-repo-path-group");
+      var urlGroup = document.getElementById("f-repo-url-group");
+      if (pathGroup) { pathGroup.style.display = val === "existing" ? "block" : "none"; }
+      if (urlGroup) { urlGroup.style.display = val === "clone" ? "block" : "none"; }
+    });
 
     form.addEventListener("submit", function (e) {
       e.preventDefault();
-      if (!submitBtn) { return; }
+      _handleFormSubmit();
+    });
 
-      var name = nameInput ? nameInput.value.trim() : "";
-      var seed = textInput ? textInput.value.trim() : "";
+    return form;
+  }
 
-      if (!name) {
-        // Try to auto-generate a name from seed text
-        if (seed) {
-          name = seed.slice(0, 48).replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "") || "project";
-        }
-        if (!name) {
-          // Highlight the name input
-          if (nameInput) { nameInput.style.borderColor = "red"; nameInput.focus(); }
-          return;
+  /** Show or hide the inline new-project form; resets fields when opening. */
+  function _toggleForm() {
+    _formOpen = !_formOpen;
+    var formContainer = document.getElementById("new-project-form");
+    if (!formContainer) { return; }
+
+    if (_formOpen) {
+      _closeAllStartForms();
+      _formOpen = true;  // _closeAllStartForms clears it
+      _startFormConfig = "dpe_default_v2";
+      formContainer.style.display = "block";
+      var form = document.getElementById("form-new-project");
+      if (form) { form.reset(); }
+      var pathGroup = document.getElementById("f-repo-path-group");
+      var urlGroup = document.getElementById("f-repo-url-group");
+      if (pathGroup) { pathGroup.style.display = "none"; }
+      if (urlGroup) { urlGroup.style.display = "none"; }
+      _hideFormError();
+      _hideFieldError("f-project-id-error");
+      var idInput = document.getElementById("f-project-id");
+      if (idInput) { setTimeout(function () { idInput.focus(); }, 100); }
+    } else {
+      formContainer.style.display = "none";
+      _startFormConfig = null;
+    }
+  }
+
+  /** Collect + validate form fields. @returns {{valid, errors, data}} */
+  function _validateForm() {
+    var idInput = document.getElementById("f-project-id");
+    var nameInput = document.getElementById("f-name");
+    var seedInput = document.getElementById("f-seed-text");
+    var repoSelect = document.getElementById("f-repo-type");
+    var pathInput = document.getElementById("f-repo-path");
+    var urlInput = document.getElementById("f-repo-url");
+
+    var errors = {};
+    var data = { config_name: "dpe_default_v2" };
+
+    // project_id: optional, but if given must be a valid slug
+    var projectId = idInput ? idInput.value.trim() : "";
+    if (projectId) {
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(projectId)) {
+        errors.project_id = "Project ID must start with a lowercase letter or digit, and contain only lowercase letters, digits, hyphens, or underscores";
+      } else {
+        data.project_id = projectId;
+      }
+    }
+
+    var name = nameInput ? nameInput.value.trim() : "";
+    if (name) { data.name = name; }
+
+    var seed = seedInput ? seedInput.value.trim() : "";
+    if (seed) { data.seed_text = seed; }
+
+    var repoType = repoSelect ? repoSelect.value : "new";
+    data.repo_type = repoType;
+
+    if (repoType === "existing") {
+      var repoPath = pathInput ? pathInput.value.trim() : "";
+      if (!repoPath) {
+        errors.repo_path = "Local repo path is required when using an existing repository";
+      } else {
+        data.repo_path = repoPath;
+      }
+    }
+
+    if (repoType === "clone") {
+      var repoUrl = urlInput ? urlInput.value.trim() : "";
+      if (!repoUrl) {
+        errors.repo_url = "Git URL is required when cloning a repository";
+      } else {
+        data.repo_url = repoUrl;
+      }
+    }
+
+    return {
+      valid: Object.keys(errors).length === 0,
+      errors: errors,
+      data: data,
+    };
+  }
+
+  function _showFieldError(errorId, message) {
+    var el = document.getElementById(errorId);
+    if (el) { el.textContent = message; el.style.display = "block"; }
+  }
+  function _hideFieldError(errorId) {
+    var el = document.getElementById(errorId);
+    if (el) { el.textContent = ""; el.style.display = "none"; }
+  }
+  function _showFormError(message) {
+    var el = document.getElementById("f-form-error");
+    if (el) { el.textContent = message; el.style.display = "block"; }
+  }
+  function _hideFormError() {
+    var el = document.getElementById("f-form-error");
+    if (el) { el.textContent = ""; el.style.display = "none"; }
+  }
+
+  /** Validate -> POST /api/runs (honors repo_type/url/path) -> close + refresh. */
+  function _handleFormSubmit() {
+    var result = _validateForm();
+    if (!result.valid) {
+      _hideFormError();
+      _hideFieldError("f-project-id-error");
+      _hideFieldError("f-repo-path-error");
+      _hideFieldError("f-repo-url-error");
+      for (var field in result.errors) {
+        if (!result.errors.hasOwnProperty(field)) { continue; }
+        if (field === "project_id") {
+          _showFieldError("f-project-id-error", result.errors[field]);
+        } else if (field === "repo_path") {
+          _showFieldError("f-repo-path-error", result.errors[field]);
+        } else if (field === "repo_url") {
+          _showFieldError("f-repo-url-error", result.errors[field]);
+        } else {
+          _showFormError(result.errors[field]);
         }
       }
+      return;
+    }
 
-      var api = window.AItelier && window.AItelier.API;
-      if (!api || typeof api.startRun !== "function") { return; }
+    _hideFieldError("f-project-id-error");
+    _hideFieldError("f-repo-path-error");
+    _hideFieldError("f-repo-url-error");
+    _hideFormError();
 
-      submitBtn.disabled = true;
-      submitBtn.textContent = "Starting\u2026";
+    var api = window.AItelier && window.AItelier.API;
+    if (!api || typeof api.startRun !== "function") {
+      _showFormError("API client not available");
+      return;
+    }
 
-      api.startRun({ config_name: "dpe_default_v2", name: name, seed_text: seed || undefined })
-        .then(function () {
-          form.style.display = "none";
-          _formOpen = false;
-          if (nameInput) { nameInput.value = ""; }
-          if (textInput) { textInput.value = ""; }
-          _refresh();
-        })
-        .catch(function (err) {
-          var msg = (err && err.message) || "Failed to start DPE run";
-          try {
-            var app = window.AItelier && window.AItelier.App;
-            if (app && typeof app.showError === "function") {
-              app.showError(msg);
-            }
-          } catch (_e) {
-            window.alert(msg);
-          }
-        })
-        .finally(function () {
-          submitBtn.disabled = false;
-          submitBtn.textContent = "Start";
-        });
+    var submitBtn = document.querySelector("#form-new-project button[type='submit']");
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Creating\u2026"; }
+
+    api.startRun(result.data).then(function () {
+      // Success \u2014 _toggleForm flips _formOpen (true here) so it closes.
+      _toggleForm();
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Create Project"; }
+      _refresh();
+    }).catch(function (err) {
+      if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Create Project"; }
+      if (err && err.status === 409) {
+        _showFormError("Project already exists");
+      } else if (err && err.status === 400) {
+        _showFormError((err && err.message) || "Invalid input");
+      } else {
+        _showFormError((err && err.message) || "Failed to create project");
+      }
     });
   }
 
 
   // ── Confirmation dialog ───────────────────────────────────────────
 
+  // Recovered from git: the styled #confirm-dialog modal (in index.html), with a
+  // per-project message and proper listener cleanup. Falls back to nothing if the
+  // dialog markup is absent.
   function _confirmDelete(projectId) {
     if (!projectId) { return; }
 
-    // Find the run name from local data
-    var name = projectId;
+    _pendingDeleteId = projectId;
 
-    // Try to use a proper modal if available
-    try {
-      var app = window.AItelier && window.AItelier.App;
-      if (app && typeof app.confirm === "function") {
-        app.confirm(
-          "Delete Run",
-          "Are you sure you want to delete this run? This cannot be undone.",
-          function (ok) {
-            if (ok) { _doDelete(projectId); }
-          }
-        );
-        return;
+    var dialog = document.getElementById("confirm-dialog");
+    if (!dialog) {
+      // No modal markup — fall back to a native confirm so delete still works.
+      if (window.confirm('Delete "' + projectId + '" permanently?')) {
+        _doDelete(projectId);
+        _pendingDeleteId = null;
       }
-    } catch (_e) { /* fall through */ }
+      return;
+    }
 
-    if (window.confirm("Delete this run permanently?")) {
-      _doDelete(projectId);
+    var titleEl = document.getElementById("confirm-title");
+    if (titleEl) { titleEl.textContent = "Delete Project"; }
+    var msgEl = document.getElementById("confirm-message");
+    if (msgEl) {
+      msgEl.textContent = 'Are you sure you want to delete "' + projectId +
+        '"? This will permanently remove all tasks, files, and workspace data.';
+    }
+
+    var yesBtn = document.getElementById("confirm-yes");
+    var noBtn = document.getElementById("confirm-no");
+
+    function cleanUp() {
+      if (yesBtn) { yesBtn.removeEventListener("click", onConfirm); }
+      if (noBtn) { noBtn.removeEventListener("click", onCancel); }
+      dialog.removeEventListener("close", onCancel);
+    }
+    function onConfirm() {
+      cleanUp();
+      _doDelete(_pendingDeleteId);
+      _pendingDeleteId = null;
+      if (typeof dialog.close === "function") { dialog.close(); }
+    }
+    function onCancel() {
+      cleanUp();
+      _pendingDeleteId = null;
+    }
+
+    if (yesBtn) { yesBtn.addEventListener("click", onConfirm); }
+    if (noBtn) { noBtn.addEventListener("click", onCancel); }
+    dialog.addEventListener("close", onCancel);
+
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
     }
   }
 
@@ -939,11 +1238,7 @@
   Dashboard._onStartRun = _onStartRun;
   Dashboard._closeAllStartForms = _closeAllStartForms;
 
-  // Init the new-project form after DOM ready
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", _initNewProjectForm);
-  } else {
-    _initNewProjectForm();
-  }
+  // The new-project form is built (and self-wired) by _renderTable on every
+  // render via _buildNewProjectForm(), so no one-time DOM-ready wiring is needed.
 
 })();

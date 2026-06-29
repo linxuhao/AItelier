@@ -2116,9 +2116,11 @@
     var dialog = tempContainer.firstElementChild;
     document.body.appendChild(dialog);
 
-    if (typeof dialog.showModal === "function") {
-      dialog.showModal();
-    }
+    // Show the modal AND wire its dismissal. The dialog lives on <body>, outside
+    // the delegated #project-dynamic / #repo-section click handlers, so its
+    // data-action="close-modal" button would otherwise be inert (only native
+    // Escape could close it). This wiring was dropped by the b7f8abb rewrite.
+    _openFileDialog(dialog);
 
     // Fetch actual content
     api.workspaceFile(projectId, path, root).then(function (data) {
@@ -2140,6 +2142,39 @@
       if (bodyEl) {
         bodyEl.innerHTML = '<p class="empty-state">Failed to load file content</p>';
       }
+    });
+  }
+
+  /**
+   * Show a file-content dialog and wire its dismissal. Recovered from the
+   * pre-rewrite wiring dropped by b7f8abb. The dialog is a <body>-level node,
+   * outside the delegated click handlers, so its close affordances must be bound
+   * locally: the close-modal button, a backdrop click, and node removal so
+   * dialogs don't pile up on <body>.
+   *
+   * @param {HTMLDialogElement} dialog — the dialog element to open
+   */
+  function _openFileDialog(dialog) {
+    if (!dialog) {
+      return;
+    }
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    }
+    function _dismiss() {
+      if (typeof dialog.close === "function") {
+        dialog.close();
+      }
+      dialog.remove();
+    }
+    dialog.addEventListener("click", function (e) {
+      if (e.target.closest('[data-action="close-modal"]') || e.target === dialog) {
+        _dismiss();
+      }
+    });
+    // Native Escape closes the modal; if the 'close' event fires, drop the node.
+    dialog.addEventListener("close", function () {
+      dialog.remove();
     });
   }
 
@@ -2312,8 +2347,28 @@
       }
 
       _isRefreshing = false;
-    }).catch(function () {
+    }).catch(function (err) {
       _isRefreshing = false;
+
+      // 404 → the project no longer exists (deleted) → bounce to the dashboard
+      // rather than stranding the user on a stale/blank project page. (Recovered
+      // from the pre-rewrite _refresh; the b7f8abb rewrite reduced this catch to
+      // a bare flag reset.)
+      if (err && (err.status === 404 ||
+                  (err.message && err.message.indexOf("404") !== -1))) {
+        try {
+          var router = window.AItelier && window.AItelier.Router;
+          if (router && typeof router.navigate === "function") {
+            router.navigate("#/");
+            return;
+          }
+        } catch (_e) { /* fall through */ }
+        window.location.hash = "#/";
+        return;
+      }
+
+      // Other (network) error → surface the reconnect overlay.
+      _updateReconnectOverlay();
     });
   }
 

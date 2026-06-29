@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import threading
 import time as _time
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -39,15 +40,28 @@ _scheduler_instance: AsyncIOScheduler | None = None
 # Per-user scheduler registry for web_api wake support
 _user_scheduler_map: dict[str, AsyncIOScheduler] = {}
 
-# SF-26: in-flight guard. The interval job and the wake-on-confirm 'date' job are
-# SEPARATE APScheduler jobs, so per-job max_instances=1 does NOT serialize them —
-# a wake tick can advance the same run the interval tick is already advancing,
-# double-executing steps (an architect/PM step running twice with no review
-# between). Track which projects have a tick in flight and skip re-entry. Keyed
-# per project (not global) so multi-tenant ticks on DIFFERENT runs still proceed
-# concurrently. Correctness rests on the check-and-add being atomic: asyncio is
-# single-threaded and there is no `await` between the membership test and the add.
-_ticking_projects: set[str] = set()
+# SF-26 / tick serialization. The interval job and the wake-on-confirm 'date'
+# job are SEPARATE APScheduler jobs (per-job max_instances=1 does NOT serialize
+# them), AND agent steps run in a thread-pool executor (runner.py:
+# loop.run_in_executor) while inline tool steps run on the loop — so a tick's
+# work spans BOTH the event loop and worker threads. A plain set + "atomic
+# check-and-add" only holds for single-thread cooperative asyncio; under
+# thread-pool execution two ticks raced and double-advanced the same run
+# (version-mismatch reopen loops, concurrent run_tests, the 5_review deadlock).
+# A per-project threading.Lock with non-blocking acquire serializes ticks across
+# the loop AND threads; acquire(False) returns False for the same loop-thread
+# (re-entrant tick during an await) and for any worker thread. Per project (not
+# global) so multi-tenant ticks on DIFFERENT runs still proceed concurrently.
+_tick_locks: dict[str, threading.Lock] = {}
+_tick_locks_meta = threading.Lock()
+
+
+def _get_tick_lock(project_id: str) -> threading.Lock:
+    with _tick_locks_meta:
+        lk = _tick_locks.get(project_id)
+        if lk is None:
+            lk = _tick_locks[project_id] = threading.Lock()
+        return lk
 
 # P0-1: cross-process advisory lock so only ONE scheduler runs even if the API
 # is (mis)launched with uvicorn --workers N. Multiple AsyncIOSchedulers polling
@@ -544,19 +558,19 @@ async def _check_hung_claims():
 async def _execute_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step.
 
-    Wraps the real tick in a per-project in-flight guard so the interval job and
-    the wake-on-confirm date job can never advance the same run concurrently
-    (which would double-execute steps). The check-and-add below is atomic — there
-    is no `await` between the test and the add — so a second overlapping tick for
-    the same project returns immediately rather than racing into advance_run.
+    Serializes the real tick under a per-project threading.Lock so the interval
+    job, the wake-on-confirm date job, and any thread-pool re-entry can never
+    advance the same run concurrently (which double-executed steps → version
+    conflicts, concurrent run_tests, deadlocks). Non-blocking acquire: if a tick
+    for this project is already in flight (on the loop OR a worker thread), skip.
     """
-    if project_id in _ticking_projects:
+    lock = _get_tick_lock(project_id)
+    if not lock.acquire(blocking=False):
         return
-    _ticking_projects.add(project_id)
     try:
         await _run_skillflow_tick(project_id, loop)
     finally:
-        _ticking_projects.discard(project_id)
+        lock.release()
 
 
 async def _run_skillflow_tick(project_id: str, loop):

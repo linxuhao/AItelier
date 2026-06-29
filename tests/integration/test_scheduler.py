@@ -429,7 +429,7 @@ async def test_tick_guard_blocks_concurrent_same_project(monkeypatch):
         await release.wait()
 
     monkeypatch.setattr(sched, "_run_skillflow_tick", fake_inner)
-    sched._ticking_projects.discard("P")
+    sched._tick_locks.pop("P", None)          # fresh, unheld lock
 
     t1 = asyncio.create_task(sched._execute_skillflow_tick("P", None))
     await entered_evt.wait()                  # t1 is now inside, holding the guard
@@ -439,7 +439,7 @@ async def test_tick_guard_blocks_concurrent_same_project(monkeypatch):
 
     release.set()
     await t1
-    assert "P" not in sched._ticking_projects  # guard released
+    assert not sched._get_tick_lock("P").locked()  # guard released
 
 
 async def test_tick_guard_allows_different_projects(monkeypatch):
@@ -457,7 +457,8 @@ async def test_tick_guard_allows_different_projects(monkeypatch):
         await release.wait()
 
     monkeypatch.setattr(sched, "_run_skillflow_tick", fake_inner)
-    sched._ticking_projects.difference_update({"P", "Q"})
+    sched._tick_locks.pop("P", None)
+    sched._tick_locks.pop("Q", None)
 
     t1 = asyncio.create_task(sched._execute_skillflow_tick("P", None))
     t2 = asyncio.create_task(sched._execute_skillflow_tick("Q", None))
@@ -478,11 +479,45 @@ async def test_tick_guard_releases_on_exception(monkeypatch):
         raise RuntimeError("tick blew up")
 
     monkeypatch.setattr(sched, "_run_skillflow_tick", boom)
-    sched._ticking_projects.discard("P")
+    sched._tick_locks.pop("P", None)
 
     with pytest.raises(RuntimeError):
         await sched._execute_skillflow_tick("P", None)
-    assert "P" not in sched._ticking_projects   # guard released despite exception
+    assert not sched._get_tick_lock("P").locked()  # guard released despite exception
+
+
+def test_tick_lock_serializes_across_threads():
+    """Core of the fix: the guard must serialize across THREADS, not just asyncio
+    tasks. Agent steps run in run_in_executor worker threads, so the old set-based
+    check-and-add raced and double-advanced runs. With 8 threads racing for one
+    project's lock, exactly one may hold it."""
+    import core.scheduler as sched
+    import threading
+
+    sched._tick_locks.pop("T", None)
+    lock = sched._get_tick_lock("T")
+    assert sched._get_tick_lock("T") is lock          # same lock per project
+    assert sched._get_tick_lock("U") is not lock       # distinct per project
+
+    winners = []
+    winners_guard = threading.Lock()
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()                                 # maximize the race
+        if lock.acquire(blocking=False):
+            with winners_guard:
+                winners.append(1)
+            # do NOT release — simulate a tick still in flight
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(winners) == 1, f"{len(winners)} threads entered the same run concurrently"
+    lock.release()
 
 
 # ── Single-backend instance lock (one AItelier backend per data dir) ──

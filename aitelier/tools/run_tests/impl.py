@@ -173,7 +173,12 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     cwd=str(repo), env=env, start_new_session=True,
                 )
-                stdout, stderr = proc.communicate(timeout=180)
+                # Outer wall kept tight: this runs on the scheduler loop-thread
+                # (under the per-project tick lock), so a long hang would stall
+                # the whole run. A genuinely-passing suite finishes well under
+                # this; an import/collection hang (not caught by pytest-timeout)
+                # fails fast instead of blocking for minutes.
+                stdout, stderr = proc.communicate(timeout=75)
                 out = ((stdout or "") + "\n" + (stderr or "")).strip()
                 report["returncode"] = proc.returncode
                 # pytest: 0=all passed, 5=no tests collected (not a failure), 1=failures
@@ -184,7 +189,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                                      else out[-3000:])
             except subprocess.TimeoutExpired:
                 _kill_group(proc)
-                report.update(passed=False, summary="pytest timed out after 180s")
+                report.update(passed=False, summary="pytest timed out after 75s")
             except Exception as e:  # never raise — the step must not fail
                 _kill_group(proc)
                 report.update(passed=False, summary=f"Error running pytest: {e}")

@@ -2344,6 +2344,13 @@
       // Make #view-project visible — CSS only displays `.active` view sections.
       container.classList.add("active");
       container.innerHTML = "";
+      // This wipe just destroyed any previously-rendered shell, INCLUDING the
+      // artifact/repository <details> (which only _render() builds). Invalidate
+      // the renderedPid marker so the next _refresh does a full _render rather
+      // than _updateDynamic — otherwise re-entering the SAME project (renderedPid
+      // still matches) takes the lightweight path that never re-appends the trees,
+      // so they vanish on the 2nd visit until another project forces a full render.
+      delete container.dataset.renderedPid;
       container.innerHTML += '<a href="#/" style="display:inline-block;margin-bottom:var(--pico-spacing,1rem)">\u2190 Back to Dashboard</a>';
       container.innerHTML += '<div id="project-reconnect-overlay" style="display:none;position:relative;text-align:center;padding:2rem 1rem;background-color:rgba(255,255,255,0.85);border-radius:0.5rem;margin-top:1rem">Loading\u2026</div>';
       // Create empty #project-dynamic so _updateDynamic sees it

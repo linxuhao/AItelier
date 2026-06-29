@@ -1211,6 +1211,11 @@ class PipelineEngine:
 
             written_files: list[str] = []
             turn_count = 0
+            # Set when the agent explicitly calls finish_step — its "I am done"
+            # signal. Used below to distinguish a deliberate no-op completion
+            # (the fix is already present, nothing to write) from a step that
+            # simply failed to produce output.
+            agent_signaled_done = False
 
             for turn_count in range(max_turns):
                 remaining = max_turns - turn_count
@@ -1362,6 +1367,7 @@ class PipelineEngine:
                     tool_name = fn["name"]
                     if tool_name == "finish_step":
                         called_finish = True
+                        agent_signaled_done = True
                     elif tool_name == "ask_more_turns":
                         try:
                             params = json.loads(fn["arguments"])
@@ -1409,6 +1415,27 @@ class PipelineEngine:
                     "turn": turn_count + 1, "mode": "native",
                     "preview": f"Executed {len(result.tool_calls)} tool call(s)",
                 })
+
+            if not written_files and agent_signaled_done:
+                # The agent explicitly called finish_step without writing
+                # anything — a deliberate "no change needed" outcome (e.g. the
+                # required fix is already present in the code). Floor with the
+                # existing project files (same no-op path as turn-budget
+                # exhaustion) so the step completes cleanly. Without this, the
+                # "No output produced" retry forced the agent to fabricate a
+                # placeholder report, which collided with the prior loop task's
+                # leftover output and escaped into a junk Step_<id>/ subfolder.
+                # For a fresh project there is nothing to floor, so a genuinely
+                # empty step still falls through to the retry below.
+                floor = self._copy_existing_to_draft(
+                    workspace, project_id, step_id, code_path)
+                if floor:
+                    written_files.extend(floor)
+                    self._emit("files_written", {
+                        "files": floor,
+                        "preview": (f"No-op completion (finish_step, no writes): "
+                                    f"floored {len(floor)} existing file(s)"),
+                    })
 
             if not written_files:
                 feedback = (

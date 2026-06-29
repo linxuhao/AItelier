@@ -124,7 +124,9 @@ final_verifier:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "step5_verifier.md"
-  tools: ["list_tree"]
+  # readme_* tools write+commit README.md directly into the delivered repo
+  # (content-mode staging never reaches the repo at step 5 — no repo_apply).
+  tools: ["list_tree", "readme_read", "readme_search", "readme_create", "readme_edit"]
   max_output_tokens: 16384
   max_tool_turns: 100
   native_tool_calling: true

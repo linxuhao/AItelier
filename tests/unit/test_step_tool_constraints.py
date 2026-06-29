@@ -73,9 +73,12 @@ def _get_tool_schemas_for_step(step_id: str) -> dict:
 CONSTRAINED_STEPS = {
     "1": ["write_sota"],
     "2": ["write_design", "write_linter_manifest"],
-    # PM owns the project README (moved here from the verifier so step 5 stays
-    # purely verification — emits only its verdict).
-    "3": ["write_tasks_manifest", "write_task_card", "write_readme"],
+    # README is NOT a content-mode output of any step — steps 3/5 have no
+    # repo_apply, so a staged README would never reach the repo. The verifier
+    # (step 5) authors it via the readme_* agent tools that write+commit the
+    # repo directly. So step 3 emits only its task files and step 5 only its
+    # verdict.
+    "3": ["write_tasks_manifest", "write_task_card"],
     "5": ["write_report"],
     "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card", "write_research_notes"],
 }

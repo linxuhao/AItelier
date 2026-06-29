@@ -1,0 +1,15 @@
+name: readme_create
+description: >
+  Create the project's README.md at the repo root and commit it. ERRORS if a
+  README already exists (use readme_edit to update an existing one). Writes
+  DIRECTLY into the project repo (not a staging dir), so the README ships in the
+  delivered repo. Returns {created, path, committed}.
+parameters:
+  content:
+    type: string
+    description: "Full Markdown content for the new README.md."
+    required: true
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)."
+    required: false

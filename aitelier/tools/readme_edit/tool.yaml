@@ -1,0 +1,24 @@
+name: readme_edit
+description: >
+  Update the project's EXISTING README.md and commit. Two modes — targeted: pass
+  `old`+`new` to replace a substring (locate it first with readme_search); or
+  full rewrite: pass `content` to overwrite the whole file. Errors if README.md
+  does not exist (use readme_create). Writes DIRECTLY into the project repo.
+  Returns {edited, path, committed}.
+parameters:
+  old:
+    type: string
+    description: "Existing text to replace (targeted edit). Omit for a full rewrite."
+    required: false
+  new:
+    type: string
+    description: "Replacement for `old` (targeted edit)."
+    required: false
+  content:
+    type: string
+    description: "Full replacement README content (overwrites the file). Used when `old` is omitted."
+    required: false
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)."
+    required: false

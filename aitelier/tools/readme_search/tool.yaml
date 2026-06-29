@@ -1,0 +1,18 @@
+name: readme_search
+description: >
+  Search the project's README.md for lines containing a query string. Returns
+  {exists, matches:[{line, text}], count}. Use to locate a section before a
+  targeted readme_edit, instead of reading the whole file.
+parameters:
+  query:
+    type: string
+    description: "Substring to search for."
+    required: true
+  ignore_case:
+    type: boolean
+    description: "Case-insensitive match (default true)."
+    required: false
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)."
+    required: false

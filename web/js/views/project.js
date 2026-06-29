@@ -1431,11 +1431,14 @@
     body.style.padding = "var(--pico-spacing, 1rem)";
     details.appendChild(body);
 
-    // Lazy load on first expand
-    var loaded = false;
+    // Re-fetch on every expand (not a one-shot latch). A single cached fetch
+    // could land on a transient empty/failed moment \u2014 pipeline still writing
+    // files, or mid-git-operation \u2014 and then stick empty forever, since polling
+    // deliberately leaves the trees untouched. Reloading on each open clears
+    // stale content and makes collapse\u2192expand a manual refresh.
     details.addEventListener("toggle", function () {
-      if (details.open && !loaded) {
-        loaded = true;
+      if (details.open) {
+        body.innerHTML = "";
         var status = document.createElement("p");
         status.className = "empty-state";
         status.textContent = "Loading\u2026";
@@ -1467,10 +1470,11 @@
     body.style.padding = "var(--pico-spacing, 1rem)";
     details.appendChild(body);
 
-    var loaded = false;
+    // Re-fetch on every expand (not a one-shot latch) so a transient failure or
+    // a mid-operation snapshot doesn't stick stale \u2014 collapse\u2192expand refreshes.
     details.addEventListener("toggle", function () {
-      if (details.open && !loaded) {
-        loaded = true;
+      if (details.open) {
+        body.innerHTML = "";
         var status = document.createElement("p");
         status.className = "empty-state";
         status.textContent = "Loading\u2026";
@@ -1870,9 +1874,9 @@
     }
 
     api.workspaceTree(_projectId, root).then(function (data) {
-      if (loadingEl && loadingEl.parentElement) {
-        loadingEl.parentElement.removeChild(loadingEl);
-      }
+      // Clear before injecting so a re-fetch (or two racing toggle events)
+      // replaces rather than appends a second tree.
+      section.innerHTML = "";
 
       var tree = (data && data.tree) || [];
       if (tree.length === 0) {
@@ -2024,23 +2028,34 @@
       dirLi.className = "workspace-file-item";
       dirLi.style.paddingLeft = "0";
       dirLi.style.cursor = "pointer";
+      // Column layout: a clickable header row, with the children <ul> stacked
+      // BELOW it. A row layout makes the expanded subtree render sideways and
+      // clipped (it becomes a flex sibling of the icon/name) — the folder then
+      // appears not to expand on click.
       dirLi.style.display = "flex";
-      dirLi.style.flexDirection = "row";
-      dirLi.style.alignItems = "center";
-      dirLi.style.gap = "0.4rem";
-      dirLi.style.padding = "0.2rem 0";
+      dirLi.style.flexDirection = "column";
+      dirLi.style.alignItems = "stretch";
+      dirLi.style.padding = "0.1rem 0";
+
+      var dirHeader = document.createElement("div");
+      dirHeader.style.display = "flex";
+      dirHeader.style.flexDirection = "row";
+      dirHeader.style.alignItems = "center";
+      dirHeader.style.gap = "0.4rem";
+      dirHeader.style.padding = "0.2rem 0";
 
       var dirIcon = document.createElement("span");
       dirIcon.className = "file-icon";
       dirIcon.textContent = "\uD83D\uDCC1"; // 📁
       dirIcon.style.fontSize = "0.85rem";
-      dirLi.appendChild(dirIcon);
+      dirHeader.appendChild(dirIcon);
 
       var dirNameSpan = document.createElement("span");
       dirNameSpan.className = "file-name";
       dirNameSpan.textContent = dirName;
-      dirLi.appendChild(dirNameSpan);
+      dirHeader.appendChild(dirNameSpan);
 
+      dirLi.appendChild(dirHeader);
       dirLi.dataset.path = dirPath;
 
       if (childNode && typeof childNode === "object") {
@@ -2053,14 +2068,11 @@
 
         _renderTreeLevel(childNode, childList, dirPath, root);
 
-        // Toggle on click
+        // Toggle on click of the header row.
         (function (list) {
-          dirLi.addEventListener("click", function (e) {
-            if (e.target === dirIcon || e.target === dirNameSpan ||
-                e.target === dirLi) {
-              e.stopPropagation();
-              list.style.display = list.style.display === "none" ? "block" : "none";
-            }
+          dirHeader.addEventListener("click", function (e) {
+            e.stopPropagation();
+            list.style.display = list.style.display === "none" ? "block" : "none";
           });
         })(childList);
       }
@@ -2196,9 +2208,12 @@
     }
 
     api.repoStatus(_projectId).then(function (data) {
-      if (loadingEl && loadingEl.parentElement) {
-        loadingEl.parentElement.removeChild(loadingEl);
-      }
+      // Clear the section before injecting (not just remove the loading
+      // placeholder). A second invocation — a re-expand, or two toggle events
+      // racing — would otherwise APPEND a second copy of the panel, duplicating
+      // the status + download + pull/push action row. Clearing makes the render
+      // idempotent regardless of how many times it runs.
+      section.innerHTML = "";
 
       var html = _renderRepoStatusHtml(data || {}, _canWrite());
 
@@ -2279,6 +2294,17 @@
       _cachedCheckpoint = results[3] || null;
 
       var dynamic = document.getElementById("project-dynamic");
+
+      // Transient null project (backend mid-tick / brief 404) while a shell is
+      // already on screen: keep the last good render. Otherwise _render(null)
+      // would clear the container and return early, blanking the WHOLE view —
+      // including the artifact/repository accordions — until the next
+      // successful poll (the "section randomly missing" symptom).
+      if (!project && dynamic) {
+        _isRefreshing = false;
+        return;
+      }
+
       if (dynamic) {
         _updateDynamic(project, tasks, run);
       } else {

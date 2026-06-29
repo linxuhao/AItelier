@@ -752,7 +752,9 @@
       });
     },
 
-    /** POST /repo/pr — open a GitHub pull request. */
+    /** POST /repo/pr — push current HEAD to origin/<head>, then open a PR
+     * from <head> into <base>. Set opts.push=false to PR an already-pushed
+     * branch without re-pushing. */
     repoPR: function (pid, opts) {
       opts = opts || {};
       return _post("/api/projects/" + encodeURIComponent(pid) + "/repo/pr", {
@@ -760,6 +762,7 @@
         body: opts.body || "",
         base: opts.base || "main",
         head: opts.head || null,
+        push: opts.push == null ? true : !!opts.push,
       });
     },
 

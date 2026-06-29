@@ -363,6 +363,22 @@ class WorkspaceManager:
         out = self._run_git_checked(code_path, *args)
         return {"pushed": True, "branch": branch, "detail": out}
 
+    def repo_push_head(self, project_id: str, branch: str,
+                       set_upstream: bool = True) -> dict:
+        """Push the current HEAD to origin/<branch>, creating that remote branch.
+
+        Unlike repo_push (which pushes a same-named local branch), this maps the
+        current working tree's HEAD onto a possibly-new remote branch name — the
+        "push current work to a feature branch, then open a PR" flow.
+        """
+        code_path = self._require_git_repo(project_id)
+        args = ["push"]
+        if set_upstream:
+            args += ["--set-upstream"]
+        args += ["origin", f"HEAD:refs/heads/{branch}"]
+        out = self._run_git_checked(code_path, *args)
+        return {"pushed": True, "branch": branch, "detail": out}
+
     def repo_pull(self, project_id: str) -> dict:
         """Fast-forward pull from the tracked upstream (no merge commits).
 

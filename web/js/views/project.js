@@ -769,16 +769,15 @@
 
     var html = '<div class="repo-status-panel">\n';
 
-    // Download ZIP — only for writers
-    if (canWrite) {
-      var archiveUrl = (api && typeof api.repoArchiveUrl === "function")
-                       ? api.repoArchiveUrl(_projectId) : "#";
-      html += '  <div style="margin:0 0 0.75rem 0">\n';
-      html += '    <a href="' + esc(archiveUrl) +
-        '" role="button" class="outline" download="" ' +
-        'style="font-size:0.85rem">\u2B07 Download ZIP</a>\n';
-      html += "  </div>\n";
-    }
+    // Download ZIP - available to readers too. The archive is an owner-scoped
+    // read, same access surface as browsing the file tree / file content.
+    var archiveUrl = (api && typeof api.repoArchiveUrl === "function")
+                     ? api.repoArchiveUrl(_projectId) : "#";
+    html += '  <div style="margin:0 0 0.75rem 0">\n';
+    html += '    <a href="' + esc(archiveUrl) +
+      '" role="button" class="outline" download="" ' +
+      'style="font-size:0.85rem">\u2B07 Download ZIP</a>\n';
+    html += "  </div>\n";
 
     // Not a git repository
     if (!repoData.is_git) {
@@ -1374,15 +1373,27 @@
   function _actionRepoMakePR(btn) {
     var api = window.AItelier && window.AItelier.API;
     if (!api) return;
-    var title = window.prompt("Pull request title:", "");
-    if (!title) return;
+    // Push the current work to a user-named feature branch, then PR it into the
+    // base branch. Avoids the "PR head == base == main" dead end.
+    var head = window.prompt(
+      "Branch name to push your current work to (the PR's source branch):", "");
+    if (!head) return;
     var base = window.prompt("Base branch (merge into):", "main");
     if (!base) return;
+    if (head === base) {
+      window.alert("The feature branch and the base branch must differ.");
+      return;
+    }
+    var title = window.prompt("Pull request title:", "");
+    if (!title) return;
     var prBody = window.prompt("PR description (optional):", "") || "";
     _repoAction(btn, function () {
-      return api.repoPR(_projectId, { title: title, body: prBody, base: base }).then(function (res) {
+      return api.repoPR(_projectId, {
+        title: title, body: prBody, base: base, head: head, push: true,
+      }).then(function (res) {
         if (res && res.url) {
-          window.alert("Pull request #" + res.number + " created:\n" + res.url);
+          window.alert("Pushed to " + head + " and opened pull request #" +
+            res.number + ":\n" + res.url);
           window.open(res.url, "_blank", "noopener");
         }
         return res;
@@ -2304,6 +2315,8 @@
     // then the first data fetch triggers a render into it.
     var container = document.getElementById("view-project");
     if (container) {
+      // Make #view-project visible — CSS only displays `.active` view sections.
+      container.classList.add("active");
       container.innerHTML = "";
       container.innerHTML += '<a href="#/" style="display:inline-block;margin-bottom:var(--pico-spacing,1rem)">\u2190 Back to Dashboard</a>';
       container.innerHTML += '<div id="project-reconnect-overlay" style="display:none;position:relative;text-align:center;padding:2rem 1rem;background-color:rgba(255,255,255,0.85);border-radius:0.5rem;margin-top:1rem">Loading\u2026</div>';
@@ -2329,6 +2342,10 @@
     if (_pollTimer) {
       clearInterval(_pollTimer);
       _pollTimer = null;
+    }
+    var container = document.getElementById("view-project");
+    if (container) {
+      container.classList.remove("active");
     }
     _projectId = null;
     _cachedProject = null;

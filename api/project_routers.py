@@ -28,7 +28,6 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner, enrich_project_status
 from api.auth import CurrentUser, get_optional_user
-from api.authz import require_writer
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -264,7 +263,7 @@ def repo_status(
     return ws.repo_status(project_id)
 
 
-@router.get("/{project_id}/repo/archive", dependencies=[Depends(require_writer)])
+@router.get("/{project_id}/repo/archive")
 def repo_archive(
     project_id: str,
     user: CurrentUser | None = Depends(get_optional_user),
@@ -272,7 +271,8 @@ def repo_archive(
     ws: WorkspaceManager = Depends(get_workspace_manager),
 ):
     """Download the project code repo as a zip (working tree, excluding .git).
-    Writer-only — the archive exposes the whole repo, so it is not a public read."""
+    Open to readers (owner-scoped via check_read_owner) — same access surface as
+    the workspace file-tree/file-content reads, which already expose every file."""
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -328,7 +328,11 @@ class RepoPRBody(BaseModel):
     title: str = Field(min_length=1)
     body: str = ""
     base: str = "main"
+    # head = the feature branch the PR is opened FROM. When push=true, the repo's
+    # current HEAD is first pushed to origin/<head> (creating it), so the user
+    # can turn their current work into a named branch + PR in one action.
     head: Optional[str] = None
+    push: bool = True
 
 
 def _repo_write_project(project_id: str, user, db):
@@ -435,11 +439,33 @@ def repo_pr(
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
 ):
-    """Open a GitHub pull request for the project repo."""
+    """Open a GitHub pull request for the project repo.
+
+    When ``push`` is true (default) and ``head`` is given, the current HEAD is
+    first pushed to ``origin/<head>`` (creating the remote feature branch), then
+    a PR is opened from ``head`` into ``base``.
+    """
     _repo_write_project(project_id, user, db)
     from core.git_ops import create_github_pr
     code_path = ws.get_code_path(project_id)
+    # Validate head != base BEFORE pushing — otherwise a head==base==main request
+    # would push HEAD straight onto the base branch and only then fail the PR.
+    if body.head and body.head == body.base:
+        raise HTTPException(
+            status_code=400,
+            detail=f"head and base are the same branch ('{body.base}') — pick a "
+                   "different feature branch to open the PR from")
     try:
+        if body.push:
+            if not body.head:
+                raise HTTPException(
+                    status_code=400,
+                    detail="head (the branch to push your work to) is required "
+                           "when push=true")
+            # set_upstream=False: this maps the current HEAD onto a differently
+            # named remote branch; rebinding the local branch's tracking ref to it
+            # would make a later Pull fast-forward from the wrong branch.
+            ws.repo_push_head(project_id, body.head, set_upstream=False)
         return create_github_pr(
             code_path, body.title, body.body, body.base, body.head)
     except (RuntimeError, ValueError) as e:

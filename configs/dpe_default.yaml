@@ -409,6 +409,10 @@ steps:
   - id: "5_test"
     step_type: "tool"
     tool_name: "run_tests"
+    # Claim timeout: must exceed run_tests' worst case (venv + pip + project
+    # deps + the 180s pytest wall ≈ 900s) so a slow-but-alive run isn't
+    # reclaimed mid-flight by a concurrent driver — only a dead claim recovers.
+    timeout_seconds: 1200
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
@@ -426,6 +430,8 @@ steps:
   - id: "5_compile"
     step_type: "tool"
     tool_name: "unity_compile"
+    # Unity semantic compile + PlayMode smoke test can be slow on a cold sidecar.
+    timeout_seconds: 900
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
@@ -441,6 +447,7 @@ steps:
   - id: "5_knowledge"
     step_type: "tool"
     tool_name: "knowledge_sync"
+    timeout_seconds: 300
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:

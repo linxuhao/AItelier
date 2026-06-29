@@ -7,11 +7,14 @@ back to the planner (the goal-loop).
 
 Runner resolution: prefer pytest in the current interpreter; if it is missing
 (the Docker backend ships no test deps), provision a throwaway venv with
-``--system-site-packages`` (so it inherits whatever IS installed and only needs
-to add pytest) and install pytest + the project's requirements there. If the
-runner cannot be provisioned at all (e.g. no network), the gate is SKIPPED
-(passed=True) — a missing test runner must never masquerade as failing tests,
-which would spin the goal-loop chasing a phantom failure.
+``--system-site-packages`` (so it inherits whatever IS installed) and install
+the test toolchain — pytest + pytest-asyncio (REQUIRED by ``asyncio_mode=auto``
+configs; without it every async test errors out) + pytest-timeout — plus the
+project's declared dependencies (``requirements.txt``, or an editable install
+that reads ``pyproject.toml``/``setup.py``). If the runner cannot be
+provisioned at all (e.g. no network), the gate is SKIPPED (passed=True) — a
+missing test runner must never masquerade as failing tests, which would spin
+the goal-loop chasing a phantom failure.
 """
 
 import importlib.util
@@ -46,6 +49,48 @@ def _kill_group(proc) -> None:
         pass
 
 
+def _install_project_deps(venv_py: str, repo: Path) -> None:
+    """Best-effort install of the project's declared deps into the venv.
+
+    Tries ``requirements.txt``; else an editable install of the project itself
+    (reads ``pyproject.toml`` ``[project.dependencies]`` / ``setup.py``). Never
+    raises and never `check=True`s — the ``--system-site-packages`` base usually
+    already satisfies imports, and a non-installable generated project (an app,
+    not a package) must NOT fail the test gate.
+    """
+    try:
+        if (repo / "requirements.txt").exists():
+            cmd = [venv_py, "-m", "pip", "install", "-q", "-r",
+                   str(repo / "requirements.txt")]
+        elif any((repo / f).exists()
+                 for f in ("pyproject.toml", "setup.py", "setup.cfg")):
+            cmd = [venv_py, "-m", "pip", "install", "-q", "-e", str(repo)]
+        else:
+            return
+        subprocess.run(cmd, capture_output=True, text=True,
+                       timeout=300, check=False)
+    except Exception:
+        pass  # deps best-effort; base site-packages usually covers imports
+
+
+def _pytest_timeout_args(py: str) -> list[str]:
+    """Per-test timeout args, only if pytest-timeout is available for ``py``.
+
+    Added unconditionally would make pytest error ("unrecognized arguments")
+    on a host interpreter that lacks the plugin (e.g. the dev test interp).
+    """
+    try:
+        if py == sys.executable:
+            available = importlib.util.find_spec("pytest_timeout") is not None
+        else:
+            available = subprocess.run(
+                [py, "-c", "import pytest_timeout"],
+                capture_output=True, timeout=30).returncode == 0
+        return ["--timeout=60", "--timeout-method=thread"] if available else []
+    except Exception:
+        return []
+
+
 def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | None]:
     """Return (python_executable, venv_dir_to_cleanup).
 
@@ -58,7 +103,7 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
         return sys.executable, None
 
     # 2. Provision a throwaway venv that inherits system site-packages (so we
-    #    only have to add pytest, not reinstall the whole dependency set).
+    #    only have to add the test toolchain, not reinstall the whole dep set).
     venv_dir = tempfile.mkdtemp(prefix="aitelier_pytest_venv_")
     try:
         subprocess.run(
@@ -69,12 +114,17 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
         if not Path(venv_py).exists():  # windows / unusual layouts
             venv_py = str(Path(venv_dir) / "Scripts" / "python.exe")
 
-        pip_cmd = [venv_py, "-m", "pip", "install", "-q", "pytest"]
-        reqs = repo / "requirements.txt"
-        if reqs.exists():
-            pip_cmd += ["-r", str(reqs)]
-        subprocess.run(pip_cmd, capture_output=True, text=True,
-                       timeout=300, check=True)
+        # Test toolchain: pytest + the plugins the project's pytest.ini commonly
+        # requires. pytest-asyncio is mandatory for `asyncio_mode = auto` (its
+        # absence makes every async test error); pytest-timeout enables the
+        # per-test wall. A failure HERE (no pytest) → SKIP the gate.
+        subprocess.run(
+            [venv_py, "-m", "pip", "install", "-q",
+             "pytest", "pytest-asyncio", "pytest-timeout"],
+            capture_output=True, text=True, timeout=300, check=True,
+        )
+        # Project's own deps — best-effort, must not skip the gate on failure.
+        _install_project_deps(venv_py, repo)
         return venv_py, venv_dir
     except Exception as e:
         shutil.rmtree(venv_dir, ignore_errors=True)
@@ -119,7 +169,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 proc = subprocess.Popen(
                     [py, "-m", "pytest", str(repo), "-q", "--tb=short",
                      "-p", "no:cacheprovider",
-                     "--rootdir", str(repo)],
+                     "--rootdir", str(repo), *_pytest_timeout_args(py)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     cwd=str(repo), env=env, start_new_session=True,
                 )

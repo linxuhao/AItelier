@@ -25,10 +25,13 @@ def test_runs_when_pytest_present():
 
 
 def test_skips_when_runner_unavailable(monkeypatch):
-    """pytest not importable AND venv provisioning fails → SKIP, not fail."""
+    """pytest not importable AND provisioning fails on EVERY retry → SKIP, not fail."""
     monkeypatch.setattr(rt.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(rt.time, "sleep", lambda *_: None)  # no real backoff in tests
 
+    calls = []
     def boom(*a, **k):
+        calls.append(a)
         raise OSError("no network / venv blocked")
     monkeypatch.setattr(rt.subprocess, "run", boom)
 
@@ -40,6 +43,33 @@ def test_skips_when_runner_unavailable(monkeypatch):
     assert res["passed"] is True          # gate does NOT fail the run
     assert rep["skipped"] is True
     assert "skipped" in rep["summary"].lower()
+    assert "3 attempts" in rep["summary"]  # retried before giving up
+    assert len(calls) == 3                 # one provisioning attempt per retry
+
+
+def test_provisioning_retries_on_transient_failure(monkeypatch):
+    """A transient blip on the first attempt is retried; the next attempt's
+    success provisions the runner instead of skipping the gate."""
+    monkeypatch.setattr(rt.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(rt.time, "sleep", lambda *_: None)
+
+    n = {"calls": 0}
+    def flaky(*a, **k):
+        n["calls"] += 1
+        if n["calls"] == 1:               # first attempt's venv-create blips
+            raise OSError("transient network blip")
+        class _R:                          # everything after succeeds
+            returncode = 0
+            stdout = ""
+            stderr = ""
+        return _R()
+    monkeypatch.setattr(rt.subprocess, "run", flaky)
+
+    report = {"passed": True, "returncode": 0, "summary": "", "failures": []}
+    py, venv_dir = rt._resolve_pytest_python(Path(tempfile.mkdtemp()), report)
+    assert py is not None                  # recovered on retry — did NOT skip
+    assert not report.get("skipped")
+    assert n["calls"] >= 2                 # first attempt failed, then retried
 
 
 def test_missing_repo_fails():

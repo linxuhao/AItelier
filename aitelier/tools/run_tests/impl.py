@@ -25,6 +25,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -104,36 +105,52 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
 
     # 2. Provision a throwaway venv that inherits system site-packages (so we
     #    only have to add the test toolchain, not reinstall the whole dep set).
-    venv_dir = tempfile.mkdtemp(prefix="aitelier_pytest_venv_")
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "venv", "--system-site-packages", venv_dir],
-            capture_output=True, text=True, timeout=120, check=True,
-        )
-        venv_py = str(Path(venv_dir) / "bin" / "python")
-        if not Path(venv_py).exists():  # windows / unusual layouts
-            venv_py = str(Path(venv_dir) / "Scripts" / "python.exe")
+    #    The pip install reaches PyPI, so a transient network blip would skip the
+    #    gate (tests never run → false pass). Retry the whole provisioning a few
+    #    times with backoff so only a PERSISTENT outage skips; a momentary blip
+    #    recovers on the next attempt.
+    attempts = 3
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        venv_dir = tempfile.mkdtemp(prefix="aitelier_pytest_venv_")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", "--system-site-packages", venv_dir],
+                capture_output=True, text=True, timeout=120, check=True,
+            )
+            venv_py = str(Path(venv_dir) / "bin" / "python")
+            if not Path(venv_py).exists():  # windows / unusual layouts
+                venv_py = str(Path(venv_dir) / "Scripts" / "python.exe")
 
-        # Test toolchain: pytest + the plugins the project's pytest.ini commonly
-        # requires. pytest-asyncio is mandatory for `asyncio_mode = auto` (its
-        # absence makes every async test error); pytest-timeout enables the
-        # per-test wall. A failure HERE (no pytest) → SKIP the gate.
-        subprocess.run(
-            [venv_py, "-m", "pip", "install", "-q",
-             "pytest", "pytest-asyncio", "pytest-timeout"],
-            capture_output=True, text=True, timeout=300, check=True,
-        )
-        # Project's own deps — best-effort, must not skip the gate on failure.
-        _install_project_deps(venv_py, repo)
-        return venv_py, venv_dir
-    except Exception as e:
-        shutil.rmtree(venv_dir, ignore_errors=True)
-        report.update(
-            passed=True, skipped=True, returncode=0,
-            summary=(f"pytest unavailable and could not be provisioned "
-                     f"({type(e).__name__}: {str(e)[:200]}) — test gate skipped."),
-        )
-        return None, None
+            # Test toolchain: pytest + the plugins the project's pytest.ini
+            # commonly requires. pytest-asyncio is mandatory for
+            # `asyncio_mode = auto` (its absence makes every async test error);
+            # pytest-timeout enables the per-test wall. pip already retries
+            # individual downloads; the outer loop recovers from a blip that
+            # exhausts pip's own retries.
+            subprocess.run(
+                [venv_py, "-m", "pip", "install", "-q",
+                 "pytest", "pytest-asyncio", "pytest-timeout"],
+                capture_output=True, text=True, timeout=300, check=True,
+            )
+            # Project's own deps — best-effort, must not skip the gate on failure.
+            _install_project_deps(venv_py, repo)
+            return venv_py, venv_dir
+        except Exception as e:
+            last_err = e
+            shutil.rmtree(venv_dir, ignore_errors=True)
+            if attempt < attempts:
+                time.sleep(2 * attempt)  # 2s, then 4s, before retrying
+
+    # All attempts failed → a persistent outage. SKIP (a missing runner must
+    # never masquerade as failing tests, which would spin the goal-loop).
+    report.update(
+        passed=True, skipped=True, returncode=0,
+        summary=(f"pytest unavailable and could not be provisioned after "
+                 f"{attempts} attempts ({type(last_err).__name__}: "
+                 f"{str(last_err)[:200]}) — test gate skipped."),
+    )
+    return None, None
 
 
 def run_tests(*, project_root: str = "", out_dir: str = "",

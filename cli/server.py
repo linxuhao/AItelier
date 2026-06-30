@@ -1,19 +1,19 @@
 # cli/server.py
-# Detect, start, and restart the AItelier backend.
+# Detect, start, and reuse the AItelier backend.
 #
-# Primary path: a Docker container (docker-compose.yml). The CLI starts the
-# container if it is not running and reuses it if it is already up. If Docker is
-# unavailable, it falls back to running uvicorn as a local subprocess.
+# The backend runs ONLY as a Docker container (docker-compose.yml): the CLI
+# reuses the container if it is already up, otherwise starts it with
+# `docker compose up -d aitelier`. There is no host-process fallback — running
+# uvicorn directly on the host would make DPE git commits use the host
+# developer's ~/.gitconfig identity instead of the image's AItelier identity.
 
-import hashlib
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
-# Load .env before spawning the server so it inherits API keys (local fallback;
-# the Docker path passes .env via compose env_file).
+# Load .env so the CLI process picks up config (AITELIER_PORT, admin token, …).
+# The container receives .env separately via compose `env_file`.
 _env_file = Path(__file__).resolve().parent.parent / ".env"
 if _env_file.exists():
     with open(_env_file) as _f:
@@ -35,18 +35,6 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _COMPOSE_FILE = _PROJECT_ROOT / "docker-compose.yml"
 _COMPOSE_SERVICE = "aitelier"
 _IMAGE_NAME = "aitelier:latest"
-
-_LOG_DIR = Path.home() / ".AItelier"
-_LOG_DIR.mkdir(parents=True, exist_ok=True)
-_SERVER_LOG = _LOG_DIR / "server.log"
-
-# Local-subprocess fallback state
-_server_process = None
-_log_file = None
-
-# Track code hash to detect stale local-fallback servers
-_HASH_FILE = _LOG_DIR / "server_code_hash"
-_WATCHED_DIRS = ["api", "core"]
 
 
 # ── Health ────────────────────────────────────────────────────────────────
@@ -150,9 +138,11 @@ def _compose_up():
     if not _image_exists():
         print("Building AItelier image (first run — this may take a few minutes)...")
     # Inherit stdout/stderr so build + startup progress is visible.
-    res = _compose("up", "-d")
+    res = _compose("up", "-d", _COMPOSE_SERVICE)
     if res.returncode != 0:
-        raise RuntimeError("`docker compose up -d` failed (see output above)")
+        raise RuntimeError(
+            f"`docker compose up -d {_COMPOSE_SERVICE}` failed (see output above)"
+        )
 
 
 def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
@@ -163,11 +153,11 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
         return True
 
     # If the container is down, free the port from any stale non-Docker server
-    # (e.g. an old local-subprocess backend) so the published port can bind.
+    # squatting on it so the published port can bind.
     if not _container_running():
         pid = _find_server_pid(_DEFAULT_PORT)
         if pid:
-            print("Stopping stale local backend before starting Docker backend...")
+            print("Stopping stale non-Docker server before starting Docker backend...")
             try:
                 os.kill(pid, 9)
                 time.sleep(0.5)
@@ -184,95 +174,32 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
     )
 
 
-# ── Local subprocess fallback ────────────────────────────────────────────────
-
-def _compute_code_hash() -> str:
-    h = hashlib.md5()
-    for dirname in _WATCHED_DIRS:
-        d = _PROJECT_ROOT / dirname
-        if not d.is_dir():
-            continue
-        for py in sorted(d.rglob("*.py")):
-            try:
-                h.update(str(py.relative_to(_PROJECT_ROOT)).encode())
-                h.update(py.read_bytes())
-            except OSError:
-                pass
-    return h.hexdigest()
-
-
-def _is_local_stale() -> bool:
-    current = _compute_code_hash()
-    if not _HASH_FILE.exists():
-        _HASH_FILE.write_text(current)
-        return False
-    return _HASH_FILE.read_text().strip() != current
-
-
-def _ensure_local_backend(base_url: str, max_wait: int) -> bool:
-    global _server_process, _log_file
-    client = httpx.Client(base_url=base_url, timeout=2.0)
-
-    stale = _is_local_stale()
-    healthy = _is_healthy(client)
-
-    if healthy and not stale:
-        return True
-
-    if healthy and stale:
-        print("Server code changed — restarting with latest code...")
-    pid = _find_server_pid(_DEFAULT_PORT)
-    if pid:
-        os.kill(pid, 9)
-        time.sleep(0.5)
-
-    _HASH_FILE.write_text(_compute_code_hash())
-    _log_file = open(_SERVER_LOG, "w", encoding="utf-8")
-    _server_process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "api.main:app",
-         "--host", "127.0.0.1", "--port", _DEFAULT_PORT],
-        stdout=_log_file, stderr=_log_file,
-    )
-
-    if _wait_healthy(client, max_wait):
-        return True
-    raise RuntimeError(f"Server did not start within {max_wait}s (pid={_server_process.pid})")
-
-
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def ensure_server_running(base_url: str, max_wait: int = 120) -> bool:
-    """Ensure the backend is up: start the Docker backend if down, reuse if up.
+def _require_docker() -> None:
+    """Raise a clear error if no Docker daemon is reachable. The backend has no
+    host-process fallback, so Docker is mandatory."""
+    if not _docker_available():
+        raise RuntimeError(
+            "Docker is required to run the AItelier backend but no Docker daemon "
+            f"is reachable (need Docker running and {_COMPOSE_FILE}). "
+            "Start Docker and retry."
+        )
 
-    Falls back to a local uvicorn subprocess when Docker is unavailable.
-    """
-    if _docker_available():
-        return _ensure_docker_backend(base_url, max_wait)
-    return _ensure_local_backend(base_url, max_wait)
+
+def ensure_server_running(base_url: str, max_wait: int = 120) -> bool:
+    """Ensure the Docker backend is up: reuse the container if it is running,
+    otherwise `docker compose up -d aitelier`. Raises if Docker is unavailable
+    — there is no host-process fallback."""
+    _require_docker()
+    return _ensure_docker_backend(base_url, max_wait)
 
 
 def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
-    """Restart the backend."""
-    global _server_process, _log_file
-
-    if _docker_available():
-        _compose("restart", _COMPOSE_SERVICE)
-        client = httpx.Client(base_url=base_url, timeout=2.0)
-        if _wait_healthy(client, max_wait):
-            return True
-        raise RuntimeError(f"Docker backend did not restart within {max_wait}s")
-
-    # Local fallback
-    if _server_process:
-        _server_process.terminate()
-        try:
-            _server_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _server_process.kill()
-            _server_process.wait(timeout=3)
-        _server_process = None
-    if _log_file:
-        _log_file.close()
-        _log_file = None
-
-    return _ensure_local_backend(base_url, max_wait)
+    """Restart the Docker backend."""
+    _require_docker()
+    _compose("restart", _COMPOSE_SERVICE)
+    client = httpx.Client(base_url=base_url, timeout=2.0)
+    if _wait_healthy(client, max_wait):
+        return True
+    raise RuntimeError(f"Docker backend did not restart within {max_wait}s")

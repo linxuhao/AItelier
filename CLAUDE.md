@@ -33,7 +33,7 @@ Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "no
 
 ### Docker deployment & secrets
 
-The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages it: `cli/server.py:ensure_server_running` starts the container if down and reuses it if up (falls back to a local uvicorn subprocess when Docker is unavailable).
+The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages it: `cli/server.py:ensure_server_running` reuses the container if it is up, otherwise runs `docker compose up -d aitelier`. Docker is mandatory — there is **no host-process fallback** (running uvicorn on the host would make DPE git commits use the host developer's `~/.gitconfig` identity instead of the image's `AItelier` identity).
 
 ```bash
 docker compose up -d            # build (first run) + start; the CLI does this for you

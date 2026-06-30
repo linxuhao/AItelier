@@ -470,13 +470,15 @@
 
   /**
    * Group runs by config_name, preserving the catalog order from /api/configs.
-   * Also returns the set of configs that have no runs (hidden by default).
+   * EVERY catalog config gets a group (even with zero runs) so all available
+   * pipelines stay listed inline with a Start button. The 92078f8 rewrite gated
+   * this on match.length > 0, silently dropping empty pipelines from the index.
    */
   function _groupRunsByConfig(configs, runs) {
     var groups = [];
     var seen = {};
 
-    // Configs in catalog order (only those with runs)
+    // Configs in catalog order (all of them — runs or not)
     for (var i = 0; i < configs.length; i++) {
       var name = configs[i].config_name || configs[i].name;
       if (!name) { continue; }
@@ -487,15 +489,13 @@
           match.push(runs[j]);
         }
       }
-      if (match.length > 0) {
-        groups.push({
-          config_name: name,
-          label: cfgLabel,
-          manifest: configs[i],
-          runs: match,
-        });
-        seen[name] = true;
-      }
+      groups.push({
+        config_name: name,
+        label: cfgLabel,
+        manifest: configs[i],
+        runs: match,
+      });
+      seen[name] = true;
     }
 
     // Runs whose config is no longer installed — orphan bucket
@@ -637,8 +637,15 @@
       }
       var bd = bodyDivs[bodyIdx];
       if (bd) {
-        var tbl = _buildRunsTable(groups[gi].runs);
-        bd.appendChild(tbl);
+        if (groups[gi].runs.length === 0) {
+          // Empty pipeline: a short hint instead of a blank table.
+          var emptyHint = document.createElement("div");
+          emptyHint.style.cssText = "padding:0.6rem 0.9rem;color:var(--muted-color,#888);font-size:0.85rem";
+          emptyHint.textContent = "No runs yet — use the button above to start one.";
+          bd.appendChild(emptyHint);
+        } else {
+          bd.appendChild(_buildRunsTable(groups[gi].runs));
+        }
       }
       bodyIdx++;
     }

@@ -195,6 +195,21 @@ class WorkspaceManager:
                 shutil.rmtree(d)
                 d.mkdir(parents=True, exist_ok=True)
 
+    def clean_draft_dir(self, project_id: str, step_id: str,
+                        graph_name: str = DPE_GRAPH_NAME):
+        """Clear ONLY the draft ({step_id}.tmp) staging for a step.
+
+        Called at the start of a step run so a fresh run starts with empty
+        staging — otherwise files written by a prior task or a prior (failed)
+        attempt linger in the shared, never-cleared {step_id}.tmp and get
+        promoted + committed wholesale. The final dir is left intact so the
+        step's own prior output ({step: ...} self-context) still resolves.
+        """
+        d = self._draft_dir(project_id, step_id, graph_name)
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True, exist_ok=True)
+
     def clean_all_task_step_dirs(self, project_id: str):
         """Clean workspace dirs for all task-level steps (for retries)."""
         for step_id in TASK_STEP_SEQUENCE:

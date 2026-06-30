@@ -711,7 +711,7 @@ class PipelineEngine:
                         if "error" in result:
                             tool_results.append(f"Write error: {result['error']}")
                             continue
-                        written_file = result.get("written", "")
+                        written_file = self._written_name(result)
                         if written_file:
                             written_files.append(written_file)
                     self._emit("files_written", {"files": written_files,
@@ -740,24 +740,16 @@ class PipelineEngine:
                     ended_early = True
                     break
 
-                # No write calls and no tool calls after message — agent signals work
-                # is already done (no-op). Copy existing project files to draft if any.
+                # No write calls and no tool calls after message — agent signals
+                # the work is already done (no-op). Complete cleanly with empty
+                # output instead of copying the whole repo into the draft (which
+                # produced wholesale commits and corrupted binaries).
                 if not tool_calls and not written_files:
-                    project_files = list(code_path.rglob("*")) if code_path and code_path.exists() else []
-                    if project_files:
-                        for f in project_files:
-                            if f.is_file() and ".git" not in f.relative_to(code_path).parts:
-                                rel = str(f.relative_to(code_path))
-                                content = f.read_text(encoding="utf-8", errors="replace")
-                                workspace.write_draft(project_id, step_id, rel, content, graph_name=self._draft_graph_name())
-                                written_files.append(
-                                    WorkspaceManager._sanitize_filename(rel, content))
-                        if written_files:
-                            self._emit("files_written", {
-                                "files": written_files,
-                                "preview": f"No-op: copied {len(written_files)} existing file(s)"
-                            })
-                    break
+                    self._emit("step_done", {
+                        "step_id": step_id, "files": [],
+                        "preview": "No change needed (no writes)",
+                    })
+                    return True
 
                 # Apply ask_more_turns budget extension after all tool calls in
                 # this turn have been processed (deferred from detection above).
@@ -952,7 +944,7 @@ class PipelineEngine:
                         if "error" in result:
                             tool_results.append(f"Write error: {result['error']}")
                             continue
-                        written_file = result.get("written", "")
+                        written_file = self._written_name(result)
                         if written_file:
                             written_files.append(written_file)
 
@@ -960,24 +952,16 @@ class PipelineEngine:
                                                  "preview": f"Written {len(written_files)} file(s)"})
                     break
 
-                # No write calls and no tool calls — agent signals no-op completion.
-                # Copy existing project files to draft so validation can proceed.
+                # No write calls and no tool calls — agent signals no-op
+                # completion. Complete cleanly with empty output instead of
+                # copying the whole repo into the draft (which produced wholesale
+                # commits and corrupted binaries).
                 if not tool_calls and not written_files:
-                    project_files = list(code_path.rglob("*")) if code_path and code_path.exists() else []
-                    if project_files:
-                        for f in project_files:
-                            if f.is_file() and ".git" not in f.relative_to(code_path).parts:
-                                rel = str(f.relative_to(code_path))
-                                content = f.read_text(encoding="utf-8", errors="replace")
-                                workspace.write_draft(project_id, step_id, rel, content, graph_name=self._draft_graph_name())
-                                written_files.append(
-                                    WorkspaceManager._sanitize_filename(rel, content))
-                        if written_files:
-                            self._emit("files_written", {
-                                "files": written_files,
-                                "preview": f"No-op: copied {len(written_files)} existing file(s)"
-                            })
-                    break
+                    self._emit("step_done", {
+                        "step_id": step_id, "files": [],
+                        "preview": "No change needed (no writes)",
+                    })
+                    return True
 
                 self._emit("exploration", {"turn": tool_turn + 1, "preview": f"Exploration turn {tool_turn + 1}, continuing..."})
             else:
@@ -1055,6 +1039,20 @@ class PipelineEngine:
             })
         return tools
 
+    @staticmethod
+    def _written_name(result: dict) -> str:
+        """The file a write/edit/create tool reported.
+
+        The generic tools use different result keys — write→'written',
+        edit→'edited', create→'created'. Count all three: a single successful
+        edit MUST register as output. Otherwise the step looks like a no-op,
+        and because retries inherit the message history, the agent re-applies
+        its edit on the next attempt (the duplicated/triplicated-code bug) and
+        the empty written_files trips the whole-repo no-op floor.
+        """
+        return (result.get("written") or result.get("edited")
+                or result.get("created") or "")
+
     def _run_native_step(self, task_id: int, step_id: str, workspace: Any,
                          project_id: str, agent_config_name: str = "",
                          subtask_id: str | None = None) -> bool:
@@ -1070,6 +1068,15 @@ class PipelineEngine:
         project_path = self._get_project_path(workspace, project_id)
         code_path = self._get_code_path(workspace, project_id)
         self._code_path = code_path
+
+        # Reset this step's draft staging at the start of the run, aligned with
+        # the fresh `messages` history below — both reset together. A new task
+        # (or a skillflow-level retry that re-invokes this method with a clean
+        # history) must not inherit a prior run's staged files, which the shared,
+        # never-cleared {step_id}.tmp would otherwise carry forward and commit
+        # wholesale. In-attempt retries stay inside the loop below and do NOT
+        # re-clear, so they keep staging consistent with the inherited history.
+        workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
 
         feedback = ""
         # Carryover across attempts (parity with JSON mode) done the cache-optimal
@@ -1329,21 +1336,20 @@ class PipelineEngine:
                                 "preview": "No tool call — nudging agent to write",
                             })
                             continue
-                        # Budget exhausted and the agent still won't write — a
-                        # genuine no-op signal. Floor with existing files so an
-                        # existing-repo step that needs no changes completes
-                        # (parity with JSON mode's no-op path). Pure exploration
-                        # exhaustion never reaches here (it keeps making tool
-                        # calls), so a real failure still raises below.
-                        floor = self._copy_existing_to_draft(
-                            workspace, project_id, step_id, code_path)
-                        if floor:
-                            written_files.extend(floor)
-                            self._emit("files_written", {
-                                "files": floor,
-                                "preview": (f"No-op floor: copied {len(floor)} "
-                                            "existing file(s) (native)"),
-                            })
+                        # Budget exhausted and the agent stopped calling tools
+                        # without writing — a genuine no-op signal. Do NOT floor
+                        # the whole repo into the draft (that produced wholesale
+                        # commits + corrupted binaries), and do NOT fall through
+                        # to the "No output produced" retry: retries inherit the
+                        # message history, so re-prompting an agent that already
+                        # decided "no change" makes it fabricate/re-edit. Complete
+                        # with EMPTY output; repo_apply no-ops on it and
+                        # t_impl_review still verifies a change wasn't required.
+                        self._emit("step_done", {
+                            "step_id": step_id, "files": [],
+                            "preview": "No change needed (no writes, budget reached)",
+                        })
+                        return True
                     # Agent signalled completion (no more tool calls)
                     break
 
@@ -1389,8 +1395,9 @@ class PipelineEngine:
                         "content": result_str,
                     })
 
-                    # Track written files
-                    wf = tool_result.get("written", "")
+                    # Track written files (write→'written', edit→'edited',
+                    # create→'created'); see _written_name.
+                    wf = self._written_name(tool_result)
                     if wf:
                         written_files.append(wf)
 
@@ -1417,25 +1424,21 @@ class PipelineEngine:
                 })
 
             if not written_files and agent_signaled_done:
-                # The agent explicitly called finish_step without writing
-                # anything — a deliberate "no change needed" outcome (e.g. the
-                # required fix is already present in the code). Floor with the
-                # existing project files (same no-op path as turn-budget
-                # exhaustion) so the step completes cleanly. Without this, the
-                # "No output produced" retry forced the agent to fabricate a
-                # placeholder report, which collided with the prior loop task's
-                # leftover output and escaped into a junk Step_<id>/ subfolder.
-                # For a fresh project there is nothing to floor, so a genuinely
-                # empty step still falls through to the retry below.
-                floor = self._copy_existing_to_draft(
-                    workspace, project_id, step_id, code_path)
-                if floor:
-                    written_files.extend(floor)
-                    self._emit("files_written", {
-                        "files": floor,
-                        "preview": (f"No-op completion (finish_step, no writes): "
-                                    f"floored {len(floor)} existing file(s)"),
-                    })
+                # Agent explicitly called finish_step without writing — a
+                # legitimate "no change needed" outcome. Complete the step with
+                # EMPTY output. This used to copy the entire code_path into the
+                # draft, which produced wholesale repo commits AND corrupted
+                # binaries (read_text(errors="replace") mangles non-UTF-8 files).
+                # It must also NOT fall through to the "No output produced" retry
+                # below: retries inherit the message history, so re-prompting an
+                # agent that correctly decided "no change" makes it re-apply its
+                # edits (the triplicated-import bug). Empty staging promotes as a
+                # no-op and repo_apply (empty source) reports success.
+                self._emit("step_done", {
+                    "step_id": step_id, "files": [],
+                    "preview": "No change needed (finish_step, no writes)",
+                })
+                return True
 
             if not written_files:
                 feedback = (
@@ -1456,24 +1459,6 @@ class PipelineEngine:
         raise MaxRetriesExceeded(
             f"Step {step_id}: Max retries ({max_retries}) exceeded in native mode."
         )
-
-    def _copy_existing_to_draft(self, workspace: Any, project_id: str,
-                                step_id: str, code_path) -> list[str]:
-        """No-op floor shared by the JSON and native paths: copy existing
-        project files into the step draft so a step that legitimately needs no
-        changes still produces output. Returns the draft filenames written
-        (empty when there is nothing to copy)."""
-        written: list[str] = []
-        project_files = (list(code_path.rglob("*"))
-                         if code_path and code_path.exists() else [])
-        for f in project_files:
-            if f.is_file() and ".git" not in f.relative_to(code_path).parts:
-                rel = str(f.relative_to(code_path))
-                content = f.read_text(encoding="utf-8", errors="replace")
-                workspace.write_draft(project_id, step_id, rel, content,
-                                      graph_name=self._draft_graph_name())
-                written.append(WorkspaceManager._sanitize_filename(rel, content))
-        return written
 
     def _draft_graph_name(self) -> str:
         """Graph config for draft writes, derived from skillflow's output_dir

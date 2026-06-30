@@ -2,8 +2,8 @@
 # Regression tests for native-mode parity with JSON mode:
 #   - turn budget resolved by role (agent_config_name), not step_id (Bug H)
 #   - no-tool-call reply is salvaged with a write nudge, not ended empty
-#   - genuine no-op signal floors with existing files (parity w/ JSON no-op)
-#   - pure exploration exhaustion still raises (floor must NOT mask it)
+#   - genuine no-op signal completes cleanly with EMPTY output (no repo copy)
+#   - pure exploration exhaustion still raises (no-op path must NOT mask it)
 import json
 import tempfile
 from pathlib import Path
@@ -34,6 +34,13 @@ class _WS:
 
     def write_draft(self, project_id, step_id, filename, content, graph_name=None):
         self.written_drafts[f"{step_id}/{filename}"] = content
+
+    def clean_draft_dir(self, project_id, step_id, graph_name=None):
+        # Reset this step's recorded staging (called at the start of a run).
+        self.written_drafts = {
+            k: v for k, v in self.written_drafts.items()
+            if not k.startswith(f"{step_id}/")
+        }
 
 
 def _setup(tmp, project_id="default", step_id="t_impl"):
@@ -104,16 +111,18 @@ def test_no_tool_reply_is_salvaged_then_writes(engine):
     assert nat.turn.call_count == 3  # salvaged, did not stop at turn 1
 
 
-def test_genuine_noop_floors_with_existing_files(engine):
-    """Feature C: when the agent keeps producing no tool call until the budget
-    is exhausted, floor with existing files (parity w/ JSON no-op)."""
+def test_genuine_noop_completes_clean_without_copying_repo(engine):
+    """No-op completion: when the agent produces no tool call until the budget
+    is exhausted, the step completes cleanly with EMPTY output. It must NOT copy
+    the existing repo into the draft (the old 'floor' did, producing wholesale
+    commits and corrupting binaries via read_text(errors='replace'))."""
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
     engine._exec_tool = MagicMock(return_value={"output": "x"})
     engine.factory.get_max_tool_turns.return_value = 2
     nat = engine.factory.get_native_agent.return_value
     nat.turn.side_effect = [_turn(text="no-op"), _turn(text="still no-op")]
     assert _run(engine, ws) is True
-    assert any("README.md" in k for k in ws.written_drafts)
+    assert ws.written_drafts == {}  # NO repo files copied into the draft
 
 
 def test_exploration_exhaustion_still_raises(engine):

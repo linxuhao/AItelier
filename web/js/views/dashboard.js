@@ -1077,6 +1077,10 @@
     function onCancel() {
       cleanUp();
       _pendingDeleteId = null;
+      // Must close the dialog (parity with onConfirm). Without this, "No" strips
+      // the listeners but leaves the modal open, so both buttons go dead and the
+      // next showModal() throws InvalidStateError on the already-open dialog.
+      if (typeof dialog.close === "function") { dialog.close(); }
     }
 
     if (yesBtn) { yesBtn.addEventListener("click", onConfirm); }

@@ -2124,19 +2124,30 @@
 
     // Fetch actual content
     api.workspaceFile(projectId, path, root).then(function (data) {
-      var content = (data && data.content) || "";
-      var contentPath = data.path || path;
-      // Replace dialog content in-place
+      var raw = (data && data.content != null) ? data.content : null;
+      var contentPath = (data && data.path) || path;
       var titleEl = document.getElementById("file-content-title");
       if (titleEl) { titleEl.textContent = contentPath; }
-      var bodyCode = document.getElementById("file-content-code");
-      if (bodyCode) {
-        var esc = (window.AItelier && window.AItelier.Utils &&
-                   typeof window.AItelier.Utils.escapeHtml === "function")
-                  ? window.AItelier.Utils.escapeHtml
-                  : function (s) { return String(s); };
-        bodyCode.textContent = esc(content);
+      var bodyEl = document.getElementById("file-content-body");
+      if (!bodyEl) { return; }
+      // Binary + truncation guards — parity with _renderFileContentModalHtml.
+      // The b7f8abb rewrite patched #file-content-code.textContent in place,
+      // bypassing both: binary files dumped raw/blank, >50000-char files flooded
+      // the DOM.
+      var isBinary = (raw === null ||
+                      (typeof raw === "string" && raw.indexOf("\x00") !== -1));
+      if (isBinary) {
+        bodyEl.textContent = "Cannot display binary content";
+        return;
       }
+      var display = raw.length > 50000
+        ? raw.slice(0, 50000) + "\n\n... [truncated at 50000 chars]"
+        : raw;
+      // Single escaping: textContent escapes exactly once. The prior code called
+      // esc(content) THEN assigned to .textContent, double-escaping <…> to &lt;…&gt;.
+      bodyEl.innerHTML = '<pre style="margin:0"><code id="file-content-code"></code></pre>';
+      var codeEl = document.getElementById("file-content-code");
+      if (codeEl) { codeEl.textContent = display; }
     }).catch(function (/* err */) {
       var bodyEl = document.getElementById("file-content-body");
       if (bodyEl) {

@@ -77,6 +77,14 @@ describe("Utils.formatTime (relative)", () => {
     expect(Utils.formatTime(ago(2 * 3600))).toBe("2h ago");
     expect(Utils.formatTime(ago(3 * 86400))).toBe("3d ago");
   });
+  it("handles epoch integer (seconds)", () => {
+    const epochNow = Math.floor(Date.now() / 1000);
+    expect(Utils.formatTime(epochNow)).toBe("just now");
+    expect(Utils.formatTime(epochNow - 30)).toBe("30s ago");
+    expect(Utils.formatTime(epochNow - 120)).toBe("2m ago");
+    expect(Utils.formatTime(epochNow - 7200)).toBe("2h ago");
+    expect(Utils.formatTime(epochNow - 259200)).toBe("3d ago");
+  });
   it("returns '' for empty or invalid input", () => {
     expect(Utils.formatTime(null)).toBe("");
     expect(Utils.formatTime("")).toBe("");

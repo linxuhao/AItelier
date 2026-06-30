@@ -176,7 +176,7 @@ AItelier is a **host application** on top of the SkillFlow framework:
 - **Templates** (`templates/`) — per-step LLM system prompts
 - **Tools** (`aitelier/tools/`) — AItelier custom tools + SkillFlow native tools
 - **Core** (`core/`) — agents, scheduler, AI router, DB, workspace
-- **API** (`api/`, `web_api/`) — the CLI backend, plus an early multi-tenant Web backend
+- **API** (`api/`, `web_api/`) — the CLI backend, plus an early multi-tenant Web backend. Includes admin endpoints (`/api/admin/`) for user tracking with per-user delete, writer-only access via Cloudflare Access.
 - **CLI** (`cli/`) — Rich TUI dashboard
 
 ```

@@ -45,43 +45,49 @@
     // ── formatTime ──────────────────────────────────────────────────
 
     /**
-     * Convert an ISO 8601 timestamp string to a human-readable relative
-     * time string (e.g. "just now", "2m ago", "1h ago", "3d ago").
+     * Convert a timestamp to a human-readable relative time string
+     * (e.g. "just now", "2m ago", "1h ago", "3d ago").
      *
-     * @param {string|null|undefined} isoString — ISO 8601 date string
+     * Accepts either:
+     *   - number: Unix epoch seconds (e.g. 1748500000)
+     *   - string: ISO 8601 date string (legacy format, e.g. "2025-06-29T13:00:00.000Z")
+     *
+     * @param {number|string|null|undefined} value — timestamp
      * @returns {string} relative time, or empty string for invalid input
      */
-    formatTime: function (isoString) {
-      if (isoString == null || isoString === "") {
+    formatTime: function (value) {
+      if (value == null || value === "") {
         return "";
       }
 
-      var date = new Date(isoString);
+      var date;
+      if (typeof value === "number") {
+        // Unix epoch seconds → milliseconds
+        date = new Date(value * 1000);
+      } else {
+        // Legacy ISO string
+        date = new Date(value);
+      }
       if (isNaN(date.getTime())) {
         return "";
       }
 
       var diffSeconds = Math.floor((Date.now() - date.getTime()) / 1000);
 
-      if (diffSeconds < 5) {
+      if (diffSeconds < 10) {
         return "just now";
       }
       if (diffSeconds < 60) {
         return diffSeconds + "s ago";
       }
-      var diffMinutes = Math.floor(diffSeconds / 60);
-      if (diffMinutes < 60) {
-        return diffMinutes + "m ago";
+      if (diffSeconds < 3600) {
+        return Math.floor(diffSeconds / 60) + "m ago";
       }
-      var diffHours = Math.floor(diffSeconds / 3600);
-      if (diffHours < 24) {
-        return diffHours + "h ago";
+      if (diffSeconds < 86400) {
+        return Math.floor(diffSeconds / 3600) + "h ago";
       }
-      var diffDays = Math.floor(diffSeconds / 86400);
-      return diffDays + "d ago";
+      return Math.floor(diffSeconds / 86400) + "d ago";
     },
-
-    // ── statusClass ─────────────────────────────────────────────────
 
     /**
      * Map a pipeline status string to a CSS class name.

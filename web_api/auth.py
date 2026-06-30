@@ -2,6 +2,8 @@
 # Cloudflare Access authentication for the web API.
 # No localhost fallback — web API is always behind Cloudflare.
 
+import time
+
 from fastapi import Header, HTTPException, Request
 from api.auth import CurrentUser
 from api.dependencies import get_db_manager
@@ -27,12 +29,13 @@ def get_current_user(
     db: DBManager = get_db_manager()
 
     # Upsert user row
+    now_epoch = int(time.time())
     with db.get_connection() as conn:
         conn.execute(
             """INSERT INTO users (email, display_name, source, last_seen_at)
-               VALUES (?, ?, 'cloudflare', CURRENT_TIMESTAMP)
-               ON CONFLICT(email) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP""",
-            (email, email.split("@")[0]),
+               VALUES (?, ?, 'cloudflare', ?)
+               ON CONFLICT(email) DO UPDATE SET last_seen_at = ?""",
+            (email, email.split("@")[0], now_epoch, now_epoch),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()

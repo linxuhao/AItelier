@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from models.schemas import TaskStatus
@@ -137,7 +138,7 @@ class DBManager:
                     display_name TEXT NOT NULL,
                     source TEXT NOT NULL DEFAULT 'cloudflare',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    last_seen_at INTEGER
                 )
             """)
             conn.execute("""
@@ -350,6 +351,34 @@ class DBManager:
                     conn.execute(f"ALTER TABLE runs DROP COLUMN {c}")
                 except sqlite3.OperationalError:
                     pass
+
+    def _mig_002_users_last_seen_epoch(self, conn):
+        """Schema v2 — convert users.last_seen_at from DATETIME TEXT to INTEGER Unix epoch.
+
+        Idempotent: checks column type via PRAGMA table_info and skips if already INTEGER.
+        Converts existing TEXT timestamps (UTC, stored by CURRENT_TIMESTAMP) to epoch
+        seconds via strftime('%s', ...). New rows get INTEGER from upsert_user().
+        """
+        cols = {
+            r[1]: r[2]
+            for r in conn.execute("PRAGMA table_info('users')").fetchall()
+        }
+        if "last_seen_at" not in cols:
+            return  # no users table yet (fresh DB)
+        current_type = cols["last_seen_at"].upper()
+        if current_type == "INTEGER":
+            return  # already migrated
+
+        # TEXT → INTEGER migration
+        conn.execute("ALTER TABLE users ADD COLUMN last_seen_at_new INTEGER")
+        conn.execute(
+            "UPDATE users SET last_seen_at_new = "
+            "COALESCE(CAST(strftime('%s', last_seen_at) AS INTEGER), "
+            "CAST(strftime('%s', 'now') AS INTEGER)) "
+            "WHERE last_seen_at_new IS NULL"
+        )
+        conn.execute("ALTER TABLE users DROP COLUMN last_seen_at")
+        conn.execute("ALTER TABLE users RENAME COLUMN last_seen_at_new TO last_seen_at")
 
     def _migrate_tasks_fk(self, conn):
         """
@@ -1685,7 +1714,7 @@ class DBManager:
     # ── User tracking ──
 
     def upsert_user(self, email: str, display_name: str | None = None, source: str = "cloudflare"):
-        """Upsert a user row, updating last_seen_at to CURRENT_TIMESTAMP.
+        """Upsert a user row, updating last_seen_at to the current Unix epoch (seconds).
 
         Args:
             email: User's email address (primary key).
@@ -1694,14 +1723,29 @@ class DBManager:
         """
         if display_name is None:
             display_name = email  # column is NOT NULL
+        now_epoch = int(time.time())
         with self.get_connection() as conn:
             conn.execute(
                 "INSERT INTO users (email, display_name, source, last_seen_at) "
-                "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
-                "ON CONFLICT(email) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP",
-                (email, display_name, source),
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(email) DO UPDATE SET last_seen_at = ?",
+                (email, display_name, source, now_epoch, now_epoch),
             )
             conn.commit()
+
+    def delete_user(self, email: str) -> bool:
+        """Delete a user by email.
+
+        Args:
+            email: User's email address to delete.
+
+        Returns:
+            True if a user was deleted, False if no user with that email exists.
+        """
+        with self.get_connection() as conn:
+            cur = conn.execute("DELETE FROM users WHERE email = ?", (email,))
+            conn.commit()
+            return cur.rowcount > 0
 
     def list_logged_users(self, limit: int = 50) -> list[dict]:
         """Return users ordered by last_seen_at DESC, with computed access_rights.
@@ -1766,4 +1810,5 @@ class DBManager:
 # schema_migrations). Defined here so the migration functions are bound.
 DBManager._VERSIONED_MIGRATIONS = [
     (1, "projects_to_runs", DBManager._mig_001_projects_to_runs),
+    (2, "users_last_seen_epoch", DBManager._mig_002_users_last_seen_epoch),
 ]

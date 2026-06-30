@@ -263,6 +263,36 @@ def test_sentinel_cli_user_created(db_manager):
     assert row["source"] == "cli"
 
 
+def test_upsert_user_stores_epoch_integer(db_manager):
+    """upsert_user should store last_seen_at as an integer Unix epoch."""
+    db_manager.upsert_user("epoch@test.com", "Epoch User")
+    with db_manager.get_connection() as conn:
+        row = conn.execute(
+            "SELECT last_seen_at FROM users WHERE email = ?",
+            ("epoch@test.com",),
+        ).fetchone()
+    assert isinstance(row["last_seen_at"], int)
+    assert row["last_seen_at"] > 1700000000  # after 2023
+
+
+def test_delete_user_existing(db_manager):
+    """delete_user should remove an existing user and return True."""
+    db_manager.upsert_user("del@test.com", "Delete Me")
+    result = db_manager.delete_user("del@test.com")
+    assert result is True
+    with db_manager.get_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM users WHERE email = ?", ("del@test.com",)
+        ).fetchone()
+    assert row is None
+
+
+def test_delete_user_nonexistent(db_manager):
+    """delete_user should return False for a non-existent email."""
+    result = db_manager.delete_user("noone@test.com")
+    assert result is False
+
+
 # ── owner_email column tests ──
 
 
@@ -644,7 +674,7 @@ def test_projects_to_runs_migration_parity(tmp_path):
     with sqlite3.connect(db_file) as conn:
         versions = sorted(r[0] for r in conn.execute(
             "SELECT version FROM schema_migrations").fetchall())
-    assert versions == [0, 1]
+    assert versions == [0, 1, 2]
     DBManager(db_file)  # re-open must not error or double-apply
 
 

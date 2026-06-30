@@ -81,6 +81,7 @@
           + '<th>Email</th>'
           + '<th>Latest Access</th>'
           + '<th>Access Rights</th>'
+          + '<th></th>'
           + '</tr></thead><tbody>';
 
         for (var i = 0; i < users.length; i++) {
@@ -90,11 +91,26 @@
           var rights = u.access_rights
             ? _escapeHtml(u.access_rights.charAt(0).toUpperCase() + u.access_rights.slice(1))
             : "";
-          html += '<tr><td>' + email + '</td><td>' + time + '</td><td>' + rights + '</td></tr>';
+          html += '<tr><td>' + email + '</td><td>' + time + '</td><td>' + rights + '</td>'
+            + '<td><button class="btn-del" data-email="' + u.email + '">Delete</button></td></tr>';
         }
 
         html += '</tbody></table>';
         container.innerHTML = html;
+
+        // Bind delete button click handlers
+        container.querySelectorAll('.btn-del').forEach(function(btn) {
+          btn.addEventListener('click', function() {
+            var email = btn.getAttribute('data-email');
+            if (!confirm('Delete user ' + email + '?')) return;
+            api.deleteUser(email).then(function() {
+              var tr = btn.closest('tr');
+              if (tr) tr.remove();
+            }).catch(function(err) {
+              alert('Delete failed: ' + (err && err.message ? err.message : err));
+            });
+          });
+        });
       }).catch(function (err) {
         container.innerHTML = '<p style="color:var(--del-color,#b00);">'
           + 'Failed to load users: ' + _escapeHtml(err && err.message ? err.message : String(err))

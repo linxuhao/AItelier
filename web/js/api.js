@@ -685,11 +685,41 @@
      * @returns {Promise<Array>}
      */
     getLoggedUsers: function (limit) {
-      var path = "/api/admin/logged-users";
+      var path = "/api/admin/logged-users"; // TEST_MARKER
       if (limit) {
         path += "?limit=" + encodeURIComponent(String(limit));
       }
       return _get(path);
+    },
+
+    /**
+     * Delete a tracked user by email (writer-only).
+     * DELETE /api/admin/logged-users/{email}
+     * @param {string} email — user email to delete
+     * @returns {Promise<object>} — {ok: true, email: string}
+     */
+    deleteUser: function (email) {
+      return _delete("/api/admin/logged-users/" + encodeURIComponent(email));
+    },
+
+    /**
+     * Delete a tracked user by email (writer-only).
+     * DELETE /api/admin/logged-users/{email}
+     * @param {string} email — user email to delete
+     * @returns {Promise<object>} — {ok: true, email: string}
+     */
+    deleteUser: function (email) {
+      return _delete("/api/admin/logged-users/" + encodeURIComponent(email));
+    },
+
+    /**
+     * Delete a tracked user by email (writer-only).
+     * DELETE /api/admin/logged-users/{email}
+     * @param {string} email — user email to delete
+     * @returns {Promise<object>} — {ok: true, email: string}
+     */
+    deleteUser: function (email) {
+      return _delete("/api/admin/logged-users/" + encodeURIComponent(email));
     },
 
     // ════════════════════════════════════════════════════════════════

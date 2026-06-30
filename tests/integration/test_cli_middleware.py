@@ -16,9 +16,15 @@ def test_localhost_allowed_by_default(client: TestClient):
     assert resp.status_code == 200
 
 
-def test_middleware_rejects_non_localhost():
+def test_middleware_rejects_non_localhost(monkeypatch):
     """Middleware should raise 403 for non-localhost client host."""
+    import api.main
     from api.main import localhost_only
+
+    # AITELIER_ALLOW_EXTERNAL=1 (set in the Docker backend) freezes
+    # api.main._ALLOW_EXTERNAL=True at import, which bypasses the guard. Pin it
+    # off so this test exercises the reject path regardless of ambient env.
+    monkeypatch.setattr(api.main, "_ALLOW_EXTERNAL", False)
 
     class FakeRequest:
         class Client:

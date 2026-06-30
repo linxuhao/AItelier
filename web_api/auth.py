@@ -4,7 +4,7 @@
 
 import time
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
 from api.auth import CurrentUser
 from api.dependencies import get_db_manager
 from core.db_manager import DBManager
@@ -13,6 +13,7 @@ from core.db_manager import DBManager
 def get_current_user(
     request: Request,
     cf_access_user_email: str | None = Header(None, alias="Cf-Access-User-Email"),
+    db: DBManager = Depends(get_db_manager),
 ) -> CurrentUser:
     """
     Resolve the current user from Cloudflare Access header.
@@ -26,7 +27,6 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="Authentication required")
 
     email = cf_access_user_email.strip().lower()
-    db: DBManager = get_db_manager()
 
     # Upsert user row
     now_epoch = int(time.time())

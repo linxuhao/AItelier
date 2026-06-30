@@ -73,7 +73,8 @@ def test_header_creates_user(web_client: TestClient):
 
     web_client.get("/api/tasks", headers=headers)
 
-    db = get_db_manager()
+    # Read from the SAME db the app uses (the override), not the prod singleton.
+    db = web_app.dependency_overrides[get_db_manager]()
     with db.get_connection() as conn:
         row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     assert row is not None
@@ -87,7 +88,8 @@ def test_header_email_trimmed_and_lowercased(web_client: TestClient):
     resp = web_client.get("/api/tasks", headers=headers)
     assert resp.status_code == 200
 
-    db = get_db_manager()
+    # Read from the SAME db the app uses (the override), not the prod singleton.
+    db = web_app.dependency_overrides[get_db_manager]()
     with db.get_connection() as conn:
         row = conn.execute("SELECT * FROM users WHERE email = ?", ("alice@example.com",)).fetchone()
     assert row is not None

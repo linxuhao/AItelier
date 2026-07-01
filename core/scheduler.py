@@ -37,7 +37,21 @@ _orphan_snapshots: set = set()  # (run_id, step_instance_id) already-dumped, for
 
 
 def _odbg(msg: str) -> None:
-    print(f"[ORPHAN-DBG] {msg}", flush=True)
+    line = f"[ORPHAN-DBG] {msg}"
+    print(line, flush=True)
+    # Durable sink: stdout via `docker logs` is WIPED when the container is
+    # recreated (e.g. an image rebuild), which lost a real recurrence once.
+    # ~/.AItelier is bind-mounted at the same absolute path on host and in the
+    # container, so this file survives restarts/recreates. Best-effort; the
+    # diagnostic must never crash the scheduler.
+    try:
+        from pathlib import Path as _P
+        import datetime as _dt
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+        with (_P.home() / ".AItelier" / "orphan_dbg.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"{ts}Z {line}\n")
+    except Exception:
+        pass
 
 
 db = get_db_manager()

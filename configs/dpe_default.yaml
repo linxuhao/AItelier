@@ -334,22 +334,27 @@ steps:
         workspace_root: "$STEP_DIR"
         manifest_path: "linter_manifest.json"
     lifecycle:
+      # on_deliver is a SEQUENCE of repo-mutating tool hooks, run in order with
+      # full variable resolution (needs skillflow-py >= 1.4.1). repo_apply
+      # adds/updates the step's files (ignoring the deletions manifest, so it
+      # never reaches the repo); repo_delete then reads _deletions.json from
+      # $STEP_DIR and git-rm's + commits the files the agent queued via
+      # delete_file. No-op when nothing was queued.
+      # (repo_delete cannot live in after_deliver: that path runs through
+      # StepValidator, which neither resolves $STEP_DIR nor unwraps `params`.)
       on_deliver:
-        tool: "repo_apply"
-        params:
-          source_dir: "$STEP_DIR"
-          # The deletions manifest is a control file — keep it out of the repo.
-          ignore: ["_deletions.json"]
-        on_failure: "retry"
-        max_retries: 3
-      after_deliver:
-        # repo_delete FIRST: apply the files the agent queued via delete_file
-        # (_deletions.json) right after repo_apply's adds, so the lint hooks
-        # below check the post-deletion tree. No-op when nothing was queued.
+        - tool: "repo_apply"
+          params:
+            source_dir: "$STEP_DIR"
+            ignore: ["_deletions.json"]
+          on_failure: "retry"
+          max_retries: 3
         - tool: "repo_delete"
           params:
             source_dir: "$STEP_DIR"
           on_failure: "warn"
+      after_deliver:
+        # Lint the post-apply, post-deletion tree.
         - tool: "lint"
           files: ["**/*.py"]
           workspace_root: "$STEP_DIR"

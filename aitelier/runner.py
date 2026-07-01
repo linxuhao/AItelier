@@ -13,11 +13,11 @@ from pathlib import Path
 
 from skillflow.core import ClaimedStep, StepResult
 
-
-# ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause is
-# pinned). Plain print so it always reaches `docker logs` (mirrors [DPE Debug]).
-def _odbg(msg: str) -> None:
-    print(f"[ORPHAN-DBG] {msg}", flush=True)
+# ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause
+# is pinned). Shared with core/scheduler.py via core.orphan_dbg so the run_step
+# ENTER/EXIT thread traces ALSO land in the durable ~/.AItelier/orphan_dbg.log
+# (they were previously stdout-only → wiped on container recreation).
+from core.orphan_dbg import odbg as _odbg
 
 
 # Backward-compat alias

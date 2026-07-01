@@ -1,9 +1,11 @@
 """repo_delete — apply a step's queued file deletions to the project repo.
 
-Runs as an ``after_deliver`` lifecycle hook right after ``repo_apply``: reads the
+Runs as the second ``on_deliver`` tool-hook right after ``repo_apply``: reads the
 ``_deletions.json`` manifest promoted into ``$STEP_DIR`` (``repo_apply`` is
 configured to ignore it, so it never reaches the repo), ``git rm``'s each listed
-repo-relative path from the project repo, commits, and clears the manifest.
+repo-relative path from the project repo, and commits. The manifest is cleared
+ONLY after the commit succeeds; if the commit fails the staged removals are
+rolled back and the manifest is kept so a retry re-attempts cleanly.
 No-op / no commit when the manifest is absent or empty.
 
 The agent never runs the destructive op — it only declared intent via
@@ -67,14 +69,18 @@ def repo_delete(source_dir: str = "", *, project_root: str = "",
         else:
             skipped.append({"path": rel, "reason": (r.stderr or r.stdout).strip()})
 
-    # Clear the manifest so a re-used / shared step dir can't replay stale
-    # deletions on a later task or run.
-    try:
-        manifest.unlink()
-    except Exception:
-        pass
+    def _clear_manifest():
+        # Drop the intent record so a re-used / shared step dir can't replay
+        # stale deletions on a later task or run.
+        try:
+            manifest.unlink()
+        except Exception:
+            pass
 
     if not removed:
+        # Nothing to commit (empty manifest, or every path unsafe/untracked/
+        # missing — a retry can't change that outcome). Safe to clear.
+        _clear_manifest()
         out = {"deleted": [], "committed": False}
         if skipped:
             out["skipped"] = skipped
@@ -88,9 +94,24 @@ def repo_delete(source_dir: str = "", *, project_root: str = "",
     parts.append(f"{len(removed)} file(s)")
     r = subprocess.run(["git", "commit", "-m", " ".join(parts)], cwd=repo,
                        capture_output=True, text=True)
-    out = {"deleted": removed, "committed": r.returncode == 0}
+
+    if r.returncode != 0:
+        # Commit FAILED. Roll back the staged `git rm`s so they are not left
+        # dangling in the index for the next repo_apply's `git add -A` to fold
+        # into an unrelated commit, and KEEP the manifest so a retry re-attempts
+        # from a clean tree (repo_delete runs with on_failure: retry).
+        subprocess.run(["git", "checkout", "HEAD", "--", *removed], cwd=repo,
+                       capture_output=True, text=True)
+        out = {"passed": False, "deleted": [], "committed": False,
+               "error": (f"git commit failed (rolled back {len(removed)} staged "
+                         f"deletion(s)): {(r.stderr or r.stdout).strip()}")}
+        if skipped:
+            out["skipped"] = skipped
+        return out
+
+    # Commit SUCCEEDED → only now is it safe to drop the intent record.
+    _clear_manifest()
+    out = {"deleted": removed, "committed": True}
     if skipped:
         out["skipped"] = skipped
-    if r.returncode != 0:
-        out["error"] = f"git commit failed: {(r.stderr or r.stdout).strip()}"
     return out

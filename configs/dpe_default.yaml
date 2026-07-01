@@ -352,7 +352,11 @@ steps:
         - tool: "repo_delete"
           params:
             source_dir: "$STEP_DIR"
-          on_failure: "warn"
+          # retry (not warn): a commit failure rolls back the staged git rm's and
+          # keeps the manifest, so an in-place retry re-attempts from a clean tree
+          # instead of advancing with a half-applied, uncommitted deletion.
+          on_failure: "retry"
+          max_retries: 2
       after_deliver:
         # Lint the post-apply, post-deletion tree.
         - tool: "lint"

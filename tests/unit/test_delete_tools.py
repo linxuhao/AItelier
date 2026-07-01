@@ -163,3 +163,44 @@ def test_repo_delete_skips_unsafe_and_missing(tmp_path):
     assert r["committed"] is False
     assert len(r["skipped"]) == 3                            # 2 unsafe + 1 missing
     assert (repo / "a.py").exists()                          # untouched
+
+
+def test_repo_delete_rolls_back_and_keeps_manifest_on_commit_failure(tmp_path):
+    """A commit failure must NOT strand a staged deletion (for the next
+    repo_apply `git add -A` to fold in) or lose the manifest: roll the git rm
+    back, keep the manifest, return passed=False — then a retry succeeds."""
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "web").mkdir()
+    (repo / "web" / "old.js").write_text("// old\n")
+    (repo / "keep.py").write_text("x = 1\n")
+    _commit_all(repo)
+
+    # Force `git commit` to fail deterministically via a failing pre-commit hook.
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+
+    step = tmp_path / "step"
+    step.mkdir()
+    (step / "_deletions.json").write_text(json.dumps(["web/old.js"]))
+
+    r = repo_delete(source_dir=str(step), project_root=str(repo), step_id="t_impl")
+
+    assert r["committed"] is False
+    assert r.get("passed") is False
+    # Rolled back: the file is restored, and nothing is left staged for a later
+    # `git add -A` to fold into an unrelated commit.
+    assert (repo / "web" / "old.js").exists()
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo,
+                            capture_output=True, text=True).stdout
+    assert "old.js" not in status, f"staged deletion left dangling:\n{status}"
+    # Manifest KEPT so the retry can re-attempt.
+    assert (step / "_deletions.json").exists()
+
+    # Remove the failing hook → a retry now succeeds and clears the manifest.
+    hook.unlink()
+    r2 = repo_delete(source_dir=str(step), project_root=str(repo), step_id="t_impl")
+    assert r2["deleted"] == ["web/old.js"]
+    assert r2["committed"] is True
+    assert not (repo / "web" / "old.js").exists()
+    assert not (step / "_deletions.json").exists()

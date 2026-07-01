@@ -1810,6 +1810,15 @@ class ChatZone(Container):
 
                         etype = event.get("type")
 
+                        if etype == "session":
+                            # Server-minted session id (our request carried
+                            # none) — adopt it so history persists and the
+                            # butler can resume this conversation's runs.
+                            sid = event.get("session_id")
+                            if sid:
+                                self.session_id = sid
+                            continue
+
                         if etype == "text_delta":
                             if agent_widget is None:
                                 agent_widget = self._add_message("agent", "")

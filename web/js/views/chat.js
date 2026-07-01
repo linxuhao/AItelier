@@ -127,15 +127,11 @@
       return Promise.resolve(null);
     }
 
-    // Read-only users can't create a session (a write) — skip the doomed POST.
-    if (typeof api.canWrite === "function" && !api.canWrite()) {
-      _sessionInitiated = true;
-      return Promise.resolve(null);
-    }
-
     // Re-attach to the last-active session across a reload (unless the caller
     // explicitly wants a fresh one, e.g. the "+ New" button). The id only ever
     // comes from a prior createSession, so the server-side row already exists.
+    // This runs BEFORE any permission check: re-attaching is a read, and the
+    // check below may still be the unresolved fail-closed default.
     if (!forceNew) {
       var stored = _readStoredSessionId();
       if (stored) {
@@ -143,6 +139,20 @@
         _sessionInitiated = true;
         return Promise.resolve(_sessionId);
       }
+    }
+
+    // Read-only users can't create a session (a write) — skip the doomed POST.
+    // Only latch this decision once /api/me has actually resolved: before
+    // that, canWrite() is just the fail-closed default, and latching it here
+    // dropped the session id for the whole page lifetime (silently unsaved
+    // history + the butler re-starting a pipeline run per message).
+    if (typeof api.canWrite === "function" && !api.canWrite()) {
+      var resolved = typeof api.permissionResolved !== "function" ||
+        api.permissionResolved();
+      if (resolved) {
+        _sessionInitiated = true;
+      }
+      return Promise.resolve(null);
     }
 
     return api.createSession().then(function (data) {
@@ -1184,6 +1194,17 @@
     var etype = event && event.type;
 
     switch (etype) {
+
+      case "session":
+        // Server-minted session id (our request carried none — e.g. the
+        // /api/me race dropped it). Adopt it so this and later turns keep
+        // their history and the butler can resume the conversation's runs.
+        if (event.session_id) {
+          _sessionId = event.session_id;
+          _sessionInitiated = true;
+          _storeSessionId(_sessionId);
+        }
+        break;
 
       case "text_delta":
         // Append to the current agent message bubble

@@ -52,10 +52,14 @@ class TestAgentChatEndpoint:
                 if line.startswith("data: "):
                     events.append(json.loads(line[6:]))
 
-            assert len(events) == 2
-            assert events[0]["type"] == "text_delta"
-            assert events[0]["content"] == "Hello!"
-            assert events[1]["type"] == "done"
+            # Sessionless request → the server mints a session and announces
+            # it as the first event, then streams the agent events.
+            assert len(events) == 3
+            assert events[0]["type"] == "session"
+            assert events[0]["session_id"]
+            assert events[1]["type"] == "text_delta"
+            assert events[1]["content"] == "Hello!"
+            assert events[2]["type"] == "done"
 
     def test_empty_message(self, client):
         """POST /api/agent/chat with empty message should still stream."""
@@ -103,8 +107,9 @@ class TestAgentChatEndpoint:
             for line in resp.text.strip().split("\n"):
                 if line.startswith("data: "):
                     events.append(json.loads(line[6:]))
-            assert events[0]["type"] == "error"
-            assert "Something broke" in events[0]["message"]
+            # events[0] is the minted-session announcement (sessionless request)
+            assert events[1]["type"] == "error"
+            assert "Something broke" in events[1]["message"]
 
     def test_tool_call_events(self, client):
         """Tool call and result events are streamed correctly."""
@@ -126,13 +131,15 @@ class TestAgentChatEndpoint:
                 if line.startswith("data: "):
                     events.append(json.loads(line[6:]))
 
-            assert len(events) == 4
-            assert events[0]["type"] == "text_delta"
-            assert events[1]["type"] == "tool_call"
-            assert events[1]["name"] == "list_projects"
-            assert events[2]["type"] == "tool_result"
-            assert events[2]["result"]["projects"] == []
-            assert events[3]["type"] == "done"
+            # events[0] is the minted-session announcement (sessionless request)
+            assert len(events) == 5
+            assert events[0]["type"] == "session"
+            assert events[1]["type"] == "text_delta"
+            assert events[2]["type"] == "tool_call"
+            assert events[2]["name"] == "list_projects"
+            assert events[3]["type"] == "tool_result"
+            assert events[3]["result"]["projects"] == []
+            assert events[4]["type"] == "done"
 
 
 class TestChatHistoryPersistence:
@@ -170,3 +177,74 @@ class TestChatHistoryPersistence:
 
         assert users == 1       # exactly one — backend saves it once, up-front
         assert assistants == 1  # assistant persisted once at stream end
+
+
+class TestServerMintedSession:
+    """A sessionless request must NOT be a silent no-persistence path (that
+    was the lost-history / duplicate-pipeline-run bug): the server mints a
+    session, persists the exchange under it, and announces it to the client."""
+
+    def test_sessionless_chat_mints_session_and_persists(self, client, tmp_path):
+        from core.db_manager import DBManager
+
+        with patch("core.meta_agent.MetaAgent.chat") as mock_chat:
+            async def fake_chat(*args, **kwargs):
+                yield {"type": "text_delta", "content": "Hi there"}
+                yield {"type": "done",
+                       "message": {"role": "assistant", "content": "Hi there"}}
+
+            mock_chat.side_effect = lambda *a, **kw: fake_chat()
+
+            resp = client.post("/api/agent/chat", json={
+                "message": "hello", "history": [],
+            })
+            assert resp.status_code == 200
+
+            events = []
+            for line in resp.text.strip().split("\n"):
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        # First event announces the minted session so the client adopts it
+        assert events[0]["type"] == "session"
+        sid = events[0]["session_id"]
+        assert sid
+
+        db = DBManager(str(tmp_path / "test.db"))
+        with db.get_connection() as conn:
+            session_row = conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE id=?", (sid,)).fetchone()[0]
+            users = conn.execute(
+                "SELECT COUNT(*) FROM chat_history WHERE session_id=? AND role='user'",
+                (sid,)).fetchone()[0]
+            assistants = conn.execute(
+                "SELECT COUNT(*) FROM chat_history WHERE session_id=? AND role='assistant'",
+                (sid,)).fetchone()[0]
+
+        assert session_row == 1
+        assert users == 1
+        assert assistants == 1
+
+    def test_client_supplied_session_gets_no_session_event(self, client):
+        """When the client already owns a session, the stream shape is
+        unchanged — no session announcement is injected."""
+        sid = client.post("/api/agent/session/create").json()["session_id"]
+
+        with patch("core.meta_agent.MetaAgent.chat") as mock_chat:
+            async def fake_chat(*args, **kwargs):
+                yield {"type": "done",
+                       "message": {"role": "assistant", "content": "OK"}}
+
+            mock_chat.side_effect = lambda *a, **kw: fake_chat()
+
+            resp = client.post("/api/agent/chat", json={
+                "message": "hello", "history": [], "session_id": sid,
+            })
+            assert resp.status_code == 200
+
+            events = []
+            for line in resp.text.strip().split("\n"):
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        assert all(e["type"] != "session" for e in events)

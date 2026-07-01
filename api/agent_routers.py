@@ -6,6 +6,7 @@
 #   POST /api/agent/chat/message   — save a single message
 
 import json
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
@@ -17,6 +18,8 @@ from api.dependencies import get_db_manager, get_workspace_manager
 from api.auth import CurrentUser, get_optional_user
 
 router = APIRouter(prefix="/api/agent", tags=["Meta Agent"])
+
+_log = logging.getLogger("aitelier.agent_chat")
 
 
 class AgentChatRequest(BaseModel):
@@ -50,34 +53,46 @@ async def agent_chat(
     """Stream agent response as SSE events."""
     owner = user.email if user else "cli@local"
 
-    # Load history from DB when session-scoped (cross-project, cross-restart)
-    history = list(request.history)
-    if request.session_id:
-        db_msgs = db.get_chat_history_by_session(request.session_id, limit=100)
-        # Append DB messages NOT already in the client-provided history
-        # (simple dedup: client history comes first, then older DB messages)
-        client_keys = {(m.get("role"), m.get("content", "")[:100]) for m in history}
-        for m in db_msgs:
-            key = (m["role"], m.get("content", "")[:100])
-            if key not in client_keys:
-                history.append({"role": m["role"], "content": m["content"]})
+    # Server-owned session integrity: a client that lost its session id (e.g.
+    # the SPA's /api/me race latching a null session) would otherwise chat
+    # sessionless — history silently unsaved and the butler unable to see the
+    # conversation's runs (lost history + duplicate pipeline runs). Mint one
+    # here and announce it as the first stream event so the client adopts it.
+    session_id = request.session_id
+    minted = not session_id
+    if minted:
+        session_id = db.create_session()
 
-    agent = MetaAgent(db, ws, owner_email=owner, session_id=request.session_id)
+    # Load history from DB (cross-project, cross-restart)
+    history = list(request.history)
+    db_msgs = db.get_chat_history_by_session(session_id, limit=100)
+    # Append DB messages NOT already in the client-provided history
+    # (simple dedup: client history comes first, then older DB messages)
+    client_keys = {(m.get("role"), m.get("content", "")[:100]) for m in history}
+    for m in db_msgs:
+        key = (m["role"], m.get("content", "")[:100])
+        if key not in client_keys:
+            history.append({"role": m["role"], "content": m["content"]})
+
+    agent = MetaAgent(db, ws, owner_email=owner, session_id=session_id)
 
     async def event_stream():
         collected_events = []  # persist after streaming
+        # Announce a server-minted session id before anything else so the
+        # client can adopt it even if the stream later aborts.
+        if minted:
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
         # Persist the user message up-front: the backend is the single owner of
         # chat-history persistence (the frontend no longer fire-and-forgets a
         # duplicate save). Saving before the stream means it survives a
         # mid-stream disconnect and works for any client of this endpoint.
-        if request.session_id:
-            try:
-                db.save_chat_message_with_session(
-                    request.session_id, request.current_project or "",
-                    "user", request.message,
-                )
-            except Exception:
-                pass  # Best-effort persistence
+        try:
+            db.save_chat_message_with_session(
+                session_id, request.current_project or "",
+                "user", request.message,
+            )
+        except Exception:
+            _log.exception("chat user-message persistence failed")  # best-effort
         try:
             async for event in agent.chat(
                 request.message, history, request.current_project
@@ -93,58 +108,57 @@ async def agent_chat(
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-        # Persist the assistant response if session-scoped
-        if request.session_id:
-            try:
-                # Accumulate ALL streamed prose, not just the final turn. The agent
-                # loop can emit prose across several turns (e.g. it presents the
-                # brief, then makes a tool call, then closes); capturing only the
-                # `done` message dropped the earlier brief, so reload/soft-nav lost
-                # it. `done` content is the last turn's text — already in the
-                # accumulated deltas — so it's only a fallback when no deltas ran.
-                streamed_text = ""
-                final_text = ""
-                surfaced = []  # brief/question text delivered via tool results
-                clean_finish = False  # a `done` event = the loop ended cleanly
-                for evt in collected_events:
-                    etype = evt.get("type")
-                    if etype == "text_delta":
-                        streamed_text += evt.get("content", "")
-                    elif etype == "done":
-                        final_text = (evt.get("message", {}) or {}).get("content", "") or ""
-                        clean_finish = True
-                    elif etype == "tool_result":
-                        res = evt.get("result", {})
-                        if isinstance(res, dict):
-                            if res.get("status") == "brief_review" and res.get("brief_markdown"):
-                                surfaced.append(res["brief_markdown"])
-                            elif res.get("status") == "question" and res.get("question"):
-                                surfaced.append(res["question"])
+        # Persist the assistant response
+        try:
+            # Accumulate ALL streamed prose, not just the final turn. The agent
+            # loop can emit prose across several turns (e.g. it presents the
+            # brief, then makes a tool call, then closes); capturing only the
+            # `done` message dropped the earlier brief, so reload/soft-nav lost
+            # it. `done` content is the last turn's text — already in the
+            # accumulated deltas — so it's only a fallback when no deltas ran.
+            streamed_text = ""
+            final_text = ""
+            surfaced = []  # brief/question text delivered via tool results
+            clean_finish = False  # a `done` event = the loop ended cleanly
+            for evt in collected_events:
+                etype = evt.get("type")
+                if etype == "text_delta":
+                    streamed_text += evt.get("content", "")
+                elif etype == "done":
+                    final_text = (evt.get("message", {}) or {}).get("content", "") or ""
+                    clean_finish = True
+                elif etype == "tool_result":
+                    res = evt.get("result", {})
+                    if isinstance(res, dict):
+                        if res.get("status") == "brief_review" and res.get("brief_markdown"):
+                            surfaced.append(res["brief_markdown"])
+                        elif res.get("status") == "question" and res.get("question"):
+                            surfaced.append(res["question"])
 
-                # Fix G: only persist the narrative on a clean finish — a stream
-                # that errored mid-way leaves partial prose we must NOT commit.
-                narrative = (streamed_text or final_text).strip()
-                to_save = []
-                saved_narrative = ""
-                if narrative and clean_finish:
-                    to_save.append(narrative)
-                    saved_narrative = narrative
-                # Safety net: a brief/question surfaced via a completed tool result
-                # is a finished artifact — persist it (deduped against any narrative
-                # we actually saved) so it survives reload even if the model emitted
-                # no prose or the stream later aborted.
-                for content in surfaced:
-                    c = (content or "").strip()
-                    if c and c not in saved_narrative:
-                        to_save.append(c)
+            # Fix G: only persist the narrative on a clean finish — a stream
+            # that errored mid-way leaves partial prose we must NOT commit.
+            narrative = (streamed_text or final_text).strip()
+            to_save = []
+            saved_narrative = ""
+            if narrative and clean_finish:
+                to_save.append(narrative)
+                saved_narrative = narrative
+            # Safety net: a brief/question surfaced via a completed tool result
+            # is a finished artifact — persist it (deduped against any narrative
+            # we actually saved) so it survives reload even if the model emitted
+            # no prose or the stream later aborted.
+            for content in surfaced:
+                c = (content or "").strip()
+                if c and c not in saved_narrative:
+                    to_save.append(c)
 
-                for content in to_save:
-                    db.save_chat_message_with_session(
-                        request.session_id, request.current_project or "",
-                        "assistant", content,
-                    )
-            except Exception:
-                pass  # Best-effort persistence
+            for content in to_save:
+                db.save_chat_message_with_session(
+                    session_id, request.current_project or "",
+                    "assistant", content,
+                )
+        except Exception:
+            _log.exception("chat assistant-message persistence failed")  # best-effort
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

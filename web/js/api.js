@@ -30,6 +30,10 @@
    *  read-only user never sees a flash of write UI in the pre-resolution window.
    *  Purely a client-side UX flag — the backend write_gate is the real control. */
   var _canWrite = false;
+
+  /** True once setCanWrite() has been called (i.e. /api/me resolved). While
+   *  false, _canWrite is only the fail-closed default, not a real answer. */
+  var _permissionResolved = false;
   var _SAFE_METHODS = { GET: 1, HEAD: 1, OPTIONS: 1 };
 
 
@@ -799,11 +803,19 @@
     /** Toggle client-side read-only mode (writes short-circuit when false). */
     setCanWrite: function (v) {
       _canWrite = !!v;
+      _permissionResolved = true;
     },
 
     /** Current write permission. */
     canWrite: function () {
       return _canWrite;
+    },
+
+    /** True once /api/me has resolved and setCanWrite recorded the outcome.
+     *  Before that, canWrite() is only the fail-closed default — callers must
+     *  not latch permanent decisions on it (see chat.js _initSession). */
+    permissionResolved: function () {
+      return _permissionResolved;
     },
   };
 

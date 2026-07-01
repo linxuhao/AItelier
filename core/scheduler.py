@@ -31,6 +31,15 @@ _HUNG_WARNING_COOLDOWN = 120  # seconds between repeated warnings for same step
 # Module-level state: track last warning time to avoid log spam
 _hung_warnings: dict[tuple, float] = {}  # (run_id, step_id, step_instance_id) -> last_warn_time
 
+# ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause is
+# pinned). Plain print so it always reaches `docker logs` (mirrors [DPE Debug]).
+_orphan_snapshots: set = set()  # (run_id, step_instance_id) already-dumped, for dedup
+
+
+def _odbg(msg: str) -> None:
+    print(f"[ORPHAN-DBG] {msg}", flush=True)
+
+
 db = get_db_manager()
 ws = get_workspace_manager()
 
@@ -508,6 +517,43 @@ async def _check_hung_claims():
             except Exception:
                 continue
 
+            # ORPHAN-DBG: trace-recency heartbeat. A claimed step whose latest
+            # skillflow_trace row is stale = executor dead/zombie/hung. Dump a
+            # ONE-SHOT forensic snapshot (all thread stacks) BEFORE skillflow's
+            # blunt stale-timeout re-dispatches it (~300s), so the next occurrence
+            # is captured in the act. Fires well under the 900s hung-warn gate.
+            try:
+                _ORPHAN_TRACE_STALE_S = 120
+                _osnap_key = (run_id, row["step_instance_id"])
+                if _osnap_key not in _orphan_snapshots:
+                    _lt = sf._conn.execute(
+                        "SELECT MAX(created_at) FROM skillflow_trace "
+                        "WHERE run_id = ? AND step_id = ?",
+                        (run_id, row["step_id"]),
+                    ).fetchone()
+                    _last_trace = _lt[0] if _lt else None
+                    if _last_trace:
+                        _lt_dt = _dt.datetime.strptime(
+                            _last_trace[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S"
+                        ).replace(tzinfo=_dt.timezone.utc)
+                        _trace_age = (now_dt - _lt_dt).total_seconds()
+                        if _trace_age > _ORPHAN_TRACE_STALE_S:
+                            _orphan_snapshots.add(_osnap_key)
+                            import sys as _sys, traceback as _tb, threading as _th
+                            _lock_held = _get_tick_lock(project_id).locked()
+                            _odbg(f"ORPHAN/HUNG SNAPSHOT project={project_id} "
+                                  f"step={row['step_id']} inst={row['step_instance_id']} "
+                                  f"claim_age={duration_s:.0f}s trace_age={_trace_age:.0f}s "
+                                  f"tick_lock_held={_lock_held} last_trace={_last_trace}")
+                            _frames = _sys._current_frames()
+                            for _to in _th.enumerate():
+                                _fr = _frames.get(_to.ident)
+                                if _fr is not None:
+                                    _odbg(f"  thread {_to.name} ({_to.ident}):\n"
+                                          + "".join(_tb.format_stack(_fr)))
+            except Exception as _e:
+                _odbg(f"orphan-snapshot check failed: {_e}")
+
             if duration_s <= warn_threshold_s:
                 continue
 
@@ -667,9 +713,20 @@ async def _run_skillflow_tick(project_id: str, loop):
         event_bus=_get_event_bus(),
     )
 
+    # ORPHAN-DBG: correlation id = step instance + claim version (unique per attempt,
+    # available on both sides of the executor boundary — no signature change needed).
+    _cid = f"inst{claimed.token.step_instance_id}.v{claimed.token.version}"
+    _t0 = _time.time()
+    _cur = asyncio.current_task()
+    _odbg(f"{_cid} tick execute BEGIN step={claimed.step_id} project={project_id} "
+          f"task={_cur.get_name() if _cur else '?'}")
+    _executed = False
     try:
         result = await runner.execute(claimed)
+        _executed = True
+        _odbg(f"{_cid} execute returned; confirm BEGIN step={claimed.step_id}")
         sf.confirm_step(claimed.token, result)
+        _odbg(f"{_cid} confirm OK step={claimed.step_id}")
 
         # Sync task manifest to DB when the PM step or its review completes.
         # FW-2: also sync on "3" so a re-run (3_review reject → 3) refreshes the
@@ -678,11 +735,23 @@ async def _run_skillflow_tick(project_id: str, loop):
             _sync_task_manifest_to_db(project_id)
     except MaxRetriesExceeded as e:
         sf.fail_step(claimed.token, str(e), retryable=False)
+    except asyncio.CancelledError:
+        # ORPHAN-DBG: THE silent path that strands the claim in 'claimed'.
+        # CancelledError is BaseException — NOT caught by `except Exception` below —
+        # so neither confirm_step nor fail_step runs. Log richly + RE-RAISE (no
+        # behavior change: the orphan still happens, then skillflow re-dispatches).
+        import traceback as _tb
+        _odbg(f"{_cid} *** CANCELLED *** step={claimed.step_id} "
+              f"execute_returned={_executed} elapsed={_time.time() - _t0:.1f}s — "
+              f"claim left status=claimed (ORPHAN). stack:\n"
+              + "".join(_tb.format_stack()))
+        raise
     except Exception as e:
         sf.fail_step(claimed.token, str(e), retryable=True)
 
     # Sync project status to DB after each tick
     _sync_project_status_to_db(project_id)
+    _odbg(f"{_cid} tick END step={claimed.step_id} confirmed={_executed}")
 
 
 def _sync_project_status_to_db(project_id: str):
@@ -1042,6 +1111,25 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
         _check_hung_claims, 'interval', seconds=30,
         max_instances=1,
     )
+
+    # ORPHAN-DBG: surface APScheduler anomalies (max-instances skip, misfire, job
+    # error) so a skip/miss at the orphan moment is visible in `docker logs`.
+    try:
+        from apscheduler.events import (
+            EVENT_JOB_ERROR, EVENT_JOB_MISSED, EVENT_JOB_MAX_INSTANCES,
+        )
+
+        def _log_job_event(ev):
+            _odbg(f"apscheduler job={getattr(ev, 'job_id', '?')} code={ev.code} "
+                  f"scheduled={getattr(ev, 'scheduled_run_time', None)} "
+                  f"exc={getattr(ev, 'exception', None)}")
+
+        scheduler.add_listener(
+            _log_job_event,
+            EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES,
+        )
+    except Exception:
+        pass
 
 
 # ── Wake-on-confirm hook ──────────────────────────────────────────

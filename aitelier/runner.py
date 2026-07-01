@@ -14,6 +14,12 @@ from pathlib import Path
 from skillflow.core import ClaimedStep, StepResult
 
 
+# ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause is
+# pinned). Plain print so it always reaches `docker logs` (mirrors [DPE Debug]).
+def _odbg(msg: str) -> None:
+    print(f"[ORPHAN-DBG] {msg}", flush=True)
+
+
 # Backward-compat alias
 AItelierStepRunner = None  # set after class definition
 
@@ -96,24 +102,36 @@ class AgentStepRunner:
             #       ticks on the same run (version-mismatch guard);
             #   (b) step.emit() and step.trace() are synchronous DB appends
             #       protected by skillflow's RLock + WAL mode.
-            import asyncio
+            import asyncio, threading
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: engine.run_step(
-                    task_id=task_id or 0,
-                    step_id=step_id,
-                    workspace=self._ws,
-                    project_id=project_id,
-                    agent_config_name=agent_name,
-                    resolved_context=resolved_context,
-                    tool_schemas=tool_schemas,
-                    output_dir=output_dir,
-                    max_tool_turns=max_tool_turns,
-                    run_id=run_id,
-                    step_instance_id=step.token.step_instance_id,
-                ),
-            )
+            # ORPHAN-DBG: log ENTER/EXIT of run_step INSIDE the executor thread.
+            # ENTER with no matching EXIT (or a very late EXIT) = the thread hung
+            # (zombie), distinguishing a real hang from an await-boundary cancel.
+            _cid = f"inst{step.token.step_instance_id}.v{step.token.version}"
+
+            def _run_traced():
+                _tid = threading.get_ident()
+                _odbg(f"{_cid} run_step ENTER thread={_tid} step={step_id}")
+                _rt0 = _time.time()
+                try:
+                    return engine.run_step(
+                        task_id=task_id or 0,
+                        step_id=step_id,
+                        workspace=self._ws,
+                        project_id=project_id,
+                        agent_config_name=agent_name,
+                        resolved_context=resolved_context,
+                        tool_schemas=tool_schemas,
+                        output_dir=output_dir,
+                        max_tool_turns=max_tool_turns,
+                        run_id=run_id,
+                        step_instance_id=step.token.step_instance_id,
+                    )
+                finally:
+                    _odbg(f"{_cid} run_step EXIT thread={_tid} step={step_id} "
+                          f"elapsed={_time.time() - _rt0:.1f}s")
+
+            await loop.run_in_executor(None, _run_traced)
         except Exception:
             raise  # Let skillflow's fail_step handle retries
 

@@ -18,7 +18,7 @@ intent_detector:
     enable: true
 
 meta_conversation_agent:
-  model: "deepseek/deepseek-v4-flash"
+  model: "deepseek/deepseek-v4-pro"
   template: "meta_conversation.md"
   # Output write-tools (write_gather_state, …) are auto-injected from the
   # graph's output.fixed; no extra tools needed.
@@ -33,7 +33,7 @@ meta_conversation_agent:
 # defined in core/meta_agent.py (TOOL_DEFINITIONS); this `tools` field is unused
 # by MetaAgent and kept empty to avoid confusion.
 meta_agent:
-  model: "deepseek/deepseek-v4-flash"
+  model: "deepseek/deepseek-v4-pro"
   template: "meta_conversation.md"
   tools: []
   max_tool_turns: 20

@@ -102,7 +102,7 @@ task_implementer:
   template: "task_implementer.md"
   # No "write": create/edit are derived from the step's output.mode (write).
   # Surgical create/edit prevents whole-file rewrites silently dropping unread code.
-  tools: ["list_tree", "test_write", "read_test_written"]
+  tools: ["list_tree", "test_write", "read_test_written", "delete_file"]
   max_output_tokens: 32768
   max_tool_turns: 15
   native_tool_calling: true

@@ -32,13 +32,11 @@ WORKDIR /app
 # Install the package + dependencies. The source is also bind-mounted at runtime
 # (docker-compose) so code edits are live without a rebuild.
 COPY . /app
-# Resolve deps with vendor/wheels/ as an extra local package index alongside PyPI;
-# pip installs the HIGHEST matching skillflow-py>=… version. See the
-# skillflow-snapshot note in CLAUDE.md.
-#   - DEV: drop a local snapshot wheel there (e.g. 1.1.8.post1, fixes not yet on
-#     PyPI) → post1 > 1.1.8 so it wins. Gitignored & not shipped; COPY copies it.
-#   - STABLE: a clone has no wheel → pip ignores the absent dir and uses PyPI.
-RUN pip install --no-cache-dir --find-links /app/vendor/wheels -e .
+# skillflow-py is a normal published dependency (pinned in pyproject.toml) —
+# installed from PyPI. To ship a skillflow change: bump its version, publish to
+# PyPI, then bump the `skillflow-py>=…` pin here. (Replaces the old
+# vendor/wheels local-snapshot override.)
+RUN pip install --no-cache-dir -e .
 
 # Identity for in-container git commits (workspace_manager commits set no inline
 # identity, and there is no global ~/.gitconfig in the image). Overridable.

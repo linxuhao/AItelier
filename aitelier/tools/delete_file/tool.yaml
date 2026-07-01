@@ -1,0 +1,14 @@
+name: delete_file
+description: >
+  Queue a repo-relative file for REMOVAL from the delivered project repo at this
+  step's delivery time (git rm + commit, applied by the repo_delete hook right
+  after your writes are committed). Use to remove OLD / superseded files during
+  a migration or refactor — e.g. after writing a file's replacement, delete the
+  old one instead of editing it into oblivion. Records intent only; the deletion
+  is applied deterministically, is reviewed, and is git-recoverable. Paths must
+  be repo-relative — no absolute paths, no '..', and never '.git'.
+parameters:
+  name:
+    type: string
+    description: "Repo-relative path of the file to delete, e.g. 'web/js/api.js'."
+    required: true

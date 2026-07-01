@@ -1,0 +1,12 @@
+name: repo_delete
+description: >
+  Apply a step's queued file deletions to the project repo. Reads the
+  _deletions.json manifest from the step dir (written by the delete_file tool),
+  git-rm's each listed repo-relative path from the project repo, commits, and
+  clears the manifest. No-op when the manifest is absent or empty. Intended as an
+  after_deliver lifecycle hook running right after repo_apply.
+parameters:
+  source_dir:
+    type: string
+    description: "Step directory holding the _deletions.json manifest (e.g. $STEP_DIR)."
+    required: true

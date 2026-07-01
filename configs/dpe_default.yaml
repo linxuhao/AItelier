@@ -338,9 +338,18 @@ steps:
         tool: "repo_apply"
         params:
           source_dir: "$STEP_DIR"
+          # The deletions manifest is a control file — keep it out of the repo.
+          ignore: ["_deletions.json"]
         on_failure: "retry"
         max_retries: 3
       after_deliver:
+        # repo_delete FIRST: apply the files the agent queued via delete_file
+        # (_deletions.json) right after repo_apply's adds, so the lint hooks
+        # below check the post-deletion tree. No-op when nothing was queued.
+        - tool: "repo_delete"
+          params:
+            source_dir: "$STEP_DIR"
+          on_failure: "warn"
         - tool: "lint"
           files: ["**/*.py"]
           workspace_root: "$STEP_DIR"

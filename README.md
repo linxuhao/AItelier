@@ -206,6 +206,20 @@ pytest tests/integration/ -v   # ~160 integration tests
 pytest tests/ -v               # full suite (~490 tests)
 ```
 
+## Web Frontend
+
+The SPA frontend lives in `web/` — Svelte 5 + Vite + Vitest.
+
+```bash
+cd web
+npm install                     # install dependencies
+npm run build                   # production build (vite build)
+npm test                        # run 103 vitest tests
+npm run dev                     # dev server with HMR
+```
+
+The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing).
+
 ## License
 
 AItelier is **source-available** under the [Functional Source License (FSL-1.1-MIT)](LICENSE).

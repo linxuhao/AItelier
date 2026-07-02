@@ -169,16 +169,47 @@ class WebSearchTool:
 
 # ── WebFetchTool ────────────────────────────────────────────────────────
 
+def _find_fragment_position(text: str, fragment: str) -> Optional[int]:
+    """Best-effort locate a URL #fragment inside extracted page text.
+
+    Fragments never reach the server, and heading ids rarely survive
+    html→text ("vi-unstuballglobals" vs the visible "vi.unstubAllGlobals"),
+    so try a few separator spellings, then the longest fragment segment.
+    """
+    low = text.lower()
+    frag = fragment.lower()
+    for candidate in (frag, frag.replace("-", " "), frag.replace("-", "."),
+                      frag.replace("-", ""), frag.replace("_", " ")):
+        if len(candidate) < 4:
+            continue
+        pos = low.find(candidate)
+        if pos != -1:
+            return pos
+    seg = max(frag.replace("_", "-").split("-"), key=len)
+    if len(seg) >= 6:
+        pos = low.find(seg)
+        if pos != -1:
+            return pos
+    return None
+
+
 class WebFetchTool:
     """Fetch a URL and extract readable text content."""
 
-    def fetch(self, url: str, max_chars: Optional[int] = None) -> dict:
+    def fetch(self, url: str, max_chars: Optional[int] = None,
+              offset: int = 0) -> dict:
         """
-        Fetch a URL and return its text content.
+        Fetch a URL and return a window of its text content.
 
         :param url: URL to fetch
         :param max_chars: Maximum characters to return (default from config)
-        :return: {"url", "title", "content", "content_length"} or {"error"}
+        :param offset: Skip this many characters of extracted text before the
+            window — a truncated result names the next offset, so the agent
+            can page through a long document instead of hitting the same
+            head-window on every retry.
+        :return: {"url", "title", "content", "content_length",
+                  "total_length", "offset", "next_offset", "truncated"}
+                 or {"error"}
         """
         if max_chars is None:
             max_chars = FETCH_MAX_CHARS
@@ -222,15 +253,38 @@ class WebFetchTool:
             title = ""
             content = raw
 
-        # Truncate
-        truncated = len(content) > max_chars
+        total = len(content)
+
+        # A #fragment deep-link: start the window at the linked section (the
+        # fragment never reaches the server, so the head of a long page would
+        # otherwise be all the agent can ever see).
+        anchor_note = ""
+        if parsed.fragment and not offset:
+            pos = _find_fragment_position(content, parsed.fragment)
+            if pos is not None:
+                offset = max(0, pos - 200)
+                anchor_note = f" (window starts at '#{parsed.fragment}')"
+
+        offset = max(0, min(int(offset or 0), total))
+        window = content[offset:offset + max_chars]
+        window_end = offset + len(window)
+        truncated = window_end < total
+
         if truncated:
-            content = content[:max_chars] + f"\n\n... [truncated at {max_chars} chars]"
+            window += (f"\n\n... [showing chars {offset}-{window_end} of "
+                       f"{total}{anchor_note} — call web_fetch again with "
+                       f"offset={window_end} to continue]")
+        elif offset:
+            window += (f"\n\n[showing chars {offset}-{window_end} of {total}"
+                       f"{anchor_note} — end of document]")
 
         return {
             "url": url,
             "title": title,
-            "content": content,
-            "content_length": len(content),
+            "content": window,
+            "content_length": len(window),
+            "total_length": total,
+            "offset": offset,
+            "next_offset": window_end if truncated else None,
             "truncated": truncated,
         }

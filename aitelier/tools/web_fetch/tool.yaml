@@ -1,8 +1,15 @@
 name: web_fetch
 description: >
-  Fetch content from a URL and extract text.
+  Fetch content from a URL and extract text. Long pages are returned in
+  windows: a truncated result names the next offset — call again with that
+  offset to continue reading. A #fragment in the URL positions the first
+  window at that section.
 parameters:
   url:
     type: string
     description: "URL to fetch"
     required: true
+  offset:
+    type: integer
+    description: "Characters to skip before the window (use a previous result's next_offset to continue). Default 0."
+    required: false

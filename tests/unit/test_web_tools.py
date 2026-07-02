@@ -199,7 +199,8 @@ class TestWebFetchTool:
 
         assert result["truncated"] is True
         assert result["content"].startswith("x" * 100)
-        assert "truncated" in result["content"]
+        # The notice teaches continuation instead of a dead-end "truncated"
+        assert "offset=100" in result["content"]
 
     @patch("core.web_tools.httpx.get")
     def test_fetch_timeout(self, mock_get):
@@ -222,3 +223,80 @@ class TestWebFetchTool:
         result = tool.fetch("https://example.com/missing")
         assert "error" in result
         assert "404" in result["error"]
+
+
+class TestWebFetchWindowing:
+    """Long pages page through windows; #fragments position the first window.
+
+    Regression for the vitest-docs incident: a 10k head-truncation with no
+    offset meant content deep in a long page was permanently unreachable —
+    the agent re-fetched the same head window until the step burned out.
+    """
+
+    @staticmethod
+    def _mock_resp(text, content_type="text/plain"):
+        resp = MagicMock()
+        resp.text = text
+        resp.headers = {"content-type": content_type}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    @patch("core.web_tools.httpx.get")
+    def test_truncated_result_names_next_offset(self, mock_get):
+        mock_get.return_value = self._mock_resp("x" * 25000)
+        result = WebFetchTool().fetch("https://example.com/big")
+        assert result["truncated"] is True
+        assert result["total_length"] == 25000
+        assert result["next_offset"] == 10000
+        assert "offset=10000" in result["content"]
+
+    @patch("core.web_tools.httpx.get")
+    def test_offset_continues_from_previous_window(self, mock_get):
+        text = "a" * 10000 + "MARKER" + "b" * 10000
+        mock_get.return_value = self._mock_resp(text)
+        result = WebFetchTool().fetch("https://example.com/big", offset=10000)
+        assert result["content"].startswith("MARKER")
+        assert result["offset"] == 10000
+        assert result["next_offset"] == 20000
+
+    @patch("core.web_tools.httpx.get")
+    def test_final_window_not_truncated(self, mock_get):
+        mock_get.return_value = self._mock_resp("x" * 25000)
+        result = WebFetchTool().fetch("https://example.com/big", offset=20000)
+        assert result["truncated"] is False
+        assert result["next_offset"] is None
+        assert "end of document" in result["content"]
+
+    @patch("core.web_tools.httpx.get")
+    def test_fragment_positions_window_at_section(self, mock_get):
+        # The linked section sits far beyond the first window — the fragment
+        # spelling in text ("vi.unstubAllGlobals") differs from the anchor id.
+        text = "intro " * 3000 + "vi.unstubAllGlobals restores all globals"
+        mock_get.return_value = self._mock_resp(text)
+        result = WebFetchTool().fetch(
+            "https://vitest.dev/api/vi.html#vi-unstuballglobals")
+        assert "vi.unstubAllGlobals restores all globals" in result["content"]
+        assert result["offset"] > 0
+
+    @patch("core.web_tools.httpx.get")
+    def test_fragment_not_found_falls_back_to_head(self, mock_get):
+        mock_get.return_value = self._mock_resp("short page")
+        result = WebFetchTool().fetch("https://example.com/p#nowhere-anchor")
+        assert result["content"] == "short page"
+        assert result["offset"] == 0
+
+    @patch("core.web_tools.httpx.get")
+    def test_explicit_offset_wins_over_fragment(self, mock_get):
+        text = "a" * 10000 + "SECTION marker here" + "b" * 10000
+        mock_get.return_value = self._mock_resp(text)
+        result = WebFetchTool().fetch(
+            "https://example.com/p#section", offset=20000)
+        assert result["offset"] == 20000
+
+    @patch("core.web_tools.httpx.get")
+    def test_short_page_unchanged(self, mock_get):
+        mock_get.return_value = self._mock_resp("tiny")
+        result = WebFetchTool().fetch("https://example.com/small")
+        assert result["content"] == "tiny"
+        assert result["truncated"] is False
+        assert result["next_offset"] is None

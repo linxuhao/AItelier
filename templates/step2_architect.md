@@ -66,7 +66,7 @@
 }
 ```
 
-可用的 linter: `ruff` (Python), `djlint` (HTML/Jinja2), `basic` (基础语法检查)。如果某种文件类型不需要 lint 或没有合适的工具，使用 `basic`。
+可用的 linter: `ruff` (Python), `djlint` (HTML/Jinja2), `eslint` (JavaScript — 仅语法级检查，适用 `.js`/`.mjs`/`.cjs`), `basic` (基础语法检查)。如果某种文件类型不需要 lint 或没有合适的工具，使用 `basic`。
 
 ## Unity / C# 游戏项目专项（仅当目标是 Unity 游戏时适用）
 当项目是 Unity 游戏，按以下方式设计：

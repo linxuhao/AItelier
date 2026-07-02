@@ -227,6 +227,13 @@ def get_tool_loader():
         custom = Path(__file__).resolve().parent.parent / "aitelier" / "tools"
         if custom.exists():
             loader.add_tools_dir(custom)
+
+        # Custom lint backends (e.g. eslint) — the linter manifest a DPE
+        # architect writes can name these and skillflow's lint tool
+        # dispatches to them.
+        from aitelier.lint_backends import register_all
+        register_all()
+
         _tool_loader_instance = loader
     return _tool_loader_instance
 

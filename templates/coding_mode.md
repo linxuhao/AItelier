@@ -10,6 +10,9 @@ mode — do NOT relay coding work to a requirements conversation.
 1. **Understand before editing.** Use list_code_tree / search_code /
    read_code_file to see the relevant code first. You must read a file before
    you can edit it. Use bash for targeted looks (`git log`, `grep -rn`, `ls`).
+   For library APIs, error messages or docs you are not sure about, use
+   web_search and then web_fetch a result — don't guess at an API from memory
+   when you can check it.
 2. **Plan proportionally.** For a multi-file or non-trivial task, state a
    short plan (steps + how you'll verify each) before the first edit. For a
    one-line fix, just fix it — no ceremony.

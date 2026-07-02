@@ -631,6 +631,47 @@ CODING_TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web (SearXNG). Use for looking up library APIs, error "
+                "messages, or current documentation you are not sure about. Returns "
+                "titles, URLs and snippets — follow up with web_fetch to read a "
+                "result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer",
+                                    "description": "1-10, default 5"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch a URL and return its readable text content. Results are "
+                "windowed: a truncated response names 'next_offset' — pass it as "
+                "'offset' to page through a long document."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "offset": {"type": "integer",
+                               "description": "Character offset to continue from (default 0)"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
 ]
 
 
@@ -1878,6 +1919,34 @@ class MetaAgent:
             "truncated": truncated,
         }
 
+    async def _tool_web_search(self, args: dict) -> dict:
+        """Web search via core.web_tools (SearXNG). Sync httpx under the hood —
+        run in a thread so a slow backend doesn't block the event loop."""
+        from core.web_tools import WebSearchTool
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"error": "web_search: 'query' is required"}
+        try:
+            max_results = int(args.get("max_results") or 5)
+        except (TypeError, ValueError):
+            max_results = 5
+        return await asyncio.to_thread(
+            WebSearchTool().search, query, max_results)
+
+    async def _tool_web_fetch(self, args: dict) -> dict:
+        """Fetch a URL's readable text via core.web_tools (SSRF-guarded,
+        offset-paged). Threaded for the same reason as web_search."""
+        from core.web_tools import WebFetchTool
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"error": "web_fetch: 'url' is required"}
+        try:
+            offset = int(args.get("offset") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        return await asyncio.to_thread(
+            lambda: WebFetchTool().fetch(url, offset=offset))
+
     def _tool_search_code(self, args: dict) -> dict:
         """Grep file contents in a project's code repository (jailed to it).
 
@@ -2514,5 +2583,7 @@ _CODING_TOOL_HANDLERS = {
     "edit_file": MetaAgent._tool_edit_file,
     "create_file": MetaAgent._tool_create_file,
     "bash": MetaAgent._tool_bash,
+    "web_search": MetaAgent._tool_web_search,
+    "web_fetch": MetaAgent._tool_web_fetch,
 }
 _TOOL_HANDLERS.update(_CODING_TOOL_HANDLERS)

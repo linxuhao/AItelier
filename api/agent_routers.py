@@ -100,6 +100,12 @@ async def agent_chat(
         # (simple dedup: client history comes first, then older DB messages)
         client_keys = {(m.get("role"), m.get("content", "")[:100]) for m in history}
         for m in db_msgs:
+            # Tool rows are kept in history for the chat display, but a bare
+            # role:'tool' message (no tool_call_id, no preceding tool_calls)
+            # is an invalid LLM sequence — providers 400 on it. Relevant when
+            # a session that ran coding mode is toggled back to butler.
+            if m["role"] == "tool":
+                continue
             key = (m["role"], m.get("content", "")[:100])
             if key not in client_keys:
                 history.append({"role": m["role"], "content": m["content"]})

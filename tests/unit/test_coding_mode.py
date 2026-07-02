@@ -58,7 +58,8 @@ class TestModePlumbing:
 
     def test_coding_tool_definitions_shape(self):
         names = {td["function"]["name"] for td in CODING_TOOL_DEFINITIONS}
-        assert names == {"edit_file", "create_file", "bash"}
+        assert names == {"edit_file", "create_file", "bash",
+                         "web_search", "web_fetch"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
 
@@ -215,6 +216,69 @@ class TestBash:
         assert len(result["output"]) < 12000
 
 
+class TestWebTools:
+    async def test_web_tools_rejected_in_butler_mode(self, butler_agent):
+        for name, args in (("web_search", {"query": "x"}),
+                           ("web_fetch", {"url": "https://example.com"})):
+            result = await butler_agent._execute_tool(name, args)
+            assert "only available in coding mode" in result["error"]
+
+    async def test_web_search_requires_query(self, coding_agent):
+        result = await coding_agent._execute_tool("web_search", {"query": "  "})
+        assert "required" in result["error"]
+
+    async def test_web_search_unconfigured_returns_note(self, coding_agent,
+                                                        monkeypatch):
+        # No SEARXNG_URL → the tool reports itself unconfigured instead of
+        # erroring, so the loop continues on model knowledge.
+        import core.web_tools as wt
+        monkeypatch.setattr(wt, "SEARXNG_URL", "")
+        result = await coding_agent._execute_tool(
+            "web_search", {"query": "python asyncio"})
+        assert result["total"] == 0
+        assert "not configured" in result["note"]
+
+    async def test_web_search_delegates(self, coding_agent, monkeypatch):
+        from core import web_tools
+        seen = {}
+
+        def fake_search(self, query, max_results=5, categories="general",
+                        language="auto"):
+            seen["query"], seen["max"] = query, max_results
+            return {"query": query, "total": 1,
+                    "results": [{"title": "t", "url": "u", "snippet": "s"}]}
+
+        monkeypatch.setattr(web_tools.WebSearchTool, "search", fake_search)
+        result = await coding_agent._execute_tool(
+            "web_search", {"query": "svelte 5 runes", "max_results": 3})
+        assert seen == {"query": "svelte 5 runes", "max": 3}
+        assert result["total"] == 1
+
+    async def test_web_fetch_invalid_url(self, coding_agent):
+        result = await coding_agent._execute_tool(
+            "web_fetch", {"url": "ftp://example.com/x"})
+        assert "Unsupported scheme" in result["error"]
+
+    async def test_web_fetch_blocks_private_hosts(self, coding_agent):
+        result = await coding_agent._execute_tool(
+            "web_fetch", {"url": "http://127.0.0.1:4444/api/me"})
+        assert "private" in result["error"].lower() or "Blocked" in result["error"]
+
+    async def test_web_fetch_passes_offset(self, coding_agent, monkeypatch):
+        from core import web_tools
+        seen = {}
+
+        def fake_fetch(self, url, max_chars=None, offset=0):
+            seen["url"], seen["offset"] = url, offset
+            return {"url": url, "content": "hello", "truncated": False}
+
+        monkeypatch.setattr(web_tools.WebFetchTool, "fetch", fake_fetch)
+        result = await coding_agent._execute_tool(
+            "web_fetch", {"url": "https://docs.python.org/3/", "offset": 500})
+        assert seen == {"url": "https://docs.python.org/3/", "offset": 500}
+        assert result["content"] == "hello"
+
+
 class TestTranscriptPersistence:
     def test_roundtrip(self, db_manager):
         sid = db_manager.create_session()
@@ -260,7 +324,10 @@ class TestTranscriptPersistence:
         msgs = db_manager.get_chat_transcript_by_session(sid)
         assert [m["role"] for m in msgs] == ["user"]
 
-    def test_narrative_history_skips_tool_rows(self, db_manager):
+    def test_narrative_history_keeps_tool_rows_drops_empty_shells(self, db_manager):
+        # Since ee0a31c tool rows are INCLUDED (the chat UI renders them as
+        # collapsible blocks after reload); empty assistant tool-call shells
+        # are still dropped.
         sid = db_manager.create_session()
         db_manager.save_chat_message_with_session(sid, "p", "user", "hi")
         db_manager.save_chat_transcript_message(
@@ -273,7 +340,7 @@ class TestTranscriptPersistence:
         db_manager.save_chat_message_with_session(sid, "p", "assistant", "done")
         narrative = db_manager.get_chat_history_by_session(sid)
         assert [(m["role"], m["content"]) for m in narrative] == [
-            ("user", "hi"), ("assistant", "done")]
+            ("user", "hi"), ("tool", "{}"), ("assistant", "done")]
 
     def test_session_mode(self, db_manager):
         sid = db_manager.create_session()

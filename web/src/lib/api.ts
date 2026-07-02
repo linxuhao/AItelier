@@ -222,6 +222,10 @@ export function getRun(runId: string): Promise<Record<string, unknown>> {
   return _get('/api/runs/' + encodeURIComponent(runId));
 }
 
+export function getTasks(projectId: string): Promise<Record<string, unknown>[]> {
+  return _get('/api/projects/' + encodeURIComponent(projectId) + '/tasks');
+}
+
 export function getRunDetail(runId: string): Promise<Record<string, unknown>> {
   // GET /api/runs/{id} IS the detail endpoint (steps + cache_stats + manifest).
   // A phantom "/detail" suffix here 404'd every run-detail fetch.

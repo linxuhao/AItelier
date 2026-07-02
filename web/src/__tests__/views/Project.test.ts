@@ -15,6 +15,7 @@ import { projectStore } from '../../stores/project';
 
 const mockApi = vi.hoisted(() => ({
   getProject: vi.fn(),
+  getTasks: vi.fn(),
   listRuns: vi.fn(),
   getRunDetail: vi.fn(),
   retryProject: vi.fn(),
@@ -140,6 +141,7 @@ describe('Project.svelte', () => {
     mockApi.getProject.mockResolvedValue({ ...MOCK_PROJECT });
     mockApi.listRuns.mockResolvedValue({ runs: MOCK_RUNS.map(r => ({ ...r })) });
     mockApi.getCheckpoint.mockResolvedValue(null);
+    mockApi.getTasks.mockResolvedValue([]);
     mockApi.getRunDetail.mockResolvedValue({ ...MOCK_RUN_DETAIL });
   });
 
@@ -386,20 +388,6 @@ describe('Project.svelte', () => {
     // element, and findByText's default matcher requires the FULL text.
     await findByText(/Checkpoint Pending/);
     expect(container.querySelector('#checkpoint-card')).not.toBeNull();
-  });
-
-  // ── Navigation to Chat ──
-
-  it('navigates to chat view on Chat button click', async () => {
-    const { findByText } = render(await import('../../views/Project.svelte'), {
-      props: { params: { id: 'test-project' } },
-    });
-
-    await findByText('Test Project');
-    const chatBtn = await findByText('Chat');
-    await fireEvent.click(chatBtn);
-
-    expect(mockPush).toHaveBeenCalledWith('#/projects/test-project/chat');
   });
 
   // ── Navigation to Trace ──

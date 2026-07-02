@@ -220,7 +220,10 @@
 
     <!-- Trace entry list -->
     <div class="trace-list">
-      {#each traces as entry (entry.seq)}
+      <!-- Keyed by POSITION, not seq: the API can return duplicate seq values
+           (runs with retry/reclaim history), and a duplicate key in a keyed
+           each is a FATAL error that froze the whole app on "Loading". -->
+      {#each traces as entry, entryIdx (entryIdx)}
         {@const seq = entry.seq as number}
         {@const cat = (entry.category as string) || 'step'}
         {@const isExpanded = expandedSeqs.has(seq)}

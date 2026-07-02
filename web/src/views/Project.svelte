@@ -6,6 +6,7 @@
   import { projectStore, setCurrentProject } from '../stores/project';
   import {
     getProject,
+    getTasks,
     listRuns,
     getRunDetail,
     retryProject,
@@ -36,6 +37,7 @@
   let project = $state<Record<string, unknown> | null>(null);
   let checkpointFeedback = $state('');
   let runs = $state<Record<string, unknown>[]>([]);
+  let tasks = $state<Record<string, unknown>[]>([]);
   let runDetail = $state<Record<string, unknown> | null>(null);
   let selectedRunId = $state<string | null>(null);
   let checkpoint = $state<Record<string, unknown> | null>(null);
@@ -101,10 +103,11 @@
     if (!pid || isRefreshing) return;
     isRefreshing = true;
     try {
-      const [proj, runsData, cpData] = await Promise.all([
+      const [proj, runsData, cpData, taskData] = await Promise.all([
         getProject(pid),
         listRuns(pid),
         getCheckpoint(pid).catch(() => null),
+        getTasks(pid).catch(() => null),
       ]);
       // Guard against stale responses when navigating away quickly
       if (params.id !== pid) return;
@@ -115,6 +118,9 @@
       const runList = (runsData as any)?.runs ?? runsData ?? [];
       if (Array.isArray(runList)) {
         runs = runList as Record<string, unknown>[];
+      }
+      if (Array.isArray(taskData)) {
+        tasks = taskData as Record<string, unknown>[];
       }
       // The endpoint returns an EMPTY CheckpointResponse ({checkpoint: null,
       // ...}) when nothing is pending — truthy as an object, which rendered a
@@ -215,12 +221,6 @@
     push('#/projects/' + encodeURIComponent(pid) + '/trace');
   }
 
-  function navigateToChat(): void {
-    const pid = params.id;
-    if (!pid) return;
-    push('#/projects/' + encodeURIComponent(pid) + '/chat');
-  }
-
   function navigateToTraceForRun(runId: string): void {
     const pid = params.id;
     if (!pid) return;
@@ -314,6 +314,18 @@
 
   function runDisplayId(run: Record<string, unknown>): string {
     return truncate((run.run_id as string) || (run.id as string) || '', 12);
+  }
+
+  function taskSteps(task: Record<string, unknown>): string {
+    // completed_steps is a JSON-encoded string in the API payload
+    let completed: unknown = task.completed_steps ?? [];
+    if (typeof completed === 'string') {
+      try { completed = JSON.parse(completed); } catch { completed = []; }
+    }
+    const n = Array.isArray(completed) ? completed.length : 0;
+    const current = (task.current_step as string) || '';
+    if ((task.status as string) === 'completed') return n + ' steps';
+    return n + ' done · at ' + (stepLabel(current) || current || '—');
   }
 
   function runDuration(run: Record<string, unknown>): string {
@@ -468,9 +480,6 @@
           </button>
           <button class="outline" onclick={handleViewTraces}>
             View Trace
-          </button>
-          <button class="outline" onclick={navigateToChat}>
-            Chat
           </button>
         </footer>
       {/if}
@@ -664,7 +673,6 @@
 
               <!-- Navigation links -->
               <nav class="run-nav">
-                <button class="outline small" onclick={navigateToChat}>Chat</button>
                 <button class="outline small" onclick={() => navigateToTraceForRun((runDetail.id as string) || (runDetail.run_id as string))}>Trace</button>
               </nav>
 
@@ -729,6 +737,42 @@
             </section>
           {/if}
         </div>
+      {/if}
+
+      <!-- Task list (per-task status), as the vanilla project view had -->
+      {#if tasks.length > 0}
+        <figure class="task-list-section">
+          <h4>Tasks ({tasks.length})</h4>
+          <table class="task-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Prompt</th>
+                <th>Status</th>
+                <th>Steps</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each tasks as task, taskIdx ((task.id as number) ?? taskIdx)}
+                {@const parsed = parseStatus(task.status as string)}
+                <tr>
+                  <td>{taskIdx + 1}</td>
+                  <td class="task-prompt" title={task.prompt as string}>
+                    {truncate((task.prompt as string) || '', 80)}
+                  </td>
+                  <td>
+                    <span class="status-badge {parsed.className}">
+                      {parsed.icon} {parsed.text}
+                    </span>
+                  </td>
+                  <td>{taskSteps(task)}</td>
+                  <td><span class="timestamp">{formatTime(task.created_at as string)}</span></td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </figure>
       {/if}
     {/if}
 
@@ -1020,6 +1064,9 @@
     overflow: hidden;
   }
   .step-header {
+    /* PicoCSS styles [role="button"] as a primary button (white text) —
+       on our light row that made every step label invisible. */
+    color: inherit;
     display: flex;
     align-items: center;
     gap: 0.5rem;

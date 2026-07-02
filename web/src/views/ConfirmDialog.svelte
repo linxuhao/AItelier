@@ -22,11 +22,13 @@
   let pending = $state(false);
 
   function handleKeydown(e: KeyboardEvent): void {
+    // Only intercept when the dialog is actually visible
+    if (!show) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       cancel();
     }
-    if (e.key === 'Enter' && !e.repeat) {
+    if (e.key === 'Enter' && !e.repeat && !e.shiftKey) {
       e.preventDefault();
       confirm();
     }

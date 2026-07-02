@@ -204,6 +204,13 @@
       // Adopt the session's stored mode so the toggle reflects reality.
       codingMode = (response.mode as string) === 'coding';
 
+      // Restore token usage from API
+      if (typeof response.token_count === 'number') {
+        tokenCount = response.token_count;
+        tokenLimit = (response.token_limit as number) || 0;
+        tokenMode = (response.mode as string) || 'butler';
+      }
+
       // Build dedup key set from existing history
       const existingKeys = new Set<string>();
       for (const msg of history) {
@@ -223,9 +230,24 @@
         if (displayRole === 'tool' && m.message_json) {
           try {
             const parsed = JSON.parse(m.message_json as string);
-            if (parsed.tool_name) {
-              msg.toolName = parsed.tool_name;
-              msg._argDisplay = '';
+            const tName = parsed.tool_name as string;
+            if (tName) {
+              msg.toolName = tName;
+              const tArgs = parsed.tool_args as Record<string, unknown> | undefined;
+              if (tArgs) {
+                msg.toolArgs = tArgs;
+                msg._argDisplay = _formatToolArgs(tName, tArgs);
+              }
+              // Parse the result from the persisted content JSON
+              if (parsed.content && typeof parsed.content === 'string') {
+                try {
+                  msg.toolResult = JSON.parse(parsed.content) as Record<string, unknown>;
+                } catch { /* not JSON */ }
+              }
+              // Replace raw-JSON content with a human summary
+              msg.content = msg.toolResult
+                ? _formatToolResult(tName, msg.toolResult)
+                : '🔧 ' + tName;
             }
           } catch { /* not JSON — ignore */ }
         }
@@ -750,7 +772,11 @@
 
   function handleKeydown(e: KeyboardEvent): void {
     if (_handleCompletionKeydown(e)) return;
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter') {
+      if (e.shiftKey) {
+        // Shift+Enter: let browser insert newline — do nothing
+        return;
+      }
       e.preventDefault();
       handleSend();
     }

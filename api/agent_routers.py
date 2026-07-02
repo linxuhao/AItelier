@@ -237,10 +237,20 @@ def get_chat_history(
     # sessions render agent-answer-before-question while live chat is correct.
     messages = db.get_chat_history_by_session(session_id, limit=100)
 
+    # Rough token estimate for the progress bar: ~4 chars/token across all
+    # message content. Close enough for a usage indicator; the live SSE stream
+    # delivers precise counts from litellm.token_counter once a turn completes.
+    token_count = 0
+    for m in messages:
+        c = m.get("content") or ""
+        token_count += len(c) // 4
+    mode = db.get_session_mode(session_id)
     return {
         "session_id": session_id,
-        "mode": db.get_session_mode(session_id),
+        "mode": mode,
         "messages": messages,
+        "token_count": token_count,
+        "token_limit": 100000 if mode == "coding" else 0,
     }
 
 

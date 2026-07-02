@@ -556,6 +556,83 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+# ── Coding-mode tool definitions ───────────────────────────────────
+# Only sent to the LLM when the session is in coding mode (user-toggled;
+# there is deliberately NO tool to switch modes — prompt injection cannot
+# escalate a butler session into an unrestricted coding one).
+
+CODING_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Surgically change an EXISTING file in the project repo by replacing "
+                "an exact, unique snippet. 'old_str' must appear exactly once — include "
+                "surrounding context to make it unique. The rest of the file is "
+                "preserved verbatim. You MUST read the file (read_code_file) in this "
+                "conversation before editing it. For multiple changes, call edit_file "
+                "repeatedly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "path": {"type": "string",
+                             "description": "Repo-relative file path"},
+                    "old_str": {"type": "string",
+                                "description": "Exact text to find (must appear exactly once)"},
+                    "new_str": {"type": "string",
+                                "description": "Replacement text"},
+                },
+                "required": ["project_id", "path", "old_str", "new_str"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_file",
+            "description": (
+                "Create a NEW file in the project repo. Fails if the file already "
+                "exists — use edit_file to change an existing file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "path": {"type": "string",
+                             "description": "Repo-relative file path"},
+                    "content": {"type": "string"},
+                },
+                "required": ["project_id", "path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": (
+                "Run a shell command in the project repo (cwd = repo root). Use for "
+                "running tests, git operations, ls/grep, builds. Output is capped — "
+                "prefer targeted commands over dumping large files (use read_code_file "
+                "for that). Long-running commands are killed at 'timeout' seconds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer",
+                                "description": "Seconds before the command is killed (default 120, max 600)"},
+                },
+                "required": ["project_id", "command"],
+            },
+        },
+    },
+]
+
 
 # ── Config loading ─────────────────────────────────────────────────
 
@@ -590,6 +667,21 @@ def _load_meta_agent_config(config_path: str = _DEFAULT_CONFIG_PATH) -> dict:
     return default_config
 
 
+def _load_agent_role_config(role: str,
+                            config_path: str = _DEFAULT_CONFIG_PATH_V2) -> dict:
+    """Load one agent role block (e.g. 'compacter') from agent_configs."""
+    try:
+        base = Path(__file__).resolve().parent.parent
+        path = base / config_path
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f) or {}
+            return config.get(role, {}) or {}
+    except Exception:
+        pass
+    return {}
+
+
 def _resolve_provider(model_name: str, config_path: str = "llm_providers.json"):
     """Resolve custom provider prefix to api_base + api_key (same as ai_router.py)."""
     api_base = None
@@ -618,14 +710,24 @@ def _resolve_provider(model_name: str, config_path: str = "llm_providers.json"):
 class MetaAgent:
     """Backend meta agent: tool-use loop over LiteLLM with streaming."""
 
-    def __init__(self, db, ws, owner_email: str = "cli@local", session_id: str = None):
+    def __init__(self, db, ws, owner_email: str = "cli@local", session_id: str = None,
+                 mode: str = "butler"):
         self.db = db
         self.ws = ws
         self.owner_email = owner_email
         self.session_id = session_id
+        # butler = orchestration/inspection toolset only; coding = adds
+        # edit_file/create_file/bash. Set from the session (user-toggled),
+        # never by the model.
+        self.mode = mode if mode in ("butler", "coding") else "butler"
         # Set per-turn in chat(); lets the approve/answer tools resolve the run
         # by project even when the session→run link is empty (drifted session).
         self._current_project = None
+        # Files read via read_code_file this request — edit_file requires a
+        # prior read so the model never splices into content it hasn't seen.
+        # Per-request on purpose: after a budget-pause resume the model must
+        # re-read before editing (files may have changed).
+        self._files_read: set = set()
 
         cfg = _load_meta_agent_config()
         raw_model = cfg.get("model", "deepseek/deepseek-v4-flash")
@@ -634,11 +736,26 @@ class MetaAgent:
         self.enable_thinking = cfg.get("enable_thinking", False)
         self.thinking_effort = cfg.get("thinking_effort")
         self.max_tool_turns = cfg.get("max_tool_turns", 20)
+        if self.mode == "coding":
+            self.max_tool_turns = cfg.get("coding_max_tool_turns", 50)
+        # Condenser threshold (tokens). 0/absent disables compaction.
+        self.compact_at_tokens = cfg.get("compact_at_tokens", 100000)
 
         litellm.telemetry = False
         litellm.drop_params = True
 
     def _build_system_prompt(self, current_project: str | None) -> str:
+        if self.mode == "coding":
+            try:
+                base = Path(__file__).resolve().parent.parent
+                template = (base / "templates" / "coding_mode.md").read_text(
+                    encoding="utf-8")
+                return template.format(
+                    current_project=current_project or "none",
+                    owner_email=self.owner_email,
+                )
+            except Exception:
+                pass  # missing/broken template → fall back to butler prompt
         return SYSTEM_PROMPT.format(
             current_project=current_project or "none",
             owner_email=self.owner_email,
@@ -738,6 +855,12 @@ class MetaAgent:
         consecutive_errors = 0  # AT-28: track consecutive tool errors for recovery
         try:
             while tool_turns < self.max_tool_turns:
+                compacted = await self._maybe_compact(messages)
+                if compacted is not messages:
+                    messages = compacted
+                    yield {"type": "compaction",
+                           "message": "Older turns were summarized to stay within context."}
+
                 full_text = ""
                 tool_calls = []
 
@@ -753,7 +876,9 @@ class MetaAgent:
                     return
 
                 # Append assistant message with tool_calls
-                messages.append(self._build_assistant_msg(full_text, tool_calls))
+                assistant_msg = self._build_assistant_msg(full_text, tool_calls)
+                messages.append(assistant_msg)
+                self._persist_transcript(assistant_msg)
 
                 turn_errors = 0
                 for tc in tool_calls:
@@ -769,11 +894,13 @@ class MetaAgent:
                     else:
                         consecutive_errors = 0  # reset on success
                     yield {"type": "tool_result", "name": tc["name"], "result": result}
-                    messages.append({
+                    tool_msg = {
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "content": json.dumps(result, default=str, ensure_ascii=False),
-                    })
+                    }
+                    messages.append(tool_msg)
+                    self._persist_transcript(tool_msg)
 
                 # AT-28: if all tool calls in this turn errored and we've had
                 # 3+ consecutive errors, guide the LLM to exit gracefully instead
@@ -792,18 +919,175 @@ class MetaAgent:
 
                 tool_turns += 1
 
-            yield {"type": "error", "message": f"Max tool turns ({self.max_tool_turns}) reached."}
+            # Budget pause, not a failure: in coding mode the transcript is
+            # persisted incrementally, so the user can reply "continue" and a
+            # fresh chat() resumes from the rebuilt transcript with full state.
+            yield {
+                "type": "budget_exhausted",
+                "tool_turns": tool_turns,
+                "message": (
+                    f"Tool-turn budget ({self.max_tool_turns}) reached. "
+                    f"Reply 'continue' to keep going."
+                ),
+            }
 
         except Exception as e:
             yield {"type": "error", "message": f"Agent error: {e}"}
 
+    def _persist_transcript(self, message: dict) -> None:
+        """Persist one loop message (coding mode only, best-effort).
+
+        Butler mode keeps the legacy narrative-only persistence; coding mode
+        needs the full tool transcript so a budget-paused or interrupted
+        session can resume with its working state intact. The row id is
+        attached back onto the in-memory message so the condenser can record
+        an exact compaction watermark.
+        """
+        if self.mode != "coding" or not self.session_id:
+            return
+        try:
+            rid = self.db.save_chat_transcript_message(
+                self.session_id, self._current_project or "", message)
+            if rid:
+                message["_row_id"] = rid
+        except Exception as e:
+            self._log_error(f"transcript persistence failed: {e}")
+
+    # ── Transcript condenser (coding mode) ─────────────────────────
+    # When the assembled context crosses compact_at_tokens, the oldest ~60%
+    # of the conversation is summarized by the `compacter` agent (one-shot,
+    # config-resolved model — never hardcoded) and replaced by a pinned
+    # summary. The summary is persisted with a `compaction_through` watermark
+    # so a resumed session rebuilds compacted instead of re-summarizing.
+
+    _COMPACT_KEEP_TAIL = 8  # most-recent messages always kept verbatim
+
+    @staticmethod
+    def _clean_msgs(messages: list[dict]) -> list[dict]:
+        """Strip loop-internal bookkeeping keys before hitting the provider."""
+        allowed = {"role", "content", "tool_calls", "tool_call_id", "name"}
+        return [{k: v for k, v in m.items() if k in allowed} for m in messages]
+
+    def _count_tokens(self, messages: list[dict]) -> int:
+        clean = self._clean_msgs(messages)
+        try:
+            return litellm.token_counter(model=self.litellm_model, messages=clean)
+        except Exception:
+            # crude fallback: ~4 chars/token
+            return sum(len(json.dumps(m, ensure_ascii=False, default=str))
+                       for m in clean) // 4
+
+    @staticmethod
+    def _serialize_for_compaction(chunk: list[dict], max_chars: int = 60000) -> str:
+        parts = []
+        for m in chunk:
+            role = m.get("role", "?")
+            content = m.get("content") or ""
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, default=str)
+            if len(content) > 2000:
+                content = content[:2000] + " …[truncated]"
+            line = f"[{role}] {content}".rstrip()
+            for tc in m.get("tool_calls") or []:
+                fn = (tc.get("function") or {})
+                args = fn.get("arguments", "")
+                if len(args) > 500:
+                    args = args[:500] + " …[truncated]"
+                line += f"\n  → {fn.get('name', '?')}({args})"
+            parts.append(line)
+        text = "\n\n".join(parts)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n…[chunk truncated]"
+        return text
+
+    async def _summarize_chunk(self, chunk_text: str) -> str | None:
+        cfg = _load_agent_role_config("compacter")
+        raw_model = cfg.get("model", "deepseek/deepseek-v4-flash")
+        model, api_base, api_key = _resolve_provider(raw_model)
+        try:
+            base = Path(__file__).resolve().parent.parent
+            system = (base / "templates" / cfg.get("template", "compaction.md")
+                      ).read_text(encoding="utf-8")
+        except Exception as e:
+            self._log_error(f"compaction template missing: {e}")
+            return None
+        kwargs = {
+            "model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": chunk_text}],
+            "temperature": 0.2,
+            "stream": False,
+        }
+        if api_base:
+            kwargs["api_base"] = api_base
+        if api_key:
+            kwargs["api_key"] = api_key
+        try:
+            resp = await litellm.acompletion(**kwargs)
+            content = resp.choices[0].message.content
+            return content.strip() if content else None
+        except Exception as e:
+            self._log_error(f"compaction LLM call failed: {e}")
+            return None
+
+    async def _maybe_compact(self, messages: list[dict]) -> list[dict]:
+        """Summarize the oldest turns when the context crosses the threshold.
+
+        Returns the original list (identity) when nothing was done, or a new
+        list [system, summary, ...kept tail]. Never splits an assistant
+        tool_calls group. Failure of any kind leaves the messages untouched —
+        the turn proceeds uncompacted rather than dying.
+        """
+        if (self.mode != "coding" or not self.compact_at_tokens
+                or len(messages) < 2):
+            return messages
+        if self._count_tokens(messages) < self.compact_at_tokens:
+            return messages
+
+        body = messages[1:]  # messages[0] is the system prompt
+        cut = int(len(body) * 0.6)
+        cut = min(cut, len(body) - self._COMPACT_KEEP_TAIL)
+        if cut < 1:
+            return messages
+        # Don't orphan tool results: extend past any trailing tool messages.
+        while cut < len(body) and body[cut].get("role") == "tool":
+            cut += 1
+        if cut >= len(body):
+            return messages
+        chunk = body[:cut]
+
+        summary = await self._summarize_chunk(
+            self._serialize_for_compaction(chunk))
+        if not summary:
+            return messages
+
+        summary_msg = {"role": "system", "content": summary}
+        through = max((m.get("_row_id") or 0) for m in chunk)
+        if through and self.session_id:
+            try:
+                rid = self.db.save_chat_transcript_message(
+                    self.session_id, self._current_project or "",
+                    {"role": "system", "content": summary,
+                     "compaction_through": through})
+                if rid:
+                    summary_msg["_row_id"] = rid
+                summary_msg["compaction_through"] = through
+            except Exception as e:
+                self._log_error(f"compaction persistence failed: {e}")
+        return [messages[0], summary_msg] + body[cut:]
+
     async def _stream_llm(self, messages: list[dict]) -> AsyncGenerator[dict, None]:
         """Stream LLM response. Yields text_delta events in real-time,
         then a single 'collected' event with the full text and parsed tool_calls."""
+        tools = TOOL_DEFINITIONS
+        if self.mode == "coding":
+            tools = TOOL_DEFINITIONS + CODING_TOOL_DEFINITIONS
         kwargs = {
             "model": self.litellm_model,
-            "messages": messages,
-            "tools": TOOL_DEFINITIONS,
+            # strip loop-internal keys (_row_id, compaction_through) — some
+            # providers reject unknown message fields
+            "messages": self._clean_msgs(messages),
+            "tools": tools,
             "stream": True,
             "temperature": 0.3,
         }
@@ -884,6 +1168,10 @@ class MetaAgent:
 
     async def _execute_tool(self, name: str, args: dict) -> dict:
         """Dispatch a tool call to the appropriate handler."""
+        # Defense in depth: coding tools are only schemas-visible in coding
+        # mode, but reject them here too in case a model hallucinates the call.
+        if name in _CODING_TOOL_HANDLERS and self.mode != "coding":
+            return {"error": f"Tool '{name}' is only available in coding mode."}
         handler = _TOOL_HANDLERS.get(name)
         if not handler:
             return {"error": f"Unknown tool: {name}"}
@@ -1446,6 +1734,8 @@ class MetaAgent:
         body = "\n".join(
             f"{start_idx + i + 1}\t{ln}" for i, ln in enumerate(selected)
         )
+        # Register the read so edit_file's read-before-edit guard passes.
+        self._files_read.add((pid, str(target)))
         return {
             "path": path,
             "content": body,
@@ -1453,6 +1743,124 @@ class MetaAgent:
             "end_line": end_idx,
             "total_lines": total,
             "truncated": end_idx < total,
+        }
+
+    # ── Coding-mode tools ──────────────────────────────────────────
+    # Direct in-place repo editing for the interactive coding agent. The
+    # surgical-edit safety core (_unique_replace) is shared with skillflow so
+    # the uniqueness rule lives in one place; path handling is butler-own
+    # (same jail as read_code_file — no staging dir, no AT-9 'project/' strip,
+    # which would mangle repos that really have a project/ directory).
+
+    def _resolve_code_target(self, pid: str, path: str):
+        """Resolve a repo-relative path inside the project's code jail.
+
+        Returns (base, target, None) or (None, None, error_dict).
+        """
+        try:
+            base = self.ws.get_code_path(pid).resolve()
+        except Exception as e:
+            return None, None, {"error": f"Cannot resolve code path for '{pid}': {e}"}
+        if not base.is_dir():
+            return None, None, {"error": f"No code directory for project '{pid}'"}
+        target = (base / path).resolve()
+        if not str(target).startswith(str(base)):
+            return None, None, {"error": "Path traversal denied"}
+        return base, target, None
+
+    def _tool_edit_file(self, args: dict) -> dict:
+        from skillflow.write_tools import _unique_replace
+
+        pid = args["project_id"]
+        path = args["path"]
+        old_str = args.get("old_str", "")
+        new_str = args.get("new_str", "")
+        if not isinstance(old_str, str) or not old_str:
+            return {"error": "edit_file: 'old_str' is required and must be non-empty"}
+        base, target, err = self._resolve_code_target(pid, path)
+        if err:
+            return err
+        if not target.is_file():
+            return {"error": f"edit_file: '{path}' does not exist — use create_file for new files"}
+        if (pid, str(target)) not in self._files_read:
+            return {"error": (f"edit_file: read '{path}' with read_code_file before "
+                              f"editing it — you must see the current content first.")}
+        content = target.read_text(encoding="utf-8")
+        updated, uerr = _unique_replace(content, old_str, new_str,
+                                        tool="edit_file", name=path)
+        if uerr:
+            return uerr
+        target.write_text(updated, encoding="utf-8")
+        return {"edited": path}
+
+    def _tool_create_file(self, args: dict) -> dict:
+        pid = args["project_id"]
+        path = args["path"]
+        base, target, err = self._resolve_code_target(pid, path)
+        if err:
+            return err
+        if target.exists():
+            return {"error": (f"create_file: '{path}' already exists — use edit_file "
+                              f"to change an existing file.")}
+        content = args.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        # A file we just authored is by definition "seen" — allow edits.
+        self._files_read.add((pid, str(target)))
+        return {"created": path, "size": len(content)}
+
+    # Output cap for bash results: head + tail, so both the command banner and
+    # the (usually decisive) final lines survive in context.
+    _BASH_HEAD_CHARS = 8000
+    _BASH_TAIL_CHARS = 2000
+    # env vars matching this never reach coding-mode subprocesses.
+    _ENV_SECRET_RE = re.compile(r"(_KEY|_TOKEN|_SECRET|PASSWORD|CREDENTIAL)", re.I)
+
+    async def _tool_bash(self, args: dict) -> dict:
+        pid = args["project_id"]
+        command = args.get("command", "")
+        if not command.strip():
+            return {"error": "bash: 'command' is required"}
+        timeout = args.get("timeout") or 120
+        timeout = max(1, min(int(timeout), 600))
+        try:
+            base = self.ws.get_code_path(pid).resolve()
+        except Exception as e:
+            return {"error": f"Cannot resolve code path for '{pid}': {e}"}
+        if not base.is_dir():
+            return {"error": f"No code directory for project '{pid}'"}
+
+        env = {k: v for k, v in os.environ.items()
+               if not self._ENV_SECRET_RE.search(k)}
+
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(base),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        try:
+            out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return {"error": f"bash: command timed out after {timeout}s", "command": command}
+
+        output = out_bytes.decode("utf-8", errors="replace")
+        truncated = False
+        limit = self._BASH_HEAD_CHARS + self._BASH_TAIL_CHARS
+        if len(output) > limit:
+            output = (output[:self._BASH_HEAD_CHARS]
+                      + f"\n... [{len(output) - limit} chars truncated] ...\n"
+                      + output[-self._BASH_TAIL_CHARS:])
+            truncated = True
+        return {
+            "exit_code": proc.returncode,
+            "output": output,
+            "truncated": truncated,
         }
 
     def _tool_search_code(self, args: dict) -> dict:
@@ -2078,3 +2486,12 @@ _TOOL_HANDLERS = {
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "start_config_run": MetaAgent._tool_start_config_run,
 }
+
+# Coding-mode-only tools — schema-visible and dispatchable only when the
+# session mode is "coding" (see _stream_llm / _execute_tool).
+_CODING_TOOL_HANDLERS = {
+    "edit_file": MetaAgent._tool_edit_file,
+    "create_file": MetaAgent._tool_create_file,
+    "bash": MetaAgent._tool_bash,
+}
+_TOOL_HANDLERS.update(_CODING_TOOL_HANDLERS)

@@ -1,0 +1,15 @@
+# agent_configs/code_review.yaml
+# Reviewer for the butler-driven code_review config (configs/code_review.yaml).
+# Same red-checker conventions as the DPE reviewers: cold temperature, JSON
+# verdict via native tool calling, thinking on.
+
+diff_reviewer:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.1
+  template: "code_review_diff.md"
+  tools: []
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

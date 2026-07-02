@@ -28,6 +28,7 @@
     parseStatus,
     escapeHtml,
     truncate,
+    cacheBadgeClass,
   } from '../lib/format';
 
   // ── Props (route params from svelte-spa-router) ──
@@ -599,7 +600,7 @@
                       </span>
                       {#if run.cache_stats && (run.cache_stats as Record<string, number>).total_tokens != null}
                         {@const rcs = run.cache_stats as Record<string, number>}
-                        <span class="cache-inline-badge">
+                        <span class="cache-inline-badge {cacheBadgeClass(rcs.hit_ratio)}">
                           {formatTokens(rcs.total_tokens)}{rcs.hit_ratio != null ? ' · ' + Math.round(rcs.hit_ratio * 100) + '%' : ''}
                         </span>
                       {/if}
@@ -667,7 +668,7 @@
                   {@const cs = runDetail.cache_stats as Record<string, unknown>}
                   <div class="cache-stats">
                     <span class="meta-label">Cache:</span>
-                    <span>{(cs.hit_ratio as number != null) ? Math.round((cs.hit_ratio as number) * 100) + '%' : '—'}</span>
+                    <span class="cache-inline-badge {cacheBadgeClass(cs.hit_ratio as number)}">{(cs.hit_ratio as number != null) ? Math.round((cs.hit_ratio as number) * 100) + '%' : '—'}</span>
                     <span class="text-muted">({formatTokens(cs.cache_hit_tokens as number)} hit / {formatTokens(cs.cache_miss_tokens as number)} miss)</span>
                   </div>
                 {/if}
@@ -699,7 +700,7 @@
                         </span>
                         <span class="step-duration">{stepDuration(step)}</span>
                         {#if scs && scs.total_tokens != null}
-                          <span class="cache-inline-badge" title="Tokens (cache hit ratio), aggregated per step id">
+                          <span class="cache-inline-badge {cacheBadgeClass(scs.hit_ratio)}" title="Tokens (cache hit ratio), aggregated per step id">
                             {formatTokens(scs.total_tokens)}{scs.hit_ratio != null ? ' · ' + Math.round(scs.hit_ratio * 100) + '% cache' : ''}
                           </span>
                         {/if}

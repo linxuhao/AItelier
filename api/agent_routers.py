@@ -27,6 +27,17 @@ class AgentChatRequest(BaseModel):
     history: list[dict] = []
     current_project: str | None = None
     session_id: str | None = None
+    # butler | coding. None = inherit the session's stored mode. The mode is
+    # user-toggled via this request field ONLY — the model has no tool to
+    # change it, so prompt injection cannot escalate to coding mode.
+    mode: str | None = None
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("butler", "coding"):
+            raise ValueError("mode must be 'butler' or 'coding'")
+        return v
 
 
 class AgentSaveMessageRequest(BaseModel):
@@ -63,18 +74,37 @@ async def agent_chat(
     if minted:
         session_id = db.create_session()
 
-    # Load history from DB (cross-project, cross-restart)
-    history = list(request.history)
-    db_msgs = db.get_chat_history_by_session(session_id, limit=100)
-    # Append DB messages NOT already in the client-provided history
-    # (simple dedup: client history comes first, then older DB messages)
-    client_keys = {(m.get("role"), m.get("content", "")[:100]) for m in history}
-    for m in db_msgs:
-        key = (m["role"], m.get("content", "")[:100])
-        if key not in client_keys:
-            history.append({"role": m["role"], "content": m["content"]})
+    # Mode: request field wins (user toggled it) and is persisted so a
+    # follow-up without the field (e.g. a budget-pause "continue") stays in
+    # the same mode; otherwise inherit the session's stored mode.
+    if request.mode:
+        db.set_session_mode(session_id, request.mode)
+        mode = request.mode
+    else:
+        mode = db.get_session_mode(session_id)
 
-    agent = MetaAgent(db, ws, owner_email=owner, session_id=session_id)
+    if mode == "coding":
+        # Coding mode rebuilds the FULL transcript (assistant tool_calls +
+        # tool results) from the DB — the model's working state must survive
+        # budget pauses and restarts. Client-supplied history is ignored: the
+        # server owns the session, and narrative-only client history would
+        # duplicate prose already inside the transcript rows. _row_id /
+        # compaction markers ride along for the condenser; MetaAgent strips
+        # them at the provider boundary.
+        history = db.get_chat_transcript_by_session(session_id, limit=400)
+    else:
+        # Load history from DB (cross-project, cross-restart)
+        history = list(request.history)
+        db_msgs = db.get_chat_history_by_session(session_id, limit=100)
+        # Append DB messages NOT already in the client-provided history
+        # (simple dedup: client history comes first, then older DB messages)
+        client_keys = {(m.get("role"), m.get("content", "")[:100]) for m in history}
+        for m in db_msgs:
+            key = (m["role"], m.get("content", "")[:100])
+            if key not in client_keys:
+                history.append({"role": m["role"], "content": m["content"]})
+
+    agent = MetaAgent(db, ws, owner_email=owner, session_id=session_id, mode=mode)
 
     async def event_stream():
         collected_events = []  # persist after streaming
@@ -137,7 +167,14 @@ async def agent_chat(
 
             # Fix G: only persist the narrative on a clean finish — a stream
             # that errored mid-way leaves partial prose we must NOT commit.
-            narrative = (streamed_text or final_text).strip()
+            # Coding mode: prose emitted alongside tool calls is already inside
+            # the transcript rows the agent persisted mid-loop; saving the
+            # accumulated deltas again would duplicate it in the rebuilt
+            # context. Only the final turn's text (no-tool-call close) is new.
+            if mode == "coding":
+                narrative = final_text.strip()
+            else:
+                narrative = (streamed_text or final_text).strip()
             to_save = []
             saved_narrative = ""
             if narrative and clean_finish:
@@ -196,6 +233,7 @@ def get_chat_history(
 
     return {
         "session_id": session_id,
+        "mode": db.get_session_mode(session_id),
         "messages": messages,
     }
 

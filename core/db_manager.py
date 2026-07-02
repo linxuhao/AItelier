@@ -227,6 +227,18 @@ class DBManager:
                 conn.execute("ALTER TABLE chat_history ADD COLUMN session_id TEXT")
             except sqlite3.OperationalError:
                 pass
+            # Migration: full-transcript persistence for coding mode — stores the
+            # complete OpenAI-format message (assistant tool_calls / tool results)
+            # so a session can resume with its working state intact.
+            try:
+                conn.execute("ALTER TABLE chat_history ADD COLUMN message_json TEXT")
+            except sqlite3.OperationalError:
+                pass
+            # Migration: per-session agent mode (butler | coding), user-toggled.
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'butler'")
+            except sqlite3.OperationalError:
+                pass
 
             conn.commit()
 
@@ -1630,11 +1642,17 @@ class DBManager:
             return [r["run_id"] for r in rows]
 
     def get_chat_history_by_session(self, session_id: str, limit: int = 100) -> list[dict]:
-        """Load recent chat messages for a session (cross-project)."""
+        """Load recent narrative chat messages for a session (cross-project).
+
+        Skips coding-mode transcript machinery (tool results, empty
+        assistant tool-call shells) — this feeds the chat display and the
+        butler-mode context, both of which want prose only. Coding mode
+        rebuilds its context from get_chat_transcript_by_session instead.
+        """
         with self.get_connection() as conn:
             rows = conn.execute(
                 """SELECT role, content, project_id, created_at FROM chat_history
-                   WHERE session_id = ?
+                   WHERE session_id = ? AND role != 'tool' AND content != ''
                    ORDER BY id DESC LIMIT ?""",
                 (session_id, limit),
             ).fetchall()
@@ -1658,6 +1676,140 @@ class DBManager:
                 (session_id, project_id, role, content[:16000]),
             )
             conn.commit()
+
+    def save_chat_transcript_message(self, session_id: str, project_id: str,
+                                     message: dict) -> int | None:
+        """Persist a full OpenAI-format chat message (coding-mode transcript).
+
+        ``content`` keeps a clipped preview for session lists; ``message_json``
+        holds the complete message (tool_calls / tool results) unclipped so the
+        loop can be rebuilt verbatim on resume. Returns the row id so the
+        condenser can record how far a compaction summary reaches. Keys
+        starting with ``_`` are loop-internal bookkeeping and not persisted.
+        """
+        import json as _json
+        message = {k: v for k, v in message.items() if not k.startswith("_")}
+        role = message.get("role", "assistant")
+        preview = (message.get("content") or "")
+        if not isinstance(preview, str):
+            preview = _json.dumps(preview, ensure_ascii=False)
+        with self.get_connection() as conn:
+            conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
+            cur = conn.execute(
+                "INSERT INTO chat_history (session_id, project_id, role, content, message_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, project_id, role, preview[:16000],
+                 _json.dumps(message, ensure_ascii=False, default=str)),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def get_chat_transcript_by_session(self, session_id: str,
+                                       limit: int = 400) -> list[dict]:
+        """Rebuild the full message transcript for a session, oldest-first.
+
+        Rows with ``message_json`` are decoded verbatim (assistant tool_calls,
+        tool results); plain rows become simple role/content messages. Each
+        message carries ``_row_id`` (the chat_history id) so the compaction
+        layer can persist how far it has summarized; callers strip it before
+        sending to the LLM.
+        """
+        import json as _json
+        with self.get_connection() as conn:
+            rows = conn.execute(
+                """SELECT id, role, content, message_json FROM chat_history
+                   WHERE session_id = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (session_id, limit),
+            ).fetchall()
+        messages = []
+        for r in reversed(rows):
+            if r["message_json"]:
+                try:
+                    msg = _json.loads(r["message_json"])
+                except (ValueError, TypeError):
+                    msg = {"role": r["role"], "content": r["content"]}
+            else:
+                msg = {"role": r["role"], "content": r["content"]}
+            msg["_row_id"] = r["id"]
+            messages.append(msg)
+        return self._sanitize_transcript(self._apply_compaction(messages))
+
+    @staticmethod
+    def _apply_compaction(messages: list[dict]) -> list[dict]:
+        """Collapse rows already covered by a persisted compaction summary.
+
+        A compaction row is a system message carrying ``compaction_through``
+        (the highest chat_history id it summarizes). The latest one wins: rows
+        at or below its watermark are dropped and the summary itself moves to
+        the front, mirroring the in-memory shape the condenser produced. Rows
+        between the watermark and the compaction row's own id are the tail
+        that was kept verbatim — they stay, ordered after the summary.
+        """
+        latest = None
+        for m in messages:
+            if m.get("compaction_through") is not None:
+                latest = m
+        if latest is None:
+            return messages
+        through = latest["compaction_through"]
+        rest = [m for m in messages
+                if m is not latest
+                and m.get("compaction_through") is None
+                and m.get("_row_id", 0) > through]
+        return [latest] + rest
+
+    @staticmethod
+    def _sanitize_transcript(messages: list[dict]) -> list[dict]:
+        """Drop broken tool-call groups so the rebuilt transcript is a valid
+        LLM message sequence.
+
+        Two failure shapes: a crash mid-turn leaves an assistant ``tool_calls``
+        message without (all of) its tool results; the LIMIT window can cut a
+        group at the start, leaving orphan ``tool`` messages with no assistant.
+        Either would make the provider reject the whole request, so incomplete
+        groups are dropped rather than repaired.
+        """
+        out = []
+        i = 0
+        n = len(messages)
+        while i < n:
+            msg = messages[i]
+            if msg.get("role") == "tool":
+                i += 1  # orphan tool result (window cut) — drop
+                continue
+            calls = msg.get("tool_calls") or []
+            if msg.get("role") == "assistant" and calls:
+                want = {c.get("id") for c in calls}
+                j = i + 1
+                got = set()
+                while j < n and messages[j].get("role") == "tool":
+                    got.add(messages[j].get("tool_call_id"))
+                    j += 1
+                if want <= got:
+                    out.extend(messages[i:j])
+                # else: incomplete group (crash mid-turn) — drop it whole
+                i = j
+                continue
+            out.append(msg)
+            i += 1
+        return out
+
+    def set_session_mode(self, session_id: str, mode: str):
+        """Persist the agent mode (butler | coding) on a session."""
+        with self.get_connection() as conn:
+            conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
+            conn.execute("UPDATE sessions SET mode = ? WHERE id = ?",
+                         (mode, session_id))
+            conn.commit()
+
+    def get_session_mode(self, session_id: str) -> str:
+        """Return the session's stored agent mode (defaults to 'butler')."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT mode FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            return (row["mode"] if row and row["mode"] else "butler")
 
     def list_chat_sessions(self, project_id: str | None = None, limit: int = 200) -> list[dict]:
         """List chat sessions with message count and last message preview.

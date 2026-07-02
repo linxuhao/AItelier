@@ -58,6 +58,11 @@
   let abortController: AbortController | null = null;
   let currentAgentText = $state('');
 
+  // Coding mode (user-toggled; sent with each request, persisted per session
+  // server-side). budgetPaused surfaces the loop's budget_exhausted pause.
+  let codingMode = $state(false);
+  let budgetPaused = $state(false);
+
   // Slash completion state
   let completionMatches = $state<SlashCommand[]>([]);
   let completionIndex = $state(0);
@@ -147,6 +152,9 @@
       if (!response || !response.messages || !Array.isArray(response.messages)) {
         return;
       }
+
+      // Adopt the session's stored mode so the toggle reflects reality.
+      codingMode = (response.mode as string) === 'coding';
 
       // Build dedup key set from existing history
       const existingKeys = new Set<string>();
@@ -432,6 +440,17 @@
         break;
       }
 
+      case 'budget_exhausted': {
+        // Not an error: the coding loop paused at its tool-turn budget. The
+        // transcript is persisted server-side, so "continue" resumes it.
+        budgetPaused = true;
+        messages = [...messages, {
+          role: 'system',
+          content: (event.message as string) || 'Tool-turn budget reached. Continue?',
+        }];
+        break;
+      }
+
       case 'error': {
         messages = [...messages, { role: 'error', content: (event.message as string) || 'Unknown agent error' }];
         break;
@@ -476,7 +495,9 @@
       history: outHistory,
       current_project: currentProject,
       session_id: sessionId || undefined,
+      mode: codingMode ? 'coding' : 'butler',
     };
+    budgetPaused = false;
 
     const controller = new AbortController();
     abortController = controller;
@@ -661,6 +682,10 @@
     <button class="outline btn-new-session" on:click={_handleNewSession} disabled={!connected}>
       + New
     </button>
+    <label class="coding-mode-toggle" title="Coding mode: the agent edits code and runs commands directly in the project repo">
+      <input type="checkbox" role="switch" bind:checked={codingMode} disabled={agentStreaming || sending} />
+      Coding mode
+    </label>
   </div>
 
   <!-- Loading state -->
@@ -748,6 +773,12 @@
       {:else if sending}
         <span class="streaming-indicator">Sending\u2026</span>
       {/if}
+
+      {#if budgetPaused && !agentStreaming && !sending}
+        <button class="outline btn-continue" on:click={() => _sendMessage('continue')} disabled={!connected}>
+          Continue \u25b6
+        </button>
+      {/if}
     </div>
   {/if}
 
@@ -787,6 +818,23 @@
   }
 
   .btn-new-session {
+    flex-shrink: 0;
+    font-size: 0.85rem;
+    padding: 0.2rem 0.6rem;
+  }
+
+  .coding-mode-toggle {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    margin-bottom: 0;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .btn-continue {
     flex-shrink: 0;
     font-size: 0.85rem;
     padding: 0.2rem 0.6rem;

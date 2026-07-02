@@ -64,18 +64,50 @@
     }
   }
 
-  function depth(path: string): number {
-    return path.split('/').length - 1;
+  // ── Nested foldable tree (ported from the vanilla _buildTreeIndices /
+  //    _renderTreeLevel) — folders start collapsed, click to expand. ──
+  interface DirNode {
+    name: string;
+    path: string;
+    dirs: DirNode[];
+    files: { name: string; path: string }[];
   }
 
-  function basename(path: string): string {
-    const parts = path.split('/');
-    return parts[parts.length - 1];
+  let expandedDirs = $state<Set<string>>(new Set());
+
+  const tree = $derived(buildTree(files));
+
+  function buildTree(paths: string[]): DirNode {
+    const root: DirNode = { name: '', path: '', dirs: [], files: [] };
+    const dirIndex = new Map<string, DirNode>([['', root]]);
+    for (const p of paths) {
+      const parts = p.split('/');
+      let node = root;
+      let prefix = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        prefix = prefix ? prefix + '/' + parts[i] : parts[i];
+        let child = dirIndex.get(prefix);
+        if (!child) {
+          child = { name: parts[i], path: prefix, dirs: [], files: [] };
+          dirIndex.set(prefix, child);
+          node.dirs.push(child);
+        }
+        node = child;
+      }
+      node.files.push({ name: parts[parts.length - 1], path: p });
+    }
+    for (const node of dirIndex.values()) {
+      node.files.sort((a, b) => a.name.localeCompare(b.name));
+      node.dirs.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return root;
   }
 
-  function dirname(path: string): string {
-    const i = path.lastIndexOf('/');
-    return i === -1 ? '' : path.slice(0, i);
+  function toggleDir(path: string): void {
+    const next = new Set(expandedDirs);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    expandedDirs = next;
   }
 </script>
 
@@ -92,17 +124,33 @@
   {:else if loaded && files.length === 0}
     <p class="ws-muted">No files.</p>
   {:else if loaded}
-    <ul class="ws-file-list">
-      {#each files as f (f)}
-        <li style="padding-left: {depth(f) * 0.9}rem">
-          <button class="ws-file" onclick={() => openFile(f)} title={f}>
-            {#if dirname(f)}<span class="ws-dir">{dirname(f)}/</span>{/if}{basename(f)}
-          </button>
-        </li>
-      {/each}
-    </ul>
+    <div class="ws-file-list">
+      {@render treeLevel(tree)}
+    </div>
   {/if}
 </details>
+
+{#snippet treeLevel(node: DirNode)}
+  <ul class="ws-tree">
+    {#each node.files as f (f.path)}
+      <li>
+        <button class="ws-file" onclick={() => openFile(f.path)} title={f.path}>
+          <span class="ws-icon">📄</span>{f.name}
+        </button>
+      </li>
+    {/each}
+    {#each node.dirs as d (d.path)}
+      <li>
+        <button class="ws-dir" onclick={() => toggleDir(d.path)} title={d.path}>
+          <span class="ws-icon">{expandedDirs.has(d.path) ? '📂' : '📁'}</span>{d.name}
+        </button>
+        {#if expandedDirs.has(d.path)}
+          {@render treeLevel(d)}
+        {/if}
+      </li>
+    {/each}
+  </ul>
+{/snippet}
 
 {#if dialogOpen}
   <dialog open class="ws-file-dialog" onclose={() => (dialogOpen = false)}>
@@ -136,33 +184,52 @@
     color: var(--pico-muted-color, #888);
   }
   .ws-file-list {
-    list-style: none;
     margin: 0.5rem 0 0;
-    padding: 0;
     max-height: 320px;
     overflow-y: auto;
     font-family: monospace;
     font-size: 0.8rem;
   }
-  .ws-file-list li {
+  .ws-tree {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .ws-tree .ws-tree {
+    padding-left: 1.2rem;
+  }
+  .ws-tree li {
     padding-top: 0.05rem;
     padding-bottom: 0.05rem;
   }
-  .ws-file {
+  .ws-file,
+  .ws-dir {
     background: none;
     border: none;
-    color: var(--pico-primary, #0066cc);
     cursor: pointer;
-    padding: 0;
+    padding: 0.1rem 0;
     width: auto;
     font: inherit;
     text-align: left;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .ws-file {
+    color: var(--pico-primary, #0066cc);
   }
   .ws-file:hover {
     text-decoration: underline;
   }
   .ws-dir {
-    color: var(--pico-muted-color, #999);
+    color: inherit;
+    font-weight: 600;
+  }
+  .ws-dir:hover {
+    text-decoration: underline;
+  }
+  .ws-icon {
+    font-size: 0.85rem;
   }
   .ws-muted {
     color: var(--pico-muted-color, #888);

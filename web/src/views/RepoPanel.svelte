@@ -109,12 +109,12 @@
     <div class="repo-actions">
       <a href={repoArchiveUrl(projectId)} class="repo-btn" download>Download .zip</a>
       {#if canWrite}
-        <button class="repo-btn" disabled={!!busy} onclick={doCommit}>Commit</button>
+        <button class="repo-btn repo-btn-green" disabled={!!busy} onclick={doCommit}>Commit</button>
         <button class="repo-btn" disabled={!!busy} onclick={() => run('Push', () => repoPush(projectId))}>Push</button>
         <button class="repo-btn" disabled={!!busy} onclick={() => run('Pull', () => repoPull(projectId))}>Pull</button>
-        <button class="repo-btn" disabled={!!busy} onclick={doSync}>Force Sync</button>
-        <button class="repo-btn" disabled={!!busy} onclick={() => run('Make PR', () => repoMakePR(projectId))}>Make PR</button>
-        <button class="repo-btn" disabled={!!busy} onclick={doSetRemote}>Set Remote</button>
+        <button class="repo-btn repo-btn-red" disabled={!!busy} onclick={doSync}>Force Sync</button>
+        <button class="repo-btn repo-btn-purple" disabled={!!busy} onclick={() => run('Make PR', () => repoMakePR(projectId))}>Make PR</button>
+        <button class="repo-btn repo-btn-amber" disabled={!!busy} onclick={doSetRemote}>Set Remote</button>
       {/if}
     </div>
     {#if busy}
@@ -201,20 +201,41 @@
     border-top: 1px solid var(--pico-muted-border-color, #eee);
   }
   .repo-btn {
+    /* Colored outline buttons (the vanilla UI used Pico's `outline` class);
+       per-action accents via --repo-btn-color. */
+    --repo-btn-color: var(--pico-primary, #0172ad);
     font-size: 0.78rem;
     padding: 0.2rem 0.6rem;
     width: auto;
     margin: 0;
-    border: 1px solid var(--pico-muted-border-color, #ccc);
+    border: 1px solid var(--repo-btn-color);
     border-radius: 0.3rem;
-    background: var(--pico-card-background-color, #fff);
-    color: inherit;
+    background: transparent;
+    color: var(--repo-btn-color);
     cursor: pointer;
     text-decoration: none;
     display: inline-block;
+    font-weight: 600;
   }
   .repo-btn:hover:not(:disabled) {
-    background: var(--pico-secondary-focus, rgba(128, 128, 128, 0.08));
+    background: var(--repo-btn-color);
+    color: #fff;
+  }
+  .repo-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .repo-btn-green {
+    --repo-btn-color: #2e7d32;
+  }
+  .repo-btn-red {
+    --repo-btn-color: #c62828;
+  }
+  .repo-btn-purple {
+    --repo-btn-color: #6a1b9a;
+  }
+  .repo-btn-amber {
+    --repo-btn-color: #b8860b;
   }
   .repo-muted {
     color: var(--pico-muted-color, #888);

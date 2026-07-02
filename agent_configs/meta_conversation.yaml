@@ -37,4 +37,22 @@ meta_agent:
   template: "meta_conversation.md"
   tools: []
   max_tool_turns: 20
+  # Coding mode (user-toggled per session): interactive edit→test→verify loop
+  # needs a much larger turn budget; at the cap the loop pauses with a
+  # budget_exhausted event and "continue" resumes from the persisted transcript.
+  coding_max_tool_turns: 50
+  # Condenser trigger (coding mode): when the assembled context exceeds this
+  # many tokens, the oldest turns are summarized by the `compacter` agent.
+  # Explicit threshold — nothing in the provider registry records context
+  # window sizes, so the denominator is configured, not derived.
+  compact_at_tokens: 100000
   enable_thinking: true
+
+# Transcript condenser for coding mode. One-shot summarizer — no tools. The
+# butler calls it when the coding-session context crosses compact_at_tokens;
+# the summary replaces the oldest turns and is persisted so a resumed session
+# doesn't re-summarize the same rows.
+compacter:
+  model: "deepseek/deepseek-v4-flash"
+  template: "compaction.md"
+  tools: []

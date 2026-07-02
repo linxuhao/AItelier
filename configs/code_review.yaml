@@ -1,0 +1,55 @@
+# configs/code_review.yaml
+# One-shot adversarial diff review, callable by the coding-mode butler.
+#
+# The butler passes the change (task summary + git diff) as seed_text; this
+# config is butler-driven (scheduler_owned: false), so start_config_run drives
+# it inline via _run_pipeline_until_checkpoint and the verdict comes back
+# synchronously inside the tool result — no completion hook needed.
+#
+# The verdict uses a tier-1 format spec: the model authors one tool argument
+# per field, so backslashes in feedback (regexes, code) can never produce an
+# unparseable verdict file.
+
+name: "code_review"
+description: "Adversarial review of a code diff → structured verdict"
+
+x-aitelier:
+  label: "Code Review"
+  scheduler_owned: false          # driven inline by the butler
+  seed_file: "review_request.md"
+  output_step: "review"
+
+begin: "review"
+
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "review"
+      result: "completed"
+      require_completed: true
+
+steps:
+  - id: "review"
+    step_type: "agent"
+    agent_config: "diff_reviewer"
+    context:
+      - source: { config: "code_review", output: "review_request.md" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", format: '{"passed": bool, "feedback": str, "findings": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed, feedback, findings]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+            findings:
+              type: array
+              items: { type: string }
+    transitions:
+      - to: null

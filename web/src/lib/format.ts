@@ -55,19 +55,36 @@ const _STATUS_CLASS_MAP: Record<string, string> = {
  * @param value — timestamp (number, string, null, or undefined)
  * @returns relative time string, or "" for invalid input
  */
+/**
+ * Parse any backend timestamp into Unix epoch SECONDS, or null.
+ *
+ * The API mixes number epochs, ISO strings, and SQLite "YYYY-MM-DD HH:MM:SS"
+ * (UTC, no zone marker) — the last is unparseable by Date in Firefox/Safari
+ * and off-by-timezone in Chrome. Doing arithmetic on the raw strings is what
+ * made every duration render as NaN.
+ */
+export function toEpochSeconds(value: unknown): number | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'number') {
+    if (isNaN(value)) return null;
+    return value > 1e12 ? value / 1000 : value; // ms epoch → seconds
+  }
+  if (typeof value === 'string') {
+    let s = value.trim().replace(' ', 'T');
+    // SQLite datetimes are UTC without a zone marker — make it explicit.
+    if (!/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(s)) s += 'Z';
+    const ms = Date.parse(s);
+    return isNaN(ms) ? null : ms / 1000;
+  }
+  return null;
+}
+
 export function formatTime(value: number | string | null | undefined): string {
-  if (value == null || value === '') {
+  const epoch = toEpochSeconds(value);
+  if (epoch == null) {
     return '';
   }
-
-  let date: Date;
-  if (typeof value === 'number') {
-    // Unix epoch seconds → milliseconds
-    date = new Date(value * 1000);
-  } else {
-    // Legacy ISO string
-    date = new Date(value);
-  }
+  const date = new Date(epoch * 1000);
   if (isNaN(date.getTime())) {
     return '';
   }

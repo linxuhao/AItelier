@@ -17,6 +17,7 @@
   } from '../lib/api';
   import {
     formatTime,
+    toEpochSeconds,
     formatTokens,
     statusClass,
     stepLabel,
@@ -316,21 +317,22 @@
   }
 
   function runDuration(run: Record<string, unknown>): string {
-    const created = run.created_at as number | undefined;
-    const updated = (run.updated_at as number) || (run.completed_at as number) || undefined;
-    if (!created || !updated) return '';
-    const secs = Math.max(0, updated - created);
+    // Timestamps arrive as SQLite strings — raw arithmetic rendered NaN.
+    const created = toEpochSeconds(run.started_at ?? run.created_at);
+    const updated = toEpochSeconds(run.completed_at ?? run.updated_at);
+    if (created == null || updated == null) return '';
+    const secs = Math.floor(Math.max(0, updated - created));
     if (secs < 60) return secs + 's';
     if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
     return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
   }
 
   function stepDuration(step: Record<string, unknown>): string {
-    const created = step.created_at as number | undefined;
-    const updated = (step.updated_at as number) || undefined;
-    if (!created) return '';
-    if (!updated) return '…';
-    const secs = Math.max(0, updated - created);
+    const created = toEpochSeconds(step.created_at);
+    const updated = toEpochSeconds(step.updated_at);
+    if (created == null) return '';
+    if (updated == null) return '…';
+    const secs = Math.floor(Math.max(0, updated - created));
     if (secs < 60) return secs + 's';
     if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
     return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
@@ -584,6 +586,12 @@
                       <span class="step-progress">
                         {run.completed_steps as number || 0}/{(run.step_count as number) || (run.steps as any[])?.length || 0}
                       </span>
+                      {#if run.cache_stats && (run.cache_stats as Record<string, number>).total_tokens != null}
+                        {@const rcs = run.cache_stats as Record<string, number>}
+                        <span class="cache-inline-badge">
+                          {formatTokens(rcs.total_tokens)}{rcs.hit_ratio != null ? ' · ' + Math.round(rcs.hit_ratio * 100) + '%' : ''}
+                        </span>
+                      {/if}
                     </td>
                     <td>
                       <span class="duration">{runDuration(run)}</span>
@@ -665,6 +673,7 @@
                 <h5>Steps</h5>
                 {#if runDetail.steps}
                   {#each runDetail.steps as step, stepIdx ((step.id as number) ?? stepIdx)}
+                    {@const scs = (runDetail.cache_stats_by_step as Record<string, Record<string, number>>)?.[step.step_id as string]}
                     <div class="step-item" class:step-expanded={isStepExpanded(step.step_id as string)}>
                       <div
                         class="step-header"
@@ -679,6 +688,11 @@
                           {statusIcon(step.status as string)} {stepStatusLabel(step)}
                         </span>
                         <span class="step-duration">{stepDuration(step)}</span>
+                        {#if scs && scs.total_tokens != null}
+                          <span class="cache-inline-badge" title="Tokens (cache hit ratio), aggregated per step id">
+                            {formatTokens(scs.total_tokens)}{scs.hit_ratio != null ? ' · ' + Math.round(scs.hit_ratio * 100) + '% cache' : ''}
+                          </span>
+                        {/if}
                         {#if (step.attempt as number) > 1}
                           <span class="retry-badge" title="Retry count">↻ {(step.attempt as number) - 1}</span>
                         {/if}
@@ -691,10 +705,9 @@
                               <pre>{escapeHtml(step.error as string)}</pre>
                             </div>
                           {/if}
-                          {#if step.cache_stats}
-                            {@const scs = step.cache_stats as Record<string, unknown>}
+                          {#if scs}
                             <div class="step-cache">
-                              <span class="text-muted">Tokens: {formatTokens(scs.cache_hit_tokens as number)} hit / {formatTokens(scs.cache_miss_tokens as number)} miss</span>
+                              <span class="text-muted">Tokens: {formatTokens(scs.cache_hit_tokens)} hit / {formatTokens(scs.cache_miss_tokens)} miss</span>
                             </div>
                           {/if}
                           <div class="step-meta text-small text-muted">

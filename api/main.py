@@ -305,4 +305,18 @@ async def stream_global_events():
 # above the route definitions).
 _WEB_DIST = _Path(__file__).resolve().parent.parent / "web" / "dist"
 if _WEB_DIST.is_dir():
+    from fastapi.responses import FileResponse
+
+    @app.get("/")
+    async def spa_index():
+        """Serve the SPA entry with no-cache so a deploy is picked up at
+        once. StaticFiles sends no Cache-Control, so browsers heuristically
+        cached index.html and kept loading STALE hashed bundles after a
+        deploy (the vite asset names are content-hashed and safe to cache;
+        the html that references them is not)."""
+        return FileResponse(
+            _WEB_DIST / "index.html",
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
+
     app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="spa")

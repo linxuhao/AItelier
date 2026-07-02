@@ -4,8 +4,8 @@
   import { authStore } from '../stores/auth';
   import { connectionStore } from '../stores/connection';
   import { projectStore, setCurrentProject } from '../stores/project';
-  import { listProjects, createProject, deleteProject } from '../lib/api';
-  import { formatTime, formatTaskProgress, parseStatus } from '../lib/format';
+  import { listAllRuns, createProject, deleteProject } from '../lib/api';
+  import { formatTime, formatTokens, formatTaskProgress, parseStatus } from '../lib/format';
 
   // ── State ──
 
@@ -55,8 +55,10 @@
     if (createFormVisible || isRefreshing) return;
     isRefreshing = true;
     try {
-      const data = await listProjects();
-      projects = data;
+      // GET /api/runs is the ENRICHED project list (cache_stats, config
+      // label, task counts) — /api/projects carries no token/cache data.
+      const data = await listAllRuns();
+      projects = ((data as any)?.runs ?? data) as Record<string, unknown>[];
       error = null;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to load projects';
@@ -346,6 +348,18 @@
                   </span>
                 {:else}
                   <span class="status-badge">—</span>
+                {/if}
+                {#if project.cache_stats && (project.cache_stats as Record<string, number>).hit_ratio != null}
+                  {@const cs = project.cache_stats as Record<string, number>}
+                  <span
+                    class="cache-inline-badge"
+                    class:cache-badge-high={cs.hit_ratio >= 0.7}
+                    class:cache-badge-mid={cs.hit_ratio >= 0.3 && cs.hit_ratio < 0.7}
+                    class:cache-badge-low={cs.hit_ratio < 0.3}
+                    title="Prompt cache hit ratio · total tokens"
+                  >
+                    Cache {(cs.hit_ratio * 100).toFixed(1)}%{cs.total_tokens != null ? ' · ' + formatTokens(cs.total_tokens) : ''}
+                  </span>
                 {/if}
               </td>
               <td>

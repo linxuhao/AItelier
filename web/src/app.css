@@ -323,3 +323,17 @@ table.project-table td {
     margin-right: 0.5rem;
   }
 }
+
+/* ── Cache/token inline badges (dashboard, run list, step timeline) ── */
+.cache-inline-badge {
+  font-size: 0.72rem;
+  color: #555;
+  background: #f0f0f0;
+  border-radius: 3px;
+  padding: 0.05rem 0.35rem;
+  margin-left: 0.4rem;
+  white-space: nowrap;
+}
+.cache-badge-high { background: #d4edda; color: #155724; }
+.cache-badge-mid  { background: #fff3cd; color: #856404; }
+.cache-badge-low  { background: #f8d7da; color: #721c24; }

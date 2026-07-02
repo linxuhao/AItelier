@@ -140,6 +140,12 @@ def list_project_runs(
         r["failed_steps"] = sum(1 for s in steps if s["status"] == "failed")
         enriched.append(r)
 
+    # Cache/token stats per run (batch) — same enrichment as GET /api/runs,
+    # so the project view's run list can show tokens + hit ratio.
+    batch_stats = compute_cache_stats_batch([r["id"] for r in enriched])
+    for r in enriched:
+        r["cache_stats"] = batch_stats.get(r["id"])
+
     return {"project_id": project_id, "runs": enriched}
 
 

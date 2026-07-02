@@ -349,7 +349,7 @@
         return true;
       case '/project':
         if (!args) {
-          messages = [...messages, { role: 'system', content: 'Usage: /project <project_id> \u2014 e.g. /project my-todo-app' }];
+          messages = [...messages, { role: 'system', content: 'Usage: /project <project_id> — e.g. /project my-todo-app' }];
         } else {
           setCurrentProject(args);
           push('#/projects/' + encodeURIComponent(args));
@@ -366,7 +366,7 @@
     for (const c of _SLASH_COMMAND_DEFS) {
       let name = c.cmd + (c.arg ? ' <arg>' : '');
       while (name.length < 16) name += ' ';
-      lines.push('  ' + name + '\u2014 ' + c.desc);
+      lines.push('  ' + name + '— ' + c.desc);
     }
     lines.push('');
     lines.push('Any other text will be sent to the Meta Agent.');
@@ -377,45 +377,45 @@
 
   function _formatToolResult(name: string, result: Record<string, unknown> | null | undefined): string {
     if (!result || typeof result !== 'object') {
-      return '\uD83D\uDD27 ' + name + ' done';
+      return '🔧 ' + name + ' done';
     }
 
     const status = (result.status as string) || '';
 
     if (name === 'list_projects') {
       const count = (Array.isArray(result.projects) ? result.projects.length : 0);
-      return '\uD83D\uDD27 ' + name + ': ' + count + ' project(s)';
+      return '🔧 ' + name + ': ' + count + ' project(s)';
     }
     if (name === 'get_project') {
       const p = (result.project as Record<string, unknown>) || {};
       const pname = (p.name as string) || (p.project_id as string) || '';
-      return '\uD83D\uDD27 ' + name + ': ' + pname + ' (' + (p.status as string || '?') + ')';
+      return '🔧 ' + name + ': ' + pname + ' (' + (p.status as string || '?') + ')';
     }
     if (name === 'create_project') {
-      return '\uD83D\uDD27 ' + name + ': created \u201C' + (result.project_id as string || '') + '\u201D';
+      return '🔧 ' + name + ': created “' + (result.project_id as string || '') + '”';
     }
     if (name === 'list_tasks') {
       const count = (Array.isArray(result.tasks) ? result.tasks.length : 0);
-      return '\uD83D\uDD27 ' + name + ': ' + count + ' task(s)';
+      return '🔧 ' + name + ': ' + count + ' task(s)';
     }
     if (name === 'list_code_tree' || name === 'list_workspace_tree') {
       const count = (Array.isArray(result.tree) ? result.tree.length : 0);
-      return '\uD83D\uDD27 ' + name + ': ' + count + ' file(s)';
+      return '🔧 ' + name + ': ' + count + ' file(s)';
     }
     if (name === 'read_code_file' || name === 'read_workspace_file') {
       const path = (result.path as string) || '';
       const len = (result.content as string || '').length;
-      return '\uD83D\uDD27 ' + name + ': ' + path + ' (' + len + ' chars)';
+      return '🔧 ' + name + ': ' + path + ' (' + len + ' chars)';
     }
     if (name === 'detect_intent') {
-      return '\uD83D\uDD27 ' + name + ': ' + (result.intent as string || '');
+      return '🔧 ' + name + ': ' + (result.intent as string || '');
     }
 
     if (status) {
-      return '\uD83D\uDD27 ' + name + ': ' + status;
+      return '🔧 ' + name + ': ' + status;
     }
 
-    return '\uD83D\uDD27 ' + name + ' done';
+    return '🔧 ' + name + ' done';
   }
 
   function _formatToolArgs(name: string, args: Record<string, unknown>): string {
@@ -439,7 +439,7 @@
     const key = keyMap[name];
     if (key && typeof args[key] === 'string') {
       let val = args[key] as string;
-      if (val.length > 80) val = val.slice(0, 80) + '\u2026';
+      if (val.length > 80) val = val.slice(0, 80) + '…';
       return val;
     }
     if (key && args[key] !== undefined) {
@@ -449,7 +449,7 @@
     for (const k of ['path', 'pattern', 'command', 'name', 'task_id', 'project_id']) {
       const v = args[k];
       if (typeof v === 'string' && v.length > 0) {
-        return v.length > 80 ? v.slice(0, 80) + '\u2026' : v;
+        return v.length > 80 ? v.slice(0, 80) + '…' : v;
       }
       if (v !== undefined && v !== null) {
         return String(v).slice(0, 80);
@@ -495,7 +495,7 @@
         const toolName = (event.name as string) || '?';
         const args = (event.args as Record<string, unknown>) || {};
         const argSummary = _formatToolArgs(toolName, args);
-        const label = '\uD83D\uDD27 ' + toolName + (argSummary ? ': ' + argSummary : '...');
+        const label = '🔧 ' + toolName + (argSummary ? ': ' + argSummary : '...');
         messages = [...messages, {
           role: 'tool',
           content: label,
@@ -818,7 +818,7 @@
         {@const pid = (s.project_id as string) || ''}
         {@const titleMsg = ((s.first_message as string) || (s.last_message as string) || '')}
         {@const count = (s.message_count as number) || 0}
-        {@const preview = titleMsg.length > 40 ? titleMsg.slice(0, 40) + '\u2026' : titleMsg}
+        {@const preview = titleMsg.length > 40 ? titleMsg.slice(0, 40) + '…' : titleMsg}
         <option value={sid} selected={sid === sessionId}>
           {pid ? pid + ': ' : ''}{preview} ({count} msgs)
         </option>
@@ -855,8 +855,8 @@
               on:click={() => toggleToolBlock(gi)}
               aria-expanded={isExpanded}
             >
-              <span class="tool-toggle">{isExpanded ? '\u25BC' : '\u25B6'}</span>
-              <span class="tool-summary">\uD83D\uDD27 {toolCount} tool{toolCount !== 1 ? 's' : ''}</span>
+              <span class="tool-toggle">{isExpanded ? '▼' : '▶'}</span>
+              <span class="tool-summary">🔧 {toolCount} tool{toolCount !== 1 ? 's' : ''}</span>
               <span class="tool-names">
                 {#each group.tools as tool, ti}
                   {#if ti > 0}, {/if}
@@ -942,7 +942,7 @@
         bind:value={draft}
         on:input={handleInput}
         on:keydown={handleKeydown}
-        placeholder={inputDisabled ? 'Chat unavailable \u2014 reconnecting\u2026' : 'Message the agent... (/ to see commands)'}
+        placeholder={inputDisabled ? 'Chat unavailable — reconnecting…' : 'Message the agent... (/ to see commands)'}
         disabled={inputDisabled}
         rows="2"
         autocomplete="off"
@@ -957,14 +957,14 @@
       </button>
 
       {#if agentStreaming}
-        <span class="streaming-indicator">Streaming\u2026</span>
+        <span class="streaming-indicator">Streaming…</span>
       {:else if sending}
-        <span class="streaming-indicator">Sending\u2026</span>
+        <span class="streaming-indicator">Sending…</span>
       {/if}
 
       {#if budgetPaused && !agentStreaming && !sending}
         <button class="outline btn-continue" on:click={() => _sendMessage('continue')} disabled={!connected}>
-          Continue \u25b6
+          Continue ▶
         </button>
       {/if}
     </div>

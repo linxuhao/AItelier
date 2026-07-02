@@ -217,7 +217,20 @@
         if (existingKeys.has(dedupKey)) continue;
 
         const displayRole = m.role === 'assistant' ? 'agent' : (m.role as string);
-        messages = [...messages, { role: displayRole as ChatMessage['role'], content: m.content as string }];
+        const msg: ChatMessage = { role: displayRole as ChatMessage['role'], content: m.content as string };
+
+        // Recover tool details from message_json (coding-mode persisted transcripts)
+        if (displayRole === 'tool' && m.message_json) {
+          try {
+            const parsed = JSON.parse(m.message_json as string);
+            if (parsed.tool_name) {
+              msg.toolName = parsed.tool_name;
+              msg._argDisplay = '';
+            }
+          } catch { /* not JSON — ignore */ }
+        }
+
+        messages = [...messages, msg];
         history = [...history, { role: m.role as ChatMessage['role'], content: m.content as string }];
         existingKeys.add(dedupKey);
         added = true;
@@ -867,21 +880,25 @@
             {#if isExpanded}
               <div class="tool-details">
                 {#each group.tools as tool}
-                  <div class="tool-entry">
-                    <div class="tool-entry-header">{tool.content}</div>
-                    {#if tool.toolArgs && Object.keys(tool.toolArgs).length > 0}
-                      <details class="tool-detail-section">
-                        <summary class="tool-section-label">Arguments ({Object.keys(tool.toolArgs).length})</summary>
-                        <pre class="tool-pre">{JSON.stringify(tool.toolArgs, null, 2)}</pre>
-                      </details>
-                    {/if}
-                    {#if tool.toolResult}
-                      <details class="tool-detail-section">
-                        <summary class="tool-section-label">Raw result</summary>
-                        <pre class="tool-pre">{JSON.stringify(tool.toolResult, null, 2)}</pre>
-                      </details>
-                    {/if}
-                  </div>
+                  <details class="tool-entry-details">
+                    <summary class="tool-entry-header">
+                      🔧 {tool.toolName || '?'}{#if tool._argDisplay}: {tool._argDisplay}{/if}
+                    </summary>
+                    <div class="tool-entry-body">
+                      {#if tool.toolArgs && Object.keys(tool.toolArgs).length > 0}
+                        <details class="tool-detail-section" open>
+                          <summary class="tool-section-label">Arguments ({Object.keys(tool.toolArgs).length})</summary>
+                          <pre class="tool-pre">{JSON.stringify(tool.toolArgs, null, 2)}</pre>
+                        </details>
+                      {/if}
+                      {#if tool.toolResult}
+                        <details class="tool-detail-section" open>
+                          <summary class="tool-section-label">Result</summary>
+                          <pre class="tool-pre">{JSON.stringify(tool.toolResult, null, 2)}</pre>
+                        </details>
+                      {/if}
+                    </div>
+                  </details>
                 {/each}
               </div>
             {/if}
@@ -1156,21 +1173,44 @@
     border-top: 1px solid var(--pico-muted-border-color, #ddd);
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.5rem;
+    padding: 0.4rem 0.5rem;
   }
 
-  .chat-tool-block .tool-entry {
+  /* Level 2: each tool is a collapsible <details> */
+  .chat-tool-block .tool-entry-details {
     border-bottom: 1px dashed var(--pico-muted-border-color, #ddd);
-    padding-bottom: 0.35rem;
+    padding: 0.25rem 0;
   }
-  .chat-tool-block .tool-entry:last-child {
+  .chat-tool-block .tool-entry-details:last-child {
     border-bottom: none;
     padding-bottom: 0;
   }
 
-  .chat-tool-block .tool-entry-header {
+  .chat-tool-block .tool-entry-details > summary {
     font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.15rem 0;
+    list-style: none;
+    font-size: 0.8rem;
+  }
+  .chat-tool-block .tool-entry-details > summary::-webkit-details-marker {
+    display: none;
+  }
+  .chat-tool-block .tool-entry-details > summary::before {
+    content: '▶ ';
+    font-size: 0.6rem;
+    display: inline-block;
+    width: 1.1em;
+    transition: transform 0.15s;
+  }
+  .chat-tool-block .tool-entry-details[open] > summary::before {
+    content: '▼ ';
+  }
+
+  /* Level 3: args / result inside each tool */
+  .chat-tool-block .tool-entry-body {
+    margin-left: 0.8rem;
     padding: 0.15rem 0;
   }
 

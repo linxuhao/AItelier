@@ -948,6 +948,7 @@ class MetaAgent:
                     tool_msg = {
                         "role": "tool",
                         "tool_call_id": tc["id"],
+                        "tool_name": tc["name"],
                         "content": json.dumps(result, default=str, ensure_ascii=False),
                     }
                     messages.append(tool_msg)

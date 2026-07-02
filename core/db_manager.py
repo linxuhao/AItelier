@@ -1651,12 +1651,13 @@ class DBManager:
         """
         with self.get_connection() as conn:
             rows = conn.execute(
-                """SELECT role, content, project_id, created_at FROM chat_history
+                """SELECT role, content, message_json, project_id, created_at FROM chat_history
                    WHERE session_id = ? AND content != ''
                    ORDER BY id DESC LIMIT ?""",
                 (session_id, limit),
             ).fetchall()
             return [{"role": r["role"], "content": r["content"],
+                     "message_json": r["message_json"],
                      "project_id": r["project_id"],
                      "created_at": r["created_at"]} for r in reversed(rows)]
 

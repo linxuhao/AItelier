@@ -11,7 +11,9 @@
   // ── State (runes) ──────────────────────────────────────────────────
 
   let projectId = $derived(params.id || '');
-  let runId = $derived(params.runId || '');
+  // No explicit runId (project-level "View Traces") → target the project id:
+  // the backend's _resolve_run accepts project ids as run identifiers.
+  let runId = $derived(params.runId || params.id || '');
 
   let traces = $state<any[]>([]);
   let loading = $state(true);

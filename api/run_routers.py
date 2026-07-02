@@ -188,6 +188,10 @@ def get_run_detail(
     steps = sf.get_steps(internal_id)
     run["steps"] = [
         {
+            # Instance id: step_id alone is NOT unique — task-loop steps
+            # (t_plan, t_impl, …) repeat per task, and a keyed {#each} on
+            # duplicates crashes Svelte 5 outright.
+            "id": s["id"],
             "step_id": s["step_id"],
             "status": s["status"],
             # skillflow_steps has no "attempt" column; retries live in

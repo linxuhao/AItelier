@@ -23,6 +23,9 @@ const _handlers = new Map<string, Set<EventHandler>>();
 /** Monotonic sequence number for out-of-order detection. */
 let _lastTs = 0;
 
+/** Monotonic suffix so notification ids stay unique within a same-_ts burst. */
+let _notifSeq = 0;
+
 /** True while a full-state refresh is in-flight. */
 let _refreshing = false;
 
@@ -152,7 +155,10 @@ function _dispatch(event: Record<string, unknown>): void {
   // Push to notification store for the notification panel
   try {
     addNotification({
-      id: String(event._ts ?? Date.now()),
+      // _ts alone is NOT unique (event bursts share a timestamp) — and the
+      // panel's keyed {#each (notif.id)} makes a duplicate id a FATAL
+      // each_key_duplicate error in Svelte 5, killing the whole app.
+      id: `${event._ts ?? Date.now()}-${++_notifSeq}`,
       type: etype,
       message: String(event.message ?? event.type ?? ''),
       timestamp: typeof event._ts === 'number' ? event._ts : Date.now(),

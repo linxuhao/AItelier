@@ -24,8 +24,12 @@
   const routes = {
     '/': Dashboard,
     '/projects': Dashboard,
+    '/chat': Chat, // standalone chat (the butler) — not tied to a project
     '/projects/:id': Project,
     '/projects/:id/chat': Chat,
+    // Project-level trace: no runId -> Trace targets the project id (the
+    // backend's _resolve_run accepts project ids as run identifiers).
+    '/projects/:id/trace': Trace,
     '/projects/:id/trace/:runId': Trace,
     '/tracking': Tracking,
   };

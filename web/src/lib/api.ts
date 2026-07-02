@@ -223,7 +223,21 @@ export function getRun(runId: string): Promise<Record<string, unknown>> {
 }
 
 export function getRunDetail(runId: string): Promise<Record<string, unknown>> {
-  return _get('/api/runs/' + encodeURIComponent(runId) + '/detail');
+  // GET /api/runs/{id} IS the detail endpoint (steps + cache_stats + manifest).
+  // A phantom "/detail" suffix here 404'd every run-detail fetch.
+  return _get('/api/runs/' + encodeURIComponent(runId));
+}
+
+// ═════════════════════════════════════════════════════════════════════
+//  Admin — logged-user tracking
+// ═════════════════════════════════════════════════════════════════════
+
+export function getLoggedUsers(limit = 50): Promise<Record<string, unknown>[]> {
+  return _get('/api/admin/logged-users?limit=' + encodeURIComponent(String(limit)));
+}
+
+export function deleteUser(email: string): Promise<Record<string, unknown>> {
+  return _del('/api/admin/logged-users/' + encodeURIComponent(email));
 }
 
 // ═════════════════════════════════════════════════════════════════════

@@ -16,6 +16,7 @@
     </ul>
     <ul>
       <li><a href="#/projects">Dashboard</a></li>
+      <li><a href="#/chat">Chat</a></li>
       {#if $authStore.canWrite}
         <li><a href="#/tracking">Tracking</a></li>
       {/if}

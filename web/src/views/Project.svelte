@@ -115,7 +115,11 @@
       if (Array.isArray(runList)) {
         runs = runList as Record<string, unknown>[];
       }
-      checkpoint = cpData;
+      // The endpoint returns an EMPTY CheckpointResponse ({checkpoint: null,
+      // ...}) when nothing is pending — truthy as an object, which rendered a
+      // blank "pending checkpoint" card on finished projects.
+      checkpoint = (cpData && (cpData as Record<string, unknown>).checkpoint)
+        ? cpData : null;
       error = null;
     } catch (err: unknown) {
       if (params.id !== pid) return;
@@ -560,7 +564,7 @@
                 </tr>
               </thead>
               <tbody>
-                {#each runs as run (run.id || run.run_id)}
+                {#each runs as run, runIdx ((run.id as string) || (run.run_id as string) || runIdx)}
                   {@const isSelected = selectedRunId === (run.id as string) || selectedRunId === (run.run_id as string)}
                   {@const parsed = parseStatus(run.status as string)}
                   <tr
@@ -660,7 +664,7 @@
               <div class="step-timeline">
                 <h5>Steps</h5>
                 {#if runDetail.steps}
-                  {#each runDetail.steps as step (step.step_id)}
+                  {#each runDetail.steps as step, stepIdx ((step.id as number) ?? stepIdx)}
                     <div class="step-item" class:step-expanded={isStepExpanded(step.step_id as string)}>
                       <div
                         class="step-header"

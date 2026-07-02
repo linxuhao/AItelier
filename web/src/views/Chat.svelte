@@ -650,7 +650,7 @@
       {#each sessionList as s (s.session_id as string)}
         {@const sid = s.session_id as string}
         {@const pid = (s.project_id as string) || ''}
-        {@const titleMsg = ((s.first_message as string) || (s.last_message as string) || '')}
+        {@const titleMsg = (s.first_message as string) || (s.last_message as string) || ''}
         {@const count = (s.message_count as number) || 0}
         {@const preview = titleMsg.length > 40 ? titleMsg.slice(0, 40) + '\u2026' : titleMsg}
         <option value={sid} selected={sid === sessionId}>

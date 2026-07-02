@@ -18,7 +18,13 @@ from core.ai_router import _read_secret
 
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
 _DEFAULT_CONFIG_PATH_V2 = "agent_configs/meta_conversation.yaml"
-_META_DIR = Path.home() / ".AItelier" / "meta"
+
+
+def _meta_dir() -> Path:
+    """Meta-conversation context store — resolved via the datadir authority
+    (call-time, so test isolation of AITELIER_HOME is honored)."""
+    from core import datadir
+    return datadir.meta_dir()
 
 # Default line window for read_code_file when no range is given. Large enough
 # that typical source files are returned whole (so the agent isn't blind to the
@@ -1022,8 +1028,8 @@ class MetaAgent:
         repo_path = proj.get("repo_path")
         # If no explicit repo_path, use the default code location
         if not repo_path:
-            from pathlib import Path as _Path
-            default = _Path.home() / ".AItelier" / "projects" / existing_pid
+            from core import datadir
+            default = datadir.projects_dir() / existing_pid
             if default.is_dir():
                 repo_path = str(default)
             else:
@@ -1574,8 +1580,9 @@ class MetaAgent:
     def _tool_retrieve_previous_context(self, args: dict) -> dict:
         pid = args["project_id"]
         which = args.get("which", 1)
-        _META_DIR.mkdir(parents=True, exist_ok=True)
-        files = sorted(_META_DIR.glob(f"{pid}_context_*.json"), reverse=True)
+        meta_dir = _meta_dir()
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        files = sorted(meta_dir.glob(f"{pid}_context_*.json"), reverse=True)
         if not files:
             return {"error": "No saved context files found"}
         if which < 1 or which > len(files):

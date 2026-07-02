@@ -30,11 +30,6 @@ FINAL_STEP = "5"
 # Default DPE graph name — matches the config name in configs/dpe_default.yaml
 DPE_GRAPH_NAME = "dpe_default_v2"
 
-# Default base paths
-_DPS_BASE = str(Path.home() / ".AItelier" / "workspaces")
-_PROJECTS_BASE = str(Path.home() / ".AItelier" / "projects")
-
-
 class WorkspaceManager:
     """
     负责 DPE 工作区的物理生命周期管理。
@@ -47,12 +42,21 @@ class WorkspaceManager:
     Outbox_Draft / Outbox_Final / Trace 路径通过 skillflow WorkspaceManager 构建
     （带 graph_name 前缀如 dpe_default_v2/），Inbox 保留在项目根层级。
     """
-    def __init__(self, base_path: str = None):
-        if base_path is None:
-            base_path = _DPS_BASE
+    def __init__(self, base_path: str, projects_base: str | None = None):
+        # base_path is REQUIRED — a prod-pointing default here let stray
+        # construction reach real workspaces. Production resolves paths in
+        # core.datadir (composed in api/dependencies); tests pass tmp paths.
+        # projects_base follows the same env-aware authority when omitted
+        # (isolated in tests via AITELIER_HOME), or can be passed explicitly.
+        if not base_path:
+            raise ValueError(
+                "WorkspaceManager requires an explicit base_path (production:"
+                " core.datadir.workspaces_dir(); tests: a tmp_path dir)")
+        from core import datadir
         self.base_path = Path(base_path).resolve()
         self.base_path.mkdir(parents=True, exist_ok=True)
-        self.projects_base = Path(_PROJECTS_BASE).resolve()
+        self.projects_base = Path(
+            projects_base or datadir.projects_dir()).resolve()
         self.projects_base.mkdir(parents=True, exist_ok=True)
 
     def _get_secure_path(self, project_id: str) -> Path:

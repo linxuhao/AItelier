@@ -75,12 +75,9 @@ def create_project(
 
     # Compute local repo_path for new/clone types
     repo_path = body.repo_path
-    if body.repo_type == "new" and not repo_path:
-        projects_base = Path.home() / ".AItelier" / "projects"
-        repo_path = str(projects_base / body.project_id)
-    elif body.repo_type == "clone" and not repo_path:
-        projects_base = Path.home() / ".AItelier" / "projects"
-        repo_path = str(projects_base / body.project_id)
+    if body.repo_type in ("new", "clone") and not repo_path:
+        from core import datadir
+        repo_path = str(datadir.projects_dir() / body.project_id)
 
     owner = user.email if user else "cli@local"
 
@@ -676,12 +673,9 @@ def submit_project(
 
     # Compute local repo_path for new/clone types
     repo_path = body.repo_path
-    if body.repo_type == "new" and not repo_path:
-        projects_base = Path.home() / ".AItelier" / "projects"
-        repo_path = str(projects_base / body.project_id)
-    elif body.repo_type == "clone" and not repo_path:
-        projects_base = Path.home() / ".AItelier" / "projects"
-        repo_path = str(projects_base / body.project_id)
+    if body.repo_type in ("new", "clone") and not repo_path:
+        from core import datadir
+        repo_path = str(datadir.projects_dir() / body.project_id)
 
     # 3. Create project in DB
     db.ensure_project(

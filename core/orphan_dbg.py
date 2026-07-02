@@ -16,11 +16,10 @@ def odbg(msg: str) -> None:
     print(line, flush=True)
     try:
         import datetime as _dt
-        from pathlib import Path as _P
+        from core import datadir
         ts = _dt.datetime.now(_dt.timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%f")[:-3]
-        with (_P.home() / ".AItelier" / "orphan_dbg.log").open(
-                "a", encoding="utf-8") as fh:
+        with datadir.orphan_log_path().open("a", encoding="utf-8") as fh:
             fh.write(f"{ts}Z {line}\n")
     except Exception:
         pass

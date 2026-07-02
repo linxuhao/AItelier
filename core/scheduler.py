@@ -88,8 +88,8 @@ def _scheduler_lock_path():
     override = _os.getenv("AITELIER_SCHEDULER_LOCK")
     if override:
         return override
-    from api.dependencies import _AITELIER_HOME
-    return _AITELIER_HOME / "scheduler.lock"
+    from core import datadir
+    return datadir.aitelier_home() / "scheduler.lock"
 
 
 def _acquire_scheduler_lock() -> bool:
@@ -134,8 +134,8 @@ def _instance_lock_path():
     override = _os.getenv("AITELIER_INSTANCE_LOCK")
     if override:
         return override
-    from api.dependencies import _AITELIER_HOME
-    return _AITELIER_HOME / "aitelier.lock"
+    from core import datadir
+    return datadir.aitelier_home() / "aitelier.lock"
 
 
 def acquire_instance_lock() -> bool:

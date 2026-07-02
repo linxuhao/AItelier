@@ -4,17 +4,15 @@
 import os
 import tempfile
 
-# Isolate the ENTIRE data directory BEFORE api.dependencies is imported (it
-# resolves _AITELIER_HOME → aitelier.db / skillflow.db / workspaces paths at
-# import time). Without this, every TestClient startup runs the app lifespan —
-# recover_claims_on_startup() + start_scheduler() — against the PRODUCTION
-# ~/.AItelier and fights any live backend: it steals the container's in-flight
-# claims, executes real pending steps on the host, and TestClient teardown
-# cancels them mid-run, leaving orphaned claims (the recurring
-# "orphaned-claim re-dispatch" storm — root-caused 2026-07-02, run
-# aitelier-web-ui-7, t_plan_review reclaimed 12× during a test session).
-# The lock-isolation fixtures below made this WORSE on their own: they let
-# the test backend start where the single-instance lock would have refused.
+# Isolate the ENTIRE data directory for the test session. Defense in depth —
+# the primary guards now live in the code itself (core/datadir.py authority,
+# REQUIRED constructor paths, lifespan _test_mode skip; see
+# tests/unit/test_datadir_guardrail.py), but this env belt keeps even
+# unconverted/legacy code paths pointed away from production ~/.AItelier.
+# Set BEFORE api.dependencies is imported: the composition root resolves its
+# singleton paths at import time. (Origin: the orphaned-claim storm — pytest
+# TestClient lifespans ran claim recovery + a scheduler against the REAL data
+# dir and fought the live container; root-caused 2026-07-02.)
 os.environ["AITELIER_HOME"] = tempfile.mkdtemp(prefix="aitelier-test-home-")
 
 import pytest

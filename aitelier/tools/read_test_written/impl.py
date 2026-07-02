@@ -9,8 +9,13 @@ from pathlib import Path
 
 
 def _scratch_dir(step_id: str, run_id: str) -> Path:
+    import sys
+    project_root = Path(__file__).parent.parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from core import datadir
     key = re.sub(r"[^A-Za-z0-9_.-]", "_", str(step_id or run_id or "default"))[:80]
-    d = Path.home() / ".AItelier" / "scratch" / key
+    d = datadir.scratch_dir() / key
     d.mkdir(parents=True, exist_ok=True)
     return d
 

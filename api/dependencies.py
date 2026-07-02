@@ -3,22 +3,26 @@
 import os
 from pathlib import Path
 from fastapi import HTTPException, Request
+from core import datadir
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.auth import CurrentUser
 
-_AITELIER_HOME = Path(os.getenv("AITELIER_HOME", Path.home() / ".AItelier"))
+# Composition root: the ONE place that resolves the production data dir and
+# hands explicit paths to every component (constructors REQUIRE paths — see
+# core/datadir.py and tests/unit/test_datadir_guardrail.py for the rules).
+# 默认从环境变量读取存储路径，方便在 Docker / 生产环境中复写
+_AITELIER_HOME = datadir.aitelier_home()
 _AITELIER_HOME.mkdir(parents=True, exist_ok=True)
 
-# 默认从环境变量读取存储路径，方便在 Docker / 生产环境中复写
-DB_PATH = os.getenv("DPE_DB_PATH", str(_AITELIER_HOME / "aitelier.db"))
-SKILLFLOW_DB_PATH = os.getenv("SKILLFLOW_DB_PATH", str(_AITELIER_HOME / "skillflow.db"))
-WS_PATH = os.getenv("DPE_WS_PATH", str(_AITELIER_HOME / "workspaces"))
-PROJECTS_PATH = os.getenv("DPE_PROJECTS_PATH", str(_AITELIER_HOME / "projects"))
+DB_PATH = datadir.db_path()
+SKILLFLOW_DB_PATH = datadir.skillflow_db_path()
+WS_PATH = str(datadir.workspaces_dir())
+PROJECTS_PATH = str(datadir.projects_dir())
 
 # 单例模式实例化核心管理器
 db_instance = DBManager(DB_PATH)
-ws_instance = WorkspaceManager(WS_PATH)
+ws_instance = WorkspaceManager(WS_PATH, projects_base=PROJECTS_PATH)
 
 def get_db_manager() -> DBManager:
     """FastAPI 依赖注入：获取数据库连接池"""

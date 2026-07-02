@@ -12,11 +12,15 @@ class DBManager:
     系统核心的 SQLite 持久化管理类。
     采用 WAL 模式提升高频读写的并发性能。
     """
-    def __init__(self, db_path: str = None):
-        if db_path is None:
-            home = Path.home() / ".AItelier"
-            home.mkdir(parents=True, exist_ok=True)
-            db_path = str(home / "aitelier.db")
+    def __init__(self, db_path: str):
+        # db_path is REQUIRED — a prod-pointing default here is how the test
+        # suite once silently opened ~/.AItelier and fought the live backend.
+        # Production resolves paths in core.datadir (composed in
+        # api/dependencies); tests pass a tmp_path file.
+        if not db_path:
+            raise ValueError(
+                "DBManager requires an explicit db_path "
+                "(production: core.datadir.db_path(); tests: a tmp_path file)")
         self.db_path = db_path
         self._init_db()
 
@@ -765,12 +769,15 @@ class DBManager:
             conn.commit()
             existed = cursor.rowcount > 0
 
-        # Clean up workspace directory + project repo
+        # Clean up workspace directory + project repo (via the datadir
+        # authority — these rmtrees MUST follow the same isolation as the DB,
+        # or a test could delete real workspaces).
         if existed:
-            ws_path = Path.home() / ".AItelier" / "workspaces" / project_id
+            from core import datadir
+            ws_path = datadir.workspaces_dir() / project_id
             if ws_path.exists():
                 shutil.rmtree(ws_path, ignore_errors=True)
-            proj_path = Path.home() / ".AItelier" / "projects" / project_id
+            proj_path = datadir.projects_dir() / project_id
             if proj_path.exists():
                 shutil.rmtree(proj_path, ignore_errors=True)
 

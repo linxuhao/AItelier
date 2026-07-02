@@ -46,7 +46,8 @@ _log = logging.getLogger(__name__)
 def generated_configs_dir() -> Path:
     """Where persisted generated configs live (override via env for tests)."""
     d = os.getenv("AITELIER_GENERATED_CONFIGS_DIR")
-    base = Path(d) if d else (Path.home() / ".AItelier" / "configs")
+    from core import datadir
+    base = Path(d) if d else datadir.configs_dir()
     base.mkdir(parents=True, exist_ok=True)
     return base
 

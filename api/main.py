@@ -44,6 +44,16 @@ async def lifespan(app: FastAPI):
     import json as _json
     from api.dependencies import get_skillflow
 
+    # Test-composed apps get NO backend: no instance lock, no claim recovery,
+    # no scheduler. recover_claims_on_startup() assumes it is the ONLY backend
+    # — from a TestClient it would steal a live backend's in-flight claims and
+    # teardown would cancel them mid-run (the orphaned-claim storm). Data-dir
+    # isolation in conftest is the primary guard; this makes the skip explicit
+    # and keeps test startups fast.
+    if getattr(app.state, "_test_mode", False):
+        yield
+        return
+
     loop = asyncio.get_running_loop()
 
     # Single-instance gate (MUST be first — before the destructive claim
@@ -96,7 +106,8 @@ async def lifespan(app: FastAPI):
         if pid and pid not in _pname_cache:
             try:
                 import sqlite3 as _sql
-                _adb = _sql.connect(_os.path.expanduser("~/.AItelier/aitelier.db"))
+                from api.dependencies import DB_PATH as _DB_PATH
+                _adb = _sql.connect(_DB_PATH)
                 row = _adb.execute(
                     "SELECT name FROM runs WHERE project_id = ?",
                     (pid,),
@@ -117,7 +128,8 @@ async def lifespan(app: FastAPI):
         # stale task name (e.g. "backend_setup" forever).
         try:
             import sqlite3 as _sql
-            _sdb = _sql.connect(_os.path.expanduser("~/.AItelier/skillflow.db"))
+            from api.dependencies import SKILLFLOW_DB_PATH as _SF_DB_PATH
+            _sdb = _sql.connect(_SF_DB_PATH)
             row = _sdb.execute(
                 "SELECT current_item FROM skillflow_loop_state WHERE run_id = ?",
                 (rid,),
@@ -139,7 +151,8 @@ async def lifespan(app: FastAPI):
         if rid and rid not in _pid_cache:
             try:
                 import sqlite3 as _sql
-                _sdb = _sql.connect(_os.path.expanduser("~/.AItelier/skillflow.db"))
+                from api.dependencies import SKILLFLOW_DB_PATH as _SF_DB_PATH
+                _sdb = _sql.connect(_SF_DB_PATH)
                 row = _sdb.execute(
                     "SELECT project_id, graph_name FROM skillflow_runs WHERE id = ?",
                     (rid,),

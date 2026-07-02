@@ -308,7 +308,7 @@ class TestContextTools:
         data = [{"role": "user", "content": "hello"}]
         (meta_dir / "test-proj_context_1234.json").write_text(json.dumps(data))
 
-        with patch("core.meta_agent._META_DIR", meta_dir):
+        with patch("core.meta_agent._meta_dir", return_value=meta_dir):
             result = await agent._execute_tool("retrieve_previous_context", {
                 "project_id": "test-proj", "which": 1
             })

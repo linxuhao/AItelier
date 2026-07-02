@@ -387,6 +387,11 @@
       }
 
       case 'tool_call': {
+        // A tool line closes the current agent bubble: without this reset,
+        // the next text_delta re-renders the FULL accumulated prose into a
+        // fresh bubble below the tool line — duplicating everything the
+        // agent said before the call.
+        currentAgentText = '';
         const toolName = (event.name as string) || '?';
         messages = [...messages, { role: 'tool', content: '\uD83D\uDD27 Calling ' + toolName + '...' }];
         break;
@@ -397,6 +402,14 @@
         const result = (event.result as Record<string, unknown>) || {};
         const summary = _formatToolResult(toolName, result);
         messages = [...messages, { role: 'tool', content: summary }];
+        // Surface conversation-driving artifacts the model may not narrate:
+        // the gather step's question and the finalized brief arrive INSIDE
+        // tool results — without this the user can face a silent stall.
+        const surfaced = (result.question as string) || (result.brief_markdown as string) || '';
+        if (surfaced) {
+          currentAgentText = '';
+          messages = [...messages, { role: 'agent', content: surfaced }];
+        }
         break;
       }
 
@@ -447,6 +460,12 @@
       await _initSession();
     }
 
+    // Snapshot history BEFORE appending the new message: the backend
+    // appends `message` to the prompt itself, so including it in `history`
+    // too made every user turn reach the LLM twice.
+    const outHistory = history.map(
+      h => ({ role: h.role === 'agent' ? 'assistant' : h.role, content: h.content }));
+
     messages = [...messages, { role: 'user', content: text }];
     history = [...history, { role: 'user', content: text }];
 
@@ -454,7 +473,7 @@
 
     const body = {
       message: text,
-      history: history.map(h => ({ role: h.role === 'agent' ? 'assistant' : h.role, content: h.content })),
+      history: outHistory,
       current_project: currentProject,
       session_id: sessionId || undefined,
     };
@@ -608,7 +627,9 @@
   <nav class="breadcrumb" aria-label="breadcrumb">
     <ul>
       <li><a href="#/" on:click|preventDefault={() => push('#/')}>Dashboard</a></li>
-      <li><a href="#/projects/{params.id}" on:click|preventDefault={() => push('#/projects/' + encodeURIComponent(params.id))}>{truncate(params.id, 30) || '...'}</a></li>
+      {#if params.id}
+        <li><a href="#/projects/{params.id}" on:click|preventDefault={() => push('#/projects/' + encodeURIComponent(params.id))}>{truncate(params.id, 30)}</a></li>
+      {/if}
       <li>Chat</li>
     </ul>
   </nav>
@@ -680,7 +701,7 @@
       <!-- Connection lost placeholder -->
       {#if !connected && messages.length > 0}
         <div class="chat-msg chat-system chat-reconnect-placeholder">
-          <div class="msg-content">Chat unavailable \u2014 reconnecting\u2026</div>
+          <div class="msg-content">Chat unavailable — reconnecting…</div>
         </div>
       {/if}
     </div>

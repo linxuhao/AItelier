@@ -170,7 +170,11 @@ class AgentStepRunner:
                 "has_suggestions": bool(suggestions),
             }
             return {"review_verdict": data}, flags
-        except Exception:
+        except Exception as e:
+            # A verdict file that exists but can't be parsed (e.g. an invalid
+            # \escape) previously vanished into empty flags and the run died
+            # on an unmatched transition with no clue — log the real reason.
+            _odbg(f"review_verdict.json unreadable in {output_dir}: {e}")
             return {}, {}
 
     def _make_emit_wrapper(self, step: ClaimedStep):

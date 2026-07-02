@@ -125,6 +125,13 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True):
         return json.dumps({"thoughts": "design", "actions": [_action("write_design", content="# Design")]})
     if "write_plan" in writes:
         return json.dumps({"thoughts": "plan", "actions": [_action("write_plan", content="# Plan")]})
+    if "write_report" in writes:
+        # verify_report.json is a structured .json slot — string content is
+        # json.loads-validated at write time, so it must be real JSON.
+        report = json.dumps({"all_goals_met": True, "verified_subtasks": [],
+                             "issues": [], "ready_for_deploy": True})
+        return json.dumps({"thoughts": "verify",
+                           "actions": [_action("write_report", content=report)]})
 
     specific = [w for w in writes if not w.startswith("write_linter")]
     if specific:

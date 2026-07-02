@@ -1018,10 +1018,17 @@ class PipelineEngine:
             for pname, pspec in params_spec.items():
                 if not isinstance(pspec, dict):
                     continue
-                properties[pname] = {
+                prop = {
                     "type": pspec.get("type", "string"),
                     "description": pspec.get("description", ""),
                 }
+                # Structured .json slots carry nested schemas (array items,
+                # object properties) — pass them through or providers see a
+                # bare "array"/"object" with no shape.
+                for key in ("items", "properties", "enum"):
+                    if key in pspec:
+                        prop[key] = pspec[key]
+                properties[pname] = prop
                 if pspec.get("required"):
                     required.append(pname)
 

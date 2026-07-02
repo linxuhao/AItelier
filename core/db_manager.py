@@ -1642,17 +1642,17 @@ class DBManager:
             return [r["run_id"] for r in rows]
 
     def get_chat_history_by_session(self, session_id: str, limit: int = 100) -> list[dict]:
-        """Load recent narrative chat messages for a session (cross-project).
+        """Load recent chat messages for a session (cross-project).
 
-        Skips coding-mode transcript machinery (tool results, empty
-        assistant tool-call shells) — this feeds the chat display and the
-        butler-mode context, both of which want prose only. Coding mode
-        rebuilds its context from get_chat_transcript_by_session instead.
+        Includes tool messages so the chat display preserves the full
+        conversation history across reloads. Coding mode still rebuilds its
+        full transcript from get_chat_transcript_by_session when it needs
+        OpenAI-format tool_calls / tool results.
         """
         with self.get_connection() as conn:
             rows = conn.execute(
                 """SELECT role, content, project_id, created_at FROM chat_history
-                   WHERE session_id = ? AND role != 'tool' AND content != ''
+                   WHERE session_id = ? AND content != ''
                    ORDER BY id DESC LIMIT ?""",
                 (session_id, limit),
             ).fetchall()

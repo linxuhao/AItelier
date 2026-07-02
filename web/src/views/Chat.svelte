@@ -32,6 +32,18 @@
   interface ChatMessage {
     role: 'user' | 'assistant' | 'agent' | 'system' | 'tool' | 'error';
     content: string;
+    toolName?: string;
+    toolArgs?: Record<string, unknown>;
+    toolResult?: Record<string, unknown>;
+  }
+
+  interface MessageGroup {
+    kind: 'message' | 'tool-block';
+    message?: ChatMessage;
+    messageIndex?: number;
+    tools?: ChatMessage[];
+    toolStartIndex?: number;
+    toolEndIndex?: number;
   }
 
   interface SlashCommand {
@@ -78,6 +90,30 @@
 
   let inputDisabled = $derived(!connected || sending || agentStreaming);
   let canSend = $derived(!sending && !agentStreaming && draft.trim().length > 0 && connected);
+
+  // ── Message groups: consecutive tool messages merged into one collapsible block ──
+  let messageGroups = $derived.by(() => {
+    const groups: MessageGroup[] = [];
+    let i = 0;
+    while (i < messages.length) {
+      if (messages[i].role === 'tool') {
+        const tools: ChatMessage[] = [];
+        const start = i;
+        while (i < messages.length && messages[i].role === 'tool') {
+          tools.push(messages[i]);
+          i++;
+        }
+        groups.push({ kind: 'tool-block', tools, toolStartIndex: start, toolEndIndex: i - 1 });
+      } else {
+        groups.push({ kind: 'message', message: messages[i], messageIndex: i });
+        i++;
+      }
+    }
+    return groups;
+  });
+
+  // Tool blocks start collapsed by default. Click toggles membership.
+  let expandedToolBlocks = $state(new Set<number>());
 
   // ── LocalStorage helpers ──
 
@@ -366,6 +402,46 @@
     return '\uD83D\uDD27 ' + name + ' done';
   }
 
+  function _formatToolArgs(name: string, args: Record<string, unknown>): string {
+    // Tool-specific key arguments for a compact one-line summary.
+    const keyMap: Record<string, string> = {
+      bash: 'command',
+      read_code_file: 'path',
+      edit_file: 'path',
+      create_file: 'path',
+      search_code: 'pattern',
+      list_code_tree: 'subdir',
+      read_workspace_file: 'path',
+      list_workspace_tree: 'subdir',
+      get_project: 'project_id',
+      list_tasks: 'project_id',
+      get_task: 'task_id',
+      retry_task: 'task_id',
+      get_step_output: 'task_id',
+      delete_file: 'path',
+    };
+    const key = keyMap[name];
+    if (key && typeof args[key] === 'string') {
+      let val = args[key] as string;
+      if (val.length > 80) val = val.slice(0, 80) + '\u2026';
+      return val;
+    }
+    if (key && args[key] !== undefined) {
+      return String(args[key]).slice(0, 80);
+    }
+    // Generic fallback: first meaningful string arg
+    for (const k of ['path', 'pattern', 'command', 'name', 'task_id', 'project_id']) {
+      const v = args[k];
+      if (typeof v === 'string' && v.length > 0) {
+        return v.length > 80 ? v.slice(0, 80) + '\u2026' : v;
+      }
+      if (v !== undefined && v !== null) {
+        return String(v).slice(0, 80);
+      }
+    }
+    return '';
+  }
+
   function _processEvent(event: Record<string, unknown>): void {
     const etype = event.type as string;
 
@@ -401,7 +477,15 @@
         // agent said before the call.
         currentAgentText = '';
         const toolName = (event.name as string) || '?';
-        messages = [...messages, { role: 'tool', content: '\uD83D\uDD27 Calling ' + toolName + '...' }];
+        const args = (event.args as Record<string, unknown>) || {};
+        const argSummary = _formatToolArgs(toolName, args);
+        const label = '\uD83D\uDD27 ' + toolName + (argSummary ? ': ' + argSummary : '...');
+        messages = [...messages, {
+          role: 'tool',
+          content: label,
+          toolName,
+          toolArgs: args,
+        }];
         break;
       }
 
@@ -409,7 +493,31 @@
         const toolName = (event.name as string) || '?';
         const result = (event.result as Record<string, unknown>) || {};
         const summary = _formatToolResult(toolName, result);
-        messages = [...messages, { role: 'tool', content: summary }];
+        // Attach the result to the matching pending tool_call message so
+        // call + result are a single collapsible block.
+        let attached = false;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (m.role === 'tool' && m.toolName === toolName && !m.toolResult) {
+            messages = [
+              ...messages.slice(0, i),
+              { ...m, content: summary, toolResult: result },
+              ...messages.slice(i + 1),
+            ];
+            attached = true;
+            break;
+          }
+        }
+        if (!attached) {
+          // No matching tool_call (butler-mode tools, or out-of-order
+          // events) — create a standalone result message.
+          messages = [...messages, {
+            role: 'tool',
+            content: summary,
+            toolName,
+            toolResult: result,
+          }];
+        }
         // Surface conversation-driving artifacts the model may not narrate:
         // the gather step's question and the finalized brief arrive INSIDE
         // tool results — without this the user can face a silent stall.
@@ -579,6 +687,16 @@
     currentAgentText = '';
   }
 
+  function toggleToolBlock(groupIndex: number): void {
+    const next = new Set(expandedToolBlocks);
+    if (next.has(groupIndex)) {
+      next.delete(groupIndex);
+    } else {
+      next.add(groupIndex);
+    }
+    expandedToolBlocks = next;
+  }
+
   // ── Event handlers ──
 
   function handleSend(): void {
@@ -682,10 +800,6 @@
     <button class="outline btn-new-session" on:click={_handleNewSession} disabled={!connected}>
       + New
     </button>
-    <label class="coding-mode-toggle" title="Coding mode: the agent edits code and runs commands directly in the project repo">
-      <input type="checkbox" role="switch" bind:checked={codingMode} disabled={agentStreaming || sending} />
-      Coding mode
-    </label>
   </div>
 
   <!-- Loading state -->
@@ -703,24 +817,59 @@
         </div>
       {/if}
 
-      <!-- Message bubbles -->
-      {#each messages as msg, i (i)}
-        <div class="chat-msg chat-{msg.role}">
-          <div class="msg-content">
-            {#if msg.role === 'agent'}
-              {@const html = renderMarkdown(msg.content)}
-              {#if html}
-                {@html html}
+      <!-- Message bubbles (grouped: consecutive tools become one block) -->
+      {#each messageGroups as group, gi (gi)}
+        {#if group.kind === 'tool-block' && group.tools}
+          {@const isExpanded = expandedToolBlocks.has(gi)}
+          {@const toolCount = group.tools.length}
+          {@const toolNames = group.tools.map(t => t.toolName || '?').filter((v, i, a) => a.indexOf(v) === i)}
+          <div class="chat-msg chat-tool-block" class:tool-expanded={isExpanded}>
+            <button
+              class="tool-block-header"
+              on:click={() => toggleToolBlock(gi)}
+              aria-expanded={isExpanded}
+            >
+              <span class="tool-toggle">{isExpanded ? '\u25BC' : '\u25B6'}</span>
+              <span class="tool-summary">\uD83D\uDD27 {toolCount} tool call{toolCount !== 1 ? 's' : ''}</span>
+              <span class="tool-names">{toolNames.join(', ')}</span>
+            </button>
+            {#if isExpanded}
+              <div class="tool-details">
+                {#each group.tools as tool}
+                  <div class="tool-entry">
+                    <div class="tool-entry-header">{tool.content}</div>
+                    {#if tool.toolArgs && Object.keys(tool.toolArgs).length > 0}
+                      <div class="tool-section-label">Arguments</div>
+                      <pre class="tool-pre">{JSON.stringify(tool.toolArgs, null, 2)}</pre>
+                    {/if}
+                    {#if tool.toolResult}
+                      <div class="tool-section-label">Result</div>
+                      <pre class="tool-pre">{JSON.stringify(tool.toolResult, null, 2)}</pre>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {:else if group.kind === 'message' && group.message}
+          {@const msg = group.message}
+          <div class="chat-msg chat-{msg.role}">
+            <div class="msg-content">
+              {#if msg.role === 'agent'}
+                {@const html = renderMarkdown(msg.content)}
+                {#if html}
+                  {@html html}
+                {:else}
+                  {msg.content}
+                {/if}
+              {:else if msg.role === 'user'}
+                {msg.content}
               {:else}
                 {msg.content}
               {/if}
-            {:else if msg.role === 'user'}
-              {msg.content}
-            {:else}
-              {msg.content}
-            {/if}
+            </div>
           </div>
-        </div>
+        {/if}
       {/each}
 
       <!-- Connection lost placeholder -->
@@ -733,6 +882,10 @@
 
     <!-- Input area -->
     <div class="chat-input-area">
+      <label class="coding-mode-toggle" title="Coding mode: the agent edits code and runs commands directly in the project repo">
+        <input type="checkbox" role="switch" bind:checked={codingMode} disabled={agentStreaming || sending} />
+        Coding mode
+      </label>
       {#if completionVisible && completionMatches.length > 0}
         <ul class="slash-completion">
           {#each completionMatches as c, i}
@@ -900,13 +1053,97 @@
     font-size: 0.9rem;
   }
 
-  .chat-tool {
+  .chat-tool-block {
     align-self: flex-start;
     font-size: 0.85rem;
-    opacity: 0.8;
     font-family: monospace;
-    background: var(--pico-card-background-color, #f5f5f5);
     max-width: 100%;
+    border-radius: 0.35rem;
+    background: var(--pico-card-background-color, #f5f5f5);
+    border: 1px solid var(--pico-muted-border-color, #ddd);
+  }
+
+  .chat-tool-block .tool-block-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    padding: 0.35rem 0.5rem;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    text-align: left;
+    opacity: 0.85;
+  }
+
+  .chat-tool-block .tool-block-header:hover {
+    opacity: 1;
+    background: var(--pico-muted-border-color, #00000010);
+    border-radius: 0.35rem;
+  }
+
+  .chat-tool-block .tool-toggle {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    width: 1em;
+  }
+
+  .chat-tool-block .tool-summary {
+    flex-shrink: 0;
+    font-weight: 600;
+  }
+
+  .chat-tool-block .tool-names {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.6;
+    font-size: 0.8rem;
+  }
+
+  .chat-tool-block .tool-details {
+    border-top: 1px solid var(--pico-muted-border-color, #ddd);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem;
+  }
+
+  .chat-tool-block .tool-entry {
+    border-bottom: 1px dashed var(--pico-muted-border-color, #ddd);
+    padding-bottom: 0.35rem;
+  }
+  .chat-tool-block .tool-entry:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+
+  .chat-tool-block .tool-entry-header {
+    font-weight: 600;
+    padding: 0.15rem 0;
+  }
+
+  .chat-tool-block .tool-section-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    opacity: 0.7;
+    margin: 0.35rem 0 0.15rem;
+  }
+
+  .chat-tool-block .tool-pre {
+    margin: 0;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.78rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 20em;
+    overflow-y: auto;
+    background: var(--pico-background-color, #fff);
+    border-radius: 0.2rem;
   }
 
   .chat-error {

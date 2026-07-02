@@ -1819,3 +1819,24 @@ DBManager._VERSIONED_MIGRATIONS = [
     (1, "projects_to_runs", DBManager._mig_001_projects_to_runs),
     (2, "users_last_seen_epoch", DBManager._mig_002_users_last_seen_epoch),
 ]
+
+
+# ── Host-side composition accessor ──────────────────────────────────
+# The CLI/TUI runs on the host and reads/writes the shared bind-mounted DB
+# directly (the path-consistency design: host and container resolve the same
+# absolute paths). This is its composition point — lazy, bound to the datadir
+# authority (so pytest's AITELIER_HOME isolation applies), and NOT a default
+# on the class (DBManager still requires an explicit path). Server code uses
+# api.dependencies' singleton instead. NOTE: cli/tui/chat.py imported this
+# for months while it didn't exist — every call swallowed the ImportError.
+
+_default_instance = None
+
+
+def get_db_manager() -> DBManager:
+    """Process-wide DBManager for host-side (CLI/TUI) direct DB access."""
+    global _default_instance
+    if _default_instance is None:
+        from core import datadir
+        _default_instance = DBManager(datadir.db_path())
+    return _default_instance

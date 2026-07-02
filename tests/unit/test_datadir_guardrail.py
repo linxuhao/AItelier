@@ -87,3 +87,17 @@ def test_datadir_honors_env_isolation(tmp_path, monkeypatch):
               datadir.configs_dir(), datadir.meta_dir(),
               datadir.scratch_dir(), datadir.orphan_log_path()):
         assert str(p).startswith(str(tmp_path))
+
+
+def test_get_db_manager_binds_to_datadir(tmp_path, monkeypatch):
+    """The CLI's host-side accessor composes via the datadir authority —
+    so pytest's AITELIER_HOME isolation applies to it too. (cli/tui/chat.py
+    imported this for months while it didn't exist; the ImportError was
+    swallowed by best-effort except blocks.)"""
+    import core.db_manager as dbm
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path))
+    monkeypatch.delenv("DPE_DB_PATH", raising=False)
+    monkeypatch.setattr(dbm, "_default_instance", None)
+    db = dbm.get_db_manager()
+    assert str(tmp_path) in db.db_path
+    assert dbm.get_db_manager() is db  # process-wide singleton

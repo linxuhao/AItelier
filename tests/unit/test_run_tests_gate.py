@@ -128,3 +128,87 @@ def test_timeout_args_gated_on_plugin(monkeypatch):
         "--timeout=60", "--timeout-method=thread"]
     monkeypatch.setattr(rt.importlib.util, "find_spec", lambda name: None)
     assert rt._pytest_timeout_args(rt.sys.executable) == []
+
+
+# ── Node gate (npm install/build/test) ──────────────────────────────
+# The old pipeline ran ONLY pytest — two dogfood runs verified green with a
+# frontend that didn't compile. The node gate finds package.json (root or one
+# level deep, e.g. web/) and folds npm failures into the same report.
+
+
+def _node_repo(tmp_path, subdir="web", scripts=None, lockfile=True):
+    repo = tmp_path / "repo"
+    pkg_dir = repo / subdir if subdir else repo
+    pkg_dir.mkdir(parents=True)
+    pkg = {"name": "x", "version": "0.0.0"}
+    if scripts is not None:
+        pkg["scripts"] = scripts
+    (pkg_dir / "package.json").write_text(json.dumps(pkg))
+    if lockfile:
+        (pkg_dir / "package-lock.json").write_text("{}")
+    return repo, pkg_dir
+
+
+def _fake_npm(tmp_path, monkeypatch, exit_codes=None):
+    """Put a fake `npm` on PATH that logs its args and exits per-command."""
+    import os
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "npm_calls.log"
+    codes = exit_codes or {}
+    script = ["#!/bin/bash", f'echo "$@" >> "{log}"']
+    for key, code in codes.items():
+        script.append(f'[[ "$*" == "{key}"* ]] && exit {code}')
+    script.append("exit 0")
+    npm = bin_dir / "npm"
+    npm.write_text("\n".join(script) + "\n")
+    npm.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    return log
+
+
+def test_node_gate_finds_subdir_package(tmp_path, monkeypatch):
+    repo, _ = _node_repo(tmp_path, subdir="web",
+                         scripts={"build": "x", "test": "y"})
+    log = _fake_npm(tmp_path, monkeypatch)
+    node = rt._run_node_checks(repo)
+    assert node is not None and node["passed"] is True
+    assert node["dir"] == "web"
+    calls = log.read_text()
+    assert "ci" in calls and "run build" in calls and "test" in calls
+
+
+def test_node_gate_absent_without_package_json(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("x = 1\n")
+    assert rt._run_node_checks(repo) is None
+
+
+def test_node_gate_skips_without_npm(tmp_path, monkeypatch):
+    repo, _ = _node_repo(tmp_path)
+    monkeypatch.setattr(rt.shutil, "which", lambda name: None)
+    node = rt._run_node_checks(repo)
+    assert node["skipped"] is True
+    assert node["passed"] is True  # missing runner must not fail the gate
+
+
+def test_node_build_failure_fails_report(tmp_path, monkeypatch):
+    repo, _ = _node_repo(tmp_path, scripts={"build": "x", "test": "y"})
+    _fake_npm(tmp_path, monkeypatch, exit_codes={"run build": 1})
+    out = tmp_path / "out"
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+    assert rep["node"]["checks"]["build"]["passed"] is False
+    assert rep["passed"] is False
+    assert res["passed"] is False
+    assert any(f.startswith("node:build") for f in rep["failures"])
+
+
+def test_node_skips_scripts_it_does_not_have(tmp_path, monkeypatch):
+    repo, _ = _node_repo(tmp_path, scripts={})  # no build/test scripts
+    log = _fake_npm(tmp_path, monkeypatch)
+    node = rt._run_node_checks(repo)
+    assert node["passed"] is True
+    assert set(node["checks"]) == {"install"}
+    assert "run build" not in log.read_text()

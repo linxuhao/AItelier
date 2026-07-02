@@ -29,8 +29,11 @@ ARG APP_GID=1000
 
 # git: workspace_manager runs git init/add/commit/clone for every project.
 # curl: container healthcheck.
+# nodejs+npm: the run_tests tool (5_test step) gates node projects with
+# npm install/build/test — without npm in the backend image the gate is
+# silently skipped and frontend breakage passes verification.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl \
+    && apt-get install -y --no-install-recommends git curl nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a writable HOME for the runtime user (HOME/.AItelier is the mount).

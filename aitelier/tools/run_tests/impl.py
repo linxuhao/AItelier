@@ -153,12 +153,95 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
     return None, None
 
 
+def _find_node_project(repo: Path) -> Path | None:
+    """Locate the repo's node project: package.json at the root, else the
+    first one exactly one level deep (e.g. ``web/package.json`` — AItelier's
+    own layout; the root-only check is how two dogfood runs verified green
+    with a frontend that didn't even compile)."""
+    if (repo / "package.json").exists():
+        return repo
+    candidates = sorted(
+        p.parent for p in repo.glob("*/package.json")
+        if "node_modules" not in p.parts
+    )
+    return candidates[0] if candidates else None
+
+
+def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int) -> dict:
+    """Run one npm command in its own process group; kill the tree on timeout."""
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=str(pkg_dir), start_new_session=True,
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        out = ((stdout or "") + "\n" + (stderr or "")).strip()
+        return {"passed": proc.returncode == 0,
+                "returncode": proc.returncode, "output": out[-2000:]}
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        return {"passed": False, "returncode": -1,
+                "output": f"timed out after {timeout}s: {' '.join(args)}"}
+    except Exception as e:
+        _kill_group(proc)
+        return {"passed": False, "returncode": -1,
+                "output": f"{type(e).__name__}: {e}"}
+
+
+def _run_node_checks(repo: Path) -> dict | None:
+    """npm install/build/test gate for the repo's node project (if any).
+
+    Mirrors the pytest gate's skip semantics: no node project → None (no
+    section in the report); npm binary unavailable → skipped=True (a missing
+    runner must never masquerade as failing tests). Otherwise install deps,
+    then run the build and test scripts that package.json actually declares —
+    the BUILD is what catches compile-level breakage (e.g. Svelte template
+    errors) that unit tests alone never see.
+    """
+    pkg_dir = _find_node_project(repo)
+    if pkg_dir is None:
+        return None
+
+    node: dict = {"passed": True, "dir": str(pkg_dir.relative_to(repo)) or ".",
+                  "checks": {}}
+
+    if shutil.which("npm") is None:
+        node.update(passed=True, skipped=True,
+                    summary="npm not available — node gate skipped "
+                            "(install nodejs+npm in the backend image).")
+        return node
+
+    try:
+        scripts = json.loads(
+            (pkg_dir / "package.json").read_text(encoding="utf-8")
+        ).get("scripts", {})
+    except Exception:
+        scripts = {}
+
+    # npm ci needs a lockfile; fall back to install without one.
+    install_cmd = ["npm", "ci"] if (pkg_dir / "package-lock.json").exists() \
+        else ["npm", "install"]
+    node["checks"]["install"] = _run_node_cmd(pkg_dir, install_cmd, timeout=600)
+    if node["checks"]["install"]["passed"]:
+        if "build" in scripts:
+            node["checks"]["build"] = _run_node_cmd(
+                pkg_dir, ["npm", "run", "build"], timeout=300)
+        if "test" in scripts:
+            node["checks"]["test"] = _run_node_cmd(
+                pkg_dir, ["npm", "test"], timeout=300)
+
+    node["passed"] = all(c["passed"] for c in node["checks"].values())
+    return node
+
+
 def run_tests(*, project_root: str = "", out_dir: str = "",
               workspace_root: str = "", **kwargs) -> dict:
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
     Returns {written, passed}. The report holds {passed, returncode, summary,
-    failures[], skipped?} for the reviewer to read.
+    failures[], skipped?} for the reviewer to read, plus a ``node`` section
+    (npm install/build/test) when the repo contains a node project.
     """
     repo = Path(project_root or workspace_root).resolve()
     report = {"passed": True, "returncode": 0, "summary": "", "failures": []}
@@ -217,6 +300,21 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     _kill_group(proc)
                 if venv_dir:
                     shutil.rmtree(venv_dir, ignore_errors=True)
+
+    # Node gate (npm install/build/test) — folded into the same report so
+    # 5_review loops frontend breakage back through the goal-loop exactly
+    # like pytest failures.
+    if repo.exists():
+        node = _run_node_checks(repo)
+        if node is not None:
+            report["node"] = node
+            if not node["passed"]:
+                report["passed"] = False
+                for name, chk in node["checks"].items():
+                    if not chk["passed"]:
+                        report["failures"].append(
+                            f"node:{name} failed (rc={chk['returncode']}): "
+                            f"{chk['output'][-500:]}")
 
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)

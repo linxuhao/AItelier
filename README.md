@@ -220,7 +220,7 @@ npm run lint                    # ESLint + eslint-plugin-svelte
 npm run dev                     # dev server with HMR
 ```
 
-The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's compile step runs `npm run build` and `npm test` automatically via `BuildRunner._check_node()`.
+The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's test step (`run_tests`, 5_test) gates node projects automatically: it finds `package.json` (root or one level deep, e.g. `web/`) and runs `npm ci` + `npm run build` + `npm test`, folding failures into the goal-loop.
 
 ## License
 

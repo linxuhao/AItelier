@@ -233,6 +233,62 @@ export function getRunDetail(runId: string): Promise<Record<string, unknown>> {
 }
 
 // ═════════════════════════════════════════════════════════════════════
+//  Workspace browsing (pipeline artifacts + project code repo)
+// ═════════════════════════════════════════════════════════════════════
+
+export function workspaceTree(
+  projectId: string, root: 'dps' | 'code' = 'dps',
+): Promise<{ project_id: string; root: string; tree: string[] }> {
+  return _get('/api/projects/' + encodeURIComponent(projectId) +
+    '/workspace/tree?root=' + encodeURIComponent(root));
+}
+
+export function workspaceFile(
+  projectId: string, path: string, root: 'dps' | 'code' = 'dps',
+): Promise<Record<string, unknown>> {
+  return _get('/api/projects/' + encodeURIComponent(projectId) +
+    '/workspace/file?path=' + encodeURIComponent(path) +
+    '&root=' + encodeURIComponent(root));
+}
+
+// ═════════════════════════════════════════════════════════════════════
+//  Repository (project code repo git panel)
+// ═════════════════════════════════════════════════════════════════════
+
+export function repoStatus(projectId: string): Promise<Record<string, unknown>> {
+  return _get('/api/projects/' + encodeURIComponent(projectId) + '/repo/status');
+}
+
+export function repoArchiveUrl(projectId: string): string {
+  return '/api/projects/' + encodeURIComponent(projectId) + '/repo/archive';
+}
+
+export function repoCommit(projectId: string, message: string): Promise<Record<string, unknown>> {
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/commit', { message });
+}
+
+export function repoPush(projectId: string): Promise<Record<string, unknown>> {
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/push', {});
+}
+
+export function repoPull(projectId: string): Promise<Record<string, unknown>> {
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/pull', {});
+}
+
+export function repoSync(projectId: string): Promise<Record<string, unknown>> {
+  // Force sync is destructive server-side; confirm is explicit.
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/sync', { confirm: true });
+}
+
+export function repoSetRemote(projectId: string, url: string): Promise<Record<string, unknown>> {
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/remote', { url });
+}
+
+export function repoMakePR(projectId: string): Promise<Record<string, unknown>> {
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/pr', {});
+}
+
+// ═════════════════════════════════════════════════════════════════════
 //  Admin — logged-user tracking
 // ═════════════════════════════════════════════════════════════════════
 

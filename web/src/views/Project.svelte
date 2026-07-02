@@ -4,6 +4,8 @@
   import { authStore } from '../stores/auth';
   import { connectionStore } from '../stores/connection';
   import { projectStore, setCurrentProject } from '../stores/project';
+  import WorkspaceBrowser from './WorkspaceBrowser.svelte';
+  import RepoPanel from './RepoPanel.svelte';
   import {
     getProject,
     getTasks,
@@ -774,6 +776,11 @@
           </table>
         </figure>
       {/if}
+
+      <!-- Pipeline artifacts + repository (vanilla project-page sections) -->
+      <WorkspaceBrowser projectId={projectId} root="dps" title="Pipeline Artifacts" />
+      <RepoPanel projectId={projectId} {canWrite} />
+      <WorkspaceBrowser projectId={projectId} root="code" title="Project Repository" />
     {/if}
 
     <!-- ══════════════════════════════════════════

@@ -82,3 +82,24 @@ describe('notificationStore', () => {
     unsub();
   });
 });
+
+
+describe('bell unread counter', () => {
+  it('increments while the panel is closed and resets on open', async () => {
+    const { notificationStore, notifPanelOpen, notifUnread, addNotification, clearNotifications } =
+      await import('../src/stores/notifications');
+    clearNotifications();
+    notifPanelOpen.set(false);
+
+    addNotification({ id: 'u1', type: 'info', message: 'a', timestamp: 1 });
+    addNotification({ id: 'u2', type: 'info', message: 'b', timestamp: 2 });
+    expect(get(notifUnread)).toBeGreaterThanOrEqual(2);
+
+    notifPanelOpen.set(true);
+    expect(get(notifUnread)).toBe(0);
+
+    // While open, arriving events do not accumulate unread
+    addNotification({ id: 'u3', type: 'info', message: 'c', timestamp: 3 });
+    expect(get(notifUnread)).toBe(0);
+  });
+});

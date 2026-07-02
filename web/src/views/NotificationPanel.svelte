@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { notificationStore, clearNotifications, type NotificationEntry } from '../stores/notifications';
+  import { notificationStore, notifPanelOpen, clearNotifications, type NotificationEntry } from '../stores/notifications';
   import { formatTime } from '../lib/format';
-  import { onMount } from 'svelte';
 
   // ── State ──
+  // Visibility is owned by the store (the AppBar bell toggles it and the
+  // unread badge resets on open) — the panel is a dropdown, not a fixture.
 
-  let collapsed = $state(false);
   let notifListEl: HTMLDivElement | undefined = $state();
 
   // ── Event type → CSS class mapping ──
@@ -26,7 +26,7 @@
   $effect(() => {
     // Read to create dependency
     void $notificationStore.length;
-    if (notifListEl && !collapsed) {
+    if (notifListEl && $notifPanelOpen) {
       requestAnimationFrame(() => {
         if (notifListEl) {
           notifListEl.scrollTop = 0;
@@ -41,23 +41,20 @@
   }
 </script>
 
-<aside id="notification-panel" class="notification-panel" class:collapsed>
-  <!-- Header (click to toggle collapse) -->
-  <div class="notif-header" on:click={() => collapsed = !collapsed} role="button" tabindex="0" on:keydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); collapsed = !collapsed; } }}>
-    <span class="notif-title">Notifications</span>
-    {#if $notificationStore.length > 0}
-      <span class="notif-badge">{Math.min($notificationStore.length, 100)}</span>
-    {/if}
-    <span class="notif-toggle">{collapsed ? '\u25B6' : '\u25BC'}</span>
-    {#if $notificationStore.length > 0 && !collapsed}
-      <button class="notif-clear-btn" on:click={handleClear} title="Clear all notifications">&times;</button>
-    {/if}
-  </div>
+{#if $notifPanelOpen}
+  <aside id="notification-panel" class="notification-panel">
+    <div class="notif-header">
+      <span class="notif-title">Notifications</span>
+      {#if $notificationStore.length > 0}
+        <span class="notif-badge">{Math.min($notificationStore.length, 100)}</span>
+        <button class="notif-clear-btn" on:click={handleClear} title="Clear all notifications">Clear</button>
+      {/if}
+      <button class="notif-clear-btn" on:click={() => notifPanelOpen.set(false)} title="Close">&times;</button>
+    </div>
 
-  {#if !collapsed}
     <div class="notif-list" bind:this={notifListEl}>
       {#if $notificationStore.length === 0}
-        <p class="notif-empty">No notifications</p>
+        <p class="notif-empty">No notifications yet — pipeline events land here live.</p>
       {:else}
         {#each $notificationStore as notif (notif.id)}
           <div class="notif-entry {typeClass(notif.type)}">
@@ -70,8 +67,8 @@
         {/each}
       {/if}
     </div>
-  {/if}
-</aside>
+  </aside>
+{/if}
 
 <style>
   .notification-panel {
@@ -88,11 +85,6 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-  }
-
-  .notification-panel.collapsed {
-    width: auto;
-    min-width: 160px;
   }
 
   .notif-header {
@@ -133,7 +125,8 @@
     background: none;
     border: none;
     color: inherit;
-    font-size: 1.1rem;
+    width: auto;
+    font-size: 0.8rem;
     cursor: pointer;
     padding: 0 0.15rem;
     line-height: 1;

@@ -62,52 +62,6 @@
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   Notification Panel
-   ════════════════════════════════════════════════════════════════════ */
-#notification-panel {
-  position: fixed;
-  top: var(--ait-appbar-height);
-  right: 0;
-  width: var(--ait-notif-width);
-  height: calc(100vh - var(--ait-appbar-height));
-  background: var(--background, #fff);
-  border-left: 1px solid var(--muted-border-color, #e0e0e0);
-  overflow-y: auto;
-  z-index: var(--ait-z-notif);
-  padding: 0.5rem;
-  display: none;
-}
-
-#notification-panel.visible {
-  display: block;
-}
-
-.notif-header {
-  font-weight: bold;
-  padding: 0.5rem 0;
-  border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
-  margin-bottom: 0.5rem;
-}
-
-.notification-entry {
-  display: flex;
-  gap: 0.5rem;
-  padding: 0.3rem 0;
-  font-size: 0.85rem;
-  border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
-}
-
-.notif-time {
-  white-space: nowrap;
-  color: var(--muted-color, #888);
-  min-width: 4em;
-}
-
-.notif-text {
-  flex: 1;
-}
-
-/* ════════════════════════════════════════════════════════════════════
    Checkpoint Modal
    ════════════════════════════════════════════════════════════════════ */
 #checkpoint-modal[open] {
@@ -309,12 +263,6 @@ table.project-table td {
    Responsive Media Queries
    ════════════════════════════════════════════════════════════════════ */
 @media (max-width: 768px) {
-  #notification-panel {
-    width: 100%;
-    border-left: none;
-    border-top: 1px solid var(--muted-border-color, #e0e0e0);
-  }
-
   .chat-msg.user {
     margin-left: 0.5rem;
   }

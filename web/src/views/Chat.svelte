@@ -35,6 +35,7 @@
     toolName?: string;
     toolArgs?: Record<string, unknown>;
     toolResult?: Record<string, unknown>;
+    _argDisplay?: string;
   }
 
   interface MessageGroup {
@@ -114,6 +115,17 @@
 
   // Tool blocks start collapsed by default. Click toggles membership.
   let expandedToolBlocks = $state(new Set<number>());
+
+  // Token usage from the last turn
+  let tokenCount = $state(0);
+  let tokenLimit = $state(0);
+  let tokenMode = $state('butler');
+
+  function _formatTokens(n: number): string {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+    return String(n);
+  }
 
   // ── LocalStorage helpers ──
 
@@ -300,7 +312,11 @@
         completionIndex = (completionIndex - 1 + completionMatches.length) % completionMatches.length;
         return true;
       case 'Tab':
+        e.preventDefault();
+        _applyCompletion();
+        return true;
       case 'Enter':
+        if (e.shiftKey) return false;
         e.preventDefault();
         _applyCompletion();
         return true;
@@ -485,6 +501,7 @@
           content: label,
           toolName,
           toolArgs: args,
+          _argDisplay: argSummary,
         }];
         break;
       }
@@ -545,6 +562,16 @@
 
         currentAgentText = '';
         _loadSessionList();
+        break;
+      }
+
+      case 'token_usage': {
+        const tokens = event.tokens as number | undefined;
+        const limit = event.limit as number | undefined;
+        const mode = event.mode as string | undefined;
+        if (tokens !== undefined) tokenCount = tokens;
+        if (limit !== undefined) tokenLimit = limit;
+        if (mode !== undefined) tokenMode = mode;
         break;
       }
 
@@ -822,7 +849,6 @@
         {#if group.kind === 'tool-block' && group.tools}
           {@const isExpanded = expandedToolBlocks.has(gi)}
           {@const toolCount = group.tools.length}
-          {@const toolNames = group.tools.map(t => t.toolName || '?').filter((v, i, a) => a.indexOf(v) === i)}
           <div class="chat-msg chat-tool-block" class:tool-expanded={isExpanded}>
             <button
               class="tool-block-header"
@@ -830,8 +856,13 @@
               aria-expanded={isExpanded}
             >
               <span class="tool-toggle">{isExpanded ? '\u25BC' : '\u25B6'}</span>
-              <span class="tool-summary">\uD83D\uDD27 {toolCount} tool call{toolCount !== 1 ? 's' : ''}</span>
-              <span class="tool-names">{toolNames.join(', ')}</span>
+              <span class="tool-summary">\uD83D\uDD27 {toolCount} tool{toolCount !== 1 ? 's' : ''}</span>
+              <span class="tool-names">
+                {#each group.tools as tool, ti}
+                  {#if ti > 0}, {/if}
+                  {tool.toolName || '?'}{#if tool._argDisplay}:{tool._argDisplay}{/if}
+                {/each}
+              </span>
             </button>
             {#if isExpanded}
               <div class="tool-details">
@@ -839,12 +870,16 @@
                   <div class="tool-entry">
                     <div class="tool-entry-header">{tool.content}</div>
                     {#if tool.toolArgs && Object.keys(tool.toolArgs).length > 0}
-                      <div class="tool-section-label">Arguments</div>
-                      <pre class="tool-pre">{JSON.stringify(tool.toolArgs, null, 2)}</pre>
+                      <details class="tool-detail-section">
+                        <summary class="tool-section-label">Arguments ({Object.keys(tool.toolArgs).length})</summary>
+                        <pre class="tool-pre">{JSON.stringify(tool.toolArgs, null, 2)}</pre>
+                      </details>
                     {/if}
                     {#if tool.toolResult}
-                      <div class="tool-section-label">Result</div>
-                      <pre class="tool-pre">{JSON.stringify(tool.toolResult, null, 2)}</pre>
+                      <details class="tool-detail-section">
+                        <summary class="tool-section-label">Raw result</summary>
+                        <pre class="tool-pre">{JSON.stringify(tool.toolResult, null, 2)}</pre>
+                      </details>
                     {/if}
                   </div>
                 {/each}
@@ -932,6 +967,19 @@
           Continue \u25b6
         </button>
       {/if}
+    </div>
+  {/if}
+
+  <!-- Token usage bar -->
+  {#if tokenCount > 0}
+    {@const pct = tokenLimit > 0 ? Math.min(100, Math.round((tokenCount / tokenLimit) * 100)) : 0}
+    <div class="token-bar">
+      <div class="token-bar-fill" style="width: {pct}%"></div>
+      <span class="token-bar-label">
+        {_formatTokens(tokenCount)} {tokenLimit > 0 ? '/ ' + _formatTokens(tokenLimit) + ' tokens' : 'tokens'}
+        {#if pct > 0} &middot; {pct}%{/if}
+        {#if tokenMode === 'coding'} &middot; coding{/if}
+      </span>
     </div>
   {/if}
 
@@ -1126,11 +1174,20 @@
     padding: 0.15rem 0;
   }
 
-  .chat-tool-block .tool-section-label {
+  .chat-tool-block .tool-detail-section {
+    margin: 0.2rem 0;
+  }
+
+  .chat-tool-block .tool-detail-section summary {
     font-size: 0.75rem;
     font-weight: 600;
     opacity: 0.7;
-    margin: 0.35rem 0 0.15rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .chat-tool-block .tool-detail-section summary:hover {
+    opacity: 1;
   }
 
   .chat-tool-block .tool-pre {
@@ -1252,5 +1309,38 @@
   .slash-desc {
     opacity: 0.7;
     font-size: 0.85rem;
+  }
+
+  .token-bar {
+    position: relative;
+    width: 100%;
+    height: 1.1rem;
+    background: var(--pico-muted-border-color, #e0e0e0);
+    border-radius: 0.2rem;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  .token-bar-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: var(--pico-primary-background, #0066cc);
+    opacity: 0.2;
+    border-radius: 0.2rem;
+    transition: width 0.3s ease;
+  }
+
+  .token-bar-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-family: monospace;
+    opacity: 0.7;
+    white-space: nowrap;
   }
 </style>

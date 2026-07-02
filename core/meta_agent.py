@@ -861,6 +861,12 @@ class MetaAgent:
                     yield {"type": "compaction",
                            "message": "Older turns were summarized to stay within context."}
 
+                # Yield token usage estimate after each turn
+                yield {"type": "token_usage",
+                       "tokens": self._count_tokens(messages),
+                       "limit": self.compact_at_tokens if self.mode == "coding" else 0,
+                       "mode": self.mode}
+
                 full_text = ""
                 tool_calls = []
 
@@ -872,6 +878,10 @@ class MetaAgent:
                         tool_calls = event["tool_calls"]
 
                 if not tool_calls:
+                    yield {"type": "token_usage",
+                           "tokens": self._count_tokens(messages),
+                           "limit": self.compact_at_tokens if self.mode == "coding" else 0,
+                           "mode": self.mode}
                     yield {"type": "done", "message": {"role": "assistant", "content": full_text}}
                     return
 

@@ -1815,8 +1815,13 @@ class MetaAgent:
     # the (usually decisive) final lines survive in context.
     _BASH_HEAD_CHARS = 8000
     _BASH_TAIL_CHARS = 2000
-    # env vars matching this never reach coding-mode subprocesses.
-    _ENV_SECRET_RE = re.compile(r"(_KEY|_TOKEN|_SECRET|PASSWORD|CREDENTIAL)", re.I)
+    # env vars matching this never reach coding-mode subprocesses. Anchored to
+    # the END of the name: secret conventions are suffixes (DEEPSEEK_API_KEY,
+    # GITHUB_TOKEN, MY_PASSWORD) — an unanchored _KEY also killed
+    # GIT_CONFIG_KEY_0 (the compose-wired credential helper) while leaving
+    # GIT_CONFIG_COUNT, which broke every git command in the container.
+    _ENV_SECRET_RE = re.compile(
+        r"(_KEY|_TOKEN|_SECRET|_SECRETS|PASSWORD|_CREDENTIAL|_CREDENTIALS)$", re.I)
 
     async def _tool_bash(self, args: dict) -> dict:
         pid = args["project_id"]
@@ -2050,7 +2055,8 @@ class MetaAgent:
                                     # Grab step output for user review
                                     try:
                                         out_dir = self.ws.get_final_path(
-                                            run.get("project_id", ""), s["step_id"]
+                                            run.get("project_id", ""), s["step_id"],
+                                            run.get("graph_name") or "dpe_default",
                                         )
                                         if out_dir.exists():
                                             checkpoint_data = {}
@@ -2084,8 +2090,13 @@ class MetaAgent:
                         for s in steps:
                             if s["status"] == "completed":
                                 try:
+                                    # graph-scoped: config runs (code_review,
+                                    # skill_converter, gen_*) promote steps under
+                                    # {pid}/{graph}/{step}; the DPE default only
+                                    # matched DPE runs, so outputs came back {}.
                                     out_dir = self.ws.get_final_path(
-                                        run.get("project_id", ""), s["step_id"]
+                                        run.get("project_id", ""), s["step_id"],
+                                        run.get("graph_name") or "dpe_default",
                                     )
                                     if out_dir.exists():
                                         files = {}

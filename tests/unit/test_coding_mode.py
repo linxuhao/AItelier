@@ -194,6 +194,19 @@ class TestBash:
         assert "p=gone" in result["output"]
         assert "v=visible" in result["output"]
 
+    async def test_bash_env_scrub_spares_git_config_vars(self, coding_agent,
+                                                         monkeypatch):
+        # An unanchored _KEY match stripped GIT_CONFIG_KEY_0 but left
+        # GIT_CONFIG_COUNT, which makes every git command fail with
+        # "error: missing config key GIT_CONFIG_KEY_0".
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "credential.helper")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/x/helper.sh")
+        result = await coding_agent._execute_tool(
+            "bash", {"project_id": "p",
+                     "command": 'echo "key=${GIT_CONFIG_KEY_0:-gone}"'})
+        assert "key=credential.helper" in result["output"]
+
     async def test_bash_output_truncated(self, coding_agent):
         result = await coding_agent._execute_tool(
             "bash", {"project_id": "p", "command": "yes x | head -c 20000"})

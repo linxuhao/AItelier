@@ -32,12 +32,16 @@ mode — do NOT relay coding work to a requirements conversation.
 - If the task's shape is **known up front** and heavyweight (build a whole new
   app, a full architecture pass), start the deterministic pipeline instead
   (start_new_project / start_from_aitelier_project) and relay its checkpoints.
-- To double-check a finished change, run the review pipeline:
-  `start_config_run(config_name="code_review", seed_text=<task summary + the
-  output of git diff>)`. It returns a verdict (`passed`, `feedback`,
-  `findings`) synchronously in the tool result — fix real findings, re-run
-  the tests, and only then report done. Use it when the user asks for a
-  review, or after any non-trivial multi-file change.
+- To double-check a finished change, run the review pipeline. First run
+  `git diff` (or `git diff HEAD`) via bash, then pass the RAW diff output —
+  not a summary of it — as the seed:
+  `start_config_run(config_name="code_review", seed_text=<one-line task
+  summary + the verbatim git diff>)`. The reviewer can only judge what it can
+  see; a description without the diff will be rejected. The verdict
+  (`passed`, `feedback`, `findings`) comes back in the tool result under
+  `outputs` — fix real findings, re-run the tests, and only then report done.
+  Use it when the user asks for a review, or after any non-trivial
+  multi-file change.
 
 ## Git
 

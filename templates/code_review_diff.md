@@ -27,3 +27,8 @@ Write your verdict with the provided tool:
 
 Base every finding on evidence visible in the diff or request. If the request
 lacks the context to judge something, say so in feedback rather than guessing.
+
+**A review needs a diff.** If the request contains only a DESCRIPTION of the
+changes (no actual `diff --git` / unified-diff hunks or file contents), you
+cannot verify anything: set `passed` to false and say in `feedback` that the
+actual git diff must be provided. Never pass a change on the author's word.

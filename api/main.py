@@ -225,11 +225,6 @@ app.include_router(run_router)
 app.include_router(config_router)
 app.include_router(admin_router)
 
-# ── Serve compiled SPA ──
-_WEB_DIST = _Path(__file__).resolve().parent.parent / "web" / "dist"
-if _WEB_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="spa")
-
 # When running in Docker (and fronted by Cloudflare Access), requests arrive
 # from the Docker bridge gateway / the tunnel — never 127.0.0.1 — so the
 # localhost guard is disabled via AITELIER_ALLOW_EXTERNAL=1. Auth is then
@@ -302,3 +297,12 @@ async def stream_global_events():
         stream_manager.event_generator("__global__"),
         media_type="text/event-stream",
     )
+
+
+# ── Serve compiled SPA ──
+# Registered LAST: Starlette matches in registration order, and a mount at
+# "/" swallows every path registered after it (it 404'd /health when it sat
+# above the route definitions).
+_WEB_DIST = _Path(__file__).resolve().parent.parent / "web" / "dist"
+if _WEB_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="spa")

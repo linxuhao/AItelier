@@ -16,12 +16,10 @@ if _env_file.exists():
                 if _key not in _os.environ:
                     _os.environ[_key] = _val
 
-import hashlib as _hashlib
-import re as _re
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from core import cf_access
 from api import authz
@@ -207,7 +205,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     if hasattr(app.state, "scheduler") and app.state.scheduler:
-        app.state.scheduler.shutdown(wait=False)
+        app.state.scheduler.shutdown(wait=True)
 
 
 app = FastAPI(
@@ -227,56 +225,10 @@ app.include_router(run_router)
 app.include_router(config_router)
 app.include_router(admin_router)
 
-# ── Serve generated web UI static files ──
-_WEB_DIR = _Path(__file__).resolve().parent.parent / "web"
-
-# Asset cache-busting: stamp each local /web asset URL in index.html with a short
-# content hash. The HTML is served no-cache, so a deploy is picked up at once;
-# the hashed URLs let Cloudflare/browsers cache the JS/CSS indefinitely yet
-# refetch the instant a file's contents change (a new hash = a new URL). Without
-# this, Cloudflare serves a stale bundle by URL until its TTL expires.
-_ASSET_HASH_CACHE: dict[str, tuple] = {}
-_ASSET_REF_RE = _re.compile(r'(src|href)="(/web/[^"?]+)"')
-
-
-def _asset_version(rel_path: str) -> str | None:
-    """Short content hash for a /web asset, memoised by (mtime, size)."""
-    fp = _WEB_DIR / rel_path
-    try:
-        st = fp.stat()
-    except OSError:
-        return None
-    sig = (st.st_mtime, st.st_size)
-    cached = _ASSET_HASH_CACHE.get(rel_path)
-    if cached and cached[0] == sig:
-        return cached[1]
-    h = _hashlib.sha1(fp.read_bytes()).hexdigest()[:10]
-    _ASSET_HASH_CACHE[rel_path] = (sig, h)
-    return h
-
-
-def _render_index_html() -> str:
-    html = (_WEB_DIR / "index.html").read_text(encoding="utf-8")
-
-    def _stamp(m):
-        attr, url = m.group(1), m.group(2)
-        version = _asset_version(url[len("/web/"):])
-        return f'{attr}="{url}?v={version}"' if version else m.group(0)
-
-    return _ASSET_REF_RE.sub(_stamp, html)
-
-
-if _WEB_DIR.is_dir():
-    app.mount("/web", StaticFiles(directory=str(_WEB_DIR)), name="web_ui")
-
-    @app.get("/")
-    async def serve_index():
-        """Serve the SPA entry point with content-hashed asset URLs."""
-        return HTMLResponse(
-            _render_index_html(),
-            headers={"Cache-Control": "no-cache, must-revalidate"},
-        )
-
+# ── Serve compiled SPA ──
+_WEB_DIST = _Path(__file__).resolve().parent.parent / "web" / "dist"
+if _WEB_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_WEB_DIST), html=True), name="spa")
 
 # When running in Docker (and fronted by Cloudflare Access), requests arrive
 # from the Docker bridge gateway / the tunnel — never 127.0.0.1 — so the

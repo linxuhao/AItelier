@@ -1,0 +1,325 @@
+/* ── Pico CSS (fluid classless) ── */
+@import '@picocss/pico/css/pico.fluid.classless.min.css';
+
+/* ════════════════════════════════════════════════════════════════════
+   Global Custom Properties
+   ════════════════════════════════════════════════════════════════════ */
+:root {
+  --ait-appbar-height: 3.5rem;
+  --ait-notif-width: 320px;
+  --ait-chat-max-width: 800px;
+  --ait-z-appbar: 100;
+  --ait-z-notif: 90;
+  --ait-z-reconnect: 200;
+  --ait-z-modal-backdrop: 300;
+
+  /* Notification event type colors */
+  --ait-color-step-start: #f0c040;
+  --ait-color-step-completed: #40c060;
+  --ait-color-checkpoint: #40b0e0;
+  --ait-color-error: #d04040;
+  --ait-color-info: #909090;
+
+  /* Chat bubble colors */
+  --ait-chat-user-bg: var(--primary, #0066cc);
+  --ait-chat-user-text: var(--primary-inverse, #ffffff);
+  --ait-chat-agent-bg: var(--surface, #f0f0f0);
+  --ait-chat-agent-text: var(--text, #333333);
+  --ait-chat-tool-color: var(--muted-color, #888888);
+  --ait-chat-error-bg: #fde8e8;
+  --ait-chat-error-border: #d04040;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   App Bar (#app-bar)
+   ════════════════════════════════════════════════════════════════════ */
+#app-bar {
+  position: sticky;
+  top: 0;
+  z-index: var(--ait-z-appbar);
+  background: var(--background, #fff);
+  border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
+  padding: 0.5rem 1rem;
+}
+
+#app-bar nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#connection-status {
+  font-size: 0.85rem;
+  cursor: default;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Layout — View Container
+   ════════════════════════════════════════════════════════════════════ */
+#view-container {
+  padding: 1rem;
+  min-height: calc(100vh - var(--ait-appbar-height));
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Notification Panel
+   ════════════════════════════════════════════════════════════════════ */
+#notification-panel {
+  position: fixed;
+  top: var(--ait-appbar-height);
+  right: 0;
+  width: var(--ait-notif-width);
+  height: calc(100vh - var(--ait-appbar-height));
+  background: var(--background, #fff);
+  border-left: 1px solid var(--muted-border-color, #e0e0e0);
+  overflow-y: auto;
+  z-index: var(--ait-z-notif);
+  padding: 0.5rem;
+  display: none;
+}
+
+#notification-panel.visible {
+  display: block;
+}
+
+.notif-header {
+  font-weight: bold;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
+  margin-bottom: 0.5rem;
+}
+
+.notification-entry {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--muted-border-color, #e0e0e0);
+}
+
+.notif-time {
+  white-space: nowrap;
+  color: var(--muted-color, #888);
+  min-width: 4em;
+}
+
+.notif-text {
+  flex: 1;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Checkpoint Modal
+   ════════════════════════════════════════════════════════════════════ */
+#checkpoint-modal[open] {
+  display: flex;
+}
+
+#checkpoint-modal {
+  z-index: var(--ait-z-modal-backdrop);
+}
+
+.cp-content {
+  max-height: 60vh;
+  overflow-y: auto;
+  margin: 1rem 0;
+}
+
+#cp-feedback {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Confirm Dialog
+   ════════════════════════════════════════════════════════════════════ */
+#confirm-dialog[open] {
+  display: flex;
+}
+
+#confirm-dialog article {
+  max-width: 400px;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Dashboard & Project Tables
+   ════════════════════════════════════════════════════════════════════ */
+table.project-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.project-table th {
+  text-align: left;
+  padding: 0.5rem;
+  font-weight: bold;
+  border-bottom: 2px solid var(--muted-border-color, #ddd);
+}
+
+table.project-table td {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--muted-border-color, #eee);
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.status-badge.completed,
+.status-badge.success {
+  background: var(--ait-color-step-completed);
+  color: #fff;
+}
+
+.status-badge.running,
+.status-badge.in_progress {
+  background: var(--ait-color-step-start);
+  color: #333;
+}
+
+.status-badge.error,
+.status-badge.failed {
+  background: var(--ait-color-error);
+  color: #fff;
+}
+
+.status-badge.pending,
+.status-badge.queued {
+  background: var(--ait-color-info);
+  color: #fff;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Chat View
+   ════════════════════════════════════════════════════════════════════ */
+.chat-container {
+  max-width: var(--ait-chat-max-width);
+  margin: 0 auto;
+}
+
+.chat-msg {
+  margin-bottom: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+}
+
+.chat-msg.user {
+  background: var(--ait-chat-user-bg);
+  color: var(--ait-chat-user-text);
+  margin-left: 2rem;
+}
+
+.chat-msg.agent {
+  background: var(--ait-chat-agent-bg);
+  color: var(--ait-chat-agent-text);
+  margin-right: 2rem;
+}
+
+.chat-msg.tool {
+  color: var(--ait-chat-tool-color);
+  font-style: italic;
+  font-size: 0.9rem;
+}
+
+.chat-msg.error {
+  background: var(--ait-chat-error-bg);
+  border: 1px solid var(--ait-chat-error-border);
+}
+
+.chat-input-area {
+  position: sticky;
+  bottom: 0;
+  background: var(--background, #fff);
+  padding: 1rem 0;
+  border-top: 1px solid var(--muted-border-color, #e0e0e0);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Trace View
+   ════════════════════════════════════════════════════════════════════ */
+.trace-tree {
+  font-family: var(--font-monospace, monospace);
+  font-size: 0.9rem;
+}
+
+.trace-node {
+  padding: 0.25rem 0;
+  cursor: pointer;
+}
+
+.trace-node:hover {
+  background: var(--surface, #f5f5f5);
+}
+
+.trace-node-detail {
+  margin: 0.5rem 0 0.5rem 1.5rem;
+  padding: 0.5rem;
+  border-left: 2px solid var(--muted-border-color, #ddd);
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Utility Classes
+   ════════════════════════════════════════════════════════════════════ */
+.text-muted {
+  color: var(--muted-color, #888);
+}
+
+.text-small {
+  font-size: 0.85rem;
+}
+
+.text-error {
+  color: var(--ait-color-error);
+}
+
+.flex-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.gap-1 {
+  gap: 1rem;
+}
+
+.mt-1 {
+  margin-top: 1rem;
+}
+
+.mb-1 {
+  margin-bottom: 1rem;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   Responsive Media Queries
+   ════════════════════════════════════════════════════════════════════ */
+@media (max-width: 768px) {
+  #notification-panel {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid var(--muted-border-color, #e0e0e0);
+  }
+
+  .chat-msg.user {
+    margin-left: 0.5rem;
+  }
+
+  .chat-msg.agent {
+    margin-right: 0.5rem;
+  }
+}

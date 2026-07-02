@@ -5,6 +5,7 @@ __pycache__/
 
 # Web SPA front-end test toolchain (Vitest + jsdom)
 web/node_modules/
+web/dist/
 node_modules/
 
 # C extensions
@@ -18,8 +19,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Root-anchored: the unanchored Python-venv `lib/` pattern silently swallowed
+# web/src/lib/ — the SPA's entire API client/SSE/markdown core was never
+# committed (and repo_apply's git add skipped it without a word).
+/lib/
+/lib64/
 parts/
 sdist/
 var/

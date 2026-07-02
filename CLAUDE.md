@@ -26,10 +26,10 @@ pytest tests/ -v            # full suite: 364 unit+integration tests
 pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake
 
 # Web SPA front-end unit tests (Vitest + jsdom) — separate toolchain, not run by pytest
-cd web && npm install && npm test   # tests web/js/{utils,router}.js pure logic
+cd web && npm install && npm test   # tests web/__tests__/ pure logic + component tests
 ```
 
-Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient. The web SPA's pure JS (sanitization, hash routing) is unit-tested separately under `web/js/__tests__/` (Vitest+jsdom); the full DPE pipeline runs end-to-end offline with mocked agents in `tests/integration/test_full_pipeline_real_runner.py`.
+Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "not network"`). Suites live in `tests/{unit,integration,e2e,skillflow}`; network-dependent tests are marked `network` and deselected by default. Fixtures in `tests/conftest.py` provide isolated SQLite DB and FastAPI TestClient. The web SPA's Svelte components and utility modules are unit-tested under `web/__tests__/` and `web/src/__tests__/` (Vitest+jsdom); the full DPE pipeline runs end-to-end offline with mocked agents in `tests/integration/test_full_pipeline_real_runner.py`.
 
 ### Docker deployment & secrets
 
@@ -130,19 +130,27 @@ AITELIER_MODE=demo uvicorn web_api.main:app --host 127.0.0.1 --port 8888
 **Architecture:**
 ```
 web/
-├── index.html              # SPA shell (PicoCSS + custom styles)
-├── css/app.css             # Custom styles (~24KB)
-└── js/
-    ├── utils.js            # DOM helpers, sanitization, notifications
-    ├── router.js           # Hash-based SPA router
-    ├── api.js              # API client (GET/POST/PATCH/DELETE /api/*)
-    ├── sse.js              # SSE event stream handler
-    ├── app.js              # App entry: init, wiring, global state
-    └── views/
-        ├── dashboard.js    # Project list with inline create form
-        ├── project.js      # Project detail with task tree
-        ├── chat.js         # Meta agent chat (SSE streaming)
-        └── checkpoint.js   # Checkpoint approve/reject modal
+├── index.html              # Svelte SPA entry (Vite)
+├── package.json            # npm deps (Svelte 5, Vite, Pico CSS, Vitest)
+├── vite.config.js          # Vite + Svelte plugin config
+├── svelte.config.js        # Svelte compiler options
+├── eslint.config.js        # ESLint + eslint-plugin-svelte
+├── vitest.config.js        # Vitest + jsdom config
+├── dist/                   # Vite build output (gitignored)
+│   ├── index.html          # Compiled SPA entry
+│   └── assets/             # Hashed JS/CSS bundles
+├── src/
+│   ├── main.js             # SPA mount point
+│   ├── app.css             # Global styles (Pico CSS import)
+│   ├── App.svelte          # Root component + router
+│   ├── lib/                # Utility modules
+│   │   ├── api.ts          # Typed fetch wrapper
+│   │   ├── sse.ts          # EventSource manager
+│   │   ├── markdown.ts     # Markdown + DOMPurify
+│   │   └── format.ts       # Formatting helpers
+│   ├── stores/             # Svelte stores (auth, connection, project, ...)
+│   └── views/              # Svelte view components
+└── __tests__/              # Vitest tests (pure logic + component)
 ```
 
 **Key behaviors:**

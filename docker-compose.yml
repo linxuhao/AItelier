@@ -60,6 +60,14 @@ services:
     volumes:
       # Live source: host repo shadows the baked-in copy (no rebuild on edits).
       - .:/app
+      # web/dist is a build artifact baked into the image (frontend-build stage).
+      # The .:/app mount above would shadow it with the host tree (which has no
+      # web/dist), so the SPA StaticFiles mount is skipped and / serves a blank
+      # page. This anonymous volume keeps the image-built bundle visible under
+      # the mount. NOTE: after a frontend change rebuild with
+      #   docker compose up -d --build --renew-anon-volumes
+      # so the volume refreshes from the new image instead of serving stale dist.
+      - /app/web/dist
       # Shared state at the identical absolute path the code expects.
       - ${HOME}/.AItelier:${HOME}/.AItelier
     networks:

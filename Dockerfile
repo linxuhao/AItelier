@@ -9,6 +9,16 @@
 # and every absolute path stored in the DB resolve identically on host and in
 # the container. That is why HOME is parameterised to the host home dir.
 
+# Stage 1: Build frontend
+FROM node:20-slim AS frontend-build
+# test comment
+WORKDIR /app/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# Stage 2: Python runtime
 FROM python:3.12-slim
 
 # Match the host user so files written into the mounted ~/.AItelier keep host
@@ -32,6 +42,8 @@ WORKDIR /app
 # Install the package + dependencies. The source is also bind-mounted at runtime
 # (docker-compose) so code edits are live without a rebuild.
 COPY . /app
+# Copy the compiled SPA bundle from the frontend-build stage.
+COPY --from=frontend-build /app/web/dist /app/web/dist
 # skillflow-py is a normal published dependency (pinned in pyproject.toml) —
 # installed from PyPI. To ship a skillflow change: bump its version, publish to
 # PyPI, then bump the `skillflow-py>=…` pin here. (Replaces the old

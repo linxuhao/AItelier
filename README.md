@@ -94,7 +94,7 @@ aitelier server                   # Backend server
 The backend and web UI also ship as a container. The CLI starts it automatically if Docker is running (and reuses it if already up), or you can manage it directly:
 
 ```bash
-docker compose up -d              # build (first run) + start; serves API + web UI on :4444
+docker compose up -d              # multi-stage build (Node.js → Svelte bundle + Python runtime); serves API + web UI on :4444
 docker compose logs -f
 ```
 
@@ -177,6 +177,7 @@ AItelier is a **host application** on top of the SkillFlow framework:
 - **Tools** (`aitelier/tools/`) — AItelier custom tools + SkillFlow native tools
 - **Core** (`core/`) — agents, scheduler, AI router, DB, workspace
 - **API** (`api/`, `web_api/`) — the CLI backend, plus an early multi-tenant Web backend. Includes admin endpoints (`/api/admin/`) for user tracking with per-user delete, writer-only access via Cloudflare Access.
+- **Web** (`web/`) — Svelte 5 + Vite SPA, compiled to `web/dist/` and served by FastAPI
 - **CLI** (`cli/`) — Rich TUI dashboard
 
 ```
@@ -208,17 +209,18 @@ pytest tests/ -v               # full suite (~490 tests)
 
 ## Web Frontend
 
-The SPA frontend lives in `web/` — Svelte 5 + Vite + Vitest.
+The web UI is a **Svelte 5 + Vite** SPA (`web/src/`), replacing the original vanilla HTML/CSS/JS frontend. The compiled bundle (`web/dist/`) is served directly by the FastAPI backend.
 
 ```bash
 cd web
 npm install                     # install dependencies
-npm run build                   # production build (vite build)
-npm test                        # run 103 vitest tests
+npm run build                   # compile to web/dist/
+npm test                        # run 103 vitest tests (stores, lib, views)
+npm run lint                    # ESLint + eslint-plugin-svelte
 npm run dev                     # dev server with HMR
 ```
 
-The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing).
+The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's compile step runs `npm run build` and `npm test` automatically via `BuildRunner._check_node()`.
 
 ## License
 

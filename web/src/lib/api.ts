@@ -275,17 +275,29 @@ export function repoPull(projectId: string): Promise<Record<string, unknown>> {
   return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/pull', {});
 }
 
-export function repoSync(projectId: string): Promise<Record<string, unknown>> {
-  // Force sync is destructive server-side; confirm is explicit.
-  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/sync', { confirm: true });
+export function repoSync(projectId: string, branch: string): Promise<Record<string, unknown>> {
+  // Force sync is destructive server-side; confirm is explicit. branch is
+  // required by the backend (RepoSyncBody) — the reset target origin/<branch>.
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/sync',
+    { branch, confirm: true, backup: true });
 }
 
 export function repoSetRemote(projectId: string, url: string): Promise<Record<string, unknown>> {
   return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/remote', { url });
 }
 
-export function repoMakePR(projectId: string): Promise<Record<string, unknown>> {
-  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/pr', {});
+export function repoMakePR(
+  projectId: string,
+  opts: { title: string; body?: string; base?: string; head?: string },
+): Promise<Record<string, unknown>> {
+  // title and head are required by the backend (RepoPRBody / push=true).
+  return _post('/api/projects/' + encodeURIComponent(projectId) + '/repo/pr', {
+    title: opts.title,
+    body: opts.body || '',
+    base: opts.base || 'main',
+    head: opts.head || null,
+    push: true,
+  });
 }
 
 // ═════════════════════════════════════════════════════════════════════

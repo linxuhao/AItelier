@@ -303,7 +303,12 @@ async def stream_global_events():
 # Registered LAST: Starlette matches in registration order, and a mount at
 # "/" swallows every path registered after it (it 404'd /health when it sat
 # above the route definitions).
-_WEB_DIST = _Path(__file__).resolve().parent.parent / "web" / "dist"
+# AITELIER_WEB_DIST: in Docker the bundle is baked OUTSIDE /app (the .:/app
+# live-source mount would shadow web/dist, which doesn't exist on the host).
+_WEB_DIST = _Path(
+    _os.getenv("AITELIER_WEB_DIST")
+    or _Path(__file__).resolve().parent.parent / "web" / "dist"
+)
 if _WEB_DIST.is_dir():
     from fastapi.responses import FileResponse
 

@@ -45,8 +45,12 @@ WORKDIR /app
 # Install the package + dependencies. The source is also bind-mounted at runtime
 # (docker-compose) so code edits are live without a rebuild.
 COPY . /app
-# Copy the compiled SPA bundle from the frontend-build stage.
-COPY --from=frontend-build /app/web/dist /app/web/dist
+# Copy the compiled SPA bundle from the frontend-build stage — OUTSIDE /app,
+# so the .:/app live-source mount (docker-compose) can't shadow it. api/main.py
+# serves it via AITELIER_WEB_DIST; no anonymous volume needed, every image
+# rebuild + `up -d` is automatically live.
+COPY --from=frontend-build /app/web/dist /srv/web_dist
+ENV AITELIER_WEB_DIST=/srv/web_dist
 # skillflow-py is a normal published dependency (pinned in pyproject.toml) —
 # installed from PyPI. To ship a skillflow change: bump its version, publish to
 # PyPI, then bump the `skillflow-py>=…` pin here. (Replaces the old

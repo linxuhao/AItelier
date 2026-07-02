@@ -59,8 +59,33 @@
   }
 
   function doSync(): void {
-    if (!window.confirm('Force sync discards local divergence (a backup branch is kept). Continue?')) return;
-    run('Force sync', () => repoSync(projectId));
+    const branch = window.prompt(
+      'Force-sync: fetch and HARD RESET the working tree to origin/<branch>.\n' +
+      'Local commits are discarded (a backup branch is created first).\n\n' +
+      'Branch to sync from:', (status?.branch as string) || '');
+    if (!branch) return;
+    if (!window.confirm('This DISCARDS uncommitted changes and local commits, resetting to origin/' + branch + '. Continue?')) return;
+    run('Force sync', () => repoSync(projectId, branch));
+  }
+
+  function doMakePR(): void {
+    // Push the current work to a user-named feature branch, then PR it into
+    // the base branch. Avoids the "PR head == base == main" dead end.
+    const head = window.prompt('Branch name to push your current work to (the PR\'s source branch):');
+    if (!head) return;
+    const base = window.prompt('Base branch (merge into):', 'main');
+    if (!base) return;
+    if (head === base) {
+      actionMsg = 'The feature branch and the base branch must differ.';
+      return;
+    }
+    const title = window.prompt('Pull request title:');
+    if (!title) return;
+    const body = window.prompt('PR description (optional):') || '';
+    run('Make PR', () => repoMakePR(projectId, { title, body, base, head }).then((res) => {
+      if (res && res.url) window.open(res.url as string, '_blank', 'noopener');
+      return res;
+    }));
   }
 
   onMount(load);
@@ -113,7 +138,7 @@
         <button class="repo-btn" disabled={!!busy} onclick={() => run('Push', () => repoPush(projectId))}>Push</button>
         <button class="repo-btn" disabled={!!busy} onclick={() => run('Pull', () => repoPull(projectId))}>Pull</button>
         <button class="repo-btn repo-btn-red" disabled={!!busy} onclick={doSync}>Force Sync</button>
-        <button class="repo-btn repo-btn-purple" disabled={!!busy} onclick={() => run('Make PR', () => repoMakePR(projectId))}>Make PR</button>
+        <button class="repo-btn repo-btn-purple" disabled={!!busy} onclick={doMakePR}>Make PR</button>
         <button class="repo-btn repo-btn-amber" disabled={!!busy} onclick={doSetRemote}>Set Remote</button>
       {/if}
     </div>

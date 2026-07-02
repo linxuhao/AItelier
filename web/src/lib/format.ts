@@ -142,6 +142,22 @@ export function statusClass(status: string | null | undefined): string {
 }
 
 /**
+ * Map a prompt-cache hit ratio (0..1) to a colorization CSS class for
+ * .cache-inline-badge elements (classes defined globally in app.css).
+ *
+ * @param hitRatio — cache hit ratio between 0 and 1, or null/undefined
+ * @returns CSS class name, or "" when the ratio is unknown
+ */
+export function cacheBadgeClass(hitRatio: number | null | undefined): string {
+  if (hitRatio == null || isNaN(hitRatio)) {
+    return '';
+  }
+  if (hitRatio >= 0.7) return 'cache-badge-high';
+  if (hitRatio >= 0.3) return 'cache-badge-mid';
+  return 'cache-badge-low';
+}
+
+/**
  * Map a step ID to a human-readable label.
  *
  * @param id — step ID (e.g. "t_impl", "3")

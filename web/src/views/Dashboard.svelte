@@ -5,7 +5,7 @@
   import { connectionStore } from '../stores/connection';
   import { projectStore, setCurrentProject } from '../stores/project';
   import { listAllRuns, createProject, deleteProject } from '../lib/api';
-  import { formatTime, formatTokens, formatTaskProgress, parseStatus } from '../lib/format';
+  import { formatTime, formatTokens, formatTaskProgress, parseStatus, cacheBadgeClass } from '../lib/format';
 
   // ── State ──
 
@@ -352,10 +352,7 @@
                 {#if project.cache_stats && (project.cache_stats as Record<string, number>).hit_ratio != null}
                   {@const cs = project.cache_stats as Record<string, number>}
                   <span
-                    class="cache-inline-badge"
-                    class:cache-badge-high={cs.hit_ratio >= 0.7}
-                    class:cache-badge-mid={cs.hit_ratio >= 0.3 && cs.hit_ratio < 0.7}
-                    class:cache-badge-low={cs.hit_ratio < 0.3}
+                    class="cache-inline-badge {cacheBadgeClass(cs.hit_ratio)}"
                     title="Prompt cache hit ratio · total tokens"
                   >
                     Cache {(cs.hit_ratio * 100).toFixed(1)}%{cs.total_tokens != null ? ' · ' + formatTokens(cs.total_tokens) : ''}

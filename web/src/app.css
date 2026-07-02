@@ -146,6 +146,23 @@ table.project-table td {
   color: #fff;
 }
 
+/* Classes emitted by format.ts statusClass()/parseStatus() — used by every
+   view (Dashboard duplicates these scoped; this is the global fallback). */
+.status-badge.status-ok {
+  background: var(--pico-color-green-100, #efe);
+  color: var(--pico-color-green-700, #060);
+}
+
+.status-badge.status-warn {
+  background: var(--pico-color-yellow-100, #ffe);
+  color: var(--pico-color-yellow-700, #960);
+}
+
+.status-badge.status-err {
+  background: var(--pico-color-red-100, #fee);
+  color: var(--pico-color-red-700, #c00);
+}
+
 /* ════════════════════════════════════════════════════════════════════
    Chat View
    ════════════════════════════════════════════════════════════════════ */

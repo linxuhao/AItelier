@@ -47,9 +47,9 @@
       <span class="notif-title">Notifications</span>
       {#if $notificationStore.length > 0}
         <span class="notif-badge">{Math.min($notificationStore.length, 100)}</span>
-        <button class="notif-clear-btn" on:click={handleClear} title="Clear all notifications">Clear</button>
+        <button class="notif-clear-btn" onclick={handleClear} title="Clear all notifications">Clear</button>
       {/if}
-      <button class="notif-clear-btn" on:click={() => notifPanelOpen.set(false)} title="Close">&times;</button>
+      <button class="notif-clear-btn" onclick={() => notifPanelOpen.set(false)} title="Close">&times;</button>
     </div>
 
     <div class="notif-list" bind:this={notifListEl}>

@@ -881,9 +881,9 @@
   <!-- Breadcrumb -->
   <nav class="breadcrumb" aria-label="breadcrumb">
     <ul>
-      <li><a href="#/" on:click|preventDefault={() => push('#/')}>Dashboard</a></li>
+      <li><a href="#/" onclick={(e) => { e.preventDefault(); push('#/'); }}>Dashboard</a></li>
       {#if params.id}
-        <li><a href="#/projects/{params.id}" on:click|preventDefault={() => push('#/projects/' + encodeURIComponent(params.id))}>{truncate(params.id, 30)}</a></li>
+        <li><a href="#/projects/{params.id}" onclick={(e) => { e.preventDefault(); push('#/projects/' + encodeURIComponent(params.id)); }}>{truncate(params.id, 30)}</a></li>
       {/if}
       <li>Chat</li>
     </ul>
@@ -894,7 +894,7 @@
     <select
       class="session-selector"
       value={selectedSessionId || ''}
-      on:change={(e) => {
+      onchange={(e) => {
         const val = (e.target as HTMLSelectElement).value;
         if (val) {
           _switchSession(val);
@@ -902,10 +902,10 @@
       }}
     >
       <option value="">Current session</option>
-      {#each sessionList as s (s.session_id as string)}
+      {#each sessionList as s (s.session_id)}
         {@const sid = s.session_id as string}
         {@const pid = (s.project_id as string) || ''}
-        {@const titleMsg = ((s.first_message as string) || (s.last_message as string) || '')}
+        {@const titleMsg = (s.first_message as string) || (s.last_message as string) || ''}
         {@const count = (s.message_count as number) || 0}
         {@const preview = titleMsg.length > 40 ? titleMsg.slice(0, 40) + '…' : titleMsg}
         <option value={sid} selected={sid === sessionId}>
@@ -913,7 +913,7 @@
         </option>
       {/each}
     </select>
-    <button class="outline btn-new-session" on:click={_handleNewSession} disabled={!connected}>
+    <button class="outline btn-new-session" onclick={_handleNewSession} disabled={!connected}>
       + New
     </button>
   </div>
@@ -941,7 +941,7 @@
           <div class="chat-msg chat-tool-block" class:tool-expanded={isExpanded}>
             <button
               class="tool-block-header"
-              on:click={() => toggleToolBlock(gi)}
+              onclick={() => toggleToolBlock(gi)}
               aria-expanded={isExpanded}
             >
               <span class="tool-toggle">{isExpanded ? '▼' : '▶'}</span>
@@ -1020,7 +1020,7 @@
             <li
               class="slash-completion-item"
               class:is-active={i === completionIndex}
-              on:mousedown|preventDefault={() => handleCompletionClick(i)}
+              onmousedown={(e) => { e.preventDefault(); handleCompletionClick(i); }}
             >
               <span class="slash-cmd">{c.cmd}</span>
               <span class="slash-desc">{c.desc}</span>
@@ -1033,8 +1033,8 @@
         id="chat-input-field"
         class="chat-input"
         bind:value={draft}
-        on:input={handleInput}
-        on:keydown={handleKeydown}
+        oninput={handleInput}
+        onkeydown={handleKeydown}
         placeholder={inputPlaceholder}
         disabled={inputDisabled}
         rows="2"
@@ -1043,7 +1043,7 @@
       <button
         id="chat-send-btn"
         class="chat-send-btn"
-        on:click={handleSend}
+        onclick={handleSend}
         disabled={!canSend}
       >
         Send
@@ -1051,13 +1051,13 @@
 
       {#if agentStreaming}
         <span class="streaming-indicator">Streaming…</span>
-        <button class="outline btn-stop" on:click={_abortStream}> Stop </button>
+        <button class="outline btn-stop" onclick={_abortStream}> Stop </button>
       {:else if sending}
         <span class="streaming-indicator">Sending…</span>
       {/if}
 
       {#if budgetPaused && !agentStreaming && !sending}
-        <button class="outline btn-continue" on:click={() => _sendMessage('continue')} disabled={!connected}>
+        <button class="outline btn-continue" onclick={() => _sendMessage('continue')} disabled={!connected}>
           Continue ▶
         </button>
       {/if}
@@ -1103,7 +1103,7 @@
   {#if error}
     <div class="chat-error-banner">
       {error}
-      <button class="close-btn" on:click={() => error = null}>&times;</button>
+      <button class="close-btn" onclick={() => error = null}>&times;</button>
     </div>
   {/if}
 </section>

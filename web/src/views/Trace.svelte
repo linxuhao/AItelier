@@ -172,7 +172,7 @@
 
 <section id="view-trace" class="trace-view">
   <!-- Back link -->
-  <a href="javascript:void(0)" on:click={goBack} class="trace-back">&larr; Back to project #{projectId}</a>
+  <a href="javascript:void(0)" onclick={goBack} class="trace-back">&larr; Back to project #{projectId}</a>
 
   <!-- Title -->
   <h3>Execution Trace &mdash; {projectId}</h3>
@@ -181,7 +181,7 @@
   <div class="trace-toolbar">
     <label>
       Category:
-      <select on:change={onCategoryChange}>
+      <select onchange={onCategoryChange}>
         {#each CATEGORIES as cat}
           <option value={cat} selected={cat === category}>
             {cat === '' ? 'All' : cat}
@@ -192,13 +192,13 @@
 
     <label>
       Order:
-      <select on:change={onOrderChange}>
+      <select onchange={onOrderChange}>
         <option value="asc" selected={order === 'asc'}>Oldest first</option>
         <option value="desc" selected={order === 'desc'}>Newest first</option>
       </select>
     </label>
 
-    <button class="outline" on:click={loadTrace}>Refresh</button>
+    <button class="outline" onclick={loadTrace}>Refresh</button>
   </div>
 
   <!-- Loading state -->
@@ -232,8 +232,8 @@
             class="trace-head"
             role="button"
             tabindex="0"
-            on:click={() => toggleEntry(seq)}
-            on:keypress={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleEntry(seq); }}
+            onclick={() => toggleEntry(seq)}
+            onkeypress={(e) => { if (e.key === 'Enter' || e.key === ' ') toggleEntry(seq); }}
           >
             <span class="trace-cat">{cat}</span>
             <span class="trace-step">{stepLabel(entry.step_id as string)}</span>
@@ -252,7 +252,7 @@
       {#if hasMore}
         <button
           class="outline"
-          on:click={loadMore}
+          onclick={loadMore}
           disabled={loadingMore}
         >
           {loadingMore ? 'Loading&hellip;' : 'Load more'}

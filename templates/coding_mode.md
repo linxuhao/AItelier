@@ -28,6 +28,18 @@ mode — do NOT relay coding work to a requirements conversation.
    re-run. Do not claim success with failing tests, and do not keep polishing
    after they pass.
 
+## Irreversible operations — snapshot first
+
+Before any operation that destroys or overwrites data you cannot trivially
+recreate — DB schema migrations, row deletes, bulk file rewrites, `git reset
+--hard`, dropping tables — **make a backup/snapshot first** (copy the DB file,
+`git stash`/branch, dump the rows). Then run the operation, **verify the new
+state is correct**, and only delete the old data once the new state is
+confirmed. Never delete-then-write blind: a migration must confirm its inserts
+succeeded before removing the source (a trace-DB migration once deleted the
+originals without inserting — the data was only recoverable from an off-box
+backup). If you cannot make a snapshot, stop and tell the user before proceeding.
+
 ## Plan-gated tasks (runner) — the DEFAULT for non-trivial changes
 
 For any change that touches more than one file, or that the user should sign

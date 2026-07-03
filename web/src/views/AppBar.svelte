@@ -2,6 +2,23 @@
   import { authStore } from '../stores/auth';
   import { connectionStore } from '../stores/connection';
   import { notifPanelOpen, notifUnread } from '../stores/notifications';
+  import { langStore, setLang } from '../stores/i18n';
+
+  const LANG_OPTIONS: { code: string; label: string }[] = [
+    { code: 'en', label: 'English' },
+    { code: 'zh-CN', label: '简体中文' },
+    { code: 'zh-TW', label: '繁體中文' },
+    { code: 'ja', label: '日本語' },
+    { code: 'ko', label: '한국어' },
+    { code: 'fr', label: 'Français' },
+    { code: 'de', label: 'Deutsch' },
+    { code: 'es', label: 'Español' },
+  ];
+
+  function onLangChange(e: Event): void {
+    const sel = e.target as HTMLSelectElement;
+    setLang(sel.value);
+  }
 
   function toggleNotifications(): void {
     notifPanelOpen.update((v) => !v);
@@ -27,6 +44,19 @@
       {/if}
     </ul>
     <ul>
+      <li>
+        <select
+          class="lang-select"
+          value={$langStore}
+          onchange={onLangChange}
+          title="Language"
+          aria-label="Language"
+        >
+          {#each LANG_OPTIONS as opt}
+            <option value={opt.code}>{opt.label}</option>
+          {/each}
+        </select>
+      </li>
       <li>
         <button
           class="notif-bell"
@@ -90,5 +120,14 @@
   }
   .connection-status.disconnected {
     color: var(--pico-color-orange-500, #c90);
+  }
+  .lang-select {
+    font-size: 0.875rem;
+    padding: 0.15rem 0.35rem;
+    border: 1px solid var(--pico-muted-border-color, #ccc);
+    border-radius: 0.3rem;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
   }
 </style>

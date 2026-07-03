@@ -440,12 +440,6 @@
               <span class="meta-value">{stepLabel(project.current_step as string)}</span>
             </div>
           {/if}
-          {#if project?.config_name}
-            <div class="meta-item">
-              <span class="meta-label">Config</span>
-              <span class="meta-value">{project.config_name as string}</span>
-            </div>
-          {/if}
         </div>
       </div>
 

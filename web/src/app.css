@@ -58,7 +58,8 @@
    ════════════════════════════════════════════════════════════════════ */
 #view-container {
   padding: 1rem;
-  min-height: calc(100vh - var(--ait-appbar-height));
+  height: calc(100vh - var(--ait-appbar-height));
+  overflow-y: auto;
 }
 
 /* ════════════════════════════════════════════════════════════════════

@@ -83,20 +83,37 @@ def list_all_runs(
         r["has_task_loop"] = bool(m and m.has_task_loop)
         out.append(r)
 
-    # Attach cache hit ratio stats per run (batch query)
+    # Attach cache hit ratio stats per run (batch query).
+    # Aggregate across ALL skillflow runs for a project so that token
+    # data from earlier DPE runs is visible even when the most recent
+    # run is an inline/coding mode run with no token_usage traces.
     sf = get_skillflow()
-    pid_to_uuid = {}
+    pid_to_uuids: dict[str, list[str]] = {}
     for r in out:
         pid = r["project_id"]
         runs = sf.list_runs(project_id=pid)
         if runs:
-            pid_to_uuid[pid] = runs[0]["id"]
-    uuid_list = list(pid_to_uuid.values())
+            pid_to_uuids[pid] = [run["id"] for run in runs]
+    uuid_list = [uid for uids in pid_to_uuids.values() for uid in uids]
     if uuid_list:
         batch_stats = compute_cache_stats_batch(uuid_list)
         for r in out:
-            uuid = pid_to_uuid.get(r["project_id"])
-            r["cache_stats"] = batch_stats.get(uuid)  # None if no trace data
+            pid = r["project_id"]
+            uuids = pid_to_uuids.get(pid, [])
+            merged: dict | None = None
+            for uid in uuids:
+                s = batch_stats.get(uid)
+                if s is None:
+                    continue
+                if merged is None:
+                    merged = dict(s)
+                else:
+                    merged["cache_hit_tokens"] += s["cache_hit_tokens"]
+                    merged["cache_miss_tokens"] += s["cache_miss_tokens"]
+                    total = merged["cache_hit_tokens"] + merged["cache_miss_tokens"]
+                    merged["total_tokens"] = total
+                    merged["hit_ratio"] = round(merged["cache_hit_tokens"] / total, 4) if total > 0 else None
+            r["cache_stats"] = merged  # None if no token data across any run
     else:
         for r in out:
             r["cache_stats"] = None

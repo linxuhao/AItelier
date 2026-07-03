@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 30
+        assert len(TOOL_DEFINITIONS) == 31
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -341,6 +341,38 @@ class TestBuildAssistantMsg:
         assert msg["role"] == "assistant"
         assert msg["content"] == "hello"
         assert "tool_calls" not in msg
+
+
+class TestSearchProjects:
+    def _agent(self, mock_db, mock_ws):
+        return MetaAgent(mock_db, mock_ws, owner_email="t@local")
+
+    _PROJECTS = [
+        {"project_id": "flappy-bird-unity", "name": "Flappy Bird", "status": "completed"},
+        {"project_id": "capsule-dash-3d", "name": "Capsule Dash", "status": "running"},
+        {"project_id": "capsule-dash-3d-2", "name": "Capsule Dash 2", "status": "failed"},
+    ]
+
+    def test_query_matches_id_and_name_substring(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        mock_db.list_projects_with_stats.return_value = list(self._PROJECTS)
+        out = agent._tool_search_projects({"query": "capsule"})
+        ids = [p["project_id"] for p in out["projects"]]
+        assert ids == ["capsule-dash-3d", "capsule-dash-3d-2"]
+        assert out["total_matches"] == 2 and out["truncated"] is False
+
+    def test_status_filter(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        mock_db.list_projects_with_stats.return_value = list(self._PROJECTS)
+        out = agent._tool_search_projects({"status": "failed"})
+        assert [p["project_id"] for p in out["projects"]] == ["capsule-dash-3d-2"]
+
+    def test_limit_caps_and_flags_truncation(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        mock_db.list_projects_with_stats.return_value = list(self._PROJECTS)
+        out = agent._tool_search_projects({"query": "", "limit": 2})
+        assert len(out["projects"]) == 2
+        assert out["total_matches"] == 3 and out["truncated"] is True
 
 
 class TestLayer3PipelineTools:

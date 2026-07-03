@@ -130,8 +130,32 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "list_projects",
-            "description": "List all projects with task stats (status counts).",
+            "description": "List all projects with task stats (status counts). For a large "
+                           "project list, prefer search_projects to avoid pulling everything.",
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_projects",
+            "description": "Find projects by a substring of their id/name, with an optional "
+                           "status filter. Returns only the matching projects (capped) — use "
+                           "this instead of list_projects when the project list is large.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string",
+                              "description": "Substring to match against project id or name "
+                                             "(case-insensitive). Omit to list by status only."},
+                    "status": {"type": "string",
+                               "description": "Optional exact status filter (e.g. planning, "
+                                              "running, completed, failed)."},
+                    "limit": {"type": "integer",
+                              "description": "Max results (default 20, capped 100)."},
+                },
+                "required": [],
+            },
         },
     },
     {
@@ -1562,6 +1586,33 @@ class MetaAgent:
     def _tool_list_projects(self, args: dict) -> dict:
         projects = self.db.list_projects_with_stats(owner_email=None)
         return {"projects": projects}
+
+    def _tool_search_projects(self, args: dict) -> dict:
+        """Filter the project list by a substring query (id/name) + optional status.
+
+        For a growing project list, prefer this over list_projects so only the
+        relevant handful enters the transcript."""
+        query = (args.get("query") or "").strip().lower()
+        status = (args.get("status") or "").strip().lower()
+        try:
+            limit = int(args.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+
+        def matches(p: dict) -> bool:
+            if status and (p.get("status") or "").lower() != status:
+                return False
+            if not query:
+                return True
+            hay = f"{p.get('project_id', '')} {p.get('name', '')}".lower()
+            return query in hay
+
+        hits = [p for p in self.db.list_projects_with_stats(owner_email=None)
+                if matches(p)]
+        total = len(hits)
+        return {"projects": hits[:limit], "total_matches": total,
+                "truncated": total > limit}
 
     def _tool_get_project(self, args: dict) -> dict:
         p = self.db.get_project(args["project_id"])
@@ -3169,6 +3220,7 @@ class MetaAgent:
 
 _TOOL_HANDLERS = {
     "list_projects": MetaAgent._tool_list_projects,
+    "search_projects": MetaAgent._tool_search_projects,
     "get_project": MetaAgent._tool_get_project,
     "update_project": MetaAgent._tool_update_project,
     "start_new_project": MetaAgent._tool_start_new_project,

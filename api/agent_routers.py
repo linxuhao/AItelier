@@ -250,7 +250,7 @@ def get_chat_history(
         "mode": mode,
         "messages": messages,
         "token_count": token_count,
-        "token_limit": 100000 if mode == "coding" else 0,
+        "token_limit": 200_000 if mode == "coding" else 0,
     }
 
 

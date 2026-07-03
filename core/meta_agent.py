@@ -779,8 +779,10 @@ class MetaAgent:
         self.max_tool_turns = cfg.get("max_tool_turns", 20)
         if self.mode == "coding":
             self.max_tool_turns = cfg.get("coding_max_tool_turns", 50)
-        # Condenser threshold (tokens). 0/absent disables compaction.
-        self.compact_at_tokens = cfg.get("compact_at_tokens", 1_000_000)
+        # Token window (the LLM's advertised context limit). Default 200k.
+        # Compaction triggers at 70% of this window (self.compact_at_tokens).
+        self.token_window = cfg.get("token_window", 200_000)
+        self.compact_at_tokens = int(self.token_window * 0.7) if self.token_window else 0
 
         litellm.telemetry = False
         litellm.drop_params = True
@@ -905,7 +907,7 @@ class MetaAgent:
 
                 turn_tokens = self._count_tokens(messages)
                 total_tokens += turn_tokens
-                limit = self.compact_at_tokens if self.mode == "coding" else 0
+                limit = self.token_window if self.mode == "coding" else 0
                 yield {"type": "token_usage",
                        "tokens": turn_tokens,
                        "total_tokens": total_tokens,
@@ -1013,11 +1015,12 @@ class MetaAgent:
             self._log_error(f"transcript persistence failed: {e}")
 
     # ── Transcript condenser (coding mode) ─────────────────────────
-    # When the assembled context crosses compact_at_tokens, the oldest ~60%
-    # of the conversation is summarized by the `compacter` agent (one-shot,
-    # config-resolved model — never hardcoded) and replaced by a pinned
-    # summary. The summary is persisted with a `compaction_through` watermark
-    # so a resumed session rebuilds compacted instead of re-summarizing.
+    # When the assembled context crosses 70% of token_window, the oldest
+    # ~60% of the conversation is summarized by the `compacter` agent
+    # (one-shot, config-resolved model — never hardcoded) and replaced by
+    # a pinned summary. The summary is persisted with a `compaction_through`
+    # watermark so a resumed session rebuilds compacted instead of
+    # re-summarizing.
 
     _COMPACT_KEEP_TAIL = 8  # most-recent messages always kept verbatim
 

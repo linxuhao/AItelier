@@ -45,7 +45,7 @@ meta_agent:
   # many tokens, the oldest turns are summarized by the `compacter` agent.
   # Explicit threshold — nothing in the provider registry records context
   # window sizes, so the denominator is configured, not derived.
-  compact_at_tokens: 100000
+  compact_at_tokens: 1_000_000
   enable_thinking: true
 
 # Transcript condenser for coding mode. One-shot summarizer — no tools. The

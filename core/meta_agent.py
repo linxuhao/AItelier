@@ -780,7 +780,7 @@ class MetaAgent:
         if self.mode == "coding":
             self.max_tool_turns = cfg.get("coding_max_tool_turns", 50)
         # Condenser threshold (tokens). 0/absent disables compaction.
-        self.compact_at_tokens = cfg.get("compact_at_tokens", 100000)
+        self.compact_at_tokens = cfg.get("compact_at_tokens", 1_000_000)
 
         litellm.telemetry = False
         litellm.drop_params = True

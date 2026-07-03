@@ -9,7 +9,7 @@ from typing import List
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner
-from api.auth import CurrentUser, get_optional_user
+from api.auth import CurrentUser, get_optional_user, creator_email
 from api.sse_manager import stream_manager
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
@@ -27,7 +27,7 @@ def create_task(
     ws: WorkspaceManager = Depends(get_workspace_manager)
 ):
     """接收任务意图，初始化安全沙盒并入队"""
-    owner = user.email if user else "cli@local"
+    owner = user.email if user else (creator_email(request) or "cli@local")
 
     # 1. Verify project exists (do NOT auto-create)
     project = db.get_project(task.project_id)

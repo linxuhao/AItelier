@@ -17,7 +17,7 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from core.scheduler import wake_scheduler
 from api.dependencies import get_db_manager, get_workspace_manager
-from api.auth import CurrentUser, get_optional_user
+from api.auth import CurrentUser, get_optional_user, creator_email
 
 router = APIRouter(prefix="/api/agent", tags=["Meta Agent"])
 
@@ -65,12 +65,13 @@ class AgentSaveMessageRequest(BaseModel):
 @router.post("/chat")
 async def agent_chat(
     request: AgentChatRequest,
+    http_request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
 ):
     """Stream agent response as SSE events."""
-    owner = user.email if user else "cli@local"
+    owner = user.email if user else (creator_email(http_request) or "cli@local")
 
     # Server-owned session integrity: a client that lost its session id (e.g.
     # the SPA's /api/me race latching a null session) would otherwise chat

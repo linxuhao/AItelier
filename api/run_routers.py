@@ -9,7 +9,7 @@ from api.dependencies import (
     get_skillflow, get_db_manager, get_config_registry, owner_filter,
     get_workspace_manager, enrich_project_status,
 )
-from api.auth import CurrentUser, get_optional_user
+from api.auth import CurrentUser, get_optional_user, creator_email
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api._cache_stats import compute_cache_stats_per_step, compute_cache_stats_batch
@@ -33,6 +33,7 @@ class StartRunRequest(BaseModel):
 @router.post("/runs", status_code=201)
 def start_run(
     body: StartRunRequest,
+    request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
@@ -42,7 +43,7 @@ def start_run(
     if registry.get(body.config_name) is None:
         raise HTTPException(404, f"Config '{body.config_name}' not found")
     from core.run_launcher import start_config_run, generate_run_id
-    owner = user.email if user else "cli@local"
+    owner = user.email if user else (creator_email(request) or "cli@local")
     project_id = body.project_id or generate_run_id(body.config_name)
     result = start_config_run(
         db, ws, body.config_name, project_id,

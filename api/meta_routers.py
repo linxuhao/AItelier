@@ -21,7 +21,7 @@ from core.interaction_meta import (
     for_checkpoint_waiting,
 )
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, check_write_owner, check_read_owner
-from api.auth import CurrentUser, get_optional_user
+from api.auth import CurrentUser, get_optional_user, creator_email
 from api.sse_manager import stream_manager
 
 logger = logging.getLogger(__name__)
@@ -335,6 +335,7 @@ def _check_task_owner(user: CurrentUser | None, db: DBManager, task_id: int):
 @router.post("/task/start", response_model=TaskMetaResponse)
 def task_meta_start(
     request: TaskMetaStartRequest,
+    http_request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
 ):
@@ -344,7 +345,7 @@ def task_meta_start(
         raise HTTPException(404, f"Project '{request.project_id}' not found")
     check_write_owner(user, project)
 
-    owner = user.email if user else "cli@local"
+    owner = user.email if user else (creator_email(http_request) or "cli@local")
 
     try:
         # Create pending task

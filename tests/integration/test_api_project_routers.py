@@ -1,8 +1,30 @@
 # tests/integration/test_api_project_routers.py
 # Integration tests for api/project_routers.py
 
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
+
+
+def _owner_of(client: TestClient, project_id: str) -> str:
+    row = next(p for p in client.get("/api/projects").json()
+               if p["project_id"] == project_id)
+    return row["owner_email"]
+
+
+class TestOwnerAttribution:
+    def test_owner_defaults_to_cli_local_without_cf(self, client: TestClient):
+        # No Cloudflare Access header → genuine localhost CLI → cli@local.
+        client.post("/api/projects", json={"project_id": "own_a", "name": "A"})
+        assert _owner_of(client, "own_a") == "cli@local"
+
+    def test_owner_is_verified_cf_access_email(self, client: TestClient):
+        # A verified Access JWT on the tunnel path → the requester is the owner.
+        with patch("core.cf_access.email_from_request_headers",
+                   return_value="alice@example.com"):
+            client.post("/api/projects", json={"project_id": "own_b", "name": "B"})
+        assert _owner_of(client, "own_b") == "alice@example.com"
 
 
 class TestProjectAPI:

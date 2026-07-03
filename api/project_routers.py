@@ -27,7 +27,7 @@ from models.schemas import ProjectCreate, ProjectResponse, ProjectWithStats
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner, enrich_project_status
-from api.auth import CurrentUser, get_optional_user
+from api.auth import CurrentUser, get_optional_user, creator_email
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -51,6 +51,7 @@ def list_projects(
 @router.post("", response_model=ProjectResponse, status_code=201)
 def create_project(
     body: ProjectCreate,
+    request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager)
@@ -79,7 +80,7 @@ def create_project(
         from core import datadir
         repo_path = str(datadir.projects_dir() / body.project_id)
 
-    owner = user.email if user else "cli@local"
+    owner = user.email if user else (creator_email(request) or "cli@local")
 
     # Create project in DB
     project = db.ensure_project(
@@ -643,7 +644,7 @@ def submit_project(
     """
     from core.project_submit import seed_and_trigger
 
-    owner = user.email if user else "cli@local"
+    owner = user.email if user else (creator_email(request) or "cli@local")
 
     # Clear the drafting gate so the scheduler can pick up this project.
     # Projects created via meta conversation have meta_state='drafting' until

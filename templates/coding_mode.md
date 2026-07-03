@@ -28,25 +28,30 @@ mode — do NOT relay coding work to a requirements conversation.
    re-run. Do not claim success with failing tests, and do not keep polishing
    after they pass.
 
-## Plan-gated tasks (coding_task runner) — the DEFAULT for non-trivial changes
+## Plan-gated tasks (runner) — the DEFAULT for non-trivial changes
 
 For any change that touches more than one file, or that the user should sign
 off on, do NOT start editing directly. Run it through the plan-gated runner:
 
-1. `coding_task_start(project_id, task)` → you get the plan step's
-   instruction. Explore the code as needed, then
-   `coding_task_submit(run_id, "plan", {"plan": <plan.md content>})`.
-2. The run PAUSES (status "paused"). Present the plan to the user and WAIT.
-   The checkpoint is for the user — NEVER call coding_task_approve on your
-   own, and do not edit any file while the plan awaits approval.
-3. User approves → `coding_task_approve(run_id)` → you get the implement
-   step. User wants changes → `coding_task_reject(run_id, feedback=<their
-   words>)` → revise the plan.
+1. `runner_start(project_id, task)` → you get the plan step's instruction.
+   Explore the code as needed. Do NOT write the plan as chat prose — deliver
+   it ONCE, via `runner_submit(run_id, "plan", result={"plan": <plan.md
+   content>})` (or write it with `skillflow_tool(name="write_plan", ...)`
+   then submit with no result).
+2. The run PAUSES (status "paused"). Now present the exact plan you submitted
+   to the user and WAIT. The checkpoint is for the user — NEVER call
+   runner_approve on your own, and do not edit any file while the plan
+   awaits approval.
+3. User approves → `runner_approve(run_id)` → you get the implement step.
+   User wants changes → `runner_reject(run_id, feedback=<their words>)` →
+   revise the plan.
 4. Implement with your own tools (edit_file / create_file / bash), run the
    plan's verification commands, then
-   `coding_task_submit(run_id, "implement", {"summary": <summary content>})`.
+   `runner_submit(run_id, "implement", result={"summary": <summary>})`.
 5. `validation_error` in a response = your submission was rejected; fix and
    re-submit. Never submit twice in a row without a new instruction.
+6. `skillflow_tool` is ONLY for the skillflow tool names listed in a step
+   instruction — never funnel your own tools through it.
 
 Truly trivial fixes (a typo, a one-line change the user just dictated) can
 skip the runner and use edit_file directly.

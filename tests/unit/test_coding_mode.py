@@ -59,8 +59,8 @@ class TestModePlumbing:
     def test_coding_tool_definitions_shape(self):
         names = {td["function"]["name"] for td in CODING_TOOL_DEFINITIONS}
         assert names == {"edit_file", "create_file", "bash",
-                         "coding_task_start", "coding_task_submit",
-                         "coding_task_approve", "coding_task_reject",
+                         "runner_start", "runner_submit",
+                         "runner_approve", "runner_reject", "skillflow_tool",
                          "web_search", "web_fetch"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
@@ -460,8 +460,9 @@ class TestCondenser:
 
 class TestCodingTaskRunner:
     """Drive the plan-gated coding_task graph end-to-end through the butler's
-    runner tools against a real (isolated) SkillFlow engine — proving the
-    engine holds the implement step until the plan checkpoint is approved."""
+    runner tools (thin wrappers over skillflow's RunnerService — the same core
+    skillflow-mcp serves) against a real isolated engine — proving the engine
+    holds the implement step until the plan checkpoint is approved."""
 
     @pytest.fixture
     def runner_env(self, tmp_path, monkeypatch, mock_db, mock_ws):
@@ -490,29 +491,31 @@ class TestCodingTaskRunner:
     async def test_full_plan_gate_flow(self, runner_env):
         agent, sf = runner_env
 
-        # 1. start → plan step instruction
+        # 1. start → plan step instruction (honest contract, no phantom tools)
         resp = await agent._execute_tool(
-            "coding_task_start", {"project_id": "p1", "task": "add a modulo fn"})
+            "runner_start", {"project_id": "p1", "task": "add a modulo fn"})
         assert resp["status"] == "in_progress"
         assert resp["step"] == "plan"
         assert "add a modulo fn" in resp["instruction"]  # seed reached context
+        assert "### write_plan" not in resp["instruction"]
+        assert "### finish_step" not in resp["instruction"]
         run_id = resp["run_id"]
 
         # 2. engine refuses a second concurrent run for the same project
         dup = await agent._execute_tool(
-            "coding_task_start", {"project_id": "p1", "task": "another"})
-        assert "already active" in dup["error"]
+            "runner_start", {"project_id": "p1", "task": "another"})
+        assert "already live" in dup["error"]
 
         # 3. submitting the WRONG step is rejected
         wrong = await agent._execute_tool(
-            "coding_task_submit", {"run_id": run_id, "step_id": "implement",
-                                   "result": {"summary": "nope"}})
-        assert "current step is 'plan'" in wrong["error"]
+            "runner_submit", {"run_id": run_id, "step_id": "implement",
+                              "result": {"summary": "nope"}})
+        assert "Current step is 'plan'" in wrong["error"]
 
         # 4. submit the plan → run pauses at the checkpoint
         resp = await agent._execute_tool(
-            "coding_task_submit", {"run_id": run_id, "step_id": "plan",
-                                   "result": {"plan": "## Goal\nadd modulo"}})
+            "runner_submit", {"run_id": run_id, "step_id": "plan",
+                              "result": {"plan": "## Goal\nadd modulo"}})
         assert resp["status"] == "paused"
         assert "Plan Review" in resp["checkpoint_label"]
         # THE GATE: engine state is paused — implement is not claimable
@@ -520,18 +523,18 @@ class TestCodingTaskRunner:
 
         # 5. reject with feedback → plan step re-runs, feedback in instruction
         resp = await agent._execute_tool(
-            "coding_task_reject", {"run_id": run_id, "feedback": "add tests too"})
+            "runner_reject", {"run_id": run_id, "feedback": "add tests too"})
         assert resp["status"] == "in_progress"
         assert resp["step"] == "plan"
         assert "add tests too" in resp["instruction"]
 
         # 6. revised plan → paused again → approve → implement step released
         resp = await agent._execute_tool(
-            "coding_task_submit", {"run_id": run_id, "step_id": "plan",
-                                   "result": {"plan": "## Goal\nmodulo + tests"}})
+            "runner_submit", {"run_id": run_id, "step_id": "plan",
+                              "result": {"plan": "## Goal\nmodulo + tests"}})
         assert resp["status"] == "paused"
         resp = await agent._execute_tool(
-            "coding_task_approve", {"run_id": run_id})
+            "runner_approve", {"run_id": run_id})
         assert resp["status"] == "in_progress"
         assert resp["step"] == "implement"
         # prior plan is in the implement step's context
@@ -539,8 +542,8 @@ class TestCodingTaskRunner:
 
         # 7. submit implementation summary → run completes
         resp = await agent._execute_tool(
-            "coding_task_submit", {"run_id": run_id, "step_id": "implement",
-                                   "result": {"summary": "done, tests pass"}})
+            "runner_submit", {"run_id": run_id, "step_id": "implement",
+                              "result": {"summary": "done, tests pass"}})
         assert resp["status"] == "completed"
         assert resp["outputs"]["implement"]["summary"] == "done, tests pass"
 
@@ -550,24 +553,51 @@ class TestCodingTaskRunner:
         assert plan_file.exists()
         assert "modulo + tests" in plan_file.read_text()
 
+    async def test_skillflow_tool_proxy(self, runner_env):
+        agent, sf = runner_env
+        resp = await agent._execute_tool(
+            "runner_start", {"project_id": "p1", "task": "t"})
+        run_id = resp["run_id"]
+
+        # write via the proxy, submit with no result — file already staged
+        staged = await agent._execute_tool(
+            "skillflow_tool", {"run_id": run_id, "step_id": "plan",
+                               "name": "write_plan",
+                               "params": {"content": "## staged"}})
+        assert staged.get("written")
+        resp = await agent._execute_tool(
+            "runner_submit", {"run_id": run_id, "step_id": "plan"})
+        assert resp["status"] == "paused"
+        plan_file = (sf._workspace.get_config_path("p1", "coding_task")
+                     / "plan" / "plan.md")
+        assert plan_file.read_text() == "## staged"
+
+        # host tools are redirected, not "not allowed"
+        bounced = await agent._execute_tool(
+            "skillflow_tool", {"run_id": run_id, "step_id": "plan",
+                               "name": "edit_file", "params": {}})
+        assert "not a skillflow tool" in bounced["error"]
+
     async def test_runner_tools_rejected_in_butler_mode(self, butler_agent):
-        result = await butler_agent._execute_tool(
-            "coding_task_start", {"project_id": "p", "task": "x"})
-        assert "only available in coding mode" in result["error"]
+        for name, args in (
+                ("runner_start", {"project_id": "p", "task": "x"}),
+                ("skillflow_tool", {"run_id": "r", "step_id": "s", "name": "n"})):
+            result = await butler_agent._execute_tool(name, args)
+            assert "only available in coding mode" in result["error"]
 
     async def test_start_requires_existing_project(self, runner_env):
         agent, _ = runner_env
         agent.db.get_project.return_value = None
         result = await agent._execute_tool(
-            "coding_task_start", {"project_id": "ghost", "task": "x"})
+            "runner_start", {"project_id": "ghost", "task": "x"})
         assert "not found" in result["error"]
 
     async def test_submit_validates_result_shape(self, runner_env):
         agent, _ = runner_env
         result = await agent._execute_tool(
-            "coding_task_submit", {"run_id": "r", "step_id": "plan",
-                                   "result": "a string"})
-        assert "must be a non-empty object" in result["error"]
+            "runner_submit", {"run_id": "r", "step_id": "plan",
+                              "result": "a string"})
+        assert "must be an object" in result["error"]
 
 
 class TestBudgetPause:

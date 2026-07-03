@@ -245,20 +245,19 @@ def get_chat_history(
     # sessions render agent-answer-before-question while live chat is correct.
     messages = db.get_chat_history_by_session(session_id, limit=100)
 
-    # Rough token estimate for the progress bar: ~4 chars/token across all
-    # message content. Close enough for a usage indicator; the live SSE stream
-    # delivers precise counts from litellm.token_counter once a turn completes.
-    token_count = 0
-    for m in messages:
-        c = m.get("content") or ""
-        token_count += len(c) // 4
+    # Restore token usage from session. For coding mode total_tokens is the
+    # cumulative sum of per-turn context-window tokens persisted by the agent.
+    # Show it as both the "window" (last known) and "cumulated" display value
+    # — the per-turn value from the last SSE event isn't persisted separately.
+    # The history endpoint's token_count is total_tokens to keep it consistent
+    # with the live SSE stream (no misleading rough char-count estimates).
     mode = db.get_session_mode(session_id)
     total_tokens = db.get_session_total_tokens(session_id) if mode == "coding" else 0
     return {
         "session_id": session_id,
         "mode": mode,
         "messages": messages,
-        "token_count": token_count,
+        "token_count": total_tokens,
         "token_limit": _TOKEN_WINDOW,
         "total_tokens": total_tokens,
     }

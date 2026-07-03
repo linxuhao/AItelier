@@ -91,6 +91,12 @@
 
   let inputDisabled = $derived(!connected || sending || agentStreaming);
   let canSend = $derived(!sending && !agentStreaming && draft.trim().length > 0 && connected);
+  let inputPlaceholder = $derived(
+    !connected ? 'Chat unavailable — reconnecting…'
+      : agentStreaming ? 'Agent is responding…'
+      : sending ? 'Sending…'
+      : 'Message the agent... (/ to see commands)'
+  );
 
   // ── Message groups: consecutive tool messages merged into one collapsible block ──
   let messageGroups = $derived.by(() => {
@@ -997,7 +1003,7 @@
         bind:value={draft}
         on:input={handleInput}
         on:keydown={handleKeydown}
-        placeholder={inputDisabled ? 'Chat unavailable — reconnecting…' : 'Message the agent... (/ to see commands)'}
+        placeholder={inputPlaceholder}
         disabled={inputDisabled}
         rows="2"
         autocomplete="off"
@@ -1013,6 +1019,7 @@
 
       {#if agentStreaming}
         <span class="streaming-indicator">Streaming…</span>
+        <button class="outline btn-stop" on:click={_abortStream}> Stop </button>
       {:else if sending}
         <span class="streaming-indicator">Sending…</span>
       {/if}
@@ -1104,6 +1111,15 @@
     flex-shrink: 0;
     font-size: 0.85rem;
     padding: 0.2rem 0.6rem;
+  }
+
+  .btn-stop {
+    flex-shrink: 0;
+    font-size: 0.85rem;
+    padding: 0.2rem 0.6rem;
+    background: var(--pico-form-element-invalid-active-border-color, #c62828);
+    border-color: var(--pico-form-element-invalid-active-border-color, #c62828);
+    color: #fff;
   }
 
   .chat-loading {

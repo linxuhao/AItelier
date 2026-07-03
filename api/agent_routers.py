@@ -27,7 +27,7 @@ _log = logging.getLogger("aitelier.agent_chat")
 # This lets the frontend render a real usage bar on history load.
 _cfg_path = Path(__file__).resolve().parent.parent / "agent_configs" / "meta_conversation.yaml"
 _cfg = yaml.safe_load(_cfg_path.read_text()) if _cfg_path.is_file() else {}
-_TOKEN_WINDOW = _cfg.get("token_window", 200_000)
+_TOKEN_WINDOW = _cfg.get("meta_agent", {}).get("token_window", 200_000)
 
 
 class AgentChatRequest(BaseModel):

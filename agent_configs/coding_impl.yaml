@@ -1,0 +1,18 @@
+# agent_configs/coding_impl.yaml
+# Spawned implementer for the offloaded coding_impl graph. A REAL spawned agent
+# (unlike coding_task's placeholder roles): it does the work in its own
+# ephemeral context, so nothing here lands in the butler's window. Mirrors DPE's
+# task_implementer tooling (write mode auto-derives surgical create/edit).
+
+offload_implementer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.2
+  template: "coding_impl.md"
+  # create/edit derived from output.mode: write. list_tree/test helpers as DPE.
+  tools: ["list_tree", "test_write", "read_test_written", "delete_file"]
+  max_output_tokens: 32768
+  max_tool_turns: 20
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

@@ -869,6 +869,32 @@ CODING_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "offload_implement",
+            "description": (
+                "OFFLOAD the implementation of an approved plan to a spawned "
+                "agent, keeping it out of your context. Use this at the "
+                "coding_task implement step for a delegatable task instead of "
+                "coding inline: pass the approved plan.md content and the "
+                "project_id; a background agent implements it against the repo, "
+                "commits, and runs the tests. Returns a run_id — poll "
+                "get_pipeline_status and report the summary + test_report when "
+                "it completes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string",
+                                   "description": "The project whose repo to implement into"},
+                    "plan": {"type": "string",
+                             "description": "The approved plan.md content, verbatim"},
+                },
+                "required": ["project_id", "plan"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_search",
             "description": (
                 "Search the web (SearXNG). Use for looking up library APIs, error "
@@ -2382,6 +2408,61 @@ class MetaAgent:
             run_id, step_id, name, args.get("params") or {},
             project_root=project_root)
 
+    def _tool_offload_implement(self, args: dict) -> dict:
+        """Hand an approved plan to a SPAWNED implementer (context offload).
+
+        Starts the scheduler-owned ``coding_impl`` graph against the project's
+        real repo, seeded with the approved plan.md. The whole edit/test loop
+        then runs in a spawned agent's ephemeral context — it never enters the
+        butler's window. The butler polls get_pipeline_status and reports the
+        summary + test_report when it completes.
+
+        Use this at the coding_task implement step for a delegatable task,
+        instead of implementing inline with edit_file/bash.
+        """
+        pid = args.get("project_id", "")
+        plan = (args.get("plan") or "").strip()
+        if not pid:
+            return {"error": "offload_implement: 'project_id' is required"}
+        if not plan:
+            return {"error": "offload_implement: 'plan' (the approved plan.md "
+                             "content) is required"}
+        proj = self.db.get_project(pid)
+        if not proj:
+            return {"error": f"Project '{pid}' not found"}
+        # The implement run works against the SAME real repo (existing-repo
+        # path: code_path_resolver maps the fresh run's code ops + repo_apply
+        # commits back here).
+        repo_path = proj.get("repo_path")
+        if not repo_path:
+            try:
+                repo_path = str(self.ws.get_code_path(pid))
+            except Exception:
+                repo_path = None
+        if not repo_path:
+            return {"error": f"No repo_path for project '{pid}' — offload needs "
+                             f"an existing repo to implement into."}
+        from core.run_launcher import start_config_run, generate_run_id
+        impl_pid = generate_run_id("coding_impl")
+        result = start_config_run(
+            self.db, self.ws, "coding_impl", impl_pid,
+            seed_text=plan,
+            name=f"impl:{proj.get('name') or pid}",
+            owner_email=self.owner_email,
+            repo_type="existing", repo_path=repo_path,
+        )
+        if result.get("run_id") and self.session_id:
+            try:
+                self.db.link_run_to_session(self.session_id, result["run_id"])
+            except Exception:
+                pass
+        result["hint"] = (
+            "Implementation is running in the background (spawned agent, "
+            "isolated context). Poll get_pipeline_status(run_id); when it "
+            "completes, report the implement summary and the test_report.")
+        result["_wake"] = True  # nudge the scheduler to pick it up now
+        return result
+
     async def _tool_web_search(self, args: dict) -> dict:
         """Web search via core.web_tools (SearXNG). Sync httpx under the hood —
         run in a thread so a slow backend doesn't block the event loop."""
@@ -3265,6 +3346,7 @@ _CODING_TOOL_HANDLERS = {
     "runner_approve": MetaAgent._tool_runner_approve,
     "runner_reject": MetaAgent._tool_runner_reject,
     "skillflow_tool": MetaAgent._tool_skillflow_tool,
+    "offload_implement": MetaAgent._tool_offload_implement,
     "web_search": MetaAgent._tool_web_search,
     "web_fetch": MetaAgent._tool_web_fetch,
 }

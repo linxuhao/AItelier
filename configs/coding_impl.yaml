@@ -1,0 +1,61 @@
+# configs/coding_impl.yaml
+# OFFLOADED implementation of an approved plan — scheduler-driven so the whole
+# edit/test loop runs in a SPAWNED agent's ephemeral context, never touching
+# the butler's window (the context-offload half of the hybrid coding flow:
+# butler plans in runner mode, then hands the approved plan here).
+#
+# Seeded with the approved plan.md; runs against the project's real repo
+# (repo_type=existing + repo_path, wired by start_config_run). The implement
+# step reuses DPE's task_implementer machinery (write mode → surgical
+# create/edit tools, repo_apply commits); run_tests then verifies.
+
+name: "coding_impl"
+description: "Offloaded implementation: a spawned agent implements an approved plan"
+
+x-aitelier:
+  label: "Coding Implementation"
+  scheduler_owned: true          # poller-driven → spawned agent → context isolated
+  seed_file: "plan.md"
+  output_step: "test"
+
+begin: "implement"
+
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "test"
+      result: "completed"
+      require_completed: true
+
+steps:
+  - id: "implement"
+    step_type: "agent"
+    agent_config: "offload_implementer"
+    timeout_seconds: 600
+    context:
+      - source: { from: "repository", mode: "tool" }        # repo read tools
+      - source: { config: "coding_impl", output: "plan.md" }  # the approved plan
+      - source: { tool: "dir_tree" }
+    output:
+      mode: "write"                # derives surgical create/edit (+ finish_step)
+    lifecycle:
+      on_deliver:
+        - tool: "repo_apply"        # stage + commit the step's files to the real repo
+          params:
+            source_dir: "$STEP_DIR"
+          on_failure: "retry"
+          max_retries: 3
+    transitions:
+      - to: "test"
+
+  - id: "test"
+    step_type: "tool"
+    tool_name: "run_tests"
+    # Must exceed run_tests' worst case (venv + deps + pytest wall) so a slow
+    # run isn't reclaimed mid-flight.
+    timeout_seconds: 1200
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: null                    # node_reached end-condition completes the run

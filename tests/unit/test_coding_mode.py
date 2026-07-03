@@ -61,6 +61,7 @@ class TestModePlumbing:
         assert names == {"edit_file", "create_file", "bash",
                          "runner_start", "runner_submit",
                          "runner_approve", "runner_reject", "skillflow_tool",
+                         "offload_implement",
                          "web_search", "web_fetch"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
@@ -581,7 +582,8 @@ class TestCodingTaskRunner:
     async def test_runner_tools_rejected_in_butler_mode(self, butler_agent):
         for name, args in (
                 ("runner_start", {"project_id": "p", "task": "x"}),
-                ("skillflow_tool", {"run_id": "r", "step_id": "s", "name": "n"})):
+                ("skillflow_tool", {"run_id": "r", "step_id": "s", "name": "n"}),
+                ("offload_implement", {"project_id": "p", "plan": "x"})):
             result = await butler_agent._execute_tool(name, args)
             assert "only available in coding mode" in result["error"]
 
@@ -598,6 +600,53 @@ class TestCodingTaskRunner:
             "runner_submit", {"run_id": "r", "step_id": "plan",
                               "result": "a string"})
         assert "must be an object" in result["error"]
+
+
+class TestOffloadImplement:
+    """The hybrid's context-offload half: offload_implement starts the
+    scheduler-owned coding_impl run seeded with the approved plan, against the
+    project's real repo, so the edit/test loop runs in a spawned agent."""
+
+    async def test_requires_plan(self, coding_agent, mock_db):
+        mock_db.get_project.return_value = {"project_id": "p", "repo_path": "/r"}
+        result = await coding_agent._execute_tool(
+            "offload_implement", {"project_id": "p", "plan": "  "})
+        assert "'plan'" in result["error"]
+
+    async def test_unknown_project(self, coding_agent, mock_db):
+        mock_db.get_project.return_value = None
+        result = await coding_agent._execute_tool(
+            "offload_implement", {"project_id": "ghost", "plan": "## do it"})
+        assert "not found" in result["error"]
+
+    async def test_starts_coding_impl_with_plan_and_repo(self, coding_agent,
+                                                         mock_db, monkeypatch):
+        mock_db.get_project.return_value = {
+            "project_id": "eval", "name": "Eval", "repo_path": "/repo/eval"}
+        captured = {}
+
+        def fake_start(db, ws, config_name, pid, **kw):
+            captured["config_name"] = config_name
+            captured["seed_text"] = kw.get("seed_text")
+            captured["repo_type"] = kw.get("repo_type")
+            captured["repo_path"] = kw.get("repo_path")
+            return {"status": "started", "run_id": "impl-1",
+                    "config_name": config_name, "scheduler_owned": True}
+
+        import core.run_launcher as rl
+        monkeypatch.setattr(rl, "start_config_run", fake_start)
+        monkeypatch.setattr(rl, "generate_run_id", lambda c: f"{c}-xyz")
+
+        result = await coding_agent._execute_tool(
+            "offload_implement", {"project_id": "eval", "plan": "## Goal\ndo it"})
+        assert result["run_id"] == "impl-1"
+        assert result["_wake"] is True
+        assert "background" in result["hint"]
+        assert captured == {"config_name": "coding_impl",
+                            "seed_text": "## Goal\ndo it",
+                            "repo_type": "existing", "repo_path": "/repo/eval"}
+        # links the spawned run to the butler session
+        mock_db.link_run_to_session.assert_called_once_with("sess1", "impl-1")
 
 
 class TestBudgetPause:

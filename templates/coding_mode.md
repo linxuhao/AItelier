@@ -57,9 +57,19 @@ off on, do NOT start editing directly. Run it through the plan-gated runner:
 3. User approves → `runner_approve(run_id)` → you get the implement step.
    User wants changes → `runner_reject(run_id, feedback=<their words>)` →
    revise the plan.
-4. Implement with your own tools (edit_file / create_file / bash), run the
-   plan's verification commands, then
-   `runner_submit(run_id, "implement", result={"summary": <summary>})`.
+4. Implement — two ways:
+   - **Offload (prefer for a delegatable change — keeps your context small):**
+     `offload_implement(project_id, plan=<approved plan.md>)`. A spawned agent
+     implements the plan against the repo, commits, and runs the tests in ITS
+     OWN context — the edit/test loop never enters yours. It returns a run_id;
+     then `runner_submit(run_id, "implement", result={"summary": "delegated to
+     coding_impl run <id>"})` to close the plan run, and poll the impl run with
+     `wait_until_next_checkpoint_or_completion` / `get_pipeline_status`, then
+     report its summary + test_report.
+   - **Inline (when you want to stay hands-on — interactive debugging):**
+     implement with your own tools (edit_file / create_file / bash), run the
+     plan's verification commands, then `runner_submit(run_id, "implement",
+     result={"summary": <summary>})`.
 5. `validation_error` in a response = your submission was rejected; fix and
    re-submit. Never submit twice in a row without a new instruction.
 6. `skillflow_tool` is ONLY for the skillflow tool names listed in a step
@@ -78,7 +88,9 @@ into an isolated place whose transcript you don't pay for.
   (debugging, a quick lookup, a one-file edit). Use your direct tools.
 - **Layer 2 — plan→task runner.** A non-trivial multi-file change the user should
   approve. `runner_start` → plan → user gate → implement → `runner_submit` (the
-  section above).
+  section above). You plan in-context, but the implement step can be **offloaded**
+  (`offload_implement`) to a spawned agent so the edit/test loop — the real
+  context sink — stays out of your window; prefer that for delegatable changes.
 - **Layer 3 — offload to a pipeline.** Context-heavy, self-contained work whose
   *result* is what you need, not the reasoning: build a whole app / a full
   architecture pass (`start_new_project` / `start_from_aitelier_project`), review

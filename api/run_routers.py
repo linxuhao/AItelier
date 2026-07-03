@@ -7,7 +7,7 @@ from typing import Optional
 from pydantic import BaseModel
 from api.dependencies import (
     get_skillflow, get_db_manager, get_config_registry, owner_filter,
-    get_workspace_manager,
+    get_workspace_manager, enrich_project_status,
 )
 from api.auth import CurrentUser, get_optional_user
 from core.db_manager import DBManager
@@ -76,6 +76,7 @@ def list_all_runs(
         cfg = r.get("config_name") or "dpe_default_v2"
         if config_name and cfg != config_name:
             continue
+        r = enrich_project_status(r) or r
         if status and (r.get("status") or "").split(":")[0] != status:
             continue
         m = registry.get(cfg)

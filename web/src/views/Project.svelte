@@ -4,6 +4,7 @@
   import { authStore } from '../stores/auth';
   import { connectionStore } from '../stores/connection';
   import { projectStore, setCurrentProject } from '../stores/project';
+  import { showCheckpoint } from '../stores/checkpoint';
   import WorkspaceBrowser from './WorkspaceBrowser.svelte';
   import RepoPanel from './RepoPanel.svelte';
   import {
@@ -499,7 +500,12 @@
         </header>
         <div class="cp-content">
           {#if cp.step_output}
-            <pre class="cp-output">{escapeHtml(JSON.stringify(cp.step_output, null, 2))}</pre>
+            <button
+              class="outline"
+              onclick={() => showCheckpoint(projectId, cp)}
+            >
+              View Checkpoint Files
+            </button>
           {/if}
           <label for="cp-feedback">
             Feedback (required for rejection)
@@ -941,16 +947,9 @@
     color: var(--ait-color-checkpoint, #40b0e0);
   }
   .cp-content {
-    max-height: 300px;
-    overflow-y: auto;
-  }
-  .cp-output {
-    font-size: 0.8rem;
-    background: var(--pico-code-background, #f5f5f5);
-    padding: 0.5rem;
-    border-radius: var(--pico-border-radius, 4px);
-    max-height: 200px;
-    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
   }
 
   /* ── Tab bar ── */

@@ -332,16 +332,22 @@ def cmd_trace(args):
 
     The trace is append-only and keyed by step_instance_id, so loop
     iterations don't overwrite — this replaces stitching Trace_*/ dirs +
-    live SSE during investigation.
+    live SSE during investigation.  When per-project trace DBs are active
+    (trace.db in the workspace), queries that instead of the shared DB.
     """
     import sqlite3
     import json as _json
 
     pid = args.project_id
-    db = os.path.join(RUN_DIR, "skillflow.db")
-    if not os.path.isfile(db):
-        _die(f"skillflow.db not found: {db}")
-    conn = sqlite3.connect(db)
+    # Per-project trace DB takes priority.
+    trace_db = os.path.join(RUN_DIR, "workspaces", pid, "trace.db")
+    if os.path.isfile(trace_db):
+        conn = sqlite3.connect(trace_db)
+    else:
+        db = os.path.join(RUN_DIR, "skillflow.db")
+        if not os.path.isfile(db):
+            _die(f"Neither trace.db nor skillflow.db found for '{pid}'")
+        conn = sqlite3.connect(db)
     try:
         run_id = args.run_id or _run_id_for_project(conn, pid)
         if not run_id:

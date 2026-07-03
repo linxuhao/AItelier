@@ -131,7 +131,8 @@ def get_skillflow():
         tool_loader = get_tool_loader()
         sf = SkillFlow(SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
                      projects_base=PROJECTS_PATH, stale_threshold_seconds=60,
-                     code_path_resolver=_existing_repo_code_path)
+                     code_path_resolver=_existing_repo_code_path,
+                     trace_db_path=WS_PATH)
 
         # Register agent configs into skillflow so graph validation catches
         # missing agent_config references at startup.

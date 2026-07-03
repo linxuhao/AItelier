@@ -529,11 +529,11 @@ async def _check_hung_claims():
                 _ORPHAN_TRACE_STALE_S = 120
                 _osnap_key = (run_id, row["step_instance_id"])
                 if _osnap_key not in _orphan_snapshots:
-                    _lt = sf._conn.execute(
+                    rows = sf.trace_query(run_id,
                         "SELECT MAX(created_at) FROM skillflow_trace "
                         "WHERE run_id = ? AND step_id = ?",
-                        (run_id, row["step_id"]),
-                    ).fetchone()
+                        (run_id, row["step_id"]))
+                    _lt = rows[0] if rows else None
                     _last_trace = _lt[0] if _lt else None
                     if _last_trace:
                         _lt_dt = _dt.datetime.strptime(
@@ -652,11 +652,11 @@ async def _run_skillflow_tick(project_id: str, loop):
     # existed), so a row-count guard never trips on exactly the loop it's meant
     # to catch.
     try:
-        n_exec = sf._conn.execute(
+        rows = sf.trace_query(run_id,
             "SELECT COUNT(*) FROM skillflow_trace "
             "WHERE run_id = ? AND event = 'claimed'",
-            (run_id,),
-        ).fetchone()[0]
+            (run_id,))
+        n_exec = rows[0][0] if rows else 0
         if n_exec > _MAX_STEPS_PER_RUN:
             sf.fail_run(run_id, f"Aborted: exceeded {_MAX_STEPS_PER_RUN} step "
                                 f"executions ({n_exec}) — likely a non-converging "

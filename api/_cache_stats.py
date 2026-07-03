@@ -32,9 +32,10 @@ def _build_stats_dict(
 def compute_cache_stats_per_step(run_id: str) -> Dict[str, Dict[str, Any]]:
     """Aggregate cache_hit_tokens and cache_miss_tokens per step_id.
 
-    Queries skillflow_trace for category='usage' / event='token_usage' entries
-    belonging to the given run, groups by step_id, and returns a dict keyed by
-    step_id (string) with aggregated stats.
+    Queries the per-project trace DB (or shared DB fallback) for
+    category='usage' / event='token_usage' entries belonging to the given
+    run, groups by step_id, and returns a dict keyed by step_id (string)
+    with aggregated stats.
 
     Args:
         run_id: The skillflow internal run UUID (not project_id).
@@ -56,52 +57,39 @@ def compute_cache_stats_per_step(run_id: str) -> Dict[str, Dict[str, Any]]:
         "GROUP BY step_id"
     )
     result: Dict[str, Dict[str, Any]] = {}
-    with sf._conn:
-        cursor = sf._conn.execute(sql, (run_id,))
-        for row in cursor.fetchall():
-            step_id = str(row[0])
-            hit = int(row[1]) if row[1] is not None else 0
-            miss = int(row[2]) if row[2] is not None else 0
-            result[step_id] = _build_stats_dict(hit, miss)
+    for row in sf.trace_query(run_id, sql, (run_id,)):
+        step_id = str(row[0])
+        hit = int(row[1]) if row[1] is not None else 0
+        miss = int(row[2]) if row[2] is not None else 0
+        result[step_id] = _build_stats_dict(hit, miss)
     return result
 
 
 def compute_cache_stats_batch(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """Aggregate cache_hit_tokens and cache_miss_tokens per run (batch mode).
 
-    Queries skillflow_trace for category='usage' / event='token_usage' entries
-    belonging to any of the given run IDs, groups by run_id, and returns a dict
-    keyed by internal run UUID with aggregated stats.
+    With per-project trace DBs, a single cross-database query is no longer
+    possible.  Instead, iterate each run, query its per-project trace DB via
+    ``compute_cache_stats_per_step``, and aggregate the per-step stats into a
+    per-run total.
 
     Args:
         run_ids: List of skillflow internal run UUIDs.
 
     Returns:
-        Dict mapping internal run UUID -> {cache_hit_tokens, cache_miss_tokens, hit_ratio, total_tokens}.
-        Run IDs with no token_usage traces are absent from the dict (callers treat
-        missing keys as zero/no-data).
+        Dict mapping internal run UUID -> {cache_hit_tokens, cache_miss_tokens,
+        hit_ratio, total_tokens}.  Run IDs with no token_usage traces are absent
+        from the dict (callers treat missing keys as zero/no-data).
     """
     if not run_ids:
         return {}
 
-    from api.dependencies import get_skillflow
-
-    placeholders = ",".join("?" for _ in run_ids)
-    sql = (
-        "SELECT run_id,"
-        "  SUM(COALESCE(json_extract(payload_json, '$.cache_hit_tokens'), 0)) AS cache_hit_tokens,"
-        "  SUM(COALESCE(json_extract(payload_json, '$.cache_miss_tokens'), 0)) AS cache_miss_tokens "
-        "FROM skillflow_trace "
-        f"WHERE run_id IN ({placeholders}) AND category = 'usage' AND event = 'token_usage' "
-        "GROUP BY run_id"
-    )
-    sf = get_skillflow()
     result: Dict[str, Dict[str, Any]] = {}
-    with sf._conn:
-        cursor = sf._conn.execute(sql, run_ids)
-        for row in cursor.fetchall():
-            run_uuid = str(row[0])
-            hit = int(row[1]) if row[1] is not None else 0
-            miss = int(row[2]) if row[2] is not None else 0
-            result[run_uuid] = _build_stats_dict(hit, miss)
+    for run_id in run_ids:
+        per_step = compute_cache_stats_per_step(run_id)
+        if not per_step:
+            continue
+        hit = sum(s["cache_hit_tokens"] for s in per_step.values())
+        miss = sum(s["cache_miss_tokens"] for s in per_step.values())
+        result[run_id] = _build_stats_dict(hit, miss)
     return result

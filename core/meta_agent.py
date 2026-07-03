@@ -894,6 +894,7 @@ class MetaAgent:
 
         tool_turns = 0
         consecutive_errors = 0  # AT-28: track consecutive tool errors for recovery
+        total_tokens = 0        # cumulative tokens sent to the LLM across all turns
         try:
             while tool_turns < self.max_tool_turns:
                 compacted = await self._maybe_compact(messages)
@@ -902,10 +903,13 @@ class MetaAgent:
                     yield {"type": "compaction",
                            "message": "Older turns were summarized to stay within context."}
 
-                # Yield token usage estimate after each turn
+                turn_tokens = self._count_tokens(messages)
+                total_tokens += turn_tokens
+                limit = self.compact_at_tokens if self.mode == "coding" else 0
                 yield {"type": "token_usage",
-                       "tokens": self._count_tokens(messages),
-                       "limit": self.compact_at_tokens if self.mode == "coding" else 0,
+                       "tokens": turn_tokens,
+                       "total_tokens": total_tokens,
+                       "limit": limit,
                        "mode": self.mode}
 
                 full_text = ""
@@ -919,9 +923,11 @@ class MetaAgent:
                         tool_calls = event["tool_calls"]
 
                 if not tool_calls:
+                    # Final token usage (messages unchanged since we counted)
                     yield {"type": "token_usage",
-                           "tokens": self._count_tokens(messages),
-                           "limit": self.compact_at_tokens if self.mode == "coding" else 0,
+                           "tokens": turn_tokens,
+                           "total_tokens": total_tokens,
+                           "limit": limit,
                            "mode": self.mode}
                     yield {"type": "done", "message": {"role": "assistant", "content": full_text}}
                     return

@@ -118,6 +118,7 @@
 
   // Token usage from the last turn
   let tokenCount = $state(0);
+  let totalTokens = $state(0);
   let tokenLimit = $state(0);
   let tokenMode = $state('butler');
 
@@ -286,6 +287,9 @@
     _abortStream();
     messages = [];
     history = [];
+    tokenCount = 0;
+    totalTokens = 0;
+    tokenLimit = 0;
     sessionId = newSessionId;
     _storeSessionId(newSessionId);
     selectedSessionId = newSessionId;
@@ -298,6 +302,9 @@
     history = [];
     sessionId = null;
     sessionInitiated = false;
+    tokenCount = 0;
+    totalTokens = 0;
+    tokenLimit = 0;
     await _initSession(true);
     selectedSessionId = sessionId;
     await _loadSessionList();
@@ -602,9 +609,11 @@
 
       case 'token_usage': {
         const tokens = event.tokens as number | undefined;
+        const total = event.total_tokens as number | undefined;
         const limit = event.limit as number | undefined;
         const mode = event.mode as string | undefined;
         if (tokens !== undefined) tokenCount = tokens;
+        if (total !== undefined) totalTokens = total;
         if (limit !== undefined) tokenLimit = limit;
         if (mode !== undefined) tokenMode = mode;
         break;
@@ -1019,9 +1028,19 @@
     <div class="token-bar">
       <div class="token-bar-fill" style="width: {pct}%"></div>
       <span class="token-bar-label">
-        {_formatTokens(tokenCount)} {tokenLimit > 0 ? '/ ' + _formatTokens(tokenLimit) + ' tokens' : 'tokens'}
-        {#if pct > 0} &middot; {pct}%{/if}
-        {#if tokenMode === 'coding'} &middot; coding{/if}
+        {#if totalTokens > 0}
+          <span class="token-stat">cumulated {_formatTokens(totalTokens)}</span>
+          <span class="token-sep">·</span>
+        {/if}
+        <span class="token-stat">window {_formatTokens(tokenCount)}{tokenLimit > 0 ? ' / ' + _formatTokens(tokenLimit) : ''}</span>
+        {#if pct > 0}
+          <span class="token-sep">·</span>
+          <span class="token-stat">{pct}%</span>
+        {/if}
+        {#if tokenMode === 'coding'}
+          <span class="token-sep">·</span>
+          <span class="token-stat">coding</span>
+        {/if}
       </span>
     </div>
   {/if}
@@ -1404,9 +1423,18 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 0.4rem;
     font-size: 0.7rem;
     font-family: monospace;
     opacity: 0.7;
+    white-space: nowrap;
+  }
+
+  .token-bar-label .token-sep {
+    opacity: 0.5;
+  }
+
+  .token-bar-label .token-stat {
     white-space: nowrap;
   }
 </style>

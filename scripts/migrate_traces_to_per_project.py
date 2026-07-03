@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """Migrate existing skillflow_trace rows into per-project trace.db files.
 
-Run once after enabling per-project trace DBs (trace_db_path=WS_PATH in
-the SkillFlow constructor).  Safe to run idempotently — skips projects
-that already have a trace.db.
+Run once after enabling per-project trace DBs.  Uses merge semantics:
+if a trace.db already exists, only rows with seq values not yet present
+are copied (idempotent, re-runnable).
 
 Usage:
     python3 scripts/migrate_traces_to_per_project.py [--delete-source]
 
     --delete-source   After copying, DELETE the rows from the shared
-                      skillflow_trace table (offline only — stop the
-                      server first).
+                      skillflow_trace table (offline only).
 """
 
 import argparse
@@ -81,15 +80,9 @@ def main():
     print(f"Found {len(project_runs)} project(s) with {sum(len(v) for v in project_runs.values())} run(s).")
 
     total_copied = 0
-    total_skipped = 0
 
     for pid, run_ids in project_runs.items():
         dest_path = ws_dir / pid / "trace.db"
-        if dest_path.exists():
-            total_skipped += 1
-            print(f"  [{pid}] trace.db already exists — skipping")
-            continue
-
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest = sqlite3.connect(str(dest_path))
         dest.execute("PRAGMA journal_mode=WAL;")
@@ -109,35 +102,48 @@ def main():
             ).fetchall()
             if not rows:
                 continue
+
+            # Merge: only insert seqs not already in the dest DB.
+            existing_seqs: set[int] = {
+                r[0] for r in dest.execute(
+                    "SELECT seq FROM skillflow_trace WHERE run_id = ?",
+                    (run_id,),
+                ).fetchall()
+            }
+            new_rows = [r for r in rows if r["seq"] not in existing_seqs]
+            if not new_rows:
+                continue
+
             dest.executemany(
                 "INSERT INTO skillflow_trace "
                 "(run_id, step_id, step_instance_id, seq, category, event, payload_json, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [(r["run_id"], r["step_id"], r["step_instance_id"], r["seq"],
                   r["category"], r["event"], r["payload_json"], r["created_at"])
-                 for r in rows],
+                 for r in new_rows],
             )
-            copied += len(rows)
+            copied += len(new_rows)
 
         dest.commit()
         dest.close()
-        total_copied += copied
-        print(f"  [{pid}] {copied} trace row(s) → {dest_path}")
+        if copied:
+            total_copied += copied
+            print(f"  [{pid}] {copied} trace row(s) merged → {dest_path}")
+        else:
+            print(f"  [{pid}] no new rows to copy")
 
     if args.delete_source:
         print("\nDeleting migrated rows from shared skillflow_trace …")
         for pid, run_ids in project_runs.items():
-            dest_path = ws_dir / pid / "trace.db"
-            if not dest_path.exists():
-                continue
             for run_id in run_ids:
                 cur = src.execute(
                     "DELETE FROM skillflow_trace WHERE run_id = ?", (run_id,))
-                print(f"  [{pid}] run={run_id}: deleted {cur.rowcount} row(s)")
+                if cur.rowcount:
+                    print(f"  [{pid}] run={run_id}: deleted {cur.rowcount} row(s)")
         src.commit()
 
     src.close()
-    print(f"\nDone: {total_copied} row(s) copied, {total_skipped} project(s) skipped.")
+    print(f"\nDone: {total_copied} row(s) merged.")
 
 
 if __name__ == "__main__":

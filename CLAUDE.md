@@ -45,11 +45,9 @@ docker compose logs -f          # tail
 - **Reader/writer auth** (`api/main.py:write_gate`): reads (GET) are open; mutating requests require an allowlisted **Cloudflare Access JWT** (`core/cf_access.py`, verified against `AITELIER_CF_TEAM_DOMAIN` + `AITELIER_CF_AUD`, email ∈ `AITELIER_WRITERS`) **or** the CLI's `AITELIER_ADMIN_TOKEN` (`X-AItelier-Admin-Token` header, honored only off-tunnel). The frontend read-only mode (`/api/me` → `can_write`) is UX only — the server gate is the control. Gate is inactive unless `AITELIER_CF_AUD` is set (local dev).
 - **API-key secret:** `DEEPSEEK_API_KEY` is delivered as a Docker **secret file** (`~/.aitelier-secrets/DEEPSEEK_API_KEY` → `/run/secrets/DEEPSEEK_API_KEY`), NOT an env var, so test/build subprocesses that inherit `os.environ` don't receive it. `core/ai_router.py:_read_secret` resolves `/run/secrets/<name>` → `$AITELIER_SECRETS_DIR/<name>` → `os.getenv`. Keep secrets out of `.env`/git (chmod 600).
 - **Git auth (clone/push/PR):** the host's `~/.ssh` / `~/.git-credentials` are **not** mounted into the container, so private-repo clone broke after containerization. Fixed with the same secret-file model: a **fine-grained GitHub PAT** at `~/.aitelier-secrets/GITHUB_TOKEN` → `/run/secrets/GITHUB_TOKEN`. `docker/git-credential-helper.sh` (wired via `GIT_CONFIG_*` in compose) feeds it to **github.com HTTPS remotes only** for clone/push; `core/git_ops.py:create_github_pr` reads the same secret for PR creation. An empty token file = "no credentials" (public clone still works). Chosen over bind-mounting `~/.git-credentials` because the container runs LLM-generated code — a scoped, revocable PAT has a far smaller blast radius than the host's whole credential store.
-- **skillflow snapshot wheel — DEV-ONLY local override of PyPI (never committed):** the container installs `skillflow-py` from **PyPI** at build time. When you're co-developing skillflow and need a fix that isn't published yet, drop a locally-built **wheel snapshot** into **`vendor/wheels/`** (gitignored — `wheels/` in `.gitignore` — so it never ships). The `Dockerfile` runs `pip install --find-links /app/vendor/wheels -e .`: pip treats `vendor/wheels/` as an extra local package index alongside PyPI and installs the **highest** matching `skillflow-py` (pip's nearest equivalent to a Maven `~/.m2` SNAPSHOT resolved locally):
-  - **Dev (wheel present):** the snapshot is a post-release (e.g. `1.1.8.post1`, fixes not yet on PyPI) → `post1 > 1.1.8` so the local wheel wins, no download. `COPY . /app` copies the gitignored wheel into the build.
-  - **Stable (no wheel):** a fresh clone has no `vendor/wheels/` → pip ignores the absent `--find-links` dir (warns, doesn't fail) and **falls back to PyPI's** published version. The build works for anyone, with or without a local skillflow checkout — the build context is the repo, never the host folder.
-  - ⚠️ **The version MUST be bumped (`.postN`).** pip resolves by version string only — it has NO "newer build of the same version" concept. A local `1.1.8` wheel and PyPI `1.1.8` are a tie and pip will silently install **PyPI's** (verified), dropping your fix. `1.1.8.post1 > 1.1.8` is what makes the local snapshot win. (This is the key difference from Maven SNAPSHOTs, which are build-time/`-U`-aware.)
-  - **Rebuild after a skillflow change:** in the skillflow checkout (`~/stepflow` / `~/skillflow`) bump `pyproject.toml` to a new marker (`…​.post2`), `python3 -m build --wheel`, copy the wheel into `vendor/wheels/` (keep one), then `docker compose build aitelier && docker compose up -d aitelier`. The host uses the editable install (`pip install -e <skillflow-checkout>`), so host changes are live without rebuilding the wheel. To ship a fix for real: publish a new `skillflow-py` release to PyPI and bump the `>=` constraint — no wheel needed.
+- **skillflow dependency — PyPI-only in the image (the vendor/wheels `--find-links` override was REMOVED from the Dockerfile):** the container runs plain `pip install -e .`, so it gets whatever `skillflow-py` version PyPI serves for the pin in `pyproject.toml`. The **host** venv uses an editable install of the skillflow checkout (`~/stepflow`), so host-side skillflow changes are live immediately — the **container** only picks them up via a PyPI release.
+  - **Ship a skillflow change for real:** bump the version in the skillflow checkout's `pyproject.toml`, publish to PyPI, bump the `skillflow-py>=…` pin here, `docker compose build aitelier && up -d`.
+  - **Quick dev-loop override (session-only, NOT durable):** build a wheel in the checkout, then `docker exec aitelier pip install --force-reinstall --no-deps /app/vendor/wheels/<wheel>` + `docker compose restart aitelier`. ⚠️ This lives in the container's writable layer — any container *recreation* (`up -d` after an image/config change) silently reverts to the image's PyPI version. When runner/butler tools error with ImportErrors, check `docker exec aitelier pip show skillflow-py` first.
 
 Env reference lives in `.env.example`.
 
@@ -58,13 +56,14 @@ Env reference lives in `.env.example`.
 ### Repo Separation
 
 ```
-~/stepflow/  (or ~/skillflow/)  # Independent library (config-agnostic framework) — PyPI: skillflow-py 1.1.4
-# Editable install (pip install -e <path>) — changes are live immediately
+~/stepflow/  (or ~/skillflow/)  # Independent library (config-agnostic framework) — PyPI: skillflow-py
+# Editable install (pip install -e <path>) — changes are live immediately (host only, NOT the container)
 ├── src/skillflow/
 │   ├── core.py, graph.py, workspace.py, tool_loader.py, ...
 │   ├── tools/               # 13 native tools (read_file, write, pytest, repo_apply, ...)
-│   └── plugins/             # linter, skill_runner (runner mode), skill_converter (skill→pipeline)
-└── {run,convert}_cli.py     # skillflow-run / skillflow-convert / skillflow-lint console scripts
+│   └── plugins/             # linter, skill_converter (skill→pipeline),
+│                            # skill_runner (runner mode: SkillTool + RunnerService + skillflow-mcp)
+└── {run,convert}_cli.py     # skillflow-run / -convert / -lint / -mcp console scripts
 
 ~/AItelier/                  # Host application
 ├── configs/                 # Skillflow graph configs (dpe_default.yaml, meta_conversation.yaml)
@@ -100,6 +99,20 @@ Env reference lives in `.env.example`.
    host agents), manifest added via `ConfigRegistry.register_one`. The butler can then
    `start_config_run(config_name="gen_<slug>")`; re-running `generate_pipeline` with the same
    name UPDATES in place (register_graph overwrites + version-bumps; manifests are lazy).
+
+4. Butler CODING MODE (user-toggled per session: SPA toggle / `mode` field; sessions.mode column)
+   The butler becomes an interactive coding agent (templates/coding_mode.md): direct repo tools
+   (edit_file with read-before-edit guard, create_file, bash with secret-scrubbed env,
+   web_search/web_fetch) + full-transcript persistence (chat_history.message_json; resume after
+   budget_exhausted at coding_max_tool_turns or page refresh) + condenser (compacter agent
+   summarizes past compact_at_tokens with a compaction_through watermark).
+   Non-trivial changes go through the PLAN-GATED runner (configs/coding_task.yaml, driven via
+   skillflow 1.5.0 RunnerService — the same core skillflow-mcp serves to external agents):
+   runner_start → plan → ENGINE-ENFORCED checkpoint (implement not released until user approves)
+   → runner_approve/reject → implement with own tools → runner_submit. skillflow_tool proxies the
+   step's write_*/read_*/native tools; host tool names are bounced with a redirect error.
+   Post-change review: start_config_run(config_name="code_review", seed_text=<task + verbatim
+   git diff>) — butler-driven (scheduler_owned: false), verdict returns synchronously in outputs.
 ```
 
 ### Existing-repo support
@@ -171,7 +184,7 @@ web/
 | `core/workspace_manager.py` | Physical directory jail, Git operations, step staging→final directory lifecycle |
 | `core/db_manager.py` | SQLite persistence (projects, tasks, settings, users) |
 | `core/ai_router.py` | `AIGateway` — LiteLLM wrapper, provider registry from `llm_providers.json` |
-| `core/meta_agent.py` | Autonomous CLI/WebGUI butler — drives meta_conversation, DPE & skill_converter runs in-chat; tools incl. `generate_pipeline`; converter-completion hook registers + relays the `gen_<slug>` pipeline |
+| `core/meta_agent.py` | Autonomous CLI/WebGUI butler, DUAL-MODE (`sessions.mode`): butler = orchestration/inspection (drives meta_conversation, DPE & skill_converter runs in-chat; `generate_pipeline`; converter-completion relay); coding = interactive coding agent (edit_file/create_file/bash/web tools, runner_* + skillflow_tool over skillflow RunnerService, transcript persistence + condenser + budget pause) |
 | `core/pipeline_registry.py` | Bridge that makes a converter-generated pipeline runnable: namespaced `gen_<slug>`, persist to `~/.AItelier/configs/`, live-register (auto-register invented agent roles as host agents), boot-scan; update overwrites in place |
 | `core/event_bus.py` | In-process pub/sub for pipeline events |
 | `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader, AgentConfigs singletons; registers skillflow's `skill_converter` graph + boot-scans `~/.AItelier/configs/` for `gen_*` pipelines; `register_pipeline_from_run` wrapper; `code_path_resolver` for existing repos |
@@ -182,8 +195,11 @@ web/
 
 - **`configs/dpe_default.yaml`** — v2 skillflow graph: steps, transitions, gates, tools, checkpoints
 - **`configs/meta_conversation.yaml`** — Meta conversation graph (2 steps)
+- **`configs/coding_task.yaml`** — Plan-gated coding runner graph (plan checkpoint → implement), butler-driven via RunnerService
+- **`configs/code_review.yaml`** — One-shot diff review (butler-driven, `scheduler_owned: false`; verdict returns synchronously)
 - **`agent_configs/dpe_default.yaml`** — Agent configs by role: model, template, tools list, thinking settings
-- **`agent_configs/meta_conversation.yaml`** — Meta conversation agent configs + meta_agent
+- **`agent_configs/meta_conversation.yaml`** — Meta conversation agent configs + meta_agent (incl. `coding_max_tool_turns`, `compact_at_tokens`) + `compacter` (condenser)
+- **`agent_configs/coding_task.yaml`** — Runner-step roles whose `system_prompt` IS the per-step prompt (the butler does the work, no LLM spawned)
 - **`llm_providers.json`** — LLM provider registry (API base URLs, key env vars)
 - **`AITELIER_HOST_AGENT_MODEL`** (env) — single model that skillflow `host`/`default` agents resolve to (default `deepseek/deepseek-v4-flash`); used by `skill_converter` and any generated pipeline
 - **`skill_converter`** — graph + host agents live in skillflow's plugin; AItelier registers them at startup (`api/dependencies.py`), so no local config/template is duplicated

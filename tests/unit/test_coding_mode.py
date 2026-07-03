@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 
 from core.meta_agent import (
-    MetaAgent, TOOL_DEFINITIONS, CODING_TOOL_DEFINITIONS,
+    MetaAgent, TOOL_DEFINITIONS, CODING_TOOL_DEFINITIONS, usage_stats,
 )
 
 
@@ -646,3 +646,136 @@ class TestBudgetPause:
         async for _ in butler_agent.chat("list", [], None):
             pass
         mock_db.save_chat_transcript_message.assert_not_called()
+
+
+class TestRealUsageTelemetry:
+    """Provider-reported usage (incl. DeepSeek cache hit/miss) is captured from
+    the stream and accumulated per session — comparable with DPE skillflow_trace."""
+
+    def test_db_accumulate_and_get(self, db_manager):
+        zeros = {"prompt_tokens": 0, "completion_tokens": 0,
+                 "cache_hit_tokens": 0, "cache_miss_tokens": 0}
+        assert db_manager.get_session_usage("nope") == zeros
+
+        db_manager.accumulate_session_usage("s1", {
+            "prompt_tokens": 100, "completion_tokens": 10,
+            "cache_hit_tokens": 60, "cache_miss_tokens": 40, "hit_ratio": 0.6})
+        # non-numeric values and unknown keys are ignored
+        db_manager.accumulate_session_usage("s1", {
+            "prompt_tokens": 50, "completion_tokens": "junk", "surprise": 9})
+        assert db_manager.get_session_usage("s1") == {
+            "prompt_tokens": 150, "completion_tokens": 10,
+            "cache_hit_tokens": 60, "cache_miss_tokens": 40}
+
+    async def test_stream_llm_captures_usage_chunk(self, coding_agent, monkeypatch):
+        from types import SimpleNamespace
+        text_chunk = SimpleNamespace(
+            usage=None,
+            choices=[SimpleNamespace(
+                delta=SimpleNamespace(content="hi", tool_calls=None))])
+        # DeepSeek-style final chunk: empty choices, usage attached
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=1000, completion_tokens=50,
+                prompt_cache_hit_tokens=800, prompt_cache_miss_tokens=200))
+
+        captured_kwargs = {}
+
+        async def fake_acompletion(**kwargs):
+            captured_kwargs.update(kwargs)
+
+            async def gen():
+                yield text_chunk
+                yield usage_chunk
+            return gen()
+
+        import core.meta_agent as ma
+        monkeypatch.setattr(ma.litellm, "acompletion", fake_acompletion)
+
+        events = [e async for e in coding_agent._stream_llm(
+            [{"role": "user", "content": "hi"}])]
+
+        assert captured_kwargs["stream_options"] == {"include_usage": True}
+        collected = events[-1]
+        assert collected["_type"] == "collected"
+        assert collected["usage"] == {
+            "prompt_tokens": 1000, "completion_tokens": 50,
+            "cache_hit_tokens": 800, "cache_miss_tokens": 200,
+            "hit_ratio": 0.8}
+
+    async def test_usage_accumulates_across_turns(self, db_manager, mock_ws):
+        agent = MetaAgent(db_manager, mock_ws, owner_email="test@local",
+                          session_id="sess-usage", mode="coding")
+        agent._count_tokens = lambda msgs: 5  # skip litellm token estimation
+
+        calls = {"n": 0}
+
+        async def fake_stream(messages):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield {"_type": "collected", "text": "",
+                       "tool_calls": [{"id": "c1", "name": "bash",
+                                       "args": {"project_id": "p",
+                                                "command": "echo hi"}}],
+                       "usage": {"prompt_tokens": 100, "completion_tokens": 10,
+                                 "cache_hit_tokens": 60, "cache_miss_tokens": 40}}
+            else:
+                yield {"_type": "collected", "text": "done", "tool_calls": [],
+                       "usage": {"prompt_tokens": 200, "completion_tokens": 20,
+                                 "cache_hit_tokens": 150, "cache_miss_tokens": 50}}
+
+        agent._stream_llm = fake_stream
+        events = [e async for e in agent.chat("run echo", [], "p")]
+
+        assert calls["n"] == 2
+        assert db_manager.get_session_usage("sess-usage") == {
+            "prompt_tokens": 300, "completion_tokens": 30,
+            "cache_hit_tokens": 210, "cache_miss_tokens": 90}
+        # Final token_usage event carries display stats from the cumulative
+        # counters: hit 210/300, billed = 90 miss + 210/10 hit + 30 completion.
+        last_usage_event = [e for e in events if e["type"] == "token_usage"][-1]
+        assert last_usage_event["hit_ratio"] == 0.7
+        assert last_usage_event["billed_tokens"] == 141
+
+    async def test_missing_usage_is_not_persisted(self, coding_agent, mock_db):
+        async def fake_stream(messages):
+            yield {"_type": "collected", "text": "done", "tool_calls": [],
+                   "usage": {}}
+
+        coding_agent._stream_llm = fake_stream
+        async for _ in coding_agent.chat("hi", [], None):
+            pass
+        mock_db.accumulate_session_usage.assert_not_called()
+
+    def test_usage_stats_derivation(self):
+        assert usage_stats(None) == {}
+        assert usage_stats({}) == {}
+        assert usage_stats({"prompt_tokens": 0, "cache_hit_tokens": 5}) == {}
+        stats = usage_stats({"prompt_tokens": 1000, "completion_tokens": 50,
+                             "cache_hit_tokens": 800, "cache_miss_tokens": 200})
+        assert stats == {"hit_ratio": 0.8, "billed_tokens": 330}
+
+    async def test_compacter_call_usage_accumulates(self, db_manager, mock_ws,
+                                                    monkeypatch):
+        from types import SimpleNamespace
+        agent = MetaAgent(db_manager, mock_ws, owner_email="test@local",
+                          session_id="sess-compact", mode="coding")
+        resp = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=500, completion_tokens=40,
+                                  prompt_cache_hit_tokens=100,
+                                  prompt_cache_miss_tokens=400),
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content="summary text"))])
+
+        async def fake_acompletion(**kwargs):
+            return resp
+
+        import core.meta_agent as ma
+        monkeypatch.setattr(ma.litellm, "acompletion", fake_acompletion)
+
+        summary = await agent._summarize_chunk("[user] hello")
+        assert summary == "summary text"
+        assert db_manager.get_session_usage("sess-compact") == {
+            "prompt_tokens": 500, "completion_tokens": 40,
+            "cache_hit_tokens": 100, "cache_miss_tokens": 400}

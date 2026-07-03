@@ -14,7 +14,7 @@ from typing import AsyncGenerator
 import litellm
 import yaml
 
-from core.ai_router import _read_secret
+from core.ai_router import AIGateway, _read_secret
 
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
 _DEFAULT_CONFIG_PATH_V2 = "agent_configs/meta_conversation.yaml"
@@ -34,6 +34,22 @@ _MAX_READ_LINES = 2000
 _BINARY_SUFFIXES = {".pyc", ".pyo", ".so", ".o", ".bin", ".png", ".jpg",
                     ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".woff",
                     ".woff2", ".ttf", ".eot"}
+
+
+def usage_stats(totals: dict | None) -> dict:
+    """Display stats derived from cumulative real-usage counters.
+
+    billed_tokens uses the DeepSeek pricing shape: a cache hit bills at
+    ~1/10th of a miss, completion tokens at full price. Empty dict when no
+    usage has been recorded (provider sent none, or pre-telemetry session).
+    """
+    t = totals or {}
+    prompt = t.get("prompt_tokens", 0)
+    if not prompt:
+        return {}
+    hit = t.get("cache_hit_tokens", 0)
+    billed = t.get("cache_miss_tokens", 0) + hit / 10 + t.get("completion_tokens", 0)
+    return {"hit_ratio": round(hit / prompt, 4), "billed_tokens": int(billed)}
 
 # ── System Prompt ──────────────────────────────────────────────────
 
@@ -882,6 +898,10 @@ class MetaAgent:
         # Per-request on purpose: after a budget-pause resume the model must
         # re-read before editing (files may have changed).
         self._files_read: set = set()
+        # In-memory mirror of the session's cumulative real API usage
+        # (sessions.usage_json). Loaded lazily at chat start, updated on every
+        # accumulate so token_usage events can carry hit_ratio/billed_tokens.
+        self._usage_totals: dict | None = None
 
         cfg = _load_meta_agent_config()
         raw_model = cfg.get("model", "deepseek/deepseek-v4-flash")
@@ -1019,6 +1039,11 @@ class MetaAgent:
                 total_tokens = self.db.get_session_total_tokens(self.session_id) or 0
             except Exception:
                 pass
+        if self.session_id and self._usage_totals is None:
+            try:
+                self._usage_totals = self.db.get_session_usage(self.session_id)
+            except Exception:
+                pass
         try:
             while tool_turns < self.max_tool_turns:
                 compacted = await self._maybe_compact(messages)
@@ -1035,7 +1060,8 @@ class MetaAgent:
                        "tokens": turn_tokens,
                        "total_tokens": total_tokens,
                        "limit": limit,
-                       "mode": self.mode}
+                       "mode": self.mode,
+                       **usage_stats(self._usage_totals)}
 
                 full_text = ""
                 tool_calls = []
@@ -1046,6 +1072,7 @@ class MetaAgent:
                     elif event["_type"] == "collected":
                         full_text = event["text"]
                         tool_calls = event["tool_calls"]
+                        self._persist_usage(event.get("usage"))
 
                 if not tool_calls:
                     # Final token usage (messages unchanged since we counted)
@@ -1054,7 +1081,8 @@ class MetaAgent:
                            "tokens": turn_tokens,
                            "total_tokens": total_tokens,
                            "limit": limit,
-                           "mode": self.mode}
+                           "mode": self.mode,
+                           **usage_stats(self._usage_totals)}
                     yield {"type": "done", "message": {"role": "assistant", "content": full_text}}
                     return
 
@@ -1138,6 +1166,21 @@ class MetaAgent:
         except Exception as e:
             self._log_error(f"transcript persistence failed: {e}")
 
+    def _persist_usage(self, usage: dict | None) -> None:
+        """Accumulate one LLM call's real API usage onto the session (best-effort).
+
+        Unlike _persist_token_counts (estimated context-window size), these are
+        the provider-reported counters (prompt/completion/cache hit+miss), so a
+        session's billed-equivalent cost is comparable with DPE skillflow_trace.
+        """
+        if not self.session_id or not usage:
+            return
+        try:
+            self._usage_totals = self.db.accumulate_session_usage(
+                self.session_id, usage)
+        except Exception as e:
+            self._log_error(f"usage persistence failed: {e}")
+
     def _persist_token_counts(self, turn_tokens: int, total_tokens: int) -> None:
         """Persist both per-turn window and cumulative counter (best-effort, coding mode only)."""
         if self.mode != "coding" or not self.session_id:
@@ -1220,6 +1263,7 @@ class MetaAgent:
             kwargs["api_key"] = api_key
         try:
             resp = await litellm.acompletion(**kwargs)
+            self._persist_usage(AIGateway._extract_usage(resp))
             content = resp.choices[0].message.content
             return content.strip() if content else None
         except Exception as e:
@@ -1285,6 +1329,9 @@ class MetaAgent:
             "messages": self._clean_msgs(messages),
             "tools": tools,
             "stream": True,
+            # Real usage telemetry: the provider attaches a usage payload to
+            # the final stream chunk (empty choices) when asked.
+            "stream_options": {"include_usage": True},
             "temperature": 0.3,
         }
         if self.api_base:
@@ -1307,8 +1354,13 @@ class MetaAgent:
 
         full_text = ""
         tool_calls_map: dict[int, dict] = {}
+        usage: dict = {}
 
         async for chunk in response:
+            if getattr(chunk, "usage", None):
+                usage = AIGateway._extract_usage(chunk) or usage
+            if not chunk.choices:
+                continue  # usage-only final chunk
             choice = chunk.choices[0]
             delta = choice.delta
 
@@ -1342,7 +1394,8 @@ class MetaAgent:
                 args = {}
             tool_calls.append({"id": tc["id"], "name": tc["name"], "args": args})
 
-        yield {"_type": "collected", "text": full_text, "tool_calls": tool_calls}
+        yield {"_type": "collected", "text": full_text, "tool_calls": tool_calls,
+               "usage": usage}
 
     def _build_assistant_msg(self, text: str, tool_calls: list[dict]) -> dict:
         msg = {"role": "assistant", "content": text or None}

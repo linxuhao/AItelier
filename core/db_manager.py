@@ -249,6 +249,12 @@ class DBManager:
                 conn.execute("ALTER TABLE sessions ADD COLUMN token_window INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            # Migration: cumulative real API usage (prompt/completion/cache
+            # tokens as reported by the provider) — JSON counters blob.
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN usage_json TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             conn.commit()
 
@@ -1855,6 +1861,38 @@ class DBManager:
             conn.execute("UPDATE sessions SET token_window = ? WHERE id = ?",
                          (token_window, session_id))
             conn.commit()
+
+    _SESSION_USAGE_KEYS = ("prompt_tokens", "completion_tokens",
+                           "cache_hit_tokens", "cache_miss_tokens")
+
+    def get_session_usage(self, session_id: str) -> dict:
+        """Cumulative real API usage counters for a session (zeros if none)."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT usage_json FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+        raw = row["usage_json"] if row else None
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            data = {}
+        return {k: int(data.get(k) or 0) for k in self._SESSION_USAGE_KEYS}
+
+    def accumulate_session_usage(self, session_id: str, usage: dict) -> dict:
+        """Add one LLM call's usage counters onto the session's running totals.
+
+        Returns the new totals so callers can mirror them in memory."""
+        totals = self.get_session_usage(session_id)
+        for k in self._SESSION_USAGE_KEYS:
+            v = usage.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                totals[k] += int(v)
+        with self.get_connection() as conn:
+            conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
+            conn.execute("UPDATE sessions SET usage_json = ? WHERE id = ?",
+                         (json.dumps(totals), session_id))
+            conn.commit()
+        return totals
 
     def list_chat_sessions(self, project_id: str | None = None, limit: int = 200) -> list[dict]:
         """List chat sessions with message count and last message preview.

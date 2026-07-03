@@ -245,12 +245,14 @@ def get_chat_history(
         c = m.get("content") or ""
         token_count += len(c) // 4
     mode = db.get_session_mode(session_id)
+    total_tokens = db.get_session_total_tokens(session_id) if mode == "coding" else 0
     return {
         "session_id": session_id,
         "mode": mode,
         "messages": messages,
         "token_count": token_count,
         "token_limit": 200_000 if mode == "coding" else 0,
+        "total_tokens": total_tokens,
     }
 
 

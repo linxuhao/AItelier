@@ -239,6 +239,11 @@ class DBManager:
                 conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT 'butler'")
             except sqlite3.OperationalError:
                 pass
+            # Migration: cumulative token counter persisted across chat() calls.
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN total_tokens INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
             conn.commit()
 
@@ -1811,6 +1816,23 @@ class DBManager:
                 "SELECT mode FROM sessions WHERE id = ?", (session_id,)
             ).fetchone()
             return (row["mode"] if row and row["mode"] else "butler")
+
+    def get_session_total_tokens(self, session_id: str) -> int:
+        """Return the session's accumulated total token count (default 0)."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT total_tokens FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            val = (row["total_tokens"] if row else 0)
+            return val if val else 0
+
+    def set_session_total_tokens(self, session_id: str, total_tokens: int):
+        """Persist the cumulative token counter for this session."""
+        with self.get_connection() as conn:
+            conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
+            conn.execute("UPDATE sessions SET total_tokens = ? WHERE id = ?",
+                         (total_tokens, session_id))
+            conn.commit()
 
     def list_chat_sessions(self, project_id: str | None = None, limit: int = 200) -> list[dict]:
         """List chat sessions with message count and last message preview.

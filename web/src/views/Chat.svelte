@@ -210,6 +210,9 @@
         tokenCount = response.token_count;
         tokenLimit = (response.token_limit as number) || 0;
         tokenMode = (response.mode as string) || 'butler';
+        if (typeof response.total_tokens === 'number') {
+          totalTokens = response.total_tokens;
+        }
       }
 
       // Build dedup key set from existing history

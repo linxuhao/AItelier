@@ -896,7 +896,15 @@ class MetaAgent:
 
         tool_turns = 0
         consecutive_errors = 0  # AT-28: track consecutive tool errors for recovery
-        total_tokens = 0        # cumulative tokens sent to the LLM across all turns
+        # Cumulative tokens persisted across chat() calls (survives "continue"
+        # and page reload). Load the session's running total, then add each
+        # turn's context-window count to it.
+        total_tokens = 0
+        if self.mode == "coding" and self.session_id:
+            try:
+                total_tokens = self.db.get_session_total_tokens(self.session_id) or 0
+            except Exception:
+                pass
         try:
             while tool_turns < self.max_tool_turns:
                 compacted = await self._maybe_compact(messages)
@@ -907,6 +915,7 @@ class MetaAgent:
 
                 turn_tokens = self._count_tokens(messages)
                 total_tokens += turn_tokens
+                self._persist_total_tokens(total_tokens)
                 limit = self.token_window if self.mode == "coding" else 0
                 yield {"type": "token_usage",
                        "tokens": turn_tokens,
@@ -926,6 +935,7 @@ class MetaAgent:
 
                 if not tool_calls:
                     # Final token usage (messages unchanged since we counted)
+                    self._persist_total_tokens(total_tokens)
                     yield {"type": "token_usage",
                            "tokens": turn_tokens,
                            "total_tokens": total_tokens,
@@ -1013,6 +1023,15 @@ class MetaAgent:
                 message["_row_id"] = rid
         except Exception as e:
             self._log_error(f"transcript persistence failed: {e}")
+
+    def _persist_total_tokens(self, total_tokens: int) -> None:
+        """Persist the cumulative token counter (best-effort, coding mode only)."""
+        if self.mode != "coding" or not self.session_id:
+            return
+        try:
+            self.db.set_session_total_tokens(self.session_id, total_tokens)
+        except Exception as e:
+            self._log_error(f"total_tokens persistence failed: {e}")
 
     # ── Transcript condenser (coding mode) ─────────────────────────
     # When the assembled context crosses 70% of token_window, the oldest

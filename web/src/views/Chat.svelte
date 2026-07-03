@@ -89,7 +89,7 @@
   let connected = $derived($connectionStore.connectionOk);
   let projectId = $derived(params.id || '');
 
-  let inputDisabled = $derived(!connected || sending || agentStreaming);
+  let inputDisabled = $derived(sending || agentStreaming);
   let canSend = $derived(!sending && !agentStreaming && draft.trim().length > 0 && connected);
   let inputPlaceholder = $derived(
     !connected ? 'Chat unavailable — reconnecting…'
@@ -687,71 +687,89 @@
     };
     budgetPaused = false;
 
-    const controller = new AbortController();
-    abortController = controller;
-
     agentStreaming = true;
     currentAgentText = '';
 
-    try {
-      const response = await fetch('/api/agent/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+    let lastError: unknown = null;
 
-      if (!response.ok) {
-        throw new Error('HTTP ' + response.status + ': ' + response.statusText);
-      }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const controller = new AbortController();
+      abortController = controller;
 
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      try {
+        const response = await fetch('/api/agent/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'text/event-stream',
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
 
-      while (true) {
-        const result = await reader.read();
-        if (result.done) {
-          // Finalise if no done event was processed
-          if (currentAgentText.trim()) {
-            const lastMsg = messages[messages.length - 1];
-            if (lastMsg && lastMsg.role === 'agent') {
-              messages = [...messages.slice(0, -1), { role: 'agent', content: currentAgentText }];
+        if (!response.ok) {
+          throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+        }
+
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const result = await reader.read();
+          if (result.done) {
+            // Finalise if no done event was processed
+            if (currentAgentText.trim()) {
+              const lastMsg = messages[messages.length - 1];
+              if (lastMsg && lastMsg.role === 'agent') {
+                messages = [...messages.slice(0, -1), { role: 'agent', content: currentAgentText }];
+              }
+              history = [...history, { role: 'assistant', content: currentAgentText }];
             }
-            history = [...history, { role: 'assistant', content: currentAgentText }];
+            break;
           }
-          break;
+
+          buffer += decoder.decode(result.value, { stream: true });
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line || line.indexOf('data: ') !== 0) continue;
+            const jsonStr = line.slice(6);
+            try {
+              const event = JSON.parse(jsonStr);
+              _processEvent(event);
+            } catch {
+              // Skip unparseable events
+            }
+          }
         }
 
-        buffer += decoder.decode(result.value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line || line.indexOf('data: ') !== 0) continue;
-          const jsonStr = line.slice(6);
-          try {
-            const event = JSON.parse(jsonStr);
-            _processEvent(event);
-          } catch {
-            // Skip unparseable events
-          }
+        lastError = null; // success
+        break;
+      } catch (err: unknown) {
+        lastError = err;
+        if (err instanceof Error && err.name === 'AbortError') {
+          break; // user-initiated abort — don't retry
         }
+        // Retry once after a short delay for transient network errors
+        if (attempt === 0 && connected) {
+          messages = [...messages, { role: 'system', content: 'Stream interrupted — retrying…' }];
+          await new Promise(r => setTimeout(r, 1500));
+          continue;
+        }
+        break; // second failure, or disconnected — stop
       }
-    } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        return;
-      }
-      messages = [...messages, { role: 'error', content: 'Connection error: ' + ((err as Error).message || 'Failed to reach agent') }];
-    } finally {
-      sending = false;
-      agentStreaming = false;
-      abortController = null;
     }
+
+    if (lastError && !((lastError instanceof Error) && (lastError as Error).name === 'AbortError')) {
+      messages = [...messages, { role: 'error', content: 'Connection error: ' + ((lastError as Error).message || 'Failed to reach agent') }];
+    }
+
+    sending = false;
+    agentStreaming = false;
+    abortController = null;
   }
 
   function _abortStream(): void {
@@ -1033,19 +1051,25 @@
   {/if}
 
   <!-- Token usage bar -->
-  {#if tokenCount > 0}
-    {@const pct = tokenLimit > 0 ? Math.min(100, Math.round((tokenCount / tokenLimit) * 100)) : 0}
+  {#if totalTokens > 0 || tokenCount > 0}
+    {@const pct = tokenCount > 0 && tokenLimit > 0 ? Math.min(100, Math.round((tokenCount / tokenLimit) * 100)) : 0}
     <div class="token-bar">
-      <div class="token-bar-fill" style="width: {pct}%"></div>
+      {#if tokenCount > 0}
+        <div class="token-bar-fill" style="width: {pct}%"></div>
+      {/if}
       <span class="token-bar-label">
         {#if totalTokens > 0}
           <span class="token-stat">cumulated {_formatTokens(totalTokens)}</span>
-          <span class="token-sep">·</span>
         {/if}
-        <span class="token-stat">window {_formatTokens(tokenCount)}{tokenLimit > 0 ? ' / ' + _formatTokens(tokenLimit) : ''}</span>
-        {#if pct > 0}
-          <span class="token-sep">·</span>
-          <span class="token-stat">{pct}%</span>
+        {#if tokenCount > 0}
+          {#if totalTokens > 0}
+            <span class="token-sep">·</span>
+          {/if}
+          <span class="token-stat">window {_formatTokens(tokenCount)}{tokenLimit > 0 ? ' / ' + _formatTokens(tokenLimit) : ''}</span>
+          {#if pct > 0}
+            <span class="token-sep">·</span>
+            <span class="token-stat">{pct}%</span>
+          {/if}
         {/if}
         {#if tokenMode === 'coding'}
           <span class="token-sep">·</span>

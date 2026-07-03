@@ -244,6 +244,11 @@ class DBManager:
                 conn.execute("ALTER TABLE sessions ADD COLUMN total_tokens INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            # Migration: per-turn context-window token count for history restore.
+            try:
+                conn.execute("ALTER TABLE sessions ADD COLUMN token_window INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
             conn.commit()
 
@@ -1832,6 +1837,23 @@ class DBManager:
             conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
             conn.execute("UPDATE sessions SET total_tokens = ? WHERE id = ?",
                          (total_tokens, session_id))
+            conn.commit()
+
+    def get_session_token_window(self, session_id: str) -> int:
+        """Return the last persisted per-turn context-window token count (default 0)."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT token_window FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            val = (row["token_window"] if row else 0)
+            return val if val else 0
+
+    def set_session_token_window(self, session_id: str, token_window: int):
+        """Persist the latest per-turn context-window token count."""
+        with self.get_connection() as conn:
+            conn.execute("INSERT OR IGNORE INTO sessions (id) VALUES (?)", (session_id,))
+            conn.execute("UPDATE sessions SET token_window = ? WHERE id = ?",
+                         (token_window, session_id))
             conn.commit()
 
     def list_chat_sessions(self, project_id: str | None = None, limit: int = 200) -> list[dict]:

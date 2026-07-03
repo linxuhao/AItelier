@@ -1003,7 +1003,7 @@ class MetaAgent:
 
                 turn_tokens = self._count_tokens(messages)
                 total_tokens += turn_tokens
-                self._persist_total_tokens(total_tokens)
+                self._persist_token_counts(turn_tokens, total_tokens)
                 limit = self.token_window if self.mode == "coding" else 0
                 yield {"type": "token_usage",
                        "tokens": turn_tokens,
@@ -1023,7 +1023,7 @@ class MetaAgent:
 
                 if not tool_calls:
                     # Final token usage (messages unchanged since we counted)
-                    self._persist_total_tokens(total_tokens)
+                    self._persist_token_counts(turn_tokens, total_tokens)
                     yield {"type": "token_usage",
                            "tokens": turn_tokens,
                            "total_tokens": total_tokens,
@@ -1112,14 +1112,15 @@ class MetaAgent:
         except Exception as e:
             self._log_error(f"transcript persistence failed: {e}")
 
-    def _persist_total_tokens(self, total_tokens: int) -> None:
-        """Persist the cumulative token counter (best-effort, coding mode only)."""
+    def _persist_token_counts(self, turn_tokens: int, total_tokens: int) -> None:
+        """Persist both per-turn window and cumulative counter (best-effort, coding mode only)."""
         if self.mode != "coding" or not self.session_id:
             return
         try:
+            self.db.set_session_token_window(self.session_id, turn_tokens)
             self.db.set_session_total_tokens(self.session_id, total_tokens)
         except Exception as e:
-            self._log_error(f"total_tokens persistence failed: {e}")
+            self._log_error(f"token persistence failed: {e}")
 
     # ── Transcript condenser (coding mode) ─────────────────────────
     # When the assembled context crosses 70% of token_window, the oldest

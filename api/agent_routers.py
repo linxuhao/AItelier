@@ -245,19 +245,17 @@ def get_chat_history(
     # sessions render agent-answer-before-question while live chat is correct.
     messages = db.get_chat_history_by_session(session_id, limit=100)
 
-    # Restore token usage from session. For coding mode total_tokens is the
-    # cumulative sum of per-turn context-window tokens persisted by the agent.
-    # Show it as both the "window" (last known) and "cumulated" display value
-    # — the per-turn value from the last SSE event isn't persisted separately.
-    # The history endpoint's token_count is total_tokens to keep it consistent
-    # with the live SSE stream (no misleading rough char-count estimates).
+    # Restore token usage from session. total_tokens is the cumulative sum
+    # of per-turn context-window tokens. token_window is the last per-turn
+    # count — used to restore the "window" bar after a page refresh.
     mode = db.get_session_mode(session_id)
     total_tokens = db.get_session_total_tokens(session_id) if mode == "coding" else 0
+    token_window = db.get_session_token_window(session_id) if mode == "coding" else 0
     return {
         "session_id": session_id,
         "mode": mode,
         "messages": messages,
-        "token_count": total_tokens,
+        "token_count": token_window,
         "token_limit": _TOKEN_WINDOW,
         "total_tokens": total_tokens,
     }

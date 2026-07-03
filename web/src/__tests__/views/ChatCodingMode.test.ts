@@ -155,3 +155,59 @@ describe('Chat coding mode', () => {
     });
   });
 });
+
+describe('Chat cache-usage stats', () => {
+  it('token_usage event renders cache ratio and billed tokens in the bar', async () => {
+    fetchSpy.mockResolvedValue(sseResponse([
+      { type: 'token_usage', tokens: 500, total_tokens: 500, limit: 1000,
+        mode: 'coding', hit_ratio: 0.7, billed_tokens: 141000 },
+      { type: 'done', message: { role: 'assistant', content: 'ok' } },
+    ]));
+    const { container } = render(Chat, { props: { params: {} } });
+    await waitFor(() => {
+      expect(container.querySelector('#chat-input-field')).toBeTruthy();
+    });
+
+    await sendMessage(container, 'hello');
+    await waitFor(() => {
+      const label = container.querySelector('.token-bar-label');
+      expect(label?.textContent).toContain('cache 70%');
+      expect(label?.textContent).toContain('billed 141.0k');
+    });
+  });
+
+  it('restores cache stats from chat history even with zero token counts', async () => {
+    window.localStorage.setItem('aitelier.chat.sessionId', 'sess-9');
+    mockApi.getChatHistory.mockResolvedValue({
+      session_id: 'sess-9', mode: 'butler',
+      messages: [{ role: 'user', content: 'earlier' }],
+      token_count: 0, token_limit: 200000, total_tokens: 0,
+      hit_ratio: 0.8, billed_tokens: 33000,
+    });
+    const { container } = render(Chat, { props: { params: {} } });
+    await waitFor(() => {
+      const label = container.querySelector('.token-bar-label');
+      expect(label?.textContent).toContain('cache 80%');
+      expect(label?.textContent).toContain('billed 33.0k');
+    });
+  });
+
+  it('bar omits cache stats when no usage recorded', async () => {
+    fetchSpy.mockResolvedValue(sseResponse([
+      { type: 'token_usage', tokens: 500, total_tokens: 500, limit: 1000,
+        mode: 'coding' },
+      { type: 'done', message: { role: 'assistant', content: 'ok' } },
+    ]));
+    const { container } = render(Chat, { props: { params: {} } });
+    await waitFor(() => {
+      expect(container.querySelector('#chat-input-field')).toBeTruthy();
+    });
+
+    await sendMessage(container, 'hello');
+    await waitFor(() => {
+      const label = container.querySelector('.token-bar-label');
+      expect(label?.textContent).toContain('window');
+      expect(label?.textContent).not.toContain('cache');
+    });
+  });
+});

@@ -12,7 +12,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
-from core.meta_agent import MetaAgent
+from core.meta_agent import MetaAgent, usage_stats
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from core.scheduler import wake_scheduler
@@ -251,6 +251,7 @@ def get_chat_history(
     mode = db.get_session_mode(session_id)
     total_tokens = db.get_session_total_tokens(session_id) if mode == "coding" else 0
     token_window = db.get_session_token_window(session_id) if mode == "coding" else 0
+    usage = usage_stats(db.get_session_usage(session_id))
     return {
         "session_id": session_id,
         "mode": mode,
@@ -258,6 +259,8 @@ def get_chat_history(
         "token_count": token_window,
         "token_limit": _TOKEN_WINDOW,
         "total_tokens": total_tokens,
+        "hit_ratio": usage.get("hit_ratio", 0),
+        "billed_tokens": usage.get("billed_tokens", 0),
     }
 
 

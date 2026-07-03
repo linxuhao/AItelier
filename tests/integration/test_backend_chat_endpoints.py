@@ -203,6 +203,29 @@ class TestGetChatHistoryAPI:
         assert "content" in msg
         assert "created_at" in msg
 
+    def test_usage_stats_in_response(self, client: TestClient,
+                                     db_manager: DBManager):
+        """Cumulative real usage surfaces as hit_ratio + billed_tokens."""
+        _seed_session(db_manager, "usage-sess", "proj-u", [("user", "Hello")])
+        db_manager.accumulate_session_usage("usage-sess", {
+            "prompt_tokens": 1000, "completion_tokens": 50,
+            "cache_hit_tokens": 800, "cache_miss_tokens": 200})
+
+        resp = client.get("/api/agent/chat/history?session_id=usage-sess")
+        data = resp.json()
+        assert data["hit_ratio"] == 0.8
+        # billed-equivalent = miss + hit/10 + completion
+        assert data["billed_tokens"] == 200 + 80 + 50
+
+    def test_usage_stats_zero_when_none_recorded(self, client: TestClient,
+                                                 db_manager: DBManager):
+        """Sessions with no recorded usage report zeros, not garbage."""
+        _seed_session(db_manager, "nousage-sess", "proj-u", [("user", "Hi")])
+        resp = client.get("/api/agent/chat/history?session_id=nousage-sess")
+        data = resp.json()
+        assert data["hit_ratio"] == 0
+        assert data["billed_tokens"] == 0
+
 
 class TestListSessionsAPI:
     """GET /api/agent/sessions"""

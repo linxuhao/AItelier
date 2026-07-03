@@ -127,6 +127,10 @@
   let totalTokens = $state(0);
   let tokenLimit = $state(0);
   let tokenMode = $state('butler');
+  // Cumulative real API usage (provider-reported): cache hit ratio and
+  // billed-equivalent tokens (cache_miss + cache_hit/10 + completion).
+  let hitRatio = $state(0);
+  let billedTokens = $state(0);
 
   function _formatTokens(n: number): string {
     if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -220,6 +224,8 @@
           totalTokens = response.total_tokens;
         }
       }
+      if (typeof response.hit_ratio === 'number') hitRatio = response.hit_ratio;
+      if (typeof response.billed_tokens === 'number') billedTokens = response.billed_tokens;
 
       // Build dedup key set from existing history
       const existingKeys = new Set<string>();
@@ -299,6 +305,8 @@
     tokenCount = 0;
     totalTokens = 0;
     tokenLimit = 0;
+    hitRatio = 0;
+    billedTokens = 0;
     sessionId = newSessionId;
     _storeSessionId(newSessionId);
     selectedSessionId = newSessionId;
@@ -314,6 +322,8 @@
     tokenCount = 0;
     totalTokens = 0;
     tokenLimit = 0;
+    hitRatio = 0;
+    billedTokens = 0;
     await _initSession(true);
     selectedSessionId = sessionId;
     await _loadSessionList();
@@ -621,10 +631,14 @@
         const total = event.total_tokens as number | undefined;
         const limit = event.limit as number | undefined;
         const mode = event.mode as string | undefined;
+        const ratio = event.hit_ratio as number | undefined;
+        const billed = event.billed_tokens as number | undefined;
         if (tokens !== undefined) tokenCount = tokens;
         if (total !== undefined) totalTokens = total;
         if (limit !== undefined) tokenLimit = limit;
         if (mode !== undefined) tokenMode = mode;
+        if (ratio !== undefined) hitRatio = ratio;
+        if (billed !== undefined) billedTokens = billed;
         break;
       }
 
@@ -1051,7 +1065,7 @@
   {/if}
 
   <!-- Token usage bar -->
-  {#if totalTokens > 0 || tokenCount > 0}
+  {#if totalTokens > 0 || tokenCount > 0 || billedTokens > 0}
     {@const pct = tokenCount > 0 && tokenLimit > 0 ? Math.min(100, Math.round((tokenCount / tokenLimit) * 100)) : 0}
     <div class="token-bar">
       {#if tokenCount > 0}
@@ -1070,6 +1084,12 @@
             <span class="token-sep">·</span>
             <span class="token-stat">{pct}%</span>
           {/if}
+        {/if}
+        {#if billedTokens > 0}
+          <span class="token-sep">·</span>
+          <span class="token-stat">cache {Math.round(hitRatio * 100)}%</span>
+          <span class="token-sep">·</span>
+          <span class="token-stat">billed {_formatTokens(billedTokens)}</span>
         {/if}
         {#if tokenMode === 'coding'}
           <span class="token-sep">·</span>

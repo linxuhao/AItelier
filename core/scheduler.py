@@ -32,6 +32,11 @@ _HUNG_WARNING_COOLDOWN = 120  # seconds between repeated warnings for same step
 # Module-level state: track last warning time to avoid log spam
 _hung_warnings: dict[tuple, float] = {}  # (run_id, step_id, step_instance_id) -> last_warn_time
 
+# Checkpoint SSE emission guard: track emitted (run_id, step_id) pairs so each
+# pause emits exactly once. Cleared when the run leaves "paused", so rejection
+# loop-backs and task-goal loops re-pausing the same step re-emit.
+_checkpoint_emitted: set[tuple] = set()
+
 # ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause
 # is pinned). `_odbg` (shared with aitelier/runner.py via core.orphan_dbg) mirrors
 # every line to stdout AND a durable ~/.AItelier/orphan_dbg.log.
@@ -752,6 +757,23 @@ async def _run_skillflow_tick(project_id: str, loop):
     _odbg(f"{_cid} tick END step={claimed.step_id} confirmed={_executed}")
 
 
+def _emit_checkpoint_sse(project_id: str, run_id: str, step_id: str, label: str):
+    """Push a checkpoint_reached SSE event to the global stream."""
+    try:
+        from api.sse_manager import stream_manager
+        payload = json.dumps({
+            "type": "checkpoint_reached",
+            "project_id": project_id,
+            "run_id": run_id,
+            "step_id": step_id,
+            "label": label,
+        })
+        loop = asyncio.get_event_loop()
+        loop.create_task(stream_manager.push_log("__global__", payload))
+    except Exception:
+        pass  # Best-effort; checkpoint polling via GET still works
+
+
 def _sync_project_status_to_db(project_id: str):
     """Write skillflow run status back to AItelier DB so the UI is not stale.
 
@@ -791,20 +813,35 @@ def _sync_project_status_to_db(project_id: str):
             # current_node is the step AFTER the checkpoint (e.g. the review step).
             # Find the actual checkpoint step among completed steps to get its label.
             label = current_step
+            checkpoint_step_id = ""
             if resolver:
                 for s in reversed(steps):
                     if s["status"] == "completed":
                         node = resolver.get_node(s["step_id"])
                         if node and node.checkpoint:
                             label = node.checkpoint_label or s["step_id"]
+                            checkpoint_step_id = s["step_id"]
                             break
             status = f"checkpoint:{label}"
+
+            # Emit checkpoint_reached SSE (once per pause; cleared on resume)
+            key = (run["id"], checkpoint_step_id or label)
+            if checkpoint_step_id and key not in _checkpoint_emitted:
+                _checkpoint_emitted.add(key)
+                _emit_checkpoint_sse(project_id, run["id"], checkpoint_step_id, label)
         elif status == "running" and current_step:
             # AT-15: use fine-grained step_id so the dashboard shows
             # "▶ Implementer" instead of "▶ PM" for all task-loop steps.
             status = f"running:{current_step}"
         elif status == "failed":
             status = f"failed:{run.get('error_reason', 'unknown')[:80]}"
+
+        # Clear checkpoint emission keys when run leaves paused — enables
+        # re-emission on the NEXT pause (e.g. rejection loop-back, task loop).
+        if run["status"] != "paused":
+            to_drop = [k for k in _checkpoint_emitted if k[0] == run["id"]]
+            for k in to_drop:
+                _checkpoint_emitted.discard(k)
 
         # Push step + status into aitelier.db so the UI sees live progress.
         # AT-15: use fine-grained step_id (e.g. "t_impl") not coarse ("3").

@@ -4,6 +4,7 @@
   // workspace <details> sections; lazy-loads on first expand and opens file
   // contents in a dialog.
   import { workspaceTree, workspaceFile } from '../lib/api';
+  import { renderMarkdown } from '../lib/markdown';
 
   let {
     projectId,
@@ -28,6 +29,8 @@
   let fileContent = $state('');
   let fileTruncated = $state(false);
   let fileTotal = $state(0);
+  let isMarkdown = $state(false);
+  let isBinary = $state(false);
 
   async function loadTree(): Promise<void> {
     if (loaded || loading || !projectId) return;
@@ -52,10 +55,25 @@
     filePath = path;
     fileContent = '';
     fileTruncated = false;
+    isMarkdown = false;
+    isBinary = false;
     dialogOpen = true;
     try {
       const data = await workspaceFile(projectId, path, root);
-      fileContent = (data.content as string) ?? '';
+      const raw = (data.content as string) ?? null;
+      // Binary guard: null content or contains null bytes
+      if (raw === null || (typeof raw === 'string' && raw.indexOf('\x00') !== -1)) {
+        isBinary = true;
+        fileContent = 'Cannot display binary content';
+        return;
+      }
+      // Detect markdown for rendering
+      if (path.toLowerCase().endsWith('.md')) {
+        isMarkdown = true;
+        fileContent = raw || '';
+      } else {
+        fileContent = raw || '';
+      }
       fileTruncated = !!data.truncated;
       fileTotal = (data.total_lines as number) || 0;
     } catch (err: unknown) {
@@ -159,7 +177,13 @@
         <code>{filePath}</code>
         <button class="ws-close" onclick={() => (dialogOpen = false)} aria-label="Close">&times;</button>
       </header>
-      <pre class="ws-file-content">{fileContent}</pre>
+      {#if isBinary}
+        <p class="ws-muted">Cannot display binary content</p>
+      {:else if isMarkdown}
+        <div class="ws-file-content ws-md-content">{@html renderMarkdown(fileContent)}</div>
+      {:else}
+        <pre class="ws-file-content"><code>{fileContent}</code></pre>
+      {/if}
       {#if fileTruncated}
         <footer class="ws-muted">Truncated — {fileTotal} lines total.</footer>
       {/if}
@@ -267,5 +291,10 @@
     font-size: 0.78rem;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .ws-md-content {
+    line-height: 1.6;
+    font-size: 0.9rem;
+    white-space: normal;
   }
 </style>

@@ -1,5 +1,5 @@
-<script>
-  import { onMount } from 'svelte';
+<script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import Router from 'svelte-spa-router';
 
   import AppBar from './views/AppBar.svelte';
@@ -16,10 +16,10 @@
   import { connectionStore } from './stores/connection';
   import { projectStore } from './stores/project';
   import { notificationStore } from './stores/notifications';
-  import { checkpointStore } from './stores/checkpoint';
+  import { checkpointStore, showCheckpoint } from './stores/checkpoint';
 
-  import { whoami } from './lib/api';
-  import { connect } from './lib/sse';
+  import { whoami, getCheckpoint } from './lib/api';
+  import { connect, on, off } from './lib/sse';
 
   const routes = {
     '/': Dashboard,
@@ -32,6 +32,21 @@
     '/projects/:id/trace/:runId': Trace,
     '/tracking': Tracking,
   };
+
+  // SSE handler for checkpoint_reached: auto-open the CheckpointModal.
+  // Skip "gather" (meta-conversation checkpoint handled in-chat by the butler).
+  function _onCheckpointReached(event: Record<string, unknown>): void {
+    const stepId = (event.step_id as string) || '';
+    if (stepId === 'gather') return;
+    const pid = (event.project_id as string) || '';
+    if (!pid) return;
+    // Fetch full checkpoint data, then show the modal
+    getCheckpoint(pid).then((data) => {
+      if (data && (data as Record<string, unknown>).checkpoint) {
+        showCheckpoint(pid, data as Record<string, unknown>);
+      }
+    }).catch(() => { /* stale checkpoint, ignore */ });
+  }
 
   onMount(async () => {
     // Fetch auth state on startup
@@ -52,6 +67,13 @@
 
     // Connect SSE event stream
     connect();
+
+    // Register checkpoint auto-open handler
+    on('checkpoint_reached', _onCheckpointReached);
+  });
+
+  onDestroy(() => {
+    off('checkpoint_reached', _onCheckpointReached);
   });
 </script>
 

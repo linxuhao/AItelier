@@ -7,6 +7,8 @@
 
 import json
 import logging
+from pathlib import Path
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
@@ -20,6 +22,12 @@ from api.auth import CurrentUser, get_optional_user
 router = APIRouter(prefix="/api/agent", tags=["Meta Agent"])
 
 _log = logging.getLogger("aitelier.agent_chat")
+
+# Load agent token_window from the same config MetaAgent uses (meta_agent.py:871).
+# This lets the frontend render a real usage bar on history load.
+_cfg_path = Path(__file__).resolve().parent.parent / "agent_configs" / "meta_conversation.yaml"
+_cfg = yaml.safe_load(_cfg_path.read_text()) if _cfg_path.is_file() else {}
+_TOKEN_WINDOW = _cfg.get("token_window", 200_000)
 
 
 class AgentChatRequest(BaseModel):
@@ -251,7 +259,7 @@ def get_chat_history(
         "mode": mode,
         "messages": messages,
         "token_count": token_count,
-        "token_limit": 200_000 if mode == "coding" else 0,
+        "token_limit": _TOKEN_WINDOW,
         "total_tokens": total_tokens,
     }
 

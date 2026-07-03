@@ -1,0 +1,60 @@
+# configs/coding_task.yaml
+# Plan-gated coding task, driven in RUNNER MODE by the butler itself.
+#
+# Unlike scheduler-driven configs (stateless per-step agents), the butler is
+# the persistent driving agent: skillflow owns the control flow (transitions,
+# validation, the plan checkpoint) while the butler does each step's work with
+# its own context and coding tools, via the coding_task_* butler tools
+# (in-process SkillTool from skillflow's skill_runner plugin).
+#
+# The plan checkpoint is ENGINE state: after the plan is submitted the run is
+# paused and skillflow will not hand out the implement step until the user
+# approves — ask-before-acting enforced by the graph, not the prompt.
+
+name: "coding_task"
+description: "Plan-gated coding task: plan → user approval → implement"
+
+x-aitelier:
+  label: "Coding Task"
+  scheduler_owned: false          # driven by the butler via SkillTool, never the poller
+  seed_file: "task.md"
+  output_step: "implement"
+
+begin: "plan"
+
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "implement"
+      result: "completed"
+      require_completed: true
+
+steps:
+  - id: "plan"
+    step_type: "agent"
+    agent_config: "coding_planner"
+    checkpoint: true
+    checkpoint_label: "Plan Review — approve to start implementation"
+    context:
+      - source: { config: "coding_task", output: "task.md" }
+    output:
+      mode: "content"
+      fixed:
+        plan: "plan.md"
+    transitions:
+      - to: "implement"
+        match: { from: "checkpoint", value: "approved" }
+
+  - id: "implement"
+    step_type: "agent"
+    agent_config: "coding_implementer"
+    context:
+      - source: { config: "coding_task", output: "task.md" }
+      - source: { step: "plan" }
+    output:
+      mode: "content"
+      fixed:
+        summary: "implementation_summary.md"
+    transitions:
+      - to: null                  # node_reached end-condition completes the run

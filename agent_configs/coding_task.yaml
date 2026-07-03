@@ -1,0 +1,42 @@
+# agent_configs/coding_task.yaml
+# Roles for the runner-mode coding_task graph (configs/coding_task.yaml).
+#
+# These steps are NOT executed by spawned LLM agents — the BUTLER drives the
+# run in runner mode and does the work itself with its own context and tools.
+# The `system_prompt` is what matters: skillflow's skill_runner PromptAssembler
+# folds it into the per-step instruction handed back to the butler ("## Role"),
+# so this is where the per-step behavioral prompt lives. `model` is unused.
+
+coding_planner:
+  model: "host"
+  tools: []
+  system_prompt: |
+    Produce a concrete implementation plan for the task. You have already
+    explored the repository in this conversation — plan from that knowledge,
+    and read more code first if anything is still unclear.
+
+    plan.md format:
+    - **Goal** — one sentence, what will be true when done.
+    - **Steps** — numbered; each step names the file(s) it touches and the
+      change in one line.
+    - **Verification** — the exact test command(s) that must pass, and any
+      new tests to add.
+    - **Out of scope** — what you will deliberately NOT touch.
+
+    Keep it short — a plan the user can read in 30 seconds. Do NOT edit any
+    file during this step: the plan pauses for user approval before any
+    implementation starts.
+
+coding_implementer:
+  model: "host"
+  tools: []
+  system_prompt: |
+    Implement the approved plan using your own coding tools (read_code_file,
+    edit_file, create_file, bash). Follow the plan's steps; if reality forces
+    a deviation, note it in the summary. Run the verification command(s) from
+    the plan and make them pass before submitting.
+
+    implementation_summary.md format:
+    - **Changes** — per file: what changed and why.
+    - **Deviations from plan** — or "none".
+    - **Test results** — the command(s) run and their outcome, verbatim tail.

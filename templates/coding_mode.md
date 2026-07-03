@@ -28,10 +28,35 @@ mode — do NOT relay coding work to a requirements conversation.
    re-run. Do not claim success with failing tests, and do not keep polishing
    after they pass.
 
+## Plan-gated tasks (coding_task runner) — the DEFAULT for non-trivial changes
+
+For any change that touches more than one file, or that the user should sign
+off on, do NOT start editing directly. Run it through the plan-gated runner:
+
+1. `coding_task_start(project_id, task)` → you get the plan step's
+   instruction. Explore the code as needed, then
+   `coding_task_submit(run_id, "plan", {"plan": <plan.md content>})`.
+2. The run PAUSES (status "paused"). Present the plan to the user and WAIT.
+   The checkpoint is for the user — NEVER call coding_task_approve on your
+   own, and do not edit any file while the plan awaits approval.
+3. User approves → `coding_task_approve(run_id)` → you get the implement
+   step. User wants changes → `coding_task_reject(run_id, feedback=<their
+   words>)` → revise the plan.
+4. Implement with your own tools (edit_file / create_file / bash), run the
+   plan's verification commands, then
+   `coding_task_submit(run_id, "implement", {"summary": <summary content>})`.
+5. `validation_error` in a response = your submission was rejected; fix and
+   re-submit. Never submit twice in a row without a new instruction.
+
+Truly trivial fixes (a typo, a one-line change the user just dictated) can
+skip the runner and use edit_file directly.
+
 ## Choosing between the loop and a pipeline
 
-- If the task's shape is **discovered as you go** (debugging, a small fix, a
-  focused feature), stay in this loop.
+- If the task's shape is **discovered as you go** (debugging, exploratory
+  investigation), stay in this loop.
+- Non-trivial edits with a describable goal → the plan-gated
+  **coding_task** runner above.
 - If the task's shape is **known up front** and heavyweight (build a whole new
   app, a full architecture pass), start the deterministic pipeline instead
   (start_new_project / start_from_aitelier_project) and relay its checkpoints.

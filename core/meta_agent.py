@@ -634,6 +634,93 @@ CODING_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "coding_task_start",
+            "description": (
+                "Start a PLAN-GATED coding task (skillflow runner mode). Use for any "
+                "non-trivial change: the engine walks you through plan → user "
+                "approval → implement, and will NOT release the implement step "
+                "until the user approves the plan. Returns the first step's "
+                "instruction — do the work it describes, then coding_task_submit. "
+                "Do not edit files while a plan is awaiting approval."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string"},
+                    "task": {"type": "string",
+                             "description": "The task, verbatim from the user plus any context you gathered"},
+                },
+                "required": ["project_id", "task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "coding_task_submit",
+            "description": (
+                "Submit the current coding_task step's output and get the next "
+                "instruction. For the plan step pass result={\"plan\": \"<plan.md "
+                "content>\"}; for the implement step (after doing the edits and "
+                "running tests with your own tools) pass result={\"summary\": "
+                "\"<implementation_summary.md content>\"}. If the response has a "
+                "validation_error, fix and re-submit. status='paused' means relay "
+                "the plan to the user and WAIT for their decision."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "step_id": {"type": "string",
+                                "description": "The step you are submitting (from the last response)"},
+                    "result": {"type": "object",
+                               "description": "One key per output slot (e.g. {\"plan\": \"...\"})"},
+                },
+                "required": ["run_id", "step_id", "result"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "coding_task_approve",
+            "description": (
+                "Approve the coding_task plan checkpoint and receive the implement "
+                "step. Call ONLY after the user has explicitly approved the plan in "
+                "chat — the checkpoint is for the user, never auto-approve."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                },
+                "required": ["run_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "coding_task_reject",
+            "description": (
+                "Reject the coding_task plan checkpoint with the user's feedback — "
+                "the plan step re-runs with that feedback and you write a revised "
+                "plan. Use when the user asks for plan changes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string"},
+                    "feedback": {"type": "string",
+                                 "description": "The user's requested changes, verbatim"},
+                },
+                "required": ["run_id", "feedback"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_search",
             "description": (
                 "Search the web (SearXNG). Use for looking up library APIs, error "
@@ -793,12 +880,13 @@ class MetaAgent:
                 base = Path(__file__).resolve().parent.parent
                 template = (base / "templates" / "coding_mode.md").read_text(
                     encoding="utf-8")
-                return template.format(
-                    current_project=current_project or "none",
-                    owner_email=self.owner_email,
-                )
+                # .replace, not .format — the template contains literal JSON
+                # braces (tool-call examples) that str.format would choke on.
+                return (template
+                        .replace("{current_project}", current_project or "none")
+                        .replace("{owner_email}", self.owner_email))
             except Exception:
-                pass  # missing/broken template → fall back to butler prompt
+                pass  # missing template → fall back to butler prompt
         return SYSTEM_PROMPT.format(
             current_project=current_project or "none",
             owner_email=self.owner_email,
@@ -1949,6 +2037,100 @@ class MetaAgent:
             "truncated": truncated,
         }
 
+    # ── Runner-mode coding task (plan-gated) ───────────────────────
+    # The butler drives configs/coding_task.yaml via skillflow's SkillTool:
+    # the engine owns transitions and the plan checkpoint (it will not release
+    # the implement step until approval); the butler does each step's work with
+    # its own context and coding tools. MetaAgent is per-request, so every call
+    # reconnects a fresh SkillTool by run_id — state lives in skillflow's DB.
+
+    _CODING_TASK_GRAPH = "coding_task"
+
+    def _skill_runner(self):
+        from api.dependencies import get_skillflow
+        from skillflow.plugins.skill_runner.runner import SkillTool
+        return SkillTool(get_skillflow(), self._CODING_TASK_GRAPH)
+
+    @staticmethod
+    def _runner_response(resp) -> dict:
+        """SkillResponse → plain dict for the LLM (drop empty fields)."""
+        from dataclasses import asdict
+        d = asdict(resp)
+        return {k: v for k, v in d.items() if v not in ("", {}, [], 0, None)}
+
+    def _tool_coding_task_start(self, args: dict) -> dict:
+        from api.dependencies import get_skillflow
+        pid = args["project_id"]
+        task = (args.get("task") or "").strip()
+        if not task:
+            return {"error": "coding_task_start: 'task' is required"}
+        if not self.db.get_project(pid):
+            return {"error": f"Project '{pid}' not found — use list_projects, or "
+                             f"create_project for a new one."}
+        sf = get_skillflow()
+        # One live coding_task per project: a second concurrent run would share
+        # the same workspace step dirs and corrupt promotion.
+        try:
+            existing = sf.get_run_by_project(pid, self._CODING_TASK_GRAPH)
+            if existing and existing.get("status") in ("running", "paused", "pending"):
+                return {"error": (f"A coding_task run is already active for '{pid}' "
+                                  f"(run_id={existing['id']}, status={existing['status']}). "
+                                  f"Resume it with coding_task_submit/approve, or finish it first.")}
+        except Exception:
+            pass
+        # Seed the task description where the plan step's context reads it.
+        seed_dir = sf._workspace.get_config_path(pid, self._CODING_TASK_GRAPH) / "_seed"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        (seed_dir / "task.md").write_text(task, encoding="utf-8")
+
+        from skillflow.plugins.skill_runner.runner import SkillTool
+        tool = SkillTool(sf, self._CODING_TASK_GRAPH, project_id=pid)
+        resp = tool(action="next")
+        if resp.run_id and self.session_id:
+            try:
+                self.db.link_run_to_session(self.session_id, resp.run_id)
+            except Exception:
+                pass
+        return self._runner_response(resp)
+
+    def _tool_coding_task_submit(self, args: dict) -> dict:
+        run_id = args.get("run_id", "")
+        step_id = args.get("step_id", "")
+        result = args.get("result")
+        if not run_id or not step_id:
+            return {"error": "coding_task_submit: 'run_id' and 'step_id' are required"}
+        if not isinstance(result, dict) or not result:
+            return {"error": "coding_task_submit: 'result' must be a non-empty object "
+                             "with one key per output slot"}
+        tool = self._skill_runner()
+        # Reconnect (re-claims the in-flight step), write the content-mode
+        # output files from the result, then confirm.
+        resp = tool(action="next", run_id=run_id)
+        if resp.status != "in_progress":
+            return self._runner_response(resp)
+        if resp.step != step_id:
+            return {"error": (f"coding_task_submit: current step is '{resp.step}', "
+                              f"not '{step_id}' — do the work in its instruction first."),
+                    **{"current": self._runner_response(resp)}}
+        tool.write_output_files(step_id, result)
+        return self._runner_response(
+            tool(action="submit", step_id=step_id, result=result))
+
+    def _tool_coding_task_approve(self, args: dict) -> dict:
+        run_id = args.get("run_id", "")
+        if not run_id:
+            return {"error": "coding_task_approve: 'run_id' is required"}
+        return self._runner_response(
+            self._skill_runner()(action="approve", run_id=run_id))
+
+    def _tool_coding_task_reject(self, args: dict) -> dict:
+        run_id = args.get("run_id", "")
+        feedback = (args.get("feedback") or "").strip()
+        if not run_id or not feedback:
+            return {"error": "coding_task_reject: 'run_id' and 'feedback' are required"}
+        return self._runner_response(
+            self._skill_runner()(action="reject", run_id=run_id, feedback=feedback))
+
     async def _tool_web_search(self, args: dict) -> dict:
         """Web search via core.web_tools (SearXNG). Sync httpx under the hood —
         run in a thread so a slow backend doesn't block the event loop."""
@@ -2613,6 +2795,10 @@ _CODING_TOOL_HANDLERS = {
     "edit_file": MetaAgent._tool_edit_file,
     "create_file": MetaAgent._tool_create_file,
     "bash": MetaAgent._tool_bash,
+    "coding_task_start": MetaAgent._tool_coding_task_start,
+    "coding_task_submit": MetaAgent._tool_coding_task_submit,
+    "coding_task_approve": MetaAgent._tool_coding_task_approve,
+    "coding_task_reject": MetaAgent._tool_coding_task_reject,
     "web_search": MetaAgent._tool_web_search,
     "web_fetch": MetaAgent._tool_web_fetch,
 }

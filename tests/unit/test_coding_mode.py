@@ -59,6 +59,8 @@ class TestModePlumbing:
     def test_coding_tool_definitions_shape(self):
         names = {td["function"]["name"] for td in CODING_TOOL_DEFINITIONS}
         assert names == {"edit_file", "create_file", "bash",
+                         "coding_task_start", "coding_task_submit",
+                         "coding_task_approve", "coding_task_reject",
                          "web_search", "web_fetch"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
@@ -454,6 +456,118 @@ class TestCondenser:
         assert contents[0] == "S2"
         assert "S1" not in contents
         assert "m3" in contents
+
+
+class TestCodingTaskRunner:
+    """Drive the plan-gated coding_task graph end-to-end through the butler's
+    runner tools against a real (isolated) SkillFlow engine — proving the
+    engine holds the implement step until the plan checkpoint is approved."""
+
+    @pytest.fixture
+    def runner_env(self, tmp_path, monkeypatch, mock_db, mock_ws):
+        from pathlib import Path as P
+        from skillflow.core import SkillFlow
+        from skillflow.graph import PipelineGraph
+        import yaml as _yaml
+
+        repo_root = P(__file__).resolve().parent.parent.parent
+        sf = SkillFlow(str(tmp_path / "sf.db"),
+                       workspace_base=str(tmp_path / "ws"),
+                       projects_base=str(tmp_path / "proj"))
+        for name, cfg in _yaml.safe_load(
+                (repo_root / "agent_configs" / "coding_task.yaml").read_text()).items():
+            sf.register_agent_config_from_dict(name, cfg)
+        sf.register_graph(PipelineGraph.from_yaml(repo_root / "configs" / "coding_task.yaml"))
+
+        import api.dependencies as deps
+        monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+
+        mock_db.get_project.return_value = {"project_id": "p1"}
+        agent = MetaAgent(mock_db, mock_ws, owner_email="t@local",
+                          session_id="sess-ct", mode="coding")
+        return agent, sf
+
+    async def test_full_plan_gate_flow(self, runner_env):
+        agent, sf = runner_env
+
+        # 1. start → plan step instruction
+        resp = await agent._execute_tool(
+            "coding_task_start", {"project_id": "p1", "task": "add a modulo fn"})
+        assert resp["status"] == "in_progress"
+        assert resp["step"] == "plan"
+        assert "add a modulo fn" in resp["instruction"]  # seed reached context
+        run_id = resp["run_id"]
+
+        # 2. engine refuses a second concurrent run for the same project
+        dup = await agent._execute_tool(
+            "coding_task_start", {"project_id": "p1", "task": "another"})
+        assert "already active" in dup["error"]
+
+        # 3. submitting the WRONG step is rejected
+        wrong = await agent._execute_tool(
+            "coding_task_submit", {"run_id": run_id, "step_id": "implement",
+                                   "result": {"summary": "nope"}})
+        assert "current step is 'plan'" in wrong["error"]
+
+        # 4. submit the plan → run pauses at the checkpoint
+        resp = await agent._execute_tool(
+            "coding_task_submit", {"run_id": run_id, "step_id": "plan",
+                                   "result": {"plan": "## Goal\nadd modulo"}})
+        assert resp["status"] == "paused"
+        assert "Plan Review" in resp["checkpoint_label"]
+        # THE GATE: engine state is paused — implement is not claimable
+        assert sf.get_run(run_id)["status"] == "paused"
+
+        # 5. reject with feedback → plan step re-runs, feedback in instruction
+        resp = await agent._execute_tool(
+            "coding_task_reject", {"run_id": run_id, "feedback": "add tests too"})
+        assert resp["status"] == "in_progress"
+        assert resp["step"] == "plan"
+        assert "add tests too" in resp["instruction"]
+
+        # 6. revised plan → paused again → approve → implement step released
+        resp = await agent._execute_tool(
+            "coding_task_submit", {"run_id": run_id, "step_id": "plan",
+                                   "result": {"plan": "## Goal\nmodulo + tests"}})
+        assert resp["status"] == "paused"
+        resp = await agent._execute_tool(
+            "coding_task_approve", {"run_id": run_id})
+        assert resp["status"] == "in_progress"
+        assert resp["step"] == "implement"
+        # prior plan is in the implement step's context
+        assert "modulo + tests" in resp["instruction"]
+
+        # 7. submit implementation summary → run completes
+        resp = await agent._execute_tool(
+            "coding_task_submit", {"run_id": run_id, "step_id": "implement",
+                                   "result": {"summary": "done, tests pass"}})
+        assert resp["status"] == "completed"
+        assert resp["outputs"]["implement"]["summary"] == "done, tests pass"
+
+        # plan artifact promoted to the workspace
+        plan_file = (sf._workspace.get_config_path("p1", "coding_task")
+                     / "plan" / "plan.md")
+        assert plan_file.exists()
+        assert "modulo + tests" in plan_file.read_text()
+
+    async def test_runner_tools_rejected_in_butler_mode(self, butler_agent):
+        result = await butler_agent._execute_tool(
+            "coding_task_start", {"project_id": "p", "task": "x"})
+        assert "only available in coding mode" in result["error"]
+
+    async def test_start_requires_existing_project(self, runner_env):
+        agent, _ = runner_env
+        agent.db.get_project.return_value = None
+        result = await agent._execute_tool(
+            "coding_task_start", {"project_id": "ghost", "task": "x"})
+        assert "not found" in result["error"]
+
+    async def test_submit_validates_result_shape(self, runner_env):
+        agent, _ = runner_env
+        result = await agent._execute_tool(
+            "coding_task_submit", {"run_id": "r", "step_id": "plan",
+                                   "result": "a string"})
+        assert "must be a non-empty object" in result["error"]
 
 
 class TestBudgetPause:

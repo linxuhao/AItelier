@@ -13,8 +13,14 @@ from typing import AsyncGenerator
 
 import litellm
 import yaml
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
 
-from core.ai_router import AIGateway, _read_secret
+from core.ai_router import AIGateway, RETRYABLE_EXCEPTIONS, _read_secret
 
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
 _DEFAULT_CONFIG_PATH_V2 = "agent_configs/meta_conversation.yaml"
@@ -1066,13 +1072,32 @@ class MetaAgent:
                 full_text = ""
                 tool_calls = []
 
-                async for event in self._stream_llm(messages):
-                    if event["_type"] == "text_delta":
-                        yield {"type": "text_delta", "content": event["content"]}
-                    elif event["_type"] == "collected":
-                        full_text = event["text"]
-                        tool_calls = event["tool_calls"]
-                        self._persist_usage(event.get("usage"))
+                try:
+                    async for event in self._stream_llm(messages):
+                        if event["_type"] == "text_delta":
+                            yield {"type": "text_delta", "content": event["content"]}
+                        elif event["_type"] == "collected":
+                            full_text = event["text"]
+                            tool_calls = event["tool_calls"]
+                            self._persist_usage(event.get("usage"))
+                except Exception as e:
+                    # Transient LLM/streaming failure (provider 5xx, rate-limit,
+                    # connection dropped mid-stream). Handshake retries inside
+                    # _stream_llm are already exhausted. Don't kill the session
+                    # with a terminal error: the assistant turn hasn't been
+                    # appended/persisted yet, so the turn is atomic — the user's
+                    # message is already saved, and "continue" rebuilds the
+                    # transcript and resumes cleanly. Emit a RESUMABLE pause.
+                    self._log_error(f"LLM stream failed: {e}")
+                    yield {
+                        "type": "llm_interrupted",
+                        "tool_turns": tool_turns,
+                        "message": (
+                            f"The model connection was interrupted "
+                            f"({type(e).__name__}). Reply 'continue' to resume."
+                        ),
+                    }
+                    return
 
                 if not tool_calls:
                     # Final token usage (messages unchanged since we counted)
@@ -1350,7 +1375,22 @@ class MetaAgent:
                 extra_body["thinking"] = {"type": "enabled"}
             kwargs["extra_body"] = extra_body
 
-        response = await litellm.acompletion(**kwargs)
+        # Retry only the handshake: transient provider errors (rate-limit,
+        # 5xx, connection at request time) surface here before any token has
+        # been yielded, so re-establishing the stream is safe and cannot
+        # duplicate already-streamed text. A drop *during* iteration bubbles up
+        # to the chat() loop, which turns it into a resumable pause. Mirrors the
+        # AIGateway tenacity policy (the meta agent bypasses that gateway).
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+            reraise=True,
+        )
+        async def _open_stream():
+            return await litellm.acompletion(**kwargs)
+
+        response = await _open_stream()
 
         full_text = ""
         tool_calls_map: dict[int, dict] = {}

@@ -142,6 +142,33 @@ describe('Chat coding mode', () => {
     });
   });
 
+  it('llm_interrupted event shows a Continue button that resends', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      sseResponse([{ type: 'llm_interrupted', tool_turns: 7,
+                     message: "The model connection was interrupted (APIConnectionError). Reply 'continue' to resume." }]));
+    const { container } = render(Chat, { props: { params: {} } });
+    await waitFor(() => {
+      expect(container.querySelector('#chat-input-field')).toBeTruthy();
+    });
+
+    await sendMessage(container, 'migrate the traces');
+    const continueBtn = await waitFor(() => {
+      const btn = container.querySelector('.btn-continue') as HTMLButtonElement;
+      expect(btn).toBeTruthy();
+      return btn;
+    });
+
+    fetchSpy.mockResolvedValueOnce(
+      sseResponse([{ type: 'done', message: { role: 'assistant', content: 'resumed' } }]));
+    await fireEvent.click(continueBtn);
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+    const body = JSON.parse(fetchSpy.mock.calls[1][1]!.body as string);
+    expect(body.message).toBe('continue');
+    await waitFor(() => {
+      expect(container.querySelector('.btn-continue')).toBeFalsy();
+    });
+  });
+
   it('adopts the session mode returned by chat history', async () => {
     window.localStorage.setItem('aitelier.chat.sessionId', 'sess-9');
     mockApi.getChatHistory.mockResolvedValue({

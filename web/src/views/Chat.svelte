@@ -642,13 +642,15 @@
         break;
       }
 
-      case 'budget_exhausted': {
-        // Not an error: the coding loop paused at its tool-turn budget. The
-        // transcript is persisted server-side, so "continue" resumes it.
+      case 'budget_exhausted':
+      case 'llm_interrupted': {
+        // Not an error: the coding loop paused — either at its tool-turn budget
+        // or on a transient model-connection interruption. The transcript is
+        // persisted server-side, so "continue" resumes it.
         budgetPaused = true;
         messages = [...messages, {
           role: 'system',
-          content: (event.message as string) || 'Tool-turn budget reached. Continue?',
+          content: (event.message as string) || 'Paused. Continue?',
         }];
         break;
       }

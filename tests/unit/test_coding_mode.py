@@ -618,6 +618,38 @@ class TestBudgetPause:
         assert events[-1]["type"] == "budget_exhausted"
         assert "continue" in events[-1]["message"].lower()
 
+    async def test_stream_failure_yields_resumable_pause(self, coding_agent):
+        # A transient LLM/streaming error mid-turn must NOT terminate the
+        # session with a generic 'error' event — it should surface a resumable
+        # 'llm_interrupted' pause so the user can reply 'continue'.
+        from litellm.exceptions import APIConnectionError
+
+        async def boom_stream(messages):
+            raise APIConnectionError("connection reset",
+                                     llm_provider="deepseek", model="x")
+            yield  # pragma: no cover — make this an async generator
+
+        coding_agent._stream_llm = boom_stream
+        events = [ev async for ev in coding_agent.chat("do work", [], "p")]
+        types = [e["type"] for e in events]
+        assert "error" not in types
+        assert events[-1]["type"] == "llm_interrupted"
+        assert "continue" in events[-1]["message"].lower()
+
+    async def test_stream_failure_does_not_persist_partial_turn(self, coding_agent, mock_db):
+        # The failed turn is atomic: nothing is written to the transcript, so a
+        # 'continue' rebuilds cleanly from the last completed state.
+        from litellm.exceptions import APIConnectionError
+
+        async def boom_stream(messages):
+            raise APIConnectionError("boom", llm_provider="deepseek", model="x")
+            yield  # pragma: no cover
+
+        coding_agent._stream_llm = boom_stream
+        async for _ in coding_agent.chat("do work", [], "p"):
+            pass
+        mock_db.save_chat_transcript_message.assert_not_called()
+
     async def test_transcript_persisted_during_loop(self, coding_agent, mock_db):
         coding_agent.max_tool_turns = 1
 

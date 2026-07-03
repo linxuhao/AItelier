@@ -68,25 +68,45 @@ off on, do NOT start editing directly. Run it through the plan-gated runner:
 Truly trivial fixes (a typo, a one-line change the user just dictated) can
 skip the runner and use edit_file directly.
 
-## Choosing between the loop and a pipeline
+## Three execution layers — pick where the work runs
 
-- If the task's shape is **discovered as you go** (debugging, exploratory
-  investigation), stay in this loop.
-- Non-trivial edits with a describable goal → the plan-gated
-  **coding_task** runner above.
-- If the task's shape is **known up front** and heavyweight (build a whole new
-  app, a full architecture pass), start the deterministic pipeline instead
-  (start_new_project / start_from_aitelier_project) and relay its checkpoints.
-- To double-check a finished change, run the review pipeline. First run
-  `git diff` (or `git diff HEAD`) via bash, then pass the RAW diff output —
-  not a summary of it — as the seed:
-  `start_config_run(config_name="code_review", seed_text=<one-line task
-  summary + the verbatim git diff>)`. The reviewer can only judge what it can
-  see; a description without the diff will be rejected. The verdict
-  (`passed`, `feedback`, `findings`) comes back in the tool result under
-  `outputs` — fix real findings, re-run the tests, and only then report done.
-  Use it when the user asks for a review, or after any non-trivial
-  multi-file change.
+Every non-trivial subtask runs in one of three layers. Choosing the right one
+keeps THIS session's context small: layers 2 and 3 push heavy reading/editing
+into an isolated place whose transcript you don't pay for.
+
+- **Layer 1 — inline (this loop).** Exploratory, small, discovered-as-you-go
+  (debugging, a quick lookup, a one-file edit). Use your direct tools.
+- **Layer 2 — plan→task runner.** A non-trivial multi-file change the user should
+  approve. `runner_start` → plan → user gate → implement → `runner_submit` (the
+  section above).
+- **Layer 3 — offload to a pipeline.** Context-heavy, self-contained work whose
+  *result* is what you need, not the reasoning: build a whole app / a full
+  architecture pass (`start_new_project` / `start_from_aitelier_project`), review
+  a diff (`code_review`), or run any registered config. The pipeline's agents burn
+  their OWN context — only checkpoints and the final result come back to you, so
+  this is how you keep a long session slim.
+
+### Driving a layer-3 pipeline
+
+1. `list_pipelines` to see what's registered; `start_config_run(config_name=…,
+   seed_text=…)` (or the `start_new_project` family for app builds) to launch.
+2. Loop on **`wait_until_next_checkpoint_or_completion(run_id)`** — one blocking
+   call, no polling. On a `checkpoint`, relay it and, once the user decides,
+   `approve_checkpoint` / `reject_checkpoint(feedback)`. On `running` (a timeout),
+   call it again or do other work meanwhile.
+3. On `completed`, `get_pipeline_result(run_id)` for the compact final output.
+   `stop_pipeline(run_id)` cancels a stuck or unwanted run.
+
+### Reviewing a change (the most common layer-3 call)
+
+To double-check a finished change, run the review pipeline. First run `git diff`
+(or `git diff HEAD`) via bash, then pass the RAW diff output — not a summary — as
+the seed: `start_config_run(config_name="code_review", seed_text=<one-line task
+summary + the verbatim git diff>)`. The reviewer can only judge what it can see; a
+description without the diff will be rejected. `code_review` is butler-driven, so
+its verdict (`passed`, `feedback`, `findings`) comes straight back in the tool
+result — fix real findings, re-run the tests, and only then report done. Use it
+when the user asks for a review, or after any non-trivial multi-file change.
 
 ## Git
 

@@ -569,10 +569,86 @@ TOOL_DEFINITIONS = [
                                     "description": "The registered config name to run."},
                     "seed_text": {"type": "string",
                                   "description": "Seed input written to the config's first-step input file."},
+                    "seed_inputs": {"type": "object",
+                                    "description": "Optional {filename: content} map of extra seed files "
+                                                   "for configs whose first step reads several inputs."},
                     "name": {"type": "string",
                              "description": "Optional human label for this run."},
+                    "repo_type": {"type": "string",
+                                  "description": "new | existing | clone (default new)."},
+                    "repo_path": {"type": "string",
+                                  "description": "Local repo path when repo_type=existing."},
+                    "repo_url": {"type": "string",
+                                 "description": "Git URL when repo_type=clone."},
                 },
                 "required": ["config_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pipelines",
+            "description": "List the registered skillflow pipelines/configs you can run "
+                           "(dpe, code_review, coding_task, gen_*, …). Use this to discover "
+                           "what's available before start_config_run. Returns each config's "
+                           "name, label, whether it's scheduler-owned, and whether it takes a seed.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_until_next_checkpoint_or_completion",
+            "description": "Block until a pipeline run reaches its next checkpoint, completes, "
+                           "or fails, then return the compact state. This is the main way to "
+                           "drive a pipeline you started (instead of polling get_pipeline_status "
+                           "in a loop): the wait costs no extra turns. On a checkpoint, relay it "
+                           "and call approve_checkpoint / reject_checkpoint. If it returns "
+                           "status 'running' it timed out still in progress — call again or do "
+                           "other work.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "Run ID to wait on."},
+                    "timeout": {"type": "number",
+                                "description": "Max seconds to wait before returning 'running' "
+                                               "(default 120, capped 600). Only applies to "
+                                               "scheduler-owned runs like DPE."},
+                },
+                "required": ["run_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pipeline_result",
+            "description": "Get the compact final result of a COMPLETED run — the terminal "
+                           "output step's file(s), with JSON parsed into structured data. Use "
+                           "after a run completes to read what it produced.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "Run ID of the completed run."},
+                },
+                "required": ["run_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_pipeline",
+            "description": "Cancel a running or paused pipeline run. The run is marked failed and "
+                           "the scheduler stops advancing it. Use for a stuck or unwanted run.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string", "description": "Run ID to stop."},
+                    "reason": {"type": "string", "description": "Optional reason to record."},
+                },
+                "required": ["run_id"],
             },
         },
     },
@@ -2610,6 +2686,211 @@ class MetaAgent:
                 "message": f"Pipeline execution error: {e}",
             }
 
+    # ── Layer-3 generic pipeline toolset ───────────────────────────────
+    # Drive/inspect ANY registered skillflow config (dpe, code_review,
+    # coding_task, gen_*, …) so the butler can offload context-heavy work to an
+    # isolated run and see only compact status + checkpoints. See
+    # design/context_offload_delegation.md.
+
+    def _read_final_dir(self, project_id: str, step_id: str, graph: str,
+                        cap: int = 2000) -> dict:
+        """Read a completed step's promoted output dir → {relpath: content[:cap]}."""
+        files: dict = {}
+        try:
+            out_dir = self.ws.get_final_path(project_id, step_id, graph or "dpe_default")
+            if out_dir.exists():
+                for f in sorted(out_dir.rglob("*")):
+                    if f.is_file() and f.name != "_snapshot.json":
+                        try:
+                            files[str(f.relative_to(out_dir))] = \
+                                f.read_text(encoding="utf-8", errors="replace")[:cap]
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return files
+
+    def _summarize_run_state(self, run_id: str) -> dict:
+        """Compact summary of a run at a terminal/paused state.
+
+        Mirrors the terminal handling in _run_pipeline_until_checkpoint (minus the
+        generated-pipeline registration side effect) so the awaited path
+        (wait_until_next_checkpoint_or_completion for scheduler-owned runs) returns
+        the identical shape as the inline-driven path.
+        """
+        from api.dependencies import get_skillflow
+        sf = get_skillflow()
+        run = sf.get_run(run_id)
+        if not run:
+            return {"status": "error", "run_id": run_id, "message": "Run not found"}
+        status = run["status"]
+        graph = run.get("graph_name") or "dpe_default"
+        pid = run.get("project_id", "")
+        steps = sf.get_steps(run_id)
+
+        if status == "paused":
+            label = run.get("current_node", "Checkpoint")
+            checkpoint_step_id = ""
+            checkpoint_data = None
+            try:
+                resolver = sf._get_resolver(run["graph_name"])
+            except Exception:
+                resolver = None
+            for s in reversed(steps):
+                if s["status"] == "completed" and resolver:
+                    node = resolver.get_node(s["step_id"])
+                    if node and node.checkpoint:
+                        checkpoint_step_id = s["step_id"]
+                        label = node.checkpoint_label or s["step_id"]
+                        checkpoint_data = self._read_final_dir(
+                            pid, s["step_id"], graph, cap=3000) or None
+                        break
+            return {
+                "status": "checkpoint",
+                "run_id": run_id,
+                "project_id": pid,
+                "step_id": checkpoint_step_id,
+                "label": label,
+                "data": checkpoint_data,
+                "message": f"Pipeline paused at checkpoint: {label}. Wait for user "
+                           f"approval before calling approve_checkpoint or reject_checkpoint.",
+            }
+        if status == "completed":
+            outputs = {}
+            for s in steps:
+                if s["status"] == "completed":
+                    files = self._read_final_dir(pid, s["step_id"], graph, cap=2000)
+                    if files:
+                        outputs[s["step_id"]] = files
+            return {
+                "status": "completed",
+                "run_id": run_id,
+                "project_id": pid,
+                "steps_completed": len([s for s in steps if s["status"] == "completed"]),
+                "outputs": outputs,
+                "message": "Pipeline completed successfully.",
+            }
+        if status == "failed":
+            return {
+                "status": "failed",
+                "run_id": run_id,
+                "project_id": pid,
+                "error": run.get("error_reason", "Unknown error"),
+                "message": f"Pipeline failed: {run.get('error_reason', 'Unknown error')[:200]}",
+            }
+        return {"status": status, "run_id": run_id, "project_id": pid,
+                "message": f"Pipeline in state: {status}"}
+
+    def _tool_list_pipelines(self, args: dict) -> dict:
+        """List registered skillflow configs the butler can start (layer 3)."""
+        from api.dependencies import get_config_registry
+        pipelines = []
+        for m in get_config_registry().list():
+            pipelines.append({
+                "config_name": m.config_name,
+                "label": getattr(m, "label", "") or m.config_name,
+                "scheduler_owned": bool(getattr(m, "scheduler_owned", False)),
+                "takes_seed": bool(getattr(m, "seed_file", None)),
+                "has_task_loop": bool(getattr(m, "has_task_loop", False)),
+            })
+        pipelines.sort(key=lambda p: p["config_name"])
+        return {"pipelines": pipelines, "count": len(pipelines)}
+
+    def _tool_stop_pipeline(self, args: dict) -> dict:
+        """Cancel a running pipeline (marks the run failed; the poller then skips it)."""
+        from api.dependencies import get_skillflow
+        run_id = (args.get("run_id") or "").strip()
+        if not run_id:
+            return {"error": "run_id is required."}
+        sf = get_skillflow()
+        run = sf.get_run(run_id)
+        if not run:
+            return {"error": f"Run '{run_id}' not found"}
+        if run["status"] in ("completed", "failed"):
+            return {"status": run["status"], "run_id": run_id,
+                    "message": f"Run already {run['status']}; nothing to stop."}
+        try:
+            sf.fail_run(run_id, args.get("reason") or "stopped via butler")
+        except Exception as e:
+            return {"error": f"Failed to stop run: {e}"}
+        return {"status": "stopped", "run_id": run_id, "message": "Pipeline stopped."}
+
+    def _tool_get_pipeline_result(self, args: dict) -> dict:
+        """Compact terminal result of a finished run (parsed JSON where possible)."""
+        from api.dependencies import get_skillflow, get_config_registry
+        run_id = (args.get("run_id") or "").strip()
+        if not run_id:
+            return {"error": "run_id is required."}
+        sf = get_skillflow()
+        run = sf.get_run(run_id)
+        if not run:
+            return {"error": f"Run '{run_id}' not found"}
+        status = run["status"]
+        if status != "completed":
+            return {"status": status, "run_id": run_id,
+                    "message": f"Run is {status}, not completed — no final result yet."}
+        graph = run.get("graph_name") or "dpe_default"
+        pid = run.get("project_id", "")
+        manifest = get_config_registry().get(graph)
+        output_step = getattr(manifest, "output_step", None) if manifest else None
+        steps = sf.get_steps(run_id)
+        completed = [s["step_id"] for s in steps if s["status"] == "completed"]
+        target_steps = ([output_step] if output_step and output_step in completed
+                        else completed)
+        result = {}
+        for sid in target_steps:
+            for rel, content in self._read_final_dir(pid, sid, graph, cap=8000).items():
+                # Parse JSON payloads so the driver gets structured data, not text.
+                try:
+                    result[rel] = json.loads(content)
+                except (ValueError, TypeError):
+                    result[rel] = content
+        return {"status": "completed", "run_id": run_id, "project_id": pid,
+                "output_step": output_step, "result": result}
+
+    async def _tool_wait_until_checkpoint(self, args: dict) -> dict:
+        """Block until the run hits its next checkpoint / completes / fails.
+
+        Butler-driven configs are driven inline; scheduler-owned configs are
+        advanced by the poller and this awaits (bounded by `timeout`, default
+        120s) — returning {status:"running"} if still going so the driver never
+        hangs. The internal wait costs zero driver turns / context.
+        """
+        from api.dependencies import get_skillflow, get_config_registry
+        run_id = (args.get("run_id") or "").strip()
+        if not run_id:
+            return {"error": "run_id is required."}
+        sf = get_skillflow()
+        run = sf.get_run(run_id)
+        if not run:
+            return {"error": f"Run '{run_id}' not found"}
+        manifest = get_config_registry().get(run.get("graph_name", ""))
+        scheduler_owned = bool(getattr(manifest, "scheduler_owned", False)) if manifest else False
+
+        if not scheduler_owned:
+            # Butler-driven: advance inline to the next checkpoint / end.
+            return await self._run_pipeline_until_checkpoint(run_id)
+
+        # Scheduler-owned: the poller advances it; await a terminal/paused state.
+        try:
+            timeout = float(args.get("timeout") or 120)
+        except (TypeError, ValueError):
+            timeout = 120.0
+        timeout = max(5.0, min(timeout, 600.0))
+        interval = 2.0
+        waited = 0.0
+        while waited < timeout:
+            run = sf.get_run(run_id)
+            status = run["status"] if run else "unknown"
+            if status in ("paused", "completed", "failed"):
+                return self._summarize_run_state(run_id)
+            await asyncio.sleep(interval)
+            waited += interval
+        return {"status": "running", "run_id": run_id,
+                "message": f"Still running after {int(timeout)}s. Call "
+                           f"wait_until_next_checkpoint_or_completion again to keep "
+                           f"waiting, or do other work meanwhile."}
+
     async def _tool_start_pipeline(self, args: dict) -> dict:
         """Start a skillflow pipeline for a project, bind to session."""
         from api.dependencies import get_skillflow
@@ -2852,8 +3133,12 @@ class MetaAgent:
         result = start_config_run(
             self.db, self.ws, config_name, pid,
             seed_text=args.get("seed_text"),
+            seed_inputs=args.get("seed_inputs") or None,
             name=args.get("name") or config_name,
             owner_email=self.owner_email,
+            repo_type=args.get("repo_type") or "new",
+            repo_url=args.get("repo_url"),
+            repo_path=args.get("repo_path"),
         )
         if result.get("status") == "error":
             return {"error": result.get("message")}
@@ -2902,6 +3187,10 @@ _TOOL_HANDLERS = {
     "get_pipeline_status": MetaAgent._tool_get_pipeline_status,
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "start_config_run": MetaAgent._tool_start_config_run,
+    "list_pipelines": MetaAgent._tool_list_pipelines,
+    "wait_until_next_checkpoint_or_completion": MetaAgent._tool_wait_until_checkpoint,
+    "get_pipeline_result": MetaAgent._tool_get_pipeline_result,
+    "stop_pipeline": MetaAgent._tool_stop_pipeline,
 }
 
 # Coding-mode-only tools — schema-visible and dispatchable only when the

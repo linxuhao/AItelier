@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 26
+        assert len(TOOL_DEFINITIONS) == 30
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -341,6 +341,127 @@ class TestBuildAssistantMsg:
         assert msg["role"] == "assistant"
         assert msg["content"] == "hello"
         assert "tool_calls" not in msg
+
+
+class TestLayer3PipelineTools:
+    """Generic pipeline-control toolset: list / wait / result / stop."""
+
+    def _agent(self, mock_db, mock_ws):
+        return MetaAgent(mock_db, mock_ws, owner_email="t@local", session_id="s1")
+
+    def _registry(self, manifests):
+        reg = MagicMock()
+        reg.list.return_value = manifests
+        reg.get.side_effect = lambda name: next(
+            (m for m in manifests if m.config_name == name), None)
+        return reg
+
+    def test_list_pipelines_surfaces_registry(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        m1 = MagicMock(config_name="code_review", label="Code Review",
+                       scheduler_owned=False, seed_file="review_request.md",
+                       has_task_loop=False)
+        m2 = MagicMock(config_name="dpe_default_v2", label="DPE",
+                       scheduler_owned=True, seed_file=None, has_task_loop=True)
+        with patch("api.dependencies.get_config_registry",
+                   return_value=self._registry([m2, m1])):
+            out = agent._tool_list_pipelines({})
+        names = [p["config_name"] for p in out["pipelines"]]
+        assert names == ["code_review", "dpe_default_v2"]  # sorted
+        assert out["count"] == 2
+        cr = out["pipelines"][0]
+        assert cr["scheduler_owned"] is False and cr["takes_seed"] is True
+
+    def test_stop_pipeline_fails_run(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run.return_value = {"id": "r1", "status": "running"}
+        with patch("api.dependencies.get_skillflow", return_value=sf):
+            out = agent._tool_stop_pipeline({"run_id": "r1"})
+        assert out["status"] == "stopped"
+        sf.fail_run.assert_called_once()
+
+    def test_stop_pipeline_noop_when_finished(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run.return_value = {"id": "r1", "status": "completed"}
+        with patch("api.dependencies.get_skillflow", return_value=sf):
+            out = agent._tool_stop_pipeline({"run_id": "r1"})
+        assert out["status"] == "completed"
+        sf.fail_run.assert_not_called()
+
+    def test_get_pipeline_result_parses_output_step_json(self, mock_db, mock_ws, tmp_path):
+        agent = self._agent(mock_db, mock_ws)
+        out_dir = tmp_path / "review_out"
+        out_dir.mkdir()
+        (out_dir / "review_verdict.json").write_text(
+            json.dumps({"passed": True, "findings": []}), encoding="utf-8")
+        mock_ws.get_final_path.return_value = out_dir
+        sf = MagicMock()
+        sf.get_run.return_value = {"id": "r1", "status": "completed",
+                                   "graph_name": "code_review", "project_id": "p1"}
+        sf.get_steps.return_value = [{"step_id": "review", "status": "completed"}]
+        reg = self._registry([MagicMock(config_name="code_review", output_step="review")])
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch("api.dependencies.get_config_registry", return_value=reg):
+            out = agent._tool_get_pipeline_result({"run_id": "r1"})
+        assert out["status"] == "completed"
+        # JSON parsed into structured data, not a string
+        assert out["result"]["review_verdict.json"] == {"passed": True, "findings": []}
+
+    def test_get_pipeline_result_rejects_unfinished(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run.return_value = {"id": "r1", "status": "running"}
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch("api.dependencies.get_config_registry", return_value=self._registry([])):
+            out = agent._tool_get_pipeline_result({"run_id": "r1"})
+        assert out["status"] == "running" and "not completed" in out["message"]
+
+    async def test_wait_butler_driven_drives_inline(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run.return_value = {"id": "r1", "graph_name": "code_review"}
+        reg = self._registry([MagicMock(config_name="code_review", scheduler_owned=False)])
+        driven = {"status": "completed", "run_id": "r1"}
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch("api.dependencies.get_config_registry", return_value=reg), \
+             patch.object(agent, "_run_pipeline_until_checkpoint",
+                          new=AsyncMock(return_value=driven)) as drive:
+            out = await agent._tool_wait_until_checkpoint({"run_id": "r1"})
+        drive.assert_awaited_once_with("r1")
+        assert out is driven
+
+    async def test_wait_scheduler_owned_times_out_to_running(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run.return_value = {"id": "r1", "graph_name": "dpe_default_v2",
+                                   "status": "running"}
+        reg = self._registry([MagicMock(config_name="dpe_default_v2", scheduler_owned=True)])
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch("api.dependencies.get_config_registry", return_value=reg), \
+             patch("core.meta_agent.asyncio.sleep", new=AsyncMock()):
+            out = await agent._tool_wait_until_checkpoint({"run_id": "r1", "timeout": 5})
+        assert out["status"] == "running"
+
+    async def test_wait_scheduler_owned_returns_on_pause(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        # first poll running, then paused
+        sf.get_run.side_effect = [
+            {"id": "r1", "graph_name": "dpe_default_v2", "status": "running"},  # tool entry
+            {"id": "r1", "graph_name": "dpe_default_v2", "status": "running"},  # loop 1
+            {"id": "r1", "graph_name": "dpe_default_v2", "status": "paused"},   # loop 2
+        ]
+        reg = self._registry([MagicMock(config_name="dpe_default_v2", scheduler_owned=True)])
+        with patch("api.dependencies.get_skillflow", return_value=sf), \
+             patch("api.dependencies.get_config_registry", return_value=reg), \
+             patch("core.meta_agent.asyncio.sleep", new=AsyncMock()), \
+             patch.object(agent, "_summarize_run_state",
+                          return_value={"status": "checkpoint", "run_id": "r1"}) as summ:
+            out = await agent._tool_wait_until_checkpoint({"run_id": "r1", "timeout": 30})
+        assert out["status"] == "checkpoint"
+        summ.assert_called_once_with("r1")
 
 
 class TestActiveMetaRunResolution:

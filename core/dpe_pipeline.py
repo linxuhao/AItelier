@@ -52,9 +52,9 @@ class MaxRetriesExceeded(Exception):
 class PipelineEngine:
     def __init__(self, log_callback=None,
                  repo_type: str = "new", event_bus=None, *, registry=None,
-                 trace_callback=None):
+                 trace_callback=None, user_lang: str | None = None):
         self.factory = AgentFactory(registry=registry)
-        self.assembler = PromptAssembler(repo_type=repo_type)
+        self.assembler = PromptAssembler(repo_type=repo_type, user_lang=user_lang)
         self._log = log_callback or (lambda *a, **kw: None)
         self._trace_cb = trace_callback or (lambda *a, **kw: None)
         self._event_bus = event_bus
@@ -64,6 +64,7 @@ class PipelineEngine:
         self._step_start = None
         self._repo_type = repo_type
         self._resolved_context: dict | None = None
+        self._user_lang = user_lang
 
     @staticmethod
     def _extract_json(text: str, try_multiple: bool = False) -> dict | None:
@@ -334,6 +335,7 @@ class PipelineEngine:
             step_id, project_path, "", "", task_id=task_id, code_path=code_path,
             resolved_context=self._resolved_context,
             tool_schemas=self._tool_schemas,
+            user_lang=self._user_lang,
         )
 
         self._trace("prompt", "user_prompt", {"mode": "content", "role": role, "user": prompt})
@@ -442,6 +444,7 @@ class PipelineEngine:
                     step_id, project_path, "", feedback, task_id=task_id, code_path=code_path,
                     resolved_context=self._resolved_context,
                     tool_schemas=self._tool_schemas,
+                    user_lang=self._user_lang,
                 )
                 # Inject turn budget and step-control instructions.
                 # finish_step is now a native tool in every step's schema;
@@ -842,6 +845,7 @@ class PipelineEngine:
                     step_id, project_path, "", feedback, task_id=task_id, code_path=code_path,
                     resolved_context=self._resolved_context,
                     tool_schemas=self._tool_schemas,
+                    user_lang=self._user_lang,
                 )
                 if cached_exploration and tool_turn == 0:
                     # Deduplicate: same tool call+result can appear multiple times
@@ -1163,6 +1167,7 @@ class PipelineEngine:
                     native=True,
                     hoist_globals=use_preamble,
                     hoist_design=use_preamble,
+                    user_lang=self._user_lang,
                 )
 
                 # Inject turn budget so the agent can pace exploration.
@@ -1190,6 +1195,7 @@ class PipelineEngine:
                     preamble = self.assembler.build_shared_preamble(
                         project_path, code_path, graph_name=graph_name,
                         preamble_steps=preamble_steps, include_design=True,
+                        user_lang=self._user_lang,
                     )
                     system_content = f"{preamble}\n\n{agent.system_prompt}"
                 else:

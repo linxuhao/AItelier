@@ -255,6 +255,11 @@ class DBManager:
                 conn.execute("ALTER TABLE sessions ADD COLUMN usage_json TEXT")
             except sqlite3.OperationalError:
                 pass
+            # Migration: per-user language preference (e.g. "zh-CN", "en").
+            try:
+                conn.execute("ALTER TABLE users ADD COLUMN lang TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             conn.commit()
 
@@ -1988,6 +1993,23 @@ class DBManager:
             cur = conn.execute("DELETE FROM users WHERE email = ?", (email,))
             conn.commit()
             return cur.rowcount > 0
+
+    def set_user_lang(self, email: str, lang: str):
+        """Set a user's preferred language (e.g. 'zh-CN', 'en')."""
+        with self.get_connection() as conn:
+            conn.execute(
+                "UPDATE users SET lang = ? WHERE email = ?",
+                (lang, email),
+            )
+            conn.commit()
+
+    def get_user_lang(self, email: str) -> str | None:
+        """Get a user's preferred language, or None if not set."""
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT lang FROM users WHERE email = ?", (email,)
+            ).fetchone()
+            return row["lang"] if row and row["lang"] else None
 
     def list_logged_users(self, limit: int = 50) -> list[dict]:
         """Return users ordered by last_seen_at DESC, with computed access_rights.

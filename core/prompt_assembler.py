@@ -35,6 +35,89 @@ WORKSPACE_LAYOUT = (
 )
 
 
+# Language instruction map: lang code → instruction block injected
+# into agent prompts so agents produce output in the user's language.
+# Used by both PromptAssembler and MetaAgent.
+_LANG_INSTRUCTIONS: dict[str, str] = {
+    "zh-CN": (
+        "[Language]\n"
+        "You MUST respond in Simplified Chinese (简体中文). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in Simplified Chinese."
+    ),
+    "zh-TW": (
+        "[Language]\n"
+        "You MUST respond in Traditional Chinese (繁體中文). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in Traditional Chinese."
+    ),
+    "ja": (
+        "[Language]\n"
+        "You MUST respond in Japanese (日本語). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in Japanese."
+    ),
+    "ko": (
+        "[Language]\n"
+        "You MUST respond in Korean (한국어). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in Korean."
+    ),
+    "fr": (
+        "[Language]\n"
+        "You MUST respond in French (Français). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in French."
+    ),
+    "de": (
+        "[Language]\n"
+        "You MUST respond in German (Deutsch). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in German."
+    ),
+    "es": (
+        "[Language]\n"
+        "You MUST respond in Spanish (Español). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in Spanish."
+    ),
+    "pt": (
+        "[Language]\n"
+        "You MUST respond in Portuguese (Português). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in Portuguese."
+    ),
+    "ru": (
+        "[Language]\n"
+        "You MUST respond in Russian (Русский). "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in Russian."
+    ),
+}
+
+
+def build_language_instruction(user_lang: str | None) -> str:
+    """Build a [Language] instruction block from a lang code.
+
+    Returns empty string when user_lang is None or 'en' (English needs
+    no extra instruction — it's the default for most models).
+    """
+    if not user_lang or user_lang.lower().startswith("en"):
+        return ""
+    if user_lang in _LANG_INSTRUCTIONS:
+        return _LANG_INSTRUCTIONS[user_lang]
+    prefix = user_lang.split("-")[0].lower()
+    for code, instruction in _LANG_INSTRUCTIONS.items():
+        if code.split("-")[0].lower() == prefix:
+            return instruction
+    return (
+        f"[Language]\n"
+        f"The user prefers responses in '{user_lang}'. "
+        f"All text, code comments, checkpoint messages, and UI strings "
+        f"SHOULD be in this language."
+    )
+
+
 class PromptAssembler:
     """
     组装结构化的 Agent 提示词。
@@ -42,15 +125,18 @@ class PromptAssembler:
     """
 
     def __init__(self, aitelier_root: Optional[Path] = None,
-                 repo_type: str = "new"):
+                 repo_type: str = "new", user_lang: str | None = None):
         """
         :param aitelier_root: AItelier 项目根目录，用于定位 project/ 设计文档。
                              None 则使用当前工作目录。
         :param repo_type: 项目仓库类型 ("new"/"existing"/"clone")，
                           用于决定是否注入工具定义和目录树。
+        :param user_lang: User's preferred language (e.g. "zh-CN"),
+                          injected as a [Language] block at the top of prompts.
         """
         self.aitelier_root = aitelier_root or Path.cwd()
         self._repo_type = repo_type
+        self._user_lang = user_lang
 
     @staticmethod
     def _is_checker(write_tools, step_id: str = "") -> bool:
@@ -76,7 +162,8 @@ class PromptAssembler:
                  tool_schemas: dict | None = None,
                  *, native: bool = False,
                  hoist_globals: bool = False,
-                 hoist_design: bool = False) -> str:
+                 hoist_design: bool = False,
+                 user_lang: str | None = None) -> str:
         """
         组装完整的 Agent 提示词。
 
@@ -89,6 +176,7 @@ class PromptAssembler:
         :param resolved_context: skillflow-resolved context (name→content map)
         :param tool_schemas: skillflow-provided merged tool schemas dict
         :param native: If True, use native-friendly output rules (no JSON format enforcement)
+        :param user_lang: User's preferred language (e.g. "zh-CN"), injected as a [Language] block
         :return: 结构化提示词字符串
         """
         if code_path is None:
@@ -96,9 +184,8 @@ class PromptAssembler:
 
         sections = [""]
 
-        # [Language Instruction] — detect from project brief
-        brief = self._load_project_brief(project_path)
-        lang_instruction = self._detect_language_instruction(brief)
+        # [Language Instruction] — from user preference, not project brief
+        lang_instruction = self._detect_language_instruction(user_lang)
         if lang_instruction:
             sections.append(lang_instruction)
 
@@ -231,6 +318,7 @@ class PromptAssembler:
         # [Project Brief] — inject for all steps except verification (handled below).
         # Skipped when hoist_globals: the brief is in the shared system preamble.
         if step_id not in ("t_verify", "5") and not hoist_globals:
+            brief = self._load_project_brief(project_path)
             if brief:
                 sections.append(f"[Project Brief]\n{brief}")
             # [Project Spec] — the verbatim requirements, un-truncated and placed
@@ -298,7 +386,8 @@ class PromptAssembler:
     def build_shared_preamble(self, project_path: Path, code_path: Path = None,
                               *, graph_name: str,
                               preamble_steps: list[str] | None = None,
-                              include_design: bool = False) -> str:
+                              include_design: bool = False,
+                              user_lang: str | None = None) -> str:
         """Build the byte-identical, project-global system preamble (F1/F2).
 
         Placed at the FRONT of the system message for steps of a config that
@@ -312,6 +401,9 @@ class PromptAssembler:
         host config registry, so any pipeline (not just DPE) can opt in.
         """
         parts = [WORKSPACE_LAYOUT]
+        lang_instruction = self._detect_language_instruction(user_lang)
+        if lang_instruction:
+            parts.append(lang_instruction)
         brief = self._load_project_brief(project_path)
         if brief:
             parts.append(f"[Project Brief]\n{brief}")
@@ -679,10 +771,9 @@ class PromptAssembler:
             parts.append(f"\n[Latest Rejected Output]\n{latest['rejected_output_summary']}")
 
         return "\n".join(parts)
+    def _detect_language_instruction(self, user_lang: str | None) -> str:
+        """Build a [Language] instruction block from the user's lang preference.
 
-    def _detect_language_instruction(self, brief: str) -> str:
-        """Deprecated in v2: language selection is a UI-level setting.
-
-        Returns empty string — UI will provide language choice.
+        Delegates to the module-level ``build_language_instruction``.
         """
-        return ""
+        return build_language_instruction(user_lang)

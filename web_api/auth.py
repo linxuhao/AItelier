@@ -13,6 +13,7 @@ from core.db_manager import DBManager
 def get_current_user(
     request: Request,
     cf_access_user_email: str | None = Header(None, alias="Cf-Access-User-Email"),
+    x_user_lang: str | None = Header(None, alias="X-User-Lang"),
     db: DBManager = Depends(get_db_manager),
 ) -> CurrentUser:
     """
@@ -20,6 +21,9 @@ def get_current_user(
 
     - Cf-Access-User-Email header present → authenticated web user.
     - Missing → 401 Unauthorized.
+    - X-User-Lang header: on first visit (no stored lang), auto-sets it
+      from the header. On subsequent visits the stored lang takes precedence
+      (user must call the settings endpoint to change it).
 
     In normal mode, also activates the user's per-user scheduler.
     """
@@ -40,6 +44,13 @@ def get_current_user(
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
 
+    # Resolve language: stored lang takes precedence; on first visit,
+    # auto-set from the browser's X-User-Lang header.
+    user_lang = row["lang"] if row and row["lang"] else None
+    if not user_lang and x_user_lang:
+        user_lang = x_user_lang.strip()[:10]  # sanity cap
+        db.set_user_lang(email, user_lang)
+
     # In normal mode: ensure user has a scheduler and mark activity
     mode = getattr(request.app.state, "mode", "normal")
     if mode == "normal":
@@ -55,4 +66,5 @@ def get_current_user(
         email=row["email"],
         display_name=row["display_name"],
         source="cloudflare",
+        lang=user_lang,
     )

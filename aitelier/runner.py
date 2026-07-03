@@ -78,11 +78,21 @@ class AgentStepRunner:
         from api.dependencies import get_skillflow
         sf = get_skillflow()
 
+        # Resolve user language from the project's owner
+        user_lang = None
+        try:
+            proj = self._db.get_project(project_id)
+            if proj and proj.get("owner_email"):
+                user_lang = self._db.get_user_lang(proj["owner_email"])
+        except Exception:
+            pass
+
         engine = PipelineEngine(
             log_callback=self._make_emit_wrapper(step),
             event_bus=self._event_bus,
             registry=sf.agent_registry,
             trace_callback=self._make_trace_wrapper(step),
+            user_lang=user_lang,
         )
 
         # skillflow surfaces reject/loop-back feedback and validation errors

@@ -118,7 +118,8 @@ async def agent_chat(
             if key not in client_keys:
                 history.append({"role": m["role"], "content": m["content"]})
 
-    agent = MetaAgent(db, ws, owner_email=owner, session_id=session_id, mode=mode)
+    agent = MetaAgent(db, ws, owner_email=owner, session_id=session_id, mode=mode,
+                      user_lang=user.lang if user else None)
 
     async def event_stream():
         collected_events = []  # persist after streaming

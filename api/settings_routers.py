@@ -85,3 +85,44 @@ def update_scheduler_settings(
         scheduler_interval=request.scheduler_interval,
         scheduler_cron=request.scheduler_cron,
     )
+
+
+# ── User language preference ──────────────────────────────────────────
+
+
+class UserLanguageResponse(BaseModel):
+    lang: str | None = None
+
+
+class UserLanguageRequest(BaseModel):
+    lang: str
+
+
+@router.get("/user/language", response_model=UserLanguageResponse)
+def get_user_language(
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+):
+    """Get the current user's language preference."""
+    if not user:
+        return UserLanguageResponse(lang=None)
+    lang = db.get_user_lang(user.email)
+    return UserLanguageResponse(lang=lang)
+
+
+@router.post("/user/language", response_model=UserLanguageResponse)
+def set_user_language(
+    body: UserLanguageRequest,
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+):
+    """Set the current user's language preference.
+
+    Open to ALL authenticated users (readers included) — this is a
+    per-user display preference, not a project mutation.
+    """
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    lang = body.lang.strip()[:10]
+    db.set_user_lang(user.email, lang)
+    return UserLanguageResponse(lang=lang)

@@ -4,6 +4,7 @@ export interface AuthState {
   canWrite: boolean;
   email: string | null;
   permissionResolved: boolean;
+  lang: string | null;
 }
 
 /** Default: fail-closed (canWrite=false) until /api/me resolves. */
@@ -11,6 +12,7 @@ export const authStore = writable<AuthState>({
   canWrite: false,
   email: null,
   permissionResolved: false,
+  lang: null,
 });
 
 /**

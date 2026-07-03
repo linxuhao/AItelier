@@ -11,6 +11,7 @@ class CurrentUser(BaseModel):
     display_name: str
     source: str  # "cloudflare"
     is_cli: bool = False
+    lang: str | None = None
 
 
 def get_optional_user() -> CurrentUser | None:

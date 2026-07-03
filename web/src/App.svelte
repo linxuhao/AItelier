@@ -18,8 +18,9 @@
   import { notificationStore } from './stores/notifications';
   import { checkpointStore, showCheckpoint } from './stores/checkpoint';
 
-  import { whoami, getCheckpoint } from './lib/api';
+  import { whoami, getCheckpoint, getUserLang, setUserLang } from './lib/api';
   import { connect, on, off } from './lib/sse';
+  import { syncInitialLang } from './stores/i18n';
 
   const routes = {
     '/': Dashboard,
@@ -64,6 +65,9 @@
         permissionResolved: true,
       });
     }
+
+    // Sync browser language to backend on first visit
+    syncInitialLang();
 
     // Connect SSE event stream
     connect();

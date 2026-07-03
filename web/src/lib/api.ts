@@ -451,6 +451,18 @@ export function setCanWrite(value: boolean): void {
 }
 
 // ═════════════════════════════════════════════════════════════════════
+//  User language preference
+// ═════════════════════════════════════════════════════════════════════
+
+export function getUserLang(): Promise<{ lang: string | null }> {
+  return _get('/api/settings/user/language');
+}
+
+export function setUserLang(lang: string): Promise<{ lang: string | null }> {
+  return _post('/api/settings/user/language', { lang });
+}
+
+// ═════════════════════════════════════════════════════════════════════
 //  Project actions (write-gated)
 // ═════════════════════════════════════════════════════════════════════
 

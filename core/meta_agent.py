@@ -963,7 +963,7 @@ class MetaAgent:
     """Backend meta agent: tool-use loop over LiteLLM with streaming."""
 
     def __init__(self, db, ws, owner_email: str = "cli@local", session_id: str = None,
-                 mode: str = "butler"):
+                 mode: str = "butler", user_lang: str | None = None):
         self.db = db
         self.ws = ws
         self.owner_email = owner_email
@@ -972,6 +972,7 @@ class MetaAgent:
         # edit_file/create_file/bash. Set from the session (user-toggled),
         # never by the model.
         self.mode = mode if mode in ("butler", "coding") else "butler"
+        self.user_lang = user_lang
         # Set per-turn in chat(); lets the approve/answer tools resolve the run
         # by project even when the session→run link is empty (drifted session).
         self._current_project = None
@@ -1003,6 +1004,8 @@ class MetaAgent:
         litellm.drop_params = True
 
     def _build_system_prompt(self, current_project: str | None) -> str:
+        from core.prompt_assembler import build_language_instruction
+        lang_block = build_language_instruction(self.user_lang)
         if self.mode == "coding":
             try:
                 base = Path(__file__).resolve().parent.parent
@@ -1010,15 +1013,21 @@ class MetaAgent:
                     encoding="utf-8")
                 # .replace, not .format — the template contains literal JSON
                 # braces (tool-call examples) that str.format would choke on.
-                return (template
+                prompt = (template
                         .replace("{current_project}", current_project or "none")
                         .replace("{owner_email}", self.owner_email))
+                if lang_block:
+                    prompt = lang_block + "\n\n" + prompt
+                return prompt
             except Exception:
                 pass  # missing template → fall back to butler prompt
-        return SYSTEM_PROMPT.format(
+        prompt = SYSTEM_PROMPT.format(
             current_project=current_project or "none",
             owner_email=self.owner_email,
         )
+        if lang_block:
+            prompt = lang_block + "\n\n" + prompt
+        return prompt
 
     def _build_messages(self, history: list[dict], current_project: str | None) -> list[dict]:
         messages = [{"role": "system", "content": self._build_system_prompt(current_project)}]

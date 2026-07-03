@@ -458,8 +458,19 @@ export function getUserLang(): Promise<{ lang: string | null }> {
   return _get('/api/settings/user/language');
 }
 
-export function setUserLang(lang: string): Promise<{ lang: string | null }> {
-  return _post('/api/settings/user/language', { lang });
+/** Set user language — uses raw fetch (NOT _post) because per-user
+ *  preferences must work for ALL users, including read-only. */
+export async function setUserLang(lang: string): Promise<{ lang: string | null }> {
+  const res = await fetch('/api/settings/user/language', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ lang }),
+  });
+  if (!res.ok) {
+    const err: Record<string, unknown> = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, (err.detail as string) || res.statusText || 'Failed to set language');
+  }
+  return res.json();
 }
 
 // ═════════════════════════════════════════════════════════════════════

@@ -1,13 +1,21 @@
 # configs/subagent.yaml
 # GATED generalist sub-agent: a spawned worker does the task the driver hands it,
-# then an adversarial RED reviewer checks the result and loops it back with
-# feedback until it passes (bounded). This is the Green/Red pattern applied to a
-# generic task — it lets even a cheap worker converge to a reviewed result, all
-# in the spawned agents' own context (never the driver's).
+# then TWO gates check the result and loop it back until both pass (bounded):
+#   1. an OBJECTIVE test gate (run_tests) — deterministic, can't be sweet-talked;
+#   2. an adversarial RED reviewer — for scope/correctness the tests don't cover.
+# This is the Green/Red pattern applied to a generic task — it lets even a cheap
+# worker converge to a reviewed result, all in the spawned agents' own context
+# (never the driver's).
 #
-# The red gate is only as good as the reviewer: the review role is prompted to
-# REFUTE, and the worker's context includes the reviewer's last verdict so it
-# fixes the named problems. Bounded by max_loop; on the pass path the run ends.
+# The test gate runs FIRST (cheap, deterministic): if the change breaks the
+# suite, it loops straight back to work with the failing report — the reviewer,
+# which has no way to execute code, never had to catch that. On a repo with no
+# runnable tests run_tests reports passed=True (skip), so a test-less task is
+# unaffected. The red gate is only as good as the reviewer: the review role is
+# prompted to REFUTE, and the worker's context includes the last verdict AND the
+# last test_report so it fixes the named problems. Bounded by max_loop on each
+# loop-back edge; on the pass path (test green → review passes) the run ends.
+# Needs skillflow-py >= 1.5.2 (max_loop on a tool-fed gate edge).
 
 name: "subagent"
 description: "Gated generalist worker: do a task, red-review + fix loop, until it passes"
@@ -20,11 +28,12 @@ x-aitelier:
   input_hint: >-
     seed_text = a self-contained task to carry out (implement X, refactor Y).
     Add against_project=<repo> to work in an existing repo. A spawned worker
-    does it, an adversarial reviewer checks and loops it back with feedback
-    until it passes (max 3 tries), committing the result. Poll to completion;
-    read the final verdict + summary. For a task that has an OBJECTIVE check
-    (make the tests pass), prefer fix_tests instead — a test gate beats an LLM
-    reviewer.
+    does it, then two gates loop it back with feedback until both pass (max 3
+    tries each): an objective test gate (run_tests — skipped on a repo with no
+    runnable tests) then an adversarial reviewer. The result is committed. Poll
+    to completion; read the final verdict + summary. For a pure "make the tests
+    pass" task with no design judgement needed, fix_tests is leaner (test gate
+    only, no reviewer).
 
 begin: "work"
 
@@ -52,6 +61,7 @@ steps:
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { config: "subagent", output: "task.md" }
+      - source: { step: "test" }          # on loop-back: the failing test_report
       - source: { step: "review" }        # on loop-back: the reviewer's feedback
       - source: { tool: "dir_tree" }
     output:
@@ -64,7 +74,25 @@ steps:
           on_failure: "retry"
           max_retries: 3
     transitions:
-      - to: "review"
+      - to: "test"
+
+  # Objective gate — run the suite on the worker's committed change BEFORE the
+  # LLM reviewer sees it. A test-breaking change loops straight back to work
+  # (the reviewer can't execute code, so it never had to catch this). On a repo
+  # with no runnable tests run_tests reports passed=True, so this is a no-op
+  # there. Mirrors the fix_tests gate.
+  - id: "test"
+    step_type: "tool"
+    tool_name: "run_tests"
+    timeout_seconds: 1200
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: "review"                       # tests green → adversarial review
+        match: { from_file: "test_report.json", field: "passed", value: true }
+      - to: "work"                         # tests red → fix, with the report
+        match: { from_file: "test_report.json", field: "passed", value: false }
+        max_loop: 3
 
   - id: "review"
     step_type: "agent"

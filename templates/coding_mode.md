@@ -110,13 +110,14 @@ into an isolated place whose transcript you don't pay for.
     does the heavy reading/editing and returns only the conclusion.
 
   **Task chunking for sub-agents:** a subagent has a 50-turn budget — enough for
-  ~5 typical files (read + edit + verify each). For mechanical, file-by-file
-  changes (i18n wiring, lint fixes, type migrations), limit each subagent to
-  **3–5 files**. A 10-file refactor → two subagents, each with its own 5-file
-  slice. This matches the PM's rule: *"each task should be completable in one
-  focused session."* When a subagent runs out of turns, it fails with only
-  partial work, and the reviewer's loop-back wastes more turns redoing
-  already-done files — splitting upfront avoids the loop entirely.
+  a handful of files (read + edit + verify each). Keep each subagent's task
+  small and self-contained; when a change spans many files or several
+  independent concerns, split it across subagents rather than handing one a
+  sprawling task. A rough ceiling of **~5 files per subagent** works for
+  repetitive, file-by-file changes. This matches the PM's rule: *"each task
+  should be completable in one focused session."* When a subagent runs out of
+  turns, it fails with only partial work, and the gate's loop-back wastes more
+  turns redoing already-done files — splitting upfront avoids the loop entirely.
 
   Rule of thumb: if it's long, multi-step, or context-heavy and you mainly need
   the outcome, it goes to layer 3 — whatever the domain.

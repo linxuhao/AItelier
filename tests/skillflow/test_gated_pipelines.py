@@ -130,18 +130,33 @@ def test_fix_tests_never_passing_fails_bounded(tmp_path):
 
 # ── subagent: adversarial LLM-reviewer gate ─────────────────────────
 
-def _wire_subagent(tmp_path, verdicts):
-    """Real subagent graph; repo_apply stubbed; the reviewer's verdict is
+def _wire_subagent(tmp_path, verdicts, test_results=None):
+    """Real subagent graph; repo_apply stubbed; the objective `test` gate
+    (run_tests) returns a scripted pass/fail sequence (`test_results`, default
+    all-green so it routes straight to review); the reviewer's verdict is
     scripted by writing review_verdict.json into the review step's dir at
     confirm time (`verdicts` is the per-review `passed` sequence)."""
     sf, loader = _sf(tmp_path)
-    calls = {"repo_apply": 0, "review": 0}
+    calls = {"repo_apply": 0, "review": 0, "run_tests": 0}
+    tseq = list(test_results) if test_results is not None else [True]
 
     def _repo_apply(*args, **kwargs):
         calls["repo_apply"] += 1
         return {"passed": True, "applied": True, "committed": True}
 
+    def _run_tests(*args, out_dir="", **kwargs):
+        passed = tseq[min(calls["run_tests"], len(tseq) - 1)]
+        calls["run_tests"] += 1
+        if out_dir:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            (Path(out_dir) / "test_report.json").write_text(json.dumps({
+                "passed": passed, "returncode": 0 if passed else 1,
+                "summary": "ok" if passed else "FAILED", "failures": []}),
+                encoding="utf-8")
+        return {"written": "test_report.json", "passed": passed}
+
     loader.register_dynamic_tool("repo_apply", {}, _repo_apply)
+    loader.register_dynamic_tool("run_tests", {}, _run_tests)
     graph, run_id = _register(sf, "subagent")
     seq = list(verdicts)
 
@@ -197,6 +212,33 @@ def test_subagent_never_passing_fails_bounded(tmp_path):
     assert status == "failed"
     assert status != "completed"
     assert calls["review"] == 4        # initial + 3 bounded retries
+
+
+def test_subagent_test_gate_loops_before_review(tmp_path):
+    # Objective gate: tests fail once → loop back to work (the reviewer is never
+    # consulted on a red build) → tests green → review → completed.
+    # NOTE: on the loop-then-pass path skillflow re-claims `review` once before
+    # routing to `done` (an advance quirk, same family as the stale-completed-row
+    # trap — costs one extra reviewer call, doesn't affect the outcome), so we
+    # assert review>=1 rather than ==1. The clean single-review path is covered
+    # by test_subagent_passing_first_review; the red-blocks-review invariant by
+    # test_subagent_test_never_green_fails_bounded (review==0).
+    status, work_runs, calls = _wire_subagent(
+        tmp_path, verdicts=[True], test_results=[False, True])()
+    assert status == "completed"
+    assert calls["run_tests"] == 2     # red then green
+    assert work_runs == 2              # re-worked after the red gate
+    assert calls["review"] >= 1        # reviewer only ran on the green build
+
+
+def test_subagent_test_never_green_fails_bounded(tmp_path):
+    # A change that never passes the suite fails on the test gate's bound and
+    # never reaches the reviewer — a test-breaking change cannot slip past.
+    status, work_runs, calls = _wire_subagent(
+        tmp_path, verdicts=[True], test_results=[False])()
+    assert status == "failed"
+    assert calls["run_tests"] == 4     # initial + 3 bounded retries
+    assert calls["review"] == 0        # never got past the objective gate
 
 
 # ── single-step pipelines: investigate (read-only) + code_review ────

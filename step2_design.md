@@ -1,263 +1,363 @@
-# 技术架构设计
+# Technical Architecture Design — Repository View for AItelier Dashboard
 
-## 概述
+## Overview
 
-本功能修复 AItelier web UI 的 i18n 国际化三个问题，并执行翻译覆盖率审计。核心改动：将 `lib/i18n.ts` 迁移到 `lib/i18n.svelte.ts`，使用 Svelte 5 `$state` rune + `langStore.subscribe()` 实现响应式 `t()` 函数；为 6 种缺失语言生成完整翻译；更新所有 11 个视图组件的 import 路径；运行审计脚本确保翻译覆盖率 100%。
+Add a top-level "Repositories" view to the AItelier dashboard, grouping projects by `repo_path`. This is achieved through a **lightweight backend grouping endpoint** (`GET /api/repos`) with no DB schema changes, new Svelte 5 views for repository listing and detail, and relocation of `RepoPanel` + `WorkspaceBrowser root="code"` from `Project.svelte` to the new Repository page.
 
 ---
 
-## 架构图（文字描述）
+## Architecture Diagram (Text)
 
 ```
-                  stores/i18n.ts
-                  (writable store — 保持不变)
-                        │
-                  langStore.set()
-                  langStore.subscribe()
-                        │
-         ┌──────────────┴──────────────┐
-         │  lib/i18n.svelte.ts  (NEW)  │
-         │                             │
-         │  let currentLang =          │
-         │    $state(get(langStore))   │
-         │                             │
-         │  langStore.subscribe(v =>   │
-         │    currentLang = v)         │
-         │                             │
-         │  export function t(key) {   │
-         │    // reads currentLang →   │
-         │    // Svelte 5 instruments  │
-         │    // as reactive dep       │
-         │  }                          │
-         │                             │
-         │  const translations = {     │
-         │    en:   { ... },           │
-         │    zh-CN:{ ... },           │
-         │    zh-TW:{ ... },  ← NEW    │
-         │    ja:   { ... },  ← NEW    │
-         │    ko:   { ... },  ← NEW    │
-         │    fr:   { ... },  ← NEW    │
-         │    de:   { ... },  ← NEW    │
-         │    es:   { ... },  ← NEW    │
-         │  }                          │
-         └──────────────┬──────────────┘
-                        │
-         import { t } from '../lib/i18n.svelte'
-                        │
-         ┌──────────────┼──────────────┐
-         │              │              │
-    AppBar.svelte  Chat.svelte   ... (11 components)
-    t('appbar.dashboard')       t('chat.title')
-         │              │              │
-         ▼              ▼              ▼
-    语言切换时 Svelte 5 编译器检测到 currentLang
-    的 $.get() 依赖 → 自动触发组件重渲染
+Browser (SPA — svelte-spa-router)
+│
+├─ /                     → Dashboard.svelte         (flat project table, kept as-is)
+├─ /projects/:id         → Project.svelte            (repo panel REMOVED; dps workspace kept)
+├─ /repos                → Repositories.svelte       (NEW — repo list from GET /api/repos)
+├─ /repos/:repoPath      → Repository.svelte         (NEW — repo detail + RepoPanel + WorkspaceBrowser)
+├─ /chat                 → Chat.svelte               (unchanged)
+├─ /tracking             → Tracking.svelte           (unchanged)
+├─ /projects/:id/trace   → Trace.svelte              (unchanged)
+│
+▼  HTTP (Fetch API via api.ts)
+│
+Backend (FastAPI)
+│
+├─ GET  /api/repos                    → list all repos (grouped by repo_path)
+├─ GET  /api/repos/{repo_path}        → single repo detail + projects
+├─ GET  /api/projects/:id/repo/status → (existing, used by RepoPanel on Repository page)
+├─ POST /api/projects/:id/repo/*      → (existing, all write ops unchanged)
+├─ GET  /api/projects/:id/workspace/* → (existing, root="code" used on Repository page)
+│
+▼
+SQLite (runs table — no schema changes)
+  Columns: project_id, name, repo_type, repo_path, repo_url, created_at, updated_at
 ```
 
-### 数据流
-
-1. 用户在 AppBar 下拉菜单选择语言 → `onLangChange()` → `setLang(lang)` → `langStore.set(lang)` + `localStorage.setItem()` + 后端 `setUserLang()` API
-2. `langStore.subscribe()` 回调触发 → `currentLang = v`（在 `i18n.svelte.ts` 内部，Svelte 编译器将其编译为 `$.set(currentLang, v)`）
-3. 所有正在渲染的组件中，`t()` 函数读取 `currentLang` → 编译器检测到 `$.get(currentLang)` 依赖变化 → Svelte 5 响应式系统标记这些组件的模板为 dirty → 自动重渲染
-4. 重渲染时 `t(key)` 使用新语言的 `translations[lang][key]` → UI 实时更新
-
 ---
 
-## 组件列表
+## Component List
 
-### 组件1: `web/src/lib/i18n.svelte.ts`（核心改动 — 新建）
+### 1. Backend: `api/repo_routers.py` (NEW FILE)
 
-- **职责**: 响应式 i18n 翻译函数 + 全部 8 种语言的翻译字典
-- **关键设计**:
-  - 文件扩展名 `.svelte.ts` 启用 Svelte 5 runes 编译
-  - 模块级 `let currentLang = $state(get(langStore))` — 初始值从 store 读取
-  - `langStore.subscribe(v => { currentLang = v; })` — store 变化时同步到 `$state`，触发所有消费组件的重渲染
-  - `export function t(key: string): string` — 签名不变，内部读取 `currentLang`（而非 `get(langStore)`）
-  - `const translations: Record<Lang, Record<string, string>>` — 8 种语言的完整字典
-  - `type Lang = 'en' | 'zh-CN' | 'zh-TW' | 'ja' | 'ko' | 'fr' | 'de' | 'es'` — 类型安全
-- **从旧文件 `web/src/lib/i18n.ts` 迁移内容**:
-  - 保留 `en` 和 `zh-CN` 翻译字典（全部现有 key）
-  - 保留 `t()` 的 fallback 逻辑：`translations[lang] || translations[lang.split('-')[0]]` → `translations['en'][key] || key`
-- **新增**: `zh-TW`, `ja`, `ko`, `fr`, `de`, `es` 六种语言的翻译字典（基于 `en` 原文机器翻译生成）
-- **接口**: `export function t(key: string): string`（签名不变）
+**Responsibility**: Serve repository grouping data via two read-only API endpoints. Queries `runs` table, groups by `repo_path`, computes metadata per group.
 
-### 组件2: `web/src/lib/i18n.ts`（删除）
+**Routes**:
 
-- **职责**: 旧的非响应式 i18n 模块
-- **操作**: 删除此文件（内容已迁移到 `i18n.svelte.ts`）
+| Method | Path | Returns |
+|--------|------|---------|
+| `GET` | `/api/repos` | `[{ repo_path, repo_name, repo_type, repo_url, project_count, representative_project_id, last_activity, projects: [{project_id, name, status, updated_at}] }]` |
+| `GET` | `/api/repos/{repo_path}` | Single repo object (same shape) filtered to one `repo_path` |
 
-### 组件3-13: 11 个视图组件（import 路径更新）
+**Implementation details**:
+- `repo_path` route param: FastAPI path param. svelte-spa-router encodes slashes; FastAPI decodes them. The router `prefix` is `/api/repos` so `GET /api/repos/{repo_path}` naturally matches.
+- Use `core.db_manager.DBManager` via FastAPI DI (`get_db_manager`).
+- `SELECT repo_path, repo_type, repo_url FROM runs WHERE repo_path IS NOT NULL AND repo_path != '' GROUP BY repo_path`
+- For each group: `SELECT project_id, name, status, updated_at FROM runs WHERE repo_path = ? ORDER BY updated_at DESC`
+  - `representative_project_id` = first row's `project_id` (most recently updated)
+  - `project_count` = row count
+  - `last_activity` = max `updated_at`
+  - `repo_name` = `os.path.basename(repo_path)` if non-empty, else `repo_path`
+  - `projects` = full list in that group
+- No write gating needed — all data is from existing `runs` table columns already exposed by `/api/projects`.
+- **Decouple from list + detail**: use a shared `_build_repo_groups()` helper so both endpoints reuse the same grouping/aggregation logic.
 
-- **文件列表**:
-  - `web/src/views/AppBar.svelte`
-  - `web/src/views/Chat.svelte`
-  - `web/src/views/CheckpointModal.svelte`
-  - `web/src/views/ConfirmDialog.svelte`
-  - `web/src/views/Dashboard.svelte`
-  - `web/src/views/NotificationPanel.svelte`
-  - `web/src/views/Project.svelte`
-  - `web/src/views/RepoPanel.svelte`
-  - `web/src/views/Trace.svelte`
-  - `web/src/views/Tracking.svelte`
-  - `web/src/views/WorkspaceBrowser.svelte`
-- **改动**: 每个文件的 import 行从 `import { t } from '../lib/i18n';` 改为 `import { t } from '../lib/i18n.svelte';`
-- **其他改动**: 无。所有 `t('...')` 调用保持不变。
+**Dependencies**: `APIRouter`, `Depends`, `HTTPException`, `DBManager`
 
-### 组件4: 审计脚本（一次性工具）
+**Lines**: ~80 Python
 
-- **职责**: 提取所有 `.svelte` 组件中的 `t('...')` / `t("...")` 调用 key，交叉比对 8 种语言字典，输出遗漏报告
-- **实现**: Node.js 脚本（可直接 `node audit-i18n.mjs` 运行），无外部依赖
-- **输出**: 按语言分组的缺失 key 列表（stdout），如果全部覆盖则输出成功消息
-- **执行时机**: 翻译生成完成后，作为验证步骤运行
+### 2. Backend: `api/main.py` (MODIFY)
 
----
+**Change**: Register the new router:
+```python
+from api.repo_routers import router as repo_router
+# ...
+app.include_router(repo_router)
+```
 
-## 技术栈
+Insert after `app.include_router(admin_router)` (line 226) keeping alphabetical-ish order.
 
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| **响应式状态** | Svelte 5 `$state` rune | 在 `.svelte.ts` 模块中使用，建立跨组件响应式依赖 |
-| **Store 同步** | `svelte/store` `subscribe()` | 将 writable store 的变化同步到 `$state` |
-| **翻译生成** | 机器翻译（Google Translate / DeepL API） | 基于 `en` 原文逐条翻译，保留 `{n}`, `{id}` 等占位符 |
-| **类型系统** | TypeScript `Record<Lang, Record<string, string>>` | 编译期确保所有 8 种语言字典结构一致 |
-| **审计** | Node.js 脚本 + 正则提取 | 无额外依赖，`fs` + `path` 标准库 |
-| **构建** | Vite + `@sveltejs/vite-plugin-svelte` | 已配置 `compilerOptions.runes: true`，自动编译 `.svelte.ts` |
+### 3. Frontend: `web/src/lib/api.ts` (MODIFY)
 
----
-
-## 接口规范
-
-### `t(key: string): string` 签名不变
-
+**New functions**:
 ```typescript
-// 调用方完全不变
-const text = t('appbar.dashboard');  // → "Dashboard" (en) / "仪表盘" (zh-CN)
+// GET /api/repos
+export function listRepos(): Promise<RepoItem[]> { ... }
 
-// 带插值的使用模式保持不变
-t('repo.actionDone').replace('{name}', 'commit');  // → "commit done."
-t('dashboard.attempt').replace('{n}', '3');         // → "Attempt 3"
+// GET /api/repos/{repo_path}
+export function getRepo(repoPath: string): Promise<RepoDetail> { ... }
 ```
 
-### `langStore` 接口不变
-
+**Types to export**:
 ```typescript
-// stores/i18n.ts — 完全不变
-export const langStore = writable<string>(initialLang());
-export async function setLang(lang: string): Promise<void>;  // 设置语言 + localStorage + 后端同步
-export async function syncInitialLang(): Promise<void>;      // 首次访问语言同步
+export interface RepoItem {
+  repo_path: string;
+  repo_name: string;
+  repo_type: string;
+  repo_url: string | null;
+  project_count: number;
+  representative_project_id: string;
+  last_activity: string;
+  projects: RepoProjectSummary[];
+}
+
+export interface RepoProjectSummary {
+  project_id: string;
+  name: string;
+  status: string;
+  updated_at: string;
+}
+
+export type RepoDetail = RepoItem;  // same shape for /api/repos/{repo_path}
 ```
 
-### 翻译字典结构
+`listRepos()` uses the `_get` helper; `getRepo(repoPath)` uses `_get('/api/repos/' + encodeURIComponent(repoPath))`.
 
+### 4. Frontend: `web/src/views/Repositories.svelte` (NEW FILE)
+
+**Responsibility**: List all repositories grouped by `repo_path`. This is the `/repos` route.
+
+**State**:
+- `repos: RepoItem[]` — fetched from `GET /api/repos` on mount
+- `loading`, `error`, `pollTimer`
+
+**Rendering**:
+- Card/table layout showing: repo name (`repo_name`), full path, project count badge, repo type badge ("new"/"existing"/"clone"), last activity timestamp.
+- Click navigates to `#/repos/${encodeURIComponent(repo.repo_path)}` via `push()`.
+- Handle empty state: "No repositories found" with link back to Dashboard.
+- Handle error state: inline retry button.
+- 10-second poll interval (same pattern as Dashboard).
+
+**Props**: None (standalone route component).
+
+### 5. Frontend: `web/src/views/Repository.svelte` (NEW FILE)
+
+**Responsibility**: Show a single repository's detail — its projects, RepoPanel, and WorkspaceBrowser root="code". This is the `/repos/:repoPath` route.
+
+**Props** (from svelte-spa-router):
 ```typescript
-type Lang = 'en' | 'zh-CN' | 'zh-TW' | 'ja' | 'ko' | 'fr' | 'de' | 'es';
+let { params = {} as Record<string, string> } = $props();
+```
+Extracts `repoPath` via `decodeURIComponent(params.repoPath)`.
 
-const translations: Record<Lang, Record<string, string>> = {
-  en:    { 'appbar.dashboard': 'Dashboard', ... },
-  'zh-CN': { 'appbar.dashboard': '仪表盘', ... },
-  'zh-TW': { 'appbar.dashboard': '儀表板', ... },
-  ja:    { 'appbar.dashboard': 'ダッシュボード', ... },
-  ko:    { 'appbar.dashboard': '대시보드', ... },
-  fr:    { 'appbar.dashboard': 'Tableau de bord', ... },
-  de:    { 'appbar.dashboard': 'Dashboard', ... },
-  es:    { 'appbar.dashboard': 'Panel', ... },
-};
+**State**:
+- `repo: RepoDetail | null` — from `GET /api/repos/{repoPath}` on mount + on `repoPath` change
+- `loading`, `error`
+
+**Derived**:
+- `representativeProjectId = repo?.representative_project_id as string`
+- `canWrite = $derived($authStore.permissionResolved && $authStore.canWrite)`
+
+**Rendering**:
+1. **Breadcrumb**: Dashboard → Repositories → Repo Name
+2. **Repo metadata header**: repo name, full path, repo type, remote URL (if any), project count
+3. **Project table**: list of `repo.projects`, each clickable → `#/projects/${p.project_id}`
+4. **`<RepoPanel projectId={representativeProjectId} {canWrite} />`** — renders git status, commits, write actions using the representative project as the proxy
+5. **`<WorkspaceBrowser projectId={representativeProjectId} root="code" title="Repository Code" />`** — renders the code file tree
+6. Error states: 404 → "Repository not found"; generic error → retry button.
+
+**Edge case handling**:
+- If `repo.project_count === 1`, the project table shows a single row (no special casing).
+- If `representativeProjectId` is missing/null (shouldn't happen with backend filtering), show an error.
+
+### 6. Frontend: `web/src/views/Project.svelte` (MODIFY)
+
+**Removals**:
+- Line 788: `<!-- <RepoPanel projectId={projectId} {canWrite} /> -->` (REMOVE entirely)
+- Line 789: `<!-- <WorkspaceBrowser projectId={projectId} root="code" title="Project Repository" /> -->` (REMOVE entirely)
+
+**Keep**:
+- Line 787: `<WorkspaceBrowser projectId={projectId} root="dps" title="Pipeline Artifacts" />` (KEEP)
+
+**Add** (breadcrumb enhancement):
+- In the breadcrumb area, if `project.repo_path` is set, add a "Repositories" link between "Dashboard" and the project name, linking to `#/repos/${encodeURIComponent(project.repo_path as string)}`.
+
+**Also remove**: The `import RepoPanel` line (line 9) if it's no longer used. `WorkspaceBrowser` import stays (still used for root="dps").
+
+### 7. Frontend: `web/src/App.svelte` (MODIFY)
+
+**New imports**:
+```typescript
+import Repositories from './views/Repositories.svelte';
+import Repository from './views/Repository.svelte';
 ```
 
-### Import 路径变更
+**New routes** (add to existing `routes` object):
+```typescript
+'/repos': Repositories,
+'/repos/:repoPath': Repository,
+```
 
-```diff
-- import { t } from '../lib/i18n';
-+ import { t } from '../lib/i18n.svelte';
+**Decision: Keep `/` as Dashboard (unchanged)**. The Dashboard still shows the flat project table. Users navigate to Repositories via the AppBar. This is the lowest-risk approach — existing users are not disrupted. The Dashboard can later be changed to show repos by default, but that is out of scope for this MVP.
+
+### 8. Frontend: `web/src/views/AppBar.svelte` (MODIFY)
+
+**Add nav link** (after Dashboard, before Chat):
+```html
+<li><a href="#/repos">{t('appbar.repos')}</a></li>
+```
+
+### 9. Frontend: `web/src/lib/i18n.svelte.ts` (MODIFY)
+
+**New translation keys** (add to each language block — en, zh-CN, zh-TW, ja, ko, fr, de, es):
+
+| Key | English | zh-CN | Notes |
+|-----|---------|-------|-------|
+| `appbar.repos` | Repositories | 仓库 | AppBar nav link |
+| `repos.title` | Repositories | 仓库 | Page title |
+| `repos.count` | `{n} projects` | `{n} 个项目` | Project count per repo |
+| `repos.noRepos` | No repositories found. | 未找到仓库。 | Empty state |
+| `repos.backToDashboard` | Back to Dashboard | 返回仪表盘 | Link when empty |
+| `repos.loading` | Loading repositories… | 加载仓库中… | Loading state |
+| `repos.failedToLoad` | Failed to load repositories. | 加载仓库失败。 | Error state |
+| `repos.retry` | Retry | 重试 | Retry button |
+| `repo.title` | Repository | 仓库 | Single repo page title |
+| `repo.projectsInRepo` | Projects in this repository | 此仓库中的项目 | Project list heading |
+| `repo.notFound` | Repository not found. | 未找到仓库。 | 404 state |
+| `repo.backToRepos` | Back to Repositories | 返回仓库列表 | Breadcrumb link |
+| `repo.repoPath` | Path | 路径 | Metadata label |
+| `repo.repoType` | Type | 类型 | Metadata label |
+| `repo.repoUrl` | Remote URL | 远程地址 | Metadata label |
+| `repo.projectCount` | Projects | 项目数 | Metadata label |
+| `repo.loading` | Loading repository… | 加载仓库中… | Loading state |
+| `repo.failedToLoad` | Failed to load repository. | 加载仓库失败。 | Error state |
+
+**Note**: Existing `repo.title`, `repo.path`, `repo.branch` etc. are already used by `RepoPanel.svelte` and should NOT be renamed.
+
+### 10. Frontend: `web/src/stores/project.ts` (MODIFY — optional enhancement)
+
+**Add to ProjectState**:
+```typescript
+currentRepoPath: string | null;
+```
+
+This tracks which repository the user navigated from, enabling the "Back to Repository" link in Project.svelte. The `Repository.svelte` view sets this before navigating to a project. This is a lightweight enhancement — if omitted, we can pass repo path via query param (`#/projects/:id?repo=...`) but the store is cleaner.
+
+**If store approach**: Add `setCurrentRepoPath(path: string | null)` alongside `setCurrentProject`.
+
+---
+
+## Data Flow
+
+### Repositories List Flow
+```
+Repositories.svelte (onMount)
+  → listRepos()                    [api.ts]
+    → GET /api/repos               [repo_routers.py]
+      → DBManager                  [db_manager.py: runs table GROUP BY repo_path]
+    ← [{ repo_path, ..., projects }]
+  → render repo cards
+  → 10s poll repeats same flow
+```
+
+### Repository Detail Flow
+```
+Repository.svelte (onMount / $effect on params.repoPath)
+  → getRepo(decodedRepoPath)       [api.ts]
+    → GET /api/repos/{repo_path}   [repo_routers.py]
+      → DBManager (WHERE repo_path = ?)
+    ← { repo_path, ..., projects, representative_project_id }
+  → render:
+      - repo metadata header
+      - project table
+      - <RepoPanel projectId={representative_project_id} />
+      - <WorkspaceBrowser projectId={representative_project_id} root="code" />
+```
+
+### RepoPanel/WorkspaceBrowser on Repository Page Flow
+```
+RepoPanel (onMount)
+  → repoStatus(projectId)               [api.ts]
+    → GET /api/projects/:id/repo/status [project_routers.py — existing]
+      → ws.repo_status(projectId)       [workspace_manager.py — existing]
+    ← git status data
+
+WorkspaceBrowser (on first expand)
+  → workspaceTree(projectId, root="code")  [api.ts]
+    → GET /api/projects/:id/workspace/tree [project_routers.py — existing]
+      → ws.get_code_path(projectId)        [workspace_manager.py — existing]
+    ← file tree
+```
+
+**Key insight**: `WorkspaceManager.get_code_path(projectId)` looks up `repo_path` from the `runs` table per project. All projects sharing the same `repo_path` return the same directory, so using the representative `projectId` is functionally identical to using any other project in the group.
+
+### Navigation Flow
+```
+AppBar "Repositories" link
+  → push('#/repos')
+    → Repositories.svelte renders
+
+Repo card click
+  → push('#/repos/' + encodeURIComponent(repo.repo_path))
+    → Repository.svelte renders
+
+Project row click (in Repository page)
+  → push('#/projects/' + project.project_id)
+    → Project.svelte renders (with breadcrumb: Dashboard → Repositories → Repo → Project)
 ```
 
 ---
 
-## 改动清单
+## Success Criteria Mapping
 
-| # | 文件 | 操作 | 描述 |
-|---|------|------|------|
-| 1 | `web/src/lib/i18n.svelte.ts` | **新建** | 响应式 i18n 模块：`$state` + `langStore.subscribe()` + 8 语言完整字典 |
-| 2 | `web/src/lib/i18n.ts` | **删除** | 旧非响应式模块，内容已迁移 |
-| 3 | `web/src/views/AppBar.svelte` | 修改 | import 路径 `'../lib/i18n'` → `'../lib/i18n.svelte'` |
-| 4 | `web/src/views/Chat.svelte` | 修改 | 同上 |
-| 5 | `web/src/views/CheckpointModal.svelte` | 修改 | 同上 |
-| 6 | `web/src/views/ConfirmDialog.svelte` | 修改 | 同上 |
-| 7 | `web/src/views/Dashboard.svelte` | 修改 | 同上 |
-| 8 | `web/src/views/NotificationPanel.svelte` | 修改 | 同上 |
-| 9 | `web/src/views/Project.svelte` | 修改 | 同上 |
-| 10 | `web/src/views/RepoPanel.svelte` | 修改 | 同上 |
-| 11 | `web/src/views/Trace.svelte` | 修改 | 同上 |
-| 12 | `web/src/views/Tracking.svelte` | 修改 | 同上 |
-| 13 | `web/src/views/WorkspaceBrowser.svelte` | 修改 | 同上 |
+| Criterion | How Addressed |
+|-----------|---------------|
+| Dashboard shows repos grouped by `repo_path` | `Repositories.svelte` at `/repos` + AppBar link as primary entry point. Flat project table remains at `/` for backward compatibility. |
+| Clicking repo → Repository page with filtered projects | `Repository.svelte` fetches `GET /api/repos/{repo_path}`, renders project table from `repo.projects`. |
+| Repository page includes RepoPanel + WorkspaceBrowser root="code" | Both rendered using `representative_project_id`. |
+| Project page no longer has RepoPanel or WorkspaceBrowser root="code" | Removed from `Project.svelte` (only root="dps" WorkspaceBrowser kept). |
+| Existing routes unchanged | `/`, `/projects/:id`, `/chat`, `/tracking`, trace routes all untouched. |
+| Breadcrumbs intuitive | Dashboard → Repositories → Repo Name → Project Name via breadcrumb in each view. |
 
 ---
 
-## 翻译生成策略
+## Technical Stack
 
-### 源数据
-
-以 `en` 字典为权威源（唯一 key 集合）。当前 `en` 字典包含约 160 个唯一 key（含重复 key，选取最后出现的值）。
-
-### 生成方法
-
-1. 从 `en` 字典提取去重后的 key-value 对
-2. 对 6 种目标语言（zh-TW, ja, ko, fr, de, es）逐条翻译英文 value
-3. **占位符保护**: 所有 `{n}`, `{id}`, `{label}`, `{error}`, `{msg}`, `{pct}`, `{cat}`, `{text}`, `{name}`, `{branch}` 占位符在译文中原样保留
-4. **HTML 标签保护**: `<strong>`, `</strong>`, `<code>`, `</code>` 在译文中原样保留
-5. 每种语言的字典 key 顺序与 `en` 保持一致，便于 diff
-
-### zh-TW 特殊处理
-
-`zh-TW` 与 `zh-CN` 共用大部分汉字但用繁体。在 `zh-CN` 翻译基础上做繁简转换 + 用词调整（如 "智能体" → "智慧體"），而非从英文重新翻译。
+| Layer | Technology | Notes |
+|-------|-----------|-------|
+| Frontend | Svelte 5 (runes mode) + TypeScript | `$state`, `$derived`, `$props`, `$effect` |
+| Routing | svelte-spa-router | Client-side hash-based routes |
+| API | Fetch wrapper in `api.ts` | `_get()` / `_post()` with timeout + error handling |
+| Backend | FastAPI + APIRouter | New `api/repo_routers.py` |
+| Database | SQLite via `core/db_manager.py` | No schema changes; queries existing `runs` table |
+| i18n | `i18n.svelte.ts` reactive module | 8-language support |
+| Auth | `authStore` + `authz.py` write gate | Read-only for repo listing; write ops still project-scoped |
 
 ---
 
-## 审计策略
+## Extension Points (Future)
 
-### 步骤
-
-1. 遍历 `web/src/views/` 下所有 `.svelte` 文件
-2. 正则提取所有 `t('...')` 和 `t("...")` 调用中的 key
-3. 收集全局唯一 key 集合
-4. 对每种语言（en, zh-CN, zh-TW, ja, ko, fr, de, es），检查每个 key 是否存在于 `translations[lang]`
-5. 输出报告：按语言列出缺失 key（如有）；全部覆盖时输出成功消息
-
-### 边界处理
-
-- **重复 key**: 字典中同一个 key 出现多次时，以最后一次赋值为准（JavaScript 对象语义），审计时不报错
-- **旧版 key 名**: `en` 中同时存在 `repo.makePR` 和 `repo.makePr`、`repo.notGit` 和 `repo.notGitWithPath` 等新旧命名。审计时两者都视为有效 key，翻译生成时两者都需覆盖
-- **不在组件中的 key**: 翻译字典中可能存在未被任何组件引用的 key（如旧版命名变体），这些不报缺失（仅审计"组件用了但字典缺了"的方向）
+1. **`repositories` table**: If repo-scoped settings/permissions are needed, a migration can add a proper `repositories` table with `repo_path` as the natural key, foreign key from `runs`. The `GET /api/repos` endpoint would then query the new table — frontend unchanged.
+2. **Repo-scoped git endpoints**: `POST /api/repos/{repo_path}/commit` etc. would internally resolve to the representative project and call the same git logic. The existing project-scoped endpoints continue to work.
+3. **Dashboard default view**: The `/` route could be changed to `Repositories` instead of `Dashboard`, with the flat project table accessible via a tab. The current design keeps `/` as-is for zero disruption.
+4. **Pagination**: If the number of repos grows large, the `GET /api/repos` endpoint can accept `limit`/`offset` params.
+5. **Search/filter**: Add query params to filter repos by name, type, or path.
 
 ---
 
-## 扩展性考虑
+## Constraints & Risk Mitigation
 
-- **新增语言**: 只需在 `translations` 对象中添加新语言字典，并在 `Lang` 类型联合中追加语言代码。`AppBar.svelte` 的 `LANG_OPTIONS` 数组中添加对应条目即可。
-- **新增翻译 key**: 在 `en` 字典中添加新 key，在 `t()` 调用中使用即可。其他 7 种语言可后续补译（fallback 到 `en`）。
-- **翻译懒加载**: 当前所有 8 种语言 ~160 条翻译内联在 bundle 中（约 15-20KB gzip'd）。如果未来支持超过 20 种语言，可改为按需动态 `import()` 各语言字典，`t()` 改为 async，但当前规模不需要。
-- **插值引擎**: 当前使用 `.replace('{n}', ...)` 手动替换。如果未来需要复数规则、日期格式化等，可引入 `intl-messageformat` 或 `i18next`（需评估 bundle size），但当前项目规模用 `.replace()` 完全够用。
-- **`stores/i18n.ts` 保持不变**: 语言持久化逻辑（localStorage + 后端 API 同步）完全在 store 层，与 `lib/i18n.svelte.ts` 通过 `subscribe()` 松耦合，未来可独立演进任何一侧。
-
----
-
-## 不可逆操作回滚设计
-
-### 文件重命名回滚
-
-- **操作**: `lib/i18n.ts` → 删除 + `lib/i18n.svelte.ts` → 新建
-- **回滚**: 旧文件 `lib/i18n.ts` 的内容完整迁移到新文件（加上响应式改造），Git 历史可追溯。如需回滚：恢复 `lib/i18n.ts` 并删除 `lib/i18n.svelte.ts`，将 11 个组件的 import 路径改回 `'../lib/i18n'`。
-- **校验**: 回滚后运行 `npm run build`（Vite build），确认无编译错误。
-
-### 翻译字典迁移回滚
-
-- **操作**: `en` 和 `zh-CN` 字典从旧文件复制到新文件
-- **回滚**: 旧文件内容完整保留在 Git 历史中。新文件中的 `en`/`zh-CN` 字典与旧文件逐 key 一致（仅新增其他 6 种语言，不修改已有翻译）。
+| Constraint | Mitigation |
+|-----------|------------|
+| No DB schema changes | `GET /api/repos` queries `runs` columns only; no migration, no new table. |
+| WorkspaceManager.get_code_path() returns same dir for all projects in a group | Verified in SOTA. Representative project ID is deterministic. |
+| repo_path as URL param (contains slashes) | `encodeURIComponent` on frontend; FastAPI decodes naturally. |
+| Write permissions | `canWrite` already derived from `authStore`; RepoPanel uses it unchanged. User needs write access to the representative project — if they lack it, git write buttons are hidden. |
+| Projects without repo_path | Filtered by `WHERE repo_path IS NOT NULL AND repo_path != ''` in the backend query. |
 
 ---
 
-## 需要关注的风险点
+## File Inventory (Complete Change List)
 
-1. **`$state` 在 `.svelte.ts` 模块顶层的初始化时机**: `get(langStore)` 在模块加载时执行，如果 `langStore` 尚未初始化（SSR/测试环境），`get()` 返回初始值 `initialLang()` 即 `localStorage` 值或 `browserLang()` 或 `'en'`，安全。
-2. **订阅泄漏**: `langStore.subscribe()` 返回 unsubscribe 函数。由于这是应用级单例模块（整个 SPA 生命周期内不销毁），不调用 unsubscribe 也不会泄漏。
-3. **Vite HMR 兼容性**: `.svelte.ts` 文件在 Vite HMR 时模块重新执行，`$state` 会重新初始化。Vite 的 Svelte 插件会处理 HMR boundary，重新执行后 `$state` 从 `get(langStore)` 获取当前值（store 在 HMR 中保持），行为正确。
+| File | Action | Description |
+|------|--------|-------------|
+| `api/repo_routers.py` | **CREATE** | New router: `GET /api/repos`, `GET /api/repos/{repo_path}` |
+| `api/main.py` | **EDIT** | Import + `app.include_router(repo_router)` |
+| `web/src/views/Repositories.svelte` | **CREATE** | Repository list view |
+| `web/src/views/Repository.svelte` | **CREATE** | Single repository detail view |
+| `web/src/views/Project.svelte` | **EDIT** | Remove RepoPanel + WorkspaceBrowser(root="code"); add breadcrumb |
+| `web/src/views/AppBar.svelte` | **EDIT** | Add "Repositories" nav link |
+| `web/src/App.svelte` | **EDIT** | Add `/repos` and `/repos/:repoPath` routes |
+| `web/src/lib/api.ts` | **EDIT** | Add `listRepos()`, `getRepo()`, `RepoItem`/`RepoDetail` types |
+| `web/src/lib/i18n.svelte.ts` | **EDIT** | Add ~16 new translation keys × 8 languages |
+| `web/src/stores/project.ts` | **EDIT** | Optional: add `currentRepoPath` to `ProjectState` + setter |

@@ -1,0 +1,47 @@
+# configs/investigate.yaml
+# READ-ONLY generalist sub-agent: the driver hands it a question/task, a spawned
+# agent explores in its own context and returns findings — it never mutates the
+# repo. The lightweight layer-3 primitive for context-offloading exploration and
+# research (the reading balloon stays out of the driver's window).
+
+name: "investigate"
+description: "Read-only investigator: explore/research a question, return findings"
+
+x-aitelier:
+  label: "Investigate"
+  scheduler_owned: true           # spawned agent, context isolated
+  seed_file: "task.md"
+  output_step: "investigate"
+  input_hint: >-
+    seed_text = the question or investigation task (e.g. "how does auth work
+    here?", "research approaches to X"). For a codebase question add
+    against_project=<repo>. A spawned READ-ONLY agent explores and returns
+    findings.md — it never modifies anything. Poll to completion, read findings.
+
+begin: "investigate"
+
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "investigate"
+      result: "completed"
+      require_completed: true
+    - type: max_total_steps
+      limit: 50
+
+steps:
+  - id: "investigate"
+    step_type: "agent"
+    agent_config: "investigator"
+    timeout_seconds: 600
+    context:
+      - source: { from: "repository", mode: "tool" }        # repo read tools
+      - source: { config: "investigate", output: "task.md" }
+      - source: { tool: "dir_tree" }
+    output:
+      mode: "content"
+      fixed:
+        findings: "findings.md"
+    transitions:
+      - to: null                  # single step; node_reached ends the run

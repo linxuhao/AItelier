@@ -1,0 +1,82 @@
+# configs/fix_tests.yaml
+# OBJECTIVE-gated fix loop: run the test suite; if it fails, a spawned agent
+# edits code to fix it and the suite runs again, looping until green or 3 tries.
+# The gate is `run_tests` — a deterministic check that can't be sweet-talked, so
+# this is more reliable (and cheaper) than an LLM reviewer for anything with a
+# real test suite. Needs skillflow-py >= 1.5.2 (max_loop on a tool-fed gate).
+
+name: "fix_tests"
+description: "Run the tests; if failing, fix code and loop until green (bounded)"
+
+x-aitelier:
+  label: "Fix Failing Tests"
+  scheduler_owned: true
+  seed_file: "task.md"
+  output_step: "test"
+  input_hint: >-
+    seed_text = optional hint (or "make the test suite pass"). Add
+    against_project=<repo>. A spawned agent runs the tests and, if any fail,
+    edits code to fix them, re-running until green or 3 attempts. Objective gate
+    (run_tests) — no LLM reviewer. Poll to completion; the test step's
+    test_report shows the final result.
+
+begin: "fix"
+
+end_conditions:
+  combinator: or
+  conditions:
+    # Terminate at the loop-EXTERNAL `done` gate, reached only when tests pass
+    # (test → done). node_reached must NOT be `test`: `test` is inside the loop,
+    # so on a loop-back a stale `completed` test row from the prior iteration
+    # would fire node_reached and report GREEN before the retried test runs
+    # (proven in coding_impl). `done` is a gate (no completed row), reached at
+    # most once. The never-passes loop is bounded by max_loop:3 below (fails
+    # with CycleLimitExceeded once exhausted).
+    - type: node_reached
+      node: "done"
+      result: "completed"
+    - type: max_total_steps
+      limit: 40
+
+steps:
+  - id: "fix"
+    step_type: "agent"
+    agent_config: "fix_worker"
+    timeout_seconds: 600
+    context:
+      - source: { from: "repository", mode: "tool" }
+      - source: { config: "fix_tests", output: "task.md" }
+      - source: { step: "test" }          # on loop-back: the failing test_report
+      - source: { tool: "dir_tree" }
+    output:
+      mode: "write"
+    lifecycle:
+      on_deliver:
+        - tool: "repo_apply"
+          params:
+            source_dir: "$STEP_DIR"
+          on_failure: "retry"
+          max_retries: 3
+    transitions:
+      - to: "test"
+
+  - id: "test"
+    step_type: "tool"
+    tool_name: "run_tests"
+    timeout_seconds: 1200
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: "done"                        # tests pass → loop-external terminal
+        match: { from_file: "test_report.json", field: "passed", value: true }
+      - to: "fix"                         # tests fail → fix, with the report
+        match: { from_file: "test_report.json", field: "passed", value: false }
+        max_loop: 3
+
+  # Loop-external terminal — reached only after tests pass; the node the
+  # end-condition fires on (see the comment on end_conditions). Gate = no
+  # completed step row, so it fires at most once.
+  - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null

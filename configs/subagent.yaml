@@ -1,0 +1,103 @@
+# configs/subagent.yaml
+# GATED generalist sub-agent: a spawned worker does the task the driver hands it,
+# then an adversarial RED reviewer checks the result and loops it back with
+# feedback until it passes (bounded). This is the Green/Red pattern applied to a
+# generic task — it lets even a cheap worker converge to a reviewed result, all
+# in the spawned agents' own context (never the driver's).
+#
+# The red gate is only as good as the reviewer: the review role is prompted to
+# REFUTE, and the worker's context includes the reviewer's last verdict so it
+# fixes the named problems. Bounded by max_loop; on the pass path the run ends.
+
+name: "subagent"
+description: "Gated generalist worker: do a task, red-review + fix loop, until it passes"
+
+x-aitelier:
+  label: "Sub-agent (gated)"
+  scheduler_owned: true           # spawned agents, context isolated
+  seed_file: "task.md"
+  output_step: "review"
+  input_hint: >-
+    seed_text = a self-contained task to carry out (implement X, refactor Y).
+    Add against_project=<repo> to work in an existing repo. A spawned worker
+    does it, an adversarial reviewer checks and loops it back with feedback
+    until it passes (max 3 tries), committing the result. Poll to completion;
+    read the final verdict + summary. For a task that has an OBJECTIVE check
+    (make the tests pass), prefer fix_tests instead — a test gate beats an LLM
+    reviewer.
+
+begin: "work"
+
+end_conditions:
+  combinator: or
+  conditions:
+    # Terminate at the loop-EXTERNAL `done` gate, reached only when the review
+    # passes (review → done). node_reached must NOT be `review`: it's inside the
+    # loop, so a stale `completed` review row from a prior (failed) iteration
+    # would fire node_reached and end the run before the fixed work is reviewed
+    # (the premature-firing trap proven in coding_impl). `done` is a gate (no
+    # completed row), reached at most once. The never-passes loop is bounded by
+    # max_loop:3 below.
+    - type: node_reached
+      node: "done"
+      result: "completed"
+    - type: max_total_steps
+      limit: 60
+
+steps:
+  - id: "work"
+    step_type: "agent"
+    agent_config: "subagent_worker"
+    timeout_seconds: 600
+    context:
+      - source: { from: "repository", mode: "tool" }
+      - source: { config: "subagent", output: "task.md" }
+      - source: { step: "review" }        # on loop-back: the reviewer's feedback
+      - source: { tool: "dir_tree" }
+    output:
+      mode: "write"                        # surgical create/edit
+    lifecycle:
+      on_deliver:
+        - tool: "repo_apply"
+          params:
+            source_dir: "$STEP_DIR"
+          on_failure: "retry"
+          max_retries: 3
+    transitions:
+      - to: "review"
+
+  - id: "review"
+    step_type: "agent"
+    agent_config: "subagent_reviewer"
+    timeout_seconds: 300
+    context:
+      - source: { from: "repository", mode: "tool" }
+      - source: { config: "subagent", output: "task.md" }
+      - source: { step: "work" }
+      - source: { tool: "dir_tree" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "findings": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+    transitions:
+      - to: "done"                          # passed → loop-external terminal
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "work"                          # failed → fix, with the feedback
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # Loop-external terminal — reached only after the review passes; the node the
+  # end-condition fires on. Gate = no completed step row, so it fires at most once.
+  - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null

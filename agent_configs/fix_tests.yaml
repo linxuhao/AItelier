@@ -1,0 +1,16 @@
+# agent_configs/fix_tests.yaml
+# Worker for configs/fix_tests.yaml — reads the failing test report and edits
+# code to make the suite pass. The gate is objective (run_tests), so there is no
+# reviewer role here.
+
+fix_worker:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.2
+  template: "fix_tests.md"
+  tools: ["list_tree", "test_write", "read_test_written", "delete_file"]
+  max_output_tokens: 32768
+  max_tool_turns: 20
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

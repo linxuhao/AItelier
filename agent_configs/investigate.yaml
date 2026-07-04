@@ -1,0 +1,16 @@
+# agent_configs/investigate.yaml
+# Read-only investigator for configs/investigate.yaml. NO write tools and no
+# output.mode:write — it can only read and emit findings, so a spawned
+# investigation can never mutate the repo (safe context-offload primitive).
+
+investigator:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.2
+  template: "investigate.md"
+  tools: ["list_tree"]            # + repo read tools from the context source
+  max_output_tokens: 8192
+  max_tool_turns: 20
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

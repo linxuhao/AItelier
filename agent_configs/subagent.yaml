@@ -1,0 +1,28 @@
+# agent_configs/subagent.yaml
+# Roles for configs/subagent.yaml — the gated generalist worker (Green) and its
+# adversarial reviewer (Red). Both spawned; nothing here touches the driver's
+# context.
+
+subagent_worker:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.2
+  template: "subagent_work.md"
+  # create/edit derived from output.mode: write.
+  tools: ["list_tree", "test_write", "read_test_written", "delete_file"]
+  max_output_tokens: 32768
+  max_tool_turns: 20
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+subagent_reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.1               # cold — a reviewer, not a brainstormer
+  template: "subagent_review.md"
+  tools: ["list_tree"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

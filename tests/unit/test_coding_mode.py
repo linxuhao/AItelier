@@ -673,6 +673,59 @@ class TestPipelineCatalog:
         full = {e["config_name"]: e for e in reg.catalog(full=True)}
         assert "git diff" in full["code_review"]["input_hint"]
 
+    def test_generalist_and_gated_pipelines_register(self, tmp_path):
+        """investigate (read-only), subagent (red-gated loop), fix_tests
+        (objective loop) all register, validate, self-describe, and expose
+        their loop-back gate — with globally-unique agent roles."""
+        from skillflow.core import SkillFlow
+        from skillflow.graph import PipelineGraph
+        from core.config_registry import ConfigRegistry
+        from pathlib import Path as P
+        import yaml as _yaml
+
+        repo = P(__file__).resolve().parent.parent.parent
+        sf = SkillFlow(str(tmp_path / "sf.db"),
+                       workspace_base=str(tmp_path / "ws"),
+                       projects_base=str(tmp_path / "proj"))
+        seen_roles = set()
+        for f in ("investigate", "subagent", "fix_tests"):
+            for name, cfg in _yaml.safe_load(
+                    (repo / "agent_configs" / f"{f}.yaml").read_text()).items():
+                assert name not in seen_roles, f"duplicate role {name}"
+                seen_roles.add(name)
+                sf.register_agent_config_from_dict(name, cfg)
+            sf.register_graph(PipelineGraph.from_yaml(repo / "configs" / f"{f}.yaml"))
+        reg = ConfigRegistry.build(sf)
+        cat = {e["config_name"]: e for e in reg.catalog(full=True)}
+
+        # all three are background (context-isolated) + self-describe
+        for name in ("investigate", "subagent", "fix_tests"):
+            assert cat[name]["drive"] == "background"
+            assert cat[name]["input_hint"]
+
+        # subagent: red-gated loop-back (review fails → back to work, bounded),
+        # pass → a loop-EXTERNAL `done` gate (not to:null on the looped node —
+        # that premature-fires node_reached; see coding_impl).
+        sub = sf._get_resolver("subagent").graph
+        review = next(n for n in sub.steps if n.id == "review")
+        targets = {t.to: t.max_loop for t in review.transitions}
+        assert targets.get("work") == 3          # loop-back with a bound
+        assert targets.get("done") is None        # pass → external terminal gate
+        assert any(n.id == "done" for n in sub.steps)
+
+        # fix_tests: objective tool-fed gate loops back to fix, pass → `done`
+        fix = sf._get_resolver("fix_tests").graph
+        test = next(n for n in fix.steps if n.id == "test")
+        ftargets = {t.to: t.max_loop for t in test.transitions}
+        assert ftargets.get("fix") == 3
+        assert ftargets.get("done") is None
+        assert any(n.id == "done" for n in fix.steps)
+
+        # investigate: read-only — no output.mode write, no repo_apply
+        inv = sf._get_resolver("investigate").graph
+        istep = next(n for n in inv.steps if n.id == "investigate")
+        assert istep.output_mode == "content"
+
     def test_catalog_block_pushed_into_coding_prompt(self, coding_agent, monkeypatch):
         class _Reg:
             def catalog(self, full=False):

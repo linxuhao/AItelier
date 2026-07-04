@@ -6,7 +6,6 @@
   import { projectStore, setCurrentProject } from '../stores/project';
   import { showCheckpoint } from '../stores/checkpoint';
   import WorkspaceBrowser from './WorkspaceBrowser.svelte';
-  import RepoPanel from './RepoPanel.svelte';
   import {
     getProject,
     getTasks,
@@ -389,6 +388,17 @@
   <!-- Breadcrumb -->
   <nav class="breadcrumb" aria-label="breadcrumb">
     <a href="#/" onclick={(e) => { e.preventDefault(); push('#/'); }}>{t('project.dashboard')}</a>
+    {#if $projectStore.currentRepoPath}
+      <span class="breadcrumb-sep">/</span>
+      <a href="#/repos/{encodeURIComponent($projectStore.currentRepoPath)}"
+         onclick={(e) => { e.preventDefault(); push('#/repos/' + encodeURIComponent($projectStore.currentRepoPath)); }}
+      >{t('repo.backToRepos')}</a>
+    {:else if project?.repo_path}
+      <span class="breadcrumb-sep">/</span>
+      <a href="#/repos/{encodeURIComponent(project.repo_path as string)}"
+         onclick={(e) => { e.preventDefault(); push('#/repos/' + encodeURIComponent(project.repo_path as string)); }}
+      >{t('repo.backToRepos')}</a>
+    {/if}
     <span class="breadcrumb-sep">/</span>
     <span class="breadcrumb-current">{projectId ? truncate(projectId, 24) : '…'}</span>
   </nav>
@@ -783,10 +793,8 @@
         </figure>
       {/if}
 
-      <!-- Pipeline artifacts + repository (vanilla project-page sections) -->
+      <!-- Pipeline artifacts (project-scoped) -->
       <WorkspaceBrowser projectId={projectId} root="dps" title="Pipeline Artifacts" />
-      <RepoPanel projectId={projectId} {canWrite} />
-      <WorkspaceBrowser projectId={projectId} root="code" title="Project Repository" />
     {/if}
 
     <!-- ══════════════════════════════════════════

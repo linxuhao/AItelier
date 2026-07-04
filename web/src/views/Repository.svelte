@@ -1,6 +1,6 @@
 <script lang="ts">
   import { push } from 'svelte-spa-router';
-  import { getRepo } from '../lib/api';
+  import { getRepo, ApiError } from '../lib/api';
   import type { RepoDetail } from '../lib/api';
   import { formatTime } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
@@ -50,7 +50,7 @@
       const data = await getRepo(repoPath);
       repo = data;
     } catch (err: unknown) {
-      if (err instanceof Response && err.status === 404) {
+      if (err instanceof ApiError && err.status === 404) {
         notFound = true;
       } else {
         const msg = err instanceof Error ? err.message : 'Failed to load repository';
@@ -90,8 +90,8 @@
     </ul>
   </nav>
 
-  <!-- Loading state -->
-  {#if loading}
+  <!-- Loading state (only on initial load, not re-fetches) -->
+  {#if loading && !repo}
     <article aria-busy="true">
       <p>{t('repo.pageLoading')}</p>
     </article>
@@ -179,7 +179,7 @@
           </table>
         </figure>
       {:else}
-        <p><small>{t('repos.noRepos')}</small></p>
+        <p><small>No projects in this repository.</small></p>
       {/if}
     </section>
 
@@ -194,7 +194,7 @@
         <WorkspaceBrowser
           projectId={representativeProjectId}
           root="code"
-          title={t('repo.pageTitle') + ' ' + t('repo.labelUrl')}
+          title="Repository Code"
         />
       </section>
     {:else}

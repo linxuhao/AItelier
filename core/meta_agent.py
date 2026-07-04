@@ -1249,34 +1249,65 @@ class MetaAgent:
                     yield {"type": "done", "message": {"role": "assistant", "content": full_text}}
                     return
 
-                # Append assistant message with tool_calls
+                # Append the assistant message with tool_calls, run its tools,
+                # and persist the assistant + ALL its results as ONE atomic group.
+                # The persist happens in a `finally` so it runs even when a client
+                # disconnect raises CancelledError/GeneratorExit at a yield or in a
+                # mid-tool await. Any call cut off before producing a result is
+                # completed with a synthetic "interrupted" result, so a persisted
+                # assistant is NEVER left with a dangling tool_call (the cause of
+                # the "tool_call_ids did not have response messages" corruption).
+                # _persist_transcript is a synchronous DB write — safe to run
+                # during generator unwinding (no yield/await in the finally).
                 assistant_msg = self._build_assistant_msg(full_text, tool_calls)
                 messages.append(assistant_msg)
-                self._persist_transcript(assistant_msg)
-
+                tool_msgs: list[dict] = []
                 turn_errors = 0
-                for tc in tool_calls:
-                    yield {"type": "tool_call", "name": tc["name"], "args": tc["args"]}
-                    try:
-                        result = await self._execute_tool(tc["name"], tc["args"])
-                    except Exception as e:
-                        result = {"error": str(e)}
-                    # AT-28: track errors to detect unrecoverable states
-                    if "error" in result:
-                        turn_errors += 1
-                        consecutive_errors += 1
-                    else:
-                        consecutive_errors = 0  # reset on success
-                    yield {"type": "tool_result", "name": tc["name"], "result": result}
-                    tool_msg = {
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "tool_name": tc["name"],
-                        "tool_args": tc["args"],
-                        "content": json.dumps(result, default=str, ensure_ascii=False),
-                    }
-                    messages.append(tool_msg)
-                    self._persist_transcript(tool_msg)
+                try:
+                    for tc in tool_calls:
+                        yield {"type": "tool_call", "name": tc["name"], "args": tc["args"]}
+                        try:
+                            result = await self._execute_tool(tc["name"], tc["args"])
+                        except Exception as e:
+                            result = {"error": str(e)}
+                        # AT-28: track errors to detect unrecoverable states
+                        if "error" in result:
+                            turn_errors += 1
+                            consecutive_errors += 1
+                        else:
+                            consecutive_errors = 0  # reset on success
+                        tool_msg = {
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "tool_name": tc["name"],
+                            "tool_args": tc["args"],
+                            "content": json.dumps(result, default=str, ensure_ascii=False),
+                        }
+                        # Capture the result BEFORE the yield, so a disconnect at
+                        # the emit can't lose it — the finally still persists it.
+                        tool_msgs.append(tool_msg)
+                        messages.append(tool_msg)
+                        yield {"type": "tool_result", "name": tc["name"], "result": result}
+                finally:
+                    # Complete the group: a synthetic result for any call cut off
+                    # (disconnect) before it produced one, so the persisted group
+                    # is always assistant + exactly one result per tool_call.
+                    answered = {m["tool_call_id"] for m in tool_msgs}
+                    for tc in tool_calls:
+                        if tc["id"] not in answered:
+                            tool_msgs.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "tool_name": tc["name"],
+                                "tool_args": tc["args"],
+                                "content": json.dumps(
+                                    {"error": "interrupted — stream disconnected "
+                                              "before this tool completed"}),
+                            })
+                    # Atomic persist: assistant first, then every result in order.
+                    self._persist_transcript(assistant_msg)
+                    for tm in tool_msgs:
+                        self._persist_transcript(tm)
 
                 # AT-28: if all tool calls in this turn errored and we've had
                 # 3+ consecutive errors, guide the LLM to exit gracefully instead

@@ -828,6 +828,40 @@ class TestBudgetPause:
                        mock_db.save_chat_transcript_message.call_args_list]
         assert saved_roles == ["assistant", "tool"]
 
+    async def test_disconnect_midchain_persists_complete_group(self, coding_agent, mock_db):
+        """A client disconnect mid tool-chain (GeneratorExit at a yield) must
+        still persist a COMPLETE group — assistant + one result per tool_call,
+        never a dangling tool_call — via the finally, with a synthetic result
+        for the call that was cut off."""
+        coding_agent.max_tool_turns = 1
+
+        async def fake_stream(messages):
+            yield {"_type": "collected", "text": "",
+                   "tool_calls": [
+                       {"id": "c1", "name": "bash", "args": {"project_id": "p", "command": "a"}},
+                       {"id": "c2", "name": "bash", "args": {"project_id": "p", "command": "b"}},
+                   ]}
+        coding_agent._stream_llm = fake_stream
+
+        async def exec_tool(name, args):
+            return {"ok": True}
+        coding_agent._execute_tool = exec_tool
+
+        gen = coding_agent.chat("run", [], "p")
+        # Consume until c1's result is emitted, then simulate a disconnect.
+        while True:
+            evt = await gen.__anext__()
+            if evt.get("type") == "tool_result":
+                break
+        await gen.aclose()  # GeneratorExit → finally persists the complete group
+
+        saved = [c.args[2] for c in mock_db.save_chat_transcript_message.call_args_list]
+        assert saved and saved[0]["role"] == "assistant"
+        tool_ids = [m["tool_call_id"] for m in saved if m["role"] == "tool"]
+        assert set(tool_ids) == {"c1", "c2"}  # both answered — nothing dangling
+        c2 = next(m for m in saved if m.get("tool_call_id") == "c2")
+        assert "interrupted" in c2["content"]  # cut-off call → synthetic result
+
     async def test_butler_mode_does_not_persist_transcript(self, butler_agent, mock_db):
         butler_agent.max_tool_turns = 1
 

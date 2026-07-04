@@ -366,7 +366,7 @@
       {:else if loadedContentHtml}
         {@html loadedContentHtml}
       {:else}
-        <p>Checkpoint reached for run <code>{projectId}</code>.</p>
+        <p>{@html t('modal.checkpointReached').replace('{id}', projectId || '')}</p>
       {/if}
     </div>
 
@@ -379,15 +379,15 @@
         <textarea
           id="cp-feedback"
           bind:value={feedback}
-          placeholder="Describe what needs to change…"
+          placeholder={t('modal.feedbackPlaceholder')}
           disabled={submitting}
         ></textarea>
         <div class="cp-feedback-buttons">
           <button class="outline" onclick={cancelFeedback} disabled={submitting}>
-            Cancel
+            {t('modal.cancel')}
           </button>
           <button class="contrast" onclick={handleRejectClick} disabled={submitting}>
-            {submitting ? 'Submitting…' : 'Submit Rejection'}
+            {submitting ? t('modal.submitting') : t('modal.submitRejection')}
           </button>
         </div>
       {:else}
@@ -397,7 +397,7 @@
           onclick={handleApprove}
           disabled={submitting}
         >
-          {submitting ? 'Approving…' : 'Approve'}
+          {submitting ? t('modal.approving') : t('modal.approve')}
         </button>
         <button
           id="cp-reject"
@@ -405,7 +405,7 @@
           onclick={handleRejectClick}
           disabled={submitting}
         >
-          Request Changes
+          {t('modal.requestChanges')}
         </button>
       {/if}
     </footer>

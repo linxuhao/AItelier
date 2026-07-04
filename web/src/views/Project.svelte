@@ -31,6 +31,7 @@
     truncate,
     cacheBadgeClass,
   } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   // ── Props (route params from svelte-spa-router) ──
 
@@ -371,11 +372,11 @@
     <dialog class="reconnect-overlay" open>
       <article>
         <header>
-          <h3>Reconnecting…</h3>
+          <h3>{t('project.reconnecting')}</h3>
         </header>
-        <p>The connection to the server is lost. Retrying automatically…</p>
+        <p>{t('project.reconnectDesc')}</p>
         {#if $connectionStore.reconnectAttempt > 0}
-          <p class="reconnect-attempt">Attempt {$connectionStore.reconnectAttempt}</p>
+          <p class="reconnect-attempt">{t('project.attempt').replace('{n}', String($connectionStore.reconnectAttempt))}</p>
         {/if}
       </article>
     </dialog>
@@ -383,7 +384,7 @@
 
   <!-- Breadcrumb -->
   <nav class="breadcrumb" aria-label="breadcrumb">
-    <a href="#/" onclick={(e) => { e.preventDefault(); push('#/'); }}>Dashboard</a>
+    <a href="#/" onclick={(e) => { e.preventDefault(); push('#/'); }}>{t('project.dashboard')}</a>
     <span class="breadcrumb-sep">/</span>
     <span class="breadcrumb-current">{projectId ? truncate(projectId, 24) : '…'}</span>
   </nav>
@@ -391,16 +392,16 @@
   <!-- Loading state (initial) -->
   {#if loading && !project}
     <article aria-busy="true">
-      <p>Loading project…</p>
+      <p>{t('project.loading')}</p>
     </article>
   {:else if error && !project}
     <!-- Error (full page — no project loaded) -->
     <article class="error-state">
       <header>
-        <h3>Failed to load project</h3>
+        <h3>{t('project.failedToLoad')}</h3>
       </header>
       <p>{error}</p>
-      <button onclick={refreshData}>Retry</button>
+      <button onclick={refreshData}>{t('project.retry')}</button>
     </article>
   {:else}
     <!-- ══════════════════════════════════════════
@@ -425,18 +426,18 @@
         {/if}
         <div class="meta-grid">
           <div class="meta-item">
-            <span class="meta-label">ID</span>
+            <span class="meta-label">{t('project.id')}</span>
             <span class="meta-value">{project?.project_id as string || projectId}</span>
           </div>
           {#if project?.created_at}
             <div class="meta-item">
-              <span class="meta-label">Created</span>
+              <span class="meta-label">{t('project.created')}</span>
               <span class="meta-value">{formatTime(project.created_at as number)}</span>
             </div>
           {/if}
           {#if project?.current_step}
             <div class="meta-item">
-              <span class="meta-label">Current Step</span>
+              <span class="meta-label">{t('project.currentStep')}</span>
               <span class="meta-value">{stepLabel(project.current_step as string)}</span>
             </div>
           {/if}
@@ -450,34 +451,34 @@
             class="outline"
             onclick={handleRetry}
             disabled={actionLoading['retry']}
-            title="Retry failed project"
+            title={t('project.retryTitle')}
           >
-            {actionLoading['retry'] ? 'Retrying…' : 'Retry'}
+            {actionLoading['retry'] ? t('project.retrying') : t('project.retry')}
           </button>
           <button
             class="outline"
             onclick={handleRefreshPlanning}
             disabled={actionLoading['refresh']}
-            title="Re-run Researcher + Architect planning"
+            title={t('project.refreshPlanTitle')}
           >
-            {actionLoading['refresh'] ? 'Refreshing…' : 'Refresh Planning'}
+            {actionLoading['refresh'] ? t('project.refreshing') : t('project.refreshPlanning')}
           </button>
           <button
             class="outline"
             onclick={handlePauseResume}
             disabled={actionLoading['pause']}
-            title={project?.status === 'paused' ? 'Resume project' : 'Pause project'}
+            title={project?.status === 'paused' ? t('project.resumeTitle') : t('project.pauseTitle')}
           >
             {#if actionLoading['pause']}
-              {project?.status === 'paused' ? 'Resuming…' : 'Pausing…'}
+              {project?.status === 'paused' ? t('project.resuming') : t('project.pausing')}
             {:else if project?.status === 'paused'}
-              Resume
+              {t('project.resume')}
             {:else}
-              Pause
+              {t('project.pause')}
             {/if}
           </button>
           <button class="outline" onclick={handleViewTraces}>
-            View Trace
+            {t('project.viewTrace')}
           </button>
         </footer>
       {/if}
@@ -490,7 +491,7 @@
       {@const cp = checkpoint as Record<string, unknown>}
       <article id="checkpoint-card" class="checkpoint-card">
         <header>
-          <h4>Checkpoint Pending: {escapeHtml((cp.label as string) || (cp.checkpoint as string) || '')}</h4>
+          <h4>{t('project.checkpointPending').replace('{label}', escapeHtml((cp.label as string) || (cp.checkpoint as string) || ''))}</h4>
         </header>
         <div class="cp-content">
           {#if cp.step_output}
@@ -498,16 +499,16 @@
               class="outline"
               onclick={() => showCheckpoint(projectId, cp)}
             >
-              View Checkpoint Files
+              {t('project.viewCheckpointFiles')}
             </button>
           {/if}
           <label for="cp-feedback">
-            Feedback (required for rejection)
+            {t('project.feedbackLabel')}
             <textarea
               id="cp-feedback"
               bind:value={checkpointFeedback}
               rows="3"
-              placeholder="Reason for rejection or approval notes…"
+              placeholder={t('project.feedbackPlaceholder')}
             ></textarea>
           </label>
         </div>
@@ -518,14 +519,14 @@
               onclick={handleCheckpointApprove}
               disabled={actionLoading['cpApprove']}
             >
-              {actionLoading['cpApprove'] ? 'Approving…' : 'Approve'}
+              {actionLoading['cpApprove'] ? t('project.approving') : t('project.approve')}
             </button>
             <button
               class="contrast"
               onclick={handleCheckpointReject}
               disabled={actionLoading['cpReject']}
             >
-              {actionLoading['cpReject'] ? 'Rejecting…' : 'Reject'}
+              {actionLoading['cpReject'] ? t('project.rejecting') : t('project.reject')}
             </button>
           </footer>
         {/if}
@@ -541,7 +542,7 @@
         class:active={activeTab === 'runs'}
         onclick={() => { activeTab = 'runs'; }}
       >
-        Runs ({runs.length})
+        {t('project.runsTab').replace('{n}', String(runs.length))}
       </button>
       {#if canWrite}
         <button
@@ -549,7 +550,7 @@
           class:active={activeTab === 'config'}
           onclick={() => { activeTab = 'config'; }}
         >
-          Config
+          {t('project.configTab')}
         </button>
       {/if}
     </nav>
@@ -560,7 +561,7 @@
     {#if activeTab === 'runs'}
       {#if runs.length === 0}
         <article class="empty-state">
-          <p>No runs yet for this project.</p>
+          <p>{t('project.noRuns')}</p>
         </article>
       {:else}
         <div class="runs-layout">

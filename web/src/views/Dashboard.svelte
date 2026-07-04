@@ -354,7 +354,7 @@
                   {@const cs = project.cache_stats as Record<string, number>}
                   <span
                     class="cache-inline-badge {cacheBadgeClass(cs.hit_ratio)}"
-                    title="Prompt cache hit ratio · total tokens"
+                    title={t('chat.cacheHitRatio')}
                   >
                     Cache {(cs.hit_ratio * 100).toFixed(1)}%{cs.total_tokens != null ? ' · ' + formatTokens(cs.total_tokens) : ''}
                   </span>
@@ -371,7 +371,7 @@
                   <button
                     class="delete-btn"
                     onclick={(e) => { e.stopPropagation(); confirmDelete(project.project_id as string); }}
-                    title="Delete project"
+                    title={t('dashboard.deleteTitle')}
                   >✕</button>
                 </td>
               {/if}
@@ -387,13 +387,13 @@
     <dialog class="confirm-dialog" open>
       <article>
         <header>
-          <h3>Delete Project</h3>
+          <h3>{t('dashboard.deleteTitle')}</h3>
         </header>
-        <p>Are you sure you want to delete project <strong>{pendingDeleteId}</strong>?</p>
-        <p class="warning">This action cannot be undone.</p>
+        <p>{@html t('dashboard.deleteConfirmMsg').replace('{id}', pendingDeleteId || '')}</p>
+        <p class="warning">{t('dashboard.deleteWarning')}</p>
         <footer>
-          <button class="secondary" onclick={cancelDelete}>Cancel</button>
-          <button class="contrast" onclick={handleDelete}>Delete</button>
+          <button class="secondary" onclick={cancelDelete}>{t('dashboard.cancel')}</button>
+          <button class="contrast" onclick={handleDelete}>{t('dashboard.delete')}</button>
         </footer>
       </article>
     </dialog>

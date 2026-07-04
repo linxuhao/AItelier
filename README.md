@@ -222,6 +222,27 @@ npm run dev                     # dev server with HMR
 
 The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's test step (`run_tests`, 5_test) gates node projects automatically: it finds `package.json` (root or one level deep, e.g. `web/`) and runs `npm ci` + `npm run build` + `npm test`, folding failures into the goal-loop.
 
+### Repositories View
+
+A top-level **Repositories** view (`/repos`) groups projects by their shared `repo_path`, replacing the flat project table as the primary entry point. Clicking a repository navigates to `/repos/:repoPath` which shows:
+
+- **Project list** — all projects belonging to that repository
+- **RepoPanel** — git status, commits, push/pull, and PR actions (relocated from the Project page)
+- **WorkspaceBrowser (root="code")** — code file tree browser (relocated from the Project page)
+
+The Project page retains only project-scoped content: runs, tasks, config, and `WorkspaceBrowser root="dps"` for pipeline artifacts.
+
+**Backend**: A lightweight `GET /api/repos` endpoint (in `api/repo_routers.py`) queries the existing `runs` table with `GROUP BY repo_path`, returning per-repo metadata (representative project ID, project count, last activity). No new DB tables or migrations were required — the existing `repo_path`, `repo_type`, and `repo_url` columns are sufficient.
+
+**Routes**:
+
+| Route | Component | Description |
+|-------|-----------|-------------|
+| `/repos` | `Repositories.svelte` | Repository list grouped by `repo_path` |
+| `/repos/:repoPath` | `Repository.svelte` | Repo detail + RepoPanel + WorkspaceBrowser |
+
+Navigation: Dashboard → Repositories → Repository Name → Project Name, with breadcrumbs at each level.
+
 ### i18n (Internationalization)
 
 The app supports **8 languages**: English (`en`), Simplified Chinese (`zh-CN`), Traditional Chinese (`zh-TW`), Japanese (`ja`), Korean (`ko`), French (`fr`), German (`de`), and Spanish (`es`). The i18n module (`web/src/lib/i18n.svelte.ts`) uses a **Svelte 5 `$state` rune** + `langStore.subscribe()` pattern to make the `t()` translation function reactive — switching languages in the AppBar dropdown triggers an automatic live re-render of all visible components, with no page navigation required.

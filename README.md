@@ -222,6 +222,16 @@ npm run dev                     # dev server with HMR
 
 The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's test step (`run_tests`, 5_test) gates node projects automatically: it finds `package.json` (root or one level deep, e.g. `web/`) and runs `npm ci` + `npm run build` + `npm test`, folding failures into the goal-loop.
 
+### i18n (Internationalization)
+
+The app supports **8 languages**: English (`en`), Simplified Chinese (`zh-CN`), Traditional Chinese (`zh-TW`), Japanese (`ja`), Korean (`ko`), French (`fr`), German (`de`), and Spanish (`es`). The i18n module (`web/src/lib/i18n.svelte.ts`) uses a **Svelte 5 `$state` rune** + `langStore.subscribe()` pattern to make the `t()` translation function reactive — switching languages in the AppBar dropdown triggers an automatic live re-render of all visible components, with no page navigation required.
+
+```bash
+node web/audit-i18n.mjs            # verify all t() keys exist in all 8 languages
+```
+
+The persistent language store (`web/src/stores/i18n.ts`) syncs the user's selection to `localStorage` and the backend API (`POST /api/settings/user/language`).
+
 ## License
 
 AItelier is **source-available** under the [Functional Source License (FSL-1.1-MIT)](LICENSE).

@@ -948,7 +948,7 @@
               aria-expanded={isExpanded}
             >
               <span class="tool-toggle">{isExpanded ? '▼' : '▶'}</span>
-              <span class="tool-summary">🔧 {toolCount} tool{toolCount !== 1 ? 's' : ''}</span>
+              <span class="tool-summary">🔧 {toolCount} {t('chat.tools')}</span>
               <span class="tool-names">
                 {#each group.tools as tool, ti}
                   {#if ti > 0}, {/if}
@@ -966,13 +966,13 @@
                     <div class="tool-entry-body">
                       {#if tool.toolArgs && Object.keys(tool.toolArgs).length > 0}
                         <details class="tool-detail-section" open>
-                          <summary class="tool-section-label">Arguments ({Object.keys(tool.toolArgs).length})</summary>
+                          <summary class="tool-section-label">{t('chat.arguments').replace('{n}', String(Object.keys(tool.toolArgs).length))}</summary>
                           <pre class="tool-pre">{JSON.stringify(tool.toolArgs, null, 2)}</pre>
                         </details>
                       {/if}
                       {#if tool.toolResult}
                         <details class="tool-detail-section" open>
-                          <summary class="tool-section-label">Result</summary>
+                          <summary class="tool-section-label">{t('chat.result')}</summary>
                           <pre class="tool-pre">{JSON.stringify(tool.toolResult, null, 2)}</pre>
                         </details>
                       {/if}
@@ -1006,7 +1006,7 @@
       <!-- Connection lost placeholder -->
       {#if !connected && messages.length > 0}
         <div class="chat-msg chat-system chat-reconnect-placeholder">
-          <div class="msg-content">Chat unavailable — reconnecting…</div>
+          <div class="msg-content">{t('chat.unavailable')}</div>
         </div>
       {/if}
     </div>
@@ -1049,19 +1049,19 @@
         onclick={handleSend}
         disabled={!canSend}
       >
-        Send
+        {t('chat.send')}
       </button>
 
       {#if agentStreaming}
-        <span class="streaming-indicator">Streaming…</span>
-        <button class="outline btn-stop" onclick={_abortStream}> Stop </button>
+        <span class="streaming-indicator">{t('chat.streaming')}</span>
+        <button class="outline btn-stop" onclick={_abortStream}>{t('chat.stop')}</button>
       {:else if sending}
-        <span class="streaming-indicator">Sending…</span>
+        <span class="streaming-indicator">{t('chat.sending')}</span>
       {/if}
 
       {#if budgetPaused && !agentStreaming && !sending}
         <button class="outline btn-continue" onclick={() => _sendMessage('continue')} disabled={!connected}>
-          Continue ▶
+          {t('chat.continue')}
         </button>
       {/if}
     </div>

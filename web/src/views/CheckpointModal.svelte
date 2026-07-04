@@ -5,6 +5,7 @@
   import { approveCheckpoint, rejectCheckpoint, getCheckpoint } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
   import { escapeHtml } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   // ── Local state (Svelte 5 runes) ──────────────────────────────────
 
@@ -355,13 +356,13 @@
 >
   <article>
     <header>
-      <h2 id="cp-label">{loadedLabel || 'Checkpoint'}{projectId ? ': ' + projectId : ''}</h2>
-      <button class="close outline" onclick={handleDismiss} aria-label="Close">&times;</button>
+      <h2 id="cp-label">{loadedLabel || t('modal.checkpoint')}{projectId ? ': ' + projectId : ''}</h2>
+      <button class="close outline" onclick={handleDismiss} aria-label={t('modal.close')}>&times;</button>
     </header>
 
     <div id="cp-content" class="cp-content">
       {#if contentLoading}
-        <p class="cp-loading">Loading checkpoint data…</p>
+        <p class="cp-loading">{t('modal.loading')}</p>
       {:else if loadedContentHtml}
         {@html loadedContentHtml}
       {:else}

@@ -6,6 +6,13 @@ export interface NotificationEntry {
   message: string;
   timestamp: number;
   data?: unknown;
+  /** Formatted-event extras (from formatEvent): icon, hover detail, severity,
+   *  and the meta line (project · task) — restore the pre-Svelte panel detail. */
+  icon?: string;
+  detail?: string;
+  severity?: string;
+  project?: string;
+  task?: string;
 }
 
 /** Buffer limit: keep at most 100 most recent entries. */

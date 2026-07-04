@@ -457,6 +457,28 @@ class TestCondenser:
         assert "S1" not in contents
         assert "m3" in contents
 
+    def test_summary_survives_large_tail(self, db_manager):
+        """The summary row must NOT age out behind a long post-watermark tail.
+
+        The old loader took the newest N rows then applied the watermark, so a
+        session that grew far past N would drop the summary row, lose older
+        context, and re-compact every turn. The watermark-aware loader keys on
+        the watermark, so the summary is always present."""
+        sid = db_manager.create_session()
+        db_manager.save_chat_message_with_session(sid, "p", "user", "seed")
+        rows = db_manager.get_chat_transcript_by_session(sid)
+        db_manager.save_chat_transcript_message(
+            sid, "p", {"role": "system", "content": "SUMMARY",
+                       "compaction_through": rows[0]["_row_id"]})
+        # A tail far larger than the old 400-row cap.
+        for i in range(600):
+            db_manager.save_chat_message_with_session(sid, "p", "user", f"t{i}")
+        msgs = db_manager.get_chat_transcript_by_session(sid)
+        assert msgs[0]["content"] == "SUMMARY"
+        assert msgs[-1]["content"] == "t599"
+        # The pre-watermark "seed" is summarized away, not resurfaced.
+        assert all(m["content"] != "seed" for m in msgs)
+
 
 class TestCodingTaskRunner:
     """Drive the plan-gated coding_task graph end-to-end through the butler's

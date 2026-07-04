@@ -31,10 +31,14 @@ const REAL_RUN_DETAIL = {
   steps: [
     { id: 1399, step_id: 'git_sync_pre', status: 'completed', retry_count: 0,
       attempt: 1, error: '', created_at: '2026-07-01 23:24:55',
-      updated_at: '2026-07-01 23:24:55' },
+      updated_at: '2026-07-01 23:24:57',
+      claimed_at: '2026-07-01 23:24:55', completed_at: '2026-07-01 23:24:57' },
+    // created_at is run start (23:24:55); the step actually ran 23:26:00→23:29:21.
+    // Duration must reflect claimed→completed (3m 21s), NOT updated-since-run-start.
     { id: 1400, step_id: '1', status: 'completed', retry_count: 0, attempt: 1,
       error: '', created_at: '2026-07-01 23:24:55',
-      updated_at: '2026-07-01 23:29:21' },
+      updated_at: '2026-07-01 23:29:21',
+      claimed_at: '2026-07-01 23:26:00', completed_at: '2026-07-01 23:29:21' },
   ],
   step_count: 2, completed_steps: 2, failed_steps: 0,
   cache_stats: { cache_hit_tokens: 100, cache_miss_tokens: 50,
@@ -73,10 +77,12 @@ describe('run detail step timeline (real payload)', () => {
       .map((el) => el.textContent?.trim());
     expect(labels).toEqual(['Git Sync', 'Researcher']);
 
-    // Durations must not be NaN with SQLite timestamps
+    // Durations must not be NaN with SQLite timestamps, and must measure the
+    // step's own claimed→completed window — not elapsed-since-run-start.
     const durations = Array.from(container.querySelectorAll('.step-duration'))
       .map((el) => el.textContent);
     for (const d of durations) expect(d).not.toContain('NaN');
+    expect(durations).toEqual(['2s', '3m 21s']);
 
     // Per-step cache badge from cache_stats_by_step
     const badges = Array.from(container.querySelectorAll('.step-timeline .cache-inline-badge'))

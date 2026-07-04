@@ -345,11 +345,15 @@
   }
 
   function stepDuration(step: Record<string, unknown>): string {
-    const created = toEpochSeconds(step.created_at);
-    const updated = toEpochSeconds(step.updated_at);
-    if (created == null) return '';
-    if (updated == null) return '…';
-    const secs = Math.floor(Math.max(0, updated - created));
+    // Real execution window: claimed_at → completed_at. Do NOT use created_at —
+    // skillflow seeds every step row at RUN creation, so created_at is the run
+    // start for all steps, and updated_at - created_at measures elapsed-since-
+    // run-start (why several steps all showed ~45m on a 1h run). For loop steps
+    // (t_plan/t_impl) the row is reused, so claimed_at reflects the latest attempt.
+    const started = toEpochSeconds(step.claimed_at);
+    if (started == null) return '—'; // pending — not yet claimed
+    const ended = toEpochSeconds(step.completed_at) ?? Date.now() / 1000;
+    const secs = Math.floor(Math.max(0, ended - started));
     if (secs < 60) return secs + 's';
     if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
     return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';

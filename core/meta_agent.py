@@ -1178,7 +1178,7 @@ class MetaAgent:
         # and page reload). Load the session's running total, then add each
         # turn's context-window count to it.
         total_tokens = 0
-        if self.mode == "coding" and self.session_id:
+        if self.session_id:
             try:
                 total_tokens = self.db.get_session_total_tokens(self.session_id) or 0
             except Exception:
@@ -1345,8 +1345,12 @@ class MetaAgent:
             self._log_error(f"usage persistence failed: {e}")
 
     def _persist_token_counts(self, turn_tokens: int, total_tokens: int) -> None:
-        """Persist both per-turn window and cumulative counter (best-effort, coding mode only)."""
-        if self.mode != "coding" or not self.session_id:
+        """Persist both per-turn window and cumulative counter (best-effort).
+
+        Mode-agnostic: the cumulative counter must survive across turns in
+        butler mode too, otherwise "cumulated" resets to 0 on every user
+        message (it was previously coding-only, so butler never accrued)."""
+        if not self.session_id:
             return
         try:
             self.db.set_session_token_window(self.session_id, turn_tokens)

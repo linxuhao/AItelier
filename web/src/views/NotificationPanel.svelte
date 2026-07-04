@@ -18,8 +18,14 @@
     success: 'notif-success',
   };
 
-  function typeClass(type: string): string {
-    return _TYPE_CLASS[type] || 'notif-info';
+  function typeClass(notif: NotificationEntry): string {
+    // Prefer the formatted severity (error/warning/success/info); fall back to
+    // the raw event type for legacy entries that predate the formatter.
+    return _TYPE_CLASS[notif.severity ?? notif.type] || 'notif-info';
+  }
+
+  function metaLine(notif: NotificationEntry): string {
+    return [notif.project, notif.task].filter(Boolean).join(' · ');
   }
 
   // ── Auto-scroll to latest ──
@@ -58,12 +64,17 @@
         <p class="notif-empty">{t('notif.empty')}</p>
       {:else}
         {#each $notificationStore as notif (notif.id)}
-          <div class="notif-entry {typeClass(notif.type)}">
+          <div class="notif-entry {typeClass(notif)}">
             <div class="notif-entry-header">
               <span class="notif-type-badge">{notif.type}</span>
+              {#if metaLine(notif)}
+                <span class="notif-meta">{metaLine(notif)}</span>
+              {/if}
               <span class="notif-timestamp">{formatTime(notif.timestamp)}</span>
             </div>
-            <div class="notif-message">{notif.message}</div>
+            <div class="notif-message" title={notif.detail || ''}>
+              {#if notif.icon}<span class="notif-icon">{notif.icon}</span>{/if}{notif.message}
+            </div>
           </div>
         {/each}
       {/if}
@@ -177,14 +188,30 @@
     border-radius: 0.2rem;
   }
 
+  .notif-meta {
+    flex: 1;
+    font-size: 0.72rem;
+    opacity: 0.7;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin: 0 0.4rem;
+  }
+
   .notif-timestamp {
     font-size: 0.75rem;
     opacity: 0.6;
+    flex-shrink: 0;
   }
 
   .notif-message {
     line-height: 1.3;
     word-wrap: break-word;
+  }
+
+  .notif-icon {
+    margin-right: 0.35rem;
+    opacity: 0.85;
   }
 
   /* Color coding by type */

@@ -9,6 +9,7 @@
 
 import { setConnected, setDisconnected } from '../stores/connection';
 import { addNotification } from '../stores/notifications';
+import { formatEvent } from './eventFormat';
 
 type EventHandler = (data: Record<string, unknown>) => void;
 
@@ -152,16 +153,30 @@ function _dispatch(event: Record<string, unknown>): void {
     }
   }
 
-  // Push to notification store for the notification panel
+  // Push to notification store for the notification panel. Format the raw
+  // event into a rich entry (icon, human step label, error/checkpoint/file
+  // detail) — a null result means "not worth showing" (drop it), matching the
+  // pre-Svelte panel which skipped noise instead of printing a bare type.
   try {
+    const fmt = formatEvent(event);
+    // Prefer an explicit human message on the event; else the formatted text.
+    const message = String(event.message ?? fmt?.text ?? event.type ?? '');
+    // Skip only when there's neither a message nor a formatted line — an event
+    // that carries its own `message` is always shown even if unmapped.
+    if (fmt === null && event.message == null) return;
     addNotification({
       // _ts alone is NOT unique (event bursts share a timestamp) — and the
       // panel's keyed {#each (notif.id)} makes a duplicate id a FATAL
       // each_key_duplicate error in Svelte 5, killing the whole app.
       id: `${event._ts ?? Date.now()}-${++_notifSeq}`,
       type: etype,
-      message: String(event.message ?? event.type ?? ''),
+      message,
       timestamp: typeof event._ts === 'number' ? event._ts : Date.now(),
+      icon: fmt?.icon,
+      detail: fmt?.detail,
+      severity: fmt?.severity ?? etype,
+      project: String(event._project_name ?? event.project_id ?? ''),
+      task: String(event._task_id ?? ''),
       data: event,
     });
   } catch {

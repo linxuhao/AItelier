@@ -228,6 +228,13 @@ def get_run_detail(
             "error": s.get("error", "") or s.get("last_error", "") or "",
             "created_at": s.get("created_at", ""),
             "updated_at": s.get("updated_at", ""),
+            # claimed_at/completed_at are the step's real execution boundaries.
+            # created_at is stamped at RUN creation for every step (skillflow
+            # seeds all step rows up front), so updated_at - created_at measures
+            # elapsed-since-run-start, not the step's own duration. The client
+            # uses claimed_at → completed_at instead.
+            "claimed_at": s.get("claimed_at", "") or "",
+            "completed_at": s.get("completed_at", "") or "",
         }
         for s in steps
     ]

@@ -1726,9 +1726,21 @@ class DBManager:
             conn.commit()
             return cur.lastrowid
 
-    def get_chat_transcript_by_session(self, session_id: str,
-                                       limit: int = 400) -> list[dict]:
-        """Rebuild the full message transcript for a session, oldest-first.
+    # Safety backstop for a never-compacted session: compaction is the real
+    # context bound (it triggers on tokens, persists a summary + watermark, and
+    # the reload below honors it), but a session that has genuinely never
+    # crossed the threshold still shouldn't stream unbounded rows into memory.
+    _TRANSCRIPT_SAFETY_CAP = 5000
+
+    def get_chat_transcript_by_session(self, session_id: str) -> list[dict]:
+        """Rebuild the LLM-context transcript for a session, oldest-first.
+
+        Watermark-aware: compaction persists a summary row carrying
+        ``compaction_through`` (the highest chat_history id it summarized). We
+        load only that summary plus rows *after* the watermark, so the effective
+        context is bounded by compaction — not by an arbitrary row count that
+        could age the summary row out of the load window (which would drop the
+        summary, lose older context, and force a re-compaction every turn).
 
         Rows with ``message_json`` are decoded verbatim (assistant tool_calls,
         tool results); plain rows become simple role/content messages. Each
@@ -1738,14 +1750,38 @@ class DBManager:
         """
         import json as _json
         with self.get_connection() as conn:
-            rows = conn.execute(
-                """SELECT id, role, content, message_json FROM chat_history
-                   WHERE session_id = ?
-                   ORDER BY id DESC LIMIT ?""",
-                (session_id, limit),
-            ).fetchall()
+            # Latest persisted compaction watermark for this session, if any.
+            wm = conn.execute(
+                """SELECT message_json FROM chat_history
+                   WHERE session_id = ? AND message_json LIKE '%"compaction_through"%'
+                   ORDER BY id DESC LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+            through = 0
+            if wm and wm["message_json"]:
+                try:
+                    through = int(_json.loads(wm["message_json"]).get(
+                        "compaction_through") or 0)
+                except (ValueError, TypeError):
+                    through = 0
+            if through:
+                # Summary row (id > through) + the verbatim tail after it.
+                rows = conn.execute(
+                    """SELECT id, role, content, message_json FROM chat_history
+                       WHERE session_id = ? AND id > ?
+                       ORDER BY id ASC""",
+                    (session_id, through),
+                ).fetchall()
+            else:
+                # Never compacted — load everything, capped only as a backstop.
+                rows = conn.execute(
+                    """SELECT id, role, content, message_json FROM chat_history
+                       WHERE session_id = ?
+                       ORDER BY id ASC LIMIT ?""",
+                    (session_id, self._TRANSCRIPT_SAFETY_CAP),
+                ).fetchall()
         messages = []
-        for r in reversed(rows):
+        for r in rows:
             if r["message_json"]:
                 try:
                     msg = _json.loads(r["message_json"])

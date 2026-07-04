@@ -100,7 +100,7 @@ async def agent_chat(
         # duplicate prose already inside the transcript rows. _row_id /
         # compaction markers ride along for the condenser; MetaAgent strips
         # them at the provider boundary.
-        history = db.get_chat_transcript_by_session(session_id, limit=400)
+        history = db.get_chat_transcript_by_session(session_id)
     else:
         # Load history from DB (cross-project, cross-restart)
         history = list(request.history)
@@ -249,10 +249,11 @@ def get_chat_history(
 
     # Restore token usage from session. total_tokens is the cumulative sum
     # of per-turn context-window tokens. token_window is the last per-turn
-    # count — used to restore the "window" bar after a page refresh.
+    # count — used to restore the "window" bar after a page refresh. Both are
+    # now persisted mode-agnostically (butler included), so restore both.
     mode = db.get_session_mode(session_id)
-    total_tokens = db.get_session_total_tokens(session_id) if mode == "coding" else 0
-    token_window = db.get_session_token_window(session_id) if mode == "coding" else 0
+    total_tokens = db.get_session_total_tokens(session_id)
+    token_window = db.get_session_token_window(session_id)
     usage = usage_stats(db.get_session_usage(session_id))
     return {
         "session_id": session_id,

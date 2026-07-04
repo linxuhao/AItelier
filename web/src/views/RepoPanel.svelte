@@ -13,6 +13,7 @@
     repoMakePR,
   } from '../lib/api';
   import { formatTime } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   let { projectId, canWrite = false }: { projectId: string; canWrite?: boolean } = $props();
 
@@ -92,30 +93,30 @@
 </script>
 
 <details class="workspace-section repo-panel" open>
-  <summary><strong>Repository</strong>
+  <summary><strong>{t('repo.title')}</strong>
     {#if status?.branch}<span class="ws-count">{status.branch as string}</span>{/if}
   </summary>
 
   {#if error}
     <p class="repo-error">{error}</p>
   {:else if !status}
-    <p class="repo-muted">Loading repository status…</p>
+    <p class="repo-muted">{t('repo.loading')}</p>
   {:else if !status.is_git}
-    <p class="repo-muted">Not a git repository{status.path ? ' — ' + status.path : ''}.</p>
+    <p class="repo-muted">{t('repo.notGit')}{status.path ? ' — ' + status.path : ''}.</p>
   {:else}
     <div class="repo-grid">
-      <span class="repo-label">Path</span><code>{status.path as string}</code>
-      <span class="repo-label">Branch</span>
+      <span class="repo-label">{t('repo.path')}</span><code>{status.path as string}</code>
+      <span class="repo-label">{t('repo.branch')}</span>
       <span>
         {status.branch as string}
-        {#if status.dirty}<span class="repo-dirty">● {(status.dirty_count as number) || ''} uncommitted</span>{/if}
+        {#if status.dirty}<span class="repo-dirty">● {(status.dirty_count as number) || ''} {t('repo.uncommitted')}</span>{/if}
       </span>
       {#if status.remote_url}
-        <span class="repo-label">Remote</span><code>{status.remote_url as string}</code>
+        <span class="repo-label">{t('repo.remote')}</span><code>{status.remote_url as string}</code>
       {/if}
       {#if status.upstream}
-        <span class="repo-label">Upstream</span>
-        <span>{status.upstream as string} · {(status.ahead as number) || 0} ahead, {(status.behind as number) || 0} behind</span>
+        <span class="repo-label">{t('repo.upstream')}</span>
+        <span>{status.upstream as string} · {(status.ahead as number) || 0} {t('repo.ahead')}, {(status.behind as number) || 0} {t('repo.behind')}</span>
       {/if}
     </div>
 
@@ -132,14 +133,14 @@
     {/if}
 
     <div class="repo-actions">
-      <a href={repoArchiveUrl(projectId)} class="repo-btn" download>Download .zip</a>
+      <a href={repoArchiveUrl(projectId)} class="repo-btn" download>{t('repo.downloadZip')}</a>
       {#if canWrite}
-        <button class="repo-btn repo-btn-green" disabled={!!busy} onclick={doCommit}>Commit</button>
-        <button class="repo-btn" disabled={!!busy} onclick={() => run('Push', () => repoPush(projectId))}>Push</button>
-        <button class="repo-btn" disabled={!!busy} onclick={() => run('Pull', () => repoPull(projectId))}>Pull</button>
-        <button class="repo-btn repo-btn-red" disabled={!!busy} onclick={doSync}>Force Sync</button>
-        <button class="repo-btn repo-btn-purple" disabled={!!busy} onclick={doMakePR}>Make PR</button>
-        <button class="repo-btn repo-btn-amber" disabled={!!busy} onclick={doSetRemote}>Set Remote</button>
+        <button class="repo-btn repo-btn-green" disabled={!!busy} onclick={doCommit}>{t('repo.commit')}</button>
+        <button class="repo-btn" disabled={!!busy} onclick={() => run('Push', () => repoPush(projectId))}>{t('repo.push')}</button>
+        <button class="repo-btn" disabled={!!busy} onclick={() => run('Pull', () => repoPull(projectId))}>{t('repo.pull')}</button>
+        <button class="repo-btn repo-btn-red" disabled={!!busy} onclick={doSync}>{t('repo.forceSync')}</button>
+        <button class="repo-btn repo-btn-purple" disabled={!!busy} onclick={doMakePR}>{t('repo.makePr')}</button>
+        <button class="repo-btn repo-btn-amber" disabled={!!busy} onclick={doSetRemote}>{t('repo.setRemote')}</button>
       {/if}
     </div>
     {#if busy}

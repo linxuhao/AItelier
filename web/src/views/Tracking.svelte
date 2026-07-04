@@ -6,6 +6,7 @@
   import { authStore } from '../stores/auth';
   import { getLoggedUsers, deleteUser } from '../lib/api';
   import { formatTime } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   // ── State (runes) ──────────────────────────────────────────────────
 
@@ -62,34 +63,34 @@
 
 <section id="view-tracking">
   {#if waitingAuth}
-    <p class="tracking-loading">Checking permissions&hellip;</p>
+    <p class="tracking-loading">{t('tracking.checking')}</p>
   {:else if denied}
     <div class="tracking-denied">
-      <h2>Access Denied</h2>
-      <p>You need write access to view user tracking.</p>
-      <a href="#/">Go to Dashboard</a>
+      <h2>{t('tracking.denied')}</h2>
+      <p>{t('tracking.deniedMsg')}</p>
+      <a href="#/">{t('tracking.goDashboard')}</a>
     </div>
   {:else}
     <div class="tracking-header">
-      <h2>Logged Users</h2>
+      <h2>{t('tracking.title')}</h2>
       <button class="outline" onclick={fetchUsers} disabled={loading}>
-        {loading ? 'Refreshing…' : 'Refresh'}
+        {loading ? t('tracking.refreshing') : t('tracking.refresh')}
       </button>
     </div>
 
     {#if loading}
-      <p class="tracking-loading">Loading users&hellip;</p>
+      <p class="tracking-loading">{t('tracking.loading')}</p>
     {:else if error}
       <p class="tracking-error">{error}</p>
     {:else if empty}
-      <p class="tracking-empty">No users tracked yet.</p>
+      <p class="tracking-empty">{t('tracking.empty')}</p>
     {:else}
       <table id="tracking-table">
         <thead>
           <tr>
-            <th>Email</th>
-            <th>Latest Access</th>
-            <th>Access Rights</th>
+            <th>{t('tracking.email')}</th>
+            <th>{t('tracking.lastAccess')}</th>
+            <th>{t('tracking.rights')}</th>
             <th></th>
           </tr>
         </thead>
@@ -109,7 +110,7 @@
                   disabled={pendingDelete === u.email}
                   onclick={() => handleDelete(u.email as string)}
                 >
-                  {pendingDelete === u.email ? 'Deleting…' : 'Delete'}
+                  {pendingDelete === u.email ? t('tracking.deleting') : t('tracking.delete')}
                 </button>
               </td>
             </tr>

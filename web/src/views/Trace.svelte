@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router';
   import { getTrace } from '../lib/api';
   import { stepLabel } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   // ── Props ──────────────────────────────────────────────────────────
 
@@ -172,40 +173,40 @@
 
 <section id="view-trace" class="trace-view">
   <!-- Back link -->
-  <a href="javascript:void(0)" onclick={goBack} class="trace-back">&larr; Back to project #{projectId}</a>
+  <a href="javascript:void(0)" onclick={goBack} class="trace-back">&larr; {t('trace.back')} #{projectId}</a>
 
   <!-- Title -->
-  <h3>Execution Trace &mdash; {projectId}</h3>
+  <h3>{t('trace.title')} &mdash; {projectId}</h3>
 
   <!-- Toolbar -->
   <div class="trace-toolbar">
     <label>
-      Category:
+      {t('trace.category')}:
       <select onchange={onCategoryChange}>
         {#each CATEGORIES as cat}
           <option value={cat} selected={cat === category}>
-            {cat === '' ? 'All' : cat}
+            {cat === '' ? t('trace.all') : cat}
           </option>
         {/each}
       </select>
     </label>
 
     <label>
-      Order:
+      {t('trace.order')}:
       <select onchange={onOrderChange}>
-        <option value="asc" selected={order === 'asc'}>Oldest first</option>
-        <option value="desc" selected={order === 'desc'}>Newest first</option>
+        <option value="asc" selected={order === 'asc'}>{t('trace.oldestFirst')}</option>
+        <option value="desc" selected={order === 'desc'}>{t('trace.newestFirst')}</option>
       </select>
     </label>
 
-    <button class="outline" onclick={loadTrace}>Refresh</button>
+    <button class="outline" onclick={loadTrace}>{t('trace.refresh')}</button>
   </div>
 
   <!-- Loading state -->
   {#if loading}
-    <p class="trace-count">Loading trace&hellip;</p>
+    <p class="trace-count">{t('trace.loading')}</p>
   {:else if error}
-    <p class="trace-count trace-error">Failed to load trace: {error}</p>
+    <p class="trace-count trace-error">{t('trace.loadError')}: {error}</p>
   {:else if empty}
     <p class="trace-count empty-state">
       {category ? 'No trace records for category "' + category + '".' : 'No trace records yet.'}
@@ -213,9 +214,9 @@
   {:else}
     <!-- Count line -->
     <p class="trace-count">
-      {loadedCount} record(s) loaded, {order === 'desc' ? 'newest first' : 'oldest first'}
-      {hasMore ? ' &middot; more available' : ' &middot; end of trace'}
-      &middot; click a row to expand
+      {loadedCount} {t('trace.recordsLoaded')}, {order === 'desc' ? t('trace.newestFirst') : t('trace.oldestFirst')}
+      {hasMore ? ' &middot; ' + t('trace.moreAvailable') : ' &middot; ' + t('trace.endOfTrace')}
+      &middot; {t('trace.clickToExpand')}
     </p>
 
     <!-- Trace entry list -->
@@ -255,7 +256,7 @@
           onclick={loadMore}
           disabled={loadingMore}
         >
-          {loadingMore ? 'Loading&hellip;' : 'Load more'}
+          {loadingMore ? t('trace.loading') : t('trace.loadMore')}
         </button>
       {/if}
     </div>

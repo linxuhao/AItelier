@@ -5,6 +5,7 @@
   // contents in a dialog.
   import { workspaceTree, workspaceFile } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
+  import { t } from '../lib/i18n';
 
   let {
     projectId,
@@ -132,15 +133,15 @@
 <details class="workspace-section" open={startOpen} ontoggle={onToggle}>
   <summary>
     <strong>{title}</strong>
-    {#if loaded}<span class="ws-count">{files.length} file(s)</span>{/if}
+    {#if loaded}<span class="ws-count">{files.length} {t('wsbrowser.files')}</span>{/if}
   </summary>
 
   {#if loading}
-    <p class="ws-muted">Loading files…</p>
+    <p class="ws-muted">{t('wsbrowser.loading')}</p>
   {:else if error}
     <p class="ws-error">{error}</p>
   {:else if loaded && files.length === 0}
-    <p class="ws-muted">No files.</p>
+    <p class="ws-muted">{t('wsbrowser.empty')}</p>
   {:else if loaded}
     <div class="ws-file-list">
       {@render treeLevel(tree)}
@@ -175,10 +176,10 @@
     <article>
       <header>
         <code>{filePath}</code>
-        <button class="ws-close" onclick={() => (dialogOpen = false)} aria-label="Close">&times;</button>
+        <button class="ws-close" onclick={() => (dialogOpen = false)} aria-label={t('wsbrowser.close')}>&times;</button>
       </header>
       {#if isBinary}
-        <p class="ws-muted">Cannot display binary content</p>
+        <p class="ws-muted">{t('wsbrowser.binary')}</p>
       {:else if isMarkdown}
         <div class="ws-file-content ws-md-content">{@html renderMarkdown(fileContent)}</div>
       {:else}

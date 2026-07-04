@@ -1,6 +1,7 @@
 <script lang="ts">
   import { notificationStore, notifPanelOpen, clearNotifications, type NotificationEntry } from '../stores/notifications';
   import { formatTime } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   // ── State ──
   // Visibility is owned by the store (the AppBar bell toggles it and the
@@ -44,17 +45,17 @@
 {#if $notifPanelOpen}
   <aside id="notification-panel" class="notification-panel">
     <div class="notif-header">
-      <span class="notif-title">Notifications</span>
+      <span class="notif-title">{t('notif.title')}</span>
       {#if $notificationStore.length > 0}
         <span class="notif-badge">{Math.min($notificationStore.length, 100)}</span>
-        <button class="notif-clear-btn" onclick={handleClear} title="Clear all notifications">Clear</button>
+        <button class="notif-clear-btn" onclick={handleClear} title={t('notif.clearAll')}>Clear</button>
       {/if}
-      <button class="notif-clear-btn" onclick={() => notifPanelOpen.set(false)} title="Close">&times;</button>
+      <button class="notif-clear-btn" onclick={() => notifPanelOpen.set(false)} title={t('notif.close')}>&times;</button>
     </div>
 
     <div class="notif-list" bind:this={notifListEl}>
       {#if $notificationStore.length === 0}
-        <p class="notif-empty">No notifications yet — pipeline events land here live.</p>
+        <p class="notif-empty">{t('notif.empty')}</p>
       {:else}
         {#each $notificationStore as notif (notif.id)}
           <div class="notif-entry {typeClass(notif.type)}">

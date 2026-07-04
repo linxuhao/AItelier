@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { t } from '../lib/i18n';
+
   let {
     show = $bindable(false),
-    title = 'Confirm',
+    title = t('confirm.title'),
     message = '',
-    confirmLabel = 'Confirm',
-    cancelLabel = 'Cancel',
+    confirmLabel = t('confirm.yes'),
+    cancelLabel = t('confirm.no'),
     variant = 'default',
     onConfirm = () => {},
     onCancel = () => {},
@@ -97,7 +99,7 @@
         onclick={confirm}
         disabled={pending}
       >
-        {pending ? 'Saving…' : confirmLabel}
+        {pending ? t('confirm.saving') : confirmLabel}
       </button>
       <button
         id="confirm-no"

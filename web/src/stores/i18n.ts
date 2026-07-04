@@ -16,9 +16,19 @@ function browserLang(): string {
 }
 
 function initialLang(): string {
-  if (typeof localStorage !== 'undefined') {
-    const stored = localStorage.getItem(LS_KEY);
-    if (stored) return stored;
+  // Guard the METHOD, not just the object: jsdom (and some embedded webviews)
+  // expose a partial `localStorage` whose getItem isn't a function, so a bare
+  // `typeof localStorage !== 'undefined'` check still throws here — at module
+  // load, via `langStore = writable(initialLang())`, taking down every view
+  // that imports i18n. try/catch keeps a hostile storage from breaking boot.
+  try {
+    if (typeof localStorage !== 'undefined'
+        && typeof localStorage.getItem === 'function') {
+      const stored = localStorage.getItem(LS_KEY);
+      if (stored) return stored;
+    }
+  } catch {
+    /* storage unavailable/partial — fall back to the browser language */
   }
   return browserLang();
 }

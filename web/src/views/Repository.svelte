@@ -146,6 +146,7 @@
             </thead>
             <tbody>
               {#each repo.projects as project}
+                {@const parsed = parseStatus(project.status)}
                 <tr
                   class="project-row"
                   onclick={() => navigateToProject(project.project_id)}
@@ -159,7 +160,6 @@
                     </a>
                   </td>
                   <td>
-                    {@const parsed = parseStatus(project.status)}
                     <span class="status-badge {parsed.className}" title={parsed.text}>
                       {parsed.icon} {parsed.text}
                     </span>

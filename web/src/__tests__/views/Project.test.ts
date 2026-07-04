@@ -24,6 +24,8 @@ const mockApi = vi.hoisted(() => ({
   getCheckpoint: vi.fn(),
   approveCheckpoint: vi.fn(),
   rejectCheckpoint: vi.fn(),
+  repoStatus: vi.fn().mockResolvedValue({}),
+  repoArchiveUrl: vi.fn().mockReturnValue('#'),
 }));
 
 vi.mock('../../lib/api', () => mockApi);

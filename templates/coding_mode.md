@@ -95,11 +95,22 @@ into an isolated place whose transcript you don't pay for.
   the edit/test loop — the real context sink — stays out of your window; prefer
   that for delegatable changes.
 - **Layer 3 — offload to a pipeline.** Context-heavy, self-contained work whose
-  *result* is what you need, not the reasoning: build a whole app / a full
-  architecture pass (`start_new_project` / `start_from_aitelier_project`), review
-  a diff (`code_review`), or run any registered config. The pipeline's agents burn
-  their OWN context — only checkpoints and the final result come back to you, so
-  this is how you keep a long session slim.
+  *result* is what you need, not the reasoning. The pipeline's agents burn their
+  OWN context — only checkpoints and the final result come back to you, so this is
+  how you keep a long session slim. This is the general offload target for **any**
+  long / multi-step / context-heavy job:
+  - build a whole app / a full architecture pass (`start_new_project` /
+    `start_from_aitelier_project`);
+  - review a diff (`code_review`), implement an approved plan (`coding_impl`);
+  - **run a captured skill** — a multi-step process the user turned into a
+    pipeline appears in your catalog (often `gen_*`); a long or multi-step skill
+    runs as a pipeline, never step-by-step in this loop;
+  - **delegate a self-contained subtask to a sub-agent** — a big exploration, a
+    research pass, a bounded refactor: hand it to a pipeline whose spawned agent
+    does the heavy reading/editing and returns only the conclusion.
+
+  Rule of thumb: if it's long, multi-step, or context-heavy and you mainly need
+  the outcome, it goes to layer 3 — whatever the domain.
 
 ### Your pipelines
 

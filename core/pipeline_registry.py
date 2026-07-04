@@ -37,7 +37,18 @@ SEED_FILE = "seed_input.md"
 # Host hints applied to every generated pipeline (keeps config_registry generic —
 # it knows nothing about `gen_`): butler-driven so checkpoints relay in-chat, and a
 # seed file so `start_config_run(seed_text=...)` reaches the first step.
-GEN_HINTS = {"scheduler_owned": False, "seed_file": SEED_FILE}
+GEN_HINTS = {
+    "scheduler_owned": False,
+    "seed_file": SEED_FILE,
+    # A generic input contract so a converted skill self-describes in the
+    # butler's pipeline catalog (converted skills are advertised as layer-3
+    # offload targets). The skill's graph `description:` says WHAT it does;
+    # this says HOW to feed it.
+    "input_hint": ("seed_text = the input for this skill's first step (the "
+                   "topic / request / material it operates on), as plain text. "
+                   "A captured multi-step skill — runs its own steps to a "
+                   "result; relay any checkpoints it raises."),
+}
 _log = logging.getLogger(__name__)
 
 

@@ -78,6 +78,12 @@ def test_register_text_adds_host_agents_graph_and_manifest(sf, registry):
     assert m.scheduler_owned is False
     assert m.seed_file == "seed_input.md"
     assert "process" in m.steps
+    # a converted skill self-describes in the butler's pipeline catalog
+    # (advertised as a layer-3 offload target) — carries a generic input_hint
+    # so the butler knows how to feed it.
+    assert "seed_text" in m.input_hint
+    cat = {e["config_name"]: e for e in registry.catalog(full=True)}["gen_demo"]
+    assert cat["drive"] == "inline" and cat["input_hint"] == m.input_hint
 
 
 def test_generated_roles_namespaced_and_dont_clobber_globals(sf, registry, gdir,

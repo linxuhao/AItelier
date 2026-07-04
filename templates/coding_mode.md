@@ -59,13 +59,15 @@ off on, do NOT start editing directly. Run it through the plan-gated runner:
    revise the plan.
 4. Implement — two ways:
    - **Offload (prefer for a delegatable change — keeps your context small):**
-     `offload_implement(project_id, plan=<approved plan.md>)`. A spawned agent
-     implements the plan against the repo, commits, and runs the tests in ITS
-     OWN context — the edit/test loop never enters yours. It returns a run_id;
-     then `runner_submit(run_id, "implement", result={"summary": "delegated to
-     coding_impl run <id>"})` to close the plan run, and poll the impl run with
-     `wait_until_next_checkpoint_or_completion` / `get_pipeline_status`, then
-     report its summary + test_report.
+     start the `coding_impl` pipeline against this project —
+     `start_config_run(config_name="coding_impl", against_project=<project_id>,
+     seed_text=<the approved plan.md>)`. A spawned agent implements the plan
+     against the repo, commits, and runs the tests in ITS OWN context — the
+     edit/test loop never enters yours. It returns a run_id; then
+     `runner_submit(run_id=<the plan run>, "implement", result={"summary":
+     "delegated to coding_impl run <id>"})` to close the plan run, and poll the
+     impl run with `wait_until_next_checkpoint_or_completion`, then report its
+     summary + test_report.
    - **Inline (when you want to stay hands-on — interactive debugging):**
      implement with your own tools (edit_file / create_file / bash), run the
      plan's verification commands, then `runner_submit(run_id, "implement",
@@ -89,8 +91,9 @@ into an isolated place whose transcript you don't pay for.
 - **Layer 2 — plan→task runner.** A non-trivial multi-file change the user should
   approve. `runner_start` → plan → user gate → implement → `runner_submit` (the
   section above). You plan in-context, but the implement step can be **offloaded**
-  (`offload_implement`) to a spawned agent so the edit/test loop — the real
-  context sink — stays out of your window; prefer that for delegatable changes.
+  (start the `coding_impl` pipeline with `against_project`) to a spawned agent so
+  the edit/test loop — the real context sink — stays out of your window; prefer
+  that for delegatable changes.
 - **Layer 3 — offload to a pipeline.** Context-heavy, self-contained work whose
   *result* is what you need, not the reasoning: build a whole app / a full
   architecture pass (`start_new_project` / `start_from_aitelier_project`), review
@@ -98,10 +101,25 @@ into an isolated place whose transcript you don't pay for.
   their OWN context — only checkpoints and the final result come back to you, so
   this is how you keep a long session slim.
 
-### Driving a layer-3 pipeline
+### Your pipelines
 
-1. `list_pipelines` to see what's registered; `start_config_run(config_name=…,
-   seed_text=…)` (or the `start_new_project` family for app builds) to launch.
+These are registered right now (name [drive mode] — what it does):
+
+{pipeline_catalog}
+
+`[background]` = start it and it runs in a spawned agent (context stays out of
+your window); `[inline]` = it drives within this turn and returns its result.
+**Call `list_pipelines` for the full input_hint** — what SEED each one expects —
+before feeding one; guessing the seed shape is the #1 way these fail (e.g.
+`code_review` needs the verbatim `git diff`, not a summary of it).
+
+### Driving a pipeline
+
+1. Choose from the catalog above (or `list_pipelines` for freshly-generated
+   gen_* ones + input contracts). Launch with `start_config_run(config_name=…,
+   seed_text=…)` — add `against_project=<id>` to run against an existing
+   project's repo. (Use the `start_new_project` family for from-scratch app
+   builds.)
 2. Loop on **`wait_until_next_checkpoint_or_completion(run_id)`** — one blocking
    call, no polling. On a `checkpoint`, relay it and, once the user decides,
    `approve_checkpoint` / `reject_checkpoint(feedback)`. On `running` (a timeout),
@@ -109,16 +127,13 @@ into an isolated place whose transcript you don't pay for.
 3. On `completed`, `get_pipeline_result(run_id)` for the compact final output.
    `stop_pipeline(run_id)` cancels a stuck or unwanted run.
 
-### Reviewing a change (the most common layer-3 call)
+### Reviewing a change (the most common call)
 
-To double-check a finished change, run the review pipeline. First run `git diff`
-(or `git diff HEAD`) via bash, then pass the RAW diff output — not a summary — as
-the seed: `start_config_run(config_name="code_review", seed_text=<one-line task
-summary + the verbatim git diff>)`. The reviewer can only judge what it can see; a
-description without the diff will be rejected. `code_review` is butler-driven, so
-its verdict (`passed`, `feedback`, `findings`) comes straight back in the tool
-result — fix real findings, re-run the tests, and only then report done. Use it
-when the user asks for a review, or after any non-trivial multi-file change.
+After any non-trivial change, run `code_review` (see its `input_hint` via
+`list_pipelines`): `git diff` via bash first, then pass the one-line summary +
+the **verbatim** diff as `seed_text`. It's `[inline]`, so its verdict (`passed`,
+`feedback`, `findings`) returns straight in the tool result — fix real findings,
+re-run the tests, then report done.
 
 ## Git
 

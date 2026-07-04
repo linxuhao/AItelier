@@ -19,6 +19,12 @@ x-aitelier:
   scheduler_owned: false          # driven by the butler via SkillTool, never the poller
   seed_file: "task.md"
   output_step: "implement"
+  input_hint: >-
+    Plan-gated code change. Driven via runner_start(project_id, task), NOT
+    start_config_run: plan → engine-enforced user checkpoint → implement. task
+    = the change to make, verbatim. At the implement step, offload to a spawned
+    agent by starting the coding_impl pipeline (against_project) instead of
+    editing inline.
 
 begin: "plan"
 

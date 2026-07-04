@@ -18,6 +18,11 @@ x-aitelier:
   scheduler_owned: false          # driven inline by the butler
   seed_file: "review_request.md"
   output_step: "review"
+  input_hint: >-
+    seed_text = a one-line task summary followed by the VERBATIM `git diff`
+    output — the raw diff hunks, NOT a description or summary of the changes
+    (the reviewer rejects a request with no actual diff). Driven inline: the
+    verdict (passed / feedback / findings) returns in the tool result.
 
 begin: "review"
 

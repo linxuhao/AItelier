@@ -17,6 +17,12 @@ x-aitelier:
   scheduler_owned: true          # poller-driven → spawned agent → context isolated
   seed_file: "plan.md"
   output_step: "test"
+  input_hint: >-
+    seed_text = the APPROVED plan.md content (goal, numbered steps, verification).
+    Start with against_project=<the project whose repo to implement into>. A
+    spawned agent implements the plan, commits, and runs the tests in its own
+    context — poll to completion, then report the summary + test_report. Use
+    this to OFFLOAD implementation of an approved plan out of your context.
 
 begin: "implement"
 

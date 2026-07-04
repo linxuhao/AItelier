@@ -382,19 +382,26 @@ class TestLayer3PipelineTools:
         return MetaAgent(mock_db, mock_ws, owner_email="t@local", session_id="s1")
 
     def _registry(self, manifests):
+        from core.config_registry import ConfigRegistry
         reg = MagicMock()
         reg.list.return_value = manifests
         reg.get.side_effect = lambda name: next(
             (m for m in manifests if m.config_name == name), None)
+        # list_pipelines now delegates to the real catalog() over the mocks.
+        reg._manifests = {m.config_name: m for m in manifests}
+        reg.catalog = lambda full=False: ConfigRegistry.catalog(reg, full=full)
         return reg
 
     def test_list_pipelines_surfaces_registry(self, mock_db, mock_ws):
         agent = self._agent(mock_db, mock_ws)
         m1 = MagicMock(config_name="code_review", label="Code Review",
+                       description="Adversarial review of a code diff",
                        scheduler_owned=False, seed_file="review_request.md",
-                       has_task_loop=False)
+                       input_hint="the verbatim git diff", has_task_loop=False)
         m2 = MagicMock(config_name="dpe_default_v2", label="DPE",
-                       scheduler_owned=True, seed_file=None, has_task_loop=True)
+                       description="Full DPE build",
+                       scheduler_owned=True, seed_file=None,
+                       input_hint="", has_task_loop=True)
         with patch("api.dependencies.get_config_registry",
                    return_value=self._registry([m2, m1])):
             out = agent._tool_list_pipelines({})
@@ -402,7 +409,8 @@ class TestLayer3PipelineTools:
         assert names == ["code_review", "dpe_default_v2"]  # sorted
         assert out["count"] == 2
         cr = out["pipelines"][0]
-        assert cr["scheduler_owned"] is False and cr["takes_seed"] is True
+        assert cr["drive"] == "inline" and cr["takes_seed"] is True
+        assert "git diff" in cr["input_hint"]
 
     def test_stop_pipeline_fails_run(self, mock_db, mock_ws):
         agent = self._agent(mock_db, mock_ws)

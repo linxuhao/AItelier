@@ -598,8 +598,13 @@ TOOL_DEFINITIONS = [
                                                    "for configs whose first step reads several inputs."},
                     "name": {"type": "string",
                              "description": "Optional human label for this run."},
+                    "against_project": {"type": "string",
+                                        "description": "Run against an EXISTING project's repo — resolves "
+                                                       "repo_path + repo_type=existing from it. Use to offload "
+                                                       "work onto the current project (e.g. coding_impl with an "
+                                                       "approved plan as seed_text)."},
                     "repo_type": {"type": "string",
-                                  "description": "new | existing | clone (default new)."},
+                                  "description": "new | existing | clone (default new). Prefer against_project for existing repos."},
                     "repo_path": {"type": "string",
                                   "description": "Local repo path when repo_type=existing."},
                     "repo_url": {"type": "string",
@@ -613,10 +618,12 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "list_pipelines",
-            "description": "List the registered skillflow pipelines/configs you can run "
-                           "(dpe, code_review, coding_task, gen_*, …). Use this to discover "
-                           "what's available before start_config_run. Returns each config's "
-                           "name, label, whether it's scheduler-owned, and whether it takes a seed.",
+            "description": "PULL the full pipeline catalog with each config's input_hint (what "
+                           "seed it expects) — a compact catalog is already in your system "
+                           "context; call this to see input contracts before feeding a pipeline, "
+                           "or to see freshly-generated gen_* ones. Returns name, description, "
+                           "input_hint, and drive mode (background = start_config_run+poll; "
+                           "inline = start_config_run drives it / or runner_start per its hint).",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -869,32 +876,6 @@ CODING_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "offload_implement",
-            "description": (
-                "OFFLOAD the implementation of an approved plan to a spawned "
-                "agent, keeping it out of your context. Use this at the "
-                "coding_task implement step for a delegatable task instead of "
-                "coding inline: pass the approved plan.md content and the "
-                "project_id; a background agent implements it against the repo, "
-                "commits, and runs the tests. Returns a run_id — poll "
-                "get_pipeline_status and report the summary + test_report when "
-                "it completes."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string",
-                                   "description": "The project whose repo to implement into"},
-                    "plan": {"type": "string",
-                             "description": "The approved plan.md content, verbatim"},
-                },
-                "required": ["project_id", "plan"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "web_search",
             "description": (
                 "Search the web (SearXNG). Use for looking up library APIs, error "
@@ -1065,7 +1046,8 @@ class MetaAgent:
                 # braces (tool-call examples) that str.format would choke on.
                 prompt = (template
                         .replace("{current_project}", current_project or "none")
-                        .replace("{owner_email}", self.owner_email))
+                        .replace("{owner_email}", self.owner_email)
+                        .replace("{pipeline_catalog}", self._pipeline_catalog_block()))
                 if lang_block:
                     prompt = lang_block + "\n\n" + prompt
                 return prompt
@@ -1078,6 +1060,27 @@ class MetaAgent:
         if lang_block:
             prompt = lang_block + "\n\n" + prompt
         return prompt
+
+    def _pipeline_catalog_block(self) -> str:
+        """Compact pipeline catalog pushed into the coding-mode system context.
+
+        Registry-generated, so gen_* and later-added configs appear with no
+        prompt maintenance. One line each (name — description [drive mode]);
+        the full input contract is pulled on demand via list_pipelines."""
+        try:
+            from api.dependencies import get_config_registry
+            entries = get_config_registry().catalog(full=False)
+        except Exception:
+            return "(pipeline catalog unavailable — call list_pipelines)"
+        if not entries:
+            return "(no pipelines registered)"
+        lines = []
+        for e in entries:
+            desc = (e.get("description") or "").strip().replace("\n", " ")
+            if len(desc) > 100:
+                desc = desc[:100] + "…"
+            lines.append(f"- `{e['config_name']}` [{e['drive']}] — {desc}")
+        return "\n".join(lines)
 
     def _build_messages(self, history: list[dict], current_project: str | None) -> list[dict]:
         messages = [{"role": "system", "content": self._build_system_prompt(current_project)}]
@@ -2408,61 +2411,6 @@ class MetaAgent:
             run_id, step_id, name, args.get("params") or {},
             project_root=project_root)
 
-    def _tool_offload_implement(self, args: dict) -> dict:
-        """Hand an approved plan to a SPAWNED implementer (context offload).
-
-        Starts the scheduler-owned ``coding_impl`` graph against the project's
-        real repo, seeded with the approved plan.md. The whole edit/test loop
-        then runs in a spawned agent's ephemeral context — it never enters the
-        butler's window. The butler polls get_pipeline_status and reports the
-        summary + test_report when it completes.
-
-        Use this at the coding_task implement step for a delegatable task,
-        instead of implementing inline with edit_file/bash.
-        """
-        pid = args.get("project_id", "")
-        plan = (args.get("plan") or "").strip()
-        if not pid:
-            return {"error": "offload_implement: 'project_id' is required"}
-        if not plan:
-            return {"error": "offload_implement: 'plan' (the approved plan.md "
-                             "content) is required"}
-        proj = self.db.get_project(pid)
-        if not proj:
-            return {"error": f"Project '{pid}' not found"}
-        # The implement run works against the SAME real repo (existing-repo
-        # path: code_path_resolver maps the fresh run's code ops + repo_apply
-        # commits back here).
-        repo_path = proj.get("repo_path")
-        if not repo_path:
-            try:
-                repo_path = str(self.ws.get_code_path(pid))
-            except Exception:
-                repo_path = None
-        if not repo_path:
-            return {"error": f"No repo_path for project '{pid}' — offload needs "
-                             f"an existing repo to implement into."}
-        from core.run_launcher import start_config_run, generate_run_id
-        impl_pid = generate_run_id("coding_impl")
-        result = start_config_run(
-            self.db, self.ws, "coding_impl", impl_pid,
-            seed_text=plan,
-            name=f"impl:{proj.get('name') or pid}",
-            owner_email=self.owner_email,
-            repo_type="existing", repo_path=repo_path,
-        )
-        if result.get("run_id") and self.session_id:
-            try:
-                self.db.link_run_to_session(self.session_id, result["run_id"])
-            except Exception:
-                pass
-        result["hint"] = (
-            "Implementation is running in the background (spawned agent, "
-            "isolated context). Poll get_pipeline_status(run_id); when it "
-            "completes, report the implement summary and the test_report.")
-        result["_wake"] = True  # nudge the scheduler to pick it up now
-        return result
-
     async def _tool_web_search(self, args: dict) -> dict:
         """Web search via core.web_tools (SearXNG). Sync httpx under the hood —
         run in a thread so a slow backend doesn't block the event loop."""
@@ -2923,19 +2871,16 @@ class MetaAgent:
                 "message": f"Pipeline in state: {status}"}
 
     def _tool_list_pipelines(self, args: dict) -> dict:
-        """List registered skillflow configs the butler can start (layer 3)."""
+        """Full pipeline catalog with input contracts (the on-demand PULL).
+
+        A compact version is already pushed into your system context; call this
+        when you need each pipeline's input_hint (what seed it expects) to
+        choose and feed one, or to see freshly-generated (gen_*) pipelines.
+        Drive a 'background' pipeline with start_config_run then poll; a
+        plan-gated one via runner_start (see its input_hint)."""
         from api.dependencies import get_config_registry
-        pipelines = []
-        for m in get_config_registry().list():
-            pipelines.append({
-                "config_name": m.config_name,
-                "label": getattr(m, "label", "") or m.config_name,
-                "scheduler_owned": bool(getattr(m, "scheduler_owned", False)),
-                "takes_seed": bool(getattr(m, "seed_file", None)),
-                "has_task_loop": bool(getattr(m, "has_task_loop", False)),
-            })
-        pipelines.sort(key=lambda p: p["config_name"])
-        return {"pipelines": pipelines, "count": len(pipelines)}
+        catalog = get_config_registry().catalog(full=True)
+        return {"pipelines": catalog, "count": len(catalog)}
 
     def _tool_stop_pipeline(self, args: dict) -> dict:
         """Cancel a running pipeline (marks the run failed; the poller then skips it)."""
@@ -3270,6 +3215,27 @@ class MetaAgent:
             avail = ", ".join(m.config_name for m in get_config_registry().list())
             return {"error": f"Unknown config '{config_name}'. Available: {avail}"}
 
+        # against_project: run this pipeline against an EXISTING project's repo
+        # (resolves repo_path + repo_type=existing from it). One generic param
+        # for every repo-operating pipeline — e.g. offloading a coding_impl run
+        # against the current project — so no per-config tool is needed.
+        repo_type = args.get("repo_type") or "new"
+        repo_path = args.get("repo_path")
+        against = (args.get("against_project") or "").strip()
+        if against:
+            proj = self.db.get_project(against)
+            if not proj:
+                return {"error": f"against_project '{against}' not found."}
+            repo_path = proj.get("repo_path")
+            if not repo_path:
+                try:
+                    repo_path = str(self.ws.get_code_path(against))
+                except Exception:
+                    repo_path = None
+            if not repo_path:
+                return {"error": f"No repo_path for project '{against}'."}
+            repo_type = "existing"
+
         pid = generate_run_id(config_name)
         result = start_config_run(
             self.db, self.ws, config_name, pid,
@@ -3277,9 +3243,9 @@ class MetaAgent:
             seed_inputs=args.get("seed_inputs") or None,
             name=args.get("name") or config_name,
             owner_email=self.owner_email,
-            repo_type=args.get("repo_type") or "new",
+            repo_type=repo_type,
             repo_url=args.get("repo_url"),
-            repo_path=args.get("repo_path"),
+            repo_path=repo_path,
         )
         if result.get("status") == "error":
             return {"error": result.get("message")}
@@ -3346,7 +3312,6 @@ _CODING_TOOL_HANDLERS = {
     "runner_approve": MetaAgent._tool_runner_approve,
     "runner_reject": MetaAgent._tool_runner_reject,
     "skillflow_tool": MetaAgent._tool_skillflow_tool,
-    "offload_implement": MetaAgent._tool_offload_implement,
     "web_search": MetaAgent._tool_web_search,
     "web_fetch": MetaAgent._tool_web_fetch,
 }

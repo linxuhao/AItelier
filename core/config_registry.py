@@ -80,6 +80,12 @@ class ConfigManifest:
     scheduler_owned: bool = True
     seed_file: str | None = None
     output_step: str | None = None
+    # Self-description for the butler's pipeline catalog: what SEED this config
+    # expects, in what shape. A human "what it does" line is derived from the
+    # graph's `description:`; this is the machine-actionable input contract, so
+    # the driver doesn't guess the seed (e.g. code_review needs the verbatim
+    # git diff, not a summary of it). Declared in the x-aitelier block.
+    input_hint: str = ""
     # When True, a completed run of this config emits a pipeline YAML the host
     # should register as a runnable config (skill_converter). Lets the meta agent's
     # completion handler stay generic instead of special-casing the graph name.
@@ -196,6 +202,7 @@ class ConfigRegistry:
             scheduler_owned=bool(hints.get("scheduler_owned")),
             seed_file=hints.get("seed_file"),
             output_step=hints.get("output_step"),
+            input_hint=hints.get("input_hint") or "",
             registers_generated_pipeline=bool(hints.get("registers_generated_pipeline")),
             preamble_steps=list(hints.get("preamble_steps") or []),
             label_overrides=hints.get("labels") or {},
@@ -238,3 +245,32 @@ class ConfigRegistry:
 
     def names(self) -> list[str]:
         return list(self._manifests.keys())
+
+    def catalog(self, full: bool = False) -> list[dict]:
+        """The butler's pipeline catalog, generated from the live registry.
+
+        ``full=False`` (compact — pushed into the system context up front):
+        name, one-line description, and drive-mode. ``full=True`` (pulled via
+        list_pipelines when the butler needs to choose): adds the input_hint
+        (seed contract), seed_file and task-loop flags. Registry-generated, so
+        gen_* and later-added pipelines appear automatically — no per-config
+        prompt text to maintain.
+        """
+        out = []
+        for m in sorted(self._manifests.values(), key=lambda x: x.config_name):
+            try:
+                desc = m.description
+            except Exception:
+                desc = ""
+            entry = {
+                "config_name": m.config_name,
+                "description": desc,
+                # scheduler-owned → fire-and-poll; else butler-driven inline.
+                "drive": "background" if m.scheduler_owned else "inline",
+            }
+            if full:
+                entry["input_hint"] = m.input_hint
+                entry["takes_seed"] = bool(m.seed_file)
+                entry["has_task_loop"] = bool(m.has_task_loop)
+            out.append(entry)
+        return out

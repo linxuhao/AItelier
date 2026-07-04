@@ -61,7 +61,6 @@ class TestModePlumbing:
         assert names == {"edit_file", "create_file", "bash",
                          "runner_start", "runner_submit",
                          "runner_approve", "runner_reject", "skillflow_tool",
-                         "offload_implement",
                          "web_search", "web_fetch"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
@@ -582,8 +581,7 @@ class TestCodingTaskRunner:
     async def test_runner_tools_rejected_in_butler_mode(self, butler_agent):
         for name, args in (
                 ("runner_start", {"project_id": "p", "task": "x"}),
-                ("skillflow_tool", {"run_id": "r", "step_id": "s", "name": "n"}),
-                ("offload_implement", {"project_id": "p", "plan": "x"})):
+                ("skillflow_tool", {"run_id": "r", "step_id": "s", "name": "n"})):
             result = await butler_agent._execute_tool(name, args)
             assert "only available in coding mode" in result["error"]
 
@@ -602,34 +600,20 @@ class TestCodingTaskRunner:
         assert "must be an object" in result["error"]
 
 
-class TestOffloadImplement:
-    """The hybrid's context-offload half: offload_implement starts the
-    scheduler-owned coding_impl run seeded with the approved plan, against the
-    project's real repo, so the edit/test loop runs in a spawned agent."""
+class TestStartConfigRunAgainstProject:
+    """Generic offload: start_config_run(against_project=…) resolves the
+    project's repo (repo_path + repo_type=existing) — one generic param that
+    replaces a per-config offload tool. Butler drives coding_impl this way."""
 
-    async def test_requires_plan(self, coding_agent, mock_db):
-        mock_db.get_project.return_value = {"project_id": "p", "repo_path": "/r"}
-        result = await coding_agent._execute_tool(
-            "offload_implement", {"project_id": "p", "plan": "  "})
-        assert "'plan'" in result["error"]
-
-    async def test_unknown_project(self, coding_agent, mock_db):
-        mock_db.get_project.return_value = None
-        result = await coding_agent._execute_tool(
-            "offload_implement", {"project_id": "ghost", "plan": "## do it"})
-        assert "not found" in result["error"]
-
-    async def test_starts_coding_impl_with_plan_and_repo(self, coding_agent,
-                                                         mock_db, monkeypatch):
+    async def test_against_project_resolves_existing_repo(self, coding_agent,
+                                                          mock_db, monkeypatch):
         mock_db.get_project.return_value = {
             "project_id": "eval", "name": "Eval", "repo_path": "/repo/eval"}
         captured = {}
 
         def fake_start(db, ws, config_name, pid, **kw):
-            captured["config_name"] = config_name
-            captured["seed_text"] = kw.get("seed_text")
-            captured["repo_type"] = kw.get("repo_type")
-            captured["repo_path"] = kw.get("repo_path")
+            captured.update(config_name=config_name, seed_text=kw.get("seed_text"),
+                            repo_type=kw.get("repo_type"), repo_path=kw.get("repo_path"))
             return {"status": "started", "run_id": "impl-1",
                     "config_name": config_name, "scheduler_owned": True}
 
@@ -638,15 +622,69 @@ class TestOffloadImplement:
         monkeypatch.setattr(rl, "generate_run_id", lambda c: f"{c}-xyz")
 
         result = await coding_agent._execute_tool(
-            "offload_implement", {"project_id": "eval", "plan": "## Goal\ndo it"})
+            "start_config_run", {"config_name": "coding_impl",
+                                 "against_project": "eval",
+                                 "seed_text": "## Goal\ndo it"})
         assert result["run_id"] == "impl-1"
-        assert result["_wake"] is True
-        assert "background" in result["hint"]
         assert captured == {"config_name": "coding_impl",
                             "seed_text": "## Goal\ndo it",
                             "repo_type": "existing", "repo_path": "/repo/eval"}
-        # links the spawned run to the butler session
         mock_db.link_run_to_session.assert_called_once_with("sess1", "impl-1")
+
+    async def test_against_project_unknown(self, coding_agent, mock_db):
+        mock_db.get_project.return_value = None
+        result = await coding_agent._execute_tool(
+            "start_config_run", {"config_name": "coding_impl",
+                                 "against_project": "ghost"})
+        assert "not found" in result["error"]
+
+
+class TestPipelineCatalog:
+    """The catalog is generated from config self-description (x-aitelier
+    input_hint) — no per-config prompt text — and pushed compact into the
+    coding-mode system context."""
+
+    def test_manifest_parses_input_hint(self, tmp_path):
+        from skillflow.core import SkillFlow
+        from skillflow.graph import PipelineGraph
+        from core.config_registry import ConfigRegistry
+        from pathlib import Path as P
+
+        repo = P(__file__).resolve().parent.parent.parent
+        sf = SkillFlow(str(tmp_path / "sf.db"),
+                       workspace_base=str(tmp_path / "ws"),
+                       projects_base=str(tmp_path / "proj"))
+        import yaml as _yaml
+        for f in ("coding_impl", "code_review"):
+            for name, cfg in _yaml.safe_load(
+                    (repo / "agent_configs" / f"{f}.yaml").read_text()).items():
+                sf.register_agent_config_from_dict(name, cfg)
+            sf.register_graph(PipelineGraph.from_yaml(repo / "configs" / f"{f}.yaml"))
+        reg = ConfigRegistry.build(sf)
+
+        cr = reg.get("code_review")
+        assert "git diff" in cr.input_hint  # the contract that prevents the trap
+        # compact catalog: name/desc/drive, no input_hint
+        compact = reg.catalog(full=False)
+        assert all(set(e) == {"config_name", "description", "drive"} for e in compact)
+        assert {e["config_name"]: e["drive"] for e in compact}["code_review"] == "inline"
+        assert {e["config_name"]: e["drive"] for e in compact}["coding_impl"] == "background"
+        # full catalog carries the input contract for the pull
+        full = {e["config_name"]: e for e in reg.catalog(full=True)}
+        assert "git diff" in full["code_review"]["input_hint"]
+
+    def test_catalog_block_pushed_into_coding_prompt(self, coding_agent, monkeypatch):
+        class _Reg:
+            def catalog(self, full=False):
+                return [{"config_name": "code_review",
+                         "description": "Adversarial review of a code diff",
+                         "drive": "inline"}]
+        import api.dependencies as deps
+        monkeypatch.setattr(deps, "get_config_registry", lambda: _Reg())
+        prompt = coding_agent._build_system_prompt("proj-1")
+        assert "code_review" in prompt
+        assert "[inline]" in prompt
+        assert "{pipeline_catalog}" not in prompt  # placeholder filled
 
 
 class TestBudgetPause:

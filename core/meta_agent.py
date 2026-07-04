@@ -630,6 +630,27 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "describe_pipeline",
+            "description": "Get ONE pipeline's exact input contract (input_hint / seed shape / "
+                           "drive mode) by name — use this INSTEAD of list_pipelines when you "
+                           "already know which pipeline you want (the compact catalog is in your "
+                           "system context) and just need its exact seed parameters, so you don't "
+                           "pull the whole catalog. Accepts an exact config_name (e.g. "
+                           "'code_review') or a keyword matched against names/descriptions; "
+                           "returns every match.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "Exact pipeline config_name, or a keyword to match."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "wait_until_next_checkpoint_or_completion",
             "description": "Block until a pipeline run reaches its next checkpoint, completes, "
                            "or fails, then return the compact state. This is the main way to "
@@ -2917,6 +2938,23 @@ class MetaAgent:
         catalog = get_config_registry().catalog(full=True)
         return {"pipelines": catalog, "count": len(catalog)}
 
+    def _tool_describe_pipeline(self, args: dict) -> dict:
+        """One pipeline's exact input contract by name (targeted PULL).
+
+        Use instead of list_pipelines when the name is known — returns just the
+        matching pipeline(s)' input_hint / seed shape / drive mode, so the whole
+        catalog isn't pulled into context. Exact config_name preferred; falls
+        back to a keyword match over names/descriptions."""
+        q = (args.get("name") or "").strip()
+        if not q:
+            return {"error": "name is required (a pipeline config_name or keyword)."}
+        from api.dependencies import get_config_registry
+        matches = get_config_registry().describe(q)
+        if not matches:
+            return {"error": f"No pipeline matches '{q}'. "
+                             f"Call list_pipelines to see all available pipelines."}
+        return {"pipelines": matches, "count": len(matches)}
+
     def _tool_stop_pipeline(self, args: dict) -> dict:
         """Cancel a running pipeline (marks the run failed; the poller then skips it)."""
         from api.dependencies import get_skillflow
@@ -3331,6 +3369,7 @@ _TOOL_HANDLERS = {
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "start_config_run": MetaAgent._tool_start_config_run,
     "list_pipelines": MetaAgent._tool_list_pipelines,
+    "describe_pipeline": MetaAgent._tool_describe_pipeline,
     "wait_until_next_checkpoint_or_completion": MetaAgent._tool_wait_until_checkpoint,
     "get_pipeline_result": MetaAgent._tool_get_pipeline_result,
     "stop_pipeline": MetaAgent._tool_stop_pipeline,

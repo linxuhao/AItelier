@@ -258,19 +258,44 @@ class ConfigRegistry:
         """
         out = []
         for m in sorted(self._manifests.values(), key=lambda x: x.config_name):
-            try:
-                desc = m.description
-            except Exception:
-                desc = ""
-            entry = {
-                "config_name": m.config_name,
-                "description": desc,
-                # scheduler-owned → fire-and-poll; else butler-driven inline.
-                "drive": "background" if m.scheduler_owned else "inline",
-            }
-            if full:
-                entry["input_hint"] = m.input_hint
-                entry["takes_seed"] = bool(m.seed_file)
-                entry["has_task_loop"] = bool(m.has_task_loop)
-            out.append(entry)
+            out.append(self._entry(m, full=full))
         return out
+
+    @staticmethod
+    def _entry(m: "ConfigManifest", full: bool = False) -> dict:
+        """One catalog row for a manifest (compact, or full with the contract)."""
+        try:
+            desc = m.description
+        except Exception:
+            desc = ""
+        entry = {
+            "config_name": m.config_name,
+            "description": desc,
+            # scheduler-owned → fire-and-poll; else butler-driven inline.
+            "drive": "background" if m.scheduler_owned else "inline",
+        }
+        if full:
+            entry["input_hint"] = m.input_hint
+            entry["takes_seed"] = bool(m.seed_file)
+            entry["has_task_loop"] = bool(m.has_task_loop)
+        return entry
+
+    def describe(self, query: str) -> list[dict]:
+        """Targeted lookup for the butler's describe_pipeline tool.
+
+        An exact ``config_name`` match returns just that pipeline's full
+        contract; otherwise the query is matched (case-insensitive substring)
+        against config_name and description, returning every match's full
+        contract. Lets the butler get one pipeline's seed shape without pulling
+        the whole catalog.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+        exact = self._manifests.get(q)
+        if exact is not None:
+            return [self._entry(exact, full=True)]
+        ql = q.lower()
+        return [self._entry(m, full=True)
+                for m in sorted(self._manifests.values(), key=lambda x: x.config_name)
+                if ql in m.config_name.lower() or ql in (m.description or "").lower()]

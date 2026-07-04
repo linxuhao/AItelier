@@ -695,6 +695,14 @@ class TestPipelineCatalog:
         full = {e["config_name"]: e for e in reg.catalog(full=True)}
         assert "git diff" in full["code_review"]["input_hint"]
 
+        # describe_pipeline: targeted lookup, no full-catalog pull.
+        exact = reg.describe("code_review")
+        assert len(exact) == 1 and exact[0]["config_name"] == "code_review"
+        assert "git diff" in exact[0]["input_hint"]           # full contract
+        assert "code_review" in {e["config_name"] for e in reg.describe("review")}  # keyword
+        assert reg.describe("nonexistent_xyz") == []          # → tool says list_pipelines
+        assert reg.describe("") == []
+
     def test_generalist_and_gated_pipelines_register(self, tmp_path):
         """investigate (read-only), subagent (red-gated loop), fix_tests
         (objective loop) all register, validate, self-describe, and expose

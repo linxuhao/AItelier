@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 31
+        assert len(TOOL_DEFINITIONS) == 32
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -387,9 +387,13 @@ class TestLayer3PipelineTools:
         reg.list.return_value = manifests
         reg.get.side_effect = lambda name: next(
             (m for m in manifests if m.config_name == name), None)
-        # list_pipelines now delegates to the real catalog() over the mocks.
+        # list_pipelines / describe_pipeline delegate to the real methods over
+        # the mocks; bind the real static/instance methods (a MagicMock `self`
+        # would otherwise resolve _entry to an auto-mock).
         reg._manifests = {m.config_name: m for m in manifests}
+        reg._entry = ConfigRegistry._entry
         reg.catalog = lambda full=False: ConfigRegistry.catalog(reg, full=full)
+        reg.describe = lambda q: ConfigRegistry.describe(reg, q)
         return reg
 
     def test_list_pipelines_surfaces_registry(self, mock_db, mock_ws):
@@ -411,6 +415,28 @@ class TestLayer3PipelineTools:
         cr = out["pipelines"][0]
         assert cr["drive"] == "inline" and cr["takes_seed"] is True
         assert "git diff" in cr["input_hint"]
+
+    def test_describe_pipeline_targeted_lookup(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        m1 = MagicMock(config_name="code_review",
+                       description="Adversarial review of a code diff",
+                       scheduler_owned=False, seed_file="review_request.md",
+                       input_hint="the verbatim git diff", has_task_loop=False)
+        m2 = MagicMock(config_name="dpe_default_v2", description="Full DPE build",
+                       scheduler_owned=True, seed_file=None,
+                       input_hint="", has_task_loop=True)
+        with patch("api.dependencies.get_config_registry",
+                   return_value=self._registry([m2, m1])):
+            # exact name → just that one's full contract (no full-catalog pull)
+            out = agent._tool_describe_pipeline({"name": "code_review"})
+            assert out["count"] == 1
+            assert out["pipelines"][0]["config_name"] == "code_review"
+            assert "git diff" in out["pipelines"][0]["input_hint"]
+            # unknown → error that points back to list_pipelines
+            miss = agent._tool_describe_pipeline({"name": "zzz"})
+            assert "list_pipelines" in miss["error"]
+            # missing arg → error
+            assert "required" in agent._tool_describe_pipeline({})["error"]
 
     def test_stop_pipeline_fails_run(self, mock_db, mock_ws):
         agent = self._agent(mock_db, mock_ws)

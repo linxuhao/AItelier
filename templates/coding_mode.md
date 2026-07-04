@@ -152,9 +152,12 @@ These are registered right now (name [drive mode] — what it does):
 
 `[background]` = start it and it runs in a spawned agent (context stays out of
 your window); `[inline]` = it drives within this turn and returns its result.
-**Call `list_pipelines` for the full input_hint** — what SEED each one expects —
-before feeding one; guessing the seed shape is the #1 way these fail (e.g.
-`code_review` needs the verbatim `git diff`, not a summary of it).
+Get the full input_hint — what SEED each one expects — before feeding one;
+guessing the seed shape is the #1 way these fail (e.g. `code_review` needs the
+verbatim `git diff`, not a summary of it). When you already know which pipeline
+you want (its name is in the list above), call **`describe_pipeline(name)`** for
+just that one's contract; use **`list_pipelines`** only to browse them all or to
+see freshly-generated `gen_*` ones.
 
 ### Driving a pipeline
 

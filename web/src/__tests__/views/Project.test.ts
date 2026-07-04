@@ -218,7 +218,7 @@ describe('Project.svelte', () => {
     // Project metadata grid should be present
     const metaLabels = container.querySelectorAll('.meta-label');
     const metaTexts = Array.from(metaLabels).map(el => el.textContent);
-    expect(metaTexts.some(t => t === 'ID')).toBe(true);
+    expect(metaTexts.some(t => t === 'Project ID')).toBe(true);
     // textContent is 'Created' — any uppercasing is CSS text-transform,
     // which textContent never sees.
     expect(metaTexts.some(t => t === 'Created')).toBe(true);
@@ -271,7 +271,7 @@ describe('Project.svelte', () => {
     });
 
     await findByText('Test Project');
-    await findByText('No runs yet for this project.');
+    await findByText('No runs yet.');
   });
 
   // ── Tab switching ──
@@ -293,7 +293,7 @@ describe('Project.svelte', () => {
     expect(tabButtons.length).toBeGreaterThanOrEqual(2);
 
     // Click Config tab
-    const configBtn = Array.from(tabButtons).find(b => b.textContent === 'Config');
+    const configBtn = Array.from(tabButtons).find(b => b.textContent === 'Configuration');
     expect(configBtn).not.toBeUndefined();
     if (configBtn) {
       await fireEvent.click(configBtn);
@@ -330,7 +330,7 @@ describe('Project.svelte', () => {
 
     const tabBar = container.querySelector('.tab-bar');
     const tabButtons = tabBar!.querySelectorAll('button');
-    const configBtn = Array.from(tabButtons).find(b => b.textContent === 'Config');
+    const configBtn = Array.from(tabButtons).find(b => b.textContent === 'Configuration');
     expect(configBtn).toBeUndefined();
   });
 
@@ -388,7 +388,7 @@ describe('Project.svelte', () => {
 
     // Substring regex: the h4 renders "Checkpoint Pending: <label>" as one
     // element, and findByText's default matcher requires the FULL text.
-    await findByText(/Checkpoint Pending/);
+    await findByText(/Checkpoint pending/);
     expect(container.querySelector('#checkpoint-card')).not.toBeNull();
   });
 
@@ -400,7 +400,7 @@ describe('Project.svelte', () => {
     });
 
     await findByText('Test Project');
-    const traceBtn = await findByText('View Trace');
+    const traceBtn = await findByText('View trace');
     await fireEvent.click(traceBtn);
 
     expect(mockPush).toHaveBeenCalledWith('#/projects/test-project/trace');

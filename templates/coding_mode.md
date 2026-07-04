@@ -119,6 +119,20 @@ into an isolated place whose transcript you don't pay for.
   turns, it fails with only partial work, and the gate's loop-back wastes more
   turns redoing already-done files — splitting upfront avoids the loop entirely.
 
+  **When splitting means it's really a PROJECT — escalate to DPE.** Subagents are
+  for *independent* subtasks. If you find yourself dispatching several subagents
+  that share a design — the same interfaces, data model, or invariant — and
+  you're making architectural decisions between them to keep them consistent,
+  that's a project wearing a task costume, not a set of tasks. Independent
+  subagents each see only their slice, so they drift and make locally-reasonable
+  choices that don't compose (conflicting interfaces, duplicated helpers) — the
+  exact failure DPE's Architect exists to prevent. Escalate: run the DPE pipeline
+  against this repo (`start_from_aitelier_project`) so the Researcher/Architect
+  own the shared design and the Final Verifier owns integration — and it keeps
+  *your* context slim too (the whole decompose→verify loop runs in the pipeline,
+  not here). The trigger is COHERENCE, not a count: unrelated fixes stay as
+  subagents no matter how many; one evolving design across N tasks goes to DPE.
+
   Rule of thumb: if it's long, multi-step, or context-heavy and you mainly need
   the outcome, it goes to layer 3 — whatever the domain.
 

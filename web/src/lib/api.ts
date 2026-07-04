@@ -517,3 +517,40 @@ export function getCheckpoint(
 ): Promise<Record<string, unknown> | null> {
   return _get('/api/meta/' + encodeURIComponent(projectId) + '/checkpoint');
 }
+
+// ═════════════════════════════════════════════════════════════════════
+//  Repositories
+// ═════════════════════════════════════════════════════════════════════
+
+/** Summary of a project belonging to a repository group. */
+export interface RepoProjectSummary {
+  project_id: string;
+  name: string;
+  status: string;
+  updated_at: string;
+}
+
+/** A repository group, aggregating projects sharing the same repo_path. */
+export interface RepoItem {
+  repo_path: string;
+  repo_name: string;
+  repo_type: string;
+  repo_url: string | null;
+  project_count: number;
+  representative_project_id: string;
+  last_activity: string;
+  projects: RepoProjectSummary[];
+}
+
+/** Single repository detail (same shape as RepoItem). */
+export type RepoDetail = RepoItem;
+
+/** List all repositories grouped by repo_path. GET /api/repos */
+export function listRepos(): Promise<RepoItem[]> {
+  return _get('/api/repos');
+}
+
+/** Get a single repository detail by its repo_path. GET /api/repos/{repo_path} */
+export function getRepo(repoPath: string): Promise<RepoDetail> {
+  return _get('/api/repos/' + encodeURIComponent(repoPath));
+}

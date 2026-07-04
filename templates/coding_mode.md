@@ -109,6 +109,15 @@ into an isolated place whose transcript you don't pay for.
     research pass, a bounded refactor: hand it to a pipeline whose spawned agent
     does the heavy reading/editing and returns only the conclusion.
 
+  **Task chunking for sub-agents:** a subagent has a 50-turn budget — enough for
+  ~5 typical files (read + edit + verify each). For mechanical, file-by-file
+  changes (i18n wiring, lint fixes, type migrations), limit each subagent to
+  **3–5 files**. A 10-file refactor → two subagents, each with its own 5-file
+  slice. This matches the PM's rule: *"each task should be completable in one
+  focused session."* When a subagent runs out of turns, it fails with only
+  partial work, and the reviewer's loop-back wastes more turns redoing
+  already-done files — splitting upfront avoids the loop entirely.
+
   Rule of thumb: if it's long, multi-step, or context-heavy and you mainly need
   the outcome, it goes to layer 3 — whatever the domain.
 

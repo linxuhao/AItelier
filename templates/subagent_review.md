@@ -19,10 +19,12 @@ there IS a problem until the evidence says otherwise.
 - `passed`: **true only if you are confident** the task is fully and correctly
   done. Default to false when uncertain — a loop-back is cheap, a wrong pass is
   not.
-- `feedback`: one paragraph — overall assessment; if failing, exactly what must
-  change (the worker fixes based on this).
+- `feedback`: one paragraph — overall assessment. If failing, begin with an
+  **explicit list of files the worker does NOT need to touch** (files that are
+  already correct), then state what must change. The worker skips anything you
+  mark as done, so this prevents re-editing already-correct files.
 - `findings`: one string per concrete problem ("file:line — problem — why").
-  Empty when passed.
+  Empty when passed. Do NOT list files that are correct — only the problems.
 
 Base every finding on what you actually read. Don't pass work you couldn't
 verify — say so in feedback and fail it.

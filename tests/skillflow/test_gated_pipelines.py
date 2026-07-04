@@ -197,3 +197,67 @@ def test_subagent_never_passing_fails_bounded(tmp_path):
     assert status == "failed"
     assert status != "completed"
     assert calls["review"] == 4        # initial + 3 bounded retries
+
+
+# ── single-step pipelines: investigate (read-only) + code_review ────
+
+def _drive_single(sf, run_id, step, max_ticks=20):
+    """Drive a single-agent-step graph to termination; confirm the one agent
+    step empty. Returns (status, runs)."""
+    runs = 0
+    for _ in range(max_ticks):
+        node = sf.advance_run(run_id)
+        run = sf.get_run(run_id)
+        if node is None:
+            if run["status"] == "running":
+                continue
+            return run["status"], runs
+        claimed = sf.claim_next_step(run_id)
+        if claimed is None:
+            continue
+        assert claimed.step_id == step
+        runs += 1
+        sf.confirm_step(claimed.token, StepResult(flags={}))
+    return "TIMEOUT", runs
+
+
+def test_investigate_completes_and_is_read_only(tmp_path):
+    sf, _ = _sf(tmp_path)
+    graph, run_id = _register(sf, "investigate")
+    status, runs = _drive_single(sf, run_id, "investigate")
+    assert status == "completed" and runs == 1
+    # read-only guarantee: the graph has no write output-mode and no
+    # repo-mutating lifecycle hook anywhere.
+    inv = next(n for n in graph.steps if n.id == "investigate")
+    assert inv.output_mode == "content"          # no create/edit derived
+    for n in graph.steps:
+        hooks = (getattr(n, "lifecycle", None) or {})
+        assert "on_deliver" not in hooks           # no repo_apply
+
+
+def test_code_review_completes(tmp_path):
+    # code_review's review step validates review_verdict.json, so it must be
+    # written before confirm (as the real reviewer agent would).
+    sf, _ = _sf(tmp_path)
+    graph, run_id = _register(sf, "code_review")
+    status = runs = None
+    for _ in range(20):
+        node = sf.advance_run(run_id)
+        run = sf.get_run(run_id)
+        if node is None:
+            if run["status"] == "running":
+                continue
+            status = run["status"]
+            break
+        claimed = sf.claim_next_step(run_id)
+        if claimed is None:
+            continue
+        assert claimed.step_id == "review"
+        tmp = sf._workspace.get_step_tmp_dir("p", graph.name, "review")
+        Path(tmp).mkdir(parents=True, exist_ok=True)
+        (Path(tmp) / "review_verdict.json").write_text(json.dumps({
+            "passed": True, "feedback": "lgtm", "findings": []}),
+            encoding="utf-8")
+        runs = (runs or 0) + 1
+        sf.confirm_step(claimed.token, StepResult(flags={}))
+    assert status == "completed" and runs == 1

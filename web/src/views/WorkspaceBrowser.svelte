@@ -5,7 +5,7 @@
   // contents in a dialog.
   import { workspaceTree, workspaceFile } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   let {
     projectId,

@@ -5,7 +5,7 @@
   import { approveCheckpoint, rejectCheckpoint, getCheckpoint } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
   import { escapeHtml } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   // ── Local state (Svelte 5 runes) ──────────────────────────────────
 

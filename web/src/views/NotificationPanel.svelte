@@ -1,7 +1,7 @@
 <script lang="ts">
   import { notificationStore, notifPanelOpen, clearNotifications, type NotificationEntry } from '../stores/notifications';
   import { formatTime } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   // ── State ──
   // Visibility is owned by the store (the AppBar bell toggles it and the

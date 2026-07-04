@@ -13,7 +13,7 @@
     repoMakePR,
   } from '../lib/api';
   import { formatTime } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   let { projectId, canWrite = false }: { projectId: string; canWrite?: boolean } = $props();
 

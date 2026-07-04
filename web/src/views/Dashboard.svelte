@@ -6,7 +6,7 @@
   import { projectStore, setCurrentProject } from '../stores/project';
   import { listAllRuns, createProject, deleteProject } from '../lib/api';
   import { formatTime, formatTokens, formatTaskProgress, parseStatus, cacheBadgeClass } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   // ── State ──
 

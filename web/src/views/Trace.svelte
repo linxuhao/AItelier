@@ -3,7 +3,7 @@
   import { push } from 'svelte-spa-router';
   import { getTrace } from '../lib/api';
   import { stepLabel } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@
   import { connectionStore } from '../stores/connection';
   import { notifPanelOpen, notifUnread } from '../stores/notifications';
   import { langStore, setLang } from '../stores/i18n';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   const LANG_OPTIONS: { code: string; label: string }[] = [
     { code: 'en', label: 'English' },

@@ -6,7 +6,7 @@
   import { authStore } from '../stores/auth';
   import { getLoggedUsers, deleteUser } from '../lib/api';
   import { formatTime } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   // ── State (runes) ──────────────────────────────────────────────────
 

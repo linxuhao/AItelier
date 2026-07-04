@@ -31,7 +31,7 @@
     truncate,
     cacheBadgeClass,
   } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   // ── Props (route params from svelte-spa-router) ──
 

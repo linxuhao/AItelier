@@ -11,7 +11,7 @@
   } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
   import { formatTime, escapeHtml, truncate } from '../lib/format';
-  import { t } from '../lib/i18n';
+  import { t } from '../lib/i18n.svelte';
 
   // ── Route params ──
 

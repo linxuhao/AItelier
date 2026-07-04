@@ -11,6 +11,7 @@
   } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
   import { formatTime, escapeHtml, truncate } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   // ── Route params ──
 
@@ -92,10 +93,10 @@
   let inputDisabled = $derived(sending || agentStreaming);
   let canSend = $derived(!sending && !agentStreaming && draft.trim().length > 0 && connected);
   let inputPlaceholder = $derived(
-    !connected ? 'Chat unavailable — reconnecting…'
-      : agentStreaming ? 'Agent is responding…'
-      : sending ? 'Sending…'
-      : 'Message the agent... (/ to see commands)'
+    !connected ? t('chat.unavailable')
+      : agentStreaming ? t('chat.agentResponding')
+      : sending ? t('chat.sending')
+      : t('chat.placeholder')
   );
 
   // ── Message groups: consecutive tool messages merged into one collapsible block ──
@@ -883,11 +884,11 @@
   <!-- Breadcrumb -->
   <nav class="breadcrumb" aria-label="breadcrumb">
     <ul>
-      <li><a href="#/" onclick={(e) => { e.preventDefault(); push('#/'); }}>Dashboard</a></li>
+      <li><a href="#/" onclick={(e) => { e.preventDefault(); push('#/'); }}>{t('chat.dashboard')}</a></li>
       {#if params.id}
         <li><a href="#/projects/{params.id}" onclick={(e) => { e.preventDefault(); push('#/projects/' + encodeURIComponent(params.id)); }}>{truncate(params.id, 30)}</a></li>
       {/if}
-      <li>Chat</li>
+      <li>{t('chat.breadcrumbChat')}</li>
     </ul>
   </nav>
 
@@ -903,7 +904,7 @@
         }
       }}
     >
-      <option value="">Current session</option>
+      <option value="">{t('chat.currentSession')}</option>
       {#each sessionList as s (s.session_id)}
         {@const sid = s.session_id as string}
         {@const pid = (s.project_id as string) || ''}
@@ -916,14 +917,14 @@
       {/each}
     </select>
     <button class="outline btn-new-session" onclick={_handleNewSession} disabled={!connected}>
-      + New
+      {t('chat.newSession')}
     </button>
   </div>
 
   <!-- Loading state -->
   {#if loading}
     <div class="chat-loading">
-      <p class="text-muted">Loading chat...</p>
+      <p class="text-muted">{t('chat.loading')}</p>
     </div>
   {:else}
     <!-- Messages container -->
@@ -931,7 +932,7 @@
       <!-- Welcome message -->
       {#if messages.length === 0}
         <div class="chat-msg chat-system">
-          <div class="msg-content">Chat with the Meta Agent. Type /help for commands.</div>
+          <div class="msg-content">{t('chat.welcome')}</div>
         </div>
       {/if}
 
@@ -1012,9 +1013,9 @@
 
     <!-- Input area -->
     <div class="chat-input-area">
-      <label class="coding-mode-toggle" title="Coding mode: the agent edits code and runs commands directly in the project repo">
+      <label class="coding-mode-toggle" title={t('chat.codingModeTitle')}>
         <input type="checkbox" role="switch" bind:checked={codingMode} disabled={agentStreaming || sending} />
-        Coding mode
+        {t('chat.codingMode')}
       </label>
       {#if completionVisible && completionMatches.length > 0}
         <ul class="slash-completion">

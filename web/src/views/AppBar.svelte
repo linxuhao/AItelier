@@ -3,6 +3,7 @@
   import { connectionStore } from '../stores/connection';
   import { notifPanelOpen, notifUnread } from '../stores/notifications';
   import { langStore, setLang } from '../stores/i18n';
+  import { t } from '../lib/i18n';
 
   const LANG_OPTIONS: { code: string; label: string }[] = [
     { code: 'en', label: 'English' },
@@ -26,8 +27,8 @@
 
   let connectionText = $derived(
     $connectionStore.connectionOk
-      ? '● Connected'
-      : `○ Reconnecting${$connectionStore.reconnectAttempt > 0 ? ` (attempt ${$connectionStore.reconnectAttempt})` : '\u2026'}`,
+      ? t('appbar.connected')
+      : t('appbar.reconnecting') + ($connectionStore.reconnectAttempt > 0 ? ` (${t('dashboard.attempt').replace('{n}', String($connectionStore.reconnectAttempt))})` : '…'),
   );
 </script>
 
@@ -37,10 +38,10 @@
       <li><strong>AItelier</strong></li>
     </ul>
     <ul>
-      <li><a href="#/projects">Dashboard</a></li>
-      <li><a href="#/chat">Chat</a></li>
+      <li><a href="#/projects">{t('appbar.dashboard')}</a></li>
+      <li><a href="#/chat">{t('appbar.chat')}</a></li>
       {#if $authStore.canWrite}
-        <li><a href="#/tracking">Tracking</a></li>
+        <li><a href="#/tracking">{t('appbar.tracking')}</a></li>
       {/if}
     </ul>
     <ul>
@@ -62,8 +63,8 @@
           class="notif-bell"
           class:open={$notifPanelOpen}
           onclick={toggleNotifications}
-          title="Pipeline notifications"
-          aria-label="Notifications"
+          title={t('appbar.notifTitle')}
+          aria-label={t('appbar.notifLabel')}
         >
           🔔
           {#if $notifUnread > 0}

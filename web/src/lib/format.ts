@@ -314,3 +314,19 @@ export function parseStatus(status: string | null | undefined): { text: string; 
 
   return { text, className, icon };
 }
+
+/**
+ * Map a repo_type value to a human-readable label.
+ *
+ * @param repoType — 'new', 'existing', 'clone', or any other string
+ * @returns display label, or the original value for unknown types
+ */
+export function repoTypeLabel(repoType: string | null | undefined): string {
+  if (repoType == null) return '';
+  switch (repoType) {
+    case 'new':      return 'new';
+    case 'existing': return 'existing';
+    case 'clone':    return 'clone';
+    default:         return repoType;
+  }
+}

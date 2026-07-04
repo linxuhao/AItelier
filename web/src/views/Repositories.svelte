@@ -3,7 +3,7 @@
   import { push } from 'svelte-spa-router';
   import { listRepos } from '../lib/api';
   import type { RepoItem } from '../lib/api';
-  import { formatTime } from '../lib/format';
+  import { formatTime, repoTypeLabel } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
 
   // ── State ──
@@ -48,15 +48,6 @@
 
   function navigateToRepo(repoPath: string): void {
     push('#/repos/' + encodeURIComponent(repoPath));
-  }
-
-  function repoTypeLabel(repoType: string): string {
-    switch (repoType) {
-      case 'new': return 'new';
-      case 'existing': return 'existing';
-      case 'clone': return 'clone';
-      default: return repoType;
-    }
   }
 </script>
 

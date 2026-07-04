@@ -2,7 +2,7 @@
   import { push } from 'svelte-spa-router';
   import { getRepo, ApiError } from '../lib/api';
   import type { RepoDetail } from '../lib/api';
-  import { formatTime } from '../lib/format';
+  import { formatTime, parseStatus, repoTypeLabel } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
   import { authStore } from '../stores/auth';
   import { setCurrentRepoPath } from '../stores/project';
@@ -64,15 +64,6 @@
   function navigateToProject(projectId: string): void {
     setCurrentRepoPath(repoPath);
     push('#/projects/' + encodeURIComponent(projectId));
-  }
-
-  function repoTypeLabel(repoType: string): string {
-    switch (repoType) {
-      case 'new': return 'new';
-      case 'existing': return 'existing';
-      case 'clone': return 'clone';
-      default: return repoType;
-    }
   }
 </script>
 
@@ -168,7 +159,10 @@
                     </a>
                   </td>
                   <td>
-                    <span class="status-badge">{project.status}</span>
+                    {@const parsed = parseStatus(project.status)}
+                    <span class="status-badge {parsed.className}" title={parsed.text}>
+                      {parsed.icon} {parsed.text}
+                    </span>
                   </td>
                   <td>
                     <span class="timestamp">{formatTime(project.updated_at)}</span>

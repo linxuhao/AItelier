@@ -112,6 +112,14 @@ into an isolated place whose transcript you don't pay for.
   Rule of thumb: if it's long, multi-step, or context-heavy and you mainly need
   the outcome, it goes to layer 3 — whatever the domain.
 
+  **No pipeline fits, and the task is a REPEATABLE shape?** Create one:
+  `generate_pipeline(description=<the process, verbatim>)` captures it as a new
+  reusable pipeline (with a design checkpoint you relay for approval); once
+  registered it appears in your catalog as `gen_<slug>` and you run it via
+  `start_config_run` like any other. Only do this for a recurring shape worth
+  reusing — for a one-off, stay in layer 1/2; minting a pipeline for a single
+  task isn't worth the ceremony.
+
 ### Your pipelines
 
 These are registered right now (name [drive mode] — what it does):

@@ -1819,38 +1819,54 @@ class DBManager:
 
     @staticmethod
     def _sanitize_transcript(messages: list[dict]) -> list[dict]:
-        """Drop broken tool-call groups so the rebuilt transcript is a valid
-        LLM message sequence.
+        """Rebuild a transcript into a valid LLM message sequence.
 
-        Two failure shapes: a crash mid-turn leaves an assistant ``tool_calls``
-        message without (all of) its tool results; the LIMIT window can cut a
-        group at the start, leaving orphan ``tool`` messages with no assistant.
-        Either would make the provider reject the whole request, so incomplete
-        groups are dropped rather than repaired.
+        The provider requires every assistant ``tool_calls`` message to be
+        followed IMMEDIATELY by exactly the ``tool`` results for its ids, with
+        no orphan tool results and no unanswered calls. Persisted order does
+        NOT guarantee this: an async/checkpoint-driven tool call (e.g.
+        approve_project_brief, wait_until_next_checkpoint) has its result
+        appended late — after a user message or another turn's calls landed in
+        between — so an assistant's results are neither adjacent nor exclusive.
+        A naive "consume the consecutive trailing tool messages" pass then
+        attaches the wrong results (or leaves a call unanswered), which the
+        provider rejects.
+
+        So we match results to calls by id from ANYWHERE in the transcript and
+        re-emit each assistant immediately followed by its own results in call
+        order. Incomplete groups (a result never arrived) are dropped whole,
+        orphan tool results (no matching call) are dropped, and empty
+        placeholder rows are dropped. Order of non-tool messages is preserved.
         """
-        out = []
-        i = 0
-        n = len(messages)
-        while i < n:
-            msg = messages[i]
-            if msg.get("role") == "tool":
-                i += 1  # orphan tool result (window cut) — drop
-                continue
+        # Index every tool result by its tool_call_id (first occurrence wins).
+        tool_by_id: dict[str, dict] = {}
+        for m in messages:
+            if m.get("role") == "tool":
+                tcid = m.get("tool_call_id")
+                if tcid and tcid not in tool_by_id:
+                    tool_by_id[tcid] = m
+
+        out: list[dict] = []
+        for msg in messages:
+            role = msg.get("role")
+            if role == "tool":
+                continue  # (re-)emitted below, paired with its assistant
             calls = msg.get("tool_calls") or []
-            if msg.get("role") == "assistant" and calls:
-                want = {c.get("id") for c in calls}
-                j = i + 1
-                got = set()
-                while j < n and messages[j].get("role") == "tool":
-                    got.add(messages[j].get("tool_call_id"))
-                    j += 1
-                if want <= got:
-                    out.extend(messages[i:j])
-                # else: incomplete group (crash mid-turn) — drop it whole
-                i = j
+            if role == "assistant" and calls:
+                ids = [c.get("id") for c in calls]
+                results = [tool_by_id.get(cid) for cid in ids]
+                if all(results):
+                    out.append(msg)
+                    out.extend(results)
+                # else: at least one call never got a result (crash mid-turn or
+                # a still-in-flight async tool) — drop the whole group so no
+                # unanswered tool_call reaches the provider.
+                continue
+            # Plain message: drop empty placeholder rows (no content, no calls);
+            # they are invalid for an assistant turn and useless otherwise.
+            if not (msg.get("content") or "").strip():
                 continue
             out.append(msg)
-            i += 1
         return out
 
     def set_session_mode(self, session_id: str, mode: str):

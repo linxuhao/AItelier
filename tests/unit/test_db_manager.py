@@ -702,3 +702,72 @@ def test_ensure_project_records_config_name(db_manager):
     """A run created for a non-DPE config records its config_name."""
     db_manager.ensure_project("conv_run", config_name="meta_conversation")
     assert db_manager.get_project("conv_run")["config_name"] == "meta_conversation"
+
+
+# ── _sanitize_transcript: valid LLM message sequence under interleaving ──
+
+def _a(*ids, content=None):
+    """assistant message, optionally with tool_calls."""
+    m = {"role": "assistant", "content": content}
+    if ids:
+        m["tool_calls"] = [{"id": i, "function": {"name": "x"}} for i in ids]
+    return m
+
+def _t(tcid):
+    return {"role": "tool", "tool_call_id": tcid, "content": "{}"}
+
+def _assert_valid(msgs):
+    """Every assistant tool_calls must be immediately followed by EXACTLY its
+    results; no orphan tool results; no empty rows."""
+    i = 0
+    while i < len(msgs):
+        m = msgs[i]; calls = m.get("tool_calls") or []
+        if m["role"] == "tool":
+            raise AssertionError(f"orphan tool result at {i}: {m['tool_call_id']}")
+        if m["role"] == "assistant" and calls:
+            want = [c["id"] for c in calls]; got = []
+            j = i + 1
+            while j < len(msgs) and msgs[j]["role"] == "tool":
+                got.append(msgs[j]["tool_call_id"]); j += 1
+            assert got == want, f"want {want} got {got}"
+            i = j; continue
+        assert (m.get("content") or "").strip() or calls, f"empty msg at {i}"
+        i += 1
+
+def test_sanitize_interleaved_async_results():
+    """The real bug: an async/checkpoint tool result (approve_project_brief)
+    lands late, after a user message and another turn's call — so results are
+    neither adjacent nor exclusive to their assistant. Sanitize must pair each
+    assistant with its OWN result by id, not greedily grab trailing tools."""
+    msgs = [
+        {"role": "user", "content": "go"},
+        _a("A"),                      # approve_project_brief
+        {"role": "user", "content": "wait"},   # user interjects before A returns
+        _a("B"),                      # wait_until_checkpoint
+        _t("B"),                      # B's result
+        _t("A"),                      # A's result arrives LATE, out of order
+    ]
+    out = DBManager._sanitize_transcript(msgs)
+    _assert_valid(out)
+    # both calls preserved, each adjacent to its own result
+    assert any(m.get("tool_calls") and m["tool_calls"][0]["id"] == "A" for m in out)
+    assert any(m.get("tool_calls") and m["tool_calls"][0]["id"] == "B" for m in out)
+
+def test_sanitize_drops_unanswered_call():
+    """A tool call whose result never arrived (crash / still in-flight) → drop
+    the whole assistant group so no unanswered tool_call reaches the provider."""
+    msgs = [_a("A"), _t("A"), _a("MISSING"), {"role": "user", "content": "hi"}]
+    out = DBManager._sanitize_transcript(msgs)
+    _assert_valid(out)
+    assert not any(m.get("tool_calls") and m["tool_calls"][0]["id"] == "MISSING" for m in out)
+
+def test_sanitize_drops_orphan_tool_and_empties():
+    msgs = [
+        _t("orphan"),                              # no assistant → drop
+        _a(content="  "),                          # empty assistant → drop
+        {"role": "user", "content": ""},           # empty user → drop
+        {"role": "user", "content": "real"},
+    ]
+    out = DBManager._sanitize_transcript(msgs)
+    _assert_valid(out)
+    assert out == [{"role": "user", "content": "real"}]

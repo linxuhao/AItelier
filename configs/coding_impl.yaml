@@ -29,10 +29,23 @@ begin: "implement"
 end_conditions:
   combinator: or
   conditions:
+    # Terminate ONLY at the dedicated `done` node, which is reached exclusively
+    # when the tests pass (test → done). `done` sits OUTSIDE the implement↔test
+    # loop, so it is entered at most once.
+    #
+    # This node MUST NOT be `test`: `test` is inside the loop, so on a
+    # loop-back the graph advances INTO `test` again while a stale `completed`
+    # `test` row from the prior iteration still exists — `node_reached: test`
+    # would then fire and complete the run as SUCCESS *before the retried test
+    # even runs*, reporting green on unverified code (the exact failure we are
+    # fixing). `done` is a gate (no completed step row), so `require_completed`
+    # is intentionally omitted.
+    # The never-passes loop is bounded by `max_loop: 3` on test → implement
+    # below (enforced on tool-step edges since skillflow-py 1.5.2): once the edge
+    # is exhausted the run fails with CycleLimitExceeded.
     - type: node_reached
-      node: "test"
+      node: "done"
       result: "completed"
-      require_completed: true
 
 steps:
   - id: "implement"
@@ -42,11 +55,23 @@ steps:
     context:
       - source: { from: "repository", mode: "tool" }        # repo read tools
       - source: { config: "coding_impl", output: "plan.md" }  # the approved plan
+      # On a test-failure loop-back this carries the previous run's
+      # test_report.json (failures[] + summary) so the agent fixes the actual
+      # breakage instead of re-guessing. Empty on the first pass (test hasn't
+      # run yet), like DPE's goal-loop feedback inputs.
+      - source: { step: "test" }
       - source: { tool: "dir_tree" }
     output:
       mode: "write"                # derives surgical create/edit (+ finish_step)
     lifecycle:
       on_deliver:
+        # repo_apply stays HERE (before the test), not after it: run_tests
+        # executes against the project's real working tree, so the changes must
+        # be applied there for the tests to exercise them — and repo_apply has no
+        # stage-only mode (it always git-adds + commits). A failing test now
+        # loops back to `implement`, which fixes and re-commits, so HEAD
+        # converges to tested-passing code (fix-forward, exactly like DPE's
+        # t_impl → t_impl_review). The gate below is what blocks completion.
         - tool: "repo_apply"        # stage + commit the step's files to the real repo
           params:
             source_dir: "$STEP_DIR"
@@ -63,5 +88,25 @@ steps:
     timeout_seconds: 1200
     tool_params:
       out_dir: "$STEP_DIR"
+    # GATE on the test outcome. run_tests returns a `passed` flag (and writes
+    # test_report.json). On pass → `done` (terminates). On failure → loop back
+    # to `implement`, which reads test_report.json (its `{ step: test }` context)
+    # and fixes the failure. (run_tests SKIPS = passed:true when no runner is
+    # available, so a missing test toolchain never spins this loop.)
+    #
+    # `max_loop: 3` bounds the retries: 4 test runs total (initial + 3), then the
+    # edge is exhausted and the run fails. Enforced on this tool-step edge since
+    # skillflow-py 1.5.2 (before that, tool-originated edges weren't counted).
     transitions:
-      - to: null                    # node_reached end-condition completes the run
+      - to: "done"
+        match: { passed: true }
+      - to: "implement"
+        match: { passed: false }
+        max_loop: 3
+
+  # Terminal no-op gate: reached only after the tests pass. Its sole purpose is
+  # to be the loop-external node the end-condition fires on (see end_conditions).
+  - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null

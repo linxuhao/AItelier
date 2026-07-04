@@ -10,8 +10,6 @@
   import Tracking from './views/Tracking.svelte';
   import Repositories from './views/Repositories.svelte';
   import Repository from './views/Repository.svelte';
-  import Repositories from './views/Repositories.svelte';
-  import Repository from './views/Repository.svelte';
   import NotificationPanel from './views/NotificationPanel.svelte';
   import CheckpointModal from './views/CheckpointModal.svelte';
   import ConfirmDialog from './views/ConfirmDialog.svelte';

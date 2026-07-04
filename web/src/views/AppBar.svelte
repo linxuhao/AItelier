@@ -39,6 +39,7 @@
     </ul>
     <ul>
       <li><a href="#/projects">{t('appbar.dashboard')}</a></li>
+      <li><a href="#/repos">{t('appbar.repos')}</a></li>
       <li><a href="#/chat">{t('appbar.chat')}</a></li>
       {#if $authStore.canWrite}
         <li><a href="#/tracking">{t('appbar.tracking')}</a></li>

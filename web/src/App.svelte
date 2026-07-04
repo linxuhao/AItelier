@@ -8,6 +8,10 @@
   import Chat from './views/Chat.svelte';
   import Trace from './views/Trace.svelte';
   import Tracking from './views/Tracking.svelte';
+  import Repositories from './views/Repositories.svelte';
+  import Repository from './views/Repository.svelte';
+  import Repositories from './views/Repositories.svelte';
+  import Repository from './views/Repository.svelte';
   import NotificationPanel from './views/NotificationPanel.svelte';
   import CheckpointModal from './views/CheckpointModal.svelte';
   import ConfirmDialog from './views/ConfirmDialog.svelte';
@@ -32,6 +36,8 @@
     '/projects/:id/trace': Trace,
     '/projects/:id/trace/:runId': Trace,
     '/tracking': Tracking,
+    '/repos': Repositories,
+    '/repos/:repoPath': Repository,
   };
 
   // SSE handler for checkpoint_reached: auto-open the CheckpointModal.

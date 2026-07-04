@@ -6,6 +6,7 @@
   import { projectStore, setCurrentProject } from '../stores/project';
   import { listAllRuns, createProject, deleteProject } from '../lib/api';
   import { formatTime, formatTokens, formatTaskProgress, parseStatus, cacheBadgeClass } from '../lib/format';
+  import { t } from '../lib/i18n';
 
   // ── State ──
 
@@ -172,11 +173,11 @@
     <dialog class="reconnect-overlay" open>
       <article>
         <header>
-          <h3>Reconnecting…</h3>
+          <h3>{t('dashboard.reconnecting')}</h3>
         </header>
-        <p>The connection to the server is lost. Retrying automatically…</p>
+        <p>{t('dashboard.reconnectDesc')}</p>
         {#if $connectionStore.reconnectAttempt > 0}
-          <p class="reconnect-attempt">Attempt {$connectionStore.reconnectAttempt}</p>
+          <p class="reconnect-attempt">{t('dashboard.attempt').replace('{n}', String($connectionStore.reconnectAttempt))}</p>
         {/if}
       </article>
     </dialog>
@@ -184,9 +185,9 @@
 
   <!-- Page header -->
   <header class="dashboard-header">
-    <h2>Projects</h2>
+    <h2>{t('dashboard.projects')}</h2>
     {#if canWrite && !createFormVisible}
-      <button class="outline" onclick={toggleCreateForm}>+ New Project</button>
+      <button class="outline" onclick={toggleCreateForm}>{t('dashboard.newProject')}</button>
     {/if}
   </header>
 
@@ -194,7 +195,7 @@
   {#if createFormVisible && canWrite}
     <article class="create-form">
       <header>
-        <h3>New Project</h3>
+        <h3>{t('dashboard.newProjectTitle')}</h3>
       </header>
       <form onsubmit={(e) => { e.preventDefault(); handleCreate(); }}>
         {#if formErrors._general}
@@ -202,11 +203,11 @@
         {/if}
 
         <label for="new-project-id">
-          Project ID (slug)
+          {t('dashboard.projectId')}
           <input
             id="new-project-id"
             type="text"
-            placeholder="my-project"
+            placeholder={t('dashboard.projectIdPlaceholder')}
             bind:value={newProjectId}
             disabled={submitting}
           />
@@ -216,21 +217,21 @@
         {/if}
 
         <label for="new-project-name">
-          Display Name (optional)
+          {t('dashboard.displayName')}
           <input
             id="new-project-name"
             type="text"
-            placeholder="My Project"
+            placeholder={t('dashboard.displayNamePlaceholder')}
             bind:value={newProjectName}
             disabled={submitting}
           />
         </label>
 
         <label for="seed-text">
-          Build Request (optional)
+          {t('dashboard.buildRequest')}
           <textarea
             id="seed-text"
-            placeholder="Describe what you want to build…"
+            placeholder={t('dashboard.buildRequestPlaceholder')}
             bind:value={seedText}
             disabled={submitting}
             rows="3"
@@ -238,21 +239,21 @@
         </label>
 
         <label for="repo-type">
-          Repository
+          {t('dashboard.repository')}
           <select id="repo-type" bind:value={repoType} disabled={submitting}>
-            <option value="new">New (auto-create)</option>
-            <option value="existing">Existing (local path)</option>
-            <option value="clone">Clone from URL</option>
+            <option value="new">{t('dashboard.repoNew')}</option>
+            <option value="existing">{t('dashboard.repoExisting')}</option>
+            <option value="clone">{t('dashboard.repoClone')}</option>
           </select>
         </label>
 
         {#if repoType === 'existing'}
           <label for="repo-path">
-            Repo Path
+            {t('dashboard.repoPath')}
             <input
               id="repo-path"
               type="text"
-              placeholder="/path/to/repo"
+              placeholder={t('dashboard.repoPathPlaceholder')}
               bind:value={repoPath}
               disabled={submitting}
             />
@@ -264,11 +265,11 @@
 
         {#if repoType === 'clone'}
           <label for="repo-url">
-            Repo URL
+            {t('dashboard.repoUrl')}
             <input
               id="repo-url"
               type="url"
-              placeholder="https://github.com/user/repo.git"
+              placeholder={t('dashboard.repoUrlPlaceholder')}
               bind:value={repoUrl}
               disabled={submitting}
             />
@@ -280,10 +281,10 @@
 
         <div class="form-actions">
           <button type="submit" disabled={submitting}>
-            {submitting ? 'Creating…' : 'Create Project'}
+            {submitting ? t('dashboard.creating') : t('dashboard.createProject')}
           </button>
           <button type="button" class="secondary" onclick={toggleCreateForm} disabled={submitting}>
-            Cancel
+            {t('dashboard.cancel')}
           </button>
         </div>
       </form>
@@ -293,25 +294,25 @@
   <!-- Loading state -->
   {#if loading}
     <article aria-busy="true">
-      <p>Loading projects…</p>
+      <p>{t('dashboard.loading')}</p>
     </article>
   {:else if error && projects.length === 0}
     <!-- Error state (only show full-page error when no projects loaded) -->
     <article class="error-state">
       <header>
-        <h3>Failed to load projects</h3>
+        <h3>{t('dashboard.failedToLoad')}</h3>
       </header>
       <p>{error}</p>
-      <button onclick={refreshProjects}>Retry</button>
+      <button onclick={refreshProjects}>{t('dashboard.retry')}</button>
     </article>
   {:else if empty}
     <!-- Empty state -->
     <article class="empty-state">
-      <p>No projects yet.</p>
+      <p>{t('dashboard.no_projects')}</p>
       {#if canWrite}
-        <p>Click <strong>+ New Project</strong> to create your first project.</p>
+        <p>{@html t('dashboard.createFirst')}</p>
       {:else}
-        <p>Sign in with write access to create a new project.</p>
+        <p>{t('dashboard.signInForWrite')}</p>
       {/if}
     </article>
   {:else}
@@ -320,11 +321,11 @@
       <table class="project-table">
         <thead>
           <tr>
-            <th>#</th>
-            <th>Project</th>
-            <th>Status</th>
-            <th>Tasks</th>
-            <th>Last Update</th>
+            <th>{t('dashboard.colNum')}</th>
+            <th>{t('dashboard.colProject')}</th>
+            <th>{t('dashboard.colStatus')}</th>
+            <th>{t('dashboard.colTasks')}</th>
+            <th>{t('dashboard.colLastUpdate')}</th>
             {#if canWrite}
               <th></th>
             {/if}

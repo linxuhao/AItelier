@@ -61,8 +61,13 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         return {"status": "error", "message": f"Unknown config '{config_name}'"}
 
     if not db.get_project(project_id):
+        # Compute default repo_path for new/clone, same as project_routers.py
+        rpath = repo_path
+        if repo_type in ("new", "clone") and not rpath:
+            from core.datadir import projects_dir
+            rpath = str(projects_dir() / project_id)
         db.ensure_project(project_id, name=name, owner_email=owner_email,
-                          repo_type=repo_type, repo_path=repo_path,
+                          repo_type=repo_type, repo_path=rpath,
                           repo_url=repo_url, config_name=config_name)
     if priority:
         db.update_project(project_id, priority=priority)

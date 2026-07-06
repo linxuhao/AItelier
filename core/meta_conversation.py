@@ -15,6 +15,7 @@ import yaml
 from pathlib import Path
 from typing import Optional
 from core.ai_router import AIGateway
+from core.prompt_assembler import build_language_instruction
 
 # Default config path (relative to project root)
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
@@ -160,7 +161,8 @@ def detect_intent_heuristic(prompt: str) -> dict | None:
         return None  # Ambiguous — caller should use LLM
 
 
-def detect_intent(prompt: str, config_path: str = _DEFAULT_CONFIG_PATH) -> dict:
+def detect_intent(prompt: str, config_path: str = _DEFAULT_CONFIG_PATH,
+                  user_lang: str | None = None) -> dict:
     """
     Single-shot LLM call to classify whether the user wants a new project
     or to work on existing code. Returns:
@@ -175,8 +177,12 @@ def detect_intent(prompt: str, config_path: str = _DEFAULT_CONFIG_PATH) -> dict:
         enable_thinking=intent_cfg.get("enable_thinking", False),
         thinking_effort=intent_cfg.get("thinking_effort") if intent_cfg.get("enable_thinking") else None,
     )
+    system_prompt = _INTENT_SYSTEM_PROMPT + _INTENT_SCHEMA
+    lang_instruction = build_language_instruction(user_lang)
+    if lang_instruction:
+        system_prompt = lang_instruction + "\n\n" + system_prompt
     response = gateway.generate(
-        system_prompt=_INTENT_SYSTEM_PROMPT + _INTENT_SCHEMA,
+        system_prompt=system_prompt,
         user_prompt=f"Classify this user prompt:\n\n{prompt}",
         is_json_mode=True
     )
@@ -204,7 +210,8 @@ class MetaConversationAgent:
     Falls back to hardcoded defaults if config is unavailable.
     """
 
-    def __init__(self, model_name: str = None, config_path: str = _DEFAULT_CONFIG_PATH):
+    def __init__(self, model_name: str = None, config_path: str = _DEFAULT_CONFIG_PATH,
+                 user_lang: str | None = None):
         meta_cfg = _load_meta_config(config_path)
         project_cfg = meta_cfg.get("project", {})
 
@@ -220,6 +227,9 @@ class MetaConversationAgent:
         )
         template_path = Path(__file__).resolve().parent.parent / template_file
         self.system_prompt = template_path.read_text(encoding="utf-8")
+        lang_instruction = build_language_instruction(user_lang)
+        if lang_instruction:
+            self.system_prompt = self.system_prompt + "\n\n" + lang_instruction
         self._history = []
         self._turn_count = 0
         self._last_message = None
@@ -265,7 +275,8 @@ class MetaConversationAgent:
             "[System: Produce the project brief NOW using Schema B.]"
         )
 
-    def revise_brief(self, brief: dict, feedback: str) -> dict:
+    def revise_brief(self, brief: dict, feedback: str,
+                     user_lang: str | None = None) -> dict:
         """
         Revise an existing brief based on user feedback.
         Returns {"status": "complete", "message": "...", "project_brief": {...}}.
@@ -274,8 +285,12 @@ class MetaConversationAgent:
             f"[Current Project Brief]\n{json.dumps(brief, indent=2, ensure_ascii=False)}\n\n"
             f"[User Feedback]\n{feedback}"
         )
+        system_prompt = REVISION_SYSTEM_PROMPT
+        lang_instruction = build_language_instruction(user_lang)
+        if lang_instruction:
+            system_prompt = lang_instruction + "\n\n" + system_prompt
         response = self.gateway.generate(
-            system_prompt=REVISION_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             is_json_mode=True
         )
@@ -287,7 +302,7 @@ class MetaConversationAgent:
             # Retry once
             user_prompt += "\n[System: Your last response was not valid JSON. Please try again.]"
             response = self.gateway.generate(
-                system_prompt=REVISION_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 is_json_mode=True
             )
@@ -394,7 +409,8 @@ class TaskMetaConversationAgent(MetaConversationAgent):
     Falls back to hardcoded defaults if config is unavailable.
     """
 
-    def __init__(self, model_name: str = None, config_path: str = _DEFAULT_CONFIG_PATH):
+    def __init__(self, model_name: str = None, config_path: str = _DEFAULT_CONFIG_PATH,
+                 user_lang: str | None = None):
         meta_cfg = _load_meta_config(config_path)
         task_cfg = meta_cfg.get("task", {})
 
@@ -410,6 +426,9 @@ class TaskMetaConversationAgent(MetaConversationAgent):
         )
         template_path = Path(__file__).resolve().parent.parent / template_file
         self.system_prompt = template_path.read_text(encoding="utf-8")
+        lang_instruction = build_language_instruction(user_lang)
+        if lang_instruction:
+            self.system_prompt = self.system_prompt + "\n\n" + lang_instruction
         self._history = []
         self._turn_count = 0
         self._last_message = None

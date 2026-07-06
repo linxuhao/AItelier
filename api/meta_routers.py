@@ -83,7 +83,7 @@ def meta_detect_intent(
     user: CurrentUser | None = Depends(get_optional_user),
 ):
     """Detect whether a user prompt is about a new project or existing code."""
-    result = detect_intent(request.prompt)
+    result = detect_intent(request.prompt, user_lang=user.lang if user else None)
     return IntentDetectResponse(
         intent=result["intent"],
         reasoning=result.get("reasoning"),
@@ -113,7 +113,7 @@ def meta_assess(
     """Unified pre-project assessment: validate prompt, detect intent, gather brief.
     No project_id required — used before project creation."""
     try:
-        agent = MetaConversationAgent()
+        agent = MetaConversationAgent(user_lang=user.lang if user else None)
         if not request.history:
             result = agent.start(request.prompt)
         else:
@@ -148,9 +148,10 @@ def meta_assess(
 
 # ── Agent replay helper ──
 
-def _replay_agent(history: list[HistoryTurn]) -> MetaConversationAgent:
+def _replay_agent(history: list[HistoryTurn],
+                  user_lang: str | None = None) -> MetaConversationAgent:
     """Create a fresh agent and replay client-provided history."""
-    agent = MetaConversationAgent()
+    agent = MetaConversationAgent(user_lang=user_lang)
     for turn in history:
         agent._history.append({
             "assistant_message": turn.message,
@@ -177,7 +178,7 @@ def meta_start(
     check_write_owner(user, project)
 
     try:
-        agent = MetaConversationAgent()
+        agent = MetaConversationAgent(user_lang=user.lang if user else None)
         result = agent.start(request.prompt)
     except Exception as e:
         logger.exception("meta_start failed")
@@ -211,7 +212,7 @@ def meta_next(
     check_write_owner(user, project)
 
     try:
-        agent = _replay_agent(request.history)
+        agent = _replay_agent(request.history, user_lang=user.lang if user else None)
         result = agent.next_turn(request.answer)
     except Exception as e:
         logger.exception("meta_next failed")
@@ -245,7 +246,7 @@ def meta_force(
     check_write_owner(user, project)
 
     try:
-        agent = _replay_agent(request.history)
+        agent = _replay_agent(request.history, user_lang=user.lang if user else None)
         result = agent.force_brief()
     except Exception as e:
         logger.exception("meta_force failed")
@@ -271,8 +272,9 @@ def revise_brief(
     check_write_owner(user, project)
 
     try:
-        agent = MetaConversationAgent()
-        result = agent.revise_brief(request.project_brief, request.feedback)
+        agent = MetaConversationAgent(user_lang=user.lang if user else None)
+        result = agent.revise_brief(request.project_brief, request.feedback,
+                                     user_lang=user.lang if user else None)
     except Exception as e:
         logger.exception("revise_brief failed")
         raise HTTPException(500, f"Meta conversation failed: {e}")
@@ -310,8 +312,9 @@ class TaskMetaResponse(BaseModel):
     interaction: Optional[InteractionMeta] = None
 
 
-def _replay_task_agent(history: list[HistoryTurn]) -> TaskMetaConversationAgent:
-    agent = TaskMetaConversationAgent()
+def _replay_task_agent(history: list[HistoryTurn],
+                       user_lang: str | None = None) -> TaskMetaConversationAgent:
+    agent = TaskMetaConversationAgent(user_lang=user_lang)
     for turn in history:
         agent._history.append({
             "assistant_message": turn.message,
@@ -361,7 +364,7 @@ def task_meta_start(
             db.advance_step(task_id, "t_plan", pre_done, current_subtask=None)
 
         # Build agent with project context
-        agent = TaskMetaConversationAgent()
+        agent = TaskMetaConversationAgent(user_lang=user.lang if user else None)
         brief = project.get("brief")
         existing_tasks = db.list_tasks_by_project(request.project_id)
         agent.set_project_context(brief, existing_tasks)
@@ -402,7 +405,7 @@ def task_meta_next(
     _check_task_owner(user, db, request.task_id)
 
     try:
-        agent = _replay_task_agent(request.history)
+        agent = _replay_task_agent(request.history, user_lang=user.lang if user else None)
         result = agent.next_turn(request.answer)
 
         if result["status"] == "complete":
@@ -439,7 +442,7 @@ def task_meta_force(
     _check_task_owner(user, db, request.task_id)
 
     try:
-        agent = _replay_task_agent(request.history)
+        agent = _replay_task_agent(request.history, user_lang=user.lang if user else None)
         result = agent.force_brief()
 
         if result.get("task_spec"):

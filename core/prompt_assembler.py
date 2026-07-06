@@ -39,6 +39,12 @@ WORKSPACE_LAYOUT = (
 # into agent prompts so agents produce output in the user's language.
 # Used by both PromptAssembler and MetaAgent.
 _LANG_INSTRUCTIONS: dict[str, str] = {
+    "en": (
+        "[Language]\n"
+        "You MUST respond in English. "
+        "All text, code comments, checkpoint messages, project briefs, "
+        "and UI strings MUST be in English."
+    ),
     "zh-CN": (
         "[Language]\n"
         "You MUST respond in Simplified Chinese (简体中文). "
@@ -99,11 +105,11 @@ _LANG_INSTRUCTIONS: dict[str, str] = {
 def build_language_instruction(user_lang: str | None) -> str:
     """Build a [Language] instruction block from a lang code.
 
-    Returns empty string when user_lang is None or 'en' (English needs
-    no extra instruction — it's the default for most models).
+    When user_lang is None (no preference set), defaults to English
+    so agents never fall back to the template's language.
     """
-    if not user_lang or user_lang.lower().startswith("en"):
-        return ""
+    if not user_lang:
+        user_lang = "en"
     if user_lang in _LANG_INSTRUCTIONS:
         return _LANG_INSTRUCTIONS[user_lang]
     prefix = user_lang.split("-")[0].lower()
@@ -184,10 +190,10 @@ class PromptAssembler:
 
         sections = [""]
 
-        # [Language Instruction] — from user preference, not project brief
+        # [Language Instruction] — from user preference, not project brief.
+        # Built early but APPENDED at the very end so changing language
+        # mid-project doesn't invalidate the prompt-cache prefix.
         lang_instruction = self._detect_language_instruction(user_lang)
-        if lang_instruction:
-            sections.append(lang_instruction)
 
         # [Output Delivery] — native tool-calling mode: output is ONLY persisted
         # when the agent CALLS a write tool. Some models (e.g. deepseek) tend to
@@ -381,6 +387,11 @@ class PromptAssembler:
         if rejection_history:
             sections.append(rejection_history)
 
+        # [Language Instruction] — at the very END so it never busts the
+        # prompt-cache prefix when the user changes language mid-project.
+        if lang_instruction:
+            sections.append(lang_instruction)
+
         return "\n\n".join(sections)
 
     def build_shared_preamble(self, project_path: Path, code_path: Path = None,
@@ -401,9 +412,9 @@ class PromptAssembler:
         host config registry, so any pipeline (not just DPE) can opt in.
         """
         parts = [WORKSPACE_LAYOUT]
+        # [Language Instruction] — resolved early but APPENDED at the end
+        # so changing language doesn't invalidate the system-preamble cache.
         lang_instruction = self._detect_language_instruction(user_lang)
-        if lang_instruction:
-            parts.append(lang_instruction)
         brief = self._load_project_brief(project_path)
         if brief:
             parts.append(f"[Project Brief]\n{brief}")
@@ -415,6 +426,8 @@ class PromptAssembler:
                                                 preamble_steps)
             if design:
                 parts.append(f"[Project Design]\n{design}")
+        if lang_instruction:
+            parts.append(lang_instruction)
         return "\n\n".join(parts)
 
     def _load_fixed_step_docs(self, project_path: Path, graph_name: str,

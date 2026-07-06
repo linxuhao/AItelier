@@ -1070,7 +1070,7 @@ class MetaAgent:
                         .replace("{owner_email}", self.owner_email)
                         .replace("{pipeline_catalog}", self._pipeline_catalog_block()))
                 if lang_block:
-                    prompt = lang_block + "\n\n" + prompt
+                    prompt = prompt + "\n\n" + lang_block
                 return prompt
             except Exception:
                 pass  # missing template → fall back to butler prompt
@@ -1079,7 +1079,7 @@ class MetaAgent:
             owner_email=self.owner_email,
         )
         if lang_block:
-            prompt = lang_block + "\n\n" + prompt
+            prompt = prompt + "\n\n" + lang_block
         return prompt
 
     def _pipeline_catalog_block(self) -> str:

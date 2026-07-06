@@ -2074,7 +2074,18 @@ class MetaAgent:
                            "this is expected if the checkpoint was approved via the CLI")
         else:
             try:
-                approve_meta(sf, run_id)
+                from aitelier.runner import AgentStepRunner
+                from core.event_bus import event_bus
+
+                async def _run_step(claimed):
+                    runner = AgentStepRunner(
+                        db_manager=self.db, workspace_manager=self.ws,
+                        agent_factory=None, prompt_assembler=None,
+                        event_bus=event_bus,
+                    )
+                    return await runner.execute(claimed)
+
+                approve_meta(sf, run_id, step_runner=_run_step)
             except Exception as e:
                 self._log_error(f"approve_meta failed for {run_id}: {e}")
                 return {"status": "error", "project_id": pid,
@@ -3028,7 +3039,14 @@ class MetaAgent:
 
         if not scheduler_owned:
             # Butler-driven: advance inline to the next checkpoint / end.
-            return await self._run_pipeline_until_checkpoint(run_id)
+            result = await self._run_pipeline_until_checkpoint(run_id)
+            # Sync project status after butler-driven run completes
+            from core.scheduler import _sync_project_status_to_db
+            try:
+                _sync_project_status_to_db(run.get("project_id", ""))
+            except Exception:
+                pass
+            return result
 
         # Scheduler-owned: the poller advances it; await a terminal/paused state.
         try:
@@ -3260,6 +3278,14 @@ class MetaAgent:
                 pass
 
         result = await self._run_pipeline_until_checkpoint(run_id)
+
+        # Sync project status after skill_converter run completes
+        from core.scheduler import _sync_project_status_to_db
+        try:
+            _sync_project_status_to_db(pid)
+        except Exception:
+            pass
+
         result["project_id"] = pid
         result["pipeline"] = "skill_converter"
         if result.get("status") == "completed":
@@ -3332,6 +3358,12 @@ class MetaAgent:
         # Butler-driven config: drive to the first checkpoint and relay it.
         if run_id and not manifest.scheduler_owned:
             driven = await self._run_pipeline_until_checkpoint(run_id)
+            # Sync project status after butler-driven config run completes
+            from core.scheduler import _sync_project_status_to_db
+            try:
+                _sync_project_status_to_db(pid)
+            except Exception:
+                pass
             driven["project_id"] = pid
             driven["config_name"] = config_name
             return driven

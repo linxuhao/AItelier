@@ -1,363 +1,282 @@
-# Technical Architecture Design — Repository View for AItelier Dashboard
+# Technical Architecture Design
 
 ## Overview
 
-Add a top-level "Repositories" view to the AItelier dashboard, grouping projects by `repo_path`. This is achieved through a **lightweight backend grouping endpoint** (`GET /api/repos`) with no DB schema changes, new Svelte 5 views for repository listing and detail, and relocation of `RepoPanel` + `WorkspaceBrowser root="code"` from `Project.svelte` to the new Repository page.
+This design addresses three bugs and one cleanup task related to pipeline run status synchronization in AItelier. The system has two execution models for skillflow pipeline runs:
 
----
+- **Scheduler-driven**: DPE-owned configs (`scheduler_owned=true`) are polled by `core/scheduler.py`'s `_run_skillflow_tick()`, which calls `_sync_project_status_to_db()` on every tick.
+- **Butler-driven (inline)**: Configs with `scheduler_owned=false` (code_review, skill_converter, coding_task, meta_conversation, etc.) are driven imperatively by `core/meta_agent.py` via `_run_pipeline_until_checkpoint()`.
 
-## Architecture Diagram (Text)
+The core failure: inline configs complete their skillflow runs but never sync status to the aitelier DB project row, leaving projects stuck in "planning" or stale intermediate states.
+
+## Architecture Diagram
 
 ```
-Browser (SPA — svelte-spa-router)
-│
-├─ /                     → Dashboard.svelte         (flat project table, kept as-is)
-├─ /projects/:id         → Project.svelte            (repo panel REMOVED; dps workspace kept)
-├─ /repos                → Repositories.svelte       (NEW — repo list from GET /api/repos)
-├─ /repos/:repoPath      → Repository.svelte         (NEW — repo detail + RepoPanel + WorkspaceBrowser)
-├─ /chat                 → Chat.svelte               (unchanged)
-├─ /tracking             → Tracking.svelte           (unchanged)
-├─ /projects/:id/trace   → Trace.svelte              (unchanged)
-│
-▼  HTTP (Fetch API via api.ts)
-│
-Backend (FastAPI)
-│
-├─ GET  /api/repos                    → list all repos (grouped by repo_path)
-├─ GET  /api/repos/{repo_path}        → single repo detail + projects
-├─ GET  /api/projects/:id/repo/status → (existing, used by RepoPanel on Repository page)
-├─ POST /api/projects/:id/repo/*      → (existing, all write ops unchanged)
-├─ GET  /api/projects/:id/workspace/* → (existing, root="code" used on Repository page)
-│
-▼
-SQLite (runs table — no schema changes)
-  Columns: project_id, name, repo_type, repo_path, repo_url, created_at, updated_at
+┌─────────────────────────────────────────────────────────┐
+│                      AItelier System                     │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  ┌──────────────┐     ┌──────────────────┐              │
+│  │ meta_agent.py│     │   scheduler.py   │              │
+│  │              │     │                  │              │
+│  │ _tool_start_ │     │ _run_skillflow_  │              │
+│  │  config_run  │     │    tick()        │              │
+│  │ _tool_gener- │     │       │          │              │
+│  │  ate_pipeline│     │       ▼          │              │
+│  │ _tool_wait_  │     │ _sync_project_   │◄────┐        │
+│  │  until_chkpt │     │  status_to_db()  │     │        │
+│  │      │       │     │                  │     │        │
+│  │      ▼       │     └──────────────────┘     │        │
+│  │ _run_pipeline│                              │        │
+│  │  _until_chkpt│─── missing sync ─────────────┤        │
+│  │              │    (Bug 1 fix: add           │        │
+│  │              │     _sync_project_           │        │
+│  │              │     status_to_db calls)      │        │
+│  └──────────────┘                              │        │
+│                                                │        │
+│  ┌──────────────┐                              │        │
+│  │ meta_run.py  │                              │        │
+│  │              │                              │        │
+│  │ approve_meta │── advance_run ≠ tool exec ───┘        │
+│  │              │   (Bug 3 fix: claim+execute            │
+│  └──────────────┘    after advance)                      │
+│                                                         │
+│  ┌──────────────────────────────────────┐               │
+│  │           aitelier.db                 │               │
+│  │  projects: {status, config_name, …}  │               │
+│  │  runs: {config_name, …}              │               │
+│  └──────────────────────────────────────┘               │
+│  ┌──────────────────────────────────────┐               │
+│  │          skillflow.db                 │               │
+│  │  runs: {project_id, graph_name, …}   │               │
+│  └──────────────────────────────────────┘               │
+└─────────────────────────────────────────────────────────┘
 ```
 
----
+### Data Flow — Butler-Driven Run Completion
+
+```
+User/Butler invokes tool
+  │
+  ▼
+_tool_start_config_run / _tool_generate_pipeline / _tool_wait_until_checkpoint
+  │
+  ├─► start_config_run() → creates run in skillflow.db + aitelier.db
+  │
+  ├─► _run_pipeline_until_checkpoint(run_id)
+  │     │
+  │     ├─► sf.advance_run() → transitions graph
+  │     ├─► sf.claim_next_step() → claims node
+  │     ├─► runner.execute(claimed) → runs agent/tool
+  │     └─► sf.confirm_step() → marks done
+  │     … repeat until checkpoint / terminal
+  │
+  └─► **NEW**: _sync_project_status_to_db(project_id)  ← Bug 1 fix
+        │
+        └─► db.update_project(project_id, status=…)
+```
+
+### Data Flow — `_sync_project_status_to_db` with Config Preference
+
+```
+_sync_project_status_to_db(project_id)
+  │
+  ├─► run = sf.get_run_by_project(project_id)     # excludes completed
+  │     │
+  │     └─► if found: use it
+  │
+  ├─► run = sf.list_runs(project_id)[0]           # fallback, newest first
+  │     │
+  │     └─► **NEW**: prefer run.graph_name == project.config_name  ← Bug 2 fix
+  │           │
+  │           ├─► db.get_project(project_id) → get config_name
+  │           └─► scan list_runs for matching graph_name first
+  │
+  └─► db.update_project(project_id, status=derived_status)
+```
 
 ## Component List
 
-### 1. Backend: `api/repo_routers.py` (NEW FILE)
+### Component 1: Sync Call Sites in `core/meta_agent.py`
 
-**Responsibility**: Serve repository grouping data via two read-only API endpoints. Queries `runs` table, groups by `repo_path`, computes metadata per group.
+- **Responsibility**: After `_run_pipeline_until_checkpoint()` returns a terminal or checkpoint result, sync the project status to the aitelier DB so the UI reflects the actual run state.
+- **Existing pattern** (already present in 3 callers): 
+  ```python
+  from core.scheduler import _sync_project_status_to_db
+  try:
+      _sync_project_status_to_db(project_id)
+  except Exception:
+      pass
+  ```
+- **Missing in 3 callers**:
 
-**Routes**:
+| Caller | Line | `project_id` source |
+|--------|------|---------------------|
+| `_tool_start_config_run` | ~3337 | `pid` variable (line 3312) |
+| `_tool_generate_pipeline` | ~3262 | `pid` variable (line 3240) |
+| `_tool_wait_until_checkpoint` | ~3031 | `result.get("project_id")` from `_run_pipeline_until_checkpoint` return |
 
-| Method | Path | Returns |
-|--------|------|---------|
-| `GET` | `/api/repos` | `[{ repo_path, repo_name, repo_type, repo_url, project_count, representative_project_id, last_activity, projects: [{project_id, name, status, updated_at}] }]` |
-| `GET` | `/api/repos/{repo_path}` | Single repo object (same shape) filtered to one `repo_path` |
+- **Interface**: No signature changes. Local import + try/except inline at each site.
+- **Idempotency**: `_sync_project_status_to_db` is safe to call multiple times — it reads current state from skillflow and writes to aitelier DB, so repeated calls produce the same result.
 
-**Implementation details**:
-- `repo_path` route param: FastAPI path param. svelte-spa-router encodes slashes; FastAPI decodes them. The router `prefix` is `/api/repos` so `GET /api/repos/{repo_path}` naturally matches.
-- Use `core.db_manager.DBManager` via FastAPI DI (`get_db_manager`).
-- `SELECT repo_path, repo_type, repo_url FROM runs WHERE repo_path IS NOT NULL AND repo_path != '' GROUP BY repo_path`
-- For each group: `SELECT project_id, name, status, updated_at FROM runs WHERE repo_path = ? ORDER BY updated_at DESC`
-  - `representative_project_id` = first row's `project_id` (most recently updated)
-  - `project_count` = row count
-  - `last_activity` = max `updated_at`
-  - `repo_name` = `os.path.basename(repo_path)` if non-empty, else `repo_path`
-  - `projects` = full list in that group
-- No write gating needed — all data is from existing `runs` table columns already exposed by `/api/projects`.
-- **Decouple from list + detail**: use a shared `_build_repo_groups()` helper so both endpoints reuse the same grouping/aggregation logic.
+### Component 2: Config-Name Preference in `core/scheduler.py`
 
-**Dependencies**: `APIRouter`, `Depends`, `HTTPException`, `DBManager`
+- **Responsibility**: `_sync_project_status_to_db()` must prefer the run whose `graph_name` matches the project's original `config_name` when multiple runs exist for the same project, preventing later runs (e.g., coding_task) from shadowing the DPE run's "completed" status.
+- **Current logic** (lines 790–793):
+  ```python
+  run = sf.get_run_by_project(project_id)
+  if not run:
+      all_runs = sf.list_runs(project_id)  # newest first
+      run = all_runs[0] if all_runs else None
+  ```
+- **New logic**:
+  ```python
+  run = sf.get_run_by_project(project_id)
+  if not run:
+      all_runs = sf.list_runs(project_id)  # newest first
+      if all_runs:
+          proj = db.get_project(project_id)
+          proj_config = proj.get("config_name", "") if proj else ""
+          run = all_runs[0]  # default: newest
+          if proj_config:
+              for r in all_runs:
+                  if r.get("graph_name") == proj_config:
+                      run = r
+                      break
+      else:
+          run = None
+  ```
+- **Interface**: No signature change. Internal to `_sync_project_status_to_db()`.
+- **Edge case**: If no run matches the project's config_name (e.g., project config was changed or run was deleted), falls back to the most recent run — preserving the existing behavior.
 
-**Lines**: ~80 Python
+### Component 3: Tool Step Execution in `approve_meta` (`core/meta_run.py`)
 
-### 2. Backend: `api/main.py` (MODIFY)
+- **Responsibility**: `approve_meta()` must ensure the `finalize` tool step actually executes, not just have its graph state transitioned. Currently, `sf.advance_run()` transitions the graph to the finalize node but does not claim or execute the tool step.
+- **Root cause**: `advance_run()` only transitions graph state. Tool steps (like `emit_project_artifacts`) require explicit `claim_next_step()` + execution + `confirm_step()` — the same pattern used by the scheduler's `_run_skillflow_tick` and by `_run_pipeline_until_checkpoint`.
+- **Approach**: Accept an optional `step_runner` callable parameter. When provided, after each `advance_run` that returns a node, claim and execute the step:
+  ```python
+  def approve_meta(sf, run_id: str, step_runner=None) -> None:
+  ```
+  In the loop:
+  ```python
+  next_node = sf.advance_run(run_id)
+  if next_node is None:
+      # check terminal/paused as before
+      continue
+  if step_runner is not None:
+      claimed = sf.claim_next_step(run_id)
+      if claimed is not None:
+          result = step_runner(claimed)       # sync or async — see below
+          sf.confirm_step(claimed.token, result)
+  ```
+- **Caller update** (`core/meta_agent.py` line ~2077): Pass a step runner that uses the AgentStepRunner infrastructure already available in MetaAgent. Since the caller is in an async context (`MetaAgent._tool_approve_brief`), the step runner must be awaitable.
+- **Signature**: `step_runner` is `Optional[Callable[[ClaimedStep], Awaitable[dict]]]`.
+- **Backward compatibility**: When `step_runner=None`, behavior is unchanged. Existing tests (which mock `sf`) continue to work because the mocked `advance_run` + `get_run` side effects simulate completion without needing actual step execution.
+- **Unit test update**: Add a test for `approve_meta` with a `step_runner` that verifies claim+execute+confirm are called.
 
-**Change**: Register the new router:
+### Component 4: One-Time Cleanup Script
+
+- **Responsibility**: Fix all currently stuck projects whose latest skillflow run has a terminal status (completed/failed) but whose aitelier DB project status does not match.
+- **Location**: A CLI command or standalone script. Recommend adding as a CLI subcommand under `cli/` (e.g., `aitelier admin sync-stuck-projects`) or a one-shot script in `scripts/sync_stuck_projects.py`.
+- **Logic**:
+  1. Iterate all projects in aitelier DB via `db.list_projects()`
+  2. For each project, get the latest skillflow run via `sf.list_runs(project_id)` (newest first)
+  3. If the run's status is terminal (`completed` or `failed`) and the project's status does NOT reflect this, call `_sync_project_status_to_db(project_id)`
+  4. Log each project updated (dry-run mode recommended for first pass)
+- **Safety**: Only updates projects where the latest run is terminal and the project status is mismatched — never touches actively running projects (where the latest run is `running` or `paused`).
+- **Interface**:
+  ```python
+  # scripts/sync_stuck_projects.py or cli command
+  def sync_stuck_projects(dry_run: bool = True) -> list[dict]:
+      """Returns list of {project_id, old_status, new_status} for each fix."""
+  ```
+
+## Interface Specifications
+
+### `_sync_project_status_to_db(project_id: str) -> None`
+
+| Aspect | Detail |
+|--------|--------|
+| Location | `core/scheduler.py` |
+| Signature | Unchanged |
+| Behavior change | After `list_runs` fallback, prefer run with `graph_name == project.config_name` |
+| Side effects | `db.update_project()`, `db.set_project_meta_state()`, SSE emission |
+| Error handling | All exceptions caught internally; logs to `aitelier.scheduler` logger |
+| Idempotency | Safe to call repeatedly — reads current state, writes derived status |
+
+### `approve_meta(sf, run_id: str, step_runner=None) -> None`
+
+| Aspect | Detail |
+|--------|--------|
+| Location | `core/meta_run.py` |
+| Signature | `def approve_meta(sf, run_id: str, step_runner: Optional[Callable] = None) -> None` |
+| `step_runner` | `Optional[Callable[[ClaimedStep], Awaitable[dict]]]` — executes a claimed step and returns result |
+| Raises | `RuntimeError` on failure or timeout (unchanged) |
+| Behavior change | When `step_runner` is provided, claims and executes tool/agent steps after each `advance_run` that returns a node |
+| Backward compat | `step_runner=None` preserves existing behavior |
+
+### Caller update in `meta_agent.py`
+
+The call at ~line 2077 changes from:
 ```python
-from api.repo_routers import router as repo_router
-# ...
-app.include_router(repo_router)
+approve_meta(sf, run_id)
 ```
+to:
+```python
+# Build a step runner from the agent's infrastructure
+async def _run_step(claimed):
+    from aitelier.runner import AgentStepRunner
+    from core.event_bus import event_bus
+    runner = AgentStepRunner(
+        db_manager=self.db, workspace_manager=self.ws,
+        agent_factory=None, prompt_assembler=None,
+        event_bus=event_bus,
+    )
+    return await runner.execute(claimed)
 
-Insert after `app.include_router(admin_router)` (line 226) keeping alphabetical-ish order.
-
-### 3. Frontend: `web/src/lib/api.ts` (MODIFY)
-
-**New functions**:
-```typescript
-// GET /api/repos
-export function listRepos(): Promise<RepoItem[]> { ... }
-
-// GET /api/repos/{repo_path}
-export function getRepo(repoPath: string): Promise<RepoDetail> { ... }
+approve_meta(sf, run_id, step_runner=_run_step)
 ```
-
-**Types to export**:
-```typescript
-export interface RepoItem {
-  repo_path: string;
-  repo_name: string;
-  repo_type: string;
-  repo_url: string | null;
-  project_count: number;
-  representative_project_id: string;
-  last_activity: string;
-  projects: RepoProjectSummary[];
-}
-
-export interface RepoProjectSummary {
-  project_id: string;
-  name: string;
-  status: string;
-  updated_at: string;
-}
-
-export type RepoDetail = RepoItem;  // same shape for /api/repos/{repo_path}
-```
-
-`listRepos()` uses the `_get` helper; `getRepo(repoPath)` uses `_get('/api/repos/' + encodeURIComponent(repoPath))`.
-
-### 4. Frontend: `web/src/views/Repositories.svelte` (NEW FILE)
-
-**Responsibility**: List all repositories grouped by `repo_path`. This is the `/repos` route.
-
-**State**:
-- `repos: RepoItem[]` — fetched from `GET /api/repos` on mount
-- `loading`, `error`, `pollTimer`
-
-**Rendering**:
-- Card/table layout showing: repo name (`repo_name`), full path, project count badge, repo type badge ("new"/"existing"/"clone"), last activity timestamp.
-- Click navigates to `#/repos/${encodeURIComponent(repo.repo_path)}` via `push()`.
-- Handle empty state: "No repositories found" with link back to Dashboard.
-- Handle error state: inline retry button.
-- 10-second poll interval (same pattern as Dashboard).
-
-**Props**: None (standalone route component).
-
-### 5. Frontend: `web/src/views/Repository.svelte` (NEW FILE)
-
-**Responsibility**: Show a single repository's detail — its projects, RepoPanel, and WorkspaceBrowser root="code". This is the `/repos/:repoPath` route.
-
-**Props** (from svelte-spa-router):
-```typescript
-let { params = {} as Record<string, string> } = $props();
-```
-Extracts `repoPath` via `decodeURIComponent(params.repoPath)`.
-
-**State**:
-- `repo: RepoDetail | null` — from `GET /api/repos/{repoPath}` on mount + on `repoPath` change
-- `loading`, `error`
-
-**Derived**:
-- `representativeProjectId = repo?.representative_project_id as string`
-- `canWrite = $derived($authStore.permissionResolved && $authStore.canWrite)`
-
-**Rendering**:
-1. **Breadcrumb**: Dashboard → Repositories → Repo Name
-2. **Repo metadata header**: repo name, full path, repo type, remote URL (if any), project count
-3. **Project table**: list of `repo.projects`, each clickable → `#/projects/${p.project_id}`
-4. **`<RepoPanel projectId={representativeProjectId} {canWrite} />`** — renders git status, commits, write actions using the representative project as the proxy
-5. **`<WorkspaceBrowser projectId={representativeProjectId} root="code" title="Repository Code" />`** — renders the code file tree
-6. Error states: 404 → "Repository not found"; generic error → retry button.
-
-**Edge case handling**:
-- If `repo.project_count === 1`, the project table shows a single row (no special casing).
-- If `representativeProjectId` is missing/null (shouldn't happen with backend filtering), show an error.
-
-### 6. Frontend: `web/src/views/Project.svelte` (MODIFY)
-
-**Removals**:
-- Line 788: `<!-- <RepoPanel projectId={projectId} {canWrite} /> -->` (REMOVE entirely)
-- Line 789: `<!-- <WorkspaceBrowser projectId={projectId} root="code" title="Project Repository" /> -->` (REMOVE entirely)
-
-**Keep**:
-- Line 787: `<WorkspaceBrowser projectId={projectId} root="dps" title="Pipeline Artifacts" />` (KEEP)
-
-**Add** (breadcrumb enhancement):
-- In the breadcrumb area, if `project.repo_path` is set, add a "Repositories" link between "Dashboard" and the project name, linking to `#/repos/${encodeURIComponent(project.repo_path as string)}`.
-
-**Also remove**: The `import RepoPanel` line (line 9) if it's no longer used. `WorkspaceBrowser` import stays (still used for root="dps").
-
-### 7. Frontend: `web/src/App.svelte` (MODIFY)
-
-**New imports**:
-```typescript
-import Repositories from './views/Repositories.svelte';
-import Repository from './views/Repository.svelte';
-```
-
-**New routes** (add to existing `routes` object):
-```typescript
-'/repos': Repositories,
-'/repos/:repoPath': Repository,
-```
-
-**Decision: Keep `/` as Dashboard (unchanged)**. The Dashboard still shows the flat project table. Users navigate to Repositories via the AppBar. This is the lowest-risk approach — existing users are not disrupted. The Dashboard can later be changed to show repos by default, but that is out of scope for this MVP.
-
-### 8. Frontend: `web/src/views/AppBar.svelte` (MODIFY)
-
-**Add nav link** (after Dashboard, before Chat):
-```html
-<li><a href="#/repos">{t('appbar.repos')}</a></li>
-```
-
-### 9. Frontend: `web/src/lib/i18n.svelte.ts` (MODIFY)
-
-**New translation keys** (add to each language block — en, zh-CN, zh-TW, ja, ko, fr, de, es):
-
-| Key | English | zh-CN | Notes |
-|-----|---------|-------|-------|
-| `appbar.repos` | Repositories | 仓库 | AppBar nav link |
-| `repos.title` | Repositories | 仓库 | Page title |
-| `repos.count` | `{n} projects` | `{n} 个项目` | Project count per repo |
-| `repos.noRepos` | No repositories found. | 未找到仓库。 | Empty state |
-| `repos.backToDashboard` | Back to Dashboard | 返回仪表盘 | Link when empty |
-| `repos.loading` | Loading repositories… | 加载仓库中… | Loading state |
-| `repos.failedToLoad` | Failed to load repositories. | 加载仓库失败。 | Error state |
-| `repos.retry` | Retry | 重试 | Retry button |
-| `repo.title` | Repository | 仓库 | Single repo page title |
-| `repo.projectsInRepo` | Projects in this repository | 此仓库中的项目 | Project list heading |
-| `repo.notFound` | Repository not found. | 未找到仓库。 | 404 state |
-| `repo.backToRepos` | Back to Repositories | 返回仓库列表 | Breadcrumb link |
-| `repo.repoPath` | Path | 路径 | Metadata label |
-| `repo.repoType` | Type | 类型 | Metadata label |
-| `repo.repoUrl` | Remote URL | 远程地址 | Metadata label |
-| `repo.projectCount` | Projects | 项目数 | Metadata label |
-| `repo.loading` | Loading repository… | 加载仓库中… | Loading state |
-| `repo.failedToLoad` | Failed to load repository. | 加载仓库失败。 | Error state |
-
-**Note**: Existing `repo.title`, `repo.path`, `repo.branch` etc. are already used by `RepoPanel.svelte` and should NOT be renamed.
-
-### 10. Frontend: `web/src/stores/project.ts` (MODIFY — optional enhancement)
-
-**Add to ProjectState**:
-```typescript
-currentRepoPath: string | null;
-```
-
-This tracks which repository the user navigated from, enabling the "Back to Repository" link in Project.svelte. The `Repository.svelte` view sets this before navigating to a project. This is a lightweight enhancement — if omitted, we can pass repo path via query param (`#/projects/:id?repo=...`) but the store is cleaner.
-
-**If store approach**: Add `setCurrentRepoPath(path: string | null)` alongside `setCurrentProject`.
-
----
-
-## Data Flow
-
-### Repositories List Flow
-```
-Repositories.svelte (onMount)
-  → listRepos()                    [api.ts]
-    → GET /api/repos               [repo_routers.py]
-      → DBManager                  [db_manager.py: runs table GROUP BY repo_path]
-    ← [{ repo_path, ..., projects }]
-  → render repo cards
-  → 10s poll repeats same flow
-```
-
-### Repository Detail Flow
-```
-Repository.svelte (onMount / $effect on params.repoPath)
-  → getRepo(decodedRepoPath)       [api.ts]
-    → GET /api/repos/{repo_path}   [repo_routers.py]
-      → DBManager (WHERE repo_path = ?)
-    ← { repo_path, ..., projects, representative_project_id }
-  → render:
-      - repo metadata header
-      - project table
-      - <RepoPanel projectId={representative_project_id} />
-      - <WorkspaceBrowser projectId={representative_project_id} root="code" />
-```
-
-### RepoPanel/WorkspaceBrowser on Repository Page Flow
-```
-RepoPanel (onMount)
-  → repoStatus(projectId)               [api.ts]
-    → GET /api/projects/:id/repo/status [project_routers.py — existing]
-      → ws.repo_status(projectId)       [workspace_manager.py — existing]
-    ← git status data
-
-WorkspaceBrowser (on first expand)
-  → workspaceTree(projectId, root="code")  [api.ts]
-    → GET /api/projects/:id/workspace/tree [project_routers.py — existing]
-      → ws.get_code_path(projectId)        [workspace_manager.py — existing]
-    ← file tree
-```
-
-**Key insight**: `WorkspaceManager.get_code_path(projectId)` looks up `repo_path` from the `runs` table per project. All projects sharing the same `repo_path` return the same directory, so using the representative `projectId` is functionally identical to using any other project in the group.
-
-### Navigation Flow
-```
-AppBar "Repositories" link
-  → push('#/repos')
-    → Repositories.svelte renders
-
-Repo card click
-  → push('#/repos/' + encodeURIComponent(repo.repo_path))
-    → Repository.svelte renders
-
-Project row click (in Repository page)
-  → push('#/projects/' + project.project_id)
-    → Project.svelte renders (with breadcrumb: Dashboard → Repositories → Repo → Project)
-```
-
----
-
-## Success Criteria Mapping
-
-| Criterion | How Addressed |
-|-----------|---------------|
-| Dashboard shows repos grouped by `repo_path` | `Repositories.svelte` at `/repos` + AppBar link as primary entry point. Flat project table remains at `/` for backward compatibility. |
-| Clicking repo → Repository page with filtered projects | `Repository.svelte` fetches `GET /api/repos/{repo_path}`, renders project table from `repo.projects`. |
-| Repository page includes RepoPanel + WorkspaceBrowser root="code" | Both rendered using `representative_project_id`. |
-| Project page no longer has RepoPanel or WorkspaceBrowser root="code" | Removed from `Project.svelte` (only root="dps" WorkspaceBrowser kept). |
-| Existing routes unchanged | `/`, `/projects/:id`, `/chat`, `/tracking`, trace routes all untouched. |
-| Breadcrumbs intuitive | Dashboard → Repositories → Repo Name → Project Name via breadcrumb in each view. |
-
----
 
 ## Technical Stack
 
-| Layer | Technology | Notes |
-|-------|-----------|-------|
-| Frontend | Svelte 5 (runes mode) + TypeScript | `$state`, `$derived`, `$props`, `$effect` |
-| Routing | svelte-spa-router | Client-side hash-based routes |
-| API | Fetch wrapper in `api.ts` | `_get()` / `_post()` with timeout + error handling |
-| Backend | FastAPI + APIRouter | New `api/repo_routers.py` |
-| Database | SQLite via `core/db_manager.py` | No schema changes; queries existing `runs` table |
-| i18n | `i18n.svelte.ts` reactive module | 8-language support |
-| Auth | `authStore` + `authz.py` write gate | Read-only for repo listing; write ops still project-scoped |
+- **Language**: Python 3.10+
+- **Database**: SQLite via custom `db_manager.py` (aitelier.db) + skillflow's internal SQLite
+- **Async**: asyncio (FastAPI runtime)
+- **Key modules**:
+  - `core/meta_agent.py` — butler agent, inline pipeline driver
+  - `core/scheduler.py` — polling scheduler, `_sync_project_status_to_db`
+  - `core/meta_run.py` — meta conversation helpers
+  - `core/db_manager.py` — aitelier DB layer
+  - `aitelier/runner.py` — `AgentStepRunner` for step execution
+  - `skillflow` (external package) — pipeline engine
 
----
+## Extensibility Considerations
 
-## Extension Points (Future)
+1. **All inline configs get sync**: The fix in `_tool_start_config_run` covers ALL butler-driven configs started via this tool — not just code_review, but any config with `scheduler_owned=false`. New inline configs added to the registry automatically benefit.
 
-1. **`repositories` table**: If repo-scoped settings/permissions are needed, a migration can add a proper `repositories` table with `repo_path` as the natural key, foreign key from `runs`. The `GET /api/repos` endpoint would then query the new table — frontend unchanged.
-2. **Repo-scoped git endpoints**: `POST /api/repos/{repo_path}/commit` etc. would internally resolve to the representative project and call the same git logic. The existing project-scoped endpoints continue to work.
-3. **Dashboard default view**: The `/` route could be changed to `Repositories` instead of `Dashboard`, with the flat project table accessible via a tab. The current design keeps `/` as-is for zero disruption.
-4. **Pagination**: If the number of repos grows large, the `GET /api/repos` endpoint can accept `limit`/`offset` params.
-5. **Search/filter**: Add query params to filter repos by name, type, or path.
+2. **Config-name preference is generic**: The `_sync_project_status_to_db` fix does not hardcode "dpe_default_v2" — it reads whatever `config_name` the project was created with, so it works for any primary config.
 
----
+3. **Step runner injection in `approve_meta`**: The optional `step_runner` parameter pattern is extensible — if other callers of `approve_meta` need different execution contexts, they can pass their own runner.
 
-## Constraints & Risk Mitigation
+4. **Cleanup script reusable**: The one-time cleanup can be re-run safely (idempotent by design) and could be adapted into a periodic health-check if needed.
 
-| Constraint | Mitigation |
-|-----------|------------|
-| No DB schema changes | `GET /api/repos` queries `runs` columns only; no migration, no new table. |
-| WorkspaceManager.get_code_path() returns same dir for all projects in a group | Verified in SOTA. Representative project ID is deterministic. |
-| repo_path as URL param (contains slashes) | `encodeURIComponent` on frontend; FastAPI decodes naturally. |
-| Write permissions | `canWrite` already derived from `authStore`; RepoPanel uses it unchanged. User needs write access to the representative project — if they lack it, git write buttons are hidden. |
-| Projects without repo_path | Filtered by `WHERE repo_path IS NOT NULL AND repo_path != ''` in the backend query. |
+## File Change Summary
 
----
+| File | Change Type | Lines Affected | Description |
+|------|-------------|----------------|-------------|
+| `core/meta_agent.py` | Add sync calls | ~10 lines added | 3 call sites: `_tool_start_config_run`, `_tool_generate_pipeline`, `_tool_wait_until_checkpoint` |
+| `core/meta_agent.py` | Update call site | ~5 lines changed | Pass `step_runner` to `approve_meta` |
+| `core/scheduler.py` | Modify fallback | ~8 lines changed | Prefer config_name-matching run in `_sync_project_status_to_db` |
+| `core/meta_run.py` | Signature + loop | ~15 lines changed | Accept optional `step_runner`, claim+execute after advance |
+| `scripts/sync_stuck_projects.py` | New file | ~60 lines | One-time cleanup script |
+| `tests/unit/test_meta_run.py` | New test | ~20 lines added | Test `approve_meta` with `step_runner` |
 
-## File Inventory (Complete Change List)
+## Rollback Plan
 
-| File | Action | Description |
-|------|--------|-------------|
-| `api/repo_routers.py` | **CREATE** | New router: `GET /api/repos`, `GET /api/repos/{repo_path}` |
-| `api/main.py` | **EDIT** | Import + `app.include_router(repo_router)` |
-| `web/src/views/Repositories.svelte` | **CREATE** | Repository list view |
-| `web/src/views/Repository.svelte` | **CREATE** | Single repository detail view |
-| `web/src/views/Project.svelte` | **EDIT** | Remove RepoPanel + WorkspaceBrowser(root="code"); add breadcrumb |
-| `web/src/views/AppBar.svelte` | **EDIT** | Add "Repositories" nav link |
-| `web/src/App.svelte` | **EDIT** | Add `/repos` and `/repos/:repoPath` routes |
-| `web/src/lib/api.ts` | **EDIT** | Add `listRepos()`, `getRepo()`, `RepoItem`/`RepoDetail` types |
-| `web/src/lib/i18n.svelte.ts` | **EDIT** | Add ~16 new translation keys × 8 languages |
-| `web/src/stores/project.ts` | **EDIT** | Optional: add `currentRepoPath` to `ProjectState` + setter |
+All changes are additive or minor modifications to existing functions:
+- **meta_agent.py sync calls**: Remove the added try/except blocks to revert.
+- **scheduler.py config preference**: Revert to `run = all_runs[0]` without scanning.
+- **meta_run.py step runner**: The `step_runner=None` default means existing callers are unaffected; remove the new parameter to revert.
+- **Cleanup script**: Delete the file; no schema changes were made.
+
+No database schema migrations, no file deletions, no irreversible operations.

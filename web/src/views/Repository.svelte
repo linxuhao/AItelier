@@ -20,7 +20,6 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let notFound = $state(false);
-  let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
 
   // ── Derived ──
 
@@ -32,16 +31,8 @@
   $effect(() => {
     void params.repoPath;
     fetchRepo();
-  });
-
-  onMount(() => {
-    pollTimer = setInterval(fetchRepo, 10000);
-  });
-
-  onDestroy(() => {
-    if (pollTimer !== null) {
-      clearInterval(pollTimer);
-    }
+    const timer = setInterval(fetchRepo, 10000);
+    return () => clearInterval(timer);
   });
 
   // ── Methods ──
@@ -221,6 +212,11 @@
         <p><a href="#/repos">{t('repo.backToRepos')}</a></p>
       </article>
     {/if}
+  {:else}
+    <!-- Fallback — should not normally be reached -->
+    <article aria-busy="true">
+      <p>{t('repo.pageLoading')}</p>
+    </article>
   {/if}
 </section>
 

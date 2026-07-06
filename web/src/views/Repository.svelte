@@ -43,8 +43,9 @@
       loading = false;
       return;
     }
-    // Only show full loading on initial fetch; silent refresh otherwise.
-    if (!repo) loading = true;
+    // Clear stale data from a previous repo before fetching.
+    repo = null;
+    loading = true;
     error = null;
     notFound = false;
     try {

@@ -119,13 +119,13 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
                     if s is None:
                         continue
                     if merged is None:
-                        merged = dict(s)
-                    else:
-                        merged["cache_hit_tokens"] += s["cache_hit_tokens"]
-                        merged["cache_miss_tokens"] += s["cache_miss_tokens"]
-                        total = merged["cache_hit_tokens"] + merged["cache_miss_tokens"]
-                        merged["total_tokens"] = total
-                        merged["hit_ratio"] = round(merged["cache_hit_tokens"] / total, 4) if total > 0 else None
+                        merged = {"cache_hit_tokens": 0, "cache_miss_tokens": 0}
+                    merged["cache_hit_tokens"] += s["cache_hit_tokens"]
+                    merged["cache_miss_tokens"] += s["cache_miss_tokens"]
+                if merged is not None:
+                    total = merged["cache_hit_tokens"] + merged["cache_miss_tokens"]
+                    merged["total_tokens"] = total
+                    merged["hit_ratio"] = round(merged["cache_hit_tokens"] / total, 4) if total > 0 else None
                 p["cache_stats"] = merged  # None if no token data
     else:
         for g in groups:

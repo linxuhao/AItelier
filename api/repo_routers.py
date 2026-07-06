@@ -3,8 +3,11 @@
 
 import os
 from fastapi import APIRouter, Depends, HTTPException
-from api.dependencies import get_db_manager
+from api.dependencies import get_db_manager, enrich_project_status
 from core.db_manager import DBManager
+
+# Imported lazily to avoid circular imports at module level.
+# get_skillflow and compute_cache_stats_batch are used in _build_repo_groups.
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
@@ -77,6 +80,10 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
             # Derive a human-friendly name from the path's basename
             repo_name = os.path.basename(rp) if rp else rp
 
+            # Enrich each project with live skillflow status.
+            for p in projects:
+                enrich_project_status(p)
+
             groups.append({
                 "repo_path": rp,
                 "repo_name": repo_name,
@@ -87,6 +94,43 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
                 "last_activity": last_activity,
                 "projects": projects,
             })
+
+    # Batch-fetch cache stats for all projects across all groups.
+    from api.dependencies import get_skillflow
+    from api._cache_stats import compute_cache_stats_batch
+    sf = get_skillflow()
+    pid_to_uuids: dict[str, list[str]] = {}
+    for g in groups:
+        for p in g["projects"]:
+            pid = p["project_id"]
+            runs = sf.list_runs(project_id=pid)
+            if runs:
+                pid_to_uuids[pid] = [run["id"] for run in runs]
+    uuid_list = [uid for uids in pid_to_uuids.values() for uid in uids]
+    if uuid_list:
+        batch_stats = compute_cache_stats_batch(uuid_list)
+        for g in groups:
+            for p in g["projects"]:
+                pid = p["project_id"]
+                uuids = pid_to_uuids.get(pid, [])
+                merged: dict | None = None
+                for uid in uuids:
+                    s = batch_stats.get(uid)
+                    if s is None:
+                        continue
+                    if merged is None:
+                        merged = dict(s)
+                    else:
+                        merged["cache_hit_tokens"] += s["cache_hit_tokens"]
+                        merged["cache_miss_tokens"] += s["cache_miss_tokens"]
+                        total = merged["cache_hit_tokens"] + merged["cache_miss_tokens"]
+                        merged["total_tokens"] = total
+                        merged["hit_ratio"] = round(merged["cache_hit_tokens"] / total, 4) if total > 0 else None
+                p["cache_stats"] = merged  # None if no token data
+    else:
+        for g in groups:
+            for p in g["projects"]:
+                p["cache_stats"] = None
 
     return groups
 

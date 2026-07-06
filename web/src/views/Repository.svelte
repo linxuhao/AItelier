@@ -2,7 +2,7 @@
   import { push } from 'svelte-spa-router';
   import { getRepo, ApiError } from '../lib/api';
   import type { RepoDetail } from '../lib/api';
-  import { formatTime, parseStatus, repoTypeLabel } from '../lib/format';
+  import { formatTime, parseStatus, repoTypeLabel, formatTokens, cacheBadgeClass, formatTaskProgress } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
   import { authStore } from '../stores/auth';
   import { setCurrentRepoPath } from '../stores/project';
@@ -20,6 +20,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let notFound = $state(false);
+  let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
 
   // ── Derived ──
 
@@ -28,10 +29,15 @@
 
   // ── Lifecycle ──
 
-  $effect(() => {
-    // Access params.repoPath to make the effect depend on it
-    void params.repoPath;
-    fetchRepo();
+  onMount(async () => {
+    await fetchRepo();
+    pollTimer = setInterval(fetchRepo, 10000);
+  });
+
+  onDestroy(() => {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer);
+    }
   });
 
   // ── Methods ──
@@ -42,10 +48,10 @@
       loading = false;
       return;
     }
-    loading = true;
+    // Only show full loading on initial fetch; silent refresh otherwise.
+    if (!repo) loading = true;
     error = null;
     notFound = false;
-    repo = null;
     try {
       const data = await getRepo(repoPath);
       repo = data;
@@ -141,6 +147,7 @@
               <tr>
                 <th>{t('dashboard.colProject')}</th>
                 <th>{t('dashboard.colStatus')}</th>
+                <th>{t('dashboard.colTasks')}</th>
                 <th>{t('dashboard.colLastUpdate')}</th>
               </tr>
             </thead>
@@ -163,6 +170,18 @@
                     <span class="status-badge {parsed.className}" title={parsed.text}>
                       {parsed.icon} {parsed.text}
                     </span>
+                    {#if project.cache_stats && (project.cache_stats as Record<string, number>).hit_ratio != null}
+                      {@const cs = project.cache_stats as Record<string, number>}
+                      <span
+                        class="cache-inline-badge {cacheBadgeClass(cs.hit_ratio)}"
+                        title={t('chat.cacheHitRatio')}
+                      >
+                        Cache {(cs.hit_ratio * 100).toFixed(1)}%{cs.total_tokens != null ? ' · ' + formatTokens(cs.total_tokens) : ''}
+                      </span>
+                    {/if}
+                  </td>
+                  <td>
+                    <span class="task-progress">{formatTaskProgress(project)}</span>
                   </td>
                   <td>
                     <span class="timestamp">{formatTime(project.updated_at)}</span>

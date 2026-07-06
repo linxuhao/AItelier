@@ -528,6 +528,11 @@ export interface RepoProjectSummary {
   name: string;
   status: string;
   updated_at: string;
+  /** Cache stats (hit ratio, token counts) — enriched by the backend via
+   *  enrich_project_status + compute_cache_stats_batch, same as Dashboard. */
+  cache_stats?: Record<string, unknown>;
+  /** Config name (e.g. dpe_default_v2), added by enrich_project_status. */
+  config_name?: string;
 }
 
 /** A repository group, aggregating projects sharing the same repo_path. */

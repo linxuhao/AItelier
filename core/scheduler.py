@@ -790,7 +790,20 @@ def _sync_project_status_to_db(project_id: str):
         run = sf.get_run_by_project(project_id)
         if not run:
             all_runs = sf.list_runs(project_id)  # newest first
-            run = all_runs[0] if all_runs else None
+            if all_runs:
+                # Prefer the run whose graph_name matches the project's
+                # original config_name, so later runs (e.g. coding_task
+                # after DPE) don't shadow the primary run's terminal status.
+                proj = db.get_project(project_id)
+                proj_config = proj.get("config_name", "") if proj else ""
+                run = all_runs[0]  # default: newest
+                if proj_config:
+                    for r in all_runs:
+                        if r.get("graph_name") == proj_config:
+                            run = r
+                            break
+            else:
+                run = None
         if not run:
             return
         # Is this a DPE-style config (task loop, coarse step mapping)?

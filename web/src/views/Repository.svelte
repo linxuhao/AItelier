@@ -29,8 +29,12 @@
 
   // ── Lifecycle ──
 
-  onMount(async () => {
-    await fetchRepo();
+  $effect(() => {
+    void params.repoPath;
+    fetchRepo();
+  });
+
+  onMount(() => {
     pollTimer = setInterval(fetchRepo, 10000);
   });
 

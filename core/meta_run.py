@@ -58,18 +58,26 @@ def request_brief_changes(sf, run_id: str, feedback: str) -> None:
                          redirect_to=GATHER_STEP)
 
 
-def approve_meta(sf, run_id: str) -> None:
+def approve_meta(sf, run_id: str, step_runner=None) -> None:
     """Approve the brief and drive the run through its `finalize` tool step.
 
     Approving the gather checkpoint routes the run to the `finalize` tool step,
-    which emits the project artifacts (project_brief.md, spec.md, step1_goals.json)
-    inline during ``advance_run``; the graph's node_reached end-condition then
-    completes the run.
+    which emits the project artifacts (project_brief.md, spec.md, step1_goals.json).
+    The graph's node_reached end-condition then completes the run.
 
     The finalize tool is the SOLE producer of those artifacts, so this does NOT
     force-complete a stuck run — a meta run that fails to emit must surface that
     failure (``RuntimeError``) so the caller does not start DPE on missing
     artifacts. Idempotent if already completed.
+
+    Args:
+        sf: SkillFlow instance.
+        run_id: Meta conversation run ID.
+        step_runner: Optional callable invoked for each step reached after
+            advance_run. Receives a ``skillflow.core.ClaimedStep`` and must return
+            a result dict suitable for ``confirm_step``. When None (default),
+            steps are NOT claimed or executed — the function only advances graph
+            state, preserving existing behavior.
     """
     run = sf.get_run(run_id)
     if run and run.get("status") == "completed":
@@ -78,9 +86,9 @@ def approve_meta(sf, run_id: str) -> None:
     if run and run.get("status") == "paused":
         sf.approve_checkpoint(run_id)
 
-    # Drive the now-running graph to terminal (finalize tool runs inline). The
-    # 2-step path (approve → finalize → complete) needs only a couple advances;
-    # the budget is a stall guard, not a normal code path.
+    # Drive the now-running graph to terminal. The 2-step path (approve →
+    # finalize → complete) needs only a couple advances; the budget is a stall
+    # guard, not a normal code path.
     for _ in range(8):
         run = sf.get_run(run_id)
         if not run:
@@ -93,9 +101,25 @@ def approve_meta(sf, run_id: str) -> None:
                 f"meta run {run_id} failed during finalize: "
                 f"{run.get('error_reason') or 'finalize did not emit artifacts'}")
         try:
-            sf.advance_run(run_id)
+            next_node = next_node = sf.advance_run(run_id)
         except Exception as e:
             # A raising finalize tool (e.g. an incomplete brief) lands here.
             raise RuntimeError(f"meta run {run_id} finalize step errored: {e}") from e
+
+        # If a step_runner is provided and advance_run transitioned into a new
+        # node, claim + execute + confirm the step (tool or agent).
+        if next_node is not None and step_runner is not None:
+            try:
+                claimed = sf.claim_next_step(run_id)
+            except Exception:
+                continue  # nothing to claim — let the loop re-check status
+            if claimed is not None:
+                try:
+                    result = step_runner(claimed)
+                    sf.confirm_step(claimed.token, result)
+                except Exception as e:
+                    sf.fail_step(claimed.token, str(e)[:200], retryable=False)
+                    raise RuntimeError(
+                        f"meta run {run_id} step '{claimed.step_id}' failed: {e}") from e
 
     raise RuntimeError(f"meta run {run_id} did not finalize within the step budget")

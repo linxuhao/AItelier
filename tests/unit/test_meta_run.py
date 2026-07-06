@@ -78,6 +78,83 @@ def test_approve_meta_raises_when_finalize_tool_errors():
     sf.complete_run.assert_not_called()
 
 
+def test_approve_meta_with_step_runner_claims_and_executes_step():
+    """When step_runner is provided, claim_next_step and confirm_step are called."""
+    sf = MagicMock()
+    # Simulate the run transitioning through paused → running → completed
+    sf.get_run.side_effect = [
+        {"status": "paused"},       # first check
+        {"status": "running"},      # after approve_checkpoint
+        {"status": "completed"},    # final check — break the loop
+    ]
+    # advance_run returns a node ID once, then None on subsequent calls
+    sf.advance_run.return_value = "finalize"
+
+    claimed_token = MagicMock()
+    claimed_token.run_id = "run-1"
+    claimed_token.step_instance_id = 1
+    claimed_token.version = 1
+    claimed = MagicMock()
+    claimed.token = claimed_token
+    claimed.step_id = "finalize"
+    sf.claim_next_step.return_value = claimed
+
+    step_runner_result = {"written": ["project_brief.md"], "emitted": True}
+    step_runner = MagicMock(return_value=step_runner_result)
+
+    meta_run.approve_meta(sf, "run-1", step_runner=step_runner)
+
+    sf.approve_checkpoint.assert_called_once_with("run-1")
+    sf.advance_run.assert_called()
+    sf.claim_next_step.assert_called_once_with("run-1")
+    step_runner.assert_called_once_with(claimed)
+    sf.confirm_step.assert_called_once_with(claimed_token, step_runner_result)
+    sf.complete_run.assert_not_called()
+
+
+def test_approve_meta_with_step_runner_fail_step_on_runner_error():
+    """When step_runner raises, fail_step is called and RuntimeError propagates."""
+    import pytest
+    sf = MagicMock()
+    sf.get_run.side_effect = [
+        {"status": "paused"},
+        {"status": "running"},
+        {"status": "running"},      # after fail_step, loop re-checks
+        {"status": "completed"},
+    ]
+    sf.advance_run.return_value = "finalize"
+
+    claimed_token = MagicMock()
+    claimed_token.run_id = "run-1"
+    claimed_token.step_instance_id = 1
+    claimed_token.version = 1
+    claimed = MagicMock()
+    claimed.token = claimed_token
+    claimed.step_id = "finalize"
+    sf.claim_next_step.return_value = claimed
+
+    def raise_error(claimed):
+        raise ValueError("tool execution failed")
+
+    with pytest.raises(RuntimeError, match="step 'finalize' failed"):
+        meta_run.approve_meta(sf, "run-1", step_runner=raise_error)
+
+    sf.fail_step.assert_called_once_with(claimed_token, "tool execution failed", retryable=False)
+
+
+def test_approve_meta_no_step_runner_preserves_backward_compat():
+    """Default step_runner=None preserves existing behavior (no claim/confirm)."""
+    sf = MagicMock()
+    seq = iter([{"status": "paused"}, {"status": "running"}, {"status": "completed"}])
+    sf.get_run.side_effect = lambda rid: next(seq, {"status": "completed"})
+    meta_run.approve_meta(sf, "run-1")
+    sf.approve_checkpoint.assert_called_once_with("run-1")
+    sf.advance_run.assert_called()
+    sf.claim_next_step.assert_not_called()
+    sf.confirm_step.assert_not_called()
+    sf.complete_run.assert_not_called()
+
+
 def test_read_gather_state_reads_committed_json(tmp_path):
     gather_dir = tmp_path / "gather"
     gather_dir.mkdir()

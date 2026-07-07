@@ -222,26 +222,31 @@ npm run dev                     # dev server with HMR
 
 The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's test step (`run_tests`, 5_test) gates node projects automatically: it finds `package.json` (root or one level deep, e.g. `web/`) and runs `npm ci` + `npm run build` + `npm test`, folding failures into the goal-loop.
 
-### Repositories View
+### Unified Dashboard
 
-A top-level **Repositories** view (`/repos`) groups projects by their shared `repo_path`, replacing the flat project table as the primary entry point. Clicking a repository navigates to `/repos/:repoPath` which shows:
+The **Unified Dashboard** (`/` and `/projects`) merges the former separate Dashboard and Repositories pages into a single view. Projects are **grouped by their parent repository** with collapsible `<details>`/`<summary>` sections, a front-end search bar, and inline git-status thumbnails.
 
-- **Project list** — all projects belonging to that repository
-- **RepoPanel** — git status, commits, push/pull, and PR actions (relocated from the Project page)
-- **WorkspaceBrowser (root="code")** — code file tree browser (relocated from the Project page)
-
-The Project page retains only project-scoped content: runs, tasks, config, and `WorkspaceBrowser root="dps"` for pipeline artifacts.
-
-**Backend**: A lightweight `GET /api/repos` endpoint (in `api/repo_routers.py`) queries the existing `runs` table with `GROUP BY repo_path`, returning per-repo metadata (representative project ID, project count, last activity). No new DB tables or migrations were required — the existing `repo_path`, `repo_type`, and `repo_url` columns are sufficient.
+**Key features**:
+- **Repo grouping** — projects are grouped by `repo_path` using the existing `GET /api/repos` endpoint (no backend changes). Each repo section shows the repo name, type badge, project count, and last activity timestamp.
+- **Collapsible sections** — all repo sections are collapsed by default, except the one containing the **most recently updated project** (auto-expanded on page load). Expand/collapse all buttons are provided.
+- **Compact RepoPanel** — expanding a repo section lazy-loads a compact thumbnail of the `RepoPanel.svelte` component showing branch name, dirty indicator, and Commit/Push/Pull action buttons. The full RepoPanel (with commit history, remote details, and all git operations) remains on the per-project detail page.
+- **Front-end search** — a search bar filters repos and projects in real-time by case-insensitive substring match against repo name, repo path, and project name. During active search, all matching repo sections are auto-expanded.
+- **Orphan projects** — projects without a `repo_path` appear in a dedicated "Projects without a repository" section at the bottom.
+- **Create/delete projects** — the create-project form and delete confirmation dialog are ported from the old Dashboard.
 
 **Routes**:
 
 | Route | Component | Description |
 |-------|-----------|-------------|
-| `/repos` | `Repositories.svelte` | Repository list grouped by `repo_path` |
-| `/repos/:repoPath` | `Repository.svelte` | Repo detail + RepoPanel + WorkspaceBrowser |
+| `/` | `UnifiedDashboard.svelte` | Unified dashboard (primary entry) |
+| `/projects` | `UnifiedDashboard.svelte` | Backward-compatible alias |
+| `/repos` | `RedirectToDashboard.svelte` | Redirects to `/` |
+| `/repos/:repoPath` | `RedirectToDashboard.svelte` | Redirects to `/` |
+| `/projects/:id` | `Project.svelte` | Per-project detail (unchanged) |
 
-Navigation: Dashboard → Repositories → Repository Name → Project Name, with breadcrumbs at each level.
+**Backend**: No changes — the unified dashboard consumes existing `GET /api/repos`, `GET /api/runs`, and repo-status endpoints as-is.
+
+Navigation: Dashboard → expand repo → click project → Project detail, with the most-recently-active repo pre-expanded.
 
 ### i18n (Internationalization)
 

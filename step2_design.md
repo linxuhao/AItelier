@@ -1,272 +1,219 @@
-# Technical Architecture Design — SQLite Concurrency Bugfix
+# Technical Architecture Design
 
 ## Overview
 
-This design addresses a SQLite concurrency bug where `GET /api/runs` returns HTTP 500, causing the dashboard to redirect to reconnect. The fix involves two independent, minimal changes:
+Three independent changes to the AItelier web dashboard and backend:
+1. **UnifiedDashboard: full git panel** — remove the `compact` prop from `<RepoPanel>` so each expanded repo accordion shows the complete git management interface (status grid, commit history, download-zip, all six action buttons).
+2. **Backend locale fix** — force `LC_ALL=C` on all git subprocess calls in `core/workspace_manager.py` and `core/git_ops.py` so git stdout/stderr is always English, preventing French locale leakage in the dashboard's action result messages.
+3. **Delete deprecated page files** — remove `web/src/views/Repository.svelte` and `web/src/views/Repositories.svelte`, which have zero remaining imports and whose routes already redirect to the dashboard.
 
-1. **SkillFlow library** (`core.py`): Add the missing `self._lock` acquisition in `_get_project_id` to serialize `sqlite3.Connection` access, matching the established locking pattern used by every other DB method in the class.
-2. **AItelier API** (`api/_cache_stats.py`): Harden `compute_cache_stats_batch` so a single run's `compute_cache_stats_per_step` failure is caught, logged, and skipped — rather than crashing the entire `/api/runs` endpoint.
-
-The design is intentionally minimal. Both fixes are one-liner or few-line changes with zero new dependencies, zero new abstractions, and zero schema changes.
-
----
-
-## Architecture Diagram
+## Architecture Diagram (textual)
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        HTTP Request                              │
-│                     GET /api/runs?config_name=...                 │
-└────────────────────────┬─────────────────────────────────────────┘
-                         │
-                         ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  api/run_routers.py:62  list_all_runs()                          │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │ 1. db.list_projects_with_stats(owner_email=owner)           │  │
-│  │ 2. sf.list_runs(project_id=pid)  ── per project             │  │
-│  │ 3. compute_cache_stats_batch(uuid_list)  ◄── FIX #2 here    │  │
-│  └────────────────────────────────────────────────────────────┘  │
-└───────────────┬──────────────────────────────────┬───────────────┘
-                │                                  │
-                ▼                                  ▼
-┌───────────────────────────────┐   ┌───────────────────────────────┐
-│  api/_cache_stats.py          │   │  skillflow (library)           │
-│  compute_cache_stats_batch()  │   │  SkillFlow class               │
-│  ┌─────────────────────────┐  │   │  ┌─────────────────────────┐  │
-│  │ for run_id in run_ids:   │  │   │  │ list_runs()             │  │
-│  │   try:                   │  │   │  │   └─► _get_project_id() │  │
-│  │     per_step = compute_  │  │   │  │        ◄── FIX #1 here  │  │
-│  │       cache_stats_per_   │──┼───┼──│        add with self.   │  │
-│  │       step(run_id)       │  │   │  │        _lock: around    │  │
-│  │   except Exception as e: │  │   │  │        self._conn.      │  │
-│  │     logger.warning(...)  │  │   │  │        execute(...)     │  │
-│  │     continue             │  │   │  └─────────────────────────┘  │
-│  └─────────────────────────┘  │   │  ┌─────────────────────────┐  │
-│                               │   │  │ trace_query(run_id,     │  │
-│                               │   │  │   sql, params)          │  │
-│                               │   │  │   └─► per-project       │  │
-│                               │   │  │        trace DB conn    │  │
-│                               │   │  └─────────────────────────┘  │
-└───────────────────────────────┘   └───────────────────────────────┘
-```
+┌──────────────────────────────────────────────────┐
+│  web/src/views/UnifiedDashboard.svelte           │
+│  ┌────────────────────────────────────────────┐  │
+│  │  Repo accordion (per repo_path)            │  │
+│  │  ┌──────────────────────────────────────┐  │  │
+│  │  │  RepoPanel.svelte (compact removed)  │  │  │
+│  │  │  • Full status grid (path, branch,   │  │  │
+│  │  │    remote, upstream, ahead/behind)   │  │  │
+│  │  │  • Commit history list               │  │  │
+│  │  │  • Download-zip link                 │  │  │
+│  │  │  • 6 action buttons                  │  │  │
+│  │  │    (Commit, Push, Pull, Force Sync,  │  │  │
+│  │  │     Make PR, Set Remote)             │  │  │
+│  │  └──────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────┘  │
+└────────────────────┬─────────────────────────────┘
+                     │ API calls (lib/api.ts)
+                     ▼
+┌──────────────────────────────────────────────────┐
+│  api/repo_routers.py (FastAPI endpoints)          │
+│  /api/repos/{id}/status | commit | push | pull   │
+│  /api/repos/{id}/sync | set-remote | make-pr     │
+└────────────────────┬─────────────────────────────┘
+                     │
+                     ▼
+┌──────────────────────────────────────────────────┐
+│  core/workspace_manager.py                        │
+│  ┌────────────────────────────────────────────┐  │
+│  │  _GIT_ENV = {"LC_ALL": "C", **os.environ}  │  │
+│  │                                           │  │
+│  │  All subprocess.run(["git", ...]) calls   │  │
+│  │  now pass env=_GIT_ENV                    │  │
+│  └────────────────────────────────────────────┘  │
+└────────────────────┬─────────────────────────────┘
+                     │
+                     ▼
+┌──────────────────────────────────────────────────┐
+│  core/git_ops.py                                  │
+│  ┌────────────────────────────────────────────┐  │
+│  │  _GIT_ENV = {"LC_ALL": "C", **os.environ}  │  │
+│  │                                           │  │
+│  │  git subprocess calls now pass            │  │
+│  │  env=_GIT_ENV (defense-in-depth)          │  │
+│  └────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────┘
 
-### Data Flow: Request → Response
-
+[DELETED FILES]
+  web/src/views/Repository.svelte   ✕ (0 remaining imports)
+  web/src/views/Repositories.svelte ✕ (0 remaining imports)
 ```
-Client
-  │  GET /api/runs
-  ▼
-list_all_runs()                          [api/run_routers.py:62]
-  │
-  ├─► db.list_projects_with_stats()       [core/db_manager.py]
-  │     Returns: List[dict] with project metadata
-  │
-  ├─► sf.list_runs(project_id=pid)        [skillflow/core.py]
-  │     └─► _get_project_id(run_id)       ◄── FIX #1: add lock
-  │           SELECT project_id FROM skillflow_runs WHERE run_id=?
-  │     Returns: List[dict] with run metadata per project
-  │
-  └─► compute_cache_stats_batch(uuids)    [api/_cache_stats.py]
-        └─► for each run_id:              ◄── FIX #2: try/except
-              compute_cache_stats_per_step(run_id)
-                └─► sf.trace_query(run_id, sql, (run_id,))
-                      SELECT step_id, SUM(cache_hit), SUM(cache_miss)
-                      FROM skillflow_trace WHERE run_id=? ...
-        Returns: Dict[run_id → cache_stats_dict]
-```
-
----
 
 ## Component List
 
-### Component 1: SkillFlow `_get_project_id` (External Library)
+### 1. UnifiedDashboard.svelte — caller-side prop change
 
-- **Location**: `/home/linxuhao/.AItelier/projects/skillflow-review/src/skillflow/core.py` ~L3507–3511
-- **Responsibility**: Convert a `run_id` (UUID) to its parent `project_id` (human-readable) via `SELECT project_id FROM skillflow_runs WHERE run_id = ?`
-- **Bug**: `self._conn.execute(sql, (run_id,))` is called **without** holding `self._lock`, while all other DB methods (e.g., `list_graphs`, `_get_resolver`, `_get_resolver_for_run`) properly wrap their `self._conn.execute()` calls in `with self._lock:`.
-- **Fix**: Add `with self._lock:` around the `self._conn.execute(sql, (run_id,))` call.
-- **Interface**: No change. The method signature, return type (`str | None`), and behavior remain identical.
-- **Lock Safety Audit**: All callers of `_get_project_id` (`list_runs`, `get_run_by_project`, `meta_agent.py:2472`) do **not** hold `self._lock` when calling it — they acquire the lock at their own `execute()` sites. A plain `threading.Lock` (not `RLock`) is therefore safe (no re-entrant deadlock risk).
+- **File:** `web/src/views/UnifiedDashboard.svelte`
+- **Change:** Line 507: remove `compact` attribute from `<RepoPanel>` tag
+- **Before:**
+  ```svelte
+  <RepoPanel
+    projectId={repo.representative_project_id}
+    {canWrite}
+    compact
+  />
+  ```
+- **After:**
+  ```svelte
+  <RepoPanel
+    projectId={repo.representative_project_id}
+    {canWrite}
+  />
+  ```
+- **Impact:** RepoPanel defaults to `compact=false`, which activates the full git panel layout. All `{#if !compact}` blocks inside RepoPanel render: status grid with all fields, commit history list, download-zip link, and the three additional action buttons (Force Sync, Make PR, Set Remote).
+- **No changes needed** to RepoPanel.svelte itself — the `compact` prop definition and all conditional blocks are already in place.
 
-### Component 2: `compute_cache_stats_batch` (AItelier API)
+### 2. RepoPanel.svelte — zero changes (verification only)
 
-- **Location**: `./api/_cache_stats.py` L68–95
-- **Responsibility**: Batch-compute per-run cache statistics by iterating over a list of `run_id` strings, calling `compute_cache_stats_per_step(run_id)` for each, and aggregating per-step stats into per-run totals. Returns `Dict[str, Dict[str, Any]]`.
-- **Bug**: If `compute_cache_stats_per_step(run_id)` raises any exception (e.g., `sqlite3.InterfaceError` from the missing-lock bug, or `sqlite3.DatabaseError` from a corrupt per-project trace DB), the exception propagates up and crashes the entire `/api/runs` response with HTTP 500.
-- **Fix**: Wrap the `compute_cache_stats_per_step(run_id)` call (line 89) in a `try/except Exception` block. On exception, log a warning via `logging.getLogger(__name__).warning(...)` including the `run_id`, then `continue` to the next run.
-- **Interface**: No change. The function signature, return type, and behavior for successful runs remain identical. The only behavioral change is that a failing run is silently skipped (with a log warning) instead of crashing the entire batch.
+- **File:** `web/src/views/RepoPanel.svelte`
+- **Status:** No structural changes. The component already fully supports both compact and full modes via its `compact` prop (default `false`). The prop definition remains intact for potential future use.
+- **Key internal structure (for confirmation):**
+  - Line 18: `let { ..., compact = false } = $props()` — default is `false`, matching our change
+  - Lines 95-100: `<details>` with `class:repo-panel--compact={compact}` and conditional `<summary>`
+  - Lines 109-133: Compact vs full status display (`{#if compact}` shows branch+dirty only; `{:else}` shows full grid with path, branch, remote, upstream, ahead/behind)
+  - Lines 135-145: Commit history list — gated by `{#if !compact && ...}`
+  - Line 149: Download-zip link — gated by `{#if !compact}`
+  - Lines 155-159: Force Sync, Make PR, Set Remote buttons — gated by `{#if !compact}`
 
-### Component 3: `compute_cache_stats_per_step` (AItelier API)
+### 3. workspace_manager.py — locale fix via module-level `_GIT_ENV`
 
-- **Location**: `./api/_cache_stats.py` L32–65
-- **Responsibility**: Query the per-project trace DB for `category='usage' / event='token_usage'` entries belonging to a single `run_id`, group by `step_id`, and return aggregated cache hit/miss stats. **No changes needed** — this component is the callee that may raise exceptions; the hardening is in the caller (`compute_cache_stats_batch`).
+- **File:** `core/workspace_manager.py`
+- **Change:** Add module-level constant after imports:
+  ```python
+  import os
+  _GIT_ENV = {"LC_ALL": "C", **os.environ}
+  ```
+- **All git subprocess call sites** to receive `env=_GIT_ENV`:
 
-### Component 4: `list_all_runs` Endpoint (AItelier API)
+| # | Method | Line | Command(s) | Priority | Notes |
+|---|--------|------|-----------|----------|-------|
+| 1 | `_run_git_checked` | 324 | Any git command | **P0** | Covers push, pull, commit, force_sync, set_remote, push_head — all write operations whose output feeds `res.detail` |
+| 2 | `_git()` in `repo_status` | 258 | `rev-parse`, `status`, `remote`, `rev-list`, `log` | **P0** | Covers all dashboard status reads |
+| 3 | `_get_git_hash` | 240 | `git rev-parse HEAD` | **P1** | Output appears in commit response |
+| 4 | `_require_git_repo` | 335 | `git rev-parse --is-inside-work-tree` | **P1** | Error output is user-visible (HTTP 400) |
+| 5 | `repo_commit` porcelain check | 362 | `git status --porcelain` | **P1** | Direct subprocess.run, not covered by helpers |
+| 6 | `repo_set_remote` remote check | 347 | `git remote` | **P1** | Direct subprocess.run, not covered by helpers |
+| 7 | `setup_workspace` DPS init | 108,110,111 | `git init`, `git add`, `git commit` | P2 | Init-time, output not user-visible in dashboard |
+| 8 | `setup_workspace` new repo init | 132,134,135 | `git init`, `git add`, `git commit` | P2 | Init-time, output not user-visible in dashboard |
+| 9 | `setup_workspace` clone | 152 | `git clone` | P2 | Init-time, output not user-visible in dashboard |
+| 10 | `rollback` | 233 | `git reset --hard` | P2 | Error recovery, output not directly user-visible |
 
-- **Location**: `./api/run_routers.py` L62–123
-- **Responsibility**: List all runs across all configs, enriched with cache stats via `compute_cache_stats_batch`. **No changes needed** — the endpoint is the consumer that benefits from both fixes. After the fixes, it will consistently return HTTP 200 under concurrent load and gracefully degrade when individual runs have bad trace data.
+- **Implementation note:** The `_run_git_checked` and `_git` inner function are the two highest-priority sites — together they cover ~90% of user-visible git output. The remaining direct subprocess calls (items 5-10) are included for completeness and defense-in-depth. All sites use the same single-line change: add `env=_GIT_ENV` to the `subprocess.run()` call.
 
----
+### 4. git_ops.py — locale fix (defense-in-depth)
 
-## Interface Contracts
+- **File:** `core/git_ops.py`
+- **Change:** Add `import os` (if not already present) and module-level `_GIT_ENV = {"LC_ALL": "C", **os.environ}`. Add `env=_GIT_ENV` to the two git subprocess calls:
 
-### `_get_project_id` (SkillFlow, pre/post-fix)
+| # | Method | Line | Command | Priority |
+|---|--------|------|---------|----------|
+| 1 | `create_github_pr` | 48-51 | `git remote get-url origin` | P2 |
+| 2 | `create_github_pr` | 57-60 | `git rev-parse --abbrev-ref HEAD` | P2 |
+
+- **Rationale:** Lower priority because PR creation errors come from the GitHub REST API, not git stderr. Still cheap to add for defense-in-depth.
+
+### 5. Deleted files
+
+| File | Path | Size | Status |
+|------|------|------|--------|
+| Repository.svelte | `web/src/views/Repository.svelte` | ~8 KB | Delete — 0 imports across codebase |
+| Repositories.svelte | `web/src/views/Repositories.svelte` | ~4 KB | Delete — 0 imports across codebase |
+
+- **Verification performed:** `search_repo_root` for `Repository.svelte` and `Repositories.svelte` across all files in the repo. Only `.aitelier/knowledge.md` references them as historical context — no Svelte/TS/JS import statements.
+- **Routing:** `App.svelte` routes `/repos` and `/repos/:repoPath` to `RedirectToDashboard` (which pushes to `/`). Neither old page is imported in `App.svelte`.
+- **No test files depend on these** — the `__tests__/views/` directory contains tests for `Project`, `ChatCodingMode`, `WorkspaceBrowser`, and `StepTimeline` only.
+
+## Data Flow
+
+### Status read flow (dashboard poll)
 
 ```
-Signature:  _get_project_id(self, run_id: str) -> str | None
-Input:      run_id — skillflow internal UUID string
-Output:     project_id string, or None if no matching run exists
-Side effects: Reads from self._conn (SQLite SELECT)
-Locking:    POST-FIX: acquires self._lock for the duration of the query
-Thread safety: POST-FIX: serialized with all other self._conn access
+UnifiedDashboard.svelte (10s poll)
+  → api.listRepos() → GET /api/repos → DB query (repo metadata)
+  ├── Accordion expands → RepoPanel mounts → onMount(load)
+  │     → api.repoStatus(projectId) → GET /api/repos/{id}/status
+  │           → workspace_manager.repo_status()
+  │                 → _git() helper (now with LC_ALL=C) → subprocess.run
+  │                 → Returns {is_git, branch, dirty, remote_url, upstream, ahead, behind, commits}
+  │     → Renders status grid + commit list + action buttons
 ```
 
-### `compute_cache_stats_batch` (AItelier, pre/post-fix)
+### Git write flow (user clicks action button)
 
 ```
-Signature:  compute_cache_stats_batch(run_ids: List[str]) -> Dict[str, Dict[str, Any]]
-Input:      run_ids — list of skillflow internal run UUIDs
-Output:     Dict mapping run_id → {cache_hit_tokens, cache_miss_tokens, hit_ratio, total_tokens}
-            Runs with no token_usage traces are absent from the dict.
-            POST-FIX: runs that raise during compute_cache_stats_per_step are also absent
-                       (treated same as "no data"), with a warning logged.
-Side effects: POST-FIX: may emit logging.WARNING messages for failed runs
+RepoPanel.svelte → doCommit() / run('Push', ...) / doSync() / etc.
+  → api.repoCommit(projectId, msg) → POST /api/repos/{id}/commit
+  → api.repoPush(projectId)        → POST /api/repos/{id}/push
+  → api.repoPull(projectId)        → POST /api/repos/{id}/pull
+  → api.repoSync(projectId, ...)   → POST /api/repos/{id}/sync
+  → api.repoSetRemote(projectId, url) → POST /api/repos/{id}/set-remote
+  → api.repoMakePR(projectId, ...)    → POST /api/repos/{id}/make-pr
+        → workspace_manager.repo_*() methods
+              → _run_git_checked() (now with LC_ALL=C) → subprocess.run
+              → Returns {detail: stdout} or {message: "..."}
+        → Frontend run() displays res.message || res.detail in actionMsg
 ```
 
-### `compute_cache_stats_per_step` (unchanged)
+### Key: LC_ALL=C ensures `res.detail` (git stdout) is always English
+Before: `git pull` on a French server → `res.detail = "Déjà à jour."`
+After:  `git pull` with LC_ALL=C → `res.detail = "Already up to date."`
 
-```
-Signature:  compute_cache_stats_per_step(run_id: str) -> Dict[str, Dict[str, Any]]
-Input:      run_id — skillflow internal run UUID
-Output:     Dict mapping step_id → {cache_hit_tokens, cache_miss_tokens, hit_ratio, total_tokens}
-Exceptions: May raise sqlite3.InterfaceError, sqlite3.DatabaseError, sqlite3.OperationalError
-```
-
----
-
-## Error Handling Strategy
-
-### Fix #1 (SkillFlow): Prevention
-
-The lock fix **prevents** the `sqlite3.InterfaceError` that occurs when two threads concurrently use the same `sqlite3.Connection`. This is a preventive fix — it removes the root cause, so the error class that triggered the investigation should never occur again for `_get_project_id`.
-
-### Fix #2 (AItelier): Defense in Depth
-
-Even after Fix #1, other failure modes exist (corrupt trace DB, disk-full, etc.). The `try/except` in `compute_cache_stats_batch` provides defense in depth:
-
-| Failure Scenario | Behavior (Post-Fix) |
-|---|---|
-| Single run's trace DB is corrupt | Warning logged; run omitted from cache stats; remaining runs return normally |
-| All runs' trace DBs are corrupt | Warning logged for each; empty dict `{}` returned; endpoint returns 200 with `cache_stats: None` for all runs |
-| Transient DB lock (WAL busy) | Warning logged; run omitted; other runs unaffected |
-| Empty `run_ids` list | Early return `{}` (existing guard, no change) |
-
-### Logging Contract
-
-```python
-import logging
-logger = logging.getLogger(__name__)
-
-# In compute_cache_stats_batch, on exception:
-logger.warning(
-    "Failed to compute cache stats for run %s, skipping: %s",
-    run_id, e
-)
-```
-
-The `%s` format (not f-string) follows Python logging best practices — deferred interpolation, no cost when the log level is suppressed.
-
----
-
-## Technology Stack
+## Technical Stack
 
 | Layer | Technology | Notes |
-|---|---|---|
-| Language | Python 3.10+ | Already in use |
-| Web framework | FastAPI | `run_routers.py` endpoints |
-| Database (AItelier) | SQLite via `DBManager` | `db.list_projects_with_stats()` |
-| Database (SkillFlow) | SQLite via `sqlite3.Connection` | `self._conn` in `SkillFlow` class |
-| Locking primitive | `threading.Lock` | `self._lock` — already exists, no new import |
-| Logging | `logging` stdlib | `logging.getLogger(__name__)` |
-| No new dependencies | — | Both fixes use only existing imports |
-
----
-
-## Testing Strategy
-
-### Unit Tests
-
-| Test | File | What it verifies |
-|---|---|---|
-| `test_compute_cache_stats_batch_skips_failing_run` | `./tests/unit/test_cache_stats.py` (new) | Mock `compute_cache_stats_per_step` to raise on run #2; verify batch returns stats for runs #1 and #3 only; verify warning is logged |
-| `test_compute_cache_stats_batch_all_fail` | Same | All runs raise; verify returns `{}` with no crash; verify N warnings logged |
-| `test_compute_cache_stats_batch_empty_input` | Same | Verify existing early-return `{}` still works |
-| `test_compute_cache_stats_batch_partial_data` | Same | Some runs return empty dicts (no token data) — verify they're absent from result (existing behavior preserved) |
-
-### Integration Tests
-
-| Test | File | What it verifies |
-|---|---|---|
-| `test_list_runs_concurrent` | `./tests/integration/test_run_routers.py` (extend) | Send 10 concurrent `GET /api/runs` requests; verify all return HTTP 200; verify no `sqlite3.InterfaceError` in server logs |
-| `test_list_runs_with_corrupt_trace_db` | Same | Corrupt one project's trace DB file; verify `GET /api/runs` returns 200 with cache stats for remaining projects |
-
-### Manual Verification
-
-```bash
-# Concurrent load test
-for i in $(seq 1 10); do
-  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8000/api/runs &
-done
-wait
-# Expected: all 200
-
-# Error injection (after mocking trace_query to raise)
-curl -s http://localhost:8000/api/runs | jq '.runs[0].cache_stats'
-# Expected: cache_stats present for healthy runs, null for the corrupted one
-```
-
----
-
-## Edge Cases Addressed
-
-1. **Contention window**: Fix #1 closes the window entirely by serializing `_get_project_id` with all other DB access.
-2. **Nested lock (deadlock)**: Audited — no caller holds `self._lock` when calling `_get_project_id`. Safe with `threading.Lock`.
-3. **Empty run_ids**: Existing early-return guard preserved.
-4. **All runs fail in batch**: Returns `{}` gracefully (same as "no data").
-5. **Partial failure in batch**: Failed runs are omitted; successful runs return normally.
-6. **Log volume**: Only one warning per failed run per request. Not a concern for production.
-
----
-
-## Rollback & Safety
-
-Both fixes are **reversible with zero data impact**:
-
-- **Fix #1 (SkillFlow)**: Removing `with self._lock:` reverts to the original (buggy) behavior. No schema changes, no data migration, no side effects. The lock is acquired and released within a single method call — it holds no state across calls.
-- **Fix #2 (AItelier)**: Removing the `try/except` reverts to the original (brittle) behavior. The catch block only logs and skips — it mutates no data.
-
-No backup/snapshot is needed because:
-- No database schema migrations
-- No data writes, deletes, or modifications
-- No file-system changes outside the two source files
-- Both fixes are purely additive (lock acquisition + exception handler)
-
----
+|-------|-----------|-------|
+| Frontend | Svelte 5 (runes mode) + TypeScript | `$props()`, `$state`, `$derived`, `$effect` |
+| Styling | Pico CSS | Already included in project |
+| Routing | svelte-spa-router | `App.svelte` route table |
+| Backend | Python 3.12+ / FastAPI | `api/repo_routers.py` endpoints |
+| Git operations | `subprocess.run` (stdlib) | No external git libraries |
+| Locale fix | `env={"LC_ALL": "C", **os.environ}` | Stdlib-only, no new dependencies |
 
 ## Extensibility Considerations
 
-While this design is intentionally minimal, the fix pattern in Fix #2 can serve as a template for hardening other batch operations that iterate over runs. If other endpoints in the future need to process runs in a batch and tolerate partial failures, the same `try/except` + `logger.warning` + `continue` pattern should be used.
+- **`compact` prop preserved:** RepoPanel.svelte retains the `compact` prop (default `false`). Future views or embedded contexts can still use `<RepoPanel compact />` without any changes to the component.
+- **Module-level `_GIT_ENV` constant:** Using a shared constant (rather than inlining the dict at each call site) makes it trivial to add future git subprocess calls with the correct locale — just pass `env=_GIT_ENV`.
+- **No new abstractions:** The design avoids creating a `_git_subprocess()` wrapper or other helper functions — the module-level constant approach is the simplest change with the least risk of introducing bugs. Future refactoring to a centralized wrapper is still possible since all call sites use the same `_GIT_ENV` constant name.
+- **File deletion is safe:** The old pages had zero remaining imports. If a rollback is ever needed, the files can be recovered from git history.
 
-The lock fix (Fix #1) should also prompt a broader audit of the SkillFlow codebase for any other `self._conn.execute()` calls that may lack lock protection. However, the SOTA research confirmed this was the only unprotected call site.
+## Risk Assessment
 
----
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| `LC_ALL=C` breaks a non-git subprocess | Very Low | Low | `env=` is scoped to individual `subprocess.run` calls — only git commands are affected |
+| Removing `compact` causes layout overflow | Low | Medium | RepoPanel's full-mode CSS already exists and was ported from the old Repository.svelte layout. Tested in prior runs. |
+| `_GIT_ENV` computed at module import time captures wrong env | Very Low | Low | `os.environ` at import time is the same environment the process uses. Docker containers have stable env. |
+| Deleted files needed by an undiscovered reference | Very Low | High | Zero imports confirmed via grep of entire `web/src/` directory. Files recoverable via git. |
+| `env=` merge pattern breaks on some Python versions | Very Low | Low | `{**os.environ}` dict unpacking is supported since Python 3.5. Project uses Python 3.12+. |
 
-## File Change Summary
+## Implementation Order (for PM task decomposition)
 
-| File | Change | Lines |
-|---|---|---|
-| `/home/linxuhao/.AItelier/projects/skillflow-review/src/skillflow/core.py` | Add `with self._lock:` around `self._conn.execute()` in `_get_project_id` | ~L3507–3511 |
-| `./api/_cache_stats.py` | Wrap `compute_cache_stats_per_step(run_id)` in `try/except` in `compute_cache_stats_batch` | L89 |
-| `./tests/unit/test_cache_stats.py` (new) | Unit tests for batch error handling | — |
-| `./tests/integration/test_run_routers.py` (extend) | Concurrent + error-injection integration tests | — |
+1. **Task 1:** Backend — Add `_GIT_ENV` constant and apply `env=_GIT_ENV` to all git subprocess calls in `core/workspace_manager.py`
+2. **Task 2:** Backend — Add `_GIT_ENV` constant and apply `env=_GIT_ENV` to git subprocess calls in `core/git_ops.py`
+3. **Task 3:** Frontend — Remove `compact` prop from `<RepoPanel>` in `web/src/views/UnifiedDashboard.svelte`
+4. **Task 4:** Frontend — Delete `web/src/views/Repository.svelte` and `web/src/views/Repositories.svelte`
+5. **Task 5:** Verification — Build check, lint, confirm no import errors, spot-check git operation messages are English
+
+Tasks 1-2 are independent of tasks 3-4. Tasks 3 and 4 are independent. All can be parallelized.

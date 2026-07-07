@@ -1,9 +1,8 @@
 {
-  ".": "py",
+  ".": "ruff",
   ".py": "ruff",
-  ".js": "basic",
-  ".ts": "basic",
   ".svelte": "basic",
+  ".ts": "basic",
   ".css": "basic",
-  ".json": "basic"
+  ".md": "basic"
 }

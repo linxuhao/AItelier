@@ -1,0 +1,25 @@
+# SkillFlow Lock Fix Patch
+#
+# This patch adds the missing `with self._lock:` around `self._conn.execute()`
+# in SkillFlow's `_get_project_id` method, fixing a SQLite concurrency bug
+# where GET /api/runs returns HTTP 500 under concurrent access.
+#
+# Target: /home/linxuhao/.AItelier/projects/skillflow-review/src/skillflow/core.py
+# Lines:  ~3507-3511 (method `_get_project_id`)
+#
+# Apply with:
+#   cd /home/linxuhao/.AItelier/projects/skillflow-review
+#   patch -p1 < /path/to/this/file
+#
+# --- a/src/skillflow/core.py
+# +++ b/src/skillflow/core.py
+@@ -3507,9 +3507,10 @@
+     def _get_project_id(self, run_id: str) -> str:
+-        row = self._conn.execute(
+-            "SELECT project_id FROM skillflow_runs WHERE id = ?", (run_id,)
+-        ).fetchone()
++        with self._lock:
++            row = self._conn.execute(
++                "SELECT project_id FROM skillflow_runs WHERE id = ?", (run_id,)
++            ).fetchone()
+         return row["project_id"] if row else ""

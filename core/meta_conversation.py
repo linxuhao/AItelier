@@ -180,7 +180,7 @@ def detect_intent(prompt: str, config_path: str = _DEFAULT_CONFIG_PATH,
     system_prompt = _INTENT_SYSTEM_PROMPT + _INTENT_SCHEMA
     lang_instruction = build_language_instruction(user_lang)
     if lang_instruction:
-        system_prompt = lang_instruction + "\n\n" + system_prompt
+        system_prompt = system_prompt + "\n\n" + lang_instruction
     response = gateway.generate(
         system_prompt=system_prompt,
         user_prompt=f"Classify this user prompt:\n\n{prompt}",
@@ -288,7 +288,7 @@ class MetaConversationAgent:
         system_prompt = REVISION_SYSTEM_PROMPT
         lang_instruction = build_language_instruction(user_lang)
         if lang_instruction:
-            system_prompt = lang_instruction + "\n\n" + system_prompt
+            system_prompt = system_prompt + "\n\n" + lang_instruction
         response = self.gateway.generate(
             system_prompt=system_prompt,
             user_prompt=user_prompt,

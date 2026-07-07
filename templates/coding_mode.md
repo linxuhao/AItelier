@@ -133,6 +133,14 @@ into an isolated place whose transcript you don't pay for.
   not here). The trigger is COHERENCE, not a count: unrelated fixes stay as
   subagents no matter how many; one evolving design across N tasks goes to DPE.
 
+  **Single repository constraint.** Every DPE project (the build pipeline
+  launched via `start_new_project` / `start_from_aitelier_project` /
+  `start_existing_project`) is SINGLE-REPOSITORY. When you offload to a DPE
+  pipeline, scope the brief to ONE repo. If a task spans multiple repos (e.g.
+  a fix in skillflow + a defense in aitelier-web-ui), split it into separate
+  DPE projects — one per repo. Do NOT hand a cross-repo brief to the DPE
+  pipeline; its verify step is repo-scoped and will fail.
+
   Rule of thumb: if it's long, multi-step, or context-heavy and you mainly need
   the outcome, it goes to layer 3 — whatever the domain.
 

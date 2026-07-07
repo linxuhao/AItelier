@@ -13,10 +13,13 @@
 #
 # --- a/src/skillflow/core.py
 # +++ b/src/skillflow/core.py
-@@ -3507,6 +3507,7 @@
+@@ -3507,9 +3507,10 @@
      def _get_project_id(self, run_id: str) -> str:
+-        row = self._conn.execute(
+-            "SELECT project_id FROM skillflow_runs WHERE id = ?", (run_id,)
+-        ).fetchone()
 +        with self._lock:
-             row = self._conn.execute(
-                 "SELECT project_id FROM skillflow_runs WHERE id = ?", (run_id,)
-             ).fetchone()
++            row = self._conn.execute(
++                "SELECT project_id FROM skillflow_runs WHERE id = ?", (run_id,)
++            ).fetchone()
          return row["project_id"] if row else ""

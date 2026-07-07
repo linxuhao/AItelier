@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 from core.agents import AgentFactory
 from core.workspace_manager import WorkspaceManager, DPE_GRAPH_NAME
-from core.prompt_assembler import PromptAssembler
+from core.prompt_assembler import PromptAssembler, build_language_instruction, build_language_instruction
 
 # F2 (default ON): the stable design docs move into the shared system preamble
 # (cached cross-step) and the growing-code-repo dump is dropped from the user
@@ -457,6 +457,10 @@ class PipelineEngine:
                     "Write files incrementally across turns. They accumulate.\n"
                     "When all required outputs are ready, call finish_step."
                 )
+                # [Language] — absolute last block for maximum recency override
+                lang_instruction = build_language_instruction(self._user_lang)
+                if lang_instruction:
+                    prompt += "\n\n" + lang_instruction
                 if cached_exploration and tool_turn == 0:
                     # Deduplicate: same tool call+result can appear multiple times
                     seen = set()
@@ -1191,6 +1195,11 @@ class PipelineEngine:
                     "least 1 turn for writing."
                 )
 
+                # [Language] — absolute last block for maximum recency override
+                lang_instruction = build_language_instruction(self._user_lang)
+                if lang_instruction:
+                    user_prompt += "\n\n" + lang_instruction
+
                 if use_preamble:
                     preamble = self.assembler.build_shared_preamble(
                         project_path, code_path, graph_name=graph_name,
@@ -1198,6 +1207,12 @@ class PipelineEngine:
                         user_lang=self._user_lang,
                     )
                     system_content = f"{preamble}\n\n{agent.system_prompt}"
+                    # Defense-in-depth: re-append [Language] after the agent
+                    # template so it overrides any template-native language
+                    # in the system message itself.
+                    lang_instruction = build_language_instruction(self._user_lang)
+                    if lang_instruction and not system_content.endswith(lang_instruction):
+                        system_content += "\n\n" + lang_instruction
                 else:
                     system_content = agent.system_prompt
                 messages = [

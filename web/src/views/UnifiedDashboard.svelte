@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { push } from 'svelte-spa-router';
   import { authStore } from '../stores/auth';
   import { connectionStore } from '../stores/connection';
@@ -33,11 +33,8 @@
 
   // Search state
   let searchQuery = $state('');
-  let expandedRepos = $state<Set<string>>(new Set());
-  let savedExpanded = new Set();
-  // TEST
+  let manualExpandedRepos = $state<Set<string>>(new Set());
   let autoExpandedOnce = $state(false);
-  let wasSearching = $state(false);
 
   // Create form state (ported from Dashboard.svelte)
   let createFormVisible = $state(false);
@@ -65,26 +62,13 @@
       : repos,
   );
 
-  // ── Search effect: auto-expand all matching repos during search ──
-
-  $effect(() => {
-    const query = searchQuery.trim();
-    if (query) {
-      if (!wasSearching) {
-        // Just entered search mode: save current expanded state
-        savedExpanded = new Set(untrack(() => expandedRepos));
-        wasSearching = true;
-      }
-      // Expand all matching repos during search
-      expandedRepos = new Set(filteredRepos.map(r => r.repo_path));
-    } else {
-      if (wasSearching) {
-        // Just exited search mode: restore saved expanded state
-        expandedRepos = savedExpanded;
-        wasSearching = false;
-      }
-    }
-  });
+  // Derived: when searching, auto-expand all matching repos.
+  // When not searching, use the user-controlled expansion set.
+  let expandedRepos = $derived<Set<string>>(
+    searchQuery.trim()
+      ? new Set(filteredRepos.map(r => r.repo_path))
+      : manualExpandedRepos,
+  );
 
   // ── Lifecycle ──
 
@@ -157,8 +141,7 @@
     for (const r of repoList) {
       if (r.last_activity > mostRecent.last_activity) mostRecent = r;
     }
-    expandedRepos = new Set([mostRecent.repo_path]);
-    savedExpanded = new Set(expandedRepos);
+    manualExpandedRepos = new Set([mostRecent.repo_path]);
   }
 
   function onRepoToggle(repoPath: string, e: Event): void {
@@ -168,30 +151,21 @@
     // feedback loop when Svelte's open={...} binding triggers ontoggle.
     if (details.open === inSet) return;
     // User clicked — sync the set to match the DOM
-    const next = new Set(expandedRepos);
+    const next = new Set(manualExpandedRepos);
     if (details.open) {
       next.add(repoPath);
     } else {
       next.delete(repoPath);
     }
-    expandedRepos = next;
-    if (!searchQuery.trim()) {
-      savedExpanded = new Set(next);
-    }
+    manualExpandedRepos = next;
   }
 
   function expandAll(): void {
-    expandedRepos = new Set(repos.map(r => r.repo_path));
-    if (!searchQuery.trim()) {
-      savedExpanded = new Set(expandedRepos);
-    }
+    manualExpandedRepos = new Set(repos.map(r => r.repo_path));
   }
 
   function collapseAll(): void {
-    expandedRepos = new Set();
-    if (!searchQuery.trim()) {
-      savedExpanded = new Set();
-    }
+    manualExpandedRepos = new Set();
   }
 
   function navigateToProject(id: string): void {

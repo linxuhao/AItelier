@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 from core.agents import AgentFactory
 from core.workspace_manager import WorkspaceManager, DPE_GRAPH_NAME
-from core.prompt_assembler import PromptAssembler, build_language_instruction, build_language_instruction
+from core.prompt_assembler import PromptAssembler, build_language_instruction
 
 # F2 (default ON): the stable design docs move into the shared system preamble
 # (cached cross-step) and the growing-code-repo dump is dropped from the user

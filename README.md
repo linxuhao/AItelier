@@ -229,7 +229,7 @@ The **Unified Dashboard** (`/` and `/projects`) merges the former separate Dashb
 **Key features**:
 - **Repo grouping** — projects are grouped by `repo_path` using the existing `GET /api/repos` endpoint (no backend changes). Each repo section shows the repo name, type badge, project count, and last activity timestamp.
 - **Collapsible sections** — all repo sections are collapsed by default, except the one containing the **most recently updated project** (auto-expanded on page load). Expand/collapse all buttons are provided.
-- **Compact RepoPanel** — expanding a repo section lazy-loads a compact thumbnail of the `RepoPanel.svelte` component showing branch name, dirty indicator, and Commit/Push/Pull action buttons. The full RepoPanel (with commit history, remote details, and all git operations) remains on the per-project detail page.
+- **Full RepoPanel** — expanding a repo section lazy-loads the full `RepoPanel.svelte` component showing complete git status (branch, remote, upstream tracking, ahead/behind counts), commit history, download-zip link, and all six action buttons (Commit, Push, Pull, Force Sync, Make PR, Set Remote). Git operation messages are forced to English (`LC_ALL=C`) on the backend regardless of server locale.
 - **Front-end search** — a search bar filters repos and projects in real-time by case-insensitive substring match against repo name, repo path, and project name. During active search, all matching repo sections are auto-expanded.
 - **Orphan projects** — projects without a `repo_path` appear in a dedicated "Projects without a repository" section at the bottom.
 - **Create/delete projects** — the create-project form and delete confirmation dialog are ported from the old Dashboard.

@@ -3,13 +3,20 @@
 # workspace_manager (which owns local git) because this is the one repo action
 # that talks to the GitHub REST API and needs the GITHUB_TOKEN secret.
 
+import os
+import os
 import re
 import subprocess
+import os
 from pathlib import Path
 
 import httpx
 
 from core.ai_router import _read_secret
+
+# Force English locale for all git subprocess calls — prevents French
+# locale leakage in dashboard "Make PR" action result messages.
+_GIT_ENV = {"LC_ALL": "C", **os.environ}
 
 
 def parse_github_owner_repo(remote_url: str) -> tuple[str, str]:
@@ -47,7 +54,7 @@ def create_github_pr(code_path: Path, title: str, body: str = "",
 
     remote = subprocess.run(
         ["git", "remote", "get-url", "origin"],
-        cwd=code_path, capture_output=True, text=True,
+        cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
     )
     if remote.returncode != 0 or not remote.stdout.strip():
         raise RuntimeError("No 'origin' remote configured")
@@ -56,7 +63,7 @@ def create_github_pr(code_path: Path, title: str, body: str = "",
     if not head:
         head = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=code_path, capture_output=True, text=True,
+            cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
         ).stdout.strip()
     if head == base:
         raise RuntimeError(

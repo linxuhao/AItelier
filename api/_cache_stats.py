@@ -86,7 +86,15 @@ def compute_cache_stats_batch(run_ids: List[str]) -> Dict[str, Dict[str, Any]]:
 
     result: Dict[str, Dict[str, Any]] = {}
     for run_id in run_ids:
-        per_step = compute_cache_stats_per_step(run_id)
+        try:
+            per_step = compute_cache_stats_per_step(run_id)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Failed to compute cache stats for run %s, skipping: %s",
+                run_id, e
+            )
+            continue
         if not per_step:
             continue
         hit = sum(s["cache_hit_tokens"] for s in per_step.values())

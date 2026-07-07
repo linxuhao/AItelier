@@ -1,214 +1,466 @@
-# Technical Architecture Design: DPE Language Instruction Placement Consistency
+# Technical Architecture Design: Unified Dashboard — Merge Repositories & Projects
 
 ## Overview
 
-Fix the inconsistent placement of the `[Language]` instruction block across the DPE prompt pipeline. Currently, the user's language preference (from `prompt_assembler`) is not always the final instruction the model sees — in some code paths it's prepended (diluted by following template text), and in others it's followed by a `[Turn Budget]` block that steals the critical "last thing the model reads" position. This design ensures `[Language]` is always the **absolute last block** in the user message across all code paths, maximizing recency-weighted influence on the model's output language.
+Merge the separate **Dashboard** (`/projects`) and **Repositories** (`/repos`, `/repos/:repoPath`) views in the AItelier Svelte 5 web frontend into a single unified page at `/` (and `/projects` for backward compatibility). The unified page groups projects by their parent repository using collapsible `<details>`/`<summary>` sections, includes a front-end search bar, auto-expands the most-recently-active repo, and shows a compact git-status thumbnail when a repo section is expanded.
 
-### Problem Summary
+All changes are **frontend-only** — the backend `GET /api/repos` endpoint already provides grouped repo+project data and requires no modification.
 
-| Location | Current Behavior | Issue |
-|---|---|---|
-| `meta_conversation.py:183` (`detect_intent`) | `lang_instruction + "\n\n" + system_prompt` | PREPEND — template text follows [Language] |
-| `meta_conversation.py:291` (`revise_brief`) | `lang_instruction + "\n\n" + system_prompt` | PREPEND — same issue |
-| `meta_conversation.py:232` (`MetaConversationAgent.__init__`) | `system_prompt + "\n\n" + lang_instruction` | APPEND — correct (reference pattern) |
-| `meta_conversation.py:431` (`TaskMetaConversationAgent.__init__`) | `system_prompt + "\n\n" + lang_instruction` | APPEND — correct |
-| `prompt_assembler.py:392-393` (`assemble()`) | `sections.append(lang_instruction)` at end | Correct within assemble(), but `dpe_pipeline.py` appends [Turn Budget] AFTER this |
-| `dpe_pipeline.py:452-458` (JSON retry) | `prompt += turn_budget` after assemble() | [Turn Budget] follows [Language] |
-| `dpe_pipeline.py:1177-1192` (native) | `user_prompt += turn_budget` after assemble() | Same issue |
-| `dpe_pipeline.py:1200` (system message) | `f"{preamble}\n\n{agent.system_prompt}"` | Preamble ends with [Language], but agent template follows it |
-| `meta_agent.py:1073,1082` (`_build_system_prompt`) | `prompt + "\n\n" + lang_block` | APPEND — already correct, no change needed |
+---
 
-## Architecture
-
-### Design Principle: Single Responsibility for [Language] Placement
-
-The `PromptAssembler.assemble()` method currently owns [Language] injection but cannot control its final position because `dpe_pipeline.py` appends `[Turn Budget]` *after* `assemble()` returns. The fix moves [Language] injection responsibility to `dpe_pipeline.py`, which is the only place that knows about both [Language] and [Turn Budget] and can therefore guarantee the correct ordering.
-
-### Data Flow (After Fix)
+## Architecture Diagram
 
 ```
-User Language Preference (e.g. "zh-CN")
+                      ┌──────────────────────────────┐
+                      │       App.svelte              │
+                      │   svelte-spa-router routes:    │
+                      │   '/' → UnifiedDashboard      │
+                      │   '/projects' → UnifiedDashboard
+                      │   '/projects/:id' → Project   │
+                      │   '/repos' → RedirectToDashboard
+                      │   '/repos/:repoPath' → RedirectToDashboard
+                      └──────────┬───────────────────┘
+                                 │
+                    ┌────────────▼──────────────────┐
+                    │    UnifiedDashboard.svelte     │
+                    │  ┌─────────────────────────┐  │
+                    │  │  Search Bar (front-end)  │  │
+                    │  └─────────────────────────┘  │
+                    │  ┌─────────────────────────┐  │
+                    │  │  Create Project Form     │  │
+                    │  └─────────────────────────┘  │
+                    │  ┌─────────────────────────┐  │
+                    │  │  Repo Accordion List     │  │
+                    │  │  <details> per repo      │  │
+                    │  │  ├─ <summary> header     │  │
+                    │  │  ├─ Project table        │  │
+                    │  │  └─ Compact RepoPanel    │  │
+                    │  │     (lazy, on expand)    │  │
+                    │  └─────────────────────────┘  │
+                    │  ┌─────────────────────────┐  │
+                    │  │  "No Repository" section │  │
+                    │  │  (orphan projects)       │  │
+                    │  └─────────────────────────┘  │
+                    │  ┌─────────────────────────┐  │
+                    │  │  Delete Confirmation     │  │
+                    │  └─────────────────────────┘  │
+                    └────────────────────────────────┘
+
+    API (unchanged):
+    GET /api/repos                → RepoItem[]   (polled every 10s)
+    GET /api/repos/{repo_path}    → RepoDetail   (not used on unified page)
+    GET /api/runs                 → { runs: [] } (used for orphan projects only)
+    POST /api/projects            → create project
+    DELETE /api/projects/{id}     → delete project
+    GET /api/projects/{id}/repo/status  → git status (called by RepoPanel)
+    POST /api/projects/{id}/repo/commit → git commit
+    POST /api/projects/{id}/repo/push   → git push
+    POST /api/projects/{id}/repo/pull   → git pull
+```
+
+### Data Flow
+
+```
+listRepos() every 10s
         │
         ▼
-build_language_instruction(user_lang)   ← module-level function in prompt_assembler.py
+$state repos: RepoItem[]
         │
-        ├──▶ meta_conversation.py        ← uses directly (APPEND pattern)
-        ├──▶ meta_agent.py               ← uses directly (APPEND pattern, already correct)
-        ├──▶ prompt_assembler.py         ← build_shared_preamble() (end of preamble, already correct)
-        └──▶ dpe_pipeline.py             ← injects AFTER [Turn Budget] as final user-message block
+        ├──▶ $derived filteredRepos (by searchQuery)
+        │         │
+        │         ▼
+        │    render repo sections
+        │
+        └──▶ on first load: find max(last_activity)
+                  → $state expandedRepos Set = { that repo_path }
+                         │
+                         ▼
+                  <details bind:open={expandedRepos.has(r.repo_path)}>
 ```
 
-### Component: `core/meta_conversation.py`
+---
 
-**Change**: Two one-line fixes — swap concatenation order from PREPEND to APPEND.
+## Component List
 
-**`detect_intent()` (line 183)**:
-```python
-# Before (PREPEND — bug):
-system_prompt = lang_instruction + "\n\n" + system_prompt
+### 1. UnifiedDashboard.svelte (NEW — replaces Dashboard.svelte)
 
-# After (APPEND — fix):
-system_prompt = system_prompt + "\n\n" + lang_instruction
-```
+- **File**: `web/src/views/UnifiedDashboard.svelte`
+- **Responsibility**: Single-page view that combines the old Dashboard (project list, create/delete) and Repositories (repo grouping, git ops thumbnail) into one view.
+- **State**:
+  - `repos: RepoItem[]` — polled from `listRepos()` every 10s
+  - `orphanProjects: RunItem[]` — projects without a repo_path, fetched once from `listAllRuns()` (supplementary)
+  - `searchQuery: string` — bound to search `<input>`
+  - `expandedRepos: Set<string>` — tracks which repo sections are open
+  - `loading, error, isRefreshing` — standard async states
+  - `createFormVisible, newProjectId, newProjectName, seedText, repoType, repoPath, repoUrl, submitting, formErrors` — ported from Dashboard.svelte
+  - `pendingDeleteId` — delete confirmation
+  - `repoStatusCache: Map<string, RepoItem>` — reused from polling; RepoPanel thumbnail reads from this
+- **Derived**:
+  - `filteredRepos: RepoItem[]` — `$derived(repos.filter(r => matchesSearch(r, searchQuery)))`
+  - `canWrite` — from `$authStore`
+  - `connected` — from `$connectionStore`
+  - `empty` — `$derived(!loading && !error && repos.length === 0)`
+- **Lifecycle**:
+  - `onMount`: call `refreshRepos()`, start 10s polling interval; fetch orphan projects once
+  - `onDestroy`: clear interval
+- **Key behaviors**:
+  - Auto-expand: on first data load, find the repo whose `last_activity` is the maximum; add its `repo_path` to `expandedRepos`
+  - Search: filter repos where `repo_name` or any `project.name` matches the query (case-insensitive substring). During active search, auto-expand all repos that have matching projects so results are visible immediately. When search is cleared, restore the previous collapsed/expanded state.
+  - Delete: same behavior as old Dashboard.svelte — confirm dialog, then call `deleteProject()`
+  - Create form: identical to old Dashboard.svelte — toggles visibility, validates, calls `createProject()`
+- **Interfaces**:
+  - Props: none (route component)
+  - Uses: `listRepos`, `listAllRuns`, `createProject`, `deleteProject` from `api.ts`
+  - Uses: `formatTime`, `parseStatus`, `formatTokens`, `formatTaskProgress`, `cacheBadgeClass`, `repoTypeLabel` from `format.ts`
+  - Uses: `t()` from `i18n.svelte.ts`
+  - Uses: `authStore`, `connectionStore`, `projectStore` from stores
+  - Uses: `push` from `svelte-spa-router` for navigation
+  - Renders: `<RepoPanel compact={true} projectId={...} canWrite={...} />` inside expanded sections
 
-**`revise_brief()` (line 291)**:
-```python
-# Before (PREPEND — bug):
-system_prompt = lang_instruction + "\n\n" + system_prompt
+### 2. RedirectToDashboard.svelte (NEW)
 
-# After (APPEND — fix):
-system_prompt = system_prompt + "\n\n" + lang_instruction
-```
+- **File**: `web/src/views/RedirectToDashboard.svelte`
+- **Responsibility**: Simple wrapper that calls `push('#/')` on mount for `/repos` and `/repos/:repoPath` backward compatibility.
+- **Code**: 3-line component — `import { push, onMount }`, call `push('#/')` in `onMount`.
+- **Reason**: `svelte-spa-router` v5 has no redirect directive; a small component is the cleanest approach per SOTA recommendation.
 
-**Rationale**: These two functions build a system prompt and then prepend the language instruction. The model reads the language instruction first, then the actual system prompt content (which may contain language-specific examples or be written in a different language). By appending instead, [Language] is the last thing the model processes in the system prompt, giving it maximum recency weight. This is consistent with the already-correct `MetaConversationAgent.__init__()` (line 232) and `TaskMetaConversationAgent.__init__()` (line 431).
+### 3. RepoPanel.svelte (MODIFY — add `compact` prop)
 
-**No changes** to `MetaConversationAgent.__init__()` (line 232) or `TaskMetaConversationAgent.__init__()` (line 431) — they already use the correct APPEND pattern.
+- **File**: `web/src/views/RepoPanel.svelte`
+- **Responsibility**: Unchanged in full mode. Adds a `compact` boolean prop that renders a minimized variant for the unified dashboard.
+- **New prop**: `compact?: boolean` (default `false`)
+- **Compact mode rendering**:
+  - **Show**: branch name, dirty indicator (● N uncommitted), 3 action buttons: Commit, Push, Pull
+  - **Hide**: commit history list, remote URL, upstream details (ahead/behind), Force sync, Make PR, Set remote, Download ZIP
+  - **Layout**: reduced padding, single-line status row with inline buttons
+  - The `load()` function runs identically — the same `repoStatus()` API call is made
+- **Rationale**: Per SOTA recommendation, avoids duplicating git-ops API logic. The `compact` prop is a simple conditional in the template that hides/show sections.
+- **CSS**: Compact mode uses a `repo-panel--compact` CSS class with reduced padding and `font-size: 0.78rem`.
 
-### Component: `core/prompt_assembler.py`
+### 4. App.svelte (MODIFY — update routes)
 
-**Change**: Remove [Language] block from `assemble()` output; the caller is now responsible for injecting it at the correct position.
+- **File**: `web/src/App.svelte`
+- **Changes**:
+  1. Replace `import Dashboard from './views/Dashboard.svelte'` with `import UnifiedDashboard from './views/UnifiedDashboard.svelte'`
+  2. Add `import RedirectToDashboard from './views/RedirectToDashboard.svelte'`
+  3. Remove `import Repositories from './views/Repositories.svelte'` and `import Repository from './views/Repository.svelte'`
+  4. Update routes:
+     ```
+     '/': UnifiedDashboard,
+     '/projects': UnifiedDashboard,
+     '/repos': RedirectToDashboard,
+     '/repos/:repoPath': RedirectToDashboard,
+     ```
+     Keep `/projects/:id`, `/projects/:id/trace`, `/projects/:id/trace/:runId`, `/chat`, `/tracking` unchanged.
 
-**`assemble()` method (lines 390-393)**:
-```python
-# Before:
-# [Language Instruction] — at the very END so it never busts the
-# prompt-cache prefix when the user changes language mid-project.
-if lang_instruction:
-    sections.append(lang_instruction)
+### 5. i18n.svelte.ts (MODIFY — add new keys)
 
-# After:
-# [Language Instruction] — NOT appended here. The caller (dpe_pipeline.py)
-# injects it AFTER the [Turn Budget] block so it is the absolute last
-# content the model sees, maximizing recency-weighted language override.
-# The lang_instruction is still resolved from user_lang above (line 196)
-# for use by build_shared_preamble() and for traceability.
-```
+- **File**: `web/src/lib/i18n.svelte.ts`
+- **New keys to add** (in all 8 language dictionaries):
+  - `dashboard.searchPlaceholder` — "Search repos and projects…"
+  - `dashboard.noRepos` — "No repositories found."
+  - `dashboard.noSearchResults` — "No repos or projects match your search."
+  - `dashboard.noRepoProjects` — "No projects in this repository."
+  - `dashboard.expandAll` — "Expand all"
+  - `dashboard.collapseAll` — "Collapse all"
+  - `dashboard.repoGroup` — "Repository"
+  - `dashboard.projectCount` — "{n} project(s)"
+  - `dashboard.orphanProjects` — "Projects without a repository"
 
-**Critical constraint**: The `_detect_language_instruction(user_lang)` call on line 196 is kept — it's still referenced by `build_shared_preamble()` (line 417) which remains unchanged. Removing only the append on lines 390-393 is sufficient.
+### 6. Dashboard.svelte (KEEP — unused, safe to remove later)
 
-**`build_shared_preamble()` (lines 429-430)**: **No change**. [Language] remains at the end of the system preamble. Having [Language] in both the system preamble and the user message is defense-in-depth — the user-message copy (after turn budget) provides the primary override, and the system-preamble copy provides a secondary reinforcement. The preamble's [Language] placement is already correct (last in the preamble parts list), and it stays byte-stable for prompt-cache purposes since it's resolved from `user_lang` which changes rarely.
+- **File**: `web/src/views/Dashboard.svelte`
+- **Decision**: Keep the file but remove its route mapping. It is no longer reachable via the router. If any code imports it, those imports are updated to point to `UnifiedDashboard` instead. The file can be physically deleted in a follow-up cleanup task.
 
-### Component: `core/dpe_pipeline.py`
+### 7. Repositories.svelte and Repository.svelte (KEEP — unused)
 
-**Change**: Import `build_language_instruction` and append [Language] AFTER [Turn Budget] at all three injection points.
+- **Files**: `web/src/views/Repositories.svelte`, `web/src/views/Repository.svelte`
+- **Decision**: Same as Dashboard.svelte — keep files, remove route mappings, no longer reachable. Can be deleted later.
 
-**Injection Point 1 — JSON-mode retry loop (line 449-458)**:
-```python
-# After appending turn budget + step-control instructions:
-prompt += (
-    f"\n\n[Turn Budget: {remaining} remaining]\n"
-    "Step-control tools available in your tool list:\n"
-    ...
-)
-# NEW: append [Language] as the absolute last block
-lang_instruction = build_language_instruction(self._user_lang)
-if lang_instruction:
-    prompt += "\n\n" + lang_instruction
-```
-
-**Injection Point 2 — Native-mode loop (line 1177-1192)**:
-```python
-# After appending turn budget:
-user_prompt += (
-    f"\n\n[Turn Budget: {max_turns} turns total, then forced output]\n"
-    ...
-)
-# NEW: append [Language] as the absolute last block
-lang_instruction = build_language_instruction(self._user_lang)
-if lang_instruction:
-    user_prompt += "\n\n" + lang_instruction
-```
-
-**Defense-in-Depth — System message (line 1200, optional)**:
-```python
-# After constructing system_content:
-system_content = f"{preamble}\n\n{agent.system_prompt}"
-# NEW: re-append [Language] after the agent template so it
-# overrides any template-native language in the system message itself.
-lang_instruction = build_language_instruction(self._user_lang)
-if lang_instruction and not system_content.endswith(lang_instruction):
-    system_content += "\n\n" + lang_instruction
-```
-
-**Rationale for defense-in-depth**: The preamble ends with [Language], but then the agent template text is appended (line 1200: `f"{preamble}\n\n{agent.system_prompt}"`). This means the template's native language follows [Language] in the system message. By re-appending [Language] after the template, we ensure both the system message AND the user message end with [Language]. The guard `not system_content.endswith(lang_instruction)` prevents double-appending if the template already ends with it.
-
-### Component: `core/meta_agent.py`
-
-**No change**. Verified that `_build_system_prompt()` (lines 1073, 1082) already uses the correct APPEND pattern:
-```python
-# Line 1073 (coding mode):
-prompt = prompt + "\n\n" + lang_block
-
-# Line 1082 (butler mode):
-prompt = prompt + "\n\n" + lang_block
-```
-The `SYSTEM_PROMPT` constant has no hardcoded `[Language]` directive.
-
-### Component: Template Files (`templates/*.md`)
-
-**No change**. Verified that no `.md` template file contains a `[Language]` directive or hardcoded language rule that could counteract the injected instruction. Templates may remain in any language — the `[Language]` instruction overrides them.
-
-## Prompt-Cache Analysis
-
-| What | Cache Impact |
-|---|---|
-| Remove [Language] from `assemble()` | None — [Language] was in the volatile suffix (past cache boundary); removing it doesn't change the byte-identical prefix |
-| Append [Language] after [Turn Budget] in dpe_pipeline.py | None — [Turn Budget] is also in the volatile suffix; the cache-prefix boundary is unchanged |
-| Append [Language] after agent template in system message | None — system message is not part of the user-message KV-cache prefix |
-| Swap PREPEND→APPEND in meta_conversation.py | None — these are standalone calls, not cached prefixes |
-
-All changes are cache-safe: they only affect content past the prompt-cache prefix boundary (the volatile suffix) or content in separate messages (system message vs. user message).
+---
 
 ## Interface Contracts
 
-### `build_language_instruction(user_lang: str | None) -> str`
+### RepoPanel.svelte — Updated Props
 
-- **Module**: `core/prompt_assembler` (already exists, no signature change)
-- **Input**: Language code (e.g. `"zh-CN"`, `"en"`, `None`)
-- **Output**: `[Language]\n...` instruction block string, or `""` if no applicable instruction
-- **Behavior**: Unchanged — returns the appropriate `[Language]` block from `_LANG_INSTRUCTIONS` dict, falling back to a generic instruction for unknown codes. When `user_lang` is `None`, defaults to English (`"en"`).
-- **Callers after fix**: `meta_conversation.py` (4 locations, all APPEND), `meta_agent.py` (2 locations, already APPEND), `prompt_assembler.py` (`build_shared_preamble()`), `dpe_pipeline.py` (3 new injection points)
+```typescript
+let {
+  projectId,
+  canWrite = false,
+  compact = false,   // NEW
+}: {
+  projectId: string;
+  canWrite?: boolean;
+  compact?: boolean;  // NEW
+} = $props();
+```
 
-### `PromptAssembler.assemble()` contract change
+### listRepos() → RepoItem[]
 
-- **Before**: Returns user prompt with `[Language]` as the last section.
-- **After**: Returns user prompt **without** `[Language]`. The caller is responsible for appending it at the correct position (after turn budget).
-- **Breaking change**: Yes, but all production callers are in `dpe_pipeline.py` and are updated in the same changeset. Test callers will need the same treatment if they assert on `[Language]` presence.
+Unchanged. Returns the existing `RepoItem[]` shape from `GET /api/repos`:
 
-## Error Handling
+```typescript
+interface RepoItem {
+  repo_path: string;
+  repo_name: string;
+  repo_type: string;
+  repo_url: string | null;
+  project_count: number;
+  representative_project_id: string;
+  last_activity: string;       // ISO timestamp
+  projects: RepoProjectSummary[];
+}
 
-- If `build_language_instruction()` returns `""` (no applicable language), the guard `if lang_instruction:` at each injection point ensures no empty block is appended.
-- If `user_lang` is `None`, `build_language_instruction` defaults to English — agents always have a language directive, never falling back to template language.
-- No new failure modes introduced — the function is already called in 6+ existing locations with the same error characteristics.
+interface RepoProjectSummary {
+  project_id: string;
+  name: string;
+  status: string;
+  updated_at: string;           // ISO timestamp
+  cache_stats?: Record<string, unknown>;
+  config_name?: string;
+}
+```
+
+### Search matching contract
+
+```typescript
+function matchesSearch(repo: RepoItem, query: string): boolean {
+  const q = query.toLowerCase().trim();
+  if (!q) return true;
+  return (
+    repo.repo_name.toLowerCase().includes(q) ||
+    repo.repo_path.toLowerCase().includes(q) ||
+    repo.projects.some(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.project_id.toLowerCase().includes(q)
+    )
+  );
+}
+```
+
+### Expanded state contract
+
+```typescript
+// Persistent expanded set keyed by repo_path
+let expandedRepos = $state<Set<string>>(new Set());
+
+// Auto-expand on first data load:
+function autoExpandMostRecent(repos: RepoItem[]): void {
+  if (repos.length === 0) return;
+  let mostRecent = repos[0];
+  for (const r of repos) {
+    if (r.last_activity > mostRecent.last_activity) mostRecent = r;
+  }
+  expandedRepos = new Set([mostRecent.repo_path]);
+}
+
+// During search: expand all repos with visible matches
+let searchExpanded = $state<Set<string>>(new Set());
+// When searchQuery changes:
+//   if query non-empty: expand all filtered repos
+//   if query empty: restore previous expandedRepos
+```
+
+---
+
+## Technical Stack
+
+| Concern | Choice | Rationale |
+|---|---|---|
+| Collapse/expand | HTML `<details>`/`<summary>` with Svelte `bind:open` | Zero-dependency, accessible, Pico CSS styled. Recommended by SOTA. |
+| Reactivity | Svelte 5 `$state` + `$derived` runes | Already the project's model. `$derived` for filtered repos. |
+| Search/filter | `Array.filter()` + `String.includes()` | Front-end only, case-insensitive substring. Performs well for <1000 items. Recommended by SOTA. |
+| Polling | `setInterval` every 10s via `listRepos()` | Existing pattern in both Dashboard.svelte and Repositories.svelte. Keep as-is. |
+| Routing | `svelte-spa-router` v5 | Already in use. Redirect via wrapper component. |
+| CSS framework | Pico CSS v2 | Already in use. Styles `<details>`/`<summary>` natively. |
+| Git ops | `RepoPanel.svelte` with `compact` prop | Reuses existing logic. Avoids duplication per SOTA recommendation. |
+| i18n | Existing `t()` function + 8-language dictionaries | Extend with new `dashboard.*` keys. |
+
+---
+
+## Search/Filter Behavior — Detailed Specification
+
+The search bar is a front-end-only filter with the following UX contract:
+
+1. **Initial state**: Search input is empty, all repos visible, only the most-recently-active repo expanded.
+2. **User types a query**: `filteredRepos` is recomputed via `$derived`. Repos and projects that don't match are hidden from the DOM. Repos that DO match (either by repo name or because at least one project matches) remain visible.
+3. **During active search**: All visible (matching) repo sections are auto-expanded so the user can immediately see matching projects. The previously-saved `expandedRepos` set is preserved in a backup variable.
+4. **User clears the search**: The filter is removed (all repos visible), and the previously-saved `expandedRepos` set is restored.
+
+Implementation pattern:
+
+```typescript
+let searchQuery = $state('');
+let expandedRepos = $state<Set<string>>(new Set());
+let savedExpanded = $state<Set<string>>(new Set()); // backup during search
+
+let filteredRepos = $derived(
+  searchQuery.trim()
+    ? repos.filter(r => matchesSearch(r, searchQuery))
+    : repos
+);
+
+// $effect to manage auto-expand during search
+$effect(() => {
+  if (searchQuery.trim()) {
+    // Entering search mode
+    savedExpanded = expandedRepos;
+    expandedRepos = new Set(filteredRepos.map(r => r.repo_path));
+  } else {
+    // Exiting search mode
+    expandedRepos = savedExpanded;
+  }
+});
+```
+
+---
+
+## Expand/Collapse Behavior — Detailed Specification
+
+Each repo section uses `<details bind:open={expandedRepos.has(repo.repo_path)}>`.
+
+1. **Page load**: `autoExpandMostRecent()` runs once after the first successful `listRepos()` call. It finds the repo with the max `last_activity` timestamp and sets `expandedRepos = new Set([thatRepoPath])`.
+2. **User clicks a repo summary**: The browser toggles the `<details>` `open` attribute. A `$effect` or `ontoggle` handler syncs the `expandedRepos` Set.
+3. **Compact RepoPanel loads on expand**: The `RepoPanel` component inside each `<details>` section calls `repoStatus()` on mount (its existing `onMount(load)` behavior). Since `<details>` contents are in the DOM even when collapsed, we must **conditionally render** the `RepoPanel` only when the section is open to avoid N unnecessary API calls on page load. Use `{#if expandedRepos.has(repo.repo_path)}<RepoPanel ... />{/if}`.
+4. **"Expand all" / "Collapse all" buttons** (optional UX enhancement): If added, they set `expandedRepos` to all repo paths or to an empty set respectively.
+
+---
+
+## Compact RepoPanel Rendering — Detailed Specification
+
+When `compact={true}`:
+
+```
+┌─────────────────────────────────────────────┐
+│ Repository                                  │
+│ main ● 3 uncommitted    [Commit] [Push] [Pull] │
+└─────────────────────────────────────────────┘
+```
+
+- Single-line layout: branch name + dirty indicator + 3 inline buttons
+- Uses existing `<details>` wrapper from RepoPanel (its own `<details class="workspace-section repo-panel">`)
+- In compact mode, that outer `<details>` is always `open` (since the parent repo section is already the collapsible container)
+- CSS class `repo-panel--compact` applied to the root element when `compact` is true
+- The `load()` function and all state management (`status`, `error`, `actionMsg`, `busy`) remain identical to full mode
+
+---
+
+## Orphan Projects Handling
+
+Projects with `repo_path IS NULL OR repo_path = ''` are excluded by the backend `GET /api/repos` query. To ensure these projects are still visible to the user, the unified dashboard fetches `GET /api/runs` once on mount and filters for projects without a `repo_path`.
+
+These "orphan" projects appear in a dedicated section at the bottom of the dashboard:
+
+```
+## Projects without a repository
+[table of orphan projects, same columns as repo project tables]
+```
+
+This section is also filterable by the search bar (orphan projects match by name/id).
+
+---
+
+## Route Migration — Backward Compatibility
+
+| Old Route | New Route | Mechanism |
+|---|---|---|
+| `/` | `/` | Direct — UnifiedDashboard |
+| `/projects` | `/projects` | Direct — UnifiedDashboard (alias) |
+| `/repos` | `/` | RedirectToDashboard component calls `push('#/')` |
+| `/repos/:repoPath` | `/` | RedirectToDashboard component calls `push('#/')` |
+
+The `RedirectToDashboard.svelte` component:
+
+```svelte
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { push } from 'svelte-spa-router';
+  onMount(() => push('#/'));
+</script>
+```
+
+---
+
+## i18n Keys — Full List of Additions
+
+| Key | English default |
+|---|---|
+| `dashboard.searchPlaceholder` | "Search repos and projects…" |
+| `dashboard.noRepos` | "No repositories found." |
+| `dashboard.noSearchResults` | "No repos or projects match your search." |
+| `dashboard.noRepoProjects` | "No projects in this repository." |
+| `dashboard.expandAll` | "Expand all" |
+| `dashboard.collapseAll` | "Collapse all" |
+| `dashboard.repoGroup` | "Repository" |
+| `dashboard.projectCount` | "{n} project(s)" |
+| `dashboard.orphanProjects` | "Projects without a repository" |
+
+All 8 language dictionaries must be updated with translations for these keys.
+
+---
+
+## Edge Case Coverage
+
+| Edge Case | Handling |
+|---|---|
+| No repos at all (`listRepos()` returns `[]`) | Show empty state with "No repositories found." and create-project CTA |
+| Repo with zero projects (defensive) | Show repo section with "No projects in this repository." text |
+| No most-recent project (empty runs) | All repo sections remain collapsed on load |
+| Search matches nothing | Show "No repos or projects match your search." with option to clear |
+| Orphan projects (no repo_path) | Separate "Projects without a repository" section at bottom |
+| User navigates back from project detail | State resets (acceptable per MVP — see SOTA edge case #10) |
+| Polling during create-form open | Skip refresh when `createFormVisible` is true (ported from Dashboard.svelte) |
+| Rapid expand/collapse clicks | Browser-native `<details>` handles this natively — no extra logic needed |
+| RepoPanel API call fails (404, network) | RepoPanel's existing error handling shows inline error message |
+
+---
+
+## File Change Summary
+
+| File | Action | Description |
+|---|---|---|
+| `web/src/views/UnifiedDashboard.svelte` | **CREATE** | New unified dashboard component |
+| `web/src/views/RedirectToDashboard.svelte` | **CREATE** | Redirect wrapper for old `/repos` routes |
+| `web/src/views/RepoPanel.svelte` | **MODIFY** | Add `compact` prop and conditional rendering |
+| `web/src/App.svelte` | **MODIFY** | Update routes: UnifiedDashboard, RedirectToDashboard |
+| `web/src/lib/i18n.svelte.ts` | **MODIFY** | Add 9 new `dashboard.*` i18n keys across all 8 languages |
+| `web/src/views/Dashboard.svelte` | **KEEP** | No longer routed; safe to delete in cleanup |
+| `web/src/views/Repositories.svelte` | **KEEP** | No longer routed; safe to delete in cleanup |
+| `web/src/views/Repository.svelte` | **KEEP** | No longer routed; safe to delete in cleanup |
+
+---
+
+## Extensibility Considerations
+
+1. **Expanded state persistence**: The `expandedRepos` Set can be trivially serialized to `localStorage` (keyed by repo_path) if cross-navigation persistence is desired in the future.
+2. **Virtual scrolling**: If repo/project counts grow beyond ~100 repos, the list can be wrapped in a virtual-scroll component without changing the data model.
+3. **Additional git operations in compact mode**: The `compact` prop design allows adding more buttons to compact mode without touching full mode.
+4. **Search debounce**: Not needed for MVP (simple substring match on <1000 items), but can be added with a Svelte `$effect` + `setTimeout` pattern.
+5. **Repo detail deep-link**: The current design redirects `/repos/:repoPath` to `/`. If deep-linking to a specific repo section is desired, a URL hash fragment (e.g., `#/repo/my-repo`) could auto-expand that section — the `expandedRepos` set supports this pattern.
+
+---
+
+## Implementation Order (for PM task decomposition)
+
+| Order | Component | Risk | Dependencies |
+|---|---|---|---|
+| 1 | `RepoPanel.svelte` — add `compact` prop | Low | None |
+| 2 | `i18n.svelte.ts` — add new keys | Low | None |
+| 3 | `UnifiedDashboard.svelte` — core component | Medium | 1, 2 |
+| 4 | `RedirectToDashboard.svelte` — redirect wrapper | Low | None |
+| 5 | `App.svelte` — route updates | Low | 3, 4 |
+| 6 | Integration testing / manual verification | Medium | 5 |
+
+---
 
 ## Rollback Path
 
-All changes are reversible by reverting the commits:
-1. Revert `meta_conversation.py` — swap APPEND back to PREPEND at the two lines
-2. Revert `prompt_assembler.py` — restore the `sections.append(lang_instruction)` lines
-3. Revert `dpe_pipeline.py` — remove the `build_language_instruction` import and the new append blocks
+All changes are reversible:
 
-No data migrations, schema changes, or irreversible operations.
+1. Revert `App.svelte` routes to the old Dashboard/Repositories/Repository mapping
+2. Remove `UnifiedDashboard.svelte` and `RedirectToDashboard.svelte` (new files, no downstream deps)
+3. Revert `RepoPanel.svelte` — remove `compact` prop (or keep it, it's additive and doesn't break existing callers)
+4. i18n keys are additive — no need to revert, they don't break anything
 
-## Implementation Order
-
-| Order | File | Change | Risk |
-|---|---|---|---|
-| 1 | `core/meta_conversation.py` | Fix PREPEND→APPEND (lines 183, 291) | Minimal — one-character operator swap |
-| 2 | `core/prompt_assembler.py` | Remove [Language] from `assemble()` (lines 390-393) | Low — affects only the volatile suffix |
-| 3 | `core/dpe_pipeline.py` | Add `build_language_instruction` import; append [Language] after turn budget at JSON retry (line ~458), native loop (line ~1192), and optionally system message (line ~1201) | Low — new appends in volatile suffix |
-| 4 | Tests | Update any test that asserts on [Language] position in `assemble()` output | Low — test-only |
-
-## Verification Checklist
-
-- [ ] `detect_intent()` appends lang_instruction (not prepends)
-- [ ] `revise_brief()` appends lang_instruction (not prepends)
-- [ ] `MetaConversationAgent.__init__()` still appends (unchanged, verify)
-- [ ] `TaskMetaConversationAgent.__init__()` still appends (unchanged, verify)
-- [ ] `assemble()` no longer contains [Language] in output
-- [ ] JSON-mode retry loop: [Language] is the LAST block after [Turn Budget]
-- [ ] Native-mode loop: [Language] is the LAST block after [Turn Budget]
-- [ ] System message (optional): [Language] follows agent template text
-- [ ] `_build_system_prompt()` in meta_agent.py already correct (verify, no change)
-- [ ] No template `.md` file contains conflicting `[Language]` directive
-- [ ] Prompt-cache prefix remains byte-identical across steps
+No data migrations, backend changes, or irreversible operations.

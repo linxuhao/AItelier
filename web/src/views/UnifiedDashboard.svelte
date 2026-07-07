@@ -34,9 +34,9 @@
   // Search state
   let searchQuery = $state('');
   let expandedRepos = $state<Set<string>>(new Set());
-  let savedExpanded = $state<Set<string>>(new Set());
+  let savedExpanded = new Set();
+  // TEST
   let autoExpandedOnce = $state(false);
-  let wasSearching = $state(false);
   let wasSearching = $state(false);
 
   // Create form state (ported from Dashboard.svelte)

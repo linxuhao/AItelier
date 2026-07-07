@@ -190,11 +190,6 @@ class PromptAssembler:
 
         sections = [""]
 
-        # [Language Instruction] — from user preference, not project brief.
-        # Built early but APPENDED at the very end so changing language
-        # mid-project doesn't invalidate the prompt-cache prefix.
-        lang_instruction = self._detect_language_instruction(user_lang)
-
         # [Output Delivery] — native tool-calling mode: output is ONLY persisted
         # when the agent CALLS a write tool. Some models (e.g. deepseek) tend to
         # paste the file contents as a JSON object / Markdown in their reply
@@ -387,19 +382,19 @@ class PromptAssembler:
         if rejection_history:
             sections.append(rejection_history)
 
-        # [Language Instruction] — NOT appended here. The caller (dpe_pipeline.py)
-        # injects it AFTER the [Turn Budget] block so it is the absolute last
-        # content the model sees, maximizing recency-weighted language override.
-        # The lang_instruction is still resolved from user_lang above (line 196)
-        # for use by build_shared_preamble() and for traceability.
+        # [Language Instruction] — NOT appended anywhere in the system/preamble
+        # side. It is injected ONCE by the caller (dpe_pipeline.py) at the very
+        # end of the USER message (after the [Turn Budget] block), so it is the
+        # absolute last content the model reads — maximal recency-weighted
+        # language override — while keeping the cached system prefix (preamble +
+        # template) fully language-independent.
 
         return "\n\n".join(sections)
 
     def build_shared_preamble(self, project_path: Path, code_path: Path = None,
                               *, graph_name: str,
                               preamble_steps: list[str] | None = None,
-                              include_design: bool = False,
-                              user_lang: str | None = None) -> str:
+                              include_design: bool = False) -> str:
         """Build the byte-identical, project-global system preamble (F1/F2).
 
         Placed at the FRONT of the system message for steps of a config that
@@ -412,10 +407,11 @@ class PromptAssembler:
         Fully config-driven: ``graph_name`` and ``preamble_steps`` come from the
         host config registry, so any pipeline (not just DPE) can opt in.
         """
+        # NOTE: the preamble is deliberately LANGUAGE-INDEPENDENT. The user's
+        # [Language] preference is injected once at the tail of the user message
+        # by the caller, never here — so this expensive, cross-step cached prefix
+        # stays byte-identical even when the user switches language mid-project.
         parts = [WORKSPACE_LAYOUT]
-        # [Language Instruction] — resolved early but APPENDED at the end
-        # so changing language doesn't invalidate the system-preamble cache.
-        lang_instruction = self._detect_language_instruction(user_lang)
         brief = self._load_project_brief(project_path)
         if brief:
             parts.append(f"[Project Brief]\n{brief}")
@@ -427,8 +423,6 @@ class PromptAssembler:
                                                 preamble_steps)
             if design:
                 parts.append(f"[Project Design]\n{design}")
-        if lang_instruction:
-            parts.append(lang_instruction)
         return "\n\n".join(parts)
 
     def _load_fixed_step_docs(self, project_path: Path, graph_name: str,

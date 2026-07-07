@@ -457,10 +457,6 @@ class PipelineEngine:
                     "Write files incrementally across turns. They accumulate.\n"
                     "When all required outputs are ready, call finish_step."
                 )
-                # [Language] — absolute last block for maximum recency override
-                lang_instruction = build_language_instruction(self._user_lang)
-                if lang_instruction:
-                    prompt += "\n\n" + lang_instruction
                 if cached_exploration and tool_turn == 0:
                     # Deduplicate: same tool call+result can appear multiple times
                     seen = set()
@@ -474,6 +470,11 @@ class PipelineEngine:
                     prompt += "\n\n[Previous Tool Results]\n" + "\n".join(tool_results)
                 if rejection_history:
                     prompt += "\n\n[Previous Rejection History]\n" + "\n---\n".join(rejection_history)
+                # [Language] — injected ONCE, as the genuinely last block (after
+                # tool results / rejection history) for maximal recency override.
+                lang_instruction = build_language_instruction(self._user_lang)
+                if lang_instruction:
+                    prompt += "\n\n" + lang_instruction
 
 
                 self._emit("agent_call", {"agent_role": role, "model": agent.gateway.litellm_model,
@@ -1195,7 +1196,11 @@ class PipelineEngine:
                     "least 1 turn for writing."
                 )
 
-                # [Language] — absolute last block for maximum recency override
+                # [Language] — injected ONCE, here, as the absolute last block of
+                # the user message (after [Turn Budget]). It is the last content
+                # the model reads (system message precedes the user message), so
+                # this single placement gives maximal recency-weighted override
+                # while keeping the cached system prefix language-independent.
                 lang_instruction = build_language_instruction(self._user_lang)
                 if lang_instruction:
                     user_prompt += "\n\n" + lang_instruction
@@ -1204,15 +1209,8 @@ class PipelineEngine:
                     preamble = self.assembler.build_shared_preamble(
                         project_path, code_path, graph_name=graph_name,
                         preamble_steps=preamble_steps, include_design=True,
-                        user_lang=self._user_lang,
                     )
                     system_content = f"{preamble}\n\n{agent.system_prompt}"
-                    # Defense-in-depth: re-append [Language] after the agent
-                    # template so it overrides any template-native language
-                    # in the system message itself.
-                    lang_instruction = build_language_instruction(self._user_lang)
-                    if lang_instruction and not system_content.endswith(lang_instruction):
-                        system_content += "\n\n" + lang_instruction
                 else:
                     system_content = agent.system_prompt
                 messages = [

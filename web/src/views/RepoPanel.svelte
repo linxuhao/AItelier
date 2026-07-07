@@ -15,7 +15,7 @@
   import { formatTime } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
 
-  let { projectId, canWrite = false }: { projectId: string; canWrite?: boolean } = $props();
+  let { projectId, canWrite = false, compact = false }: { projectId: string; canWrite?: boolean; compact?: boolean } = $props();
 
   let status = $state<Record<string, unknown> | null>(null);
   let error = $state<string | null>(null);
@@ -92,10 +92,12 @@
   onMount(load);
 </script>
 
-<details class="workspace-section repo-panel" open>
-  <summary><strong>{t('repo.title')}</strong>
-    {#if status?.branch}<span class="ws-count">{status.branch as string}</span>{/if}
-  </summary>
+<details class="workspace-section repo-panel" class:repo-panel--compact={compact} open>
+  {#if !compact}
+    <summary><strong>{t('repo.title')}</strong>
+      {#if status?.branch}<span class="ws-count">{status.branch as string}</span>{/if}
+    </summary>
+  {/if}
 
   {#if error}
     <p class="repo-error">{error}</p>
@@ -104,23 +106,33 @@
   {:else if !status.is_git}
     <p class="repo-muted">{t('repo.notGit')}{status.path ? ' — ' + status.path : ''}.</p>
   {:else}
-    <div class="repo-grid">
-      <span class="repo-label">{t('repo.path')}</span><code>{status.path as string}</code>
-      <span class="repo-label">{t('repo.branch')}</span>
-      <span>
-        {status.branch as string}
-        {#if status.dirty}<span class="repo-dirty">● {(status.dirty_count as number) || ''} {t('repo.uncommitted')}</span>{/if}
-      </span>
-      {#if status.remote_url}
-        <span class="repo-label">{t('repo.remote')}</span><code>{status.remote_url as string}</code>
-      {/if}
-      {#if status.upstream}
-        <span class="repo-label">{t('repo.upstream')}</span>
-        <span>{status.upstream as string} · {(status.ahead as number) || 0} {t('repo.ahead')}, {(status.behind as number) || 0} {t('repo.behind')}</span>
-      {/if}
-    </div>
+    {#if compact}
+      <div class="repo-compact-row">
+        <span class="repo-label">{t('repo.branch')}</span>
+        <span>
+          {status.branch as string}
+          {#if status.dirty}<span class="repo-dirty">● {(status.dirty_count as number) || ''} {t('repo.uncommitted')}</span>{/if}
+        </span>
+      </div>
+    {:else}
+      <div class="repo-grid">
+        <span class="repo-label">{t('repo.path')}</span><code>{status.path as string}</code>
+        <span class="repo-label">{t('repo.branch')}</span>
+        <span>
+          {status.branch as string}
+          {#if status.dirty}<span class="repo-dirty">● {(status.dirty_count as number) || ''} {t('repo.uncommitted')}</span>{/if}
+        </span>
+        {#if status.remote_url}
+          <span class="repo-label">{t('repo.remote')}</span><code>{status.remote_url as string}</code>
+        {/if}
+        {#if status.upstream}
+          <span class="repo-label">{t('repo.upstream')}</span>
+          <span>{status.upstream as string} · {(status.ahead as number) || 0} {t('repo.ahead')}, {(status.behind as number) || 0} {t('repo.behind')}</span>
+        {/if}
+      </div>
+    {/if}
 
-    {#if Array.isArray(status.commits) && (status.commits as unknown[]).length > 0}
+    {#if !compact && Array.isArray(status.commits) && (status.commits as unknown[]).length > 0}
       <ul class="repo-commits">
         {#each (status.commits as Record<string, unknown>[]) as c (c.hash as string)}
           <li>
@@ -132,15 +144,19 @@
       </ul>
     {/if}
 
-    <div class="repo-actions">
-      <a href={repoArchiveUrl(projectId)} class="repo-btn" download>{t('repo.downloadZip')}</a>
+    <div class="repo-actions" class:repo-actions--compact={compact}>
+      {#if !compact}
+        <a href={repoArchiveUrl(projectId)} class="repo-btn" download>{t('repo.downloadZip')}</a>
+      {/if}
       {#if canWrite}
         <button class="repo-btn repo-btn-green" disabled={!!busy} onclick={doCommit}>{t('repo.commit')}</button>
         <button class="repo-btn" disabled={!!busy} onclick={() => run('Push', () => repoPush(projectId))}>{t('repo.push')}</button>
         <button class="repo-btn" disabled={!!busy} onclick={() => run('Pull', () => repoPull(projectId))}>{t('repo.pull')}</button>
-        <button class="repo-btn repo-btn-red" disabled={!!busy} onclick={doSync}>{t('repo.forceSync')}</button>
-        <button class="repo-btn repo-btn-purple" disabled={!!busy} onclick={doMakePR}>{t('repo.makePr')}</button>
-        <button class="repo-btn repo-btn-amber" disabled={!!busy} onclick={doSetRemote}>{t('repo.setRemote')}</button>
+        {#if !compact}
+          <button class="repo-btn repo-btn-red" disabled={!!busy} onclick={doSync}>{t('repo.forceSync')}</button>
+          <button class="repo-btn repo-btn-purple" disabled={!!busy} onclick={doMakePR}>{t('repo.makePr')}</button>
+          <button class="repo-btn repo-btn-amber" disabled={!!busy} onclick={doSetRemote}>{t('repo.setRemote')}</button>
+        {/if}
       {/if}
     </div>
     {#if busy}
@@ -272,5 +288,29 @@
     color: #b00;
     font-size: 0.85rem;
     margin: 0.5rem 0 0;
+  }
+  .repo-panel--compact {
+    padding: 0.3rem 0.5rem;
+    font-size: 0.78rem;
+    margin-top: 0;
+  }
+  .repo-panel--compact summary {
+    display: none;
+  }
+  .repo-compact-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: 0.15rem 0;
+    font-size: 0.85rem;
+  }
+  .repo-panel--compact .repo-commits {
+    display: none;
+  }
+  .repo-panel--compact .repo-actions {
+    margin-top: 0.2rem;
+    padding-top: 0.2rem;
+    border-top: none;
+    gap: 0.25rem;
   }
 </style>

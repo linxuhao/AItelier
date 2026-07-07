@@ -499,12 +499,11 @@
           </span>
         </summary>
 
-        <!-- Lazy load RepoPanel in compact mode only when expanded -->
+        <!-- Lazy load RepoPanel only when expanded -->
         {#if expandedRepos.has(repo.repo_path)}
           <RepoPanel
             projectId={repo.representative_project_id}
             {canWrite}
-            compact
           />
         {/if}
 

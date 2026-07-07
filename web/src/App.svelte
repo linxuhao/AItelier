@@ -3,13 +3,12 @@
   import Router from 'svelte-spa-router';
 
   import AppBar from './views/AppBar.svelte';
-  import Dashboard from './views/Dashboard.svelte';
+  import UnifiedDashboard from './views/UnifiedDashboard.svelte';
+  import RedirectToDashboard from './views/RedirectToDashboard.svelte';
   import Project from './views/Project.svelte';
   import Chat from './views/Chat.svelte';
   import Trace from './views/Trace.svelte';
   import Tracking from './views/Tracking.svelte';
-  import Repositories from './views/Repositories.svelte';
-  import Repository from './views/Repository.svelte';
   import NotificationPanel from './views/NotificationPanel.svelte';
   import CheckpointModal from './views/CheckpointModal.svelte';
   import ConfirmDialog from './views/ConfirmDialog.svelte';
@@ -25,8 +24,8 @@
   import { syncInitialLang } from './stores/i18n';
 
   const routes = {
-    '/': Dashboard,
-    '/projects': Dashboard,
+    '/': UnifiedDashboard,
+    '/projects': UnifiedDashboard,
     '/chat': Chat, // the butler is standalone — the ONLY chat entry
     '/projects/:id': Project,
     // Project-level trace: no runId -> Trace targets the project id (the
@@ -34,8 +33,8 @@
     '/projects/:id/trace': Trace,
     '/projects/:id/trace/:runId': Trace,
     '/tracking': Tracking,
-    '/repos': Repositories,
-    '/repos/:repoPath': Repository,
+    '/repos': RedirectToDashboard,
+    '/repos/:repoPath': RedirectToDashboard,
   };
 
   // SSE handler for checkpoint_reached: auto-open the CheckpointModal.

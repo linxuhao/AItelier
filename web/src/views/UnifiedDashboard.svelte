@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { push } from 'svelte-spa-router';
   import { authStore } from '../stores/auth';
   import { connectionStore } from '../stores/connection';
@@ -36,6 +36,8 @@
   let expandedRepos = $state<Set<string>>(new Set());
   let savedExpanded = $state<Set<string>>(new Set());
   let autoExpandedOnce = $state(false);
+  let wasSearching = $state(false);
+  let wasSearching = $state(false);
 
   // Create form state (ported from Dashboard.svelte)
   let createFormVisible = $state(false);
@@ -66,14 +68,20 @@
   // ── Search effect: auto-expand all matching repos during search ──
 
   $effect(() => {
-    if (searchQuery.trim()) {
-      // Entering search mode: save current expanded state, expand all matching
-      savedExpanded = new Set(expandedRepos);
+    const query = searchQuery.trim();
+    if (query) {
+      if (!wasSearching) {
+        // Just entered search mode: save current expanded state
+        savedExpanded = new Set(untrack(() => expandedRepos));
+        wasSearching = true;
+      }
+      // Expand all matching repos during search
       expandedRepos = new Set(filteredRepos.map(r => r.repo_path));
     } else {
-      // Exiting search mode: restore saved expanded state
-      if (savedExpanded.size > 0 || autoExpandedOnce) {
+      if (wasSearching) {
+        // Just exited search mode: restore saved expanded state
         expandedRepos = savedExpanded;
+        wasSearching = false;
       }
     }
   });

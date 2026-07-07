@@ -387,10 +387,11 @@ class PromptAssembler:
         if rejection_history:
             sections.append(rejection_history)
 
-        # [Language Instruction] — at the very END so it never busts the
-        # prompt-cache prefix when the user changes language mid-project.
-        if lang_instruction:
-            sections.append(lang_instruction)
+        # [Language Instruction] — NOT appended here. The caller (dpe_pipeline.py)
+        # injects it AFTER the [Turn Budget] block so it is the absolute last
+        # content the model sees, maximizing recency-weighted language override.
+        # The lang_instruction is still resolved from user_lang above (line 196)
+        # for use by build_shared_preamble() and for traceability.
 
         return "\n\n".join(sections)
 

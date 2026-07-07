@@ -7,11 +7,17 @@
 #        （带 config_name 前缀），Inbox 保留在顶层（AItelier 概念）。
 
 import json
+import os
+import os
 import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# Force English locale for all git subprocess calls — prevents French
+# locale leakage in dashboard action result messages (res.detail).
+_GIT_ENV = {"LC_ALL": "C", **os.environ}
 
 # 六步法步骤序列（string ID）
 STEP_SEQUENCE = ["1", "2", "3", "5"]
@@ -105,10 +111,10 @@ class WorkspaceManager:
 
         # 初始化 DPS Git 仓库 (事件溯源基座)
         if not (dps_path / ".git").exists():
-            subprocess.run(["git", "init"], cwd=dps_path, check=True, capture_output=True)
+            subprocess.run(["git", "init"], cwd=dps_path, check=True, capture_output=True, env=_GIT_ENV)
             (dps_path / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
-            subprocess.run(["git", "add", "."], cwd=dps_path, check=True)
-            subprocess.run(["git", "commit", "-m", "Initial commit: DPS Workspace Created"], cwd=dps_path)
+            subprocess.run(["git", "add", "."], cwd=dps_path, check=True, env=_GIT_ENV)
+            subprocess.run(["git", "commit", "-m", "Initial commit: DPS Workspace Created"], cwd=dps_path, env=_GIT_ENV)
 
         # 创建 DPS 目录结构
         (dps_path / "Global_Mount").mkdir(exist_ok=True)
@@ -129,10 +135,10 @@ class WorkspaceManager:
             code_path = self.projects_base / project_id
             code_path.mkdir(parents=True, exist_ok=True)
             if not (code_path / ".git").exists():
-                subprocess.run(["git", "init"], cwd=code_path, check=True, capture_output=True)
+                subprocess.run(["git", "init"], cwd=code_path, check=True, capture_output=True, env=_GIT_ENV)
                 (code_path / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
-                subprocess.run(["git", "add", "."], cwd=code_path, check=True)
-                subprocess.run(["git", "commit", "-m", "Initial commit: Project workspace"], cwd=code_path)
+                subprocess.run(["git", "add", "."], cwd=code_path, check=True, env=_GIT_ENV)
+                subprocess.run(["git", "commit", "-m", "Initial commit: Project workspace"], cwd=code_path, env=_GIT_ENV)
 
         elif repo_type == "existing":
             if not repo_path:
@@ -150,7 +156,7 @@ class WorkspaceManager:
             if not code_path.exists():
                 subprocess.run(
                     ["git", "clone", repo_url, str(code_path)],
-                    check=True, capture_output=True
+                    check=True, capture_output=True, env=_GIT_ENV
                 )
             elif not (code_path / ".git").exists():
                 raise ValueError(f"Clone target exists but is not a git repo: {code_path}")
@@ -230,7 +236,7 @@ class WorkspaceManager:
         """[时光机] 强行重置代码仓库状态"""
         code_path = self.get_code_path(project_id)
         try:
-            subprocess.run(["git", "reset", "--hard", commit_hash], cwd=code_path, check=True)
+            subprocess.run(["git", "reset", "--hard", commit_hash], cwd=code_path, check=True, env=_GIT_ENV)
             return True
         except subprocess.CalledProcessError:
             return False
@@ -239,7 +245,7 @@ class WorkspaceManager:
         """获取项目工作区的当前 Git Commit Hash。"""
         res = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=project_path, capture_output=True, text=True
+            cwd=project_path, capture_output=True, text=True, env=_GIT_ENV
         )
         return res.stdout.strip()
 
@@ -257,7 +263,7 @@ class WorkspaceManager:
         def _git(*args: str) -> tuple[int, str]:
             res = subprocess.run(
                 ["git", *args], cwd=code_path,
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=_GIT_ENV,
             )
             return res.returncode, res.stdout.strip()
 
@@ -323,6 +329,7 @@ class WorkspaceManager:
         """Run a git command, raising RuntimeError(stderr) on non-zero exit."""
         res = subprocess.run(
             ["git", *args], cwd=code_path, capture_output=True, text=True,
+            env=_GIT_ENV,
         )
         if res.returncode != 0:
             raise RuntimeError(
@@ -334,7 +341,7 @@ class WorkspaceManager:
         code_path = self.get_code_path(project_id)
         res = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=code_path, capture_output=True, text=True,
+            cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
         )
         if res.returncode != 0:
             raise RuntimeError("Not a git repository")
@@ -346,6 +353,7 @@ class WorkspaceManager:
         code_path = self._require_git_repo(project_id)
         existing = subprocess.run(
             ["git", "remote"], cwd=code_path, capture_output=True, text=True,
+            env=_GIT_ENV,
         ).stdout.split()
         if name in existing:
             self._run_git_checked(code_path, "remote", "set-url", name, url)
@@ -361,7 +369,7 @@ class WorkspaceManager:
         self._run_git_checked(code_path, "add", "-A")
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=code_path, capture_output=True, text=True,
+            cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
         ).stdout.strip()
         if not porcelain:
             return {"committed": False, "message": "Nothing to commit"}

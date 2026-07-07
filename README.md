@@ -139,7 +139,9 @@ The flagship DPE pipeline planning, building, and reviewing a real e-commerce ap
 
 A typical run with the flagship DPE pipeline:
 
-1. **Describe what you want.** Tell the meta agent your goal. It asks a few scoping questions, drafts a project brief, and — once you approve — starts the pipeline.
+1. **Describe what you want.** Tell the butler your goal. It picks one of two paths automatically:
+   - **Path A — Pipeline Offload** (fast): for small bug fixes or features (~5 files) on existing projects, offloads directly to a subagent/fix_tests/investigate pipeline — no requirements conversation needed.
+   - **Path B — DPE** (safe default): for new projects and non-trivial changes, asks scoping questions, drafts a project brief, and — once you approve — starts the full research → architect → plan → build pipeline.
 2. **Watch it work, with checkpoints.** Research → Architect → PM → per-task Plan/Implement/Verify → Final Verification. It **pauses at review checkpoints** so you can **approve** or **reject with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
 3. **Inspect the trace.** Every prompt, response, and tool call is in an append-only audit log — answer "why did it do that?" for any step, after the fact.
 4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.

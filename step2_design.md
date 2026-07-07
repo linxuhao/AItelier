@@ -2,218 +2,171 @@
 
 ## Overview
 
-Three independent changes to the AItelier web dashboard and backend:
-1. **UnifiedDashboard: full git panel** — remove the `compact` prop from `<RepoPanel>` so each expanded repo accordion shows the complete git management interface (status grid, commit history, download-zip, all six action buttons).
-2. **Backend locale fix** — force `LC_ALL=C` on all git subprocess calls in `core/workspace_manager.py` and `core/git_ops.py` so git stdout/stderr is always English, preventing French locale leakage in the dashboard's action result messages.
-3. **Delete deprecated page files** — remove `web/src/views/Repository.svelte` and `web/src/views/Repositories.svelte`, which have zero remaining imports and whose routes already redirect to the dashboard.
+Add a "Path A — Pipeline Offload" decision path to the butler agent's SYSTEM_PROMPT in `core/meta_agent.py`, allowing small bug fixes and small features (~5 files or fewer) on existing projects to be offloaded directly to subagent/fix_tests/investigate/code_review pipelines without the DPE requirements conversation. Keep the existing DPE flow as Path B (the default for everything else — new projects and non-trivial changes).
 
-## Architecture Diagram (textual)
+This is purely a **prompt string edit** to one file. No new tool definitions, no runtime logic changes, no pipeline config changes.
+
+## Architecture Diagram
 
 ```
-┌──────────────────────────────────────────────────┐
-│  web/src/views/UnifiedDashboard.svelte           │
-│  ┌────────────────────────────────────────────┐  │
-│  │  Repo accordion (per repo_path)            │  │
-│  │  ┌──────────────────────────────────────┐  │  │
-│  │  │  RepoPanel.svelte (compact removed)  │  │  │
-│  │  │  • Full status grid (path, branch,   │  │  │
-│  │  │    remote, upstream, ahead/behind)   │  │  │
-│  │  │  • Commit history list               │  │  │
-│  │  │  • Download-zip link                 │  │  │
-│  │  │  • 6 action buttons                  │  │  │
-│  │  │    (Commit, Push, Pull, Force Sync,  │  │  │
-│  │  │     Make PR, Set Remote)             │  │  │
-│  │  └──────────────────────────────────────┘  │  │
-│  └────────────────────────────────────────────┘  │
-└────────────────────┬─────────────────────────────┘
-                     │ API calls (lib/api.ts)
-                     ▼
-┌──────────────────────────────────────────────────┐
-│  api/repo_routers.py (FastAPI endpoints)          │
-│  /api/repos/{id}/status | commit | push | pull   │
-│  /api/repos/{id}/sync | set-remote | make-pr     │
-└────────────────────┬─────────────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────────────┐
-│  core/workspace_manager.py                        │
-│  ┌────────────────────────────────────────────┐  │
-│  │  _GIT_ENV = {"LC_ALL": "C", **os.environ}  │  │
-│  │                                           │  │
-│  │  All subprocess.run(["git", ...]) calls   │  │
-│  │  now pass env=_GIT_ENV                    │  │
-│  └────────────────────────────────────────────┘  │
-└────────────────────┬─────────────────────────────┘
-                     │
-                     ▼
-┌──────────────────────────────────────────────────┐
-│  core/git_ops.py                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │  _GIT_ENV = {"LC_ALL": "C", **os.environ}  │  │
-│  │                                           │  │
-│  │  git subprocess calls now pass            │  │
-│  │  env=_GIT_ENV (defense-in-depth)          │  │
-│  └────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────┘
-
-[DELETED FILES]
-  web/src/views/Repository.svelte   ✕ (0 remaining imports)
-  web/src/views/Repositories.svelte ✕ (0 remaining imports)
+┌─────────────────────────────────────────────────────────┐
+│              butler SYSTEM_PROMPT                        │
+│              (core/meta_agent.py:62-127)                 │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ IDENTITY / ROLE (unchanged)                       │  │
+│  │ "You are the AItelier butler..."                  │  │
+│  └──────────────────────────────────────────────────┘  │
+│                         │                               │
+│                         ▼                               │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ PATH DECISION (NEW)                               │  │
+│  │ Decision table + routing logic:                   │  │
+│  │   - Existing project + small (~5 files) → Path A  │  │
+│  │   - Everything else → Path B (default)             │  │
+│  └──────────────────────────────────────────────────┘  │
+│                    │              │                     │
+│                    ▼              ▼                     │
+│  ┌──────────────────────┐ ┌────────────────────────┐  │
+│  │ PATH A (NEW)          │ │ PATH B (EXISTING)       │  │
+│  │ Pipeline Offload      │ │ DPE                     │  │
+│  │                        │ │                         │  │
+│  │ 1. Explore codebase   │ │ 1. start_new_project /  │  │
+│  │ 2. Pick pipeline      │ │    start_from_aitelier  │  │
+│  │    (describe_pipeline)│ │    / start_existing     │  │
+│  │ 3. Offload             │ │    / start_from_git_url│  │
+│  │    (start_config_run) │ │ 2. Relay questions      │  │
+│  │ 4. Drive to completion│ │ 3. Relay brief          │  │
+│  │    (wait→approve/     │ │ 4. Approve → build      │  │
+│  │     reject loop)      │ │                         │  │
+│  │ 5. Report              │ │                         │  │
+│  │    (get_pipeline_     │ │                         │  │
+│  │     result)           │ │                         │  │
+│  └──────────────────────┘ └────────────────────────┘  │
+│                         │                               │
+│                         ▼                               │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │ SHARED SECTIONS (preserved/lightly adjusted)      │  │
+│  │ - [ACTIVE PROJECT CONVERSATION] relay            │  │
+│  │ - Skill/workflow → generate_pipeline             │  │
+│  │ - After a pipeline starts (checkpoint handling)  │  │
+│  │ - CRITICAL rules                                 │  │
+│  │ - Otherwise (chit-chat)                          │  │
+│  │ - Placeholder variables                          │  │
+│  └──────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## Component List
 
-### 1. UnifiedDashboard.svelte — caller-side prop change
+### Component 1: Butler SYSTEM_PROMPT string
 
-- **File:** `web/src/views/UnifiedDashboard.svelte`
-- **Change:** Line 507: remove `compact` attribute from `<RepoPanel>` tag
-- **Before:**
-  ```svelte
-  <RepoPanel
-    projectId={repo.representative_project_id}
-    {canWrite}
-    compact
-  />
-  ```
-- **After:**
-  ```svelte
-  <RepoPanel
-    projectId={repo.representative_project_id}
-    {canWrite}
-  />
-  ```
-- **Impact:** RepoPanel defaults to `compact=false`, which activates the full git panel layout. All `{#if !compact}` blocks inside RepoPanel render: status grid with all fields, commit history list, download-zip link, and the three additional action buttons (Force Sync, Make PR, Set Remote).
-- **No changes needed** to RepoPanel.svelte itself — the `compact` prop definition and all conditional blocks are already in place.
+- **File:** `./core/meta_agent.py`
+- **Lines:** 62–127 (triple-quoted Python string assigned to `SYSTEM_PROMPT`)
+- **Responsibility:** Instructs the butler LLM on how to route user requests and orchestrate pipelines
+- **Interface:** This is a string injected as the system message into the butler's LLM conversation. It has no programmatic interface — it drives LLM behavior purely through instruction.
+- **Change scope:** ~65 lines of Python string (adding Path A section + decision table; reorganizing existing Path B text)
 
-### 2. RepoPanel.svelte — zero changes (verification only)
+### Component 2: (No changes) Existing pipeline configs
 
-- **File:** `web/src/views/RepoPanel.svelte`
-- **Status:** No structural changes. The component already fully supports both compact and full modes via its `compact` prop (default `false`). The prop definition remains intact for potential future use.
-- **Key internal structure (for confirmation):**
-  - Line 18: `let { ..., compact = false } = $props()` — default is `false`, matching our change
-  - Lines 95-100: `<details>` with `class:repo-panel--compact={compact}` and conditional `<summary>`
-  - Lines 109-133: Compact vs full status display (`{#if compact}` shows branch+dirty only; `{:else}` shows full grid with path, branch, remote, upstream, ahead/behind)
-  - Lines 135-145: Commit history list — gated by `{#if !compact && ...}`
-  - Line 149: Download-zip link — gated by `{#if !compact}`
-  - Lines 155-159: Force Sync, Make PR, Set Remote buttons — gated by `{#if !compact}`
+The five offload pipelines are already registered and operational:
+- `subagent` — gated generalist worker (default for small fixes/features)
+- `fix_tests` — test-fix loop (when tests are failing)
+- `investigate` — read-only exploration
+- `code_review` — adversarial diff review
+- `coding_impl` — offloaded implementation from approved plan
 
-### 3. workspace_manager.py — locale fix via module-level `_GIT_ENV`
+### Component 3: (No changes) Existing orchestration tools
 
-- **File:** `core/workspace_manager.py`
-- **Change:** Add module-level constant after imports:
-  ```python
-  import os
-  _GIT_ENV = {"LC_ALL": "C", **os.environ}
-  ```
-- **All git subprocess call sites** to receive `env=_GIT_ENV`:
+All tools needed for Path A already exist in `TOOL_DEFINITIONS`:
+- `describe_pipeline(name)` — check pipeline input contracts
+- `start_config_run(config_name, seed_text, against_project)` — launch pipeline
+- `wait_until_next_checkpoint_or_completion(run_id)` — block until checkpoint/completion
+- `approve_checkpoint(run_id)` / `reject_checkpoint(run_id, feedback)` — handle checkpoints
+- `get_pipeline_result(run_id)` — get final output
+- `stop_pipeline(run_id)` — cancel a run
+- `list_code_tree(path)`, `read_code_file(path)`, `search_code(pattern)` — explore codebase
 
-| # | Method | Line | Command(s) | Priority | Notes |
-|---|--------|------|-----------|----------|-------|
-| 1 | `_run_git_checked` | 324 | Any git command | **P0** | Covers push, pull, commit, force_sync, set_remote, push_head — all write operations whose output feeds `res.detail` |
-| 2 | `_git()` in `repo_status` | 258 | `rev-parse`, `status`, `remote`, `rev-list`, `log` | **P0** | Covers all dashboard status reads |
-| 3 | `_get_git_hash` | 240 | `git rev-parse HEAD` | **P1** | Output appears in commit response |
-| 4 | `_require_git_repo` | 335 | `git rev-parse --is-inside-work-tree` | **P1** | Error output is user-visible (HTTP 400) |
-| 5 | `repo_commit` porcelain check | 362 | `git status --porcelain` | **P1** | Direct subprocess.run, not covered by helpers |
-| 6 | `repo_set_remote` remote check | 347 | `git remote` | **P1** | Direct subprocess.run, not covered by helpers |
-| 7 | `setup_workspace` DPS init | 108,110,111 | `git init`, `git add`, `git commit` | P2 | Init-time, output not user-visible in dashboard |
-| 8 | `setup_workspace` new repo init | 132,134,135 | `git init`, `git add`, `git commit` | P2 | Init-time, output not user-visible in dashboard |
-| 9 | `setup_workspace` clone | 152 | `git clone` | P2 | Init-time, output not user-visible in dashboard |
-| 10 | `rollback` | 233 | `git reset --hard` | P2 | Error recovery, output not directly user-visible |
+## Prompt Structure Design
 
-- **Implementation note:** The `_run_git_checked` and `_git` inner function are the two highest-priority sites — together they cover ~90% of user-visible git output. The remaining direct subprocess calls (items 5-10) are included for completeness and defense-in-depth. All sites use the same single-line change: add `env=_GIT_ENV` to the `subprocess.run()` call.
+### Section ordering (final SYSTEM_PROMPT)
 
-### 4. git_ops.py — locale fix (defense-in-depth)
+1. **Identity/role** (1 line) — unchanged
+2. **Path decision guide** (NEW) — how to choose between Paths A and B, includes the decision table
+3. **Path A — Pipeline Offload** (NEW) — explore → pick → offload → drive → report workflow
+4. **Path B — DPE** (MODIFIED) — existing DPE flow, recontextualized as "for everything else"
+5. **Active conversation relay** — unchanged
+6. **Skill/workflow → pipeline** — unchanged
+7. **After a pipeline starts** — lightly expanded to cover both Path A and Path B checkpoint handling
+8. **CRITICAL rules** — preserved with minor additions for Path A
+9. **Otherwise** — unchanged
+10. **Placeholder variables** — unchanged
 
-- **File:** `core/git_ops.py`
-- **Change:** Add `import os` (if not already present) and module-level `_GIT_ENV = {"LC_ALL": "C", **os.environ}`. Add `env=_GIT_ENV` to the two git subprocess calls:
+### Path A workflow (5 steps)
 
-| # | Method | Line | Command | Priority |
-|---|--------|------|---------|----------|
-| 1 | `create_github_pr` | 48-51 | `git remote get-url origin` | P2 |
-| 2 | `create_github_pr` | 57-60 | `git rev-parse --abbrev-ref HEAD` | P2 |
+| Step | Action | Tool(s) |
+|------|--------|---------|
+| 1. Explore | Understand the codebase before acting | `list_code_tree`, `read_code_file`, `search_code` |
+| 2. Pick pipeline | Choose the right offload target; verify its contract | `describe_pipeline(name)` |
+| 3. Offload | Launch the pipeline against the existing project | `start_config_run(config_name, seed_text, against_project=<project_id>)` |
+| 4. Drive | Block→relay→approve/reject loop until completion | `wait_until_next_checkpoint_or_completion`, `approve_checkpoint`, `reject_checkpoint` |
+| 5. Report | Summarize the result | `get_pipeline_result` |
 
-- **Rationale:** Lower priority because PR creation errors come from the GitHub REST API, not git stderr. Still cheap to add for defense-in-depth.
+### Decision table (embedded in prompt)
 
-### 5. Deleted files
+| Situation | Path | Pipeline |
+|-----------|------|----------|
+| "Fix the login redirect bug" on existing project | A | subagent |
+| "Add a search bar" on existing project | A | subagent |
+| "Find everywhere we use the old API" on existing project | A | investigate |
+| "The tests are failing — fix them" on existing project | A | fix_tests |
+| "Build a new habit-tracking app" (from scratch) | B | DPE |
+| "Add real-time collaboration" (touches architecture) | B | DPE |
+| "Migrate the database schema and all queries" (many files) | B | DPE |
 
-| File | Path | Size | Status |
-|------|------|------|--------|
-| Repository.svelte | `web/src/views/Repository.svelte` | ~8 KB | Delete — 0 imports across codebase |
-| Repositories.svelte | `web/src/views/Repositories.svelte` | ~4 KB | Delete — 0 imports across codebase |
+### Path A gates (when NOT to use Path A)
 
-- **Verification performed:** `search_repo_root` for `Repository.svelte` and `Repositories.svelte` across all files in the repo. Only `.aitelier/knowledge.md` references them as historical context — no Svelte/TS/JS import statements.
-- **Routing:** `App.svelte` routes `/repos` and `/repos/:repoPath` to `RedirectToDashboard` (which pushes to `/`). Neither old page is imported in `App.svelte`.
-- **No test files depend on these** — the `__tests__/views/` directory contains tests for `Project`, `ChatCodingMode`, `WorkspaceBrowser`, and `StepTimeline` only.
+- No existing project (new app from scratch)
+- Non-trivial scope (~5+ files, architectural implications)
+- Cross-cutting concerns (shared design, data model changes)
+- User explicitly requests DPE/architecture planning
+- Ambiguous scope that reveals cross-cutting implications after initial exploration
 
-## Data Flow
+When in doubt: **Path A for existing projects with clearly small scope; Path B (safer default) for everything else.**
 
-### Status read flow (dashboard poll)
+### Extended CRITICAL rules
 
-```
-UnifiedDashboard.svelte (10s poll)
-  → api.listRepos() → GET /api/repos → DB query (repo metadata)
-  ├── Accordion expands → RepoPanel mounts → onMount(load)
-  │     → api.repoStatus(projectId) → GET /api/repos/{id}/status
-  │           → workspace_manager.repo_status()
-  │                 → _git() helper (now with LC_ALL=C) → subprocess.run
-  │                 → Returns {is_git, branch, dirty, remote_url, upstream, ahead, behind, commits}
-  │     → Renders status grid + commit list + action buttons
-```
-
-### Git write flow (user clicks action button)
-
-```
-RepoPanel.svelte → doCommit() / run('Push', ...) / doSync() / etc.
-  → api.repoCommit(projectId, msg) → POST /api/repos/{id}/commit
-  → api.repoPush(projectId)        → POST /api/repos/{id}/push
-  → api.repoPull(projectId)        → POST /api/repos/{id}/pull
-  → api.repoSync(projectId, ...)   → POST /api/repos/{id}/sync
-  → api.repoSetRemote(projectId, url) → POST /api/repos/{id}/set-remote
-  → api.repoMakePR(projectId, ...)    → POST /api/repos/{id}/make-pr
-        → workspace_manager.repo_*() methods
-              → _run_git_checked() (now with LC_ALL=C) → subprocess.run
-              → Returns {detail: stdout} or {message: "..."}
-        → Frontend run() displays res.message || res.detail in actionMsg
-```
-
-### Key: LC_ALL=C ensures `res.detail` (git stdout) is always English
-Before: `git pull` on a French server → `res.detail = "Déjà à jour."`
-After:  `git pull` with LC_ALL=C → `res.detail = "Already up to date."`
+Existing rules preserved; adds:
+- Path A still uses pipelines — NEVER write code yourself
+- Path A requires an existing project with a wired repo
+- If exploration reveals the task is larger than ~5 files, escalate to Path B
 
 ## Technical Stack
 
-| Layer | Technology | Notes |
-|-------|-----------|-------|
-| Frontend | Svelte 5 (runes mode) + TypeScript | `$props()`, `$state`, `$derived`, `$effect` |
-| Styling | Pico CSS | Already included in project |
-| Routing | svelte-spa-router | `App.svelte` route table |
-| Backend | Python 3.12+ / FastAPI | `api/repo_routers.py` endpoints |
-| Git operations | `subprocess.run` (stdlib) | No external git libraries |
-| Locale fix | `env={"LC_ALL": "C", **os.environ}` | Stdlib-only, no new dependencies |
+- **Language:** Python 3.x (string literal edit only)
+- **No dependencies changed**
+- **No tests changed** (existing tests for `core/meta_agent.py` continue to pass — they test tool definitions and runtime behavior, not the SYSTEM_PROMPT string content)
 
 ## Extensibility Considerations
 
-- **`compact` prop preserved:** RepoPanel.svelte retains the `compact` prop (default `false`). Future views or embedded contexts can still use `<RepoPanel compact />` without any changes to the component.
-- **Module-level `_GIT_ENV` constant:** Using a shared constant (rather than inlining the dict at each call site) makes it trivial to add future git subprocess calls with the correct locale — just pass `env=_GIT_ENV`.
-- **No new abstractions:** The design avoids creating a `_git_subprocess()` wrapper or other helper functions — the module-level constant approach is the simplest change with the least risk of introducing bugs. Future refactoring to a centralized wrapper is still possible since all call sites use the same `_GIT_ENV` constant name.
-- **File deletion is safe:** The old pages had zero remaining imports. If a rollback is ever needed, the files can be recovered from git history.
+- **New offload pipelines:** If new pipeline configs are registered (e.g., a `gen_*` skill), the butler discovers them via `describe_pipeline` — no prompt change needed. The prompt says "pick the right pipeline" generically.
+- **Threshold tuning:** The "~5 files" heuristic is in the prompt string, not in code. Adjusting it is a one-line edit.
+- **Path C (future):** The prompt structure cleanly separates path selection from path execution. A future Path C would slot in next to A and B with its own decision-table row.
 
-## Risk Assessment
+## Rollback Plan
 
-| Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|------------|
-| `LC_ALL=C` breaks a non-git subprocess | Very Low | Low | `env=` is scoped to individual `subprocess.run` calls — only git commands are affected |
-| Removing `compact` causes layout overflow | Low | Medium | RepoPanel's full-mode CSS already exists and was ported from the old Repository.svelte layout. Tested in prior runs. |
-| `_GIT_ENV` computed at module import time captures wrong env | Very Low | Low | `os.environ` at import time is the same environment the process uses. Docker containers have stable env. |
-| Deleted files needed by an undiscovered reference | Very Low | High | Zero imports confirmed via grep of entire `web/src/` directory. Files recoverable via git. |
-| `env=` merge pattern breaks on some Python versions | Very Low | Low | `{**os.environ}` dict unpacking is supported since Python 3.5. Project uses Python 3.12+. |
+The change is a single-file string edit. Rollback:
+1. Revert `core/meta_agent.py` to the previous version via `git checkout`
+2. Restart the butler agent service
 
-## Implementation Order (for PM task decomposition)
+No database migrations, no schema changes, no config changes. The SYSTEM_PROMPT is read at agent initialization time.
 
-1. **Task 1:** Backend — Add `_GIT_ENV` constant and apply `env=_GIT_ENV` to all git subprocess calls in `core/workspace_manager.py`
-2. **Task 2:** Backend — Add `_GIT_ENV` constant and apply `env=_GIT_ENV` to git subprocess calls in `core/git_ops.py`
-3. **Task 3:** Frontend — Remove `compact` prop from `<RepoPanel>` in `web/src/views/UnifiedDashboard.svelte`
-4. **Task 4:** Frontend — Delete `web/src/views/Repository.svelte` and `web/src/views/Repositories.svelte`
-5. **Task 5:** Verification — Build check, lint, confirm no import errors, spot-check git operation messages are English
+## Edge Cases Addressed
 
-Tasks 1-2 are independent of tasks 3-4. Tasks 3 and 4 are independent. All can be parallelized.
+1. **No project exists:** Path A gates require an existing project → falls through to Path B
+2. **Ambiguous scope:** Prompt instructs butler to explore first; if scope exceeds ~5 files or reveals architectural implications, escalate to Path B
+3. **Coherence trigger:** Multiple independent small fixes can each be Path A; a single change touching many files with shared design → Path B (same rule as coding_mode.md)
+4. **Unknown pipeline:** `describe_pipeline` may return an error → butler instructed to fall back to `list_pipelines` or pick a safe default (subagent)
+5. **Missing repo:** `start_config_run` may fail if project has no repo → butler instructed to explain and suggest Path B
+6. **Mixed request:** Prompt instructs butler to prefer Path B for safety when a request mixes small fixes with architectural changes
+7. **Existing project without prior DPE run:** "Existing project" is the gate, not DPE history — projects started via `start_existing_project` qualify for Path A

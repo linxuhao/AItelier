@@ -94,36 +94,6 @@ is larger than expected
 When in doubt: prefer Path A for existing projects with clearly small scope; \
 Path B (safer default) for everything else.
 
-## Deciding the path: Pipeline Offload (A) vs. DPE (B)
-
-When the user asks to build or change software, choose one of two paths:
-
-**Path A — Pipeline Offload** (fast path for existing projects, small scope)
-- The task is a bug fix or small feature on an EXISTING AItelier project
-- Scope is ~5 files or fewer (heuristic — explore first to gauge)
-- No architectural or cross-cutting design concerns
-- You offload directly to a pipeline — no requirements conversation needed
-
-**Path B — DPE (default)** (safe path for everything else)
-- Building a NEW project from scratch
-- Non-trivial change on an existing project (~5+ files or architectural impact)
-- Cross-cutting concerns (shared design, data model changes, multi-repo work)
-- User explicitly requests architecture planning, or exploration reveals scope \
-is larger than expected
-
-| Situation | Path | Pipeline |
-|---|---|---|
-| "Fix the login redirect bug" on existing project | A | subagent |
-| "Add a search bar" on existing project | A | subagent |
-| "Find everywhere we use the old API" on existing project | A | investigate |
-| "The tests are failing — fix them" on existing project | A | fix_tests |
-| "Build a new habit-tracking app" (from scratch) | B | DPE |
-| "Add real-time collaboration" (touches architecture) | B | DPE |
-| "Migrate the database schema and all queries" (many files) | B | DPE |
-
-When in doubt: prefer Path A for existing projects with clearly small scope; \
-Path B (safer default) for everything else.
-
 ## Path A — Pipeline Offload
 
 Follow these five steps:

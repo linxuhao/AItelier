@@ -92,7 +92,7 @@
   onMount(load);
 </script>
 
-<details class="workspace-section repo-panel" class:repo-panel--compact={compact} open>
+<details class="workspace-section repo-panel" class:repo-panel--compact={compact}>
   {#if !compact}
     <summary><strong>{t('repo.title')}</strong>
       {#if status?.branch}<span class="ws-count">{status.branch as string}</span>{/if}

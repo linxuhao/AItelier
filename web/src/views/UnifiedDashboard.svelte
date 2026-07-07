@@ -153,15 +153,20 @@
     savedExpanded = new Set(expandedRepos);
   }
 
-  function toggleRepo(repoPath: string): void {
+  function onRepoToggle(repoPath: string, e: Event): void {
+    const details = e.target as HTMLDetailsElement;
+    const inSet = expandedRepos.has(repoPath);
+    // Guard: skip if the DOM state already matches our set — this breaks the
+    // feedback loop when Svelte's open={...} binding triggers ontoggle.
+    if (details.open === inSet) return;
+    // User clicked — sync the set to match the DOM
     const next = new Set(expandedRepos);
-    if (next.has(repoPath)) {
-      next.delete(repoPath);
-    } else {
+    if (details.open) {
       next.add(repoPath);
+    } else {
+      next.delete(repoPath);
     }
     expandedRepos = next;
-    // If search is active, don't overwrite savedExpanded
     if (!searchQuery.trim()) {
       savedExpanded = new Set(next);
     }
@@ -477,7 +482,7 @@
       <details
         class="repo-section"
         open={expandedRepos.has(repo.repo_path)}
-        ontoggle={() => toggleRepo(repo.repo_path)}
+        ontoggle={(e) => onRepoToggle(repo.repo_path, e)}
       >
         <summary class="repo-summary">
           <span class="repo-summary-name">

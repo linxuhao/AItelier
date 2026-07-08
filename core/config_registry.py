@@ -191,6 +191,12 @@ class ConfigRegistry:
         try:
             sf._get_resolver(name)  # ensure the graph resolves; skip if broken
         except Exception:
+            # A broken graph silently vanishing from the registry is hard to
+            # diagnose (e.g. a generated pipeline the butler can't then run).
+            import logging
+            logging.getLogger("aitelier").warning(
+                "config %r did not resolve; skipped from registry", name,
+                exc_info=True)
             return None
         hints = {**_DEFAULTS, **_EXTERNAL_HINTS.get(name, {}),
                  **host_hints.get(name, {}), **(hint_overrides or {})}

@@ -2248,7 +2248,12 @@ class MetaAgent:
                     try:
                         sf.fail_step(claimed.token, str(e)[:200], retryable=True)
                     except Exception:
-                        pass
+                        # fail_step itself failing leaves the step stuck-claimed
+                        # and loses the original error entirely.
+                        import logging
+                        logging.getLogger("aitelier").warning(
+                            "fail_step failed after step error (%s); step may "
+                            "stay claimed", str(e)[:120], exc_info=True)
                     return {"status": "error", "run_id": run_id, "step_id": claimed.step_id,
                             "message": f"step '{claimed.step_id}' failed: {str(e)[:200]}"}
             return {"status": "error", "run_id": run_id,
@@ -2900,7 +2905,12 @@ class MetaAgent:
                     try:
                         sf.fail_step(claimed.token, error_msg, retryable=True)
                     except Exception:
-                        pass
+                        # fail_step itself failing leaves the step stuck-claimed
+                        # and loses the original error entirely.
+                        import logging
+                        logging.getLogger("aitelier").warning(
+                            "fail_step failed after step error (%s); step may "
+                            "stay claimed", error_msg[:120], exc_info=True)
                     return {
                         "status": "error",
                         "run_id": run_id,

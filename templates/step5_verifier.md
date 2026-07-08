@@ -36,9 +36,9 @@
 5. **目标回归**: 对照 Step 1 的 MVP 目标清单，逐条确认
 
 ## 工具使用建议
-- 先用 `list_repo_root` / `list_tree` 了解项目结构
-- 用 `search_repo_root` 搜索关键模式（`import`、`def `、`class `）快速定位
-- 只对关键集成点使用 `read_repo_root_file`
+- 先用 `list` / `list_tree` 了解项目结构
+- 用 `search` 搜索关键模式（`import`、`def `、`class `）快速定位
+- 只对关键集成点使用 `read`
 - **每读 2-3 个文件就写一段报告**，不要读完所有文件再写
 
 ## 任务要求

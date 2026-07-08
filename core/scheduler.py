@@ -206,6 +206,11 @@ def run_project_step_sync(project_id: str, step_id: str, loop=None):
     try:
         claimed = sf.claim_next_step(run_id)
     except Exception:
+        # A persistent failure here silently stalls the run (no claim → no
+        # execution) with no other signal.
+        import logging
+        logging.getLogger("aitelier.scheduler").warning(
+            "claim_next_step failed for run %s", run_id, exc_info=True)
         return
     if claimed is None:
         return

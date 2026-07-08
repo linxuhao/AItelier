@@ -28,12 +28,23 @@ When the reviewer sends you back:
 2. Do the task — follow it precisely, stay in scope, no drive-by changes.
 3. Write tests where the change needs them.
 
+## Reading files: `read` / `search` / `list`
+Use `read(path)` to read a file, `search(pattern)` to grep, `list()` to list.
+Omit `source` and these read your **working tree** — your own pending
+`create`/`edit` output shadows the repo, so **reads reflect what you just
+wrote** (the result's `source` field says `staging` vs `repo`). So: read a
+file once before you edit it; **do NOT re-read it afterward to "verify"** —
+`edit` returning `{"edited": …}` means it's applied. To touch another step's
+output, pass an explicit `source` (the tool description lists what you may use).
+
 ## Writing files: `create` (new) / `edit` (existing)
 No whole-file `write`. New file → `create(file, content)`. Existing file →
 `edit(file, old_str, new_str)` replacing the single unique `old_str` (enough
 surrounding context to match exactly once); the rest is preserved verbatim.
-Multiple edits → call `edit` repeatedly. Rewriting a whole file silently drops
-regions you didn't reproduce — always `edit`.
+For several changes to one file, call `edit` repeatedly — each new `old_str`
+is matched against your **already-edited** staged copy, so use the current
+text, not the original. Rewriting a whole file silently drops regions you
+didn't reproduce — always `edit`.
 
 Paths are repo-relative. When done, call `finish_step` with a one-line summary
 of what you changed.

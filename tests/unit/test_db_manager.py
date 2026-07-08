@@ -70,6 +70,23 @@ def test_ensure_project(db_manager):
     # Name not updated on existing project
     assert p2["name"] == "My Project"
 
+def test_ensure_project_defaults_repo_path_for_new(db_manager):
+    """new/clone projects get repo_path defaulted to projects_dir()/id.
+
+    Regression: butler-created 'new' projects passed repo_path=None, leaving the
+    row out of the dashboard's repository grouping (repo_path IS NOT NULL filter).
+    """
+    from core.datadir import projects_dir
+
+    p = db_manager.ensure_project("repo_new_proj", repo_type="new")
+    assert p["repo_path"] == str(projects_dir() / "repo_new_proj")
+
+    # An explicit repo_path (e.g. existing repo) is never overwritten.
+    p2 = db_manager.ensure_project(
+        "repo_existing_proj", repo_type="existing", repo_path="/some/real/repo"
+    )
+    assert p2["repo_path"] == "/some/real/repo"
+
 def test_get_project(db_manager):
     """测试项目查询"""
     db_manager.ensure_project("lookup_proj")
@@ -390,10 +407,12 @@ def test_create_tasks_from_manifest_owner(db_manager):
 
 
 def test_ensure_project_default_repo_type(db_manager):
-    """Projects default to repo_type='new'."""
+    """Projects default to repo_type='new' with repo_path under projects_dir()."""
+    from core.datadir import projects_dir
+
     p = db_manager.ensure_project("repo_proj")
     assert p["repo_type"] == "new"
-    assert p["repo_path"] is None
+    assert p["repo_path"] == str(projects_dir() / "repo_proj")
     assert p["repo_url"] is None
 
 

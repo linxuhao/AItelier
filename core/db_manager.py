@@ -732,6 +732,13 @@ class DBManager:
         """
         if name is None:
             name = project_id.replace("-", " ").replace("_", " ").title()
+        # For new/clone projects the code repo lives at projects_dir()/project_id
+        # (setup_workspace ignores repo_path for these types). Record that path so
+        # the run shows up in repo groups / the dashboard's repository view.
+        # Callers that already compute this pass the identical value — no-op for them.
+        if repo_type in ("new", "clone") and not repo_path:
+            from core.datadir import projects_dir
+            repo_path = str(projects_dir() / project_id)
         with self.get_connection() as conn:
             row = conn.execute(
                 "SELECT project_id FROM runs WHERE project_id = ?", (project_id,)

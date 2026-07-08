@@ -3133,8 +3133,10 @@ class MetaAgent:
             from core.scheduler import _sync_project_status_to_db
             try:
                 _sync_project_status_to_db(run.get("project_id", ""))
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_error(
+                    f"project status sync failed for "
+                    f"{run.get('project_id', '')}: {e}")
             return result
 
         # Scheduler-owned: the poller advances it; await a terminal/paused state.
@@ -3201,8 +3203,8 @@ class MetaAgent:
         from core.scheduler import _sync_project_status_to_db
         try:
             _sync_project_status_to_db(project_id)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_error(f"project status sync failed for {project_id}: {e}")
 
         # Wake the scheduler for any background work
         from core.scheduler import wake_scheduler
@@ -3246,8 +3248,8 @@ class MetaAgent:
         from core.scheduler import _sync_project_status_to_db, wake_scheduler
         try:
             _sync_project_status_to_db(project_id)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_error(f"project status sync failed for {project_id}: {e}")
         wake_scheduler()
 
         return result
@@ -3296,8 +3298,8 @@ class MetaAgent:
         project_id = run.get("project_id", "")
         try:
             _sync_project_status_to_db(project_id)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_error(f"project status sync failed for {project_id}: {e}")
         wake_scheduler()
 
         return result
@@ -3372,8 +3374,8 @@ class MetaAgent:
         from core.scheduler import _sync_project_status_to_db
         try:
             _sync_project_status_to_db(pid)
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_error(f"project status sync failed for {pid}: {e}")
 
         result["project_id"] = pid
         result["pipeline"] = "skill_converter"
@@ -3451,8 +3453,8 @@ class MetaAgent:
             from core.scheduler import _sync_project_status_to_db
             try:
                 _sync_project_status_to_db(pid)
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_error(f"project status sync failed for {pid}: {e}")
             driven["project_id"] = pid
             driven["config_name"] = config_name
             return driven

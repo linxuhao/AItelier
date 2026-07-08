@@ -101,7 +101,7 @@ def approve_meta(sf, run_id: str, step_runner=None) -> None:
                 f"meta run {run_id} failed during finalize: "
                 f"{run.get('error_reason') or 'finalize did not emit artifacts'}")
         try:
-            next_node = next_node = sf.advance_run(run_id)
+            next_node = sf.advance_run(run_id)
         except Exception as e:
             # A raising finalize tool (e.g. an incomplete brief) lands here.
             raise RuntimeError(f"meta run {run_id} finalize step errored: {e}") from e

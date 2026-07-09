@@ -142,4 +142,8 @@ def test_builder_unreachable_degrades_to_pass(tmp_path, monkeypatch):
     out = tmp_path / "out"
     r = unity_compile(project_root=str(tmp_path), out_dir=str(out))
     assert r["passed"] is True
-    assert "unreachable" in _read_report(out)["summary"]
+    report = _read_report(out)
+    assert "unreachable" in report["summary"]
+    # Loud skip: C# present but gate didn't run → flag it so 5_review surfaces
+    # it rather than reading a bare passed:true as a clean compile.
+    assert report["gate_skipped"] is True

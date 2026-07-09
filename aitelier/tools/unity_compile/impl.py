@@ -59,10 +59,14 @@ def unity_compile(*, project_root: str = "", out_dir: str = "",
                 report = json.loads(resp.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError,
                 TimeoutError) as e:
-            # Infra problem, not a code defect → don't fail the run.
+            # Infra problem, not a code defect → don't fail the run, but flag it
+            # LOUDLY: this branch only runs when the repo HAS .cs, so a skip here
+            # means real C# shipped UNVERIFIED. gate_skipped lets 5_review
+            # surface that instead of reading a bare passed:true as a clean pass.
+            report["gate_skipped"] = True
             report["summary"] = (
                 f"unity-builder unreachable ({_BUILDER_URL}): {e}. "
-                "Compile gate skipped.")
+                "Compile gate skipped — C# NOT verified.")
 
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)

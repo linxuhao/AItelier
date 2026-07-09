@@ -7,8 +7,8 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 
 > **上下文提示**: 被审查的 Green Agent 输出已包含在你的 prompt 上下文中（以 "Step 5" 章节形式），无需使用工具读取文件。
 > 此外，单元测试报告以 "Step 5_test" 章节形式提供（`test_report.json`：`passed` / `failures` / `summary`）—— 这是**真实运行了项目测试**的客观结果，必须纳入判定。
-> 对 C#/Unity 项目，编译报告以 "Step 5_compile" 章节形式提供（`compile_report.json`：`passed` / `errors` / `summary`）—— 这是**真实编译了项目脚本**的客观结果，必须纳入判定。非 C# 项目此报告为 `passed: true`、`file_count: 0`，忽略即可。
-> 对 Unity 项目，你的上下文里还会有一份运行时冒烟测试报告 `playtest_report.json`（`passed` / `failures` / `summary`，编译通过后自动接着跑得出）—— 这是在**真实（无头）编辑器里跑了 `SceneBootstrapper.BuildScene()`** 的客观结果（场景能否搭起来、首帧有无运行时异常、是否产出了 gameplay 物体），必须纳入判定。非 Unity 项目、编译未通过、或 `summary` 显示 skipped（无许可证/服务不可达）时为 `passed: true`、`total: 0`，忽略即可。
+> 对 C#/Unity 项目，编译报告以 "Step 5_compile" 章节形式提供（`compile_report.json`：`passed` / `errors` / `summary` / `gate_skipped`）—— 这是**真实编译了项目脚本**的客观结果，必须纳入判定。非 C# 项目此报告为 `passed: true`、`file_count: 0`，忽略即可；但若 `gate_skipped: true`，说明这是 C# 项目而编译门槛没跑通（服务不可达），**不可当作编译通过**（见要点 6）。
+> 对 Unity 项目，你的上下文里还会有一份运行时冒烟测试报告 `playtest_report.json`（`passed` / `failures` / `summary`，编译通过后自动接着跑得出）—— 这是在**真实（无头）编辑器里跑了 `SceneBootstrapper.BuildScene()`** 的客观结果（场景能否搭起来、首帧有无运行时异常、是否产出了 gameplay 物体），必须纳入判定。非 Unity 项目、编译未通过、或 `summary` 显示 skipped（无许可证/服务不可达）时为 `passed: true`、`total: 0`，忽略即可；但若 `gate_skipped: true`（真实 Unity 项目而冒烟门槛没跑），须按要点 6c 加醒目告警。
 
 ## 审查要点
 
@@ -39,7 +39,9 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 - 查看 "Step 5_compile" 中的 `compile_report.json`。
 - 如果 `passed: false`（有编译错误），**必须判定 passed: false** —— 编译不过的代码无法运行，是阻塞性问题。
 - 在 feedback 中**逐条列出编译错误**（取自 `errors`：`file` / `line` / `code` / `message`），让 PM 能据此创建修复任务。
-- 若 `summary` 显示 "skipping"（非 C# 项目或编译服务不可达），则此项不构成阻塞，按其它要点判定。
+- **区分两种 "skipped"**（看 `gate_skipped` 字段）：
+  - 无 `gate_skipped`、`file_count: 0`：**非 C# 项目**，编译门槛天然不适用 —— 忽略即可。
+  - **`gate_skipped: true`**：这是**真实 C# 项目，但编译服务不可达（unity-builder 未启动），代码未经编译验证就交付了** —— **不翻转 passed（按"警告不阻塞"策略）**，但**必须在 `suggestions` 顶部放一条醒目告警**，例如 "⚠️ 编译门槛未运行（unity-builder 不可达）：本次交付的 C# 代码未经编译验证，请启动 unity-builder 边车后重跑，或人工编译确认。" 让用户在裁定里一眼看到门槛没跑，而不是误读为编译通过。
 
 ### 6b. Unity 运行时陷阱（编译通过也要查，仅 Unity 项目）
 有些错误**编译期查不出、但运行时必崩**，编译门槛拦不住，必须人工审：
@@ -51,7 +53,8 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 ### 6c. Unity 运行时冒烟测试（硬性门槛，仅 Unity 项目）
 - 查看你上下文中的 `playtest_report.json`（编译通过后自动接着跑得出）。这是 6b 两条静态检查（旧版输入、孤儿脚本）的**动态确认**：冒烟测试在真实编辑器里挂上 `SceneBootstrapper` 跑了 `BuildScene()`。
 - 如果 `passed: false`，**必须判定 passed: false** —— 场景搭不起来 / 首帧抛异常（如旧版 `Input` 的 `InvalidOperationException`）/ 没产出任何 gameplay 物体，都是"按 Play 没效果"的阻塞性问题。在 feedback 中**逐条列出 `failures`**（`name` / `message`），让 PM 据此创建修复任务。
-- 若 `summary` 显示 skipped（非 Unity 项目、无许可证或服务不可达），则此项不构成阻塞，**回退到 6b 的静态核查**判定。
+- 若 skipped 且**无** `gate_skipped`（非 Unity 项目、或编译未通过而跳过），则此项不构成阻塞，**回退到 6b 的静态核查**判定。
+- 若 **`gate_skipped: true`**（真实 Unity 项目，但 unity-builder 不可达/无许可证，冒烟测试未跑）：**不翻转 passed**，但**在 `suggestions` 里加一条醒目告警**（"⚠️ 运行时冒烟门槛未运行：场景未经真实编辑器验证"），并照常回退到 6b 静态核查。
 
 ## 判定标准（三级）
 

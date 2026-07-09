@@ -273,6 +273,23 @@ node web/audit-i18n.mjs            # verify all t() keys exist in all 8 language
 
 The persistent language store (`web/src/stores/i18n.ts`) syncs the user's selection to `localStorage` and the backend API (`POST /api/settings/user/language`).
 
+## Recent Delivery — jinyong-heroes Compilation Fixes
+
+**Date**: March 2025
+
+Resolved **4 compilation errors and 2 obsolete-API warnings** in the jinyong-heroes Unity project (Unity 2023.1+). All fixes are pure C# script edits with zero behavioural change.
+
+| Fix | File | Change | Error/Warning |
+|-----|------|--------|---------------|
+| 1 | `SkillEffectResolver.cs:128` | `target.Heal(healed)` | CS0272 — protected setter bypass |
+| 2 | `SkillEffectResolver.cs:147` + `CombatManager.cs` | `combat?.RaiseDamageDealt(...)` + new `RaiseDamageDealt()` method | CS0070 — event invocation from external type |
+| 3 | `Placeholders.cs:166` | `UnityEngine.Sprite.Create(...)` | CS0119 — type/method name ambiguity |
+| 4 | `UIManager.cs:360` | `TextAlignmentOptions.Center` | CS0117 — invalid TMP enum value |
+| 5 | `CameraController.cs:49` | `FindAnyObjectByType<Light>()` | CS0618 — deprecated FindFirstObjectByType |
+| 6 | `TutorialManager.cs:410` | `FindObjectsOfType<Character>()` | CS0618 — deprecated FindObjectsByType overload |
+
+**Status**: ✅ All 6 fixes verified — zero errors, zero warnings. No behavioural changes.
+
 ## License
 
 AItelier is **source-available** under the [Functional Source License (FSL-1.1-MIT)](LICENSE).

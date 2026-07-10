@@ -42,9 +42,10 @@ services:
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: "credential.helper"
       GIT_CONFIG_VALUE_0: "/app/docker/git-credential-helper.sh"
-      # C#/Unity projects: the `csharp` lint backend POSTs source dirs here for a
-      # license-free semantic compile. Python projects never call it.
-      UNITY_BUILDER_URL: "http://unity-builder:8080"
+      # Godot projects: the godot_compile / godot_playtest tools POST the repo
+      # path here for a license-free parse-check + headless play-test. Non-game
+      # (Python/web) projects never call it.
+      GODOT_BUILDER_URL: "http://godot-builder:8080"
     env_file:
       - .env
     secrets:
@@ -84,41 +85,30 @@ services:
       retries: 5
       start_period: 30s
 
-  # ── Unity builder sidecar ──────────────────────────────────────────────────
-  # License-free semantic compile of generated Unity C# (editor Roslyn + Unity
-  # reference assemblies behind a tiny HTTP service). Reached only by C# projects
-  # at http://unity-builder:8080. ~5GB editor image — built lazily; pull/build is
-  # skipped for Python-only deployments that never start this service.
-  unity-builder:
+  # ── Godot builder sidecar ──────────────────────────────────────────────────
+  # License-free parse-check + headless play-test of generated Godot projects
+  # (Godot 4 headless behind a tiny HTTP service). Reached only by game projects
+  # at http://godot-builder:8080. ~250MB image (no editor, no account, no
+  # license) — built lazily; skipped for non-game deployments that never start it.
+  godot-builder:
     build:
       context: .
-      dockerfile: Dockerfile.unity
-    image: aitelier-unity:latest
-    container_name: aitelier-unity
-    # Pin a stable machine identity so the node-locked Unity Personal .ulf keeps
-    # matching across restarts/recreates (with the baked machine-id in
-    # Dockerfile.unity). The .alf must be generated from a container with THIS
-    # same hostname + mac_address.
-    hostname: aitelier-unity
-    mac_address: "02:42:ac:11:00:99"
-    # Same host user → can read the host-owned workspace files it compiles.
+      dockerfile: Dockerfile.godot
+    image: aitelier-godot:latest
+    container_name: aitelier-godot
+    # Same host user → can read the host-owned workspace files it checks.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
     environment:
       PORT: "8080"
+      # Writable HOME for Godot's import cache when run as an arbitrary host uid
+      # (the image's /tmp/godot-home is 0777; keep it off the read-only mount).
+      HOME: /tmp/godot-home
     volumes:
       # Read-only view of the workspace at the IDENTICAL absolute path the main
       # container uses, so a project_dir passed over HTTP resolves the same here.
-      # /playtest never writes here — it copies the project to a container-local
-      # tmp dir first, so the source stays read-only.
+      # Both /compile and /playtest copy the project to a container-local tmp dir
+      # before importing/running, so the source stays read-only.
       - ${HOME}/.AItelier:${HOME}/.AItelier:ro
-    secrets:
-      # Unity account credentials for ONLINE Personal activation (the /playtest
-      # route). Optional: with no files the entrypoint skips activation and
-      # /playtest reports "skipped" (compile is unaffected). Unity discontinued
-      # manual .alf/.ulf activation for Personal, so online login is the only
-      # headless route for a free account. See docker/unity/entrypoint.sh.
-      - UNITY_EMAIL
-      - UNITY_PASSWORD
     networks:
       - default
     restart: unless-stopped
@@ -149,19 +139,7 @@ secrets:
   #   printf '%s' "$GH_PAT" > ~/.aitelier-secrets/GITHUB_TOKEN && chmod 600 "$_"
   GITHUB_TOKEN:
     file: ${HOME}/.aitelier-secrets/GITHUB_TOKEN
-  # Unity account credentials for ONLINE Personal activation, consumed only by
-  # unity-builder /playtest (manual .alf/.ulf activation is discontinued for
-  # Personal). Create the files before `up`:
-  #   printf '%s' 'you@example.com' > ~/.aitelier-secrets/UNITY_EMAIL    && chmod 600 "$_"
-  #   printf '%s' 'your-unity-password' > ~/.aitelier-secrets/UNITY_PASSWORD && chmod 600 "$_"
-  # NOTE: this is your reusable Unity ACCOUNT password living in a container that
-  # runs LLM-generated code — treat it like the other secrets (600, never
-  # committed). 2FA on the account will block headless login. May be absent —
-  # /playtest then reports "skipped" and compile is unaffected.
-  UNITY_EMAIL:
-    file: ${HOME}/.aitelier-secrets/UNITY_EMAIL
-  UNITY_PASSWORD:
-    file: ${HOME}/.aitelier-secrets/UNITY_PASSWORD
+  # (Godot needs no account or license — the game builder carries no secrets.)
 
 networks:
   # The backend's own private network.

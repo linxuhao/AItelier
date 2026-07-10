@@ -1,0 +1,36 @@
+# configs/addons/game_harness.yaml — Godot game-harness addon overlay.
+#
+# Injected into the engine-agnostic DPE base (dpe_default.yaml) at registration
+# time via skillflow.compose (see api/dependencies.py). Keeps game/engine
+# concerns OUT of the base pipeline: to target a different engine (a web
+# harness, a mobile harness) you write a sibling addon and swap the base's
+# `overlays:` list — you never fork the DPE graph.
+#
+# What it adds: a deterministic Godot gate after the test gate that
+#   1. parse-checks every GDScript + scene in the repo (import), then
+#   2. if that passed, headless-play-tests the main scene, capturing runtime
+#      errors (with res:// file+line) AND a live snapshot of scene-tree state.
+# Both land in compile_report.json / playtest_report.json, folded into 5_review
+# so parse + runtime failures loop back through the goal-loop. No-ops (passes)
+# for non-Godot projects, so applying it unconditionally is safe.
+
+name: "game_harness"
+description: "Godot compile + headless play-test gate for game projects."
+
+overlay:
+  # 1. Splice the Godot gate onto the edge out of the test gate.
+  - insert_after: "@post_verify_tests"
+    steps:
+      - id: "5_compile"
+        step_type: "tool"
+        tool_name: "godot_compile"
+        # Import + headless play-test is fast (no editor, no license), but give a
+        # cold sidecar headroom.
+        timeout_seconds: 300
+        tool_params:
+          out_dir: "$STEP_DIR"
+        # no transitions → auto-wired to 5_test's original target (5_knowledge)
+
+  # 2. Let the final verifier read the gate's reports.
+  - add_context: "@verifier_review"
+    source: { step: "5_compile" }

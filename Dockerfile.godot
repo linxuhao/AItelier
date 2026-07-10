@@ -1,0 +1,38 @@
+# Dockerfile.godot — the aitelier-godot builder sidecar.
+#
+# The Godot analogue of Dockerfile.unity, but trivial by comparison: Godot's
+# headless binary is a free ~120MB download with NO license activation, NO
+# account, NO editor image. Base = python-slim (for the harness) + the Godot 4
+# binary + the handful of X/GL libs the linux build links against even in
+# --headless mode (it never opens a display, but the binary is dynamically
+# linked). Serves docker/godot/godot_harness.py over HTTP on :8080.
+
+FROM python:3.12-slim
+
+ARG GODOT_VERSION=4.4-stable
+ARG GODOT_ZIP=Godot_v4.4-stable_linux.x86_64.zip
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget unzip ca-certificates \
+        libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxext6 \
+        libgl1 libglu1-mesa fontconfig libfontconfig1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fetch the headless-capable Godot 4 binary.
+RUN wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/${GODOT_ZIP}" -O /tmp/godot.zip \
+    && unzip -q /tmp/godot.zip -d /opt/godot \
+    && mv /opt/godot/Godot_* /usr/local/bin/godot \
+    && chmod +x /usr/local/bin/godot \
+    && rm /tmp/godot.zip
+
+# Godot writes editor/import metadata under $HOME/.config|.cache — give it a
+# writable home so it works when run as an arbitrary host uid (compose `user:`).
+ENV GODOT_BIN=/usr/local/bin/godot \
+    HOME=/tmp/godot-home \
+    PORT=8080
+RUN mkdir -p /tmp/godot-home && chmod 0777 /tmp/godot-home
+
+COPY docker/godot/godot_harness.py /srv/godot_harness.py
+
+EXPOSE 8080
+CMD ["python3", "/srv/godot_harness.py", "--serve"]

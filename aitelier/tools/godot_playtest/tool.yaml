@@ -1,0 +1,18 @@
+name: godot_playtest
+description: >
+  Headless play-test of the Godot scene via the godot-builder sidecar: runs the
+  main scene for a bounded number of frames with an autoload probe, then writes
+  playtest_report.json {passed, frames, errors[], state, summary} where errors
+  carry res:// file + line and state is a live snapshot of every node's script
+  variables. Always succeeds as a step; no-ops for non-Godot projects and
+  degrades to a LOUD gate_skipped pass if the builder is unreachable. Chained by
+  godot_compile after a passing parse; not a standalone graph step.
+parameters:
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Directory to write playtest_report.json (set to $STEP_DIR)"
+    required: false

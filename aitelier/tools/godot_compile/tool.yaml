@@ -1,0 +1,20 @@
+name: godot_compile
+description: >
+  Parse-check every GDScript + scene in the consolidated repo together (by
+  importing the project via the godot-builder sidecar) and write
+  compile_report.json {passed, returncode, file_count, errors, summary} where
+  each error carries a res:// file + line. THEN, if parsing passed, chain a
+  headless play-test (godot_playtest) and write playtest_report.json; if parsing
+  failed or it's not a Godot project, write a 'skipped' playtest_report instead.
+  Always succeeds as a step; no-ops for non-Godot projects and degrades to a
+  LOUD gate_skipped pass if the builder is unreachable. Both outcomes are
+  captured for the verifier to act on.
+parameters:
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Directory to write compile_report.json + playtest_report.json (set to $STEP_DIR)"
+    required: false

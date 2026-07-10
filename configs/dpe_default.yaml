@@ -6,6 +6,18 @@
 name: "dpe_default_v2"
 description: "AItelier DPE: Research → Architect → PM → Task Loop → Verify"
 
+# ── Addon overlays (skillflow.compose) ──────────────────────────────────────
+# This base graph is ENGINE-AGNOSTIC — it contains no game/Unity/Godot steps.
+# Game projects get their runtime gates from the `game_harness` addon
+# (configs/addons/game_harness.yaml), spliced in at the anchors below at
+# registration time (api/dependencies.py). Non-game projects are unaffected
+# (the godot gate no-ops without a project.godot). Swap harnesses (web, mobile)
+# by editing this list, not by forking the pipeline.
+overlays: ["game_harness"]
+anchors:
+  post_verify_tests: "5_test"   # the edge out of the deterministic test gate
+  verifier_review: "5_review"   # the final verifier/reviewer
+
 # Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
 x-aitelier:
   label: "DPE Pipeline"
@@ -434,25 +446,9 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
-      - to: "5_compile"
-
-  # ─── C#/Unity compile + PlayMode gate (deterministic, AFTER tests) ───
-  # Semantic-compiles every *.cs in the consolidated repo together against Unity's
-  # reference assemblies (via the unity-builder sidecar), THEN — if compile passed
-  # — chains a PlayMode smoke test that runs SceneBootstrapper.BuildScene() in a
-  # real headless editor (catches what compile can't: legacy-Input runtime throws,
-  # orphaned/empty scenes). No-ops for non-C# projects. Always succeeds as a step
-  # (degrades to pass if the builder is unreachable/unlicensed); both
-  # compile_report.json and playtest_report.json are folded into 5_review so
-  # failures loop back through the goal-loop.
-  - id: "5_compile"
-    step_type: "tool"
-    tool_name: "unity_compile"
-    # Unity semantic compile + PlayMode smoke test can be slow on a cold sidecar.
-    timeout_seconds: 900
-    tool_params:
-      out_dir: "$STEP_DIR"
-    transitions:
+      # Engine-agnostic base: goes straight to knowledge. The `game_harness`
+      # addon splices the compile/play-test gate (5_compile) in HERE, on this
+      # edge (anchor: post_verify_tests), for game projects.
       - to: "5_knowledge"
 
   # ─── Cross-run knowledge transfer (deterministic, NEVER fails) ───
@@ -478,7 +474,8 @@ steps:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "5" }
       - source: { step: "5_test" }
-      - source: { step: "5_compile" }
+      # { step: "5_compile" } is added by the game_harness addon (add_context),
+      # so the base reviewer stays engine-agnostic.
     output:
       mode: "content"
       fixed:

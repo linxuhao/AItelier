@@ -7,8 +7,8 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 
 > **上下文提示**: 被审查的 Green Agent 输出已包含在你的 prompt 上下文中（以 "Step 5" 章节形式），无需使用工具读取文件。
 > 此外，单元测试报告以 "Step 5_test" 章节形式提供（`test_report.json`：`passed` / `failures` / `summary`）—— 这是**真实运行了项目测试**的客观结果，必须纳入判定。
-> 对 C#/Unity 项目，编译报告以 "Step 5_compile" 章节形式提供（`compile_report.json`：`passed` / `errors` / `summary` / `gate_skipped`）—— 这是**真实编译了项目脚本**的客观结果，必须纳入判定。非 C# 项目此报告为 `passed: true`、`file_count: 0`，忽略即可；但若 `gate_skipped: true`，说明这是 C# 项目而编译门槛没跑通（服务不可达），**不可当作编译通过**（见要点 6）。
-> 对 Unity 项目，你的上下文里还会有一份运行时冒烟测试报告 `playtest_report.json`（`passed` / `failures` / `summary`，编译通过后自动接着跑得出）—— 这是在**真实（无头）编辑器里跑了 `SceneBootstrapper.BuildScene()`** 的客观结果（场景能否搭起来、首帧有无运行时异常、是否产出了 gameplay 物体），必须纳入判定。非 Unity 项目、编译未通过、或 `summary` 显示 skipped（无许可证/服务不可达）时为 `passed: true`、`total: 0`，忽略即可；但若 `gate_skipped: true`（真实 Unity 项目而冒烟门槛没跑），须按要点 6c 加醒目告警。
+> 对 Godot 游戏项目，解析报告以 "Step 5_compile" 章节形式提供（`compile_report.json`：`passed` / `errors`（每条含 `kind` / res:// `file` / `line` / `msg`）/ `summary` / `gate_skipped`）—— 这是**真实 headless 导入解析了项目脚本**的客观结果，必须纳入判定。非 Godot 项目此报告为 `passed: true`、`file_count: 0`，忽略即可；但若 `gate_skipped: true`，说明这是 Godot 项目而解析门槛没跑通（godot-builder 不可达），**不可当作解析通过**（见要点 6）。
+> 对 Godot 项目，你的上下文里还有一份运行时冒烟报告 `playtest_report.json`（`passed` / `frames` / `errors`（运行时异常，含 res:// file+line）/ **`state`（运行若干帧后场景树各节点的脚本变量快照）** / `summary`，解析通过后自动接着跑得出）—— 这是在**真实无头 Godot 里运行了主场景**的客观结果：主场景能否加载、有无运行时异常（null 调用 / `push_error`）、以及**运行时各节点的实际状态**（分数/速度/游戏状态——据此判断游戏逻辑是否真的在动）。必须纳入判定。非 Godot 项目 / 解析未过 / skipped 时为 `passed: true`；但若 `gate_skipped: true`（真实 Godot 项目而冒烟门槛没跑），须按要点 6c 加醒目告警。
 
 ## 审查要点
 
@@ -35,26 +35,26 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 - 如果 `passed: false`（有测试失败），**必须判定 passed: false** —— 测试失败是阻塞性问题，无论文档多完善。
 - 在 feedback 中**逐条列出失败的测试**（取自 `failures` / `summary`），让 PM 能据此创建修复任务。
 
-### 6. C# 编译（硬性门槛，仅 Unity/C# 项目）
+### 6. GDScript 解析（硬性门槛，仅 Godot 项目）
 - 查看 "Step 5_compile" 中的 `compile_report.json`。
-- 如果 `passed: false`（有编译错误），**必须判定 passed: false** —— 编译不过的代码无法运行，是阻塞性问题。
-- 在 feedback 中**逐条列出编译错误**（取自 `errors`：`file` / `line` / `code` / `message`），让 PM 能据此创建修复任务。
+- 如果 `passed: false`（有解析错误），**必须判定 passed: false** —— 解析不过的脚本无法加载，是阻塞性问题。
+- 在 feedback 中**逐条列出解析错误**（取自 `errors`：`kind` / `file`(res://) / `line` / `msg`），让 PM 能据此创建修复任务。
 - **区分两种 "skipped"**（看 `gate_skipped` 字段）：
-  - 无 `gate_skipped`、`file_count: 0`：**非 C# 项目**，编译门槛天然不适用 —— 忽略即可。
-  - **`gate_skipped: true`**：这是**真实 C# 项目，但编译服务不可达（unity-builder 未启动），代码未经编译验证就交付了** —— **不翻转 passed（按"警告不阻塞"策略）**，但**必须在 `suggestions` 顶部放一条醒目告警**，例如 "⚠️ 编译门槛未运行（unity-builder 不可达）：本次交付的 C# 代码未经编译验证，请启动 unity-builder 边车后重跑，或人工编译确认。" 让用户在裁定里一眼看到门槛没跑，而不是误读为编译通过。
+  - 无 `gate_skipped`、`file_count: 0`：**非 Godot 项目**，解析门槛天然不适用 —— 忽略即可。
+  - **`gate_skipped: true`**：这是**真实 Godot 项目，但解析服务不可达（godot-builder 未启动），脚本未经验证就交付了** —— **不翻转 passed（按"警告不阻塞"策略）**，但**必须在 `suggestions` 顶部放一条醒目告警**，例如 "⚠️ 解析门槛未运行（godot-builder 不可达）：本次交付的 GDScript 未经解析验证，请启动 godot-builder 边车后重跑，或人工用 `godot --headless --import` 确认。" 让用户一眼看到门槛没跑，而不是误读为解析通过。
 
-### 6b. Unity 运行时陷阱（编译通过也要查，仅 Unity 项目）
-有些错误**编译期查不出、但运行时必崩**，编译门槛拦不住，必须人工审：
-- **旧版输入 API**：运行时脚本若出现 `UnityEngine.Input`（`Input.GetKey*`/`Input.GetMouseButton*`/`Input.touch*`/`Input.GetAxis*`），而项目用新 Input System（跨平台模板默认），运行时会抛 `InvalidOperationException` —— 判 passed: false，要求改用 `UnityEngine.InputSystem`。
-- **编辑器脚本未守卫**：`Assets/Editor/` 下若有脚本未整体包在 `#if UNITY_EDITOR` 里，会污染发布构建/编译门槛 —— 应在 feedback 中指出。
-- **孤儿脚本（没接进 `BuildScene()`）—— 全局核查，这是你独有的视角**：你能看到整个项目，逐个核对**每个需要运行时存在的 gameplay `MonoBehaviour`**（`Assets/Scripts/` 下的玩家/敌人/障碍/边界/管理器等）是否在 `SceneBootstrapper.BuildScene()` 里被**实例化或挂载**（grep 该类型名是否在 `BuildScene()`/其调用的方法里出现）。**编译通过但没接进 `BuildScene()` 的脚本运行时形同不存在**（按 Play 没效果），编译门槛查不出——发现遗漏判 passed: false，在 feedback 里列出哪些组件没接线。这是静态读检：只查"有没有接"，不查"接得对不对"（字段绑错不在此列）。
-- **`BuildScene()` 非幂等（重烘焙会重复/抹掉自定义）—— 静态读检**：`BuildScene()` 必须是 **find-or-create**（按稳定名字 `GameObject.Find(...)` 找不到才 `new`、组件 `GetComponent<T>() ?? AddComponent<T>()`），否则用户在已换好美术的场景里再次烘焙时会**重复造一遍对象**、且若 `BuildScene()` 里**直接给序列化美术字段赋值**还会**抹掉用户拖入的真 sprite/模型**。冒烟测试（6c）跑的是空场景，查不出这个缺陷——只能靠你静态读。**冒烟点（smell）**：(a) `new GameObject(...)` 前没有配套 `Find`/存在性判断；(b) `AddComponent` 没有先 `GetComponent ?? `；(c) `BuildScene()` 内对 `[SerializeField]` 美术字段赋值（占位应只走 `Awake` 的"未赋值才回退"）。**判定**：对**既有仓库的改 bug/加功能**任务（重烘焙是真实场景），判 passed: false 并在 feedback 指出哪几处非幂等；对**全新项目**（尚无自定义场景）作为 suggestion 提出、不阻塞。
+### 6b. Godot 运行时陷阱（解析通过也要查，仅 Godot 项目）
+有些错误**解析期查不出、但运行时必崩或没效果**，解析门槛拦不住，必须人工审：
+- **主场景未设 / 加载不了**：`project.godot` 必须设 `run/main_scene` 且该场景能无头加载。没设或指向不存在的场景 → 冒烟无场景可跑。
+- **孤儿脚本（从未进入场景树）—— 全局核查，这是你独有的视角**：你能看到整个项目，逐个核对**每个需要运行时存在的 gameplay 脚本**（玩家/敌人/生成器/边界/管理器）是否**挂在某个 `.tscn` 的节点上、或注册为 autoload、或被主脚本在 `_ready()` 里 `add_child(...)` 实例化**（grep 脚本路径/`class_name` 是否出现在某个 `.tscn` 的 `ext_resource`、`project.godot` 的 `[autoload]`、或某处 `add_child`）。**解析通过但从未进场景树的脚本运行时形同不存在**（打开没效果），解析门槛查不出——发现遗漏判 passed: false，列出哪些脚本没接入。这是静态读检：只查"有没有接"，不查"接得对不对"。
+- **Godot 3 遗留 API**：`KinematicBody2D` / `yield(...)` / `instance()` / `connect("sig",self,"m")` 等 Godot 3 写法在 4 下解析或运行会报错 —— 指出改用 Godot 4 API（`CharacterBody2D`+`move_and_slide()`、`await`、`instantiate()`、`sig.connect(m)`）。
 
-### 6c. Unity 运行时冒烟测试（硬性门槛，仅 Unity 项目）
-- 查看你上下文中的 `playtest_report.json`（编译通过后自动接着跑得出）。这是 6b 两条静态检查（旧版输入、孤儿脚本）的**动态确认**：冒烟测试在真实编辑器里挂上 `SceneBootstrapper` 跑了 `BuildScene()`。
-- 如果 `passed: false`，**必须判定 passed: false** —— 场景搭不起来 / 首帧抛异常（如旧版 `Input` 的 `InvalidOperationException`）/ 没产出任何 gameplay 物体，都是"按 Play 没效果"的阻塞性问题。在 feedback 中**逐条列出 `failures`**（`name` / `message`），让 PM 据此创建修复任务。
-- 若 skipped 且**无** `gate_skipped`（非 Unity 项目、或编译未通过而跳过），则此项不构成阻塞，**回退到 6b 的静态核查**判定。
-- 若 **`gate_skipped: true`**（真实 Unity 项目，但 unity-builder 不可达/无许可证，冒烟测试未跑）：**不翻转 passed**，但**在 `suggestions` 里加一条醒目告警**（"⚠️ 运行时冒烟门槛未运行：场景未经真实编辑器验证"），并照常回退到 6b 静态核查。
+### 6c. Godot 运行时冒烟 + 状态核查（硬性门槛，仅 Godot 项目）
+- 查看你上下文中的 `playtest_report.json`（解析通过后自动接着跑得出）。这是 6b 静态检查的**动态确认**：在真实无头 Godot 里加载并运行了主场景若干帧。
+- 如果 `passed: false`，**必须判定 passed: false** —— 主场景加载失败 / 运行时抛异常（`errors` 里的 null 调用、`SCRIPT ERROR`、`push_error`，均含 res:// `file`+`line`）都是"打开没效果"的阻塞性问题。在 feedback 中**逐条列出 `errors`**（`kind` / `file` / `line` / `msg`），让 PM 据此创建修复任务。
+- **善用 `state` 快照（Godot 独有、Unity 给不了的视角）**：`state` 是运行若干帧后场景树各节点的脚本变量实拍（如 `{"/root/Main": {"vars": {"score": 4, "game_state": "playing"}}}`）。据此核查游戏逻辑是否**真的在动**：例如小鸟游戏跑了若干帧后 `score` 是否随时间/输入变化、`game_state` 是否合理、玩家 `position`/`velocity` 是否在变。若该动的没动、该变的没变（状态一潭死水），即便无异常也可能是"建好了却不动"的逻辑缺陷——作为 issue 指出（对全新项目至少列为 suggestion）。
+- 若 skipped 且**无** `gate_skipped`（非 Godot 项目、或解析未过而跳过），则此项不构成阻塞，**回退到 6b 的静态核查**判定。
+- 若 **`gate_skipped: true`**（真实 Godot 项目，但 godot-builder 不可达，冒烟未跑）：**不翻转 passed**，但**在 `suggestions` 里加一条醒目告警**（"⚠️ 运行时冒烟门槛未运行：主场景未经真实运行验证"），并照常回退到 6b 静态核查。
 
 ## 判定标准（三级）
 

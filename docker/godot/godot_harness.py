@@ -152,6 +152,10 @@ var _max := 180
 var _dumped := false
 var _action := ""
 func _ready() -> void:
+	# Cap the framerate so a frame budget maps to stable wall-clock/game seconds —
+	# headless runs uncapped otherwise, making delta tiny and the playtest advance
+	# almost no game time regardless of frame count.
+	Engine.max_fps = 60
 	_max = int(OS.get_environment("AITELIER_PROBE_FRAMES")) if OS.get_environment("AITELIER_PROBE_FRAMES") != "" else 180
 	_action = OS.get_environment("AITELIER_PROBE_INPUT")
 	if _action != "" and not InputMap.has_action(_action):
@@ -182,6 +186,8 @@ func _dump() -> void:
 		f.close()
 		print("AITELIER_PROBE_WROTE ", path)
 func _walk(node: Node, acc: Dictionary) -> void:
+	# Only snapshot script-bearing nodes (the gameplay logic), but for those also
+	# capture transform so the agent sees WHERE things are, not just their vars.
 	if node.get_script() != null:
 		var vars := {}
 		for p in node.get_property_list():
@@ -192,7 +198,14 @@ func _walk(node: Node, acc: Dictionary) -> void:
 						vars[p.name] = v
 					TYPE_VECTOR2:
 						vars[p.name] = [v.x, v.y]
-		acc[str(node.get_path())] = {"class": node.get_class(), "vars": vars}
+		var entry := {"class": node.get_class(), "vars": vars}
+		if node is Node2D:
+			entry["pos"] = [node.global_position.x, node.global_position.y]
+			entry["visible"] = node.visible
+		elif node is Node3D:
+			entry["pos"] = [node.global_position.x, node.global_position.y, node.global_position.z]
+			entry["visible"] = node.visible
+		acc[str(node.get_path())] = entry
 	for c in node.get_children():
 		_walk(c, acc)
 '''

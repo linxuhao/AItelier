@@ -156,3 +156,43 @@ class TestV2ConfigLoading:
             assert has_criteria, (
                 f"Red template {tmpl_path.name} has no review criteria"
             )
+
+
+class TestTerminalGateNoLatch:
+    """Regression: the run must terminate at a loop-EXTERNAL `done` gate, not at
+    `node_reached 5_review`.
+
+    5_review is inside the goal loop. With `node_reached 5_review` as the end
+    condition, once 5_review completed ONCE (even passed:false → loops to "3"),
+    its completed row latched node_reached and the run terminated on the next
+    loop iteration before re-verifying the fixed code — a live dpe_game run
+    shipped a game with playtest passed:false as `completed`. The fix routes
+    5_review passed:true → `done` (a gate: no completed row, fires at most once).
+    """
+
+    def _graph(self):
+        path = ROOT / "configs" / "dpe_default.yaml"
+        return PipelineGraph.from_yaml(path)
+
+    def test_terminal_is_loop_external_done_gate(self):
+        g = self._graph()
+        done = next((n for n in g.steps if n.id == "done"), None)
+        assert done is not None, "no loop-external `done` terminal node"
+        assert done.step_type == "gate", "`done` must be a gate (no completed row to latch)"
+        assert [t.to for t in done.transitions] == [None], "`done` must be terminal (to: null)"
+
+    def test_end_condition_fires_on_done_not_review(self):
+        g = self._graph()
+        nodes = {c.node for c in g.end_conditions.conditions if c.type == "node_reached"}
+        assert "done" in nodes, "end condition must fire on `done`"
+        assert "5_review" not in nodes, "end must NOT fire on in-loop `5_review` (premature-latch trap)"
+
+    def test_review_pass_routes_to_done_fail_loops(self):
+        g = self._graph()
+        review = next(n for n in g.steps if n.id == "5_review")
+        pass_edge = next(t for t in review.transitions
+                         if t.match and t.match.get("value") is True)
+        fail_edge = next(t for t in review.transitions
+                         if t.match and t.match.get("value") is False)
+        assert pass_edge.to == "done", "passed:true must route to the done gate"
+        assert fail_edge.to == "3", "passed:false must loop back (not terminate)"

@@ -52,10 +52,19 @@ begin: "git_sync_pre"
 end_conditions:
   combinator: or
   conditions:
+    # Terminate at the loop-EXTERNAL `done` gate, reached ONLY when the final
+    # verifier passes (5_review passed:true → done). node_reached must NOT be
+    # `5_review`: it's inside the goal loop, so once it completes ONCE (even
+    # with passed:false, which loops back to "3"), its `completed` row latches
+    # node_reached and the run terminates on the NEXT loop iteration before
+    # 5_review re-evaluates the fixed code — shipping a still-failing gate
+    # (proven live: a game with playtest passed:false shipped as completed).
+    # `done` is a gate (no completed step row), reached at most once, only on a
+    # real pass. A never-passing loop is bounded by max_loop (5_review→3) and
+    # max_total_steps below — both end the run as FAILED, never completed.
     - type: node_reached
-      node: "5_review"    # end after final verifier review passes
+      node: "done"
       result: "completed"
-      require_completed: true  # AT-2: must actually execute before triggering
     - type: max_total_steps
       limit: 200
     # No wall-clock run cap: AItelier is single-instance and human-in-the-loop,
@@ -492,7 +501,8 @@ steps:
             passed: { type: boolean }
             feedback: { type: string }
     transitions:
-      - to: null    # end — graph terminates here
+      - to: "done"    # passed → loop-external terminal gate (the run's ONLY
+                      # completed-terminal; see end_conditions note above)
         match: { from_file: "review_verdict.json", field: "passed", value: true }
       # ── GOAL-LOOP (configurable) ───────────────────────────────────────────
       # When final verification fails, loop back and re-do the project WITH the
@@ -510,3 +520,13 @@ steps:
       - to: "3"
         match: { from_file: "review_verdict.json", field: "passed", value: false }
         max_loop: 2
+
+  # Loop-external terminal — reached only after the final verifier passes; the
+  # node the end-condition fires on. Gate = no completed step row, so it fires
+  # at most once and can't latch from a prior failed loop iteration. The
+  # game_harness addon's anchors resolve against the steps above; `done` is the
+  # graph's terminal and is not an anchor.
+  - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null

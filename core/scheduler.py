@@ -263,7 +263,14 @@ def _sync_task_manifest_to_db(project_id: str):
     try:
         import json as _json, hashlib
         ws = get_workspace_manager()
-        final_3 = ws.get_final_path(project_id, "3", DPE_GRAPH_NAME)
+        # Read step 3 from the project's ACTUAL config, not the hardcoded base:
+        # a composed addon config (e.g. dpe_game = dpe_default_v2 + game_harness)
+        # writes its steps under `.../<config_name>/3/`, so keying on
+        # DPE_GRAPH_NAME looked in the wrong dir, found no manifest, and left the
+        # project's task list empty in the UI for every non-base config.
+        _proj = db.get_project(project_id)
+        _graph = (_proj.get("config_name") if _proj else None) or DPE_GRAPH_NAME
+        final_3 = ws.get_final_path(project_id, "3", _graph)
         tasks_dir = final_3 / "tasks"
         mf = final_3 / "tasks_manifest.json"
         if not mf.exists():

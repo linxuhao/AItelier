@@ -585,3 +585,104 @@ class TestActiveMetaRunResolution:
         msg = agent._build_assistant_msg("", tcs)
         assert "tool_calls" in msg
         assert msg["tool_calls"][0]["function"]["name"] == "list_projects"
+
+
+class TestResolvePipelineRun:
+    """The approve/reject/wait tools must resolve the run by the stable
+    project_id, so a stale/wrong run_id (e.g. the completed meta_conversation
+    run) self-corrects to the project's active build run instead of no-opping.
+    Regression for a live dpe_game drive where the butler approved the finished
+    meta run, saw no progress, and spawned a duplicate project.
+    """
+
+    def _agent(self, mock_db, mock_ws):
+        return MetaAgent(mock_db, mock_ws, owner_email="t@local")
+
+    def test_prefers_active_run_over_stale_run_id(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run.return_value = {"project_id": "flappy", "status": "completed"}
+        sf.get_run_by_project.return_value = {"id": "dpe-run", "status": "paused"}
+        with patch("api.dependencies.get_skillflow", return_value=sf):
+            rid, note = agent._resolve_pipeline_run(
+                {"run_id": "meta-run-completed"})
+        assert rid == "dpe-run"
+        assert "meta-run-completed" in note  # flagged the correction
+
+    def test_resolves_from_project_id_alone(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run_by_project.return_value = {"id": "dpe-run", "status": "paused"}
+        with patch("api.dependencies.get_skillflow", return_value=sf):
+            rid, note = agent._resolve_pipeline_run({"project_id": "flappy"})
+        assert rid == "dpe-run"
+        assert note == ""
+
+    def test_run_id_used_when_no_active_run(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        sf.get_run.return_value = {"project_id": "flappy", "status": "running"}
+        sf.get_run_by_project.return_value = None
+        with patch("api.dependencies.get_skillflow", return_value=sf):
+            rid, note = agent._resolve_pipeline_run({"run_id": "only-run"})
+        assert rid == "only-run"
+
+    def test_empty_when_nothing_resolvable(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        with patch("api.dependencies.get_skillflow", return_value=sf):
+            rid, note = agent._resolve_pipeline_run({})
+        assert rid == ""
+
+
+class TestResolveBuildConfig:
+    """approve_project_brief is composition-native: it selects the build
+    pipeline from an `addons` list (not a baked config-name string). Regression
+    for the awkward config_name seam + the multi-addon gap."""
+
+    def _agent(self, mock_db, mock_ws):
+        return MetaAgent(mock_db, mock_ws, owner_email="t@local")
+
+    def test_no_addons_is_base(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        cfg, err = agent._resolve_build_config(MagicMock(), {})
+        assert cfg == "dpe_default_v2" and err == ""
+
+    def test_single_addon_reuses_alias(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        with patch("core.addon_registry.list_addons",
+                   return_value=[{"name": "game_harness", "alias": "dpe_game"}]), \
+             patch("core.addon_registry.register_addon_combo",
+                   return_value="dpe_game") as reg, \
+             patch("api.dependencies.get_config_registry", return_value=MagicMock()):
+            cfg, err = agent._resolve_build_config(sf, {"addons": ["game_harness"]})
+        assert cfg == "dpe_game" and err == ""
+        # composed with the alias name (blessed single-addon combo)
+        assert reg.call_args.kwargs.get("name") == "dpe_game"
+
+    def test_multi_addon_composes_emergent(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        sf = MagicMock()
+        with patch("core.addon_registry.list_addons",
+                   return_value=[{"name": "game_harness", "alias": "dpe_game"}]), \
+             patch("core.addon_registry.register_addon_combo",
+                   return_value="dpe_default_v2__game_harness+i18n") as reg, \
+             patch("api.dependencies.get_config_registry", return_value=MagicMock()):
+            cfg, err = agent._resolve_build_config(sf, {"addons": ["game_harness", "i18n"]})
+        assert cfg == "dpe_default_v2__game_harness+i18n" and err == ""
+        assert reg.call_args.kwargs.get("name") is None  # emergent, no alias
+
+    def test_deprecated_config_name_still_works(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        cfg, err = agent._resolve_build_config(MagicMock(), {"config_name": "dpe_game"})
+        assert cfg == "dpe_game" and err == ""
+
+    def test_bad_addon_returns_error_and_base(self, mock_db, mock_ws):
+        agent = self._agent(mock_db, mock_ws)
+        with patch("core.addon_registry.list_addons", return_value=[]), \
+             patch("core.addon_registry.register_addon_combo",
+                   side_effect=ValueError("unknown addon 'nope'")), \
+             patch("api.dependencies.get_config_registry", return_value=MagicMock()):
+            cfg, err = agent._resolve_build_config(MagicMock(), {"addons": ["nope"]})
+        assert cfg == "dpe_default_v2" and "Could not compose" in err

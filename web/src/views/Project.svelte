@@ -673,7 +673,12 @@
                   {#if runDetail.config_name}
                     <div class="meta-item">
                       <span class="meta-label">Config</span>
-                      <span class="meta-value">{runDetail.config_name as string}</span>
+                      <span class="meta-value">
+                        {(runDetail.config_base ?? runDetail.config_name) as string}
+                        {#each (runDetail.config_addons as string[] | undefined) ?? [] as addon}
+                          <span class="addon-chip">+ {addon}</span>
+                        {/each}
+                      </span>
                     </div>
                   {/if}
                 </div>
@@ -858,7 +863,12 @@
               </div>
               <div class="config-field">
                 <span class="meta-label">Config</span>
-                <span class="meta-value">{project?.config_name as string || '—'}</span>
+                <span class="meta-value">
+                  {(project?.config_base ?? project?.config_name) as string || '—'}
+                  {#each (project?.config_addons as string[] | undefined) ?? [] as addon}
+                    <span class="addon-chip">+ {addon}</span>
+                  {/each}
+                </span>
               </div>
               <div class="config-field">
                 <span class="meta-label">Priority</span>
@@ -933,6 +943,16 @@
   }
   .meta-value {
     font-size: 0.9rem;
+  }
+  .addon-chip {
+    display: inline-block;
+    margin-left: 0.35rem;
+    padding: 0.05rem 0.4rem;
+    font-size: 0.72rem;
+    border-radius: 0.6rem;
+    background: var(--muted-border-color, #e0e0e0);
+    color: var(--color, inherit);
+    white-space: nowrap;
   }
   .action-bar {
     display: flex;

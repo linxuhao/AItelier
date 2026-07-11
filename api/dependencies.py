@@ -278,6 +278,14 @@ def enrich_project_status(project: dict | None) -> dict | None:
             cfg = run.get("graph_name") or project.get("config_name") or "dpe_default_v2"
             project["config_name"] = cfg
             try:
+                from core.addon_registry import describe_config
+                _d = describe_config(cfg)
+                project["config_base"] = _d["base"]
+                project["config_addons"] = _d["addons"]
+            except Exception:
+                project["config_base"] = cfg
+                project["config_addons"] = []
+            try:
                 manifest = get_config_registry().get(cfg)
             except Exception:
                 manifest = None

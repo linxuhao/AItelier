@@ -531,8 +531,13 @@ export interface RepoProjectSummary {
   /** Cache stats (hit ratio, token counts) — enriched by the backend via
    *  enrich_project_status + compute_cache_stats_batch, same as Dashboard. */
   cache_stats?: Record<string, unknown>;
-  /** Config name (e.g. dpe_default_v2), added by enrich_project_status. */
+  /** Config name (e.g. dpe_default_v2, or an addon alias like dpe_game),
+   *  added by enrich_project_status. */
   config_name?: string;
+  /** Base pipeline of config_name (a composed alias decomposes to base + addons). */
+  config_base?: string;
+  /** Composing addon names (e.g. ["game_harness"]); empty for a plain base. */
+  config_addons?: string[];
 }
 
 /** A repository group, aggregating projects sharing the same repo_path. */

@@ -33,11 +33,19 @@ def scaffold(*, project_root: str = "", workspace_root: str = "", addon: str = "
         rel = src.relative_to(assets)
         name = ("." + rel.name[4:]) if rel.name.startswith("dot_") else rel.name
         dst = repo / rel.parent / name
-        asset_text = src.read_text(encoding="utf-8")
+        try:
+            asset_text = src.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            skipped.append(str(rel))  # binary asset — not line-mergeable, skip
+            continue
         if dst.exists():
-            # An existing file (e.g. the workspace's default .gitignore) is not
-            # clobbered — instead MERGE any of the asset's lines that are missing,
-            # so a Godot .gitignore's `.godot/` lands even atop a Python default.
+            # An existing file is never clobbered. For line-additive files
+            # (.gitignore) MERGE missing lines so the Godot `.godot/` lands even
+            # atop a Python default; for anything else, skip (appending lines to a
+            # structured config like export_presets.cfg would corrupt it).
+            if not name.endswith("ignore"):
+                skipped.append(str(dst.relative_to(repo)))
+                continue
             existing = dst.read_text(encoding="utf-8")
             have = {ln.strip() for ln in existing.splitlines()}
             add = [ln for ln in asset_text.splitlines()

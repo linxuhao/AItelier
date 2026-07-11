@@ -96,6 +96,19 @@ def read_fragments(paths: list[str]) -> dict[str, str]:
     return out
 
 
+def describe_config(config_name: str) -> dict:
+    """Decompose a runnable config name into its base + composing addons, for
+    display. An addon alias (``dpe_game``) → its base + [addon]; an emergent name
+    (``base__a+b``) → parsed; a plain base → no addons."""
+    for a in list_addons():
+        if a.get("alias") and a["alias"] == config_name:
+            return {"base": a.get("base", ""), "addons": [a["name"]]}
+    if "__" in config_name:
+        base, _, rest = config_name.partition("__")
+        return {"base": base, "addons": [x for x in rest.split("+") if x]}
+    return {"base": config_name, "addons": []}
+
+
 def _addon_by_name(name: str) -> tuple[dict, dict]:
     """Return (addon_dict, base_dict) for an addon name; raise on unknown/mismatch."""
     path = _configs_dir() / "addons" / f"{name}.yaml"

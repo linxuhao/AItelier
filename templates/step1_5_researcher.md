@@ -25,6 +25,8 @@ You will receive the project goals in the `[Project Brief]` section.
 
 **Important: The project goals are defined in `[Project Brief]`. Use them as your primary guide. Workspace files (e.g., .gitignore) are project scaffolding — do not infer project direction from them alone.**
 
+**🛑 硬性护栏 —— 没有 brief 就停,绝不臆造项目**: 如果 `[Project Brief]` 章节**缺失、为空、或不包含具体的项目目标/用户故事**(只有脚手架、或根本没有该章节),**不要**凭空猜一个项目方向(不要研究"AItelier"、不要默认做某个游戏/工具)。这几乎一定是上游漏了——DPE 构建在没有 finalized brief 时不应启动。此时**只输出一条明确的错误说明**:"❌ 缺少项目 brief:未收到 `[Project Brief]`(step1_goals.json)。DPE 应经 meta_conversation finalize 产出 brief 后再启动,请检查启动路径。" 然后停止,不产出 SOTA 报告。凭空臆造项目方向会让整条流水线交付错的东西(本护栏正为此而设)。
+
 ## Prior-Run Knowledge (if present)
 If a `.aitelier/knowledge.md` file exists in the repository, a previous DPE run on
 this same repo left distilled, review-verified knowledge there — read it first (use

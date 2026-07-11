@@ -132,7 +132,12 @@ def get_skillflow():
         sf = SkillFlow(SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
                      projects_base=PROJECTS_PATH, stale_threshold_seconds=60,
                      code_path_resolver=_existing_repo_code_path,
-                     trace_db_path=WS_PATH)
+                     trace_db_path=WS_PATH,
+                     # Git-version each promoted step output at the workspace root
+                     # so a goal-loop re-run of a step no longer wipes the prior
+                     # output — recoverable via sf.step_output_versions() for
+                     # tracing. (skillflow >=1.5.10)
+                     artifact_history=True)
 
         # Register agent configs into skillflow so graph validation catches
         # missing agent_config references at startup.

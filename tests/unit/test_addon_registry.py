@@ -1,54 +1,83 @@
-"""Regression tests for the pipeline-addon registry (core/addon_registry.py)."""
+"""Regression tests for the pipeline-addon HOST layer (core/addon_registry.py).
 
+The overlay MECHANICS (compose/describe/validate) now live in skillflow and are
+tested in skillflow's test_overlay_registry.py. Here we test AItelier's half:
+declaring addons to skillflow, delegating list/describe, and layering the
+ConfigManifest onto a composed combo — against the REAL dpe_default_v2 base +
+game_harness addon.
+"""
+
+import yaml
 import pytest
+from unittest.mock import patch, MagicMock
+from pathlib import Path
 
+from skillflow import SkillFlow, PipelineGraph
 from core import addon_registry as ar
 
+_ROOT = Path(__file__).resolve().parents[2]
+_CONFIGS = _ROOT / "configs"
 
-def test_list_addons_discovers_game_harness():
-    addons = ar.list_addons()
-    gh = next((a for a in addons if a["name"] == "game_harness"), None)
+
+@pytest.fixture
+def sf_with_addons():
+    """A real SkillFlow with agent configs + the dpe_default_v2 base + declared
+    addons, patched in as the get_skillflow() singleton (list/describe delegate)."""
+    sf = SkillFlow(":memory:")
+    for f in sorted((_ROOT / "agent_configs").glob("*.yaml")):
+        for name, cfg in (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).items():
+            try:
+                sf.register_agent_config_from_dict(name, cfg)
+            except Exception:
+                pass
+    sf.register_graph(PipelineGraph.from_yaml(_CONFIGS / "dpe_default.yaml"))
+    ar.declare_addons(sf)
+    with patch("api.dependencies.get_skillflow", return_value=sf):
+        yield sf
+
+
+def test_declare_registers_overlays_with_skillflow(sf_with_addons):
+    names = {o["name"] for o in sf_with_addons.list_overlays()}
+    assert "game_harness" in names
+
+
+def test_list_addons_delegates(sf_with_addons):
+    gh = next((a for a in ar.list_addons() if a["name"] == "game_harness"), None)
     assert gh is not None
     assert gh["base"] == "dpe_default_v2"
     assert gh["alias"] == "dpe_game"
     assert gh["description"] and gh["when_to_use"]
 
 
-def test_compose_alias_name_and_steps():
-    name, graph, hints = ar.compose_addon_graph("dpe_default_v2", ["game_harness"], "dpe_game")
+def test_register_addon_combo_composes_and_manifests(sf_with_addons):
+    sf = sf_with_addons
+    reg = MagicMock()
+    name = ar.register_addon_combo(sf, reg, "dpe_default_v2", ["game_harness"],
+                                   name="dpe_game")
     assert name == "dpe_game"
-    ids = {s.id for s in graph.steps}
-    # the addon's steps are spliced in
-    assert "5_compile" in ids and "gh_scaffold" in ids
-    # base's own steps survive
-    assert "1" in ids and "5_review" in ids
-    # base hints carried onto the composed config
+    ids = {n.id for n in sf._graphs["dpe_game"].steps}
+    assert {"5_compile", "gh_scaffold"} <= ids     # addon steps spliced
+    assert {"1", "5_review"} <= ids                # base steps survive
+    # the AItelier manifest is layered on, seeded from the base's hints
+    reg.register_one.assert_called_once()
+    hints = reg.register_one.call_args.kwargs.get("hint_overrides") or {}
     assert hints.get("seed_file") == "project_brief.md"
 
 
-def test_compose_emergent_name_for_no_result_name():
-    name, _, _ = ar.compose_addon_graph("dpe_default_v2", ["game_harness"])
-    assert name == "dpe_default_v2__game_harness"
+def test_register_addon_combo_auto_resolves_alias(sf_with_addons):
+    # A single addon that declares an alias resolves to it even without an
+    # explicit name — the blessed combo. (Emergent names for aliasless/multi-
+    # addon combos are covered in skillflow's test_overlay_registry.)
+    name = ar.register_addon_combo(sf_with_addons, None, "dpe_default_v2",
+                                   ["game_harness"])
+    assert name == "dpe_game"
 
 
-def test_compose_rejects_base_mismatch():
-    with pytest.raises(ValueError, match="binds to base"):
-        ar.compose_addon_graph("meta_conversation", ["game_harness"])
-
-
-def test_compose_rejects_unknown_base():
-    with pytest.raises(ValueError, match="unknown base"):
-        ar.compose_addon_graph("does_not_exist", ["game_harness"])
-
-
-def test_compose_rejects_unknown_addon():
-    with pytest.raises(ValueError, match="unknown addon"):
-        ar.compose_addon_graph("dpe_default_v2", ["nope_addon"])
-
-
-def test_describe_config_decomposes_alias_emergent_and_base():
-    assert ar.describe_config("dpe_game") == {"base": "dpe_default_v2", "addons": ["game_harness"]}
-    assert ar.describe_config("dpe_default_v2") == {"base": "dpe_default_v2", "addons": []}
+def test_describe_config_delegates(sf_with_addons):
+    assert ar.describe_config("dpe_game") == {
+        "base": "dpe_default_v2", "addons": ["game_harness"]}
+    assert ar.describe_config("dpe_default_v2") == {
+        "base": "dpe_default_v2", "addons": []}
     assert ar.describe_config("dpe_default_v2__game_harness+mobile") == {
         "base": "dpe_default_v2", "addons": ["game_harness", "mobile"]}
 
@@ -62,6 +91,5 @@ def test_read_fragments_resolves_addon_files():
 
 
 def test_read_fragments_ignores_missing_and_escapes():
-    # missing file → dropped; path traversal outside addons dir → dropped
     frags = ar.read_fragments(["game_harness/nope.md", "../../etc/passwd"])
     assert frags == {}

@@ -675,11 +675,18 @@
                       <span class="meta-label">Config</span>
                       <span class="meta-value">
                         {(runDetail.config_base ?? runDetail.config_name) as string}
-                        {#each (runDetail.config_addons as string[] | undefined) ?? [] as addon}
-                          <span class="addon-chip">+ {addon}</span>
-                        {/each}
                       </span>
                     </div>
+                    {#if ((runDetail.config_addons as string[] | undefined) ?? []).length}
+                      <div class="meta-item">
+                        <span class="meta-label">Addons</span>
+                        <span class="meta-value">
+                          {#each (runDetail.config_addons as string[]) as addon}
+                            <span class="addon-chip">{addon}</span>
+                          {/each}
+                        </span>
+                      </div>
+                    {/if}
                   {/if}
                 </div>
 
@@ -865,11 +872,18 @@
                 <span class="meta-label">Config</span>
                 <span class="meta-value">
                   {(project?.config_base ?? project?.config_name) as string || '—'}
-                  {#each (project?.config_addons as string[] | undefined) ?? [] as addon}
-                    <span class="addon-chip">+ {addon}</span>
-                  {/each}
                 </span>
               </div>
+              {#if ((project?.config_addons as string[] | undefined) ?? []).length}
+                <div class="config-field">
+                  <span class="meta-label">Addons</span>
+                  <span class="meta-value">
+                    {#each (project?.config_addons as string[]) as addon}
+                      <span class="addon-chip">{addon}</span>
+                    {/each}
+                  </span>
+                </div>
+              {/if}
               <div class="config-field">
                 <span class="meta-label">Priority</span>
                 <span class="meta-value">{(project?.priority as number) ?? '—'}</span>

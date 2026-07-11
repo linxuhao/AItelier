@@ -134,3 +134,52 @@ class TestStepSequences:
         """Task steps should follow the correct order."""
         assert TASK_STEP_SEQUENCE == ["t_plan", "t_impl"]
         assert FINAL_STEP == "5"
+
+
+class TestTaskSyncConfigAware:
+    """_sync_task_manifest_to_db must read step 3 from the project's ACTUAL
+    config dir (e.g. dpe_game = dpe_default_v2 + game_harness), not the
+    hardcoded base. Keying on DPE_GRAPH_NAME left every non-base (addon)
+    config with an EMPTY task list in the project-detail UI.
+    """
+
+    def _setup(self, tmp_path, config_name):
+        from core.workspace_manager import WorkspaceManager
+        db = DBManager(str(tmp_path / "t.db"))
+        db.ensure_project("g", name="G")
+        if config_name:
+            db.update_project("g", config_name=config_name)
+        ws = WorkspaceManager(base_path=str(tmp_path / "ws"))
+        return db, ws
+
+    def _write_manifest(self, ws, graph_name):
+        d = ws.get_final_path("g", "3", graph_name)
+        (d / "tasks").mkdir(parents=True, exist_ok=True)
+        (d / "tasks_manifest.json").write_text(
+            json.dumps({"execution_order": [["t1", "t2"]]}), encoding="utf-8")
+        (d / "tasks" / "t1.json").write_text(
+            json.dumps({"id": "t1", "description": "do t1"}), encoding="utf-8")
+        (d / "tasks" / "t2.json").write_text(
+            json.dumps({"id": "t2", "description": "do t2"}), encoding="utf-8")
+
+    def test_syncs_from_addon_config_path(self, tmp_path, monkeypatch):
+        import core.scheduler as sch
+        db, ws = self._setup(tmp_path, "dpe_game")
+        self._write_manifest(ws, "dpe_game")           # written under dpe_game/3
+        monkeypatch.setattr(sch, "db", db)
+        monkeypatch.setattr(sch, "get_workspace_manager", lambda: ws)
+        sch._sync_task_manifest_to_db("g")
+        keys = {(t if isinstance(t, dict) else dict(t)).get("manifest_key")
+                for t in db.list_tasks_by_project("g")}
+        assert {"t1", "t2"} <= keys, f"addon-config tasks not synced: {keys}"
+
+    def test_base_config_still_syncs(self, tmp_path, monkeypatch):
+        import core.scheduler as sch
+        db, ws = self._setup(tmp_path, None)           # no config_name → base
+        self._write_manifest(ws, "dpe_default_v2")
+        monkeypatch.setattr(sch, "db", db)
+        monkeypatch.setattr(sch, "get_workspace_manager", lambda: ws)
+        sch._sync_task_manifest_to_db("g")
+        keys = {(t if isinstance(t, dict) else dict(t)).get("manifest_key")
+                for t in db.list_tasks_by_project("g")}
+        assert {"t1", "t2"} <= keys

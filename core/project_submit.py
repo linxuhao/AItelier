@@ -40,6 +40,25 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     if all(s in existing_steps for s in ["1", "2", "3"]):
         return {"status": "already_planned", "project_id": project_id}
 
+    # Host-side brief guard: the DPE researcher reads the FINALIZED brief from the
+    # meta_conversation finalize step (step1_goals.json). If it's absent, the build
+    # would run brief-less and hallucinate a project — refuse to trigger. The
+    # proper flow (butler → meta finalize → seed_and_trigger) always has it; a
+    # direct start that skipped meta does not. (skillflow's required-context flag
+    # on step 1 also catches this at run time; this fails earlier, at submit, with
+    # a clear message.)
+    try:
+        from api.dependencies import get_skillflow
+        goals = (get_skillflow()._workspace.get_project_path(project_id)
+                 / "meta_conversation" / "finalize" / "step1_goals.json")
+        if not (goals.is_file() and goals.read_text(encoding="utf-8").strip()):
+            return {"status": "error", "project_id": project_id, "message":
+                    "Cannot start the build: no finalized brief (the meta "
+                    "conversation must produce step1_goals.json first). Start the "
+                    "build through the butler / meta conversation, not directly."}
+    except Exception:
+        pass  # never block the proper flow on a guard-internal error
+
     # Clear the drafting gate so the scheduler can pick up this project.
     db.set_project_meta_state(project_id, None)
 

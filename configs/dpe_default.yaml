@@ -92,7 +92,7 @@ steps:
       # it. Treat its "known issues" as things to avoid; verify any file/symbol it
       # names still exists before relying on it (it reflects a past run's state).
       - source: { from: "repository", path: ".aitelier/knowledge.md", mode: "tool" }
-      - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json" }
+      - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json", required: true }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"
@@ -418,7 +418,7 @@ steps:
       - source: { step: "5_review" }
       # Goals delivered by skillflow context from the meta run's surviving copy
       # (DPE step-1 promotion wipes any copy placed in dpe_default_v2/1/).
-      - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json" }
+      - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json", required: true }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"

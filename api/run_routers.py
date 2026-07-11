@@ -207,6 +207,12 @@ def get_run_detail(
     # for any config without hardcoding the DPE step set.
     cfg = run.get("graph_name") or "dpe_default_v2"
     run["config_name"] = cfg
+    try:
+        from core.addon_registry import describe_config
+        _d = describe_config(cfg)
+        run["config_base"], run["config_addons"] = _d["base"], _d["addons"]
+    except Exception:
+        run["config_base"], run["config_addons"] = cfg, []
     manifest = registry.get(cfg)
     run["manifest"] = manifest.to_dict() if manifest else None
 

@@ -142,7 +142,8 @@ def get_skillflow():
 
         # Register every host graph in configs/*.yaml (agent_config refs validated
         # below). No graph name is special-cased — drop a new config in the dir and
-        # it is registered automatically.
+        # it is registered automatically. These are the ENGINE-AGNOSTIC bases; addon
+        # overlays (configs/addons/) are composed onto them separately, below.
         configs_dir = project_root / "configs"
         if configs_dir.exists():
             for cfg_path in sorted(configs_dir.glob("*.yaml")):
@@ -176,6 +177,17 @@ def get_skillflow():
         # Build the config registry once skillflow knows every graph.
         global _config_registry_instance
         _config_registry_instance = ConfigRegistry.build(sf)
+
+        # Register addon aliases: each addon (configs/addons/) that declares an
+        # `alias` is composed onto its `base:` and registered as that name (e.g.
+        # game_harness → dpe_game), so the blessed base+addon combo is runnable.
+        # Ad-hoc combos use core.addon_registry.register_addon_combo at run time.
+        try:
+            from core.addon_registry import load_addon_aliases
+            load_addon_aliases(sf, _config_registry_instance)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("addon aliases not loaded: %s", e)
 
         # Register previously-generated pipelines (gen_*.yaml in ~/.AItelier/configs)
         # so they survive restart and are runnable by name. Non-fatal.
@@ -265,6 +277,14 @@ def enrich_project_status(project: dict | None) -> dict | None:
             # run belongs to and render its labels/checkpoints generically.
             cfg = run.get("graph_name") or project.get("config_name") or "dpe_default_v2"
             project["config_name"] = cfg
+            try:
+                from core.addon_registry import describe_config
+                _d = describe_config(cfg)
+                project["config_base"] = _d["base"]
+                project["config_addons"] = _d["addons"]
+            except Exception:
+                project["config_base"] = cfg
+                project["config_addons"] = []
             try:
                 manifest = get_config_registry().get(cfg)
             except Exception:

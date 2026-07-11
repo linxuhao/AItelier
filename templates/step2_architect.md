@@ -68,24 +68,6 @@
 
 可用的 linter: `ruff` (Python), `djlint` (HTML/Jinja2), `basic` (基础语法检查)。如果某种文件类型不需要 lint 或没有合适的工具，使用 `basic`。
 
-## Unity / C# 游戏项目专项（仅当目标是 Unity 游戏时适用）
-当项目是 Unity 游戏，按以下方式设计：
-- **版本与平台**：目标为 Unity **最新稳定 LTS（Unity 6 / `6000.0`）**，不兼容旧版本。**只做全平台通用**，不设计任何平台专属功能或条件编译。
-- **输入设计走新 Input System**：跨平台模板默认启用 Input System Package（新），旧版 `UnityEngine.Input` 会在运行时抛 `InvalidOperationException`（编译期查不出）。设计输入时统一基于 `UnityEngine.InputSystem`（`Keyboard.current` / `Mouse.current` / `Touchscreen.current`，各自判空），把输入查询收敛到单一接口。
-- **交付形态 = 纯脚本 + 资源说明**：只交付 `.cs` 脚本（放 `Assets/Scripts/`）与一份 `RESOURCES.md`。**不要设计 `.meta` / `ProjectSettings/` / 场景文件**——工程骨架由人类在编辑器中创建。
-- **"按 Play 即玩"——用占位资源，不要让用户先准备美术**（核心降门槛要求）：
-  - 设计一个 `Placeholders` 工具类（纯 UnityEngine、运行时生成占位视觉，无导入资源）：`Placeholders.Sprite(color, shape)` 生成纯色方/圆 sprite（`Texture2D`+`Sprite.Create`）、`Placeholders.Primitive(type, color)` 生成上色图元。
-  - 设计一个 `SceneBootstrapper`（MonoBehaviour）：把搭建逻辑放进**幂等的** `public void BuildScene()`——建相机、生成所有实体 GameObject + 组件 + 占位视觉，但用"按稳定名字 find-or-create"而非"无条件 new"，使其可重复运行只补缺失、不重复、不覆盖已存在对象；`Awake` 仅"未搭建则调用 `BuildScene()`"。用户新建一个空物体挂上它、按 Play 就能玩，零手动搭场景。
-  - **同时设计一个"烘焙到场景"的编辑器入口**（`Assets/Editor/` 下、`#if UNITY_EDITOR` 包裹的菜单命令），在**编辑期**调用同一个 `BuildScene()`，让生成的 GameObject **持久化进场景**供用户在 Inspector 手动替换美术后保存。理由：运行时 `Awake` 生成的对象不会写进场景资产、退出 Play 即消失；只有编辑期搭建才能持久化。运行时与编辑期共用 `BuildScene()`（单一事实来源）。因 `BuildScene()` 幂等，此菜单**可重复运行**：修 bug 新增组件后，用户在已换好美术的场景里再烘焙一次即补入新增对象/组件，既有自定义美术原样保留，无需手动重新换皮（这是修既有项目"零手工再定制"的关键）。
-  - **`BuildScene()` 是唯一的场景集成点——每个新增的运行时组件都要在这里被实例化+接线**：设计时明确列出本次新增的每个 `MonoBehaviour`/组件挂在哪个 GameObject 上、需要哪些引用/字段，并要求实现者把它们接进 `BuildScene()`。任何"写了脚本但没接进 `BuildScene()`"的组件运行时形同不存在（编译通过却没效果）。bake 菜单与 bootstrap 共用 `BuildScene()`，接进去即两条路都覆盖。改既有 Unity 项目（加功能/修 bug）时，把新组件并入现有 `BuildScene()`，不要再写一份。
-  - **按 category 选占位**：主角 2D→生成圆/方 sprite，3D→Capsule；障碍/平台→Cube/Quad 或矩形 sprite；地面→Plane；收集品/子弹→Sphere/小 sprite；背景→相机纯色或 Quad；UI 文字→TMP 默认字体。
-  - **自供给**：每个有视觉的 gameplay 脚本暴露 `[SerializeField] Sprite/Mesh/Material`，并在 `Awake` 里**未赋值时回退到 `Placeholders` 生成占位**——这样 SceneBootstrapper 不需要反射去填私有字段，用户之后在 Inspector 拖入真资源即覆盖。
-  - **不依赖 `Awake` 顺序**：被多处依赖的单例（如 `GameManager`）须 `[DefaultExecutionOrder(-100)]` 或让依赖方惰性获取——否则烘焙后的场景（对象已存在、`Awake` 顺序未定义）会出现"建好却不动"。设计时明确"运行时能跑 ≠ 烘焙能跑，两者都要满足"。
-  - **2D 显式分层**：用 `SpriteRenderer.sortingOrder` 显式设渲染层级（背景置后、玩家/前景置前），不要让多个 sprite 都留默认 0 在同一 z——否则背景会盖住前景。
-- **`RESOURCES.md`（必须作为一个交付物列入设计）**：定位为"**可选的进阶/换皮指南**"，不是"必做的搭建步骤"（占位版已经能 Play）。写明 (a) Unity 版本；(b) 需要的 UPM 包（如有）；(c) 如何把占位换成真美术（在哪个物体/字段拖入 sprite/模型）；(d) 进阶：如何用编辑器把代码拼的场景固化成 prefab/scene。
-- **可编译性**：脚本会被自动**整仓编译**校验（无需许可证）。设计组件时确保脚本间接口（类名/命名空间/公共方法签名）清晰一致。
-- **linter_manifest 说明**：C# 编译由系统自动完成，**`.cs` 不必写进 manifest**；manifest 只需覆盖其它文本文件（如有 `.json`/`.md` 用 `basic`）。若项目只有 C#，manifest 可为 `{}`。
-
 ## 关键约束
 - **不可逆操作要设计回滚**: 如果架构涉及不可逆操作（数据库 schema 迁移、批量删除/重写数据、覆盖既有文件），设计中**必须**包含"先备份/快照 → 执行 → 校验新状态 → 确认无误后才删除旧数据"的步骤，并规划回滚路径。绝不设计"先删除再写入、且不校验写入成功"的迁移方案。
 - **详细但不冗余**: 提供足够细节供 PM 分解任务，但避免过度设计

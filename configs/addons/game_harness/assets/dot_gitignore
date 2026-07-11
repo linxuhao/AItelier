@@ -1,0 +1,10 @@
+# Godot 4+ import cache / editor state — regenerated on open, never committed.
+.godot/
+
+# Godot export artifacts
+export_presets.cfg
+*.translation
+
+# OS cruft
+.DS_Store
+Thumbs.db

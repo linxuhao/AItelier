@@ -24,7 +24,7 @@
 - **⚠️ 绝不要靠"重发已完成任务"来修它**：上一轮已完成的任务 id 都已在引擎的 `completed_items` 里，**再次列出同一个 id 会被直接跳过、永不重跑——你的修复会被静默丢弃**（这正是目标循环"修了却没效果"的根因）。不要为了"重跑某个任务"而沿用它的旧 id。
 - **为每条问题新建一个"修复任务"，用全新的、体现修复意图的 id**（如 `fix_input_touch_type`、`fix_checkout_cookie`）：
   - `detailed_requirements` 具体引用失败原因（哪个文件、哪行、哪个测试、期望行为）。
-  - `artifact_requirement` 指向**要修改的现有文件**（如 `Assets/Scripts/InputHandler.cs`）——实现者会读现有文件 + 反馈做**外科手术式小改**，而非整文件重写。
+  - `artifact_requirement` 指向**要修改的现有文件**（如 `src/checkout/handler.py`）——实现者会读现有文件 + 反馈做**外科手术式小改**，而非整文件重写。
   - `dependencies` 指向它所基于的原任务 id。
 - **`execution_order` 里放这些新修复任务**（保留旧条目也无妨——它们在 `completed_items` 里会被自动跳过；关键是修复任务必须是**新 id** 才会被执行）。
 - **接口被改坏会被门槛接住**：若某修复改了别的文件依赖的接口，`5_compile`/`5_test` 会失败并触发下一轮目标循环，你再为受影响的文件新建修复任务即可——这是预期流程。

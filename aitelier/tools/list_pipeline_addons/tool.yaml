@@ -1,0 +1,17 @@
+name: list_pipeline_addons
+description: >
+  Discover pipeline addons available to compose onto a base pipeline. Returns
+  {addons:[{name, base, alias, description, when_to_use}], count}. Each addon
+  binds to a specific base (its `base` field) and splices in at that base's
+  anchors; compose a runnable pipeline with run(base, [addons]) or use the
+  addon's `alias` (a boot-registered base+addon config). Optionally filter by
+  base or a name/description query.
+parameters:
+  base:
+    type: string
+    description: "Only list addons that bind to this base pipeline (e.g. dpe_default_v2)"
+    required: false
+  query:
+    type: string
+    description: "Substring filter over addon name/description"
+    required: false

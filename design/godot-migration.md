@@ -101,3 +101,43 @@ An addon declares `base:` + optional `alias:`; `run(base, [addons])` composes an
 emergent-named config, or the alias (`game_harness` → `dpe_game`) is boot-
 registered and runnable by name. `list_pipeline_addons` is the discovery surface.
 The base (`dpe_default_v2`) is now verified engine-agnostic.
+
+The addon contributes all four kinds of thing at named anchors, each with its own
+delivery channel:
+
+| Contribution | Channel | game_harness example |
+|---|---|---|
+| steps | `insert_after` | the compile+playtest gate (`5_compile`) |
+| tools | `insert_after` a tool step | `scaffold` drops a Godot `.gitignore` (mechanical, LLM-independent; merges into an existing one) |
+| context | `add_context` | verifier reads the gate reports |
+| prompts | `add_template` | Godot conventions reach architect/implementer/verifier prompts only when applied |
+
+## Butler autonomy + live DPE run
+
+The butler now picks the game pipeline itself: a `list_pipeline_addons` tool +
+`approve_project_brief(config_name=...)` threaded onto the project row, and a
+`SYSTEM_PROMPT` that says "game → dpe_game". Deployed to the live container
+(compose-enabled skillflow wheel + godot-builder sidecar), a real `dpe_game`
+build (`flappy-godot-dpe`) ran real agents through researcher → review →
+architect → review → PM → review with **the addon fully live**: the `gh_scaffold`
+tool step executed, the godot gate (`5_compile`) is queued, and the
+`game_harness/architect.md` **fragment reached the live architect prompt**
+(step2_design.md contains Polygon2D / ColorRect / ui_accept / autoload / res:// —
+terms only in the fragment, never in the brief). Two integration bugs the drive
+surfaced were fixed (scaffold merge vs the workspace's default .gitignore; DPE
+seeding keyed on the brief contract so composed pipelines seed).
+
+## Content comparison: capsule-dash Godot vs Unity (per concern)
+
+Same gameplay, every concern far smaller — and ~1200 LOC of Unity-only
+scaffolding simply doesn't exist:
+
+| Concern | Unity `.cs` | Godot `.gd` |
+|---|---|---|
+| Game state / score | GameManager 118 | game_manager 58 |
+| Player (lanes, jump, death) | PlayerController 226 | player 56 |
+| Obstacle spawner | ObstacleSpawner 239 | obstacle_spawner 40 |
+| Obstacle | Obstacle 115 | obstacle 13 |
+| Camera | CameraFollow 100 | static in `.tscn` (0) |
+| HUD | UIManager 306 | ui 26 |
+| **Unity-only scaffolding** | SceneBootstrapper 299 + Placeholders 106 + SceneBaker 141 + InputHandler 138 (+ LaneMarker/WindEffect cosmetics 562) | **none — scenes are text, primitives are nodes, Input is built-in** |

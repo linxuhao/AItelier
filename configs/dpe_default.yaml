@@ -6,14 +6,13 @@
 name: "dpe_default_v2"
 description: "AItelier DPE: Research → Architect → PM → Task Loop → Verify"
 
-# ── Addon overlays (skillflow.compose) ──────────────────────────────────────
-# This base graph is ENGINE-AGNOSTIC — it contains no game/Unity/Godot steps.
-# Game projects get their runtime gates from the `game_harness` addon
-# (configs/addons/game_harness.yaml), spliced in at the anchors below at
-# registration time (api/dependencies.py). Non-game projects are unaffected
-# (the godot gate no-ops without a project.godot). Swap harnesses (web, mobile)
-# by editing this list, not by forking the pipeline.
-overlays: ["game_harness"]
+# ── Addon anchors (skillflow.compose) ───────────────────────────────────────
+# This base graph is ENGINE-AGNOSTIC — no game/Unity/Godot steps or prompts. It
+# just publishes named extension points (anchors). Addons bind to THIS base by
+# name (their `base:` field) and splice in at these anchors; compose the runnable
+# combo with `run(base, [addons])` or a boot-registered alias (e.g. the
+# game_harness addon → `dpe_game`). See core/addon_registry.py. Games route to
+# the composed config; non-game runs use this clean base.
 anchors:
   post_verify_tests: "5_test"   # the edge out of the deterministic test gate
   verifier_review: "5_review"   # the final verifier/reviewer

@@ -116,31 +116,6 @@ def _validate_graph_agent_configs(sf):
         )
 
 
-def _load_graph_with_overlays(cfg_path, addons_dir):
-    """Load a graph config, applying any addon overlays it declares.
-
-    A base config with `overlays: [name, ...]` is composed with
-    configs/addons/<name>.yaml via skillflow.compose so the base stays generic
-    (e.g. the DPE pipeline carries no engine-specific game steps — the Godot
-    compile/play-test gate lives in the game_harness addon). Configs without an
-    `overlays` key load unchanged.
-    """
-    import yaml
-    from skillflow import PipelineGraph
-    from skillflow.compose import compose_graph
-
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        base = yaml.safe_load(f)
-    names = base.get("overlays") or []
-    if not names:
-        return PipelineGraph.from_yaml(cfg_path)
-    overlays = []
-    for name in names:
-        with open(addons_dir / f"{name}.yaml", "r", encoding="utf-8") as f:
-            overlays.append(yaml.safe_load(f))
-    return PipelineGraph._from_dict(compose_graph(base, overlays))
-
-
 def get_skillflow():
     """FastAPI dependency injection: get the skillflow orchestrator singleton.
 
@@ -167,14 +142,12 @@ def get_skillflow():
 
         # Register every host graph in configs/*.yaml (agent_config refs validated
         # below). No graph name is special-cased — drop a new config in the dir and
-        # it is registered automatically. A config may declare `overlays: [name,...]`
-        # to compose addon fragments from configs/addons/<name>.yaml at registration
-        # (skillflow.compose) — this is how game projects get their runtime harness
-        # without the base pipeline carrying any engine-specific steps.
+        # it is registered automatically. These are the ENGINE-AGNOSTIC bases; addon
+        # overlays (configs/addons/) are composed onto them separately, below.
         configs_dir = project_root / "configs"
         if configs_dir.exists():
             for cfg_path in sorted(configs_dir.glob("*.yaml")):
-                sf.register_graph(_load_graph_with_overlays(cfg_path, configs_dir / "addons"))
+                sf.register_graph(PipelineGraph.from_yaml(cfg_path))
 
         # Register skillflow's skill_converter graph so the butler can generate a
         # new pipeline from a skill description via start_pipeline("skill_converter").
@@ -204,6 +177,17 @@ def get_skillflow():
         # Build the config registry once skillflow knows every graph.
         global _config_registry_instance
         _config_registry_instance = ConfigRegistry.build(sf)
+
+        # Register addon aliases: each addon (configs/addons/) that declares an
+        # `alias` is composed onto its `base:` and registered as that name (e.g.
+        # game_harness → dpe_game), so the blessed base+addon combo is runnable.
+        # Ad-hoc combos use core.addon_registry.register_addon_combo at run time.
+        try:
+            from core.addon_registry import load_addon_aliases
+            load_addon_aliases(sf, _config_registry_instance)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("addon aliases not loaded: %s", e)
 
         # Register previously-generated pipelines (gen_*.yaml in ~/.AItelier/configs)
         # so they survive restart and are runnable by name. Non-fatal.

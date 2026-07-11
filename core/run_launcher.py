@@ -110,3 +110,21 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
     return {"status": "started", "project_id": project_id, "run_id": run_id,
             "config_name": config_name, "scheduler_owned": manifest.scheduler_owned}
+
+
+def start_addon_run(db, ws, base: str, addons: list[str], project_id: str, **kwargs) -> dict:
+    """run(base, [addons]) — compose a base with a list of addons and start it.
+
+    Composes base + addons into a runnable config (an emergent name, or the
+    single blessed alias if it is exactly one aliased addon), registers it, then
+    delegates to start_config_run. Ad-hoc combos are registered on demand;
+    already-registered ones (e.g. a boot alias) are reused idempotently.
+    """
+    from api.dependencies import get_skillflow, get_config_registry
+    from core.addon_registry import register_addon_combo
+
+    try:
+        config_name = register_addon_combo(get_skillflow(), get_config_registry(), base, addons)
+    except ValueError as e:
+        return {"status": "error", "message": str(e)}
+    return start_config_run(db, ws, config_name, project_id, **kwargs)

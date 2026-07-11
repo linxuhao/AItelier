@@ -15,7 +15,14 @@
 # for non-Godot projects, so applying it unconditionally is safe.
 
 name: "game_harness"
+# Base binding: this addon targets dpe_default_v2's anchors, so it is specific to
+# that base (not generic). `alias` names the blessed base+THIS-addon combo, which
+# core/addon_registry.py registers at boot as a runnable config. Multi-addon runs
+# (run(base, [game_harness, ...])) get an emergent name instead.
+base: "dpe_default_v2"
+alias: "dpe_game"
 description: "Godot compile + headless play-test gate for game projects."
+whenToUse: "Building a Godot game — adds the parse gate + runtime play-test that captures errors and live scene state."
 
 overlay:
   # 1. Splice the Godot gate onto the edge out of the test gate.

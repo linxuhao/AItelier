@@ -363,6 +363,14 @@ def _build_real_run(tmp_path):
                 pass  # duplicate names across files — first wins, fine for routing
     graph = PipelineGraph.from_yaml(_REPO_ROOT / "configs" / "dpe_default.yaml")
     sf.register_graph(graph)
+    # Seed the finalized brief step 1 reads as a REQUIRED context source (the
+    # meta_conversation finalize output). Without it the researcher fails loud
+    # (RequiredContextMissing) — the fail-loud-on-missing-brief guard.
+    finalize = tmp_path / "ws" / "p" / "meta_conversation" / "finalize"
+    finalize.mkdir(parents=True, exist_ok=True)
+    (finalize / "step1_goals.json").write_text(
+        json.dumps({"mvp_goals": ["x"], "non_goals": [], "user_stories": ["As a user, x"]}),
+        encoding="utf-8")
     run_id = sf.create_run(graph.name, {"project_id": "p"})
     sf.start_run(run_id)
     return sf, run_id

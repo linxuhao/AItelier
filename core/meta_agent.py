@@ -150,13 +150,14 @@ answer_project_conversation(run_id, answer=<their reply>).
 4. When a BRIEF is returned, present it and ask the user to approve. On approval \
 call approve_project_brief(run_id) — this starts the build pipeline. If they \
 want changes, call answer_project_conversation(run_id, answer=<their changes>).
-   - PICK THE RIGHT PIPELINE: if the project is a GAME, the default software \
-pipeline is wrong — it has no runtime game gate. Before approving, call \
-list_pipeline_addons(query="game") to find the game pipeline's alias (e.g. \
-"dpe_game"), and pass it as approve_project_brief(run_id, config_name="dpe_game"). \
-For non-game software, omit config_name (default pipeline). When unsure whether \
-a request counts as a game (it renders/simulates/has a play loop), check \
-list_pipeline_addons and prefer the matching addon.
+   - PICK THE RIGHT PIPELINE via ADDONS: if the project is a GAME, the default \
+software pipeline is wrong — it has no runtime game gate. Before approving, call \
+list_pipeline_addons(query="game") to find the matching addon, and approve with \
+its NAME in the addons list: approve_project_brief(project_id=..., \
+addons=["game_harness"]). For non-game software, omit addons (default pipeline). \
+Several addons compose automatically. When unsure whether a request counts as a \
+game (it renders/simulates/has a play loop), check list_pipeline_addons and \
+prefer the matching addon.
 
 ## When a conversation is already in progress
 You will see an [ACTIVE PROJECT CONVERSATION] note telling you the run_id \
@@ -184,7 +185,14 @@ Pipelines run and surface their own review checkpoints. For Path A, call \
 wait_until_next_checkpoint_or_completion(run_id) to block until each checkpoint \
 or final completion. For Path B, report progress with get_pipeline_status(run_id). \
 In both paths, when the user explicitly approves or rejects a checkpoint in \
-chat, call approve_checkpoint(run_id) or reject_checkpoint(run_id, feedback).
+chat, call approve_checkpoint or reject_checkpoint.
+- IDENTIFY THE RUN BY project_id, not a remembered run_id. A project has a \
+completed meta_conversation run AND a live build run; passing the wrong id makes \
+approve/wait no-op on the finished run. approve_checkpoint / reject_checkpoint / \
+wait_until_next_checkpoint_or_completion all accept project_id — prefer it.
+- A build paused at a checkpoint RESUMES only via approve_checkpoint / \
+reject_checkpoint. NEVER call start_config_run or refresh_planning to "restart" \
+a paused build — start_config_run spawns a whole new duplicate project.
 
 ## Critical rules
 - NEVER write code or offer code snippets. The pipeline implements; you relay.
@@ -376,19 +384,24 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "approve_project_brief",
             "description": "Approve the reviewed project brief and start the build (DPE) pipeline. "
-                           "Call ONLY after the user has clearly approved the brief. For a GAME "
-                           "project, first call list_pipeline_addons to find the game pipeline and "
-                           "pass its alias as config_name (e.g. 'dpe_game'); otherwise omit "
-                           "config_name to use the default software pipeline.",
+                           "Call ONLY after the user has clearly approved the brief. Identify the "
+                           "project by project_id. Choose the pipeline by ADDONS: for a GAME, first "
+                           "call list_pipeline_addons and pass the matching addon NAME(s) as "
+                           "addons=[\"game_harness\"]; for plain software omit addons (default "
+                           "pipeline). Multiple addons compose automatically.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "description": "The conversation run_id "
-                               "(optional — resolved automatically from the active conversation "
-                               "if omitted)"},
-                    "config_name": {"type": "string", "description": "Pipeline config to build "
-                               "with. Omit for the default software pipeline. For a game, pass the "
-                               "addon alias from list_pipeline_addons (e.g. 'dpe_game')."},
+                    "project_id": {"type": "string", "description": "Project whose brief to approve "
+                               "(preferred identity — the conversation run is resolved from it)."},
+                    "addons": {"type": "array", "items": {"type": "string"},
+                               "description": "Addon NAMES from list_pipeline_addons to build with "
+                               "(e.g. [\"game_harness\"]). Omit/empty for the default software "
+                               "pipeline. One addon reuses its alias (dpe_game); several compose."},
+                    "run_id": {"type": "string", "description": "Conversation run_id (optional — "
+                               "resolved automatically from project_id / the active conversation)."},
+                    "config_name": {"type": "string", "description": "DEPRECATED — a pre-registered "
+                               "config name. Prefer `addons`. Omit for the default pipeline."},
                 },
                 "required": [],
             },
@@ -606,13 +619,18 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "approve_checkpoint",
             "description": "Approve a pending checkpoint and continue the pipeline. "
-                           "Only call when the user has indicated approval.",
+                           "Only call when the user has indicated approval. Pass "
+                           "project_id (preferred — a project has one active build "
+                           "run, so this is unambiguous across turns); run_id also "
+                           "works. Do NOT use start_config_run or refresh_planning "
+                           "to resume a paused build — that spawns a duplicate.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "description": "Run ID from the checkpoint"},
+                    "project_id": {"type": "string", "description": "Project whose active build to approve (preferred)."},
+                    "run_id": {"type": "string", "description": "Run ID from the checkpoint (alternative to project_id)."},
                 },
-                "required": ["run_id"],
+                "required": [],
             },
         },
     },
@@ -621,14 +639,16 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "reject_checkpoint",
             "description": "Reject a pending checkpoint with feedback. "
-                           "The pipeline will redo the checkpoint step with the feedback.",
+                           "The pipeline will redo the checkpoint step with the feedback. "
+                           "Pass project_id (preferred) or run_id.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "description": "Run ID from the checkpoint"},
+                    "project_id": {"type": "string", "description": "Project whose active build to reject (preferred)."},
+                    "run_id": {"type": "string", "description": "Run ID from the checkpoint (alternative to project_id)."},
                     "feedback": {"type": "string", "description": "User's feedback for redoing the step"},
                 },
-                "required": ["run_id", "feedback"],
+                "required": ["feedback"],
             },
         },
     },
@@ -773,13 +793,14 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "run_id": {"type": "string", "description": "Run ID to wait on."},
+                    "project_id": {"type": "string", "description": "Project whose active build to wait on (preferred)."},
+                    "run_id": {"type": "string", "description": "Run ID to wait on (alternative to project_id)."},
                     "timeout": {"type": "number",
                                 "description": "Max seconds to wait before returning 'running' "
                                                "(default 120, capped 600). Only applies to "
                                                "scheduler-owned runs like DPE."},
                 },
-                "required": ["run_id"],
+                "required": [],
             },
         },
     },
@@ -2139,6 +2160,42 @@ class MetaAgent:
             self._append_conversation(pid, f"Assistant: {result.get('question', '')}")
         return result
 
+    def _resolve_build_config(self, sf, args: dict) -> tuple[str, str]:
+        """Resolve the build pipeline from `addons` (preferred) or `config_name`.
+
+        Returns ``(config_name, error)``. ``addons`` is a list of addon names
+        (from list_pipeline_addons): [] → base ``dpe_default_v2``; one → the
+        addon's alias if it has one (game_harness → "dpe_game"), else an emergent
+        composed name; many → emergent composed name. Composition registers the
+        graph live (register_addon_combo). ``config_name`` is a deprecated
+        fallback naming a pre-registered config directly.
+        """
+        addons = args.get("addons")
+        if isinstance(addons, str):
+            addons = [addons]
+        if isinstance(addons, list) and any(str(a).strip() for a in addons):
+            addons = [str(a).strip() for a in addons if str(a).strip()]
+            import core.addon_registry as ar
+            from api.dependencies import get_config_registry
+            base = (args.get("base") or "dpe_default_v2").strip() or "dpe_default_v2"
+            # Reuse a blessed alias for a single-addon combo (→ "dpe_game").
+            name = None
+            if len(addons) == 1:
+                for m in ar.list_addons():
+                    if m.get("name") == addons[0] and m.get("alias"):
+                        name = m["alias"]
+                        break
+            try:
+                cfg = ar.register_addon_combo(sf, get_config_registry(), base, addons, name=name)
+                return cfg, ""
+            except Exception as e:
+                return "dpe_default_v2", (
+                    f"Could not compose addons {addons} onto base '{base}': {e}. "
+                    "Use list_pipeline_addons to see valid addon names.")
+        # Deprecated: an explicit pre-registered config name.
+        cfg = (args.get("config_name") or "").strip()
+        return (cfg or "dpe_default_v2"), ""
+
     async def _tool_approve_project_brief(self, args: dict) -> dict:
         """Approve the reviewed brief, complete the meta run, and trigger DPE."""
         from api.dependencies import get_skillflow
@@ -2163,12 +2220,18 @@ class MetaAgent:
                                "Check the project list."}
         pid = run.get("project_id", "")
 
-        # Config selection: the butler may pass config_name (e.g. "dpe_game" for a
-        # Godot game — base dpe_default_v2 + the game_harness addon) after
-        # discovering it via list_pipeline_addons. Persist it on the project row so
-        # the scheduler (core/scheduler.py) and the in-chat driver both build with
-        # the chosen pipeline instead of the plain base.
-        build_config = (args.get("config_name") or "").strip() or "dpe_default_v2"
+        # Config selection — COMPOSITION-NATIVE. The butler expresses the build
+        # pipeline as a list of ADDONS (from list_pipeline_addons), not a baked
+        # config-name string: none → base dpe_default_v2; one → reuse the addon's
+        # alias (e.g. game_harness → "dpe_game"); many → an emergent composed name
+        # (register_addon_combo, the same path start_addon_run uses). The composed
+        # config is registered live and stored on the project row so the scheduler
+        # and the in-chat driver build with it. `config_name` stays accepted as a
+        # deprecated escape hatch (a pre-registered name), but the butler should
+        # pass `addons`.
+        build_config, cfg_err = self._resolve_build_config(sf, args)
+        if cfg_err:
+            return {"status": "error", "message": cfg_err}
         if build_config != "dpe_default_v2":
             self.db.update_project(pid, config_name=build_config)
 
@@ -3172,9 +3235,9 @@ class MetaAgent:
         hangs. The internal wait costs zero driver turns / context.
         """
         from api.dependencies import get_skillflow, get_config_registry
-        run_id = (args.get("run_id") or "").strip()
+        run_id, _note = self._resolve_pipeline_run(args)
         if not run_id:
-            return {"error": "run_id is required."}
+            return {"error": "Provide project_id (preferred) or run_id."}
         sf = get_skillflow()
         run = sf.get_run(run_id)
         if not run:
@@ -3268,11 +3331,45 @@ class MetaAgent:
 
         return result
 
+    def _resolve_pipeline_run(self, args: dict) -> tuple[str, str]:
+        """Resolve which run the approve/reject/wait tools should drive.
+
+        The butler juggles more than one run_id across turns — a project carries
+        a completed ``meta_conversation`` run AND its live ``dpe_*`` run. Passing
+        the stale/wrong one made ``approve_checkpoint`` no-op on the completed
+        meta run while the real DPE run stayed paused, and the butler then
+        floundered (spawning a duplicate build via ``start_config_run``). So
+        resolve by the stable ``project_id``: prefer the project's active
+        (non-completed) run. The given ``run_id`` is a fallback / a way to derive
+        the project. Returns ``(run_id, note)``; ``run_id`` is "" if nothing
+        resolvable.
+        """
+        from api.dependencies import get_skillflow
+        sf = get_skillflow()
+        run_id = (args.get("run_id") or "").strip()
+        project_id = (args.get("project_id") or "").strip()
+        if not project_id and run_id:
+            r = sf.get_run(run_id)
+            if r:
+                project_id = r.get("project_id") or ""
+        note = ""
+        if project_id:
+            active = sf.get_run_by_project(project_id)
+            if active and active.get("id"):
+                if run_id and active["id"] != run_id:
+                    note = (f"(note: '{run_id}' was not this project's active run; "
+                            f"resolved to {active['id']} via project_id="
+                            f"'{project_id}')")
+                run_id = active["id"]
+        return run_id, note
+
     async def _tool_approve_checkpoint(self, args: dict) -> dict:
         """Approve a checkpoint and continue the pipeline."""
         from api.dependencies import get_skillflow
 
-        run_id = args["run_id"]
+        run_id, _note = self._resolve_pipeline_run(args)
+        if not run_id:
+            return {"error": "Provide project_id (preferred) or run_id."}
         sf = get_skillflow()
 
         run = sf.get_run(run_id)
@@ -3308,13 +3405,17 @@ class MetaAgent:
             self._log_error(f"project status sync failed for {project_id}: {e}")
         wake_scheduler()
 
+        if _note and isinstance(result, dict):
+            result["resolution_note"] = _note
         return result
 
     async def _tool_reject_checkpoint(self, args: dict) -> dict:
         """Reject a checkpoint with feedback and redo the step."""
         from api.dependencies import get_skillflow
 
-        run_id = args["run_id"]
+        run_id, _note = self._resolve_pipeline_run(args)
+        if not run_id:
+            return {"error": "Provide project_id (preferred) or run_id."}
         feedback = args.get("feedback", "")
 
         sf = get_skillflow()

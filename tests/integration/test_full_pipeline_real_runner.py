@@ -85,6 +85,19 @@ def _build_real_pipeline(tmp_path):
     db.ensure_project("p", name="E2E")
     ws = WorkspaceManager(base_path=str(ws_base))
 
+    # Seed the finalized brief that step 1 reads as a REQUIRED context source
+    # ({config: meta_conversation, step: finalize, output: step1_goals.json},
+    # required: true). In a real run the meta_conversation finalize step emits
+    # this; without it the researcher fails loud (RequiredContextMissing) — the
+    # fail-loud-on-missing-brief guard. Mirror that artifact here.
+    finalize = ws_base / "p" / "meta_conversation" / "finalize"
+    finalize.mkdir(parents=True, exist_ok=True)
+    (finalize / "step1_goals.json").write_text(json.dumps({
+        "mvp_goals": ["Add two numbers"],
+        "non_goals": ["No UI"],
+        "user_stories": ["As a user, I can add two numbers"],
+    }), encoding="utf-8")
+
     run_id = sf.create_run(graph.name, {"project_id": "p"})
     sf.start_run(run_id)
     return sf, db, ws, run_id

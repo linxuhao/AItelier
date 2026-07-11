@@ -150,6 +150,13 @@ answer_project_conversation(run_id, answer=<their reply>).
 4. When a BRIEF is returned, present it and ask the user to approve. On approval \
 call approve_project_brief(run_id) — this starts the build pipeline. If they \
 want changes, call answer_project_conversation(run_id, answer=<their changes>).
+   - PICK THE RIGHT PIPELINE: if the project is a GAME, the default software \
+pipeline is wrong — it has no runtime game gate. Before approving, call \
+list_pipeline_addons(query="game") to find the game pipeline's alias (e.g. \
+"dpe_game"), and pass it as approve_project_brief(run_id, config_name="dpe_game"). \
+For non-game software, omit config_name (default pipeline). When unsure whether \
+a request counts as a game (it renders/simulates/has a play loop), check \
+list_pipeline_addons and prefer the matching addon.
 
 ## When a conversation is already in progress
 You will see an [ACTIVE PROJECT CONVERSATION] note telling you the run_id \
@@ -369,13 +376,19 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "approve_project_brief",
             "description": "Approve the reviewed project brief and start the build (DPE) pipeline. "
-                           "Call ONLY after the user has clearly approved the brief.",
+                           "Call ONLY after the user has clearly approved the brief. For a GAME "
+                           "project, first call list_pipeline_addons to find the game pipeline and "
+                           "pass its alias as config_name (e.g. 'dpe_game'); otherwise omit "
+                           "config_name to use the default software pipeline.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "run_id": {"type": "string", "description": "The conversation run_id "
                                "(optional — resolved automatically from the active conversation "
                                "if omitted)"},
+                    "config_name": {"type": "string", "description": "Pipeline config to build "
+                               "with. Omit for the default software pipeline. For a game, pass the "
+                               "addon alias from list_pipeline_addons (e.g. 'dpe_game')."},
                 },
                 "required": [],
             },
@@ -704,6 +717,25 @@ TOOL_DEFINITIONS = [
                            "input_hint, and drive mode (background = start_config_run+poll; "
                            "inline = start_config_run drives it / or runner_start per its hint).",
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pipeline_addons",
+            "description": "List pipeline ADDONS — optional overlays that compose onto a base "
+                           "pipeline to add capabilities (e.g. a Godot game harness: compile + "
+                           "runtime play-test gates + engine conventions, injected only for games). "
+                           "Returns each addon's name, the base it targets, its runnable alias (a "
+                           "base+addon config you can build with), description, and when_to_use. "
+                           "Call this for a GAME request to find the game pipeline alias (e.g. "
+                           "'dpe_game'), then pass that alias as approve_project_brief's config_name.",
+            "parameters": {"type": "object", "properties": {
+                "base": {"type": "string", "description": "Only addons for this base pipeline "
+                         "(optional, e.g. dpe_default_v2)"},
+                "query": {"type": "string", "description": "Filter by name/description substring "
+                          "(optional, e.g. 'game')"},
+            }},
         },
     },
     {
@@ -2131,6 +2163,15 @@ class MetaAgent:
                                "Check the project list."}
         pid = run.get("project_id", "")
 
+        # Config selection: the butler may pass config_name (e.g. "dpe_game" for a
+        # Godot game — base dpe_default_v2 + the game_harness addon) after
+        # discovering it via list_pipeline_addons. Persist it on the project row so
+        # the scheduler (core/scheduler.py) and the in-chat driver both build with
+        # the chosen pipeline instead of the plain base.
+        build_config = (args.get("config_name") or "").strip() or "dpe_default_v2"
+        if build_config != "dpe_default_v2":
+            self.db.update_project(pid, config_name=build_config)
+
         # AT-1: If the run is already completed (its finalize step already ran),
         # skip approve_meta — the artifacts have been emitted.
         run_already_completed = run.get("status") == "completed"
@@ -2182,7 +2223,7 @@ class MetaAgent:
         # The meta agent now starts the DPE build pipeline and drives it to its
         # first review checkpoint, surfaced in this chat (reuses the proven
         # session-bound pipeline driver).
-        dpe = await self._tool_start_pipeline({"project_id": pid, "config": "dpe_default_v2"})
+        dpe = await self._tool_start_pipeline({"project_id": pid, "config": build_config})
         dpe.setdefault("project_id", pid)
         dpe.setdefault("message", f"Brief approved — the build pipeline for '{pid}' has started.")
         return dpe
@@ -3038,6 +3079,21 @@ class MetaAgent:
         catalog = get_config_registry().catalog(full=True)
         return {"pipelines": catalog, "count": len(catalog)}
 
+    def _tool_list_pipeline_addons(self, args: dict) -> dict:
+        """Discover pipeline addons (base-bound overlays). For a game request,
+        find the game pipeline alias (e.g. dpe_game) to pass as
+        approve_project_brief's config_name."""
+        from core.addon_registry import list_addons
+        addons = list_addons()
+        base = (args.get("base") or "").strip()
+        q = (args.get("query") or "").strip().lower()
+        if base:
+            addons = [a for a in addons if a.get("base") == base]
+        if q:
+            addons = [a for a in addons
+                      if q in a.get("name", "").lower() or q in a.get("description", "").lower()]
+        return {"addons": addons, "count": len(addons)}
+
     def _tool_describe_pipeline(self, args: dict) -> dict:
         """One pipeline's exact input contract by name (targeted PULL).
 
@@ -3492,6 +3548,7 @@ _TOOL_HANDLERS = {
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "start_config_run": MetaAgent._tool_start_config_run,
     "list_pipelines": MetaAgent._tool_list_pipelines,
+    "list_pipeline_addons": MetaAgent._tool_list_pipeline_addons,
     "describe_pipeline": MetaAgent._tool_describe_pipeline,
     "wait_until_next_checkpoint_or_completion": MetaAgent._tool_wait_until_checkpoint,
     "get_pipeline_result": MetaAgent._tool_get_pipeline_result,

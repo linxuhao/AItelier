@@ -871,7 +871,8 @@ class DBManager:
                        brief: str = None, priority: int = None,
                        status: str = None,
                        current_project_step: str = None,
-                       completed_project_steps: str = None) -> bool:
+                       completed_project_steps: str = None,
+                       config_name: str = None) -> bool:
         """Update run fields. Only sets non-None values.
 
         Run-level fields (name/priority/status/current_project_step) update the
@@ -892,6 +893,9 @@ class DBManager:
         if current_project_step is not None:
             updates.append("current_project_step = ?")
             params.append(current_project_step)
+        if config_name is not None:
+            updates.append("config_name = ?")
+            params.append(config_name)
 
         dpe_fields = {}
         if brief is not None:

@@ -25,19 +25,42 @@ description: "Godot compile + headless play-test gate for game projects."
 whenToUse: "Building a Godot game — adds the parse gate + runtime play-test that captures errors and live scene state."
 
 overlay:
-  # 1. Splice the Godot gate onto the edge out of the test gate.
+  # ── STEPS + TOOLS ──────────────────────────────────────────────────────────
+  # 1. Mechanical (tool) channel: scaffold a Godot .gitignore into the repo right
+  #    after it's created — guaranteed, doesn't depend on the LLM. Asset lives at
+  #    configs/addons/game_harness/assets/dot_gitignore.
+  - insert_after: "@post_repo_setup"
+    steps:
+      - id: "gh_scaffold"
+        step_type: "tool"
+        tool_name: "scaffold"
+        timeout_seconds: 60
+        tool_params:
+          addon: "game_harness"
+
+  # 2. Splice the Godot compile + headless play-test gate onto the edge out of
+  #    the test gate.
   - insert_after: "@post_verify_tests"
     steps:
       - id: "5_compile"
         step_type: "tool"
         tool_name: "godot_compile"
-        # Import + headless play-test is fast (no editor, no license), but give a
-        # cold sidecar headroom.
         timeout_seconds: 300
         tool_params:
           out_dir: "$STEP_DIR"
         # no transitions → auto-wired to 5_test's original target (5_knowledge)
 
-  # 2. Let the final verifier read the gate's reports.
+  # ── CONTEXT ────────────────────────────────────────────────────────────────
+  # 3. Let the final verifier read the gate's reports.
   - add_context: "@verifier_review"
     source: { step: "5_compile" }
+
+  # ── PROMPT FRAGMENTS (add_template) ────────────────────────────────────────
+  # 4. Godot conventions reach the architect/implementer/verifier prompts ONLY
+  #    when this addon is applied — the base templates stay engine-agnostic.
+  - add_template: "@architect"
+    fragment: "game_harness/architect.md"
+  - add_template: "@implementer"
+    fragment: "game_harness/implementer.md"
+  - add_template: "@verifier_review"
+    fragment: "game_harness/verifier.md"

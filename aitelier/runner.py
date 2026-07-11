@@ -99,6 +99,14 @@ class AgentStepRunner:
         # into _resolved_context itself (inside claim_next_step), so the host
         # renders them for free — no special-casing needed here.
         resolved_context = step.inputs.get("_resolved_context")
+        # Addon prompt fragments (skillflow add_template stores their paths in the
+        # step's opaque config): merge them into the resolved context so they reach
+        # the prompt ONLY when the addon that added them is applied — the base
+        # pipeline's own templates stay engine-agnostic.
+        _frags = step.step_config.get("extra_templates") if isinstance(step.step_config, dict) else None
+        if _frags:
+            from core.addon_registry import read_fragments
+            resolved_context = {**(resolved_context or {}), **read_fragments(_frags)}
         tool_schemas = step.inputs.get("_tool_schemas", {})
         output_dir = step.inputs.get("_output_dir", "")
         max_tool_turns = step.inputs.get("_max_tool_turns", 0)

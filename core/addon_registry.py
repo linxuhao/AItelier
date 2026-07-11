@@ -77,6 +77,25 @@ def list_addons() -> list[dict]:
     return out
 
 
+def read_fragments(paths: list[str]) -> dict[str, str]:
+    """Resolve addon prompt fragments (skillflow add_template stores their paths in
+    a step's config.extra_templates) to a {label: content} map, read relative to
+    configs/addons/. Merged into a step's resolved context by the runner, so the
+    guidance reaches the prompt ONLY when the addon that added it is applied."""
+    base = _configs_dir() / "addons"
+    out: dict[str, str] = {}
+    for rel in paths or []:
+        p = (base / rel).resolve()
+        try:
+            if p.is_file() and str(p).startswith(str(base.resolve())):
+                out[f"Addon guidance ({rel})"] = p.read_text(encoding="utf-8")
+            else:
+                log.warning("addon fragment not found or outside addons dir: %s", rel)
+        except OSError as e:
+            log.warning("addon fragment unreadable %s: %s", rel, e)
+    return out
+
+
 def _addon_by_name(name: str) -> tuple[dict, dict]:
     """Return (addon_dict, base_dict) for an addon name; raise on unknown/mismatch."""
     path = _configs_dir() / "addons" / f"{name}.yaml"

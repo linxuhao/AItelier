@@ -50,20 +50,6 @@
 - 覆盖关键功能的测试文件。
 - 文件必须具有适当的扩展名（.py、.json、.md、.html、.css、.js 等）。
 
-## Godot / GDScript 项目专项约定（仅当任务是 Godot 游戏脚本时适用）
-项目交付为**一个可直接运行的 Godot 工程**（`project.godot` + `.gd` + `.tscn`），目标是**"打开即玩"**：用 Godot 图元做占位视觉，主场景加载即可玩，零美术零手动搭场景。整仓脚本会被 headless **导入解析**校验、主场景会被 headless **运行冒烟**（Godot 4 / `4.4`），所以下面几条是硬性的：
-
-- **工程清单 `project.godot`**：必须存在，且设 `run/main_scene="res://<主场景>.tscn"`（否则冒烟测试无场景可跑）。跨场景单例在 `[autoload]` 段注册；自定义输入动作在 `[input]` 段定义；`config/features` 标 `"4.4"`。
-- **场景 `.tscn` 直接以文本编写**（Godot 的 .tscn 是文本、可 diff——这是相对 Unity 的最大简化，无需"用代码重建场景"）：`[gd_scene format=3]` + `[ext_resource type="Script" path="res://x.gd" id="1"]` + `[node ...]` 树 + `script = ExtResource("1")` 挂脚本。**主场景须自足**：加载即含相机 / 玩家 / 生成器 / UI / 碰撞体，可直接跑。
-- **GDScript 规范**：每个脚本 `extends` 合适基类（`Node`/`CharacterBody2D`/`Area2D`/`Control`…）；用**信号**（`signal foo` + `foo.emit()`）解耦；**加类型标注**（`var score: int = 0`、`func flap() -> void:`）让解析闸门更早发现错误；资源用 `res://` 路径或 `preload(...)`。
-- **API 版本**：只用 **Godot 4** API，不要用 Godot 3 的。常见替换：`KinematicBody2D`→`CharacterBody2D`（用 `velocity` + `move_and_slide()`）、`yield(...)`→`await`、`.tscn format=2`→`format=3`、`OS.get_ticks_msec`→`Time.get_ticks_msec`、`instance()`→`instantiate()`、`connect("sig", self, "m")`→`sig.connect(m)`。
-- **输入用 Godot Input**：`Input.is_action_just_pressed("ui_accept")`（内置动作，映射空格/回车）或 `_input(event)` 判 `InputEventMouseButton` / `InputEventScreenTouch` / `InputEventKey`。把"是否有任意输入"收敛到一个方法，菜单 / 操作 / 重开共用。**冒烟测试会自动周期性按 `ui_accept`——让游戏至少响应它，否则自动 playtest 推不动、状态快照会显示"一潭死水"。**
-- **占位视觉用内置图元，无二进制资源**：`Polygon2D`（圆/多边形）、`ColorRect`（矩形/UI）、`Sprite2D`+代码 `ImageTexture`（纯色贴图，`Image.create`+`fill`+`ImageTexture.create_from_image`）、3D 用 `CSGBox3D` / `MeshInstance3D`+`BoxMesh`。不 `preload` 任何 `.png`/`.jpg`/`.glb`。2D 渲染顺序用节点树顺序或 `z_index`（背景小、前景大），别让背景盖住前景。
-- **全平台、不碰平台特性**：不写平台专属分支（`OS.get_name()==...` 特判等），只用跨平台通用功能。
-- **引用一致**：脚本/场景互相引用时，节点路径（`$Path` / `get_node("...")`）、信号名、方法签名、`class_name`、autoload 名必须前后一致——任何一处写错都会在**导入解析**或**运行冒烟**时暴露（整仓一起导入解析）。
-- **每个 gameplay 脚本都必须真正接入场景**：写了一个需要运行时存在的节点脚本（玩家/敌人/生成器/边界检测/管理器），**必须把它挂到某个 `.tscn` 场景的节点上、或注册为 autoload、或由主脚本在 `_ready()` 里 `add_child(...)` 实例化进场景树**。否则脚本解析通过却从未进入场景树 → 运行时形同不存在（打开没效果，解析闸门查不出，但运行冒烟 + 状态快照能暴露）。改既有项目时，先读现有主场景/主脚本，把新节点接进去，别另起炉灶。
-- **纯逻辑测试可选**：如需单元测试，抽成不依赖场景树的普通 GDScript 类/函数，保持最小。headless 环境不跑图形化测试——运行冒烟由系统的 playtest 闸门负责。
-
 ## 重试处理
 如果这是一次重试，你将看到 `[之前的反馈 — 必须修复]`。请修复所有提到的问题。不要重写所有内容——只修复被拒绝的部分。
 

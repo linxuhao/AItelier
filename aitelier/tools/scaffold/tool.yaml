@@ -1,0 +1,20 @@
+name: scaffold
+description: >
+  Copy an addon's static asset files (configs/addons/<addon>/assets/) into the
+  project repo working tree — the mechanical channel for guaranteed deliverables
+  like a Godot .gitignore, independent of what the LLM writes. Never clobbers an
+  existing file. Convention: an asset named `dot_<x>` lands as `.<x>`. Always
+  succeeds as a step; a later repo_apply commits what it wrote.
+parameters:
+  addon:
+    type: string
+    description: "Addon name whose assets/ dir to copy from (e.g. game_harness)"
+    required: true
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Step output dir (auto-injected)"
+    required: false

@@ -68,18 +68,6 @@
 
 可用的 linter: `ruff` (Python), `djlint` (HTML/Jinja2), `basic` (基础语法检查)。如果某种文件类型不需要 lint 或没有合适的工具，使用 `basic`。
 
-## Godot 游戏项目专项（仅当目标是 Godot 游戏时适用）
-当项目是 Godot 游戏，按以下方式设计：
-- **版本与语言**：目标为 **Godot 最新稳定版（Godot 4 / `4.4`）**，脚本用 **GDScript**（agent 友好、迭代快、无需编译工具链）。**只做全平台通用**，不设计任何平台专属功能。
-- **交付形态 = 一个可直接运行的 Godot 工程**：与 Unity 不同，Godot 的场景文件 `.tscn` 是**纯文本、可 diff、可由 agent 直接编写**——所以交付的是**完整可跑工程**，而非"纯脚本 + 人工搭场景"。工程含：`project.godot`（工程清单）、`.gd` 脚本、`.tscn` 场景。**`project.godot` 必须设 `run/main_scene="res://<主场景>.tscn"`**——校验闸门会 headless 导入并运行这个主场景。这消除了 Unity 那套"用代码重建场景 + 烘焙菜单"的复杂度：场景本身就是可交付、可 diff 的文本。
-- **"打开即玩"——用 Godot 图元做占位，不要让用户先准备美术**（核心降门槛要求）：
-  - 占位视觉一律用 **Godot 内置图元节点，不引入任何二进制美术资源**：`Polygon2D`（圆/多边形，如小鸟）、`ColorRect`（矩形/UI 底）、`Sprite2D` + 代码生成的 `ImageTexture`（纯色贴图）、3D 用 `CSGBox3D` / `MeshInstance3D`+`BoxMesh`。按 category 选：主角 2D→圆 `Polygon2D` / 3D→`CSGBox3D`；障碍/平台→`ColorRect` 或矩形 `StaticBody2D`；地面→长条 `StaticBody2D`；收集品/子弹→小圆；背景→`ColorRect` 或相机背景色；UI 文字→`Label`（内置默认字体）。
-  - **主场景自足**：主场景（如 `main.tscn`）加载即是完整可玩状态——挂好相机、玩家、生成器、UI、碰撞体。用户打开工程按 F5 即玩，无需手动摆场景。用户之后可把占位节点替换为真美术。
-- **输入走 Godot Input 动作**：在 `project.godot` 的 `[input]` 段定义动作，或复用内置动作 `ui_accept`/`ui_select`（映射到空格/回车）。tap/click/触屏统一用 `_input(event)` 判 `InputEventMouseButton` / `InputEventScreenTouch`，或 `Input.is_action_just_pressed("ui_accept")`。把"是否有任意输入"收敛到单一方法，菜单/操作/重开共用。**（运行时冒烟测试会自动周期性按 `ui_accept`，所以让游戏至少响应 `ui_accept` 才能被自动 playtest 推进。）**
-- **跨场景单例用 autoload**：`GameManager`、分数等跨场景共享状态设为 autoload（在 `project.godot` 的 `[autoload]` 段注册 `Name="*res://.../game_manager.gd"`），用信号（`signal`/`emit`）广播状态变化，而非到处 `get_node`。
-- **可运行性**：整仓脚本会被自动 headless **导入解析**校验（`godot --headless --import`，无需许可证，捕获 GDScript 解析错误含 res:// file+line），主场景会被自动 headless **运行冒烟**（跑若干帧，捕获运行时异常 + **快照运行时各节点的脚本变量状态**）。设计时确保脚本间接口（`class_name`/信号名/方法签名/节点路径）一致、主场景能被无头加载。
-- **linter_manifest 说明**：GDScript 的解析由 Godot 导入自动完成，**`.gd` 不必写进 manifest**；manifest 只需覆盖其它文本文件（如有 `.json`/`.md` 用 `basic`）。若项目只有 GDScript/场景，manifest 可为 `{}`。
-
 ## 关键约束
 - **不可逆操作要设计回滚**: 如果架构涉及不可逆操作（数据库 schema 迁移、批量删除/重写数据、覆盖既有文件），设计中**必须**包含"先备份/快照 → 执行 → 校验新状态 → 确认无误后才删除旧数据"的步骤，并规划回滚路径。绝不设计"先删除再写入、且不校验写入成功"的迁移方案。
 - **详细但不冗余**: 提供足够细节供 PM 分解任务，但避免过度设计

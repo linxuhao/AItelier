@@ -14,8 +14,11 @@ description: "AItelier DPE: Research → Architect → PM → Task Loop → Veri
 # game_harness addon → `dpe_game`). See core/addon_registry.py. Games route to
 # the composed config; non-game runs use this clean base.
 anchors:
-  post_verify_tests: "5_test"   # the edge out of the deterministic test gate
-  verifier_review: "5_review"   # the final verifier/reviewer
+  post_repo_setup: "git_sync_pre"  # right after the repo exists (early scaffold)
+  architect: "2"                   # the architect agent
+  implementer: "t_impl"            # the per-task implementer agent
+  post_verify_tests: "5_test"      # the edge out of the deterministic test gate
+  verifier_review: "5_review"      # the final verifier/reviewer
 
 # Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
 x-aitelier:

@@ -26,17 +26,30 @@ def scaffold(*, project_root: str = "", workspace_root: str = "", addon: str = "
     if not assets.is_dir():
         return {"written": [], "reason": f"no assets for addon '{addon}'", "addon": addon}
 
-    written, skipped = [], []
+    written, merged, skipped = [], [], []
     for src in sorted(assets.rglob("*")):
         if not src.is_file():
             continue
         rel = src.relative_to(assets)
         name = ("." + rel.name[4:]) if rel.name.startswith("dot_") else rel.name
         dst = repo / rel.parent / name
+        asset_text = src.read_text(encoding="utf-8")
         if dst.exists():
-            skipped.append(str(dst.relative_to(repo)))  # never clobber
+            # An existing file (e.g. the workspace's default .gitignore) is not
+            # clobbered — instead MERGE any of the asset's lines that are missing,
+            # so a Godot .gitignore's `.godot/` lands even atop a Python default.
+            existing = dst.read_text(encoding="utf-8")
+            have = {ln.strip() for ln in existing.splitlines()}
+            add = [ln for ln in asset_text.splitlines()
+                   if ln.strip() and not ln.strip().startswith("#") and ln.strip() not in have]
+            if add:
+                sep = "" if existing.endswith("\n") else "\n"
+                dst.write_text(existing + sep + "\n".join(add) + "\n", encoding="utf-8")
+                merged.append(str(dst.relative_to(repo)))
+            else:
+                skipped.append(str(dst.relative_to(repo)))
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        dst.write_text(asset_text, encoding="utf-8")
         written.append(str(dst.relative_to(repo)))
-    return {"written": written, "skipped": skipped, "addon": addon}
+    return {"written": written, "merged": merged, "skipped": skipped, "addon": addon}

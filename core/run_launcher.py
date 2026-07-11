@@ -72,9 +72,11 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     if priority:
         db.update_project(project_id, priority=priority)
 
-    # DPE keeps its proven brief→step-1 seeding ritual.
+    # DPE (and its addon combos, e.g. dpe_game) keep the proven brief→step-1
+    # seeding ritual — keyed on the DPE brief contract (seed_file), not a single
+    # config name, so composed game pipelines seed the same way as the base.
     seed_inputs = seed_inputs or {}
-    if config_name == "dpe_default_v2" and isinstance(seed_inputs.get("brief"), dict):
+    if manifest.seed_file == "project_brief.md" and isinstance(seed_inputs.get("brief"), dict):
         ws.setup_workspace(project_id, repo_type=seed_inputs.get("repo_type", repo_type),
                            repo_path=repo_path, repo_url=repo_url)
         from core.project_submit import seed_and_trigger

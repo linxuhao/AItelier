@@ -174,6 +174,26 @@ def get_skillflow():
                 "will be unavailable): %s", e
             )
 
+        # Register skillflow's addon_converter graph (sibling of skill_converter):
+        # turns a capability description + a base into a validated addon overlay,
+        # driven by the butler's generate_addon tool. Its agents are registered in
+        # Python (like skill_converter), and its acceptance test is the native
+        # compose_validate tool (auto-loaded from skillflow's tools dir).
+        try:
+            import skillflow as _sf_pkg
+            from skillflow.plugins.skill_converter import _register_addon_converter_agents
+            _register_addon_converter_agents(sf)
+            addon_conv_path = (Path(_sf_pkg.__file__).parent / "plugins"
+                               / "skill_converter" / "addon_converter.yaml")
+            if addon_conv_path.exists():
+                sf.register_graph(PipelineGraph.from_yaml(addon_conv_path))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "addon_converter graph not registered (addon authoring "
+                "will be unavailable): %s", e
+            )
+
         # Verify all agent_config references resolve (belt-and-suspenders over
         # skillflow's own _check_agent_configs — gives clearer error messages).
         _validate_graph_agent_configs(sf)
@@ -203,6 +223,17 @@ def get_skillflow():
             import logging
             logging.getLogger(__name__).warning(
                 "generated pipelines not loaded: %s", e)
+
+        # Register previously-generated addons (~/.AItelier/configs/addons/*.yaml)
+        # authored via addon_converter, so they survive restart and their blessed
+        # alias combos are runnable by name. Non-fatal.
+        try:
+            from core.addon_registry import load_generated_addons
+            load_generated_addons(sf, _config_registry_instance)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "generated addons not loaded: %s", e)
     return _skillflow_instance
 
 
@@ -213,6 +244,14 @@ def register_pipeline_from_run(run_id: str, name: str) -> dict:
     from core.pipeline_registry import register_generated_pipeline
     return register_generated_pipeline(
         get_skillflow(), get_config_registry(), run_id, name)
+
+
+def register_addon_from_run(run_id: str) -> dict:
+    """Persist + live-register the addon overlay a completed addon_converter run
+    made, so its blessed combo can be launched immediately. Returns
+    ``{addon_name, base, action, path, registered_config?}`` or ``{error}``."""
+    from core.addon_registry import register_addon_from_run as _bridge
+    return _bridge(get_skillflow(), get_config_registry(), run_id)
 
 
 def get_config_registry():

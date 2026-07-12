@@ -34,6 +34,16 @@ def _configs_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "configs"
 
 
+def generated_addons_dir() -> Path:
+    """Where addon_converter-generated overlays are persisted (gitignored user
+    data under ~/.AItelier/configs/addons, boot-scanned). Mirrors
+    core.pipeline_registry.generated_configs_dir for generated pipelines."""
+    from core import datadir
+    d = datadir.configs_dir() / "addons"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _load_yaml(path: Path) -> dict:
     import yaml
     with open(path, "r", encoding="utf-8") as f:
@@ -122,6 +132,84 @@ def register_addon_combo(sf, registry, base_name: str, addon_names: list[str],
     if registry is not None:
         registry.register_one(sf, cfg_name, hint_overrides=_base_hints(base_name))
     return cfg_name
+
+
+def register_addon_from_run(sf, registry, run_id: str) -> dict:
+    """Bridge: persist + register the overlay a completed addon_converter run made.
+
+    Reads the compose-validated ``overlay.yaml`` from the run workspace, declares
+    it to skillflow (``register_overlay``), persists it to ``generated_addons_dir``
+    (gitignored, boot-scanned), and — when the base graph is registered — composes
+    its blessed alias combo so it is immediately runnable by name. Returns
+    ``{addon_name, base, action, path, registered_config?}`` or ``{error}``.
+    Parallel to core.pipeline_registry.register_generated_pipeline.
+    """
+    import yaml
+    from skillflow.plugins.skill_converter import get_addon_output_file
+    from core.run_launcher import slugify
+
+    src = get_addon_output_file(sf, run_id)
+    if not src or not Path(src).exists():
+        return {"error": "no generated overlay YAML found for this run"}
+    try:
+        spec = yaml.safe_load(Path(src).read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        return {"error": f"generated overlay YAML is invalid: {e}"}
+    if not isinstance(spec, dict):
+        return {"error": "generated overlay YAML is not a mapping"}
+    name, base = spec.get("name"), spec.get("base")
+    if not name or not base:
+        return {"error": "overlay missing required 'name'/'base'"}
+
+    # Sanitize the LLM-chosen name into a safe registry key / filename (stable, so
+    # re-generating the same addon overwrites in place).
+    name = slugify(name, sep="_", maxlen=48, fallback="addon")
+    spec["name"] = name
+    existed = (generated_addons_dir() / f"{name}.yaml").exists()
+
+    sf.register_overlay(name, spec)          # mechanical half (never fails)
+    result = {"addon_name": name, "base": base,
+              "action": "updated" if existed else "created"}
+
+    # Compose the blessed alias combo when the base is registered, so the addon is
+    # runnable by name immediately (not just declared).
+    if base in getattr(sf, "_graphs", {}):
+        try:
+            result["registered_config"] = register_addon_combo(
+                sf, registry, base, [name], name=spec.get("alias") or None)
+        except Exception as e:
+            result["combo_error"] = str(e)
+            log.warning("addon combo not registered for %s: %s", name, e)
+    else:
+        result["combo_error"] = f"base graph '{base}' not registered; combo not composed"
+
+    dest = generated_addons_dir() / f"{name}.yaml"
+    dest.write_text(yaml.safe_dump(spec, sort_keys=False, allow_unicode=True),
+                    encoding="utf-8")
+    result["path"] = str(dest)
+    return result
+
+
+def load_generated_addons(sf, registry) -> list[str]:
+    """Boot: declare + alias-register every persisted overlay in
+    ``generated_addons_dir`` (~/.AItelier/configs/addons). Mirrors
+    core.pipeline_registry.load_generated_configs. Non-fatal per file."""
+    out: list[str] = []
+    for p in sorted(generated_addons_dir().glob("*.yaml")):
+        try:
+            spec = _load_yaml(p)
+            nm = spec.get("name", p.stem)
+            sf.register_overlay(nm, spec)
+            base, alias = spec.get("base"), spec.get("alias")
+            if base and base in getattr(sf, "_graphs", {}):
+                try:
+                    register_addon_combo(sf, registry, base, [nm], name=alias or None)
+                except Exception as e:
+                    log.warning("generated addon combo '%s' not registered: %s", nm, e)
+            out.append(nm)
+        except Exception as e:
+            log.warning("skipping invalid generated addon %s: %s", p, e)
+    return out
 
 
 def load_addon_aliases(sf, registry) -> list[str]:

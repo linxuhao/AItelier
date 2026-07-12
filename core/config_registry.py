@@ -42,6 +42,7 @@ _DEFAULTS: dict = {
     "seed_file": None,
     "output_step": None,
     "registers_generated_pipeline": False,
+    "registers_generated_addon": False,
     "preamble_steps": [],
     "checkpoint_kind": "file-review",
     "checkpoint_kinds": {},
@@ -57,6 +58,13 @@ _EXTERNAL_HINTS: dict[str, dict] = {
         "seed_file": "skill_description.md",
         "output_step": "done",
         "registers_generated_pipeline": True,
+    },
+    "addon_converter": {
+        "label": "Capability → Addon",
+        "scheduler_owned": False,
+        "seed_file": "addon_description.md",
+        "output_step": "done",
+        "registers_generated_addon": True,
     },
 }
 
@@ -90,6 +98,10 @@ class ConfigManifest:
     # should register as a runnable config (skill_converter). Lets the meta agent's
     # completion handler stay generic instead of special-casing the graph name.
     registers_generated_pipeline: bool = False
+    # When True, a completed run of this config emits an addon OVERLAY the host
+    # should register (addon_converter). Parallel to registers_generated_pipeline,
+    # so the meta agent's completion handler stays generic.
+    registers_generated_addon: bool = False
     # Step ids whose outputs are project-global & stable (e.g. SOTA/architecture).
     # The host hoists these into the shared system preamble for prompt caching.
     preamble_steps: list[str] = field(default_factory=list)
@@ -210,6 +222,7 @@ class ConfigRegistry:
             output_step=hints.get("output_step"),
             input_hint=hints.get("input_hint") or "",
             registers_generated_pipeline=bool(hints.get("registers_generated_pipeline")),
+            registers_generated_addon=bool(hints.get("registers_generated_addon")),
             preamble_steps=list(hints.get("preamble_steps") or []),
             label_overrides=hints.get("labels") or {},
             checkpoint_kind=hints.get("checkpoint_kind") or "file-review",

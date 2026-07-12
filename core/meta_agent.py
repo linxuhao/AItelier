@@ -180,6 +180,21 @@ Use start_new_project / start_from_aitelier_project for *software* \
 (apps/tools/bug-fixes); generate_pipeline for *converting a skill/workflow into \
 a pipeline graph*.
 
+## When the user wants to add a reusable CAPABILITY on top of an existing pipeline
+Distinct from both building software and authoring a standalone pipeline. If the \
+user wants a cross-cutting GATE or STAGE layered onto an *existing base pipeline* \
+— an engine compile/play-test gate, an i18n pass, a mobile harness, an extra \
+review stage — call generate_addon(description=<the capability>, base=<base \
+pipeline, default dpe_default_v2>). It runs addon_converter and returns an Overlay \
+Review checkpoint — relay it; on approval it COMPOSE-VALIDATES the overlay against \
+the real base (composition is the acceptance test) and AUTO-REGISTERS the addon \
+(reported as `registered_addon`, and a runnable `registered_config` if it has an \
+alias). Then apply it with approve_project_brief(addons=[<addon>]) on a build, or \
+run its blessed combo with start_config_run(config_name=<registered_config>). \
+Routing in one line: build software → start_new_project; a standalone reusable \
+pipeline → generate_pipeline; a reusable gate/capability ON an existing base → \
+generate_addon.
+
 ## After a pipeline starts
 Pipelines run and surface their own review checkpoints. For Path A, call \
 wait_until_next_checkpoint_or_completion(run_id) to block until each checkpoint \
@@ -684,6 +699,34 @@ TOOL_DEFINITIONS = [
                                     "description": "The skill / workflow to convert into a pipeline."},
                     "name": {"type": "string",
                              "description": "Optional short name for the generated pipeline."},
+                },
+                "required": ["description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_addon",
+            "description": "Turn a description of a reusable CAPABILITY or GATE to add ON TOP of "
+                           "an existing base pipeline into a validated addon OVERLAY, by running "
+                           "the addon_converter pipeline. Use this when the user wants a "
+                           "cross-cutting stage layered onto an existing pipeline (an engine "
+                           "compile/play-test gate, an i18n pass, a mobile harness, an extra "
+                           "review stage) — NOT for a standalone pipeline (use generate_pipeline) "
+                           "or for building an app (use start_new_project). Returns an Overlay "
+                           "Review checkpoint to relay; on approval it compose-validates against "
+                           "the real base and AUTO-REGISTERS the addon.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string",
+                                    "description": "The capability/gate to add and where it belongs."},
+                    "base": {"type": "string",
+                             "description": "The base pipeline the addon targets (default: "
+                                            "dpe_default_v2). Must be a registered graph with anchors."},
+                    "name": {"type": "string",
+                             "description": "Optional short name for the generated addon."},
                 },
                 "required": ["description"],
             },
@@ -2971,6 +3014,30 @@ class MetaAgent:
                                     result["registration_error"] = reg["error"]
                             except Exception as e:
                                 result["registration_error"] = str(e)
+                        # addon_converter runs emit an OVERLAY on completion — persist +
+                        # register it (and its blessed alias combo) so it can be applied
+                        # immediately. Same manifest-driven generic path as pipelines.
+                        elif _mf and _mf.registers_generated_addon:
+                            try:
+                                from api.dependencies import register_addon_from_run
+                                reg = register_addon_from_run(run_id)
+                                if reg.get("addon_name"):
+                                    result["registered_addon"] = reg["addon_name"]
+                                    result["registered_action"] = reg.get("action")
+                                    result["registered_config"] = reg.get("registered_config")
+                                    combo = reg.get("registered_config")
+                                    how = (f"Run it with start_config_run(config_name='{combo}')"
+                                           if combo else
+                                           f"Apply it with approve_project_brief(addons=['{reg['addon_name']}'])")
+                                    result["message"] = (
+                                        f"Addon '{reg['addon_name']}' is registered and ready "
+                                        f"({reg.get('action')}). {how}.")
+                                    if reg.get("combo_error"):
+                                        result["combo_error"] = reg["combo_error"]
+                                elif reg.get("error"):
+                                    result["registration_error"] = reg["error"]
+                            except Exception as e:
+                                result["registration_error"] = str(e)
                         return result
                     elif status == "failed":
                         return {
@@ -3547,6 +3614,88 @@ class MetaAgent:
                 pass
         return result
 
+    async def _tool_generate_addon(self, args: dict) -> dict:
+        """Generate a reusable addon OVERLAY from a capability description by
+        running skillflow's addon_converter pipeline, then relaying its overlay
+        review checkpoint. The host seeds the base's extension surface
+        (base_spec.json) + full graph (base_graph.yaml) so the converter targets
+        real anchors and the compose_validate acceptance test can run. On
+        completion the generic waiter persists + registers the overlay."""
+        from api.dependencies import get_skillflow
+
+        description = (args.get("description") or "").strip()
+        if not description:
+            return {"error": "description is required — the capability/gate to add."}
+        base = (args.get("base") or "dpe_default_v2").strip()
+        name = args.get("name") or description[:40]
+        sf = get_skillflow()
+
+        # Inspect the base graph host-side: its anchors are the ONLY legal
+        # injection points, so seed them (+ step ids + where each anchor leads)
+        # for the converter agents, and the full graph dict for compose_validate.
+        graph = sf._graphs.get(base)
+        if graph is None:
+            try:
+                graph = sf._get_resolver(base).graph
+            except Exception:
+                graph = None
+        if graph is None:
+            avail = ", ".join(sorted(sf._graphs.keys()))
+            return {"error": f"Unknown base graph '{base}'. Registered: {avail}"}
+        if not getattr(graph, "anchors", None):
+            return {"error": f"Base graph '{base}' declares no anchors — nothing for "
+                             f"an addon overlay to target."}
+
+        import json as _json
+        import yaml as _yaml
+        anchor_targets = {}
+        by_id = {s.id: s for s in graph.steps}
+        for anchor_name, step_id in graph.anchors.items():
+            node = by_id.get(step_id)
+            anchor_targets[anchor_name] = (
+                [t.to for t in node.transitions if t.to] if node else [])
+        base_spec = {
+            "name": graph.name,
+            "anchors": dict(graph.anchors),
+            "steps": [s.id for s in graph.steps],
+            "anchor_targets": anchor_targets,
+        }
+        base_graph_yaml = _yaml.safe_dump(graph.to_dict(), sort_keys=False,
+                                          allow_unicode=True)
+
+        import uuid as _uuid
+        pid = "addon-" + self._slugify(name) + "-" + _uuid.uuid4().hex[:6]
+        from core.run_launcher import start_config_run
+        launch = start_config_run(
+            self.db, self.ws, "addon_converter", pid,
+            seed_text=description,
+            seed_inputs={"base_spec.json": _json.dumps(base_spec, indent=2),
+                         "base_graph.yaml": base_graph_yaml},
+            name=name, owner_email=self.owner_email,
+        )
+        if launch.get("status") == "error":
+            return {"error": launch.get("message")}
+        run_id = launch["run_id"]
+        sid = getattr(self, "session_id", None)
+        if sid:
+            try:
+                self.db.link_run_to_session(sid, run_id)
+            except Exception:
+                pass
+
+        result = await self._run_pipeline_until_checkpoint(run_id)
+
+        from core.scheduler import _sync_project_status_to_db
+        try:
+            _sync_project_status_to_db(pid)
+        except Exception as e:
+            self._log_error(f"project status sync failed for {pid}: {e}")
+
+        result["project_id"] = pid
+        result["pipeline"] = "addon_converter"
+        result["base"] = base
+        return result
+
     async def _tool_start_config_run(self, args: dict) -> dict:
         """Start a run of any registered skillflow config by name. Scheduler-owned
         configs are driven by the poller; butler-driven configs are driven inline
@@ -3647,6 +3796,7 @@ _TOOL_HANDLERS = {
     "reject_checkpoint": MetaAgent._tool_reject_checkpoint,
     "get_pipeline_status": MetaAgent._tool_get_pipeline_status,
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
+    "generate_addon": MetaAgent._tool_generate_addon,
     "start_config_run": MetaAgent._tool_start_config_run,
     "list_pipelines": MetaAgent._tool_list_pipelines,
     "list_pipeline_addons": MetaAgent._tool_list_pipeline_addons,

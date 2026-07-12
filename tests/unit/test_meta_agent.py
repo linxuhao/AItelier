@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 33  # +list_pipeline_addons
+        assert len(TOOL_DEFINITIONS) == 34  # +generate_addon
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -65,7 +65,7 @@ class TestToolDefinitions:
             "list_workspace_tree", "read_workspace_file",
             "retrieve_previous_context",
             "approve_checkpoint", "reject_checkpoint", "get_pipeline_status",
-            "generate_pipeline",
+            "generate_pipeline", "generate_addon",
         }
         assert required.issubset(names)
 

@@ -201,3 +201,41 @@ async def test_generate_addon_seeds_and_launches(tmp_path):
     # base_graph seed is the full graph dict (anchors intact) for compose_validate
     bg = yaml.safe_load(captured["seed_inputs"]["base_graph.yaml"])
     assert bg["name"] == "mini_base" and bg["anchors"] == {"mid": "b"}
+
+
+class TestOverlayDependencyWarnings:
+    """compose_validate proves the overlay composes; this host check surfaces
+    runtime deps that don't exist — an invented tool or a missing fragment."""
+
+    def _sf(self, tools):
+        sf = MagicMock()
+        sf._tool_loader.list_tools.return_value = list(tools)
+        return sf
+
+    def test_warns_on_unknown_tool(self):
+        sf = self._sf(["run_tests", "lint"])
+        spec = {"overlay": [
+            {"insert_after": "@post_verify_tests",
+             "steps": [{"id": "x", "step_type": "tool", "tool_name": "made_up_tool"}]}]}
+        w = ar._overlay_dependency_warnings(sf, spec)
+        assert any("made_up_tool" in m and "run time" in m for m in w)
+
+    def test_no_warn_for_known_tool(self):
+        sf = self._sf(["run_tests", "lint"])
+        spec = {"overlay": [
+            {"insert_after": "@post_verify_tests",
+             "steps": [{"id": "x", "step_type": "tool", "tool_name": "lint"}]}]}
+        assert ar._overlay_dependency_warnings(sf, spec) == []
+
+    def test_warns_on_missing_fragment(self):
+        sf = self._sf(["lint"])
+        spec = {"overlay": [
+            {"add_template": "@architect", "fragment": "nope_addon/ghost.md"}]}
+        w = ar._overlay_dependency_warnings(sf, spec)
+        assert any("ghost.md" in m and "skipped" in m for m in w)
+
+    def test_no_warn_for_existing_fragment(self):
+        sf = self._sf(["lint"])
+        spec = {"overlay": [
+            {"add_template": "@architect", "fragment": "game_harness/architect.md"}]}
+        assert ar._overlay_dependency_warnings(sf, spec) == []

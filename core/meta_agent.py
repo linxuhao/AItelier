@@ -3657,11 +3657,19 @@ class MetaAgent:
             node = by_id.get(step_id)
             anchor_targets[anchor_name] = (
                 [t.to for t in node.transitions if t.to] if node else [])
+        # Available tool names — so the design agent references REAL tools in any
+        # `insert_after` tool step instead of inventing one that fails at run time
+        # (compose only checks graph structure, not tool existence).
+        try:
+            available_tools = sf._tool_loader.list_tools()
+        except Exception:
+            available_tools = []
         base_spec = {
             "name": graph.name,
             "anchors": dict(graph.anchors),
             "steps": [s.id for s in graph.steps],
             "anchor_targets": anchor_targets,
+            "available_tools": available_tools,
         }
         base_graph_yaml = _yaml.safe_dump(graph.to_dict(), sort_keys=False,
                                           allow_unicode=True)

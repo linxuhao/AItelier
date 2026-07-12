@@ -134,6 +134,37 @@ def register_addon_combo(sf, registry, base_name: str, addon_names: list[str],
     return cfg_name
 
 
+def _overlay_dependency_warnings(sf, spec: dict) -> list[str]:
+    """Runtime-dependency check for a (compose-valid) overlay: compose_validate
+    proves the overlay COMPOSES into a valid graph, but not that the tools/
+    fragments it references actually EXIST in this host. Warn (don't block) so a
+    generated addon that names an unregistered tool or a missing fragment is
+    surfaced instead of silently misbehaving at run time."""
+    warns: list[str] = []
+    try:
+        known_tools = set(sf._tool_loader.list_tools())
+    except Exception:
+        known_tools = set()
+    frag_base = _configs_dir() / "addons"
+    for op in spec.get("overlay", []) or []:
+        if not isinstance(op, dict):
+            continue
+        if "insert_after" in op:
+            for st in op.get("steps", []) or []:
+                tn = (st or {}).get("tool_name")
+                if tn and known_tools and tn not in known_tools:
+                    warns.append(
+                        f"step '{(st or {}).get('id', '?')}' calls unknown tool "
+                        f"'{tn}' — it composes but will fail at run time")
+        if "add_template" in op:
+            frag = op.get("fragment")
+            if frag and not (frag_base / frag).is_file():
+                warns.append(
+                    f"add_template fragment '{frag}' does not exist — its guidance "
+                    "will be silently skipped at run time")
+    return warns
+
+
 def register_addon_from_run(sf, registry, run_id: str) -> dict:
     """Bridge: persist + register the overlay a completed addon_converter run made.
 
@@ -170,6 +201,9 @@ def register_addon_from_run(sf, registry, run_id: str) -> dict:
     sf.register_overlay(name, spec)          # mechanical half (never fails)
     result = {"addon_name": name, "base": base,
               "action": "updated" if existed else "created"}
+    warns = _overlay_dependency_warnings(sf, spec)
+    if warns:
+        result["warnings"] = warns           # runtime deps that don't exist yet
 
     # Compose the blessed alias combo when the base is registered, so the addon is
     # runnable by name immediately (not just declared).

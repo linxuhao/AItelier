@@ -61,9 +61,15 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         return {"status": "error", "message": f"Unknown config '{config_name}'"}
 
     if not db.get_project(project_id):
-        # Compute default repo_path for new/clone, same as project_routers.py
+        # Compute default repo_path for new/clone, same as project_routers.py.
+        # Authoring configs (skill_converter / addon_converter) emit a pipeline or
+        # overlay artifact, NOT a code repo — leave repo_path NULL so each run
+        # doesn't surface as an independent "fake repo" on the group-by-repo
+        # dashboard (it's an internal byproduct of a chat action, not a project).
+        authoring = bool(manifest.registers_generated_pipeline
+                         or manifest.registers_generated_addon)
         rpath = repo_path
-        if repo_type in ("new", "clone") and not rpath:
+        if repo_type in ("new", "clone") and not rpath and not authoring:
             from core.datadir import projects_dir
             rpath = str(projects_dir() / project_id)
         db.ensure_project(project_id, name=name, owner_email=owner_email,

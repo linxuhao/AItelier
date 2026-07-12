@@ -172,6 +172,7 @@ const translations: Record<Lang, Record<string, string>> = {
 
     // Repo panel
     'repo.title': 'Repository',
+    'repo.files': 'Repository Files',
     'repo.loading': 'Loading repository status…',
     'repo.notGit': 'Not a git repository',
     'repo.path': 'Path',
@@ -379,6 +380,7 @@ const translations: Record<Lang, Record<string, string>> = {
     'project.configTab': '配置',
     'project.noRuns': '暂无运行记录。',
     'repo.title': '仓库',
+    'repo.files': '仓库文件',
     'repo.loading': '加载仓库状态…',
     'repo.notGit': '不是 Git 仓库',
     'repo.path': '路径',

@@ -21,6 +21,7 @@
   } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
   import RepoPanel from './RepoPanel.svelte';
+  import WorkspaceBrowser from './WorkspaceBrowser.svelte';
 
   // ── State ──
 
@@ -80,9 +81,12 @@
       const runs = ((data as any)?.runs ?? data) as Record<string, unknown>[];
       orphanProjects = runs.filter(
         (r) =>
-          r.repo_path == null ||
-          r.repo_path === '' ||
-          r.repo_path === undefined,
+          (r.repo_path == null ||
+            r.repo_path === '' ||
+            r.repo_path === undefined) &&
+          // Authoring-converter runs (generate_addon / generate_pipeline) have no
+          // repo but are internal chat byproducts, not projects — don't list them.
+          !r.is_authoring,
       );
     } catch {
       // Orphan projects are non-critical — silently ignore
@@ -481,11 +485,19 @@
           </span>
         </summary>
 
-        <!-- Lazy load RepoPanel only when expanded -->
+        <!-- Lazy load RepoPanel + file browser only when expanded -->
         {#if expandedRepos.has(repo.repo_path)}
           <RepoPanel
             projectId={repo.representative_project_id}
             {canWrite}
+          />
+          <!-- Repository files browser (folded by default) — sits under the repo
+               operations panel; restores the file browser lost in the group-by-repo
+               migration. -->
+          <WorkspaceBrowser
+            projectId={repo.representative_project_id}
+            root="code"
+            title={t('repo.files')}
           />
         {/if}
 

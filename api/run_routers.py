@@ -83,6 +83,10 @@ def list_all_runs(
         m = registry.get(cfg)
         r["config_label"] = m.label if m else cfg
         r["has_task_loop"] = bool(m and m.has_task_loop)
+        # Authoring converters (skill_converter / addon_converter) emit a config
+        # artifact, not a project — the dashboard hides them from the orphan list.
+        r["is_authoring"] = bool(
+            m and (m.registers_generated_pipeline or m.registers_generated_addon))
         out.append(r)
 
     # Attach cache hit ratio stats per run (batch query).

@@ -13,6 +13,10 @@ dependencies = [
     "fastapi>=0.136",
     "typer>=0.24",
     "litellm>=1.85",
+    # litellm's provider JSON path imports orjson at call time but no longer
+    # pulls it transitively (litellm 1.92) — declare it so a rebuild never ships
+    # a butler that 500s on the first LLM call with "No module named 'orjson'".
+    "orjson>=3.10",
     "httpx>=0.28",
     "pydantic>=2.13",
     "apscheduler>=3.11",

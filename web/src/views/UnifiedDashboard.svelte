@@ -27,6 +27,10 @@
 
   let repos = $state<RepoItem[]>([]);
   let orphanProjects = $state<Record<string, unknown>[]>([]);
+  // Authoring runs (generate_pipeline / generate_addon) — repo-independent
+  // config-authoring tooling, not projects. Listed in their own auditable
+  // section (trace links) rather than as repos.
+  let authoringRuns = $state<Record<string, unknown>[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
@@ -79,17 +83,19 @@
     try {
       const data = await listAllRuns();
       const runs = ((data as any)?.runs ?? data) as Record<string, unknown>[];
+      // Authoring-converter runs (generate_addon / generate_pipeline) have no
+      // repo, but are config-authoring tooling — split into their own section
+      // (auditable via traces) rather than mixing with orphan projects.
+      authoringRuns = runs.filter((r) => r.is_authoring);
       orphanProjects = runs.filter(
         (r) =>
           (r.repo_path == null ||
             r.repo_path === '' ||
             r.repo_path === undefined) &&
-          // Authoring-converter runs (generate_addon / generate_pipeline) have no
-          // repo but are internal chat byproducts, not projects — don't list them.
           !r.is_authoring,
       );
     } catch {
-      // Orphan projects are non-critical — silently ignore
+      // Orphan / authoring runs are non-critical — silently ignore
     }
     pollTimer = setInterval(refreshData, 10000);
   });
@@ -175,6 +181,10 @@
   function navigateToProject(id: string): void {
     setCurrentProject(id);
     push('#/projects/' + encodeURIComponent(id));
+  }
+
+  function navigateToTrace(id: string): void {
+    push('#/projects/' + encodeURIComponent(id) + '/trace');
   }
 
   // ── Create form (ported from Dashboard.svelte) ──
@@ -679,6 +689,95 @@
         </details>
       {/if}
     {/if}
+
+    <!-- Authoring runs (pipelines & addons) — repo-independent config tooling,
+         auditable via traces. Not repos, not orphan projects. -->
+    {#if authoringRuns.length > 0}
+      {@const filteredAuthoring = searchQuery.trim()
+        ? authoringRuns.filter(o => orphanMatchesSearch(o, searchQuery))
+        : authoringRuns}
+      {#if filteredAuthoring.length > 0}
+        <details class="repo-section authoring-section">
+          <summary class="repo-summary">
+            <span class="repo-summary-name">
+              <strong>{t('dashboard.authoringRuns')}</strong>
+            </span>
+            <span class="repo-summary-meta">
+              <span class="project-count">
+                {t('dashboard.projectCount').replace('{n}', String(filteredAuthoring.length))}
+              </span>
+            </span>
+          </summary>
+          <p class="authoring-hint">{t('dashboard.authoringHint')}</p>
+          <figure>
+            <table class="project-table">
+              <thead>
+                <tr>
+                  <th>{t('dashboard.colNum')}</th>
+                  <th>{t('dashboard.colProject')}</th>
+                  <th>{t('dashboard.colKind')}</th>
+                  <th>{t('dashboard.colStatus')}</th>
+                  <th>{t('dashboard.colLastUpdate')}</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each filteredAuthoring as run, idx}
+                  <tr class="project-row">
+                    <td>{idx + 1}</td>
+                    <td>
+                      <a
+                        href="#/projects/{encodeURIComponent(run.project_id as string)}/trace"
+                        onclick={(e) => {
+                          e.preventDefault();
+                          navigateToTrace(run.project_id as string);
+                        }}
+                      >
+                        {run.name || (run.project_id as string)}
+                      </a>
+                    </td>
+                    <td><span class="repo-type-badge">{run.config_label || run.config_name}</span></td>
+                    <td>
+                      {#if run.status}
+                        {@const parsed = parseStatus(run.status as string)}
+                        <span class="status-badge {parsed.className}" title={parsed.text}>
+                          {parsed.icon} {parsed.text}
+                        </span>
+                      {:else}
+                        <span class="status-badge">—</span>
+                      {/if}
+                    </td>
+                    <td>
+                      <span class="timestamp">{formatTime((run.last_update as number) ?? run.updated_at)}</span>
+                    </td>
+                    <td>
+                      <a
+                        class="repo-btn"
+                        href="#/projects/{encodeURIComponent(run.project_id as string)}/trace"
+                        onclick={(e) => {
+                          e.preventDefault();
+                          navigateToTrace(run.project_id as string);
+                        }}
+                      >{t('dashboard.viewTrace')}</a>
+                      {#if canWrite}
+                        <button
+                          class="delete-btn"
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            confirmDelete(run.project_id as string);
+                          }}
+                          title={t('dashboard.deleteTitle')}
+                        >✕</button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </figure>
+        </details>
+      {/if}
+    {/if}
   {/if}
 
   <!-- Delete confirmation dialog -->
@@ -781,6 +880,15 @@
   /* ── Orphan section ── */
   .orphan-section {
     margin-top: 1.5rem;
+  }
+
+  .authoring-section {
+    margin-top: 1.5rem;
+  }
+  .authoring-hint {
+    margin: 0.25rem 0 0.5rem;
+    font-size: 0.8rem;
+    color: var(--pico-muted-color, #888);
   }
 
   /* ── Create form ── */

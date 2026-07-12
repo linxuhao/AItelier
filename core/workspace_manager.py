@@ -131,7 +131,12 @@ class WorkspaceManager:
             self._final_dir(project_id, step_id, graph_name).mkdir(parents=True, exist_ok=True)
 
         # 初始化 Project 代码仓库
-        if repo_type == "new":
+        if repo_type == "none":
+            # Authoring runs (pipeline/addon converters) emit a config/overlay
+            # artifact, not code — they get NO code repo, staying fully repo-
+            # independent. The skillflow step dirs created above are all they need.
+            pass
+        elif repo_type == "new":
             code_path = self.projects_base / project_id
             code_path.mkdir(parents=True, exist_ok=True)
             if not (code_path / ".git").exists():

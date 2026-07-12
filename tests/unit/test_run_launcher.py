@@ -15,8 +15,9 @@ def _fake_manifest(**over):
 
 
 def _run_start(manifest):
-    """Drive start_config_run with everything but repo_path resolution mocked,
-    returning the repo_path passed to db.ensure_project."""
+    """Drive start_config_run with everything but repo resolution mocked,
+    returning (repo_path, repo_type) passed to db.ensure_project and the
+    repo_type passed to ws.setup_workspace."""
     db = MagicMock()
     db.get_project.return_value = None            # force ensure_project path
     ws = MagicMock()
@@ -29,20 +30,25 @@ def _run_start(manifest):
          patch("api.dependencies.get_config_registry", return_value=registry), \
          patch("core.scheduler.wake_scheduler"):
         start_config_run(db, ws, "c", "pid_x")
-    return db.ensure_project.call_args.kwargs["repo_path"]
+    ep = db.ensure_project.call_args.kwargs
+    return ep["repo_path"], ep["repo_type"], ws.setup_workspace.call_args.kwargs["repo_type"]
 
 
-def test_authoring_run_gets_no_repo_path():
+def test_authoring_run_gets_repoless_workspace():
     # skill_converter / addon_converter emit a config artifact, not a code repo —
-    # so they must NOT be assigned a synthetic repo_path (else each surfaces as a
-    # "fake repo" on the group-by-repo dashboard).
-    assert _run_start(_fake_manifest(registers_generated_addon=True)) is None
-    assert _run_start(_fake_manifest(registers_generated_pipeline=True)) is None
+    # no synthetic repo_path (else each surfaces as a "fake repo") AND repo_type
+    # "none" so setup_workspace never git-inits a throwaway projects/<id> dir.
+    for m in (_fake_manifest(registers_generated_addon=True),
+              _fake_manifest(registers_generated_pipeline=True)):
+        rp, ep_type, ws_type = _run_start(m)
+        assert rp is None
+        assert ep_type == "none" and ws_type == "none"
 
 
 def test_plain_new_run_gets_a_repo_path():
-    rp = _run_start(_fake_manifest())
+    rp, ep_type, ws_type = _run_start(_fake_manifest())
     assert rp is not None and rp.endswith("pid_x")
+    assert ep_type == "new" and ws_type == "new"
 
 
 def test_generate_run_id_is_filesystem_safe():

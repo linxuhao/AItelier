@@ -186,11 +186,14 @@ user wants a cross-cutting GATE or STAGE layered onto an *existing base pipeline
 — an engine compile/play-test gate, an i18n pass, a mobile harness, an extra \
 review stage — call generate_addon(description=<the capability>, base=<base \
 pipeline, default dpe_default_v2>). It runs addon_converter and returns an Overlay \
-Review checkpoint — relay it; on approval it COMPOSE-VALIDATES the overlay against \
-the real base (composition is the acceptance test) and AUTO-REGISTERS the addon \
-(reported as `registered_addon`, and a runnable `registered_config` if it has an \
-alias). Then apply it with approve_project_brief(addons=[<addon>]) on a build, or \
-run its blessed combo with start_config_run(config_name=<registered_config>). \
+Review checkpoint (with the addon run's project_id) — relay it. On approval, call \
+approve_checkpoint(project_id=<that project_id>) — do NOT call generate_addon \
+again (that starts a duplicate authoring run). Approval COMPOSE-VALIDATES the \
+overlay against the real base (composition is the acceptance test) and \
+AUTO-REGISTERS the addon (reported as `registered_addon`, and a runnable \
+`registered_config` if it has an alias). Then apply it with \
+approve_project_brief(addons=[<addon>]) on a build, or run its blessed combo with \
+start_config_run(config_name=<registered_config>). \
 Routing in one line: build software → start_new_project; a standalone reusable \
 pipeline → generate_pipeline; a reusable gate/capability ON an existing base → \
 generate_addon.

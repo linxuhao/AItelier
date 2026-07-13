@@ -195,7 +195,8 @@ func _load_spec(path: String) -> void:
             if act != "" and not InputMap.has_action(act):
                 InputMap.add_action(act)
 func _process(_d: float) -> void:
-    _frame += 1
+    # 0-based frames: apply this frame's scheduled releases + timeline entries,
+    # THEN advance. Incrementing first would make `at: 0` unreachable.
     if _releases.has(_frame):
         for act in _releases[_frame]:
             if InputMap.has_action(act):
@@ -210,6 +211,7 @@ func _process(_d: float) -> void:
             Input.action_press(_legacy_action)
         elif _frame % 20 == 1:
             Input.action_release(_legacy_action)
+    _frame += 1
     if _frame >= _max:
         _finish()
         get_tree().quit()

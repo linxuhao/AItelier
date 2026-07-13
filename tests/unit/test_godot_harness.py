@@ -210,6 +210,22 @@ def test_real_playtest_spec_evaluates_assertions(good_project):
 
 
 @requires_godot
+def test_real_playtest_spec_input_timeline(good_project):
+    # The game reacts to a 'flap' action; a press at frame 0 must reach it.
+    # Regression: frames are 0-based, so an `at: 0` press is not swallowed.
+    (good_project / "main.gd").write_text(
+        "extends Node\nvar lift := 0.0\n"
+        "func _process(_d):\n"
+        "\tif Input.is_action_pressed('flap'):\n\t\tlift = -1.0\n")
+    spec = {"scenarios": [{"name": "flap", "timeline": [
+        {"at": 0, "press": "flap"},
+        {"at": 5, "assert": [{"node": "Main", "expr": "lift < 0"}]}]}]}
+    r = gh.playtest_project(str(good_project), frames=10, spec=spec)
+    assert r["passed"] is True
+    assert r["behavior"]["scenarios"][0]["passed"] is True
+
+
+@requires_godot
 def test_real_playtest_spec_reports_bad_node(good_project):
     # An assertion against a node that doesn't exist → error recorded, advisory
     # (the run itself is clean, so hard passed stays True).

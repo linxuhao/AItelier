@@ -7,3 +7,11 @@
 - **交付物清单里必须包含**：一份 `README.md`（说明装 Godot 4.4+、F5 开玩、怎么把占位节点换成真美术）。工程根 `.gitignore`（含 `.godot/`）由系统自动加入，无需设计。
 - **可运行性**：整仓脚本被自动 headless 导入解析校验、主场景被自动 headless 运行冒烟（捕获运行时异常 + 快照运行时各节点脚本变量状态）。确保脚本间接口（`class_name`/信号名/方法签名/节点路径）一致、主场景能被无头加载。
 - **linter_manifest**：`.gd` 由 Godot 导入自动解析，**不必写进 manifest**；manifest 只覆盖其它文本文件（`.json`/`.md` 用 `basic`）。只有 GDScript/场景时可为 `{}`。
+
+## 行为测试契约 `playtest_spec.yaml`（你负责"可观测面 + 剧本骨架"）
+运行时 playtest 已升级为**脚本化剧本 + 断言的 TDD 式测试**：工程根的 `playtest_spec.yaml` 是"预期"，闸门按剧本时间线按键、并在指定帧用 `Expression` 对活节点求值断言。该文件由你与 PM 分工产出——**你定义可观测面 + 剧本骨架，PM 填断言阈值**：
+- `scene`：主场景 `res://<主场景>.tscn`（默认即主场景，可省略）。
+- `actions`：游戏用到的输入动作名（如 `flap`）——**这些动作必须同时在 `project.godot` `[input]` 段定义**；playtest 会按剧本按这些动作（不再只按 `ui_accept`）。
+- `surface`：断言可引用的**节点→脚本变量白名单**，如 `Bird: [velocity, position]`、`ScoreLabel: [score]`。这是**给实现者的硬契约**：实现里节点名 / 脚本变量名 / 动作名必须与此**逐字一致**（断言用 `Expression` 直接对活节点求值，名字对不上断言即失败）。
+- `scenarios[]`：每个 `{name, timeline}`——你只搭**骨架**（这个场景测什么行为、`at` 哪几帧、`press` 什么动作、在哪帧放 `assert` 占位），**断言阈值留给 PM 填**。
+产出：把 `playtest_spec.yaml` 的 `scene`/`actions`/`surface` + 剧本骨架写进你的架构产物，作为 PM 与实现者的契约。示例见 `playtest_spec.example.yaml`。

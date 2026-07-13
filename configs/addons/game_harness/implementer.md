@@ -12,3 +12,4 @@
 - **每个 gameplay 脚本都必须真正接入场景**：写了一个需要运行时存在的节点脚本（玩家/敌人/生成器/边界/管理器），**必须挂到某个 `.tscn` 的节点上、或注册为 autoload、或由主脚本在 `_ready()` 里 `add_child(...)` 实例化**。否则解析通过却从未进入场景树 → 运行时形同不存在（解析闸门查不出，但运行冒烟 + 状态快照能暴露）。
 - **交付一份 `README.md`**：说明装 Godot 4.4+、Import 工程、F5 开玩、操作键，以及"怎么把占位节点（`Polygon2D`/`ColorRect`）换成 `Sprite2D`+贴图"。（工程 `.gitignore` 由系统自动加入。）
 - **纯逻辑测试可选**：如需单测,抽成不依赖场景树的普通 GDScript 类,保持最小。
+- **落地行为测试契约 `playtest_spec.yaml`（工程根）**：PM 已产出完整的 `playtest_spec.yaml`（场景剧本 + 断言）。**把它原样写到工程根 `playtest_spec.yaml`**——运行时 playtest 闸门会读它，按剧本时间线按键并用 `Expression` 对活节点求值断言。**实现必须与其 `surface` 契约逐字一致**：断言引用的**节点名**（如 `Bird`/`ScoreLabel`）、**脚本变量名**（如 `velocity`/`score`）、**输入动作名**（如 `flap`，须在 `project.godot` `[input]` 段定义）必须真实存在且拼写一致——`Expression` 直接对活节点求值，名字对不上断言即失败、`error` 记 "node not found"/"parse error"。被断言的量要用**脚本变量**（`var`，能被求值/快照），且避开内置成员名冲突（见上：`velocity` 直接用基类的、别 `var velocity`）。

@@ -1,0 +1,43 @@
+# playtest_spec.yaml — the authored TDD oracle for the Godot playtest gate.
+#
+# Lives at the PROJECT ROOT. Authored across two DPE steps:
+#   * ARCHITECT declares the observable surface: `scene`, `actions`, `surface`
+#     (which nodes/vars an assertion may reference) + scenario skeletons.
+#   * PM fills each scenario's `assert` thresholds against that surface.
+# The `godot_playtest` gate runs ONE isolated headless pass per scenario, drives
+# its input `timeline`, and at each `assert` frame evaluates the GDScript
+# `expr` against the live `node` (as `self`) via Godot's Expression class.
+#
+# Gate semantics: a CRASH or scene-didn't-run is a HARD failure (loops the
+# goal-loop). Assertion outcomes are ADVISORY — a prominent signal the verifier
+# weighs, but a wrong/flaky spec can never stall an otherwise-clean build.
+#
+# Absent → the gate falls back to the legacy canned smoke test (auto-press
+# ui_accept, one end snapshot). This example targets a Flappy-Bird-style game.
+
+scene: res://main.tscn          # optional — defaults to project.godot's main scene
+frames: 300                     # optional global frame budget per scenario
+
+# ARCHITECT: input actions the game uses (also defined in project.godot [input]).
+actions: [flap]
+
+# ARCHITECT: the observable surface — nodes + script vars an assertion may touch.
+# This is the contract the implementer must match (exact node & var names).
+surface:
+  Bird: [velocity, position]
+  ScoreLabel: [score]
+
+scenarios:
+  # PM authors the `assert` entries; ARCHITECT provided name + timeline shape.
+  - name: gravity pulls the bird down when idle
+    timeline:
+      - { at: 40, assert: [ { node: Bird, expr: "velocity.y > 0" } ] }
+
+  - name: a flap gives the bird upward velocity
+    timeline:
+      - { at: 0, press: flap }
+      - { at: 8, assert: [ { node: Bird, expr: "velocity.y < 0" } ] }
+
+  - name: passing a pipe increments the score
+    timeline:
+      - { at: 180, assert: [ { node: ScoreLabel, expr: "score >= 1" } ] }

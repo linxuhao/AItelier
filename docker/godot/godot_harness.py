@@ -144,70 +144,170 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
 
 # ── playtest gate ──────────────────────────────────────────────────────────
 _PROBE_GD = r'''extends Node
-# AItelier runtime probe (injected). Runs the game headless for a bounded number
-# of frames, optionally auto-pressing an input action so the game progresses,
-# then snapshots every node's script variables to JSON and quits.
-var _frames := 0
+# AItelier runtime probe (injected). Two modes:
+#   * SPEC mode  (AITELIER_PROBE_SPEC set): drive an AUTHORED input timeline and,
+#     at each assert frame, evaluate a GDScript Expression against a live node —
+#     objective, per-game behavioural checks (the TDD oracle).
+#   * LEGACY mode (no spec): run N frames auto-pressing one action every 20
+#     frames, then snapshot — the old canned smoke test (still the fallback).
+# Always writes {frames, asserts[], nodes{}} to AITELIER_PROBE_OUT and quits.
+# Indented with spaces (GDScript accepts consistent spaces or tabs).
+var _frame := 0
 var _max := 180
 var _dumped := false
-var _action := ""
+var _legacy_action := ""
+var _spec_mode := false
+var _timeline := []      # SPEC: [{at:int, press?:String, release?:String, assert?:[{name,node,expr}]}]
+var _releases := {}      # frame -> [action, ...] auto-release schedule
+var _results := []       # [{name, node, expr, passed, actual, error, frame}]
 func _ready() -> void:
-	# Cap the framerate so a frame budget maps to stable wall-clock/game seconds —
-	# headless runs uncapped otherwise, making delta tiny and the playtest advance
-	# almost no game time regardless of frame count.
-	Engine.max_fps = 60
-	_max = int(OS.get_environment("AITELIER_PROBE_FRAMES")) if OS.get_environment("AITELIER_PROBE_FRAMES") != "" else 180
-	_action = OS.get_environment("AITELIER_PROBE_INPUT")
-	if _action != "" and not InputMap.has_action(_action):
-		InputMap.add_action(_action)
+    # Cap the framerate so a frame budget maps to stable game time — headless
+    # runs uncapped otherwise, making delta tiny so the game barely advances.
+    Engine.max_fps = 60
+    var envf := OS.get_environment("AITELIER_PROBE_FRAMES")
+    _max = int(envf) if envf != "" else 180
+    var spec_path := OS.get_environment("AITELIER_PROBE_SPEC")
+    if spec_path != "":
+        _load_spec(spec_path)
+    else:
+        _legacy_action = OS.get_environment("AITELIER_PROBE_INPUT")
+        if _legacy_action != "" and not InputMap.has_action(_legacy_action):
+            InputMap.add_action(_legacy_action)
+func _load_spec(path: String) -> void:
+    var f := FileAccess.open(path, FileAccess.READ)
+    if f == null:
+        return
+    var data = JSON.parse_string(f.get_as_text())
+    f.close()
+    if typeof(data) != TYPE_DICTIONARY:
+        return
+    _spec_mode = true
+    if data.has("frames"):
+        _max = int(data["frames"])
+    var tl = data.get("timeline", [])
+    if typeof(tl) == TYPE_ARRAY:
+        for e in tl:
+            _timeline.append(e)
+    # Register every action the timeline presses so the input actually fires.
+    for e in _timeline:
+        for key in ["press", "release"]:
+            var act = e.get(key, "")
+            if act != "" and not InputMap.has_action(act):
+                InputMap.add_action(act)
 func _process(_d: float) -> void:
-	_frames += 1
-	if _action != "" and _frames % 20 == 0:
-		Input.action_press(_action)
-	elif _action != "" and _frames % 20 == 1:
-		Input.action_release(_action)
-	if _frames >= _max:
-		_dump()
-		get_tree().quit()
+    _frame += 1
+    if _releases.has(_frame):
+        for act in _releases[_frame]:
+            if InputMap.has_action(act):
+                Input.action_release(act)
+        _releases.erase(_frame)
+    if _spec_mode:
+        for e in _timeline:
+            if int(e.get("at", -1)) == _frame:
+                _apply_entry(e)
+    elif _legacy_action != "":
+        if _frame % 20 == 0:
+            Input.action_press(_legacy_action)
+        elif _frame % 20 == 1:
+            Input.action_release(_legacy_action)
+    if _frame >= _max:
+        _finish()
+        get_tree().quit()
+func _apply_entry(e: Dictionary) -> void:
+    var pr = e.get("press", "")
+    if pr != "":
+        Input.action_press(pr)
+        var rf := _frame + 2      # hold ~2 frames, then auto-release
+        _releases[rf] = _releases.get(rf, [])
+        _releases[rf].append(pr)
+    var rl = e.get("release", "")
+    if rl != "" and InputMap.has_action(rl):
+        Input.action_release(rl)
+    var asserts = e.get("assert", [])
+    if typeof(asserts) == TYPE_ARRAY:
+        for a in asserts:
+            _eval_assert(a)
+func _eval_assert(a: Dictionary) -> void:
+    var node_name = str(a.get("node", ""))
+    var expr_str = str(a.get("expr", ""))
+    var res := {"name": str(a.get("name", expr_str)), "node": node_name,
+        "expr": expr_str, "passed": false, "actual": null, "error": "", "frame": _frame}
+    var target := _resolve(node_name)
+    if target == null:
+        res["error"] = "node not found: " + node_name
+        _results.append(res)
+        return
+    var expr := Expression.new()
+    if expr.parse(expr_str) != OK:
+        res["error"] = "parse error: " + expr.get_error_text()
+        _results.append(res)
+        return
+    # Evaluate against the node as base instance (so "velocity.y < 0" resolves the
+    # node's own properties). show_error=false keeps a failed assert OUT of stderr
+    # so it stays advisory and never trips the hard runtime-error gate.
+    var val = expr.execute([], target, false)
+    if expr.has_execute_failed():
+        res["error"] = "execute failed: " + expr.get_error_text()
+        _results.append(res)
+        return
+    res["actual"] = _jsonable(val)
+    res["passed"] = bool(val)
+    _results.append(res)
+func _resolve(name: String) -> Node:
+    if name == "":
+        return get_tree().current_scene
+    if name.begins_with("/") or name.begins_with("res:"):
+        return get_node_or_null(NodePath(name))
+    return get_tree().get_root().find_child(name, true, false)
+func _jsonable(v):
+    match typeof(v):
+        TYPE_VECTOR2:
+            return [v.x, v.y]
+        TYPE_VECTOR3:
+            return [v.x, v.y, v.z]
+        TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_STRING:
+            return v
+        _:
+            return str(v)
 func _exit_tree() -> void:
-	_dump()  # fallback if the game quit itself before the frame budget
-func _dump() -> void:
-	if _dumped:
-		return
-	_dumped = true
-	var out := {"frames": _frames, "nodes": {}}
-	_walk(get_tree().get_root(), out["nodes"])
-	var path := OS.get_environment("AITELIER_PROBE_OUT")
-	if path == "":
-		path = "user://probe_state.json"
-	var f := FileAccess.open(path, FileAccess.WRITE)
-	if f != null:
-		f.store_string(JSON.stringify(out, "  "))
-		f.close()
-		print("AITELIER_PROBE_WROTE ", path)
+    _finish()  # fallback if the game quit itself before the frame budget
+func _finish() -> void:
+    if _dumped:
+        return
+    _dumped = true
+    var out := {"frames": _frame, "asserts": _results, "nodes": {}}
+    _walk(get_tree().get_root(), out["nodes"])
+    var path := OS.get_environment("AITELIER_PROBE_OUT")
+    if path == "":
+        path = "user://probe_state.json"
+    var f := FileAccess.open(path, FileAccess.WRITE)
+    if f != null:
+        f.store_string(JSON.stringify(out, "  "))
+        f.close()
+        print("AITELIER_PROBE_WROTE ", path)
 func _walk(node: Node, acc: Dictionary) -> void:
-	# Only snapshot script-bearing nodes (the gameplay logic), but for those also
-	# capture transform so the agent sees WHERE things are, not just their vars.
-	if node.get_script() != null:
-		var vars := {}
-		for p in node.get_property_list():
-			if p.usage & PROPERTY_USAGE_SCRIPT_VARIABLE:
-				var v = node.get(p.name)
-				match typeof(v):
-					TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_STRING:
-						vars[p.name] = v
-					TYPE_VECTOR2:
-						vars[p.name] = [v.x, v.y]
-		var entry := {"class": node.get_class(), "vars": vars}
-		if node is Node2D:
-			entry["pos"] = [node.global_position.x, node.global_position.y]
-			entry["visible"] = node.visible
-		elif node is Node3D:
-			entry["pos"] = [node.global_position.x, node.global_position.y, node.global_position.z]
-			entry["visible"] = node.visible
-		acc[str(node.get_path())] = entry
-	for c in node.get_children():
-		_walk(c, acc)
+    # Only snapshot script-bearing nodes (the gameplay logic), but for those also
+    # capture transform so the agent sees WHERE things are, not just their vars.
+    if node.get_script() != null:
+        var vars := {}
+        for p in node.get_property_list():
+            if p.usage & PROPERTY_USAGE_SCRIPT_VARIABLE:
+                var v = node.get(p.name)
+                match typeof(v):
+                    TYPE_INT, TYPE_FLOAT, TYPE_BOOL, TYPE_STRING:
+                        vars[p.name] = v
+                    TYPE_VECTOR2:
+                        vars[p.name] = [v.x, v.y]
+        var entry := {"class": node.get_class(), "vars": vars}
+        if node is Node2D:
+            entry["pos"] = [node.global_position.x, node.global_position.y]
+            entry["visible"] = node.visible
+        elif node is Node3D:
+            entry["pos"] = [node.global_position.x, node.global_position.y, node.global_position.z]
+            entry["visible"] = node.visible
+        acc[str(node.get_path())] = entry
+    for c in node.get_children():
+        _walk(c, acc)
 '''
 
 
@@ -223,43 +323,118 @@ def _inject_probe(dst: Path) -> None:
     pg.write_text(text)
 
 
+def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
+               extra: dict, scene: str = "") -> tuple[dict, list, bool]:
+    """One headless probe run. Returns (probe_report, errors, timed_out)."""
+    if state_path.exists():
+        state_path.unlink()
+    args = ["--path", str(dst)]
+    if scene:
+        args.append(scene)              # run a specific scene instead of main
+    env = {"AITELIER_PROBE_OUT": str(state_path), "AITELIER_PROBE_FRAMES": str(frames)}
+    env.update(extra)
+    try:
+        cp = _run(args, timeout=timeout, extra_env=env)
+        stderr, timed_out = cp.stderr, False
+    except subprocess.TimeoutExpired as e:
+        stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+        timed_out = True
+    errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
+    probe = {}
+    if state_path.is_file():
+        try:
+            probe = json.loads(state_path.read_text())
+        except json.JSONDecodeError:
+            probe = {}
+    return probe, errs, timed_out
+
+
+def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) -> dict:
+    """The old canned smoke test: run the main scene auto-pressing one action,
+    snapshot the end state. HARD-fails only on crash / didn't-run."""
+    state_path = dst.parent / "probe_state.json"
+    probe, errs, timed_out = _run_probe(
+        dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action})
+    ran = bool(probe) or not timed_out
+    passed = not errs and ran
+    if not ran:
+        summary = "Playtest could not run the scene (no probe snapshot)."
+    elif passed:
+        summary = "Playtest ran %d frames cleanly, no runtime errors." % probe.get("frames", frames)
+    else:
+        summary = "Playtest surfaced %d runtime error(s)." % len(errs)
+    return {"passed": passed, "frames": probe.get("frames", frames), "errors": errs,
+            "state": probe.get("nodes", {}), "behavior": None,
+            "spec_used": False, "summary": summary}
+
+
+def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
+    """Authored-spec playtest: run ONE isolated headless pass per scenario, driving
+    its input timeline and evaluating its Expression assertions against live nodes.
+
+    Gate split: ``passed`` (HARD, loops the goal-loop) covers only crash / didn't-
+    run; per-scenario assertion outcomes are ADVISORY (``behavior``) so a wrong or
+    flaky spec can never stall a build that otherwise runs clean."""
+    scene = str(spec.get("scene", "") or "")
+    default_frames = int(spec.get("frames", frames) or frames)
+    scenarios = spec.get("scenarios") or []
+    state_path = dst.parent / "probe_state.json"
+    spec_path = dst.parent / "scenario_spec.json"
+
+    scen_results, all_errors = [], []
+    ran_any = crashed = False
+    last_state: dict = {}
+    for sc in scenarios:
+        name = str(sc.get("name", "scenario"))
+        timeline = sc.get("timeline") or []
+        max_at = max([int(e.get("at", 0)) for e in timeline], default=0)
+        sframes = min(default_frames, max_at + 30) if timeline else default_frames
+        spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline}))
+        probe, errs, timed_out = _run_probe(
+            dst, state_path, sframes, timeout,
+            {"AITELIER_PROBE_SPEC": str(spec_path)}, scene=scene)
+        ran = bool(probe) or not timed_out
+        ran_any = ran_any or ran
+        if errs:
+            crashed = True
+        all_errors.extend({**e, "scenario": name} for e in errs)
+        asserts = probe.get("asserts", [])
+        scen_passed = ran and not errs and bool(asserts) and all(a.get("passed") for a in asserts)
+        scen_results.append({"name": name, "ran": ran, "errors": errs,
+                             "asserts": asserts, "passed": scen_passed})
+        last_state = probe.get("nodes", last_state)
+
+    behavior_passed = bool(scen_results) and all(s["passed"] for s in scen_results)
+    hard_passed = ran_any and not crashed      # HARD gate = crash / didn't-run only
+    n_fail = sum(1 for s in scen_results if not s["passed"])
+    if not hard_passed:
+        summary = ("Playtest HARD-failed: %s."
+                   % ("runtime error(s)" if crashed else "scene did not run"))
+    elif behavior_passed:
+        summary = "Playtest ran %d scenario(s); all assertions passed." % len(scen_results)
+    else:
+        summary = ("Playtest ran clean but %d/%d scenario(s) failed assertions (advisory)."
+                   % (n_fail, len(scen_results)))
+    return {"passed": hard_passed, "frames": default_frames, "errors": all_errors,
+            "state": last_state, "spec_used": True,
+            "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
+            "summary": summary}
+
+
 def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
-                     input_action: str = "ui_accept", timeout: int = 120) -> dict:
+                     input_action: str = "ui_accept", spec: dict | None = None,
+                     timeout: int = 120) -> dict:
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
         return {"passed": True, "frames": 0, "errors": [], "state": {},
+                "behavior": None, "spec_used": False,
                 "summary": "No Godot project — playtest skipped."}
     dst = _copy_project(proj)
-    state_path = dst.parent / "probe_state.json"
     try:
         _inject_probe(dst)
-        try:
-            cp = _run(["--path", str(dst)], timeout=timeout, extra_env={
-                "AITELIER_PROBE_OUT": str(state_path),
-                "AITELIER_PROBE_FRAMES": str(frames),
-                "AITELIER_PROBE_INPUT": input_action,
-            })
-            stderr, timed_out = cp.stderr, False
-        except subprocess.TimeoutExpired as e:
-            stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
-            timed_out = True
-        errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
-        state = {}
-        if state_path.is_file():
-            try:
-                state = json.loads(state_path.read_text())
-            except json.JSONDecodeError:
-                state = {}
-        ran = bool(state) or not timed_out
-        passed = not errs and ran
-        if not ran:
-            summary = "Playtest could not run the scene (no probe snapshot)."
-        elif passed:
-            summary = "Playtest ran %d frames cleanly, no runtime errors." % state.get("frames", frames)
-        else:
-            summary = "Playtest surfaced %d runtime error(s)." % len(errs)
-        return {"passed": passed, "frames": state.get("frames", frames),
-                "errors": errs, "state": state.get("nodes", {}), "summary": summary}
+        if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
+            return _playtest_spec(dst, spec, frames, timeout)
+        return _playtest_legacy(dst, frames, input_action, timeout)
     finally:
         shutil.rmtree(dst.parent, ignore_errors=True)
 
@@ -296,7 +471,8 @@ class _Handler(BaseHTTPRequestHandler):
             elif self.path == "/playtest":
                 self._send(200, playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),
-                    input_action=req.get("input_action", "ui_accept")))
+                    input_action=req.get("input_action", "ui_accept"),
+                    spec=req.get("spec")))
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:  # never crash the service on one bad project

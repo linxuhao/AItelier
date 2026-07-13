@@ -28,21 +28,45 @@ from pathlib import Path
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 
 
+def _read_spec(repo: Path) -> dict | None:
+    """Load the authored ``playtest_spec.yaml`` from the repo root (the TDD-style
+    oracle: architect declares scene/actions/surface, PM sets scenario assert
+    thresholds). Absent/invalid → None → the sidecar runs the legacy canned smoke
+    test. Best-effort: a malformed spec must not crash the gate."""
+    p = repo / "playtest_spec.yaml"
+    if not p.is_file():
+        return None
+    try:
+        import yaml
+        spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+        return spec if isinstance(spec, dict) and spec.get("scenarios") else None
+    except Exception:
+        return None
+
+
 def godot_playtest(*, project_root: str = "", out_dir: str = "",
                    workspace_root: str = "", **kwargs) -> dict:
     """Run the headless play-test via godot-builder; write playtest_report.json.
 
-    Returns {written, passed}. The report holds {passed, frames, errors[], state,
-    summary} for the reviewer to read."""
+    Reads an authored ``playtest_spec.yaml`` if present → scenario-driven TDD
+    play-test (input timeline + live Expression assertions); else the legacy
+    canned smoke test. Returns {written, passed}. The report holds {passed (HARD:
+    crash/didn't-run), behavior (ADVISORY per-scenario asserts), frames, errors[],
+    state, spec_used, summary} for the reviewer to read."""
     repo = Path(project_root or workspace_root).resolve()
-    report = {"passed": True, "frames": 0, "errors": [], "state": {}, "summary": ""}
+    report = {"passed": True, "frames": 0, "errors": [], "state": {},
+              "behavior": None, "spec_used": False, "summary": ""}
 
     if not repo.exists():
         report.update(passed=False, summary=f"Project root not found: {repo}")
     elif not (repo / "project.godot").is_file():
         report["summary"] = "No project.godot — not a Godot project; play-test skipped."
     else:
-        body = json.dumps({"project_dir": str(repo)}).encode("utf-8")
+        payload = {"project_dir": str(repo)}
+        spec = _read_spec(repo)
+        if spec:
+            payload["spec"] = spec
+        body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             _BUILDER_URL.rstrip("/") + "/playtest", data=body,
             headers={"Content-Type": "application/json"}, method="POST")

@@ -56,10 +56,17 @@ overlay:
     source: { step: "5_compile" }
 
   # ── PROMPT FRAGMENTS (add_template) ────────────────────────────────────────
-  # 4. Godot conventions reach the architect/implementer/verifier prompts ONLY
+  # 4. Godot conventions reach the architect/pm/implementer/verifier prompts ONLY
   #    when this addon is applied — the base templates stay engine-agnostic.
+  #    The playtest_spec.yaml TDD contract is authored across two of them:
+  #    architect declares the observable surface (scene/actions/nodes+vars +
+  #    scenario skeletons); PM fills each scenario's assert thresholds; the
+  #    implementer materialises the final spec into the repo verbatim; the
+  #    godot_playtest gate reads it and evaluates the assertions.
   - add_template: "@architect"
     fragment: "game_harness/architect.md"
+  - add_template: "@pm"
+    fragment: "game_harness/pm.md"
   - add_template: "@implementer"
     fragment: "game_harness/implementer.md"
   - add_template: "@verifier_review"

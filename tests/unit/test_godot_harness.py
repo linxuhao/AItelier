@@ -71,6 +71,71 @@ def test_parse_failed_load():
     assert errs[0]["kind"] == "load"
 
 
+# ── spec-driven aggregation (Godot-free: _run_probe mocked) ────────────────
+# The hard/advisory gate split lives in _playtest_spec; test it without Godot by
+# faking each probe run's (probe_report, errors, timed_out).
+def _mock_run_probe(monkeypatch, probe, errs, timed_out):
+    monkeypatch.setattr(gh, "_run_probe",
+                        lambda *a, **k: (probe, errs, timed_out))
+
+
+def test_playtest_spec_all_assertions_pass(monkeypatch, tmp_path):
+    _mock_run_probe(monkeypatch,
+                    {"frames": 50, "asserts": [{"name": "a", "passed": True}], "nodes": {}},
+                    [], False)
+    spec = {"scenarios": [{"name": "flap", "timeline": [
+        {"at": 8, "assert": [{"node": "Bird", "expr": "velocity.y < 0"}]}]}]}
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    assert r["passed"] is True and r["spec_used"] is True
+    assert r["behavior"]["all_passed"] is True
+
+
+def test_playtest_spec_failed_assertion_is_advisory(monkeypatch, tmp_path):
+    # Game ran clean but the assertion is false → HARD passed stays True, behaviour
+    # False. A wrong/flaky spec must never stall an otherwise-clean build.
+    _mock_run_probe(monkeypatch,
+                    {"frames": 50, "asserts": [{"name": "a", "passed": False, "actual": 5.0}], "nodes": {}},
+                    [], False)
+    spec = {"scenarios": [{"name": "s", "timeline": [
+        {"at": 8, "assert": [{"node": "Bird", "expr": "velocity.y < 0"}]}]}]}
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    assert r["passed"] is True                      # advisory, not hard fail
+    assert r["behavior"]["all_passed"] is False
+
+
+def test_playtest_spec_runtime_error_is_hard_fail(monkeypatch, tmp_path):
+    _mock_run_probe(monkeypatch,
+                    {"frames": 3, "asserts": [], "nodes": {}},
+                    [{"kind": "runtime", "msg": "boom", "file": "res://x.gd", "line": 1}], False)
+    spec = {"scenarios": [{"name": "s", "timeline": [{"at": 8, "assert": []}]}]}
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    assert r["passed"] is False                     # crash → hard fail (loops)
+    assert any(e["scenario"] == "s" for e in r["errors"])
+
+
+def test_playtest_spec_didnt_run_is_hard_fail(monkeypatch, tmp_path):
+    _mock_run_probe(monkeypatch, {}, [], True)      # timeout, no probe snapshot
+    spec = {"scenarios": [{"name": "s", "timeline": [{"at": 8}]}]}
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    assert r["passed"] is False
+
+
+def test_playtest_project_dispatches_on_spec(monkeypatch, tmp_path):
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    monkeypatch.setattr(gh, "_copy_project", lambda p: tmp_path / "proj" / "proj")
+    (tmp_path / "proj" / "proj").mkdir(parents=True)
+    monkeypatch.setattr(gh, "_inject_probe", lambda d: None)
+    monkeypatch.setattr(gh.shutil, "rmtree", lambda *a, **k: None)
+    called = {}
+    monkeypatch.setattr(gh, "_playtest_spec", lambda *a, **k: called.setdefault("spec", True) or {"passed": True})
+    monkeypatch.setattr(gh, "_playtest_legacy", lambda *a, **k: called.setdefault("legacy", True) or {"passed": True})
+    gh.playtest_project(str(tmp_path), spec={"scenarios": [{"name": "s", "timeline": []}]})
+    assert called == {"spec": True}
+    called.clear()
+    gh.playtest_project(str(tmp_path), spec=None)
+    assert called == {"legacy": True}
+
+
 # ── real Godot (skipped if no binary) ──────────────────────────────────────
 _GODOT = os.environ.get("GODOT_BIN") or shutil.which("godot")
 requires_godot = pytest.mark.skipif(not _GODOT, reason="no Godot binary (set GODOT_BIN)")
@@ -123,3 +188,34 @@ def test_real_playtest_catches_runtime_error(good_project):
     r = gh.playtest_project(str(good_project), frames=5)
     assert r["passed"] is False
     assert any(e["kind"] == "runtime" for e in r["errors"])
+
+
+@requires_godot
+def test_real_playtest_spec_evaluates_assertions(good_project):
+    # main.gd increments `score` each frame. A true and an impossible assertion
+    # exercise the live Expression evaluator end-to-end: both scenarios RUN clean
+    # (hard passed True), but only the satisfiable one passes its assertion.
+    spec = {"scenarios": [
+        {"name": "score rises", "timeline": [
+            {"at": 3, "assert": [{"node": "Main", "expr": "score >= 1"}]}]},
+        {"name": "impossible", "timeline": [
+            {"at": 3, "assert": [{"node": "Main", "expr": "score >= 999"}]}]},
+    ]}
+    r = gh.playtest_project(str(good_project), frames=6, spec=spec)
+    assert r["passed"] is True and r["spec_used"] is True     # ran clean (hard)
+    scen = {s["name"]: s for s in r["behavior"]["scenarios"]}
+    assert scen["score rises"]["passed"] is True
+    assert scen["impossible"]["passed"] is False
+    assert r["behavior"]["all_passed"] is False
+
+
+@requires_godot
+def test_real_playtest_spec_reports_bad_node(good_project):
+    # An assertion against a node that doesn't exist → error recorded, advisory
+    # (the run itself is clean, so hard passed stays True).
+    spec = {"scenarios": [{"name": "typo", "timeline": [
+        {"at": 3, "assert": [{"node": "Nonexistent", "expr": "score >= 1"}]}]}]}
+    r = gh.playtest_project(str(good_project), frames=6, spec=spec)
+    assert r["passed"] is True
+    a = r["behavior"]["scenarios"][0]["asserts"][0]
+    assert a["passed"] is False and "not found" in a["error"]

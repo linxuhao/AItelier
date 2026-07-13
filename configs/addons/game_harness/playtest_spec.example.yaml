@@ -5,8 +5,14 @@
 #     (which nodes/vars an assertion may reference) + scenario skeletons.
 #   * PM fills each scenario's `assert` thresholds against that surface.
 # The `godot_playtest` gate runs ONE isolated headless pass per scenario, drives
-# its input `timeline`, and at each `assert` frame evaluates the GDScript
-# `expr` against the live `node` (as `self`) via Godot's Expression class.
+# its input `timeline`, and at each `assert` frame evaluates each assertion
+# against the live node (as `self`) via Godot's Expression class.
+#
+# `assert` is a MAP of `Node.attr.path: expected`:
+#   * scalar (true/false/number)        → equality  (paused: true → paused == true)
+#   * string with a comparison operator → GDScript expression, verbatim
+#   * node name is the key up to the 1st dot (scene sub-paths use '/', e.g.
+#     "HUD/PausedLabel.visible").
 #
 # Gate semantics: a CRASH or scene-didn't-run is a HARD failure (loops the
 # goal-loop). Assertion outcomes are ADVISORY — a prominent signal the verifier
@@ -28,16 +34,22 @@ surface:
   ScoreLabel: [score]
 
 scenarios:
-  # PM authors the `assert` entries; ARCHITECT provided name + timeline shape.
+  # PM authors the `assert` maps; ARCHITECT provided name + timeline shape.
   - name: gravity pulls the bird down when idle
     timeline:
-      - { at: 40, assert: [ { node: Bird, expr: "velocity.y > 0" } ] }
+      - at: 40
+        assert:
+          Bird.velocity.y: "velocity.y > 0"
 
   - name: a flap gives the bird upward velocity
     timeline:
       - { at: 0, press: flap }
-      - { at: 8, assert: [ { node: Bird, expr: "velocity.y < 0" } ] }
+      - at: 8
+        assert:
+          Bird.velocity.y: "velocity.y < 0"
 
   - name: passing a pipe increments the score
     timeline:
-      - { at: 180, assert: [ { node: ScoreLabel, expr: "score >= 1" } ] }
+      - at: 180
+        assert:
+          ScoreLabel.score: "score >= 1"

@@ -161,6 +161,10 @@ var _timeline := []      # SPEC: [{at:int, press?:String, release?:String, asser
 var _releases := {}      # frame -> [action, ...] auto-release schedule
 var _results := []       # [{name, node, expr, passed, actual, error, frame}]
 func _ready() -> void:
+    # Keep ticking even when the game calls get_tree().paused = true — otherwise
+    # the probe freezes with the game and can neither un-pause nor assert, so a
+    # pause feature would be untestable.
+    process_mode = Node.PROCESS_MODE_ALWAYS
     # Cap the framerate so a frame budget maps to stable game time — headless
     # runs uncapped otherwise, making delta tiny so the game barely advances.
     Engine.max_fps = 60
@@ -200,7 +204,7 @@ func _process(_d: float) -> void:
     if _releases.has(_frame):
         for act in _releases[_frame]:
             if InputMap.has_action(act):
-                Input.action_release(act)
+                _act(act, false)
         _releases.erase(_frame)
     if _spec_mode:
         for e in _timeline:
@@ -208,23 +212,33 @@ func _process(_d: float) -> void:
                 _apply_entry(e)
     elif _legacy_action != "":
         if _frame % 20 == 0:
-            Input.action_press(_legacy_action)
+            _act(_legacy_action, true)
         elif _frame % 20 == 1:
-            Input.action_release(_legacy_action)
+            _act(_legacy_action, false)
     _frame += 1
     if _frame >= _max:
         _finish()
         get_tree().quit()
+func _act(action: String, pressed: bool) -> void:
+    # Feed a real InputEventAction through the input system: this reaches BOTH
+    # polling (Input.is_action_pressed) AND event handlers (_input /
+    # _unhandled_input + event.is_action_pressed). Input.action_press only
+    # updates polling state, so event-driven input (a common pause handler)
+    # would never fire.
+    var ev := InputEventAction.new()
+    ev.action = action
+    ev.pressed = pressed
+    Input.parse_input_event(ev)
 func _apply_entry(e: Dictionary) -> void:
     var pr = e.get("press", "")
     if pr != "":
-        Input.action_press(pr)
+        _act(pr, true)
         var rf := _frame + 2      # hold ~2 frames, then auto-release
         _releases[rf] = _releases.get(rf, [])
         _releases[rf].append(pr)
     var rl = e.get("release", "")
     if rl != "" and InputMap.has_action(rl):
-        Input.action_release(rl)
+        _act(rl, false)
     var asserts = e.get("assert", [])
     if typeof(asserts) == TYPE_ARRAY:
         for a in asserts:
@@ -260,6 +274,16 @@ func _resolve(name: String) -> Node:
         return get_tree().current_scene
     if name.begins_with("/") or name.begins_with("res:"):
         return get_node_or_null(NodePath(name))
+    var scene := get_tree().current_scene
+    # A "/"-separated name is a PATH (e.g. "HUD/PausedLabel"), not a node name —
+    # resolve it relative to the current scene; fall back to matching the leaf
+    # name anywhere in the tree if the exact path doesn't line up.
+    if "/" in name and scene != null:
+        var n := scene.get_node_or_null(NodePath(name))
+        if n != null:
+            return n
+        var parts := name.split("/")
+        return get_tree().get_root().find_child(parts[parts.size() - 1], true, false)
     return get_tree().get_root().find_child(name, true, false)
 func _jsonable(v):
     match typeof(v):
@@ -370,6 +394,49 @@ def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) ->
             "spec_used": False, "summary": summary}
 
 
+_CMP_OPS = ("==", "!=", "<=", ">=", "<", ">", " and ", " or ", " in ", " not ")
+
+
+def _normalize_asserts(raw) -> list:
+    """Accept BOTH assertion shapes and return the probe's ``[{node, expr, name}]``.
+
+    LLM-authored specs use an ergonomic DICT — ``"Node.attr.path": <value>`` —
+    which we normalise here (the probe stays a simple {node, expr} evaluator):
+      * value is a bool/number      → equality on the attr path (``attr == value``)
+      * value is a comparison string → used verbatim as the expression
+      * value is a plain string      → string-literal equality (``attr == "value"``)
+    The node is the key up to the FIRST dot (node names use ``/`` for scene paths,
+    so ``HUD/PausedLabel.visible`` splits cleanly into node + ``visible``). A LIST
+    already in ``{node, expr}`` form passes through unchanged."""
+    if isinstance(raw, list):
+        return raw
+    out = []
+    if isinstance(raw, dict):
+        for key, val in raw.items():
+            node, _, attr = str(key).partition(".")
+            if isinstance(val, bool):
+                expr = f"{attr} == {'true' if val else 'false'}"
+            elif isinstance(val, (int, float)):
+                expr = f"{attr} == {val}"
+            elif isinstance(val, str) and any(op in val for op in _CMP_OPS):
+                expr = val                       # already a boolean expression
+            else:
+                expr = f'{attr} == "{val}"'      # string-literal equality
+            out.append({"node": node, "expr": expr, "name": str(key)})
+    return out
+
+
+def _normalize_timeline(timeline: list) -> list:
+    """Normalise every entry's ``assert`` (dict → {node,expr} list) so the probe
+    receives a uniform shape regardless of which format the spec author used."""
+    out = []
+    for e in timeline or []:
+        if isinstance(e, dict) and "assert" in e:
+            e = {**e, "assert": _normalize_asserts(e["assert"])}
+        out.append(e)
+    return out
+
+
 def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     """Authored-spec playtest: run ONE isolated headless pass per scenario, driving
     its input timeline and evaluating its Expression assertions against live nodes.
@@ -388,9 +455,12 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     last_state: dict = {}
     for sc in scenarios:
         name = str(sc.get("name", "scenario"))
-        timeline = sc.get("timeline") or []
+        timeline = _normalize_timeline(sc.get("timeline") or [])
         max_at = max([int(e.get("at", 0)) for e in timeline], default=0)
-        sframes = min(default_frames, max_at + 30) if timeline else default_frames
+        # Run long enough to REACH the last timeline event (+margin) — default_frames
+        # is a floor, not a ceiling. Capped for safety. Truncating here would drop a
+        # scenario's late assertions (e.g. one that checks at frame 300).
+        sframes = min(max(max_at + 30, default_frames), 3000) if timeline else default_frames
         spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline}))
         probe, errs, timed_out = _run_probe(
             dst, state_path, sframes, timeout,

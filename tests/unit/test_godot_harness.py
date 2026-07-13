@@ -120,6 +120,45 @@ def test_playtest_spec_didnt_run_is_hard_fail(monkeypatch, tmp_path):
     assert r["passed"] is False
 
 
+def test_normalize_asserts_dict_form():
+    # The ergonomic dict form authored by the DPE agents → the probe's {node,expr}.
+    out = gh._normalize_asserts({
+        "GameManager.paused": True,
+        "HUD/PausedLabel.visible": True,       # node name contains '/', attr after 1st dot
+        "Bird.velocity.y": "velocity.y != 0",  # comparison string → expr verbatim
+        "GameManager.state": 0,                # number → equality
+        "GameManager.score": "score == 0",
+    })
+    by = {a["name"]: a for a in out}
+    assert by["GameManager.paused"]["node"] == "GameManager"
+    assert by["GameManager.paused"]["expr"] == "paused == true"
+    assert by["HUD/PausedLabel.visible"]["node"] == "HUD/PausedLabel"
+    assert by["HUD/PausedLabel.visible"]["expr"] == "visible == true"
+    assert by["Bird.velocity.y"] == {"node": "Bird", "expr": "velocity.y != 0", "name": "Bird.velocity.y"}
+    assert by["GameManager.state"]["expr"] == "state == 0"
+    assert by["GameManager.score"]["expr"] == "score == 0"
+
+
+def test_normalize_asserts_string_literal_equality():
+    # A plain string (no comparison operator) → string-literal equality.
+    out = gh._normalize_asserts({"HUD/MessageLabel.text": "Game Over"})
+    assert out[0]["node"] == "HUD/MessageLabel"
+    assert out[0]["expr"] == 'text == "Game Over"'
+
+
+def test_normalize_asserts_list_passthrough():
+    lst = [{"node": "Bird", "expr": "velocity.y < 0"}]
+    assert gh._normalize_asserts(lst) is lst
+
+
+def test_normalize_timeline_only_touches_assert_entries():
+    tl = [{"at": 0, "press": "flap"},
+          {"at": 5, "assert": {"Bird.velocity.y": "velocity.y < 0"}}]
+    out = gh._normalize_timeline(tl)
+    assert out[0] == {"at": 0, "press": "flap"}
+    assert out[1]["assert"] == [{"node": "Bird", "expr": "velocity.y < 0", "name": "Bird.velocity.y"}]
+
+
 def test_playtest_project_dispatches_on_spec(monkeypatch, tmp_path):
     (tmp_path / "project.godot").write_text("config_version=5\n")
     monkeypatch.setattr(gh, "_copy_project", lambda p: tmp_path / "proj" / "proj")
@@ -221,6 +260,17 @@ def test_real_playtest_spec_input_timeline(good_project):
         {"at": 0, "press": "flap"},
         {"at": 5, "assert": [{"node": "Main", "expr": "lift < 0"}]}]}]}
     r = gh.playtest_project(str(good_project), frames=10, spec=spec)
+    assert r["passed"] is True
+    assert r["behavior"]["scenarios"][0]["passed"] is True
+
+
+@requires_godot
+def test_real_playtest_spec_dict_assert_form(good_project):
+    # The ergonomic dict form (what the DPE agents actually author) must evaluate
+    # identically to the list form end-to-end.
+    spec = {"scenarios": [{"name": "score", "timeline": [
+        {"at": 3, "assert": {"Main.score": "score >= 1"}}]}]}
+    r = gh.playtest_project(str(good_project), frames=6, spec=spec)
     assert r["passed"] is True
     assert r["behavior"]["scenarios"][0]["passed"] is True
 

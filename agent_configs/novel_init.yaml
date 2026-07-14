@@ -1,0 +1,33 @@
+# agent_configs/novel_init.yaml — novel_init 图的角色配置。
+# 初始化是一次性的慢变层（错了污染全书），三个角色全部用 pro。
+
+novel_brainstormer:
+  model: "deepseek/deepseek-v4-pro"
+  template: "novel_brainstorm.md"
+  tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+novel_designer:
+  model: "deepseek/deepseek-v4-pro"
+  template: "novel_design.md"
+  tools: []
+  # bible_seed.json is a large single-file write; native tool-calling needs
+  # headroom (a cautious model burns turns on test-writes + read-back verify).
+  # The template tells it to write once, but keep a safety margin over 20.
+  max_tool_turns: 40
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+novel_design_reviewer:
+  model: "deepseek/deepseek-v4-pro"
+  template: "novel_design_review.md"
+  tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

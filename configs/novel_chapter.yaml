@@ -1,0 +1,278 @@
+# configs/novel_chapter.yaml — 网文章节循环（一次 run = 一章，B 精修）
+#
+# probe（tool）在图头：查 bible 存在（缺失→响亮报错，先跑 novel_init）、算下一章
+# 章号、并把整本 bible + 滚动摘要 + 上章结尾打包进 novel_context.md（它的 step
+# 输出）。novel/ 树住在 code repo（可下载+git），skillflow 原生 context 读不到
+# code repo，所以由 probe 这个确定性工具把 bible 桥进 prompt，agent 用
+# {step: probe} 读到（原生 context、不烧 turn、不做 mention 选卡——整本小 bible
+# 全给）。
+#
+# 章循环：
+#   probe(tool) → outline(章纲：读 probe bundle 做完整规划, CP#1 人讨论)
+#   → outline_review(Red) → draft(整章成文) → humanize(独立去AI味)
+#   → continuity(确定性硬gate：字数/元标记/套话密度, fail 回 draft)
+#   → draft_review(Red 七维+原文举证——死人出场/OOC/战力/时间线归这里, fail 回 draft)
+#   → finalize(提取记账分录) → CP#2(终稿+状态变更一起人批) → apply_state(记账+对账+git commit)。
+#
+# 细纲(arc_plan)与章纲(outline)在 per-chapter 精修下重复，已合并进 outline；
+# 长线方向由 bible/compass.md 提供。
+
+name: "novel_chapter"
+description: "网文章节循环：probe 装配上下文 → 章纲/正文/去AI味/双审/记账"
+
+anchors:
+  writer: "draft"              # 题材包可替换正文写手
+  pre_review: "continuity"     # 追加机检 gate 的接入边
+  reviewer: "draft_review"     # 题材包可替换评审卡
+
+# Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
+x-aitelier:
+  label: "Novel Chapter"
+  scheduler_owned: true
+  output_step: "finalize"
+  input_hint: >-
+    对一个已运行过 novel_init 的项目写下一章（无需 seed；写哪一章由图头 probe
+    自动算）。每章两个 checkpoint：章纲讨论（reject+反馈=改章纲）与终稿+状态变更
+    确认（reject+反馈=正文返工重走全链）。
+  labels:
+    probe: "上下文装配"
+    outline: "章纲"
+    outline_review: "章纲审查 (Red)"
+    draft: "正文"
+    humanize: "去AI味润色"
+    continuity: "一致性硬门槛"
+    draft_review: "正文审查 (Red)"
+    finalize: "摘要与记账分录"
+    apply_state: "记账入册"
+
+begin: "probe"
+
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "apply_state"
+      result: "completed"
+      require_completed: true   # 章节必须真实入册，本 run 才算完成
+
+steps:
+  # ── 图头：查 bible + 算章号 + 打包上下文（bible bundle）────────────────────
+  - id: "probe"
+    step_type: "tool"
+    tool_name: "state_probe"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: "outline"
+
+  # ── 章纲（读 probe bundle 做完整规划；CP#1 人讨论）─────────────────────────
+  - id: "outline"
+    step_type: "agent"
+    agent_config: "novel_outliner"
+    timeout_seconds: 600
+    context:
+      - source: { step: "probe" }            # 整本 bible + 上章结尾 + 滚动摘要
+      - source: { step: "outline" }          # 上一版章纲（修订时保留未被指出的部分，防打地鼠）
+      - source: { step: "outline_review" }   # Red 驳回意见（首轮为空）
+    output:
+      mode: "content"
+      fixed:
+        outline: "chapter_outline.md"
+    validation:
+      - files: ["chapter_outline.md"]
+        tool: "file_exists"
+    checkpoint: true
+    checkpoint_label: "章纲讨论（reject+反馈=改章纲，approve=开写正文）"
+    checkpoint_reject_to: "outline"
+    transitions:
+      - to: "outline_review"
+        match: { from: "checkpoint", value: "approved" }
+
+  - id: "outline_review"
+    step_type: "agent"
+    agent_config: "novel_outline_reviewer"
+    timeout_seconds: 300
+    context:
+      - source: { step: "probe" }
+      - source: { step: "outline" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+    transitions:
+      - to: "draft"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "outline"
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  - id: "draft"
+    step_type: "agent"
+    agent_config: "novel_writer"
+    timeout_seconds: 900
+    context:
+      - source: { step: "probe" }            # 上章结尾/角色卡/节奏约定
+      - source: { step: "outline" }
+      - source: { step: "draft" }            # 上一版正文（修订时保留未被指出的段落，防打地鼠）
+      - source: { step: "continuity" }       # 机检违规反馈（首轮为空）
+      - source: { step: "draft_review" }     # Red 驳回意见（首轮为空）
+    output:
+      mode: "content"
+      fixed:
+        draft: "chapter_draft.md"
+    validation:
+      - files: ["chapter_draft.md"]
+        tool: "file_exists"
+    transitions:
+      - to: "humanize"
+
+  - id: "humanize"
+    step_type: "agent"
+    agent_config: "novel_humanizer"
+    timeout_seconds: 600
+    context:
+      - source: { step: "draft" }
+    output:
+      mode: "content"
+      fixed:
+        final: "chapter_final.md"
+    validation:
+      - files: ["chapter_final.md"]
+        tool: "file_exists"
+    transitions:
+      - to: "continuity"
+
+  # ── 确定性硬门槛（只机械项；语义一致性归 draft_review）─────────────────────
+  - id: "continuity"
+    step_type: "tool"
+    tool_name: "continuity_check"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: "draft_review"
+        match: { passed: true }
+      - to: "draft"
+        match: { passed: false }
+        max_loop: 2
+        feedback: true       # 违规清单注入 draft 重写
+
+  - id: "draft_review"
+    step_type: "agent"
+    agent_config: "novel_chapter_reviewer"
+    timeout_seconds: 600
+    context:
+      - source: { step: "probe" }
+      - source: { step: "outline" }
+      - source: { step: "humanize" }
+      - source: { step: "continuity" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+    transitions:
+      - to: "finalize"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "draft"
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # ── 记账分录提取 + 终稿人批 ───────────────────────────────────────────────
+  - id: "finalize"
+    step_type: "agent"
+    agent_config: "novel_finalizer"
+    timeout_seconds: 300
+    context:
+      - source: { step: "probe" }
+      - source: { step: "outline" }
+      - source: { step: "humanize" }
+    output:
+      mode: "content"
+      fixed:
+        events:
+          file: "chapter_events.json"
+          # Tier-1 per-field write args (see novel_init design step rationale).
+          format: '{"chapter": int, "title": str, "summary": str, "events": [{}], "appearances": [{}], "thread_updates": [{}], "arc_updates": [{}]}'
+    validation:
+      - files: ["chapter_events.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [chapter, title, summary, events, appearances,
+                     thread_updates, arc_updates]
+          properties:
+            chapter: { type: integer, minimum: 1 }
+            title: { type: string, minLength: 1 }
+            summary: { type: string, minLength: 10 }
+            events:
+              type: array
+              items:
+                type: object
+                required: [entity_type, entity_name, changes, reason]
+                properties:
+                  entity_type: { type: string, enum: [character, protagonist, faction, world_setting] }
+                  entity_name: { type: string, minLength: 1 }
+                  create: { type: boolean }
+                  changes: { type: object }
+                  reason: { type: string }
+            appearances:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string, minLength: 1 }
+                  importance: { type: integer }
+            thread_updates:
+              type: array
+              items:
+                type: object
+                required: [name, action]
+                properties:
+                  name: { type: string, minLength: 1 }
+                  action: { type: string, enum: [hint, resolve, register, abandon] }
+                  detail: { type: string }
+            arc_updates:
+              # 节点驱动：本章完成了哪些剧情节点（可为空数组=推进中未完成）。
+              # 全部节点完成时 apply_state 自动把 arc 标 completed。
+              type: array
+              items:
+                type: object
+                required: [name, nodes_completed]
+                properties:
+                  name: { type: string, minLength: 1 }
+                  nodes_completed:
+                    type: array
+                    items: { type: string }
+                  notes: { type: string }
+    checkpoint: true
+    checkpoint_label: "终稿与状态变更确认（正文见 humanize 步；reject+反馈=正文返工重走全链）"
+    checkpoint_reject_to: "draft"
+    transitions:
+      - to: "apply_state"
+        match: { from: "checkpoint", value: "approved" }
+
+  - id: "apply_state"
+    step_type: "tool"
+    tool_name: "apply_state"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: null            # node_reached end-condition completes the run

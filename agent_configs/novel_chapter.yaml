@@ -1,0 +1,62 @@
+# agent_configs/novel_chapter.yaml — 章循环角色配置。
+# 模型路由（按"这一步错了污染多远"分档）：
+#   pro   = 章纲/正文/去AI味/正文评审/滚动细纲 —— 文笔与创作判断是成品质量第一决定因素；
+#           弱模型判文学质量≈随机，评审必须用强模型（调研结论）。
+#   flash = 章纲审查（结构化对照）/细纲审查/记账分录提取（信息抽取）。
+
+novel_outliner:
+  model: "deepseek/deepseek-v4-pro"
+  template: "novel_outline.md"
+  tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+novel_outline_reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  template: "novel_outline_review.md"
+  tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+novel_writer:
+  model: "deepseek/deepseek-v4-pro"
+  template: "novel_draft.md"
+  tools: []
+  max_tool_turns: 40   # full chapter prose (2000-4500字) in one write
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+novel_humanizer:
+  model: "deepseek/deepseek-v4-pro"
+  template: "novel_humanize.md"
+  tools: []
+  max_tool_turns: 40   # rewrites full chapter prose in one write
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+novel_chapter_reviewer:
+  model: "deepseek/deepseek-v4-pro"
+  template: "novel_draft_review.md"
+  tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+novel_finalizer:
+  model: "deepseek/deepseek-v4-flash"
+  template: "novel_finalize.md"
+  tools: []
+  max_tool_turns: 40   # chapter_events.json can be a sizeable structured write
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

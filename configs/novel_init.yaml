@@ -1,0 +1,127 @@
+# configs/novel_init.yaml — 网文项目初始化（一书一次）
+#
+# brainstorm（立意讨论，checkpoint 循环：用户以 reject+feedback 回答开放问题，
+# approve 进入设计）→ design（写 bible_seed.json 设定七件套）→ checkpoint（设定
+# 定稿）→ design_review（Red 完整性/一致性审查）→ scaffold_bible（确定性工具：
+# 落地 novel/ 状态树 + genesis 快照）→ node_reached 结束。
+#
+# 之后的一切世界设定演进都发生在 novel_chapter 的记账循环里（events.yaml 分录
+# → bible 余额），本图不再重跑；scaffold_bible 对已存在的 bible 直接报错。
+
+name: "novel_init"
+description: "网络小说初始化：立意讨论 → 世界设定七件套 → scaffold 小说状态树"
+
+# Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
+x-aitelier:
+  label: "Novel Init"
+  scheduler_owned: true
+  seed_file: "novel_request.md"
+  output_step: "design"
+  input_hint: >-
+    seed_text = 用户的小说构想：题材（修仙/都市/系统流…）、主角设想、核心创意/
+    金手指，一句话到一段皆可。一本小说只运行一次；已初始化的项目会报错。
+    brainstorm 步骤的 checkpoint 上，用 reject+feedback 回答开放问题继续讨论，
+    approve 表示立意定稿进入设定生成。
+  labels:
+    brainstorm: "立意与总纲讨论"
+    design: "世界设定生成"
+    design_review: "设定审查 (Red)"
+    scaffold: "落地设定树"
+
+begin: "brainstorm"
+
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "scaffold"
+      result: "completed"
+      require_completed: true   # bible 必须真实落地，本图才算完成
+
+steps:
+  # ── 立意讨论（checkpoint 循环 = 人在环 Q&A）───────────────────────────────
+  - id: "brainstorm"
+    step_type: "agent"
+    agent_config: "novel_brainstormer"
+    timeout_seconds: 300
+    context:
+      - source: { config: "novel_init", output: "novel_request.md" }
+    output:
+      mode: "content"
+      fixed:
+        proposal: "design_proposal.md"
+    validation:
+      - files: ["design_proposal.md"]
+        tool: "file_exists"
+    checkpoint: true
+    checkpoint_label: "小说立意与总纲讨论（reject+反馈=继续讨论，approve=定稿）"
+    checkpoint_reject_to: "brainstorm"
+    transitions:
+      - to: "design"
+        match: { from: "checkpoint", value: "approved" }
+
+  # ── 世界设定生成（慢变层：错了污染全书，人工+Red 双重把关）─────────────────
+  # DPE 纪律（同 t_impl）：agent 自由写 novel/bible/ 各文件 → repo_apply 提交进
+  # 【持久 code repo】。修订时 `{from: repository}` 读到上一版全部 bible，用 edit
+  # 外科改被 Red 指出的文件/字段，物理上不碰其余文件 → 不会打地鼠。
+  - id: "design"
+    step_type: "agent"
+    agent_config: "novel_designer"
+    timeout_seconds: 600
+    context:
+      - source: { config: "novel_init", output: "novel_request.md" }
+      - source: { step: "brainstorm" }
+      - source: { from: "repository", mode: "tool" }   # 上一版 bible（修订时读它 edit；首轮为空）
+      - source: { step: "design_review" }              # Red 驳回意见（首轮为空）
+    output:
+      mode: "write"                                     # 自由 create + edit
+    # 无 file_exists validation：显式嵌套路径在 $STEP_DIR 下解析不稳，且冗余——
+    # scaffold_bible 会校验 7 文件齐全并报错。DPE t_impl 同理只对产物做 lint。
+    lifecycle:
+      on_deliver:
+        - tool: "repo_apply"
+          params:
+            source_dir: "$STEP_DIR"
+          on_failure: "retry"
+          max_retries: 3
+    checkpoint: true
+    checkpoint_label: "世界设定定稿（7 个 bible 文件审阅）"
+    checkpoint_reject_to: "design"
+    transitions:
+      - to: "design_review"
+        match: { from: "checkpoint", value: "approved" }
+
+  - id: "design_review"
+    step_type: "agent"
+    agent_config: "novel_design_reviewer"
+    timeout_seconds: 300
+    context:
+      - source: { step: "brainstorm" }
+      - source: { from: "repository", mode: "tool" }   # 读 repo 里定稿的 bible（全 7 文件）
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+            suggestions: { type: array, items: { type: string } }
+    transitions:
+      - to: "scaffold"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "design"
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # ── 确定性落地：novel/ 状态树 + genesis 快照 ──────────────────────────────
+  - id: "scaffold"
+    step_type: "tool"
+    tool_name: "scaffold_bible"
+    transitions:
+      - to: null            # node_reached end-condition completes the run

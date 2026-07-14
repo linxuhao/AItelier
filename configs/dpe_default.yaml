@@ -103,6 +103,15 @@ steps:
       # names still exists before relying on it (it reflects a past run's state).
       - source: { from: "repository", path: ".aitelier/knowledge.md", mode: "tool" }
       - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json", required: true }
+      # Review loop-back inputs (both empty on the first pass). sota has no
+      # repo_apply, so its prior draft lives only in the step artifact dir —
+      # unreachable as an `edit` baseline — meaning a reject can only REWRITE, not
+      # surgically edit. Injecting the prior draft + the reviewer's verdict turns
+      # that blind rewrite into an INFORMED one: the researcher keeps what was
+      # right and rewrites only what 1_review flagged, instead of re-deriving the
+      # whole SOTA from scratch (and possibly regressing the parts that passed).
+      - source: { step: "1" }
+      - source: { step: "1_review" }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"
@@ -303,6 +312,13 @@ steps:
       - source: { step: "1", mode: "summary" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan_review" }
+      # Self prior (empty on the first pass). t_plan already sees the reviewer's
+      # verdict, but without its OWN prior plan a reject re-authors task_plan.md
+      # from scratch — so parts the reviewer never objected to can silently
+      # change (a mini whack-a-mole on the plan doc). The plan isn't repo_applied,
+      # so this self-context is the only way to carry it forward; the planner then
+      # revises just what t_plan_review flagged. (t_impl already does this.)
+      - source: { step: "t_plan" }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"

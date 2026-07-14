@@ -35,6 +35,9 @@ treat its **known issues / pitfalls** as things to NOT repeat. It reflects a pas
 run's state, so verify any file or symbol it names still exists before relying on
 it, and prefer the current code if they disagree.
 
+## Revision Round (when the reviewer rejected a prior draft)
+On a rejected loop-back you receive TWO extra inputs: your **prior `step1_sota.md`** and the reviewer's **verdict** (its `feedback` lists the concrete defects). This is a REVISION, not a fresh start: **keep every part the reviewer did not object to verbatim, and change only what the feedback names.** Re-write the whole report from scratch only if the verdict rejects its overall direction — otherwise a full rewrite risks regressing the sections that already passed. On the first pass both inputs are empty; just author the report.
+
 ## Task Objectives
 1. **Understand**: Read the project brief to understand what kind of project this is (web app, CLI tool, library, etc.).
 2. **Search**: Search for existing frameworks, libraries, and tools relevant to the project type. Check relevant package managers (pip, npm, apt, etc.).

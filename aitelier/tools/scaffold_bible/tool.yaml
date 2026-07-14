@@ -1,0 +1,21 @@
+name: scaffold_bible
+description: >
+  Terminal tool of the novel_init graph. Reads the design step's approved
+  bible_seed.json and deterministically scaffolds the novel state tree
+  (novel/bible/, plans/, chapters/, state/), then freezes a genesis snapshot
+  of the bible for later reconcile replays. Pure transform, no LLM — the
+  approved design survives un-summarized. Fails loud if the seed is missing
+  or invalid (it is the sole producer of the novel state).
+parameters:
+  project_root:
+    type: string
+    description: "Project code repo root (auto-injected). Novel tree is scaffolded here."
+    required: false
+  workspace_root:
+    type: string
+    description: "Skillflow workspace root (auto-injected); holds the design step output."
+    required: false
+  seed_step_dir:
+    type: string
+    description: "Dir containing bible_seed.json (defaults to novel_init/design under the workspace)"
+    required: false

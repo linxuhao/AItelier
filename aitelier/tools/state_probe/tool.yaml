@@ -1,0 +1,31 @@
+name: state_probe
+description: >
+  Head-of-loop tool for novel_chapter. Fails LOUD if the novel bible is missing
+  (run novel_init first — no silent fallback). Otherwise computes the next
+  chapter number and ASSEMBLES the writing context the agents need — the whole
+  (small) bible + rolling digest + the previous chapter's ending — into
+  novel_context.md in its step dir. Downstream agent steps read it via a
+  {step: probe} context source, so the bible reaches the prompt with zero agent
+  read-turns even though it lives in the code repo (which native context sources
+  can't inject). No LLM, no mention-based filtering — the whole bible goes in.
+parameters:
+  project_root:
+    type: string
+    description: "Project code repo root (auto-injected). Novel tree lives here."
+    required: false
+  workspace_root:
+    type: string
+    description: "Fallback root (auto-injected); used only when project_root is empty (tests)."
+    required: false
+  out_dir:
+    type: string
+    description: "This step's output dir (set to $STEP_DIR) — receives probe.json + novel_context.md"
+    required: false
+  recent_summaries:
+    type: integer
+    description: "How many recent chapter summaries to include verbatim (default 3)"
+    required: false
+  thread_horizon:
+    type: integer
+    description: "伏笔陈旧提醒阈值：重要伏笔连续N章无暗示则提醒 (default 12)"
+    required: false

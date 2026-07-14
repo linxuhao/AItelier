@@ -1,0 +1,32 @@
+name: apply_state
+description: >
+  Terminal tool of the chapter loop — the "book the journal entries" step. Runs
+  only after the final human checkpoint. Copies the approved prose + summary +
+  events into the immutable novel/chapters/chNNNN/ record, posts the events to
+  the bible balances (character progression, threads, arcs, appearances),
+  rebuilds the rolling digest and derived index, then reconciles (replays all
+  journals over the genesis snapshot vs the live bible) and reports drift as
+  warnings, then git-commits the chapter into the code repo (history + download).
+  Fails loud on schema violations (unknown entities without create:true, chapter
+  number mismatch).
+parameters:
+  project_root:
+    type: string
+    description: "Project code repo root (auto-injected). Novel tree lives here; the chapter is committed here."
+    required: false
+  workspace_root:
+    type: string
+    description: "Skillflow workspace root (auto-injected); holds the finalize/humanize step outputs."
+    required: false
+  out_dir:
+    type: string
+    description: "This step's output dir (set to $STEP_DIR) — receives apply_report.json"
+    required: false
+  finalize_step_dir:
+    type: string
+    description: "Dir containing chapter_events.json (defaults to novel_chapter/finalize)"
+    required: false
+  prose_step_dir:
+    type: string
+    description: "Dir containing chapter_final.md (defaults to novel_chapter/humanize)"
+    required: false

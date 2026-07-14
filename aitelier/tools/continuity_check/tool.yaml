@@ -1,0 +1,26 @@
+name: continuity_check
+description: >
+  Cheap MECHANICAL hard gate between humanize and the Red review — only checks
+  that need no reading comprehension: prose present, word count within the
+  pacing bounds, no meta markers ([说明]/TODO) in prose, and a crude known-AI-ism
+  density scan (hard over threshold, advisory otherwise). Semantic consistency
+  (dead characters, OOC, power, timeline, hook strength) is the Red reviewer's
+  job, not string matching. On failure the returned `error` is feedback-injected
+  into the draft step's retry; the full report is written for the reviewer.
+parameters:
+  project_root:
+    type: string
+    description: "Project code repo root (auto-injected). Novel tree lives here."
+    required: false
+  workspace_root:
+    type: string
+    description: "Fallback root (auto-injected); used only when project_root is empty (tests)."
+    required: false
+  out_dir:
+    type: string
+    description: "This step's output dir (set to $STEP_DIR) — receives continuity_report.json"
+    required: false
+  prose_step_dir:
+    type: string
+    description: "Dir containing chapter_final.md (defaults to novel_chapter/humanize under the root)"
+    required: false

@@ -50,6 +50,13 @@ steps:
     timeout_seconds: 300
     context:
       - source: { config: "novel_init", output: "novel_request.md" }
+      # Self prior (empty on the first pass): brainstorm's OWN last proposal. A
+      # reject re-runs this step with only the LATEST feedback (skillflow's
+      # _feedback is latest-only, not accumulated), so without its prior proposal
+      # it would regenerate blind and DROP earlier rounds' decisions. Reading the
+      # prior proposal makes the artifact cumulative — each round edits the
+      # standing proposal instead of starting over.
+      - source: { step: "brainstorm" }
     output:
       mode: "content"
       fixed:
@@ -126,13 +133,15 @@ steps:
   # ── 人工终审（Red 通过后才到这）───────────────────────────────────────────
   # skillflow checkpoint 是无条件的（步一完成必暂停），所以「Red 过了才叫人工」
   # 必须是一个独立的、只在 Red-pass 时到达的 checkpoint 步。checkpoint 弹窗只显示
-  # 本步自己目录里的文件，故用 restage 把 design 的 7 个 bible 文件 + design_review
-  # 的裁决摆进来，人工看到的是设定终稿（+Red 建议），不是空弹窗。reject → design。
+  # 本步自己目录里的文件，故用 restage 把设定摆进来：bible 从【repo】拷（那里是
+  # 累积的全 7 文件；design 步目录在外科修订后只剩本轮改过的子集）+ design_review
+  # 的裁决从其步目录拷。人工看到的是完整设定终稿（+Red 建议）。reject → design。
   - id: "design_gate"
     step_type: "tool"
     tool_name: "restage"
     tool_params:
-      from_steps: ["design", "design_review"]
+      from_repo: ["novel/bible"]
+      from_steps: ["design_review"]
       out_dir: "$STEP_DIR"
     checkpoint: true
     checkpoint_label: "世界设定终审（Red 已通过；approve 落地设定树，reject 退回重做）"

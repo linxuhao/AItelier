@@ -330,39 +330,45 @@ def test_reconcile_skips_without_git(tmp_path):
     assert len(out) == 1 and "reconcile skipped" in out[0]
 
 
-def test_restage_copies_prior_step_outputs(tmp_path):
-    # restage stages a checkpoint step's modal from prior steps' promoted dirs.
-    # Layout: {workspace}/{config}/{step}/... — restage copies into out_dir.
+def test_restage_stages_full_bible_from_repo_plus_verdict(tmp_path):
+    # design_gate must show the CUMULATIVE bible (from the repo — the maker's
+    # step dir only holds the last surgical-edit subset) + the reviewer verdict
+    # (from its step dir).
     from aitelier.tools.restage.impl import restage
 
-    ws, cfg = tmp_path, "novel_init"
-    design = ws / cfg / "design" / "novel" / "bible"
-    design.mkdir(parents=True)
-    (design / "overview.md").write_text("# 总纲", encoding="utf-8")
-    (design / "arcs.yaml").write_text("- name: 主线", encoding="utf-8")
-    # skillflow bookkeeping that MUST be skipped
-    (ws / cfg / "design" / "_snapshot.json").write_text("{}", encoding="utf-8")
-    (ws / cfg / "design" / "user_rejection_history.json").write_text("[]", encoding="utf-8")
+    ws, cfg = tmp_path / "ws", "novel_init"
+    repo = tmp_path / "repo"
+    # Repo has the full bible (all 7 files accumulated via repo_apply).
+    bible = repo / "novel" / "bible"
+    bible.mkdir(parents=True)
+    for f in ["overview.md", "compass.md", "world.yaml", "pacing.yaml",
+              "characters.yaml", "threads.yaml", "arcs.yaml"]:
+        (bible / f).write_text("x", encoding="utf-8")
+    (repo / ".git" / "objects").mkdir(parents=True)  # .git must be skipped
+    (repo / ".git" / "config").write_text("[core]", encoding="utf-8")
+    # The reviewer's step dir holds the verdict.
     review = ws / cfg / "design_review"
     review.mkdir(parents=True)
     (review / "review_verdict.json").write_text('{"passed": true}', encoding="utf-8")
 
     out = ws / cfg / "design_gate.tmp"
-    res = restage(workspace_root=str(ws), config_name=cfg, out_dir=str(out),
-                  from_steps=["design", "design_review"])
+    res = restage(workspace_root=str(ws), project_root=str(repo), config_name=cfg,
+                  out_dir=str(out), from_repo=["novel/bible"],
+                  from_steps=["design_review"])
 
     assert res["restaged"] is True
     staged = {p.relative_to(out).as_posix()
               for p in out.rglob("*") if p.is_file()}
-    assert staged == {"novel/bible/overview.md", "novel/bible/arcs.yaml",
-                      "review_verdict.json"}
-    # bookkeeping excluded
-    assert not (out / "_snapshot.json").exists()
-    assert not (out / "user_rejection_history.json").exists()
+    assert staged == {
+        "novel/bible/overview.md", "novel/bible/compass.md",
+        "novel/bible/world.yaml", "novel/bible/pacing.yaml",
+        "novel/bible/characters.yaml", "novel/bible/threads.yaml",
+        "novel/bible/arcs.yaml", "review_verdict.json"}
+    assert not (out / ".git").exists()  # .git tree excluded
 
 
 def test_restage_fails_loud_when_nothing_to_copy(tmp_path):
     from aitelier.tools.restage.impl import restage
     with pytest.raises(ValueError, match="nothing copied"):
-        restage(workspace_root=str(tmp_path), config_name="novel_init",
-                out_dir=str(tmp_path / "out"), from_steps=["design"])
+        restage(project_root=str(tmp_path / "repo"), out_dir=str(tmp_path / "out"),
+                from_repo=["novel/bible"])

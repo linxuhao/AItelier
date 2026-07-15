@@ -6,12 +6,17 @@ description: >
   (_read_step_output → {workspace}/{graph}/{step}/), so a bare gate would show
   "no files to review"; restage re-materializes the named steps' files here.
   Generic, deterministic, no LLM. Used by novel_init's design_gate to show the
-  Red-approved bible (+ the reviewer verdict) for final human sign-off. Reusable
-  by any "maker → reviewer → human checkpoint" ordering (e.g. DPE architect).
+  Red-approved bible (from the repo — the cumulative artifact) + the reviewer
+  verdict (from its step dir) for final human sign-off. Reusable by any
+  "maker → reviewer → human checkpoint" ordering (e.g. DPE architect).
 parameters:
+  from_repo:
+    type: array
+    description: "Repo-relative paths (files/dirs) to copy from the code repo (project_root) — the CUMULATIVE artifact, unlike a maker's partial step dir."
+    required: false
   from_steps:
     type: array
-    description: "Step ids whose promoted outputs to copy into this step's dir (in order)."
+    description: "Step ids whose promoted step dir to copy (e.g. a reviewer's verdict)."
     required: false
   from_step:
     type: string

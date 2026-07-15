@@ -1,0 +1,31 @@
+name: restage
+description: >
+  Copy prior steps' promoted outputs into THIS step's directory, so a human
+  checkpoint placed AFTER an intervening reviewer still surfaces the maker's
+  artifact. The checkpoint modal reads the checkpoint step's OWN dir
+  (_read_step_output → {workspace}/{graph}/{step}/), so a bare gate would show
+  "no files to review"; restage re-materializes the named steps' files here.
+  Generic, deterministic, no LLM. Used by novel_init's design_gate to show the
+  Red-approved bible (+ the reviewer verdict) for final human sign-off. Reusable
+  by any "maker → reviewer → human checkpoint" ordering (e.g. DPE architect).
+parameters:
+  from_steps:
+    type: array
+    description: "Step ids whose promoted outputs to copy into this step's dir (in order)."
+    required: false
+  from_step:
+    type: string
+    description: "Single source step id (alternative/addition to from_steps)."
+    required: false
+  workspace_root:
+    type: string
+    description: "Skillflow workspace root (auto-injected); source dirs live at <ws>/<config>/<step>."
+    required: false
+  config_name:
+    type: string
+    description: "Graph name (auto-injected); the config subdir under the workspace."
+    required: false
+  out_dir:
+    type: string
+    description: "This step's staging dir ($STEP_DIR) — the copy destination."
+    required: false

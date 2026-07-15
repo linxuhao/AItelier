@@ -66,6 +66,35 @@ def test_probe_routes_to_outline():
     assert "arc_plan" not in ids and "ctx_pull" not in ids and "apply_arc" not in ids
 
 
+def test_novel_init_reviews_before_human_checkpoint():
+    # Order must be design → design_review(Red) → design_gate(human checkpoint)
+    # → scaffold. The checkpoint lives on design_gate (reached only on Red-pass),
+    # NOT on design — so the human is asked once Red is clean, not every loop.
+    graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_init.yaml")
+    resolver = GraphResolver(graph)
+
+    # design no longer checkpoints; it flows straight to review.
+    design = resolver.get_node("design")
+    assert design.checkpoint is False
+    assert resolver.next_node("design", {}, {}) == "design_review"
+
+    # Red verdict edges match on the review_verdict.json file (not raw flags),
+    # so assert them structurally: pass → human gate, fail → autonomous re-design.
+    review = resolver.get_node("design_review")
+    routes = {t.match.get("value"): t.to for t in review.transitions
+              if t.match and t.match.get("from_file")}
+    assert routes.get(True) == "design_gate"
+    assert routes.get(False) == "design"
+
+    # The human checkpoint is on design_gate (a restage tool step), reject→design.
+    gate = resolver.get_node("design_gate")
+    assert gate.checkpoint is True and gate.step_type == "tool"
+    assert gate.tool_name == "restage" and gate.checkpoint_reject_to == "design"
+    approve_edge = [t for t in gate.transitions
+                    if t.match and t.match.get("from") == "checkpoint"][0]
+    assert approve_edge.to == "scaffold"
+
+
 def test_continuity_gate_loops_back_with_limit():
     graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
     resolver = GraphResolver(graph)

@@ -328,3 +328,41 @@ def test_reconcile_skips_without_git(tmp_path):
     _seed(tmp_path)  # no git → no novel-genesis tag
     out = ns.reconcile(tmp_path)
     assert len(out) == 1 and "reconcile skipped" in out[0]
+
+
+def test_restage_copies_prior_step_outputs(tmp_path):
+    # restage stages a checkpoint step's modal from prior steps' promoted dirs.
+    # Layout: {workspace}/{config}/{step}/... — restage copies into out_dir.
+    from aitelier.tools.restage.impl import restage
+
+    ws, cfg = tmp_path, "novel_init"
+    design = ws / cfg / "design" / "novel" / "bible"
+    design.mkdir(parents=True)
+    (design / "overview.md").write_text("# 总纲", encoding="utf-8")
+    (design / "arcs.yaml").write_text("- name: 主线", encoding="utf-8")
+    # skillflow bookkeeping that MUST be skipped
+    (ws / cfg / "design" / "_snapshot.json").write_text("{}", encoding="utf-8")
+    (ws / cfg / "design" / "user_rejection_history.json").write_text("[]", encoding="utf-8")
+    review = ws / cfg / "design_review"
+    review.mkdir(parents=True)
+    (review / "review_verdict.json").write_text('{"passed": true}', encoding="utf-8")
+
+    out = ws / cfg / "design_gate.tmp"
+    res = restage(workspace_root=str(ws), config_name=cfg, out_dir=str(out),
+                  from_steps=["design", "design_review"])
+
+    assert res["restaged"] is True
+    staged = {p.relative_to(out).as_posix()
+              for p in out.rglob("*") if p.is_file()}
+    assert staged == {"novel/bible/overview.md", "novel/bible/arcs.yaml",
+                      "review_verdict.json"}
+    # bookkeeping excluded
+    assert not (out / "_snapshot.json").exists()
+    assert not (out / "user_rejection_history.json").exists()
+
+
+def test_restage_fails_loud_when_nothing_to_copy(tmp_path):
+    from aitelier.tools.restage.impl import restage
+    with pytest.raises(ValueError, match="nothing copied"):
+        restage(workspace_root=str(tmp_path), config_name="novel_init",
+                out_dir=str(tmp_path / "out"), from_steps=["design"])

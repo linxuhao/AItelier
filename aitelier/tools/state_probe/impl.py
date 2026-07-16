@@ -145,6 +145,13 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
             ending = prev.read_text(encoding="utf-8").rstrip()[-ENDING_CHARS:]
             parts += ["## 上一章结尾（衔接文风与场景，正文必须自然承接）", "",
                       "```", ending, "```", ""]
+    else:
+        # First chapter: make the ABSENCE of a predecessor explicit, so the
+        # outliner opens the story here instead of inventing an "上一章" (and
+        # thereby drifting the chapter number forward on a revision reject).
+        parts += [f"## 本章为第{n}章（全书开篇）", "",
+                  "这是本书【第一章】——之前没有任何章节，没有上一章结尾，没有已发生的前情。"
+                  f"直接从这里开场，不要承接、不要假设读者已知任何剧情。章号锁定为第{n}章。", ""]
 
     result = {"next_chapter": n, "has_previous": bool(done)}
     if out_dir:

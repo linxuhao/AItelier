@@ -119,19 +119,33 @@ def test_novel_chapter_reviews_outline_before_human_checkpoint():
                if t.match and t.match.get("from") == "checkpoint"][0]
     assert approve.to == "draft"
 
-    # finalize's human checkpoint already has Red (draft_review) before it.
-    dr = resolver.get_node("draft_review")
-    dr_pass = {t.match.get("value"): t.to for t in dr.transitions
-               if t.match and t.match.get("from_file")}
-    assert dr_pass.get(True) == "finalize"
+    # finalize's human checkpoint (CP#2) is reached after the reviews + polish.
     assert resolver.get_node("finalize").checkpoint is True
 
 
-def test_continuity_gate_loops_back_with_limit():
+def test_novel_chapter_reviews_substance_before_humanize():
+    # Fail-fast order: draft → draft_review(substance) → humanize(去AI味) →
+    # continuity(machine gate) → finalize. Review BEFORE polish so a substance
+    # reject re-writes the draft without wasting a humanize pass.
     graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
     resolver = GraphResolver(graph)
-    assert resolver.next_node("continuity", {"passed": True}, {}) == "draft_review"
-    assert resolver.next_node("continuity", {"passed": False}, {}) == "draft"
+
+    assert resolver.next_node("draft", {}, {}) == "draft_review"
+    dr = {t.match.get("value"): t.to
+          for t in resolver.get_node("draft_review").transitions
+          if t.match and t.match.get("from_file")}
+    assert dr.get(True) == "humanize"   # substance pass → polish
+    assert dr.get(False) == "draft"     # substance fail → rewrite (no wasted humanize)
+    assert resolver.next_node("humanize", {}, {}) == "continuity"
+
+
+def test_continuity_gate_loops_back_to_humanize():
+    # continuity is now AFTER humanize: pass → finalize, fail → humanize
+    # (re-polish; AI-ism is humanize's job, not a re-write).
+    graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
+    resolver = GraphResolver(graph)
+    assert resolver.next_node("continuity", {"passed": True}, {}) == "finalize"
+    assert resolver.next_node("continuity", {"passed": False}, {}) == "humanize"
     node = resolver.get_node("continuity")
-    fail_edge = [t for t in node.transitions if t.to == "draft"][0]
+    fail_edge = [t for t in node.transitions if t.to == "humanize"][0]
     assert fail_edge.max_loop == 2 and fail_edge.feedback is True

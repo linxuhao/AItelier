@@ -10,10 +10,12 @@
 # 章循环：
 #   probe(tool) → outline(章纲：读 probe bundle 做完整规划)
 #   → outline_review(Red) → outline_gate(CP#1 人讨论：restage 显示 Red 已审章纲)
-#   → draft(整章成文) → humanize(独立去AI味)
-#   → continuity(确定性硬gate：字数/元标记/套话密度, fail 回 draft)
-#   → draft_review(Red 七维+原文举证——死人出场/OOC/战力/时间线归这里, fail 回 draft)
+#   → draft(整章成文)
+#   → draft_review(Red 审【未润色初稿】的实质：OOC/战力/时间线/章纲忠实, fail 回 draft)
+#   → humanize(独立去AI味——只润已过审的稿, 不做无用功)
+#   → continuity(确定性硬gate：字数/元标记/套话密度, fail 回 humanize 重润)
 #   → finalize(提取记账分录) → CP#2(终稿+状态变更一起人批) → apply_state(记账+对账+git commit)。
+# 先审实质、后润色（同真人作者：先改结构/情节，再抠语言）——绝不在有硬伤的稿上白润一遍。
 #
 # 细纲(arc_plan)与章纲(outline)在 per-chapter 精修下重复，已合并进 outline；
 # 长线方向由 bible/compass.md 提供。
@@ -97,6 +99,7 @@ steps:
     context:
       - source: { step: "probe" }
       - source: { step: "outline" }
+      - source: { step: "outline_review" }   # Red 驳回意见（首轮为空）
     output:
       mode: "content"
       fixed:
@@ -142,7 +145,6 @@ steps:
       - source: { step: "probe" }            # 上章结尾/角色卡/节奏约定
       - source: { step: "outline" }
       - source: { step: "draft" }            # 上一版正文（修订时保留未被指出的段落，防打地鼠）
-      - source: { step: "continuity" }       # 机检违规反馈（首轮为空）
       - source: { step: "draft_review" }     # Red 驳回意见（首轮为空）
     output:
       mode: "content"
@@ -152,38 +154,11 @@ steps:
       - files: ["chapter_draft.md"]
         tool: "file_exists"
     transitions:
-      - to: "humanize"
-
-  - id: "humanize"
-    step_type: "agent"
-    agent_config: "novel_humanizer"
-    timeout_seconds: 600
-    context:
-      - source: { step: "draft" }
-    output:
-      mode: "content"
-      fixed:
-        final: "chapter_final.md"
-    validation:
-      - files: ["chapter_final.md"]
-        tool: "file_exists"
-    transitions:
-      - to: "continuity"
-
-  # ── 确定性硬门槛（只机械项；语义一致性归 draft_review）─────────────────────
-  - id: "continuity"
-    step_type: "tool"
-    tool_name: "continuity_check"
-    tool_params:
-      out_dir: "$STEP_DIR"
-    transitions:
       - to: "draft_review"
-        match: { passed: true }
-      - to: "draft"
-        match: { passed: false }
-        max_loop: 2
-        feedback: true       # 违规清单注入 draft 重写
 
+  # ── Red 正文审查（审的是【未润色初稿】的实质：设定/角色/章纲/叙事/节奏/钩子）──
+  # 先审实质、后润色：故事有硬伤先打回重写，绝不在有硬伤的稿子上浪费一遍去AI味。
+  # 审美/AI味不在这里做阻塞判断——那是 humanize 去 + continuity 机检 + CP#2 人审的事。
   - id: "draft_review"
     step_type: "agent"
     agent_config: "novel_chapter_reviewer"
@@ -191,8 +166,7 @@ steps:
     context:
       - source: { step: "probe" }
       - source: { step: "outline" }
-      - source: { step: "humanize" }
-      - source: { step: "continuity" }
+      - source: { step: "draft" }            # 审初稿（未润色）
     output:
       mode: "content"
       fixed:
@@ -207,11 +181,44 @@ steps:
             passed: { type: boolean }
             feedback: { type: string }
     transitions:
-      - to: "finalize"
+      - to: "humanize"                                    # 实质过审 → 去AI味
         match: { from_file: "review_verdict.json", field: "passed", value: true }
-      - to: "draft"
+      - to: "draft"                                       # 硬伤 → 重写（不浪费 humanize）
         match: { from_file: "review_verdict.json", field: "passed", value: false }
         max_loop: 3
+
+  # ── 去AI味润色（只对已过实质审查的初稿润色，不做无用功）────────────────────
+  - id: "humanize"
+    step_type: "agent"
+    agent_config: "novel_humanizer"
+    timeout_seconds: 600
+    context:
+      - source: { step: "draft" }            # 实质已过审的初稿（润色基底）
+      - source: { step: "humanize" }         # 上一版润色（continuity 打回时保留、只修违规处）
+      - source: { step: "continuity" }       # 机检违规清单（首轮为空）
+    output:
+      mode: "content"
+      fixed:
+        final: "chapter_final.md"
+    validation:
+      - files: ["chapter_final.md"]
+        tool: "file_exists"
+    transitions:
+      - to: "continuity"
+
+  # ── 确定性硬门槛（机械项：字数/元标记/套话密度——去AI味的机检地板；语义归 Red）──
+  - id: "continuity"
+    step_type: "tool"
+    tool_name: "continuity_check"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: "finalize"
+        match: { passed: true }
+      - to: "humanize"                        # 套话超标 → 重润（AI味是 humanize 的活，不重写）
+        match: { passed: false }
+        max_loop: 2
+        feedback: true       # 违规清单注入 humanize 重润
 
   # ── 记账分录提取 + 终稿人批 ───────────────────────────────────────────────
   - id: "finalize"

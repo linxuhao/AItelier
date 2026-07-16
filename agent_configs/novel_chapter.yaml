@@ -7,7 +7,11 @@
 novel_outliner:
   model: "deepseek/deepseek-v4-pro"
   template: "novel_outline.md"
-  tools: []
+  # Web tools: pull current 梗/时事 or sample a "写得像《X》/像作者Y" style ref while
+  # planning. Used ON DEMAND only (see template) — most chapters need zero searches.
+  # web_search needs SEARXNG_URL set; unset → it fails soft and the outliner proceeds.
+  tools: ["web_search", "web_fetch"]
+  max_tool_turns: 40
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:

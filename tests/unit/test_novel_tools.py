@@ -372,3 +372,32 @@ def test_restage_fails_loud_when_nothing_to_copy(tmp_path):
     with pytest.raises(ValueError, match="nothing copied"):
         restage(project_root=str(tmp_path / "repo"), out_dir=str(tmp_path / "out"),
                 from_repo=["novel/bible"])
+
+
+def test_probe_bundle_survives_prompt_context_whole():
+    # Regression: [Pre-resolved Context] used to clip every entry at 6000 CHARS,
+    # which cut the 578-line probe bundle at line 267 — losing world rules
+    # (模拟器插入时序), character cards and the plot frontier. The outliner then
+    # invented lore contradicting the bible. A bible-sized bundle must arrive whole.
+    from core.prompt_assembler import PromptAssembler, MAX_CONTEXT_LINES
+
+    bundle = "### novel_context.md\n" + "\n".join(
+        f"设定行 {i}" for i in range(560)) + "\n世界规则: 模拟器插入时序——传送中截停"
+    out = PromptAssembler._clip_context_entry("Step probe", bundle, "outline")
+    assert out == bundle                      # untouched
+    assert "模拟器插入时序" in out             # the rule that got silently cut
+    assert "[上下文截断" not in out
+
+
+def test_oversized_context_truncation_is_recoverable():
+    # When a cut IS necessary it must be line-based and tell the agent where to
+    # resume — skillflow's read() pages by 0-based start_line — not die silently.
+    from core.prompt_assembler import PromptAssembler, MAX_CONTEXT_LINES
+
+    huge = "### novel_context.md\n" + "\n".join(
+        f"line {i}" for i in range(MAX_CONTEXT_LINES + 500))
+    out = PromptAssembler._clip_context_entry("Step probe", huge, "outline")
+    assert "[上下文截断" in out
+    assert f"共 {MAX_CONTEXT_LINES + 501} 行" in out          # honest total
+    assert f"start_line={MAX_CONTEXT_LINES}" in out           # resume point
+    assert "novel_context.md" in out                          # names the file to read

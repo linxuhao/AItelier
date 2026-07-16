@@ -4,9 +4,29 @@
 #        Agent 通过工具按需探索 project/，而非被动接收全量上下文。
 #        目录树自动注入确保 Agent 知道确切的文件名，避免浪费工具轮次猜测。
 
+import logging
 from pathlib import Path
 from typing import Optional
 from core.workspace_manager import DPE_GRAPH_NAME, TASK_STEP_SEQUENCE, PROJECT_STEP_SEQUENCE, STEP_SEQUENCE
+
+logger = logging.getLogger(__name__)
+
+# Per-entry budget for [Pre-resolved Context], counted in LINES (not chars) so a
+# truncation can name the exact line the agent must resume from — skillflow's
+# `read` tool pages by 0-based start_line/end_line, so the cut is recoverable
+# instead of terminal.
+#
+# This was a flat 6000-CHAR clip, which silently destroyed deliberately-assembled
+# context: novel_chapter's probe bundle (the whole bible, 578 lines) was cut at
+# line 267, taking the world rules (模拟器插入时序), every character card, the plot
+# frontier and the 伏笔 sections with it. The outliner then invented lore that
+# contradicted the bible — and burned 13 read turns trying to compensate. DPE's
+# sota/design docs were being clipped at ~200 lines by the same rule.
+#
+# 1500 lines comfortably fits a full bible/design doc whole (the point of a
+# pre-assembled bundle is that the agent does NOT have to go fetch it), while
+# still bounding genuinely runaway content.
+MAX_CONTEXT_LINES = 1500
 
 
 # Tool definitions are handled by skillflow — injected via _tool_schemas and
@@ -361,9 +381,7 @@ class PromptAssembler:
         if resolved_context:
             ctx_parts = []
             for label, content in resolved_context.items():
-                # Truncate very long content to avoid token waste
-                if len(content) > 6000:
-                    content = content[:6000] + "\n... [truncated]"
+                content = self._clip_context_entry(label, content, step_id)
                 ctx_parts.append(f"### {label}\n{content}")
             if ctx_parts:
                 sections.append("[Pre-resolved Context]\n" + "\n\n".join(ctx_parts))
@@ -747,6 +765,33 @@ class PromptAssembler:
             lines = extracted.splitlines()
             extracted = "\n".join(lines[:500]) + "\n... [interfaces truncated]"
         return extracted
+
+    @staticmethod
+    def _clip_context_entry(label: str, content: str, step_id: str = "") -> str:
+        """Bound one [Pre-resolved Context] entry — RECOVERABLY.
+
+        Line-based (not char-based) so the marker can name the exact line the
+        agent must resume from, and say how: skillflow's `read` pages by 0-based
+        start_line/end_line. A silent mid-file cut is what let an outliner miss
+        the world rules entirely and invent contradicting lore.
+        """
+        lines = content.splitlines()
+        if len(lines) <= MAX_CONTEXT_LINES:
+            return content
+        # skillflow emits step entries as "### <relpath>\n<content>" — name that
+        # path so the resume hint is copy-pasteable.
+        head = lines[0].strip()
+        target = head[4:].strip() if head.startswith("### ") else ""
+        resume = (f"read(path='{target}', start_line={MAX_CONTEXT_LINES})" if target
+                  else f"read(path=<上面 ### 标出的文件>, start_line={MAX_CONTEXT_LINES})")
+        logger.warning(
+            "prompt context %r truncated at line %d/%d (step=%s) — the agent must "
+            "page the remainder via read()", label, MAX_CONTEXT_LINES, len(lines),
+            step_id or "?")
+        return "\n".join(lines[:MAX_CONTEXT_LINES]) + (
+            f"\n\n... [上下文截断：已显示前 {MAX_CONTEXT_LINES} 行 / 共 {len(lines)} 行。"
+            f"**剩余部分依然存在，可能含关键规则/角色卡/剧情前沿**——不要臆测、不要当它不存在，"
+            f"用 read 工具接着读：{resume}（start_line/end_line 为 0-based）]")
 
     def _load_user_rejection_history(self, project_path: Path, step_id: str) -> str:
         """

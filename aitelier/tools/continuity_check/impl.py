@@ -1,16 +1,24 @@
-"""continuity_check — the CHEAP MECHANICAL gate before the Red review.
+"""continuity_check — the CHEAP MECHANICAL gate on the humanized chapter.
 
-Only checks that need no reading comprehension live here — word count vs the
-pacing bounds, meta markers leaking into prose, and a crude known-AI-ism density
-scan. Everything that needs to understand the text (dead characters reappearing,
-OOC, power regressions, timeline, hook strength) is the Red reviewer's job
-(draft_review, with evidence-quoting) — string-matching a dead character's NAME
-both misses indirect references and false-flags legitimate mentions, so it does
-not belong in a deterministic gate.
+Runs right AFTER humanize (draft → draft_review → humanize → HERE), and does two
+mechanical jobs; anything needing reading comprehension (OOC, power regressions,
+timeline, hook strength) is the Red reviewer's job on the DRAFT (draft_review,
+with evidence-quoting) — string-matching a dead character's NAME both misses
+indirect references and false-flags legitimate mentions, so it stays out.
+
+1. Prose floor: word count vs pacing bounds, meta markers leaking into prose,
+   and a crude known-AI-ism density scan (套话 frequency — NOT semantic
+   AI-detection; the real de-AI-ing is humanize itself + the human at CP#2).
+2. Humanize fidelity: diff against the approved draft (title / length / cast /
+   paragraph structure). humanize re-emits the whole chapter with no
+   surgical-edit constraint, and NOTHING else re-checks substance after Red
+   signed off on the draft — so a silent drift (dropped scene, renamed chapter,
+   deleted character) would reach the reader. The draft is the truth source and
+   stays intact, so a violation loops back to humanize to re-polish from it.
 
 Returns {"passed": bool, "error": <summary>} — `passed` drives the graph
-transition (fail → back to draft, feedback injected); the full report (hard
-violations + advisories) is written for the Red reviewer's context.
+transition (fail → back to humanize, feedback injected); the full report (hard
+violations + advisories) is written for downstream context.
 """
 
 import json
@@ -27,6 +35,24 @@ BANNED_SINGLE_MAX = 4
 DEFAULT_MIN_CHARS = 1500
 DEFAULT_MAX_CHARS = 6000
 
+# Humanize fidelity: the polish pass promises ±10% length and an untouched
+# structure. It re-emits the WHOLE chapter (create_final) with no surgical-edit
+# constraint, so it can silently drift — and nothing downstream re-checks the
+# substance (Red reviewed the DRAFT; the human at CP#2 won't diff line by line).
+HUMANIZE_LEN_DELTA_MAX = 10.0    # percent
+HUMANIZE_PARA_TOLERANCE = 0.15   # fraction of the draft's paragraph count
+
+
+def _title_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("# "):
+            return line.strip()
+    return ""
+
+
+def _para_count(text: str) -> int:
+    return len([p for p in text.split("\n\n") if p.strip()])
+
 
 def continuity_check(*, project_root: str = "", workspace_root: str = "",
                      out_dir: str = "", prose_step_dir: str = "", **kwargs) -> dict:
@@ -35,6 +61,7 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
     prose_dir = Path(prose_step_dir) if prose_step_dir \
         else Path(stage) / "novel_chapter" / "humanize"
     prose_path = prose_dir / "chapter_final.md"
+    draft_path = Path(stage) / "novel_chapter" / "draft" / "chapter_draft.md"
 
     violations: list[str] = []
     advisories: list[str] = []
@@ -80,6 +107,38 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
         found = [m for m in ns.META_MARKERS if m in prose]
         if found:
             violations.append(f"正文含元信息标记: {found} — 正文不得出现非故事内容")
+
+        # ── Humanize fidelity: 润色只许改语言，不得动实质（对照 draft 初稿）──
+        # Red 审的是初稿；humanize 之后没有第二次实质评审，人工也不会逐行 diff。
+        # 这里用机械不变量兜住漂移（语义仍归 Red/人工）。draft 是真相源且完好，
+        # 违规 → 回 humanize 重润即可。
+        draft = draft_path.read_text(encoding="utf-8") if draft_path.is_file() else ""
+        if draft:
+            d_title, f_title = _title_line(draft), _title_line(prose)
+            if d_title and f_title and d_title != f_title:
+                violations.append(
+                    f"润色改了标题: 初稿『{d_title}』→ 终稿『{f_title}』——标题行不得改动")
+
+            d_count = ns.char_count(draft)
+            if d_count:
+                delta = (count - d_count) / d_count * 100.0
+                if abs(delta) > HUMANIZE_LEN_DELTA_MAX:
+                    violations.append(
+                        f"润色字数漂移 {delta:+.0f}%（初稿 {d_count} → 终稿 {count}），"
+                        f"超出 ±{HUMANIZE_LEN_DELTA_MAX:.0f}% —— 润色只改语言，"
+                        "不得增删情节/段落")
+
+            dropped = [nm for nm in ns.load_characters(base)
+                       if nm in draft and nm not in prose]
+            if dropped:
+                violations.append(
+                    f"润色后角色消失: {dropped} —— 初稿中出场的角色不得在润色中被删除")
+
+            d_paras, f_paras = _para_count(draft), _para_count(prose)
+            if d_paras and abs(f_paras - d_paras) > max(2, d_paras * HUMANIZE_PARA_TOLERANCE):
+                violations.append(
+                    f"润色改了段落结构: 初稿 {d_paras} 段 → 终稿 {f_paras} 段 —— "
+                    "段落结构不得改动（只在句内与相邻句衔接处润色）")
 
         # ── Advisory-only: ending shape (real hook judgment is Red's) ──
         last_para = prose.rstrip().rsplit("\n", 1)[-1].strip()

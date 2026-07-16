@@ -401,3 +401,46 @@ def test_oversized_context_truncation_is_recoverable():
     assert f"共 {MAX_CONTEXT_LINES + 501} 行" in out          # honest total
     assert f"start_line={MAX_CONTEXT_LINES}" in out           # resume point
     assert "novel_context.md" in out                          # names the file to read
+
+
+def _write_draft(tmp_path, text):
+    d = tmp_path / "novel_chapter" / "draft"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "chapter_draft.md").write_text(text, encoding="utf-8")
+
+
+DRAFT = ("# 第1章：初试\n\n林凡握紧了剑。赵四步步紧逼，灵气翻涌。" * 1 + "\n\n"
+         + "林凡握紧了剑。赵四步步紧逼，灵气翻涌。" * 19
+         + "\n\n他抬头望向山门，那里站着一个不该出现的人——")
+
+
+def test_humanize_fidelity_passes_language_only_polish(tmp_path):
+    # A legitimate polish: same title/cast/paragraphs, length within ±10%.
+    _seed(tmp_path)
+    _write_draft(tmp_path, DRAFT)
+    _write_prose(tmp_path, DRAFT.replace("步步紧逼", "一步步压上来"))
+    assert continuity_check(workspace_root=str(tmp_path),
+                            out_dir=str(tmp_path / "cc")) == {"passed": True}
+
+
+def test_humanize_fidelity_catches_substance_drift(tmp_path):
+    # humanize re-emits the whole chapter, so it can silently drift. The draft is
+    # the truth source — these must fail the gate and loop back to re-polish.
+    _seed(tmp_path)
+    _write_draft(tmp_path, DRAFT)
+
+    # 1) renamed the chapter
+    _write_prose(tmp_path, DRAFT.replace("# 第1章：初试", "# 第1章：血战"))
+    r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
+    assert r["passed"] is False and "标题" in r["error"]
+
+    # 2) deleted a character who appeared in the draft
+    _write_prose(tmp_path, DRAFT.replace("赵四", "那人"))
+    r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
+    assert r["passed"] is False and "角色消失" in r["error"]
+
+    # 3) cut the story down instead of just polishing language
+    _write_prose(tmp_path, "# 第1章：初试\n\n林凡握紧了剑。\n\n他抬头望向山门——")
+    r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
+    assert r["passed"] is False
+    assert "字数" in r["error"] or "段落" in r["error"]

@@ -109,6 +109,7 @@ steps:
     context:
       - source: { step: "brainstorm" }
       - source: { from: "repository", mode: "tool" }   # 读 repo 里定稿的 bible（全 7 文件）
+      - source: { feedback_of: "design" }              # 用户历轮 checkpoint 反馈——守护者：任何一轮被回退即打回
     output:
       mode: "content"
       fixed:

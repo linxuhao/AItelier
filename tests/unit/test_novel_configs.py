@@ -175,3 +175,22 @@ def test_continuity_gate_loops_back_to_humanize():
     node = resolver.get_node("continuity")
     fail_edge = [t for t in node.transitions if t.to == "humanize"][0]
     assert fail_edge.max_loop == 2 and fail_edge.feedback is True
+
+def test_reviewers_guard_user_feedback_rounds():
+    # Every reviewer that gates a human-checkpoint reject loop must SEE the
+    # accumulated user feedback ({feedback_of: step}) — otherwise a revision
+    # that silently reverts an earlier round's fix passes review unchallenged
+    # (live incident: outline v3 pasted the round-1 quote back verbatim and
+    # Red approved it, blind).
+    cases = [
+        ("novel_chapter.yaml", "outline_review", "outline"),
+        ("novel_chapter.yaml", "draft_review", "draft"),
+        ("novel_init.yaml", "design_review", "design"),
+    ]
+    for cfg, reviewer, target in cases:
+        graph = PipelineGraph.from_yaml(ROOT / "configs" / cfg)
+        node = GraphResolver(graph).get_node(reviewer)
+        fb = [s for s in node.context if s.get("feedback_of") == target]
+        assert fb, f"{cfg}: {reviewer} must declare {{feedback_of: {target}}}"
+        assert fb[0].get("source_type") == "feedback", \
+            f"{cfg}: {reviewer} feedback_of spec not normalized to 'feedback'"

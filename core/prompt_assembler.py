@@ -249,6 +249,21 @@ class PromptAssembler:
                         "complete only once you have called the write tool(s) for all "
                         "required files."
                     )
+                    edit_tools = sorted(
+                        n for n in (tool_schemas or {})
+                        if n.startswith("edit_") or n == "edit"
+                    )
+                    if edit_tools:
+                        edit_list = ", ".join(f"`{t}`" for t in edit_tools)
+                        delivery += (
+                            "\nWhen REVISING a previous version (reviewer/user "
+                            f"feedback in context), PREFER the edit tool(s) ({edit_list}): "
+                            "change exactly the flagged spots — the unflagged rest "
+                            "is carried through verbatim. Rewriting the whole file "
+                            "from memory silently corrupts parts nobody complained "
+                            "about. Full-file writes are for authoring from scratch "
+                            "or when feedback demands a restructure."
+                        )
                 if "write" in write_tools:
                     # AT-9: pin one canonical root for the generic write(file, …).
                     delivery += (

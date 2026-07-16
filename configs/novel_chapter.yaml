@@ -102,6 +102,7 @@ steps:
       - source: { step: "probe" }
       - source: { step: "outline" }
       - source: { step: "outline_review" }   # Red 驳回意见（首轮为空）
+      - source: { feedback_of: "outline" }   # 用户历轮 checkpoint 反馈——守护者：任何一轮被回退即打回
     output:
       mode: "content"
       fixed:
@@ -169,6 +170,7 @@ steps:
       - source: { step: "probe" }
       - source: { step: "outline" }
       - source: { step: "draft" }            # 审初稿（未润色）
+      - source: { feedback_of: "draft" }     # 用户对正文的历轮反馈（CP#2 reject 回 draft）——守护不回退
     output:
       mode: "content"
       fixed:

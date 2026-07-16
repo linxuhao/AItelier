@@ -54,6 +54,19 @@ def _para_count(text: str) -> int:
     return len([p for p in text.split("\n\n") if p.strip()])
 
 
+def _cast_present(text: str, name: str, card: dict) -> bool:
+    """Is this character on stage in `text`?
+
+    Presence only — canonical name OR any alias counts, so a polish that keeps
+    「王长老」but drops 「王老」isn't flagged as a vanished character (the person is
+    still there; only the form of address changed). Deliberately NOT count-based:
+    humanize is allowed to swap some 「说/道」dialogue tags for action beats, which
+    legitimately reduces how often a name appears — counting would false-flag it.
+    """
+    forms = [name] + [a for a in (card.get("aliases") or []) if a]
+    return any(f and f in text for f in forms)
+
+
 def continuity_check(*, project_root: str = "", workspace_root: str = "",
                      out_dir: str = "", prose_step_dir: str = "", **kwargs) -> dict:
     base = project_root or workspace_root or "."           # novel/ tree (pacing)
@@ -128,11 +141,25 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
                         f"超出 ±{HUMANIZE_LEN_DELTA_MAX:.0f}% —— 润色只改语言，"
                         "不得增删情节/段落")
 
-            dropped = [nm for nm in ns.load_characters(base)
-                       if nm in draft and nm not in prose]
+            # Cast presence both ways: a polish must not drop a character who was
+            # on stage, nor introduce one who wasn't. Presence-only (name OR
+            # alias) — see _cast_present for why this is not count-based, and why
+            # "how much" a character appears stays Red's call on the draft.
+            cast = ns.load_characters(base)
+            dropped = [nm for nm, card in cast.items()
+                       if _cast_present(draft, nm, card)
+                       and not _cast_present(prose, nm, card)]
             if dropped:
                 violations.append(
-                    f"润色后角色消失: {dropped} —— 初稿中出场的角色不得在润色中被删除")
+                    f"润色后角色消失: {dropped} —— 初稿中出场的角色不得在润色中被删除"
+                    "（改称谓可以，人不能没）")
+            added = [nm for nm, card in cast.items()
+                     if not _cast_present(draft, nm, card)
+                     and _cast_present(prose, nm, card)]
+            if added:
+                violations.append(
+                    f"润色凭空加人: {added} —— 初稿没出场的角色不得在润色中出现"
+                    "（润色只改语言，不动出场名单）")
 
             d_paras, f_paras = _para_count(draft), _para_count(prose)
             if d_paras and abs(f_paras - d_paras) > max(2, d_paras * HUMANIZE_PARA_TOLERANCE):

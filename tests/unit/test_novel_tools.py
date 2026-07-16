@@ -444,3 +444,27 @@ def test_humanize_fidelity_catches_substance_drift(tmp_path):
     r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
     assert r["passed"] is False
     assert "字数" in r["error"] or "段落" in r["error"]
+
+
+def test_humanize_cast_check_is_alias_aware_and_two_way(tmp_path):
+    # Presence is by name OR alias, both directions.
+    _seed(tmp_path)
+
+    # 1) alias swap is NOT a vanished character (王老 aliases → 王长老).
+    #    The person is still on stage; only the form of address changed.
+    d = DRAFT + "\n\n王老站在山门下，没有说话。"
+    _write_draft(tmp_path, d)
+    _write_prose(tmp_path, d.replace("王老", "王长老"))
+    assert continuity_check(workspace_root=str(tmp_path),
+                            out_dir=str(tmp_path / "cc")) == {"passed": True}
+
+    # 2) but actually removing him IS caught
+    _write_prose(tmp_path, d.replace("王老站在山门下，没有说话。", "山门下空无一人。"))
+    r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
+    assert r["passed"] is False and "角色消失" in r["error"]
+
+    # 3) polish must not invent a character the draft never had
+    _write_draft(tmp_path, DRAFT)
+    _write_prose(tmp_path, DRAFT + "\n\n王老忽然出现在他身后。")
+    r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
+    assert r["passed"] is False and "凭空加人" in r["error"]

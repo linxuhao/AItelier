@@ -13,7 +13,8 @@
 #   → draft(整章成文)
 #   → draft_review(Red 审【未润色初稿】的实质：OOC/战力/时间线/章纲忠实, fail 回 draft)
 #   → humanize(独立去AI味——只润已过审的稿, 不做无用功)
-#   → continuity(确定性硬gate：字数/元标记/套话密度, fail 回 humanize 重润)
+#   → continuity(确定性硬gate：字数/元标记/套话密度 + 对照初稿的保真三条, fail 回 humanize)
+#   → humanize_review(Red 保真对照：除了语言还有别的变了吗, fail 回 humanize)
 #   → finalize(提取记账分录) → CP#2(终稿+状态变更一起人批) → apply_state(记账+对账+git commit)。
 # 先审实质、后润色（同真人作者：先改结构/情节，再抠语言）——绝不在有硬伤的稿上白润一遍。
 #
@@ -45,6 +46,7 @@ x-aitelier:
     draft: "正文"
     humanize: "去AI味润色"
     continuity: "一致性硬门槛"
+    humanize_review: "润色保真对照 (Red)"
     draft_review: "正文审查 (Red)"
     finalize: "摘要与记账分录"
     apply_state: "记账入册"
@@ -196,6 +198,7 @@ steps:
       - source: { step: "draft" }            # 实质已过审的初稿（润色基底）
       - source: { step: "humanize" }         # 上一版润色（continuity 打回时保留、只修违规处）
       - source: { step: "continuity" }       # 机检违规清单（首轮为空）
+      - source: { step: "humanize_review" }  # 保真对照的驳回证据（首轮为空）
     output:
       mode: "content"
       fixed:
@@ -213,12 +216,47 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:
-      - to: "finalize"
+      - to: "humanize_review"
         match: { passed: true }
       - to: "humanize"                        # 套话超标 → 重润（AI味是 humanize 的活，不重写）
         match: { passed: false }
         max_loop: 2
         feedback: true       # 违规清单注入 humanize 重润
+
+  # ── 润色保真对照（Red，窄）────────────────────────────────────────────────
+  # 交付链缺口：Red 批的是 draft，读者拿到的是 chapter_final，中间没人核对过两者
+  # 是不是同一个故事。humanize 整篇重发（create_final）物理上想改哪都行，而机检只
+  # 数得动标题/字数/段落——改个数字、换个人说话、把钩子补完，机器全看不见，CP#2 的
+  # 人手里也没有初稿可对照。这一步只回答一个问题：除了语言，还有别的变了吗。
+  # 用 flash：这是 A/B 对照不是创作判断。范围必须窄（不复审质量，Red 已批过初稿），
+  # 且必须两边引原文举证——否则它会退化成又一个假阳性门槛。
+  # 放在 continuity 之后：便宜的机械门槛先拦（fail-fast）。
+  - id: "humanize_review"
+    step_type: "agent"
+    agent_config: "novel_humanize_reviewer"
+    timeout_seconds: 300
+    context:
+      - source: { step: "draft" }             # 基准：已过 Red 实质审查的初稿
+      - source: { step: "humanize" }          # 待查：润色终稿
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+    transitions:
+      - to: "finalize"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "humanize"                        # 改了剧情 → 拿着对照证据回去重润
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 2
 
   # ── 记账分录提取 + 终稿人批 ───────────────────────────────────────────────
   - id: "finalize"

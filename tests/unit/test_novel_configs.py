@@ -139,12 +139,38 @@ def test_novel_chapter_reviews_substance_before_humanize():
     assert resolver.next_node("humanize", {}, {}) == "continuity"
 
 
-def test_continuity_gate_loops_back_to_humanize():
-    # continuity is now AFTER humanize: pass → finalize, fail → humanize
-    # (re-polish; AI-ism is humanize's job, not a re-write).
+def test_humanize_fidelity_review_closes_the_chain_of_custody():
+    # Red approves the DRAFT but the reader gets chapter_final — humanize_review
+    # is the only thing verifying they're the same story. Cheap mechanical gate
+    # runs first (fail-fast), then the A/B fidelity diff; either failure loops
+    # back to humanize to re-polish from the intact draft.
     graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
     resolver = GraphResolver(graph)
-    assert resolver.next_node("continuity", {"passed": True}, {}) == "finalize"
+
+    hr = resolver.get_node("humanize_review")
+    assert hr.step_type == "agent" and hr.checkpoint is False
+    assert hr.agent_config == "novel_humanize_reviewer"
+    # it must see BOTH sides to diff them
+    srcs = {(s.get("source") or s).get("step") for s in hr.context}
+    assert {"draft", "humanize"} <= srcs
+
+    routes = {t.match.get("value"): t.to for t in hr.transitions
+              if t.match and t.match.get("from_file")}
+    assert routes.get(True) == "finalize"
+    assert routes.get(False) == "humanize"   # not draft: polish drift → re-polish
+
+    # humanize gets the fidelity evidence on the re-polish loop
+    h_srcs = {(s.get("source") or s).get("step")
+              for s in resolver.get_node("humanize").context}
+    assert "humanize_review" in h_srcs
+
+
+def test_continuity_gate_loops_back_to_humanize():
+    # continuity is now AFTER humanize: pass → the fidelity review, fail →
+    # humanize (re-polish; AI-ism is humanize's job, not a re-write).
+    graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
+    resolver = GraphResolver(graph)
+    assert resolver.next_node("continuity", {"passed": True}, {}) == "humanize_review"
     assert resolver.next_node("continuity", {"passed": False}, {}) == "humanize"
     node = resolver.get_node("continuity")
     fail_edge = [t for t in node.transitions if t.to == "humanize"][0]

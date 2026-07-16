@@ -55,6 +55,18 @@ novel_chapter_reviewer:
   thinking:
     enable: true
 
+novel_humanize_reviewer:
+  # A/B fidelity diff (did anything but the language change?) — a comparison
+  # task, not creative judgment, so flash is the right tier. Red already judged
+  # quality on the draft; this one must NOT re-litigate it.
+  model: "deepseek/deepseek-v4-flash"
+  template: "novel_humanize_review.md"
+  tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
 novel_finalizer:
   model: "deepseek/deepseek-v4-flash"
   template: "novel_finalize.md"

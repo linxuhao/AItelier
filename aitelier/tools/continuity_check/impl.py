@@ -9,12 +9,15 @@ indirect references and false-flags legitimate mentions, so it stays out.
 1. Prose floor: word count vs pacing bounds, meta markers leaking into prose,
    and a crude known-AI-ism density scan (套话 frequency — NOT semantic
    AI-detection; the real de-AI-ing is humanize itself + the human at CP#2).
-2. Humanize fidelity: diff against the approved draft (title / length / cast /
-   paragraph structure). humanize re-emits the whole chapter with no
-   surgical-edit constraint, and NOTHING else re-checks substance after Red
-   signed off on the draft — so a silent drift (dropped scene, renamed chapter,
-   deleted character) would reach the reader. The draft is the truth source and
-   stays intact, so a violation loops back to humanize to re-polish from it.
+2. Humanize fidelity: diff against the approved draft on invariants that need NO
+   reading comprehension — title line, length, paragraph structure. humanize
+   re-emits the whole chapter with no surgical-edit constraint, so a deleted
+   scene or a renamed chapter would otherwise sail past Red's sign-off (Red
+   reviewed the DRAFT). Whether the CAST or the meaning survived is NOT checked
+   here: that needs a reader (see the note above _para_count) — gross drift
+   still shows up in the counts, and the rest is Red's + the human's at CP#2.
+   The draft is the truth source and stays intact, so a violation loops back to
+   humanize to re-polish from it.
 
 Returns {"passed": bool, "error": <summary>} — `passed` drives the graph
 transition (fail → back to humanize, feedback injected); the full report (hard
@@ -54,17 +57,19 @@ def _para_count(text: str) -> int:
     return len([p for p in text.split("\n\n") if p.strip()])
 
 
-def _cast_present(text: str, name: str, card: dict) -> bool:
-    """Is this character on stage in `text`?
-
-    Presence only — canonical name OR any alias counts, so a polish that keeps
-    「王长老」but drops 「王老」isn't flagged as a vanished character (the person is
-    still there; only the form of address changed). Deliberately NOT count-based:
-    humanize is allowed to swap some 「说/道」dialogue tags for action beats, which
-    legitimately reduces how often a name appears — counting would false-flag it.
-    """
-    forms = [name] + [a for a in (card.get("aliases") or []) if a]
-    return any(f and f in text for f in forms)
+# NOTE (deliberate omission): there is no cast check here.
+#
+# A "did the polish drop a character" gate can only be built out of name/alias
+# string matching, and that is exactly the thing this tool's contract rules out:
+# it MISSES indirect references (初稿「王老曾说过」→ 润色「师父曾说过」: the person
+# was never on stage, yet the name vanished) and FALSE-FLAGS legitimate ones
+# (short names collide with ordinary words), while still missing the real damage
+# (name kept once, the character's whole scene polished away). Noisy AND leaky —
+# and it was wired to a HARD gate that stalls the chapter and forces a re-polish.
+# Whether the cast survived the polish needs reading comprehension, so it belongs
+# to a reader: Red on the draft (七维「角色行为」, with evidence) and the human at
+# CP#2. Gross drift is still caught below by genuinely mechanical invariants —
+# a deleted scene moves the length/paragraph counts.
 
 
 def continuity_check(*, project_root: str = "", workspace_root: str = "",
@@ -140,26 +145,6 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
                         f"润色字数漂移 {delta:+.0f}%（初稿 {d_count} → 终稿 {count}），"
                         f"超出 ±{HUMANIZE_LEN_DELTA_MAX:.0f}% —— 润色只改语言，"
                         "不得增删情节/段落")
-
-            # Cast presence both ways: a polish must not drop a character who was
-            # on stage, nor introduce one who wasn't. Presence-only (name OR
-            # alias) — see _cast_present for why this is not count-based, and why
-            # "how much" a character appears stays Red's call on the draft.
-            cast = ns.load_characters(base)
-            dropped = [nm for nm, card in cast.items()
-                       if _cast_present(draft, nm, card)
-                       and not _cast_present(prose, nm, card)]
-            if dropped:
-                violations.append(
-                    f"润色后角色消失: {dropped} —— 初稿中出场的角色不得在润色中被删除"
-                    "（改称谓可以，人不能没）")
-            added = [nm for nm, card in cast.items()
-                     if not _cast_present(draft, nm, card)
-                     and _cast_present(prose, nm, card)]
-            if added:
-                violations.append(
-                    f"润色凭空加人: {added} —— 初稿没出场的角色不得在润色中出现"
-                    "（润色只改语言，不动出场名单）")
 
             d_paras, f_paras = _para_count(draft), _para_count(prose)
             if d_paras and abs(f_paras - d_paras) > max(2, d_paras * HUMANIZE_PARA_TOLERANCE):

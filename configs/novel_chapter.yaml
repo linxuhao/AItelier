@@ -8,8 +8,9 @@
 # 全给）。
 #
 # 章循环：
-#   probe(tool) → outline(章纲：读 probe bundle 做完整规划, CP#1 人讨论)
-#   → outline_review(Red) → draft(整章成文) → humanize(独立去AI味)
+#   probe(tool) → outline(章纲：读 probe bundle 做完整规划)
+#   → outline_review(Red) → outline_gate(CP#1 人讨论：restage 显示 Red 已审章纲)
+#   → draft(整章成文) → humanize(独立去AI味)
 #   → continuity(确定性硬gate：字数/元标记/套话密度, fail 回 draft)
 #   → draft_review(Red 七维+原文举证——死人出场/OOC/战力/时间线归这里, fail 回 draft)
 #   → finalize(提取记账分录) → CP#2(终稿+状态变更一起人批) → apply_state(记账+对账+git commit)。
@@ -38,6 +39,7 @@ x-aitelier:
     probe: "上下文装配"
     outline: "章纲"
     outline_review: "章纲审查 (Red)"
+    outline_gate: "章纲人工讨论"
     draft: "正文"
     humanize: "去AI味润色"
     continuity: "一致性硬门槛"
@@ -65,7 +67,10 @@ steps:
     transitions:
       - to: "outline"
 
-  # ── 章纲（读 probe bundle 做完整规划；CP#1 人讨论）─────────────────────────
+  # ── 章纲（读 probe bundle 做完整规划）─────────────────────────────────────
+  # 顺序同 novel_init：outline → outline_review(Red) →〔过〕→ outline_gate(CP#1
+  # 人讨论) →〔批〕→ draft。Red 先审、人工后批：outline↔outline_review 自主循环到
+  # Red 满意，人工只在 Red-clean 时被叫一次（不在每圈重修里被打扰）。
   - id: "outline"
     step_type: "agent"
     agent_config: "novel_outliner"
@@ -81,12 +86,9 @@ steps:
     validation:
       - files: ["chapter_outline.md"]
         tool: "file_exists"
-    checkpoint: true
-    checkpoint_label: "章纲讨论（reject+反馈=改章纲，approve=开写正文）"
-    checkpoint_reject_to: "outline"
+    # NO checkpoint here — Red reviews first, the human gates at outline_gate.
     transitions:
       - to: "outline_review"
-        match: { from: "checkpoint", value: "approved" }
 
   - id: "outline_review"
     step_type: "agent"
@@ -109,11 +111,28 @@ steps:
             passed: { type: boolean }
             feedback: { type: string }
     transitions:
-      - to: "draft"
+      - to: "outline_gate"                                # Red 过 → 人工讨论
         match: { from_file: "review_verdict.json", field: "passed", value: true }
-      - to: "outline"
+      - to: "outline"                                     # Red 驳回 → 自主重修（不惊动人工）
         match: { from_file: "review_verdict.json", field: "passed", value: false }
         max_loop: 3
+
+  # ── 章纲人工讨论（Red 通过后才到这；CP#1）─────────────────────────────────
+  # restage 把 outline 的章纲 + outline_review 的裁决摆进本步目录，弹窗显示 Red 已
+  # 审过的章纲（+建议）。reject → outline 改章纲。章纲不进 code repo（每章临时产物），
+  # 故从 step 目录拷（outline 是 content 单文件，每轮全量重写，目录里就是完整章纲）。
+  - id: "outline_gate"
+    step_type: "tool"
+    tool_name: "restage"
+    tool_params:
+      from_steps: ["outline", "outline_review"]
+      out_dir: "$STEP_DIR"
+    checkpoint: true
+    checkpoint_label: "章纲讨论（Red 已通过；reject+反馈=改章纲，approve=开写正文）"
+    checkpoint_reject_to: "outline"
+    transitions:
+      - to: "draft"
+        match: { from: "checkpoint", value: "approved" }
 
   - id: "draft"
     step_type: "agent"

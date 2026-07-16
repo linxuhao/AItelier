@@ -95,6 +95,38 @@ def test_novel_init_reviews_before_human_checkpoint():
     assert approve_edge.to == "scaffold"
 
 
+def test_novel_chapter_reviews_outline_before_human_checkpoint():
+    # Same review-before-checkpoint order as novel_init: outline →
+    # outline_review(Red) → outline_gate(human checkpoint) → draft. The checkpoint
+    # is on outline_gate (reached only on Red-pass), NOT on outline.
+    graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
+    resolver = GraphResolver(graph)
+
+    outline = resolver.get_node("outline")
+    assert outline.checkpoint is False
+    assert resolver.next_node("outline", {}, {}) == "outline_review"
+
+    review = resolver.get_node("outline_review")
+    routes = {t.match.get("value"): t.to for t in review.transitions
+              if t.match and t.match.get("from_file")}
+    assert routes.get(True) == "outline_gate"
+    assert routes.get(False) == "outline"
+
+    gate = resolver.get_node("outline_gate")
+    assert gate.checkpoint is True and gate.step_type == "tool"
+    assert gate.tool_name == "restage" and gate.checkpoint_reject_to == "outline"
+    approve = [t for t in gate.transitions
+               if t.match and t.match.get("from") == "checkpoint"][0]
+    assert approve.to == "draft"
+
+    # finalize's human checkpoint already has Red (draft_review) before it.
+    dr = resolver.get_node("draft_review")
+    dr_pass = {t.match.get("value"): t.to for t in dr.transitions
+               if t.match and t.match.get("from_file")}
+    assert dr_pass.get(True) == "finalize"
+    assert resolver.get_node("finalize").checkpoint is True
+
+
 def test_continuity_gate_loops_back_with_limit():
     graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
     resolver = GraphResolver(graph)

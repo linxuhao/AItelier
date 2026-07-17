@@ -280,6 +280,11 @@ steps:
       - source: { step: "probe" }
       - source: { step: "outline" }
       - source: { step: "humanize" }
+      # 本章的用户 checkpoint 反馈（project=章，天然只有本章的）：其中**世界规则级
+      # 裁定**要以 world_setting/角色卡分录入账进 bible——否则规则只活在本章文本里，
+      # 下一章（新 project 新 run）的 probe 包永远学不到。文本级反馈不入账。
+      - source: { feedback_of: "outline" }
+      - source: { feedback_of: "draft" }
     output:
       mode: "content"
       fixed:

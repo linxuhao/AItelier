@@ -214,6 +214,15 @@ def test_journal_audit_gates_the_booking():
     srcs = {(s.get("source") or s).get("step") for s in fr.context}
     assert {"probe", "outline", "humanize", "finalize"} <= srcs  # 分录+真相源都要在场
 
+    # finalize must SEE this chapter's user feedback: world-rule verdicts in it
+    # get booked into the bible (world_setting / golden_finger entries) — the
+    # next chapter is a fresh project+run whose probe only feeds the bible, so
+    # an unbooked rule is a rule the next writer never learns. (project=章,
+    # so feedback_of is chapter-scoped by construction.)
+    fin = resolver.get_node("finalize")
+    fb_targets = {c.get("feedback_of") for c in fin.context if c.get("feedback_of")}
+    assert {"outline", "draft"} <= fb_targets
+
     routes = {t.match.get("value"): t.to for t in fr.transitions
               if t.match and t.match.get("from_file")}
     assert routes.get(True) == "final_gate"

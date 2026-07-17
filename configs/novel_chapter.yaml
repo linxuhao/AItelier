@@ -15,7 +15,9 @@
 #   → humanize(独立去AI味——只润已过审的稿, 不做无用功)
 #   → continuity(确定性硬gate：字数/元标记/套话密度 + 对照初稿的保真三条, fail 回 humanize)
 #   → humanize_review(Red 保真对照：除了语言还有别的变了吗, fail 回 humanize)
-#   → finalize(提取记账分录) → CP#2(终稿+状态变更一起人批) → apply_state(记账+对账+git commit)。
+#   → finalize(提取记账分录) → finalize_review(Red 审计分录 vs 正文：虚报节点/漏记/
+#     hint≠resolve, fail 回 finalize) → final_gate(CP#2: 终稿+分录+审计一屏人批)
+#   → apply_state(记账+对账+git commit)。
 # 先审实质、后润色（同真人作者：先改结构/情节，再抠语言）——绝不在有硬伤的稿上白润一遍。
 #
 # 细纲(arc_plan)与章纲(outline)在 per-chapter 精修下重复，已合并进 outline；
@@ -49,6 +51,8 @@ x-aitelier:
     humanize_review: "润色保真对照 (Red)"
     draft_review: "正文审查 (Red)"
     finalize: "摘要与记账分录"
+    finalize_review: "记账审计 (Red)"
+    final_gate: "终稿人工终审"
     apply_state: "记账入册"
 
 begin: "probe"
@@ -83,6 +87,10 @@ steps:
       - source: { step: "probe" }            # 整本 bible + 上章结尾 + 滚动摘要
       - source: { step: "outline" }          # 上一版章纲（修订时保留未被指出的部分，防打地鼠）
       - source: { step: "outline_review" }   # Red 驳回意见（首轮为空）
+      # 记账库按需读面：novel/state/index.yaml（反向索引：人物/地点/节点/伏笔→章号）
+      # 定位，novel/chapters/chNNNN/{events.yaml,summary.md} 取账。probe 包只给
+      # 余额两点（初始→现在）；要查"王老在哪几章/蜂巢发生过什么"用这里的 read/search。
+      - source: { from: "repository", mode: "tool" }
     output:
       mode: "content"
       fixed:
@@ -149,6 +157,9 @@ steps:
       - source: { step: "outline" }
       - source: { step: "draft" }            # 上一版正文（修订时保留未被指出的段落，防打地鼠）
       - source: { step: "draft_review" }     # Red 驳回意见（首轮为空）
+      # 记账库按需读面（同 outline）：写到旧地点/旧配角时，用 index.yaml 反查该
+      # 实体的历史章号，再读对应章的 events/summary 保持一致。
+      - source: { from: "repository", mode: "tool" }
     output:
       mode: "content"
       fixed:
@@ -275,7 +286,7 @@ steps:
         events:
           file: "chapter_events.json"
           # Tier-1 per-field write args (see novel_init design step rationale).
-          format: '{"chapter": int, "title": str, "summary": str, "events": [{}], "appearances": [{}], "thread_updates": [{}], "arc_updates": [{}]}'
+          format: '{"chapter": int, "title": str, "summary": str, "events": [{}], "appearances": [{}], "locations": [str], "thread_updates": [{}], "arc_updates": [{}]}'
     validation:
       - files: ["chapter_events.json"]
         tool: "json_schema"
@@ -306,6 +317,11 @@ steps:
                 properties:
                   name: { type: string, minLength: 1 }
                   importance: { type: integer }
+            locations:
+              # 反向索引锚点（by_location）：本章实际发生场景的具名地点。
+              # 非 required —— 老分录没有它；缺失时索引里该章地点为空即可。
+              type: array
+              items: { type: string, minLength: 1 }
             thread_updates:
               type: array
               items:
@@ -328,8 +344,56 @@ steps:
                     type: array
                     items: { type: string }
                   notes: { type: string }
+    # NO checkpoint here — the journal gets a Red audit first (finalize_review),
+    # the human gates at final_gate. Same review-before-checkpoint order as
+    # outline_gate / design_gate.
+    transitions:
+      - to: "finalize_review"
+
+  # ── Red 记账审计（分录 vs 正文的忠实性；入册前最后一道专业审查）────────────
+  # 分录一旦 apply_state 入册就永久固化（改余额/推节点/动伏笔），且此前没有任何
+  # agent 审过它——虚报节点/漏记状态/hint记成resolve 都会在数章后以吃书显形。
+  - id: "finalize_review"
+    step_type: "agent"
+    agent_config: "novel_finalize_reviewer"
+    timeout_seconds: 300
+    context:
+      - source: { step: "probe" }            # 当前状态（对照：变更是否真的是变更）
+      - source: { step: "outline" }          # 章纲的节点推进声明（对照虚报）
+      - source: { step: "humanize" }         # 终稿正文（真相源）
+      - source: { step: "finalize" }         # 被审计的分录
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+    transitions:
+      - to: "final_gate"                                  # 审计过 → 人工终审
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "finalize"                                    # 分录有误 → 重记（正文不动）
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 2
+
+  # ── 终稿人工终审（Red 审计通过后才到这；CP#2）──────────────────────────────
+  # restage 摆出：终稿正文 + 记账分录 + 审计裁决，一屏批完。
+  # reject → draft：正文返工重走全链（反馈累积到 _feedback/draft.md，draft 与
+  # draft_review 的 feedback_of 都读得到）。
+  - id: "final_gate"
+    step_type: "tool"
+    tool_name: "restage"
+    tool_params:
+      from_steps: ["humanize", "finalize", "finalize_review"]
+      out_dir: "$STEP_DIR"
     checkpoint: true
-    checkpoint_label: "终稿与状态变更确认（正文见 humanize 步；reject+反馈=正文返工重走全链）"
+    checkpoint_label: "终稿与状态变更确认（Red 已审计分录；reject+反馈=正文返工重走全链）"
     checkpoint_reject_to: "draft"
     transitions:
       - to: "apply_state"

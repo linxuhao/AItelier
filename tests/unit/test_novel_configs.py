@@ -119,8 +119,10 @@ def test_novel_chapter_reviews_outline_before_human_checkpoint():
                if t.match and t.match.get("from") == "checkpoint"][0]
     assert approve.to == "draft"
 
-    # finalize's human checkpoint (CP#2) is reached after the reviews + polish.
-    assert resolver.get_node("finalize").checkpoint is True
+    # CP#2 moved off finalize onto final_gate (review-before-checkpoint,
+    # third instance of the pattern) — see the dedicated journal-audit test.
+    assert resolver.get_node("finalize").checkpoint is False
+    assert resolver.get_node("final_gate").checkpoint is True
 
 
 def test_novel_chapter_reviews_substance_before_humanize():
@@ -194,3 +196,35 @@ def test_reviewers_guard_user_feedback_rounds():
         assert fb, f"{cfg}: {reviewer} must declare {{feedback_of: {target}}}"
         assert fb[0].get("source_type") == "feedback", \
             f"{cfg}: {reviewer} feedback_of spec not normalized to 'feedback'"
+
+def test_journal_audit_gates_the_booking():
+    # The journal (chapter_events.json) permanently mutates bible balances at
+    # apply_state, and finalize was the ONLY unreviewed agent output in the
+    # chain. Order: finalize → finalize_review(Red audit, prose is the source
+    # of truth) → final_gate(human CP#2, restage prose+journal+verdict) →
+    # apply_state. Audit fail → re-book (finalize), NOT re-write (draft);
+    # human reject → draft (正文返工重走全链).
+    graph = PipelineGraph.from_yaml(ROOT / "configs" / "novel_chapter.yaml")
+    resolver = GraphResolver(graph)
+
+    assert resolver.next_node("finalize", {}, {}) == "finalize_review"
+
+    fr = resolver.get_node("finalize_review")
+    assert fr.agent_config == "novel_finalize_reviewer"
+    srcs = {(s.get("source") or s).get("step") for s in fr.context}
+    assert {"probe", "outline", "humanize", "finalize"} <= srcs  # 分录+真相源都要在场
+
+    routes = {t.match.get("value"): t.to for t in fr.transitions
+              if t.match and t.match.get("from_file")}
+    assert routes.get(True) == "final_gate"
+    assert routes.get(False) == "finalize"
+    fail_edge = [t for t in fr.transitions if t.to == "finalize"][0]
+    assert fail_edge.max_loop == 2
+
+    gate = resolver.get_node("final_gate")
+    assert gate.checkpoint is True and gate.tool_name == "restage"
+    assert gate.checkpoint_reject_to == "draft"
+    assert set(gate.tool_params["from_steps"]) == {"humanize", "finalize", "finalize_review"}
+    approve = [t for t in gate.transitions
+               if t.match and t.match.get("from") == "checkpoint"][0]
+    assert approve.to == "apply_state"

@@ -56,20 +56,49 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
 
     world = ns.load_yaml(bib / "world.yaml", {}) or {}
     if world:
-        parts += ["## 世界设定", "", _yaml_block(world), ""]
+        # Two-point view (期初余额→现在): full histories (setting_log, faction
+        # progression) stay in the repo for on-demand reads — the prompt gets
+        # each mutated setting's trajectory endpoints, which compress the whole
+        # timeline into one line (初始 0% → 现在 0.3% tells the arc).
+        w = {k: v for k, v in world.items() if k != "setting_log"}
+        for f in (w.get("factions") or {}).values():
+            if isinstance(f, dict):
+                f.pop("progression", None)
+        for entry in (w.get("settings") or {}).values():
+            if isinstance(entry, dict):
+                init = entry.pop("initial", None)
+                if init:
+                    delta = {k: v for k, v in init.items()
+                             if entry.get(k) != v}
+                    if delta:
+                        entry["初始状态（与现状不同的字段）"] = delta
+        parts += ["## 世界设定（含 初始→现在；完整演变史在 novel/bible/world.yaml 的 "
+                  "setting_log，可用 read 按需查）", "", _yaml_block(w), ""]
     pacing = ns.load_yaml(bib / "pacing.yaml", {}) or {}
     if pacing:
         parts += ["## 节奏与爽点约定", "", _yaml_block(pacing), ""]
 
     characters = ns.load_characters(base)
     if characters:
-        # Whole cast, current balances (drop progression history — git has it).
+        # Whole cast as trajectory ENDPOINTS: current balances + an 初始 diff
+        # (first-appearance state, fields that changed since). Two points draw
+        # the growth line without the O(chapters) progression history — that
+        # stays in the per-card file for on-demand reads.
         cards = []
         for name in sorted(characters):
             c = dict(characters[name])
             c.pop("progression", None)
+            init = c.pop("initial", None)
+            if init:
+                delta = {k: v for k, v in init.items()
+                         if k not in ("initial", "progression")
+                         and c.get(k) != v}
+                if delta:
+                    c["初始状态（登场时；仅列与现状不同的字段）"] = delta
             cards.append(c)
-        parts += ["## 角色卡（当前状态；出场角色仅限于此，新增角色须在章纲阶段提案）",
+        parts += ["## 角色卡（当前状态 + 登场时初始状态；出场角色仅限于此，新增角色须在"
+                  "章纲阶段提案。完整成长履历在 novel/bible/characters/<名>.yaml 的 "
+                  "progression，可用 read 按需查）",
                   "", _yaml_block(cards), ""]
 
     # ── Plot frontier (node-driven: what each arc advances next) ──
@@ -152,6 +181,22 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
         parts += [f"## 本章为第{n}章（全书开篇）", "",
                   "这是本书【第一章】——之前没有任何章节，没有上一章结尾，没有已发生的前情。"
                   f"直接从这里开场，不要承接、不要假设读者已知任何剧情。章号锁定为第{n}章。", ""]
+
+    # On-demand ledger pointer. The bundle carries trajectory ENDPOINTS only
+    # (初始→现在) — histories live in the repo, and the agents' read surface
+    # includes it ({from: repository, mode: tool}). Without an explicit map,
+    # agents don't go looking (empirically: they act on what's in front of
+    # them), so name the entry points.
+    if done:
+        parts += [
+            "## 记账库按需查询（本包只给状态两点，历史明细用 read/search 取）", "",
+            "- **反向索引** `novel/state/index.yaml`：by_character / by_location / "
+            "by_thread / by_node → 章号列表；`chapters:` 每章锚点行（人物/地点/节点/"
+            "伏笔/单行摘要）。写到旧地点、久未出场的配角、历史伏笔时，先在这里定位章号。",
+            "- **单章明细** `novel/chapters/chNNNN/`：`events.yaml`（该章全部状态变更"
+            "分录）、`summary.md`（摘要）、`prose.md`（全文，慎读，很长）。",
+            "- **完整履历**：角色卡 `novel/bible/characters/<名>.yaml` 的 progression；"
+            "世界设定演变 `novel/bible/world.yaml` 的 setting_log。", ""]
 
     result = {"next_chapter": n, "has_previous": bool(done)}
     if out_dir:

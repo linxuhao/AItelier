@@ -285,6 +285,7 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
                 if resolved:
                     name = resolved
             card = characters.get(name)
+            created = card is None
             if card is None:
                 if not ev.get("create"):
                     raise ValueError(
@@ -306,6 +307,13 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
                     f"(reason: {reason or 'none'})")
             for k, v in changes.items():
                 card[k] = v
+            if created:
+                # Opening balance = the state the character ENTERS the story
+                # with (this first entry applied). Genesis-cast cards get
+                # theirs from scaffold_bible; this covers mid-book arrivals so
+                # every card can feed the probe's 初始→现在 two-point view.
+                card["initial"] = {k: v for k, v in card.items()
+                                   if k not in ("initial", "progression")}
             card.setdefault("progression", []).append(
                 {"chapter": chapter, "changes": changes, "reason": reason})
             dump_yaml(character_path(ws, name), card)
@@ -324,10 +332,15 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
 
         else:  # world_setting
             settings = world.setdefault("settings", {})
+            created = name not in settings
             entry = settings.setdefault(name, {})
             if isinstance(entry, dict):
                 for k, v in changes.items():
                     entry[k] = v
+                if created:
+                    # Opening balance for a setting born mid-book (e.g. 灵气浓度
+                    # first measured in ch.1) — lets the probe show 初始→现在.
+                    entry["initial"] = dict(changes)
             else:
                 settings[name] = changes
             world.setdefault("setting_log", []).append(
@@ -477,22 +490,19 @@ RECENT_FULL = 10  # last N chapter summaries kept verbatim in the digest
 
 
 def rebuild_digest(ws) -> None:
-    """digest.md — 近细远粗: last RECENT_FULL summaries verbatim, older one-line."""
+    """digest.md — the NARRATIVE recap: last RECENT_FULL summaries verbatim.
+
+    Bounded on purpose (the one prompt block that used to grow O(chapters)).
+    Older chapters' one-liners were dropped: their durable consequences
+    already live in the state balances (初始→现在 on cards/settings, thread
+    registry, node frontier), and "which chapter did X happen in" is the
+    reverse index's job (state/index.yaml, searchable, machine-built from
+    events.yaml) — not a prose list's.
+    """
     done = written_chapters(ws)
-    old, recent = done[:-RECENT_FULL], done[-RECENT_FULL:]
-    lines: list[str] = ["# 前情摘要（自动生成，近细远粗）", ""]
-    if old:
-        lines.append("## 更早章节（单行）")
-        for n in old:
-            summ = (chapter_dir(ws, n) / "summary.md")
-            first = ""
-            if summ.is_file():
-                for ln in summ.read_text(encoding="utf-8").splitlines():
-                    if ln.strip() and not ln.startswith("#"):
-                        first = ln.strip()
-                        break
-            lines.append(f"- 第{n}章：{first}")
-        lines.append("")
+    recent = done[-RECENT_FULL:]
+    lines: list[str] = ["# 前情摘要（自动生成；更早章节查 novel/state/index.yaml "
+                        "的反向索引 + novel/chapters/chNNNN/）", ""]
     if recent:
         lines.append("## 最近章节（完整摘要）")
         for n in recent:
@@ -506,11 +516,56 @@ def rebuild_digest(ws) -> None:
 
 
 def rebuild_index(ws) -> dict:
-    """Derived aggregates — never authoritative, cheap to recompute."""
+    """Derived aggregates — never authoritative, cheap to recompute.
+
+    Includes the REVERSE index (anchor points): entity → chapters, plus one
+    anchor row per chapter (characters/locations/nodes/threads + one-line
+    summary), all machine-built from the per-chapter journals. This is what
+    makes the file ledger NAVIGABLE for an agent with only read/search:
+    the forward view answers "他还活着吗", the reverse view answers "王老在
+    哪几章出现过/蜂巢发生过什么" — locate here (O(1)), then read the k
+    matching chapters' events.yaml/summary.md on demand (O(k))."""
     characters = load_characters(ws)
     threads = load_yaml(bible_dir(ws) / "threads.yaml", []) or []
     done = written_chapters(ws)
     arcs = load_yaml(bible_dir(ws) / "arcs.yaml", []) or []
+
+    by_character: dict[str, list[int]] = {}
+    by_location: dict[str, list[int]] = {}
+    by_thread: dict[str, list[int]] = {}
+    by_node: dict[str, list[int]] = {}
+    chapter_anchors: dict[int, dict] = {}
+    for n in done:
+        ev = load_yaml(chapter_dir(ws, n) / "events.yaml", {}) or {}
+        names = [str(a.get("name")) for a in (ev.get("appearances") or [])
+                 if a.get("name")]
+        locs = [str(loc) for loc in (ev.get("locations") or []) if loc]
+        tnames = [str(t.get("name")) for t in (ev.get("thread_updates") or [])
+                  if t.get("name")]
+        nodes = [str(nd) for a in (ev.get("arc_updates") or [])
+                 for nd in (a.get("nodes_completed") or [])]
+        for nm in names:
+            by_character.setdefault(nm, []).append(n)
+        for loc in locs:
+            by_location.setdefault(loc, []).append(n)
+        for tn in tnames:
+            by_thread.setdefault(tn, []).append(n)
+        for nd in nodes:
+            by_node.setdefault(nd, []).append(n)
+        first = ""
+        summ = chapter_dir(ws, n) / "summary.md"
+        if summ.is_file():
+            for ln in summ.read_text(encoding="utf-8").splitlines():
+                if ln.strip() and not ln.startswith("#"):
+                    first = ln.strip()
+                    break
+        chapter_anchors[n] = {
+            "title": str(ev.get("title") or ""),
+            "characters": names, "locations": locs,
+            "threads": tnames, "nodes_completed": nodes,
+            "summary": first,
+        }
+
     index = {
         "chapters_written": len(done),
         "last_chapter": done[-1] if done else 0,
@@ -526,6 +581,13 @@ def rebuild_index(ws) -> dict:
                    "last_appearance": card.get("last_appearance")}
             for name, card in characters.items()
         },
+        # Reverse index — entity → chapters (anchor points for search)
+        "by_character": by_character,
+        "by_location": by_location,
+        "by_thread": by_thread,
+        "by_node": by_node,
+        # Per-chapter anchor rows (章号 → 人物/地点/节点/伏笔/单行摘要)
+        "chapters": chapter_anchors,
     }
     dump_yaml(state_dir(ws) / "index.yaml", index)
     return index

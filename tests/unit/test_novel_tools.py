@@ -441,3 +441,90 @@ def test_humanize_fidelity_catches_substance_drift(tmp_path):
     r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
     assert r["passed"] is False
     assert "字数" in r["error"] or "段落" in r["error"]
+
+
+# ── 期初余额（initial）+ 反向索引 + 有界 digest ──────────────────────────────
+
+def test_initial_snapshot_on_genesis_and_midbook_create(tmp_path):
+    """Every card carries its opening balance: genesis cast stamped by
+    scaffold_bible, mid-book arrivals stamped by apply_events(create:true) —
+    the probe's 初始→现在 two-point view depends on both paths."""
+    _seed(tmp_path)
+    lin = ns.load_yaml(ns.character_path(tmp_path, "林凡"), {})
+    assert lin["initial"]["power_level"] == 10
+    assert "initial" not in lin["initial"] and "progression" not in lin["initial"]
+
+    # protagonist grows; a new character arrives mid-book
+    ns.apply_events(tmp_path, [
+        {"entity_type": "protagonist", "entity_name": "林凡",
+         "changes": {"power_level": 500}, "reason": "筑基"},
+        {"entity_type": "character", "entity_name": "血手", "create": True,
+         "changes": {"role": "villain", "power_level": 800}, "reason": "登场"},
+        {"entity_type": "world_setting", "entity_name": "灵气浓度",
+         "changes": {"value": "0.3%"}, "reason": "首次测得"},
+    ], 1)
+    lin = ns.load_yaml(ns.character_path(tmp_path, "林凡"), {})
+    assert lin["power_level"] == 500 and lin["initial"]["power_level"] == 10  # 两点成线
+    xue = ns.load_yaml(ns.character_path(tmp_path, "血手"), {})
+    assert xue["initial"]["power_level"] == 800  # 登场时刻即初始
+    world = ns.load_yaml(ns.bible_dir(tmp_path) / "world.yaml", {})
+    assert world["settings"]["灵气浓度"]["initial"] == {"value": "0.3%"}
+
+
+def test_probe_bundle_shows_two_point_trajectory(tmp_path):
+    _seed(tmp_path)
+    ns.apply_events(tmp_path, [
+        {"entity_type": "protagonist", "entity_name": "林凡",
+         "changes": {"power_level": 500}, "reason": "筑基"},
+    ], 1)
+    state_probe(workspace_root=str(tmp_path), out_dir=str(tmp_path / "out"))
+    bundle = (tmp_path / "out" / "novel_context.md").read_text(encoding="utf-8")
+    assert "初始状态（登场时" in bundle          # trajectory start shown
+    assert "power_level: 10" in bundle          # the opening value
+    assert "power_level: 500" in bundle         # the current value
+    # history entries stay out of the prompt (the word appears only in the
+    # on-demand pointer text) — the progression entry's payload must be absent
+    assert "reason: 筑基" not in bundle
+
+
+def test_reverse_index_anchor_points(tmp_path):
+    """index.yaml answers 'X 在哪几章' (reverse), not just 'X 还活着吗'
+    (forward) — built from the per-chapter journals."""
+    _seed(tmp_path)
+    ch = ns.chapter_dir(tmp_path, 1)
+    ch.mkdir(parents=True)
+    (ch / "prose.md").write_text("正文", encoding="utf-8")   # written_chapters 认 prose.md
+    (ch / "summary.md").write_text("# 第1章\n\n林凡拜入宗门。", encoding="utf-8")
+    ns.dump_yaml(ch / "events.yaml", {
+        "chapter": 1, "title": "拜山",
+        "appearances": [{"name": "林凡"}, {"name": "王老"}],
+        "locations": ["青云山"],
+        "thread_updates": [{"name": "身世之谜", "action": "hint"}],
+        "arc_updates": [{"name": "求道长生", "nodes_completed": ["n1"]}],
+    })
+    idx = ns.rebuild_index(tmp_path)
+    assert idx["by_character"]["王老"] == [1]
+    assert idx["by_location"]["青云山"] == [1]
+    assert idx["by_thread"]["身世之谜"] == [1]
+    assert idx["by_node"]["n1"] == [1]
+    anchor = idx["chapters"][1]
+    assert anchor["title"] == "拜山" and "林凡" in anchor["characters"]
+    assert anchor["summary"] == "林凡拜入宗门。"
+
+
+def test_digest_is_bounded_to_recent_chapters(tmp_path):
+    """The digest no longer grows O(chapters): old chapters' one-liners were
+    the reverse index's job; the digest keeps only the recent full recaps."""
+    _seed(tmp_path)
+    for n in range(1, ns.RECENT_FULL + 4):
+        ch = ns.chapter_dir(tmp_path, n)
+        ch.mkdir(parents=True)
+        (ch / "prose.md").write_text("正文", encoding="utf-8")
+        (ch / "summary.md").write_text(f"# 第{n}章\n\n第{n}章摘要。", encoding="utf-8")
+        ns.dump_yaml(ch / "events.yaml", {"chapter": n})
+    ns.rebuild_digest(tmp_path)
+    digest = (ns.state_dir(tmp_path) / "digest.md").read_text(encoding="utf-8")
+    assert "更早章节（单行）" not in digest                 # the O(chapters) section is gone
+    assert f"### 第{ns.RECENT_FULL + 3}章" in digest      # newest kept in full
+    assert "### 第1章" not in digest                      # oldest dropped
+    assert "index.yaml" in digest                         # pointer to the reverse index

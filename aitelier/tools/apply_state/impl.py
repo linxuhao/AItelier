@@ -81,6 +81,7 @@ def apply_state(*, project_root: str = "", workspace_root: str = "",
         "word_count": ns.char_count(prose),
         "events": record.get("events") or [],
         "appearances": record.get("appearances") or [],
+        "locations": record.get("locations") or [],
         "thread_updates": record.get("thread_updates") or [],
         "arc_updates": record.get("arc_updates") or [],
     })

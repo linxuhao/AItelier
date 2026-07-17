@@ -27,6 +27,7 @@
      "changes": {"status": "被占领"}, "reason": "魔族入侵"}
   ],
   "appearances": [{"name": "角色名", "importance": 10}],
+  "locations": ["江城", "主神空间广场", "蜂巢（副本）"],
   "thread_updates": [
     {"name": "登记表准确名", "action": "hint", "detail": "本章给出的暗示内容"},
     {"name": "…", "action": "resolve", "detail": "具体怎么解决的"}
@@ -42,6 +43,7 @@
 2. **changes 写终值不写增量**（`power_level: 500` 是新值，不是 +490）；数值与正文文字一致。
 3. **新角色必须 `create: true`** 且只有章纲提案过的才允许；顺手给 aliases（正文出现过的称呼）。
 4. **appearances 列出全部具名出场角色**（防配角蒸发的出场台账，路人龙套不算）。
+4b. **locations 列出本章实际发生场景的地点**（具名的城市/空间/副本/建筑；一笔带过的提及不算）。这是反向索引的锚点——将来"回到蜂巢"的章节靠它查到这里。名字与正文/世界设定一致。
 5. **thread/arc 名字必须与登记表逐字一致**（记账工具按名字对账，错名报 warning）。
 6. **伏笔解决必须显式 `action: "resolve"`**——只写在 summary 里不会更新登记表。且只有「可回收伏笔」区里的才允许 resolve（未解锁的揭开会被记 warning）。
 7. **节点完成判定要严格**：`nodes_completed` 只列正文中**确实发生并落定**的节点 id（对照章纲声明与上下文包的"剧情前沿"）；推进了但没完成 → 不列，写进 `notes`。本章无完成节点时给 `"nodes_completed": []`。

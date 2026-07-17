@@ -71,7 +71,13 @@ steps:
     checkpoint_label: "Project conversation"
     context:
       - source: { from: "workspace", path: "meta/conversation.md" }
-      - source: { from: "repository" }     # best-effort; populated for existing_code
+      # Read tools over the code repo (best-effort; meaningful for existing
+      # repos). MUST stay mode:"tool" — inline mode would concatenate the whole
+      # repo into the prompt (the ~4 MB intent_detect incident); skillflow
+      # >=1.5.20 refuses pathless inline outright, so this would inject nothing
+      # anyway. The old pathless-inline form only ever "worked" because the
+      # resolver read the wrong (near-empty) root.
+      - source: { from: "repository", mode: "tool" }
     output:
       mode: "content"
       fixed:

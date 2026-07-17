@@ -76,3 +76,14 @@ novel_finalizer:
   fallback_to_json_mode: true
   thinking:
     enable: true
+
+novel_finalize_reviewer:
+  # 分录 vs 正文的事实核对（虚报节点/漏记/数字/hint≠resolve）——对照审计而非
+  # 创作判断，flash 档与 finalize 同级。这是分录入册前唯一的专业审查。
+  model: "deepseek/deepseek-v4-flash"
+  template: "novel_finalize_review.md"
+  tools: []
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

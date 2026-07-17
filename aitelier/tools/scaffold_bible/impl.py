@@ -93,6 +93,12 @@ def scaffold_bible(*, project_root: str = "", workspace_root: str = "",
     for card in characters:
         card.setdefault("status", "alive")
         card.setdefault("progression", [])
+        # Opening balance: the card as authored at genesis (design prompt
+        # mandates first-appearance state). Kept ON the card so the probe can
+        # feed 初始→现在 without touching git in the hot path; characters
+        # created later get theirs stamped in apply_events (create: true).
+        card["initial"] = {k: v for k, v in card.items()
+                          if k not in ("initial", "progression")}
         ns.dump_yaml(ns.character_path(ws, str(card["name"]).strip()), card)
     chars_path.unlink()
 

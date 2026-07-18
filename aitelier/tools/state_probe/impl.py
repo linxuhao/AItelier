@@ -196,7 +196,11 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
             "- **单章明细** `novel/chapters/chNNNN/`：`events.yaml`（该章全部状态变更"
             "分录）、`summary.md`（摘要）、`prose.md`（全文，慎读，很长）。",
             "- **完整履历**：角色卡 `novel/bible/characters/<名>.yaml` 的 progression；"
-            "世界设定演变 `novel/bible/world.yaml` 的 setting_log。", ""]
+            "世界设定演变 `novel/bible/world.yaml` 的 setting_log。",
+            "- **边界**：`novel/chapters/` 只有**已入册的旧章**。**本章**的草稿/章纲/"
+            "终稿是 step 输出，读它们用 `source: \"step:draft\"` 等 + 文件名本身"
+            "（如 `read(path='chapter_draft.md', source='step:draft')`），"
+            "不要拼 `novel/chapters/` 路径。", ""]
 
     result = {"next_chapter": n, "has_previous": bool(done)}
     if out_dir:

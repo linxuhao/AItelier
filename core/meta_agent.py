@@ -167,19 +167,17 @@ while one is active.
 ## When the user wants a reusable pipeline for a repeatable workflow
 This is different from building software. If the user wants a repeatable \
 multi-step workflow captured as a pipeline they can re-run (e.g. "make me a \
-pipeline that researches a topic, drafts, then fact-checks"), call \
-generate_pipeline(description=<the user's request>). It runs the grounded \
-`pipeline_forge` generator — it interprets the request, grounds the design in the \
-real tool registry, builds any missing tools, passes 3 gates (lint + \
-registry-check + dry-run smoke), and returns a Design Review checkpoint — relay it; \
-on approval (approve_checkpoint) it AUTO-REGISTERS the pipeline as `gen_<slug>` \
-(reported as `registered_config`), runnable via start_config_run. To MODIFY an \
-existing generated pipeline, call generate_pipeline(description=<the change>, \
-edit_target=<gen_ name>) — it applies the change surgically and overwrites in place. \
-NOTE: the gates verify STRUCTURE, not runtime behavior — for the full \
-generate-then-test-drive-then-fix loop, use CODING mode (its drive_pipeline tool). \
+pipeline that researches a topic, drafts, then fact-checks"), tell them to \
+**switch to CODING mode** and generate it there — do NOT try to do it from butler \
+mode. Generating a pipeline (the `generate_pipeline` tool) lives ONLY in coding \
+mode, because a generated pipeline's 3 gates verify STRUCTURE, not runtime \
+behavior, so it MUST be test-driven and fixed after generation — and the \
+test-drive tool (`drive_pipeline`) and the edit tools are coding-mode only. So the \
+right move is: "Generating a pipeline needs coding mode — flip the coding toggle \
+and I'll design it, test-drive it, and fix it until it works." Do not call \
+generate_pipeline yourself here (it isn't available in butler mode). \
 Use start_new_project / start_from_aitelier_project for *software* \
-(apps/tools/bug-fixes); generate_pipeline for a standalone reusable pipeline.
+(apps/tools/bug-fixes).
 
 ## When the user wants to add a reusable CAPABILITY on top of an existing pipeline
 Distinct from both building software and authoring a standalone pipeline. If the \
@@ -196,7 +194,8 @@ AUTO-REGISTERS the addon (reported as `registered_addon`, and a runnable \
 approve_project_brief(addons=[<addon>]) on a build, or run its blessed combo with \
 start_config_run(config_name=<registered_config>). \
 Routing in one line: build software → start_new_project; a standalone reusable \
-pipeline → generate_pipeline; a reusable gate/capability ON an existing base → \
+pipeline → switch to CODING mode (generate_pipeline lives there); a reusable \
+gate/capability ON an existing base → \
 generate_addon.
 
 ## After a pipeline starts
@@ -688,39 +687,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "generate_pipeline",
-            "description": "Design a reusable SkillFlow pipeline (a YAML graph) FROM A USER "
-                           "REQUEST by running the grounded `pipeline_forge` generator — it "
-                           "interprets what the user wants, grounds the design in the real "
-                           "tool registry, BUILDS + registers any missing tools, and passes 3 "
-                           "gates (lint + registry-check + dry-run smoke) before a Design "
-                           "Review checkpoint. Use when the user wants a repeatable multi-step "
-                           "workflow captured as a re-runnable pipeline — NOT for building an "
-                           "app or fixing code (use start_new_project / start_from_aitelier_project). "
-                           "To MODIFY an existing generated pipeline (add/remove/change a "
-                           "feature), pass `edit_target=gen_<slug>` — the generator loads it as "
-                           "a baseline and applies your request as a surgical change, preserving "
-                           "the rest. After it registers, ALWAYS `drive_pipeline` to verify "
-                           "runtime behavior (the gates only check structure).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "description": {"type": "string",
-                                    "description": "The user's request: what the pipeline should "
-                                    "accomplish (fresh), OR the change to make (with edit_target)."},
-                    "name": {"type": "string",
-                             "description": "Optional short name for the generated pipeline."},
-                    "edit_target": {"type": "string",
-                                    "description": "Optional gen_<slug> to EDIT: the request is "
-                                    "applied as a change to this existing pipeline, not a new build."},
-                },
-                "required": ["description"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "generate_addon",
             "description": "Turn a description of a reusable CAPABILITY or GATE to add ON TOP of "
                            "an existing base pipeline into a validated addon OVERLAY, by running "
@@ -901,6 +867,40 @@ TOOL_DEFINITIONS = [
 # escalate a butler session into an unrestricted coding one).
 
 CODING_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_pipeline",
+            "description": "Design a reusable SkillFlow pipeline (a YAML graph) FROM A USER "
+                           "REQUEST by running the grounded `pipeline_forge` generator — it "
+                           "interprets what the user wants, grounds the design in the real "
+                           "tool registry, BUILDS + registers any missing tools, and passes 3 "
+                           "gates (lint + registry-check + dry-run smoke) before a Design "
+                           "Review checkpoint. Use when the user wants a repeatable multi-step "
+                           "workflow captured as a re-runnable pipeline — NOT for building an "
+                           "app or fixing code (use start_new_project / start_from_aitelier_project). "
+                           "To MODIFY an existing generated pipeline (add/remove/change a "
+                           "feature), pass `edit_target=gen_<slug>` — the generator loads it as "
+                           "a baseline and applies your request as a surgical change, preserving "
+                           "the rest. After it registers, ALWAYS `drive_pipeline` to verify "
+                           "runtime behavior (the gates only check structure). Coding-mode only, "
+                           "because verification (drive_pipeline) lives here.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string",
+                                    "description": "The user's request: what the pipeline should "
+                                    "accomplish (fresh), OR the change to make (with edit_target)."},
+                    "name": {"type": "string",
+                             "description": "Optional short name for the generated pipeline."},
+                    "edit_target": {"type": "string",
+                                    "description": "Optional gen_<slug> to EDIT: the request is "
+                                    "applied as a change to this existing pipeline, not a new build."},
+                },
+                "required": ["description"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -4024,7 +4024,6 @@ _TOOL_HANDLERS = {
     "approve_checkpoint": MetaAgent._tool_approve_checkpoint,
     "reject_checkpoint": MetaAgent._tool_reject_checkpoint,
     "get_pipeline_status": MetaAgent._tool_get_pipeline_status,
-    "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "generate_addon": MetaAgent._tool_generate_addon,
     "start_config_run": MetaAgent._tool_start_config_run,
     "list_pipelines": MetaAgent._tool_list_pipelines,
@@ -4038,6 +4037,7 @@ _TOOL_HANDLERS = {
 # Coding-mode-only tools — schema-visible and dispatchable only when the
 # session mode is "coding" (see _stream_llm / _execute_tool).
 _CODING_TOOL_HANDLERS = {
+    "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "drive_pipeline": MetaAgent._tool_drive_pipeline,
     "edit_file": MetaAgent._tool_edit_file,
     "create_file": MetaAgent._tool_create_file,

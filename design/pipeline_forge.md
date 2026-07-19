@@ -320,6 +320,13 @@ loop caught + fixed both in three iterations.
 
 ## 12. Lessons from the live runs (all fixed)
 
+> Several of these gotchas are **gate-invisible** — the 3 structural gates can't catch
+> them (see §11). They're now **discoverable at design time**: the maker agents +
+> coding mode have the native **`skillflow_docs_{list,search,read}`** tools (skillflow
+> ≥1.5.22, backed by `skillflow.docs`) — e.g. `skillflow_docs_search "credit"` lands on
+> the loop-crediting rule in `core.py`. So agents can look up the spec instead of
+> re-learning these the hard way.
+
 1. **Loop-var interpolation is context-only.** `$current_tool` is substituted in a
    step's `context` file paths but NOT in `tool_params`. `register_tool` takes the
    name from the engine-injected `task_name` (the loop's current_item) instead.

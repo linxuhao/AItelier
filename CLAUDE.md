@@ -59,8 +59,11 @@ Env reference lives in `.env.example`.
 ~/stepflow/  (or ~/skillflow/)  # Independent library (config-agnostic framework) — PyPI: skillflow-py
 # Editable install (pip install -e <path>) — changes are live immediately (host only, NOT the container)
 ├── src/skillflow/
-│   ├── core.py, graph.py, workspace.py, tool_loader.py, ...
-│   ├── tools/               # 13 native tools (read_file, write, pytest, repo_apply, ...)
+│   ├── core.py, graph.py, workspace.py, tool_loader.py, docs.py, ...
+│   │                        # docs.py backs the native skillflow_docs_* tools:
+│   │                        # search/read skillflow's own docs + schema source (>=1.5.22)
+│   ├── tools/               # 16 native tools (read_file, write, pytest, repo_apply,
+│   │                        # skillflow_docs_{list,search,read}, ...)
 │   └── plugins/             # linter, addon_converter, skill_converter (DEPRECATED,
 │                            # not registered — replaced by AItelier's pipeline_forge),
 │                            # skill_runner (runner mode: SkillTool + RunnerService + skillflow-mcp)
@@ -209,7 +212,8 @@ web/
 - **`agent_configs/coding_task.yaml`** — Runner-step roles whose `system_prompt` IS the per-step prompt (the butler does the work, no LLM spawned)
 - **`llm_providers.json`** — LLM provider registry (API base URLs, key env vars)
 - **`AITELIER_HOST_AGENT_MODEL`** (env) — single model that skillflow `host`/`default` agents resolve to (default `deepseek/deepseek-v4-flash`); used by generated pipelines' host roles (pipeline_forge's own agents are real deepseek roles)
-- **`configs/pipeline_forge.yaml` + `agent_configs/pipeline_forge.yaml`** — the grounded, self-provisioning pipeline generator (replaces `skill_converter`); backs `generate_pipeline`. New tools `aitelier/tools/{forge_palette,register_tool,forge_registry_check,forge_dryrun_smoke}` + `aitelier/stub_runner.py`; templates `templates/forge_*.md`
+- **`configs/pipeline_forge.yaml` + `agent_configs/pipeline_forge.yaml`** — the grounded, self-provisioning pipeline generator (replaces `skill_converter`); backs `generate_pipeline` (coding-mode only, so verification via `drive_pipeline` is always in reach). New tools `aitelier/tools/{forge_palette,register_tool,forge_registry_check,forge_dryrun_smoke}` + `aitelier/stub_runner.py`; templates `templates/forge_*.md`
+- **`skillflow_docs_{list,search,read}`** — NATIVE skillflow tools (skillflow >=1.5.22, backed by `skillflow.docs`) that search/read skillflow's own docs + authoritative schema source (graph.py/core.py). The forge maker agents + coding mode use them to design/edit graphs against the real spec (line-numbered read couples with search hits). Not AItelier tools — the earlier AItelier bridge was removed once 1.5.22 shipped.
 - **`skill_converter`** — skillflow's built-in skill→pipeline converter, now DEPRECATED and no longer registered (see `api/dependencies.py`); superseded by `pipeline_forge`
 - **`templates/`** — Markdown prompt templates (step1_5_researcher.md, task_impl.md, ...)
 - **`aitelier/tools/`** — AItelier custom tools: `web_search` (→ SearXNG), `web_fetch`, `run_tests`, `user_stories_present`

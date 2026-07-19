@@ -3752,21 +3752,25 @@ class MetaAgent:
                      "or a template, then drive_pipeline again."),
         }
 
+    def _skillflow_docs_fn(self, name: str):
+        """Resolve a skillflow_docs_* tool via the registry — the NATIVE skillflow tool
+        (skillflow >= 1.5.22) when present, else AItelier's transitional bridge tool."""
+        from api.dependencies import get_skillflow
+        return get_skillflow()._tool_loader.load_fn(name)
+
     async def _tool_skillflow_docs_list(self, args: dict) -> dict:
         """List skillflow doc topics (real spec + schema source)."""
-        from aitelier.skillflow_docs_lib import list_topics
-        return list_topics()
+        return self._skillflow_docs_fn("skillflow_docs_list")()
 
     async def _tool_skillflow_docs_search(self, args: dict) -> dict:
         """Grep skillflow's own docs + schema for a term; line-numbered snippets."""
-        from aitelier.skillflow_docs_lib import search_docs
-        return search_docs(args.get("query") or "")
+        return self._skillflow_docs_fn("skillflow_docs_search")(query=args.get("query") or "")
 
     async def _tool_skillflow_docs_read(self, args: dict) -> dict:
         """Read a skillflow doc topic with line numbers (couples with search hits)."""
-        from aitelier.skillflow_docs_lib import read_doc
-        return read_doc(args.get("topic") or "", start_line=args.get("start_line") or 0,
-                        end_line=args.get("end_line"))
+        return self._skillflow_docs_fn("skillflow_docs_read")(
+            topic=args.get("topic") or "", start_line=args.get("start_line") or 0,
+            end_line=args.get("end_line"))
 
     async def _poll_pipeline_until_checkpoint(self, run_id: str,
                                               max_wait_s: int = 1800) -> dict:

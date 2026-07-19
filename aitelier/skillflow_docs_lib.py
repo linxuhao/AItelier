@@ -1,8 +1,15 @@
-"""Shared logic for the skillflow_docs_{list,search,read} tools.
+"""Shared logic for AItelier's skillflow_docs_{list,search,read} bridge tools.
+
+⚠️ TRANSITIONAL BRIDGE. These tools now exist NATIVELY in skillflow
+(``skillflow/tools/skillflow_docs_*`` + ``skillflow.docs``, skillflow >= 1.5.22).
+skillflow's ToolLoader is "first match wins", so the native tools override these
+wherever the running skillflow has them. AItelier keeps this copy only so the
+CONTAINER (which pins skillflow from PyPI) still has the tools until 1.5.22 is
+published + the pin bumped + the image rebuilt. REMOVE this file + the three
+aitelier/tools/skillflow_docs_* dirs once the container runs skillflow >= 1.5.22.
 
 Serves skillflow's OWN bundled docs + authoritative schema source from the
-*installed* package, so agents design/edit graphs against the real spec. Kept out
-of aitelier/tools/ (so it isn't itself a tool); the 3 tool impls are thin wrappers.
+*installed* package, so agents design/edit graphs against the real spec.
 """
 from __future__ import annotations
 

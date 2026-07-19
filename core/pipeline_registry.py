@@ -40,13 +40,12 @@ SEED_FILE = "seed_input.md"
 GEN_HINTS = {
     "scheduler_owned": False,
     "seed_file": SEED_FILE,
-    # A generic input contract so a converted skill self-describes in the
-    # butler's pipeline catalog (converted skills are advertised as layer-3
-    # offload targets). The skill's graph `description:` says WHAT it does;
-    # this says HOW to feed it.
-    "input_hint": ("seed_text = the input for this skill's first step (the "
+    # A generic input contract so a generated pipeline self-describes in the
+    # butler's pipeline catalog (generated pipelines are layer-3 offload targets).
+    # The graph's `description:` says WHAT it does; this says HOW to feed it.
+    "input_hint": ("seed_text = the input for this pipeline's first step (the "
                    "topic / request / material it operates on), as plain text. "
-                   "A captured multi-step skill — runs its own steps to a "
+                   "A generated multi-step pipeline — runs its own steps to a "
                    "result; relay any checkpoints it raises."),
 }
 _log = logging.getLogger(__name__)
@@ -207,12 +206,125 @@ def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
             "action": "updated" if existed else "created"}
 
 
+def _register_forge_roles(sf, config_name: str, roles: dict) -> None:
+    """Register a forge-generated pipeline's roles with their REAL emitted prompts
+    (namespaced), overriding the generic host-agent fallback. ``roles`` maps a
+    namespaced role name → {system_prompt, tools, model, temperature, thinking}."""
+    for role, cfg in (roles or {}).items():
+        if not isinstance(cfg, dict):
+            continue
+        sf.register_agent_config_from_dict(role, {
+            "model": cfg.get("model") or "host",
+            "tools": cfg.get("tools") or ["read_file", "write"],
+            "system_prompt": cfg.get("system_prompt") or _role_prompt(role),
+            "temperature": cfg.get("temperature", 0.2),
+            "thinking": cfg.get("thinking") or {"enable": True},
+        })
+
+
+def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
+    """Persist + register the pipeline emitted by a completed ``pipeline_forge`` run.
+
+    Unlike skill_converter (single YAML), pipeline_forge writes emit_graph/{
+    pipeline.yaml, role_table.yaml, templates/<role>.md}. This wires the graph
+    runnable (namespaced name + roles + seed) AND registers each role with its
+    real emitted template as the system prompt, then persists both the graph and a
+    companion ``<config>.roles.json`` so a boot re-scan restores the real prompts.
+    """
+    run = sf.get_run(run_id) or {}
+    pid = run.get("project_id")
+    if not pid:
+        return {"error": "run has no project_id"}
+    emit = sf._workspace.get_step_dir(pid, "pipeline_forge", "emit_graph")
+    gpath = emit / "pipeline.yaml"
+    if not gpath.exists():
+        return {"error": f"no emitted pipeline.yaml at {emit}"}
+
+    config_name = config_name_for(name)
+    existed = registry.get(config_name) is not None
+    try:
+        data = yaml.safe_load(gpath.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            return {"error": "emitted pipeline.yaml is not a mapping"}
+        data["name"] = config_name
+        _namespace_agents(data, config_name)
+        _inject_seed_context(data, config_name)
+
+        # Build namespaced roles from role_table.yaml + the emitted templates.
+        prefix = config_name + _ROLE_SEP
+        roles: dict = {}
+        rt_path = emit / "role_table.yaml"
+        rt = yaml.safe_load(rt_path.read_text(encoding="utf-8")) if rt_path.exists() else {}
+        for role, rcfg in (rt or {}).items():
+            rcfg = rcfg if isinstance(rcfg, dict) else {}
+            tmpl = rcfg.get("template") or f"templates/{role}.md"
+            tfile = emit / tmpl
+            prompt = tfile.read_text(encoding="utf-8") if tfile.exists() else _role_prompt(role)
+            roles[prefix + role] = {
+                "model": "host",
+                "tools": rcfg.get("tools") or ["read_file", "write"],
+                "temperature": rcfg.get("temperature", 0.2),
+                "thinking": rcfg.get("thinking") or {"enable": True},
+                "system_prompt": prompt,
+            }
+        yaml_text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    except Exception as e:
+        return {"error": f"emitted pipeline is invalid: {e}"}
+
+    try:
+        _register_forge_roles(sf, config_name, roles)
+        graph = PipelineGraph._from_dict(yaml.safe_load(yaml_text))
+        ensure_host_agents(sf, graph)   # any role not in role_table → generic fallback
+        sf.register_graph(graph)
+        registry.register_one(sf, config_name, hint_overrides=GEN_HINTS)
+    except Exception as e:
+        return {"error": f"emitted pipeline failed validation: {e}"}
+
+    dest = generated_configs_dir() / f"{config_name}.yaml"
+    dest.write_text(yaml_text, encoding="utf-8")
+    (generated_configs_dir() / f"{config_name}.roles.json").write_text(
+        _json_dumps(roles), encoding="utf-8")
+    return {"config_name": config_name, "path": str(dest),
+            "action": "updated" if existed else "created",
+            "roles": sorted(roles.keys())}
+
+
+def _json_dumps(obj) -> str:
+    import json
+    return json.dumps(obj, ensure_ascii=False, indent=2)
+
+
+def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
+    """Re-read a persisted generated pipeline (``gen_<slug>.yaml`` + optional
+    ``.roles.json``) from disk and re-register it live, picking up any manual edits
+    the workflow agent made. Returns ``{config_name}`` or ``{error}``."""
+    f = generated_configs_dir() / f"{config_name}.yaml"
+    if not f.exists():
+        return {"error": f"no persisted config {config_name}.yaml"}
+    try:
+        roles_file = f.with_suffix(".roles.json")
+        if roles_file.exists():
+            import json
+            _register_forge_roles(sf, config_name,
+                                  json.loads(roles_file.read_text(encoding="utf-8")))
+        _register_text(sf, registry, config_name, f.read_text(encoding="utf-8"))
+        return {"config_name": config_name}
+    except Exception as e:
+        return {"error": f"reload failed: {e}"}
+
+
 def load_generated_configs(sf, registry) -> list[str]:
     """Boot-time: register every persisted ``gen_*.yaml``. Returns the names
-    registered. Invalid files are skipped (logged), never fatal."""
+    registered. Invalid files are skipped (logged), never fatal. A companion
+    ``<name>.roles.json`` (forge-generated pipelines) restores the real role
+    prompts before the graph registers."""
     out: list[str] = []
     for f in sorted(generated_configs_dir().glob(f"{GEN_PREFIX}*.yaml")):
         try:
+            roles_file = f.with_suffix(".roles.json")
+            if roles_file.exists():
+                import json
+                _register_forge_roles(sf, f.stem, json.loads(roles_file.read_text(encoding="utf-8")))
             _register_text(sf, registry, f.stem, f.read_text(encoding="utf-8"))
             out.append(f.stem)
         except Exception as e:

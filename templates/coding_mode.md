@@ -102,9 +102,9 @@ into an isolated place whose transcript you don't pay for.
   - build a whole app / a full architecture pass (`start_new_project` /
     `start_from_aitelier_project`);
   - review a diff (`code_review`), implement an approved plan (`coding_impl`);
-  - **run a captured skill** — a multi-step process the user turned into a
-    pipeline appears in your catalog (often `gen_*`); a long or multi-step skill
-    runs as a pipeline, never step-by-step in this loop;
+  - **run a generated pipeline** — a repeatable multi-step workflow captured via
+    `generate_pipeline` appears in your catalog (often `gen_*`); it runs as a
+    pipeline, never step-by-step in this loop;
   - **delegate a self-contained subtask to a sub-agent** — a big exploration, a
     research pass, a bounded refactor: hand it to a pipeline whose spawned agent
     does the heavy reading/editing and returns only the conclusion.
@@ -145,12 +145,41 @@ into an isolated place whose transcript you don't pay for.
   the outcome, it goes to layer 3 — whatever the domain.
 
   **No pipeline fits, and the task is a REPEATABLE shape?** Create one:
-  `generate_pipeline(description=<the process, verbatim>)` captures it as a new
-  reusable pipeline (with a design checkpoint you relay for approval); once
-  registered it appears in your catalog as `gen_<slug>` and you run it via
-  `start_config_run` like any other. Only do this for a recurring shape worth
-  reusing — for a one-off, stay in layer 1/2; minting a pipeline for a single
-  task isn't worth the ceremony.
+  `generate_pipeline(description=<the user's request>)` runs the `pipeline_forge`
+  generator — it interprets what the user wants (a plain request, not a pre-written
+  spec), grounds the design in the real tool registry, BUILDS + registers any
+  missing tools, emits the graph, and passes 3 deterministic gates
+  (lint + registry-check + dry-run smoke) before a design checkpoint you relay.
+  Registered as `gen_<slug>`. Only for a recurring shape worth reusing — a one-off
+  stays in layer 1/2.
+
+  **To MODIFY an existing generated pipeline** (add/remove/change a feature), call
+  `generate_pipeline(description=<the change>, edit_target="gen_<slug>")` — it loads
+  the existing pipeline as a baseline and applies your change surgically (building
+  any new tools the change needs, re-passing the gates), overwriting `gen_<slug>` in
+  place. Use this for feature-level edits that need new tools/gates; for a tiny
+  config tweak or a repair you already diagnosed via `drive_pipeline`, just bash-edit
+  `~/.AItelier/configs/gen_<slug>.yaml`/`.roles.json` and `drive_pipeline` again.
+
+  **CRITICAL — always test-drive a generated pipeline before trusting it.** Those
+  3 gates verify STRUCTURE (valid graph, real tools, reachable terminal) — NOT
+  runtime behavior. A generated agent role can still misbehave live (e.g. a
+  reviewer told to `read_file` a file that's already in its context → crashes).
+  Sequence: generate_pipeline → relay the design checkpoint → on `approve_checkpoint`
+  the pipeline REGISTERS as `gen_<slug>` (only now is it runnable) → THEN close the
+  loop the DAG can't:
+  1. Synthesize a concrete test input (for a link-fixer: a doc with known-broken
+     links). Call `drive_pipeline(config_name="gen_<slug>", test_seed=…)` — it runs
+     the pipeline context-isolated and returns a compact per-step summary + first
+     failure + final outputs.
+  2. JUDGE the result: did every step complete, and are `final_outputs` actually
+     correct for your test input?
+  3. If a step failed or the output is wrong, FIX it: edit the generated config
+     with bash — `~/.AItelier/configs/gen_<slug>.yaml` (graph structure) or
+     `gen_<slug>.roles.json` (a role's `tools` / `system_prompt`) — then
+     `drive_pipeline` again (it reloads from disk). Repeat until it behaves.
+  4. Only then present it as ready. (Common fix: a reviewer role should drop
+     `read_file` and rely on its injected context, like the DPE reviewers.)
 
 ### Your pipelines
 

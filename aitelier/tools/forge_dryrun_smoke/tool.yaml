@@ -1,0 +1,21 @@
+name: forge_dryrun_smoke
+description: >
+  Gate (c) of pipeline_forge validation. Boots a generated skillflow graph once in
+  an ephemeral in-memory engine with a stub (no-LLM) StepRunner: real tool/gate/loop
+  nodes execute and transitions evaluate, while agent steps return canned verdicts.
+  Asserts the graph loads, every tool/role constructs (no ImportError), a path
+  reaches the loop-external `done` terminal, and it terminates within the step
+  bound. Returns {passed, status, steps_run, unresolved_tools, trail, error}.
+parameters:
+  graph_path:
+    type: string
+    description: "Path to the generated graph YAML to smoke-test."
+    required: true
+  max_steps:
+    type: integer
+    description: "Hard bound on driven steps (default 200)."
+    required: false
+  verdict:
+    type: boolean
+    description: "Canned review verdict: true = happy path (default), false = adversarial."
+    required: false

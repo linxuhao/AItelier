@@ -49,6 +49,9 @@ ws = get_workspace_manager()
 
 # Module-level scheduler instance for wake_scheduler()
 _scheduler_instance: AsyncIOScheduler | None = None
+# Run ids whose generated pipeline has already been registered on completion
+# (fire-once guard for the scheduler-owned generator registration hook).
+_registered_gen_runs: set[str] = set()
 # Per-user scheduler registry for web_api wake support
 _user_scheduler_map: dict[str, AsyncIOScheduler] = {}
 
@@ -820,12 +823,38 @@ def _sync_project_status_to_db(project_id: str):
             return
         # Is this a DPE-style config (task loop, coarse step mapping)?
         has_task_loop = False
+        manifest = None
         try:
             from api.dependencies import get_config_registry
             manifest = get_config_registry().get(run["graph_name"])
             has_task_loop = bool(manifest and manifest.has_task_loop)
         except Exception:
             has_task_loop = run["graph_name"] == "dpe_default_v2"
+
+        # Scheduler-owned generator (e.g. pipeline_forge): on completion, persist +
+        # live-register the pipeline it produced so it's runnable as gen_<slug>.
+        # Butler-driven generators register in _run_pipeline_until_checkpoint; a
+        # scheduler-driven one has no such hook, so do it here (fire-once per run).
+        if (run["status"] == "completed" and manifest
+                and manifest.registers_generated_pipeline
+                and run["id"] not in _registered_gen_runs):
+            _registered_gen_runs.add(run["id"])
+            try:
+                from api.dependencies import register_pipeline_from_run
+                proj = db.get_project(project_id) or {}
+                pname = proj.get("name") or project_id
+                reg = register_pipeline_from_run(run["id"], pname)
+                _glog = logging.getLogger("aitelier.scheduler")
+                if reg.get("error"):
+                    _glog.warning("gen-pipeline registration failed for %s: %s",
+                                  run["id"], reg["error"])
+                else:
+                    _glog.info("registered generated pipeline %s (%s)",
+                               reg.get("config_name"), reg.get("action"))
+            except Exception:
+                logging.getLogger("aitelier.scheduler").warning(
+                    "gen-pipeline registration errored for %s", run["id"],
+                    exc_info=True)
 
         steps = sf.get_steps(run["id"])
         completed = [s["step_id"] for s in steps if s["status"] == "completed"]

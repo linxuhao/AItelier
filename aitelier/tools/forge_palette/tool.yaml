@@ -1,0 +1,12 @@
+name: forge_palette
+description: >
+  Grounding context for pipeline_forge's designer/architect/implementer agents.
+  Returns the LIVE tool registry (real tool names + signatures), a curated list
+  of exemplar config paths to read, and the AItelier skillflow-graph idiom & trap
+  cheatsheet. Reference ONLY tools this returns; anything else must be built via a
+  tool-creation task (never invent a tool name). Read-only.
+parameters:
+  include_signatures:
+    type: boolean
+    description: "Include each tool's parameter signature (default true)."
+    required: false

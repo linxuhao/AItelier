@@ -1,0 +1,18 @@
+name: register_tool
+description: >
+  Persist a freshly-built tool (tool.yaml + impl.py [+ tests]) from a step output
+  directory into the durable generated-tools dir (~/.AItelier/tools/<name>) AND
+  live-register it into the running ToolLoader, so list_tools()/load_fn() see it
+  immediately — this is what lets a later step in the same run reference the tool
+  as a real primitive. Returns {registered, tool_name, path}.
+parameters:
+  tool_name:
+    type: string
+    description: "Name of the tool to register (usually the loop var $current_tool)."
+    required: true
+  source_dir:
+    type: string
+    description: >
+      Directory containing the built tool. Either <source_dir>/<tool_name>/{tool.yaml,impl.py}
+      or <source_dir>/{tool.yaml,impl.py}. Set to the implementer step's output dir.
+    required: true

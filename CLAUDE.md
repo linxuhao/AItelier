@@ -61,7 +61,8 @@ Env reference lives in `.env.example`.
 ├── src/skillflow/
 │   ├── core.py, graph.py, workspace.py, tool_loader.py, ...
 │   ├── tools/               # 13 native tools (read_file, write, pytest, repo_apply, ...)
-│   └── plugins/             # linter, skill_converter (skill→pipeline),
+│   └── plugins/             # linter, addon_converter, skill_converter (DEPRECATED,
+│                            # not registered — replaced by AItelier's pipeline_forge),
 │                            # skill_runner (runner mode: SkillTool + RunnerService + skillflow-mcp)
 └── {run,convert}_cli.py     # skillflow-run / -convert / -lint / -mcp console scripts
 
@@ -90,15 +91,21 @@ Env reference lives in `.env.example`.
    → t_impl_validate (tool) → t_impl_review → t_verify → t_verify_review
    → task_loop → Final Verifier (5) → 5_review
 
-3. Skill → Pipeline conversion + run (skillflow's skill_converter graph, registered at startup)
-   analyze_skill → design_graph → explain_design (checkpoint) → validate_design (lint) → done
-   Driven in-chat by the butler's `generate_pipeline` tool; host-mode agents → AITELIER_HOST_AGENT_MODEL.
-   On completion the host BRIDGES the generated graph into a runnable config
-   (`core/pipeline_registry.py`): namespaced `gen_<slug>`, persisted to `~/.AItelier/configs/`
-   (gitignored, boot-scanned), live-registered (invented agent roles auto-registered as
-   host agents), manifest added via `ConfigRegistry.register_one`. The butler can then
-   `start_config_run(config_name="gen_<slug>")`; re-running `generate_pipeline` with the same
-   name UPDATES in place (register_graph overwrites + version-bumps; manifests are lazy).
+3. Pipeline generation (configs/pipeline_forge.yaml) — a grounded, self-provisioning generator
+   that replaces skillflow's built-in `skill_converter` (deprecated: it was ReAct-shaped, ungrounded
+   + lint-only, and hallucinated tools — see design/pipeline_forge.md).
+   survey(ground in the live tool registry) → architect(graph shape + missing tools) → tool_plan
+   → tool_loop(BUILD + register each missing tool in-graph) → emit_graph(graph + roles + templates)
+   → 3-part gate: skillflow_lint → forge_registry_check → forge_dryrun_smoke → explain(checkpoint) → done
+   Driven by the butler's `generate_pipeline(description=<user request>[, edit_target=gen_<slug>])`
+   tool (edit_target seeds the existing pipeline as a baseline for a surgical change). scheduler_owned,
+   so the poller drives it. On completion the host BRIDGES it into a runnable config
+   (`core/pipeline_registry.py:register_forge_pipeline`): namespaced `gen_<slug>`, persisted to
+   `~/.AItelier/configs/` (+ `<slug>.roles.json` for the real role prompts; gitignored, boot-scanned),
+   live-registered, manifest via `ConfigRegistry.register_one`. Missing tools persist to
+   `~/.AItelier/tools/` (boot-scanned). NOTE: the 3 gates verify STRUCTURE, not runtime behavior —
+   the CODING-mode `drive_pipeline` tool test-drives the generated pipeline context-isolated and the
+   agent fixes it (edit gen_<slug>.yaml/.roles.json → drive again). See design/pipeline_forge.md.
 
 4. Butler CODING MODE (user-toggled per session: SPA toggle / `mode` field; sessions.mode column)
    The butler becomes an interactive coding agent (templates/coding_mode.md): direct repo tools
@@ -184,10 +191,10 @@ web/
 | `core/workspace_manager.py` | Physical directory jail, Git operations, step staging→final directory lifecycle |
 | `core/db_manager.py` | SQLite persistence (projects, tasks, settings, users) |
 | `core/ai_router.py` | `AIGateway` — LiteLLM wrapper, provider registry from `llm_providers.json` |
-| `core/meta_agent.py` | Autonomous CLI/WebGUI butler, DUAL-MODE (`sessions.mode`): butler = orchestration/inspection (drives meta_conversation, DPE & skill_converter runs in-chat; `generate_pipeline`; converter-completion relay); coding = interactive coding agent (edit_file/create_file/bash/web tools, runner_* + skillflow_tool over skillflow RunnerService, transcript persistence + condenser + budget pause) |
-| `core/pipeline_registry.py` | Bridge that makes a converter-generated pipeline runnable: namespaced `gen_<slug>`, persist to `~/.AItelier/configs/`, live-register (auto-register invented agent roles as host agents), boot-scan; update overwrites in place |
+| `core/meta_agent.py` | Autonomous CLI/WebGUI butler, DUAL-MODE (`sessions.mode`): butler = orchestration/inspection (drives meta_conversation, DPE & pipeline_forge runs; `generate_pipeline`; run-completion relay); coding = interactive coding agent (edit_file/create_file/bash/web tools, `generate_pipeline` + `drive_pipeline` for the generate→test-drive→fix loop, runner_* + skillflow_tool over skillflow RunnerService, transcript persistence + condenser + budget pause) |
+| `core/pipeline_registry.py` | Bridge that makes a generated pipeline runnable: `register_forge_pipeline` (pipeline_forge: graph + role_table + templates → namespaced `gen_<slug>` + roles with real prompts + `<slug>.roles.json`), namespaced roles, persist to `~/.AItelier/configs/`, live-register, boot-scan (`load_generated_configs`), `reload_generated_pipeline` for edits; update overwrites in place |
 | `core/event_bus.py` | In-process pub/sub for pipeline events |
-| `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader, AgentConfigs singletons; registers skillflow's `skill_converter` graph + boot-scans `~/.AItelier/configs/` for `gen_*` pipelines; `register_pipeline_from_run` wrapper; `code_path_resolver` for existing repos |
+| `api/dependencies.py` | FastAPI DI: SkillFlow, ToolLoader (scans `aitelier/tools/` + `~/.AItelier/tools/` for generated tools), AgentConfigs singletons; registers `addon_converter` (deprecates + drops `skill_converter`); boot-scans `~/.AItelier/configs/` for `gen_*` pipelines; `register_pipeline_from_run` dispatch (pipeline_forge vs skill_converter); `code_path_resolver` for existing repos |
 | `aitelier/runner.py` | `AItelierStepRunner` — bridges skillflow StepRunner protocol to PipelineEngine |
 | `cli/tui/dashboard.py` | Rich TUI with project list, chat, checkpoint review |
 
@@ -201,8 +208,9 @@ web/
 - **`agent_configs/meta_conversation.yaml`** — Meta conversation agent configs + meta_agent (incl. `coding_max_tool_turns`, `compact_at_tokens`) + `compacter` (condenser)
 - **`agent_configs/coding_task.yaml`** — Runner-step roles whose `system_prompt` IS the per-step prompt (the butler does the work, no LLM spawned)
 - **`llm_providers.json`** — LLM provider registry (API base URLs, key env vars)
-- **`AITELIER_HOST_AGENT_MODEL`** (env) — single model that skillflow `host`/`default` agents resolve to (default `deepseek/deepseek-v4-flash`); used by `skill_converter` and any generated pipeline
-- **`skill_converter`** — graph + host agents live in skillflow's plugin; AItelier registers them at startup (`api/dependencies.py`), so no local config/template is duplicated
+- **`AITELIER_HOST_AGENT_MODEL`** (env) — single model that skillflow `host`/`default` agents resolve to (default `deepseek/deepseek-v4-flash`); used by generated pipelines' host roles (pipeline_forge's own agents are real deepseek roles)
+- **`configs/pipeline_forge.yaml` + `agent_configs/pipeline_forge.yaml`** — the grounded, self-provisioning pipeline generator (replaces `skill_converter`); backs `generate_pipeline`. New tools `aitelier/tools/{forge_palette,register_tool,forge_registry_check,forge_dryrun_smoke}` + `aitelier/stub_runner.py`; templates `templates/forge_*.md`
+- **`skill_converter`** — skillflow's built-in skill→pipeline converter, now DEPRECATED and no longer registered (see `api/dependencies.py`); superseded by `pipeline_forge`
 - **`templates/`** — Markdown prompt templates (step1_5_researcher.md, task_impl.md, ...)
 - **`aitelier/tools/`** — AItelier custom tools: `web_search` (→ SearXNG), `web_fetch`, `run_tests`, `user_stories_present`
 

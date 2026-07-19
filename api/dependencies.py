@@ -154,27 +154,19 @@ def get_skillflow():
             for cfg_path in sorted(configs_dir.glob("*.yaml")):
                 sf.register_graph(PipelineGraph.from_yaml(cfg_path))
 
-        # Register skillflow's skill_converter graph so the butler can generate a
-        # new pipeline from a skill description via start_pipeline("skill_converter").
-        # It ships inside the skillflow package (its agents are registered in
-        # Python, not agent_configs/*.yaml), so it is registered explicitly rather
-        # than via the configs/ glob.
+        # skillflow's built-in `skill_converter` is DEPRECATED — `generate_pipeline`
+        # now runs the grounded `pipeline_forge` generator (the built-in was
+        # ReAct-shaped, ungrounded + lint-only, and hallucinated tools; see
+        # design/pipeline_forge.md). skillflow persists registered graphs in its DB,
+        # so a prior boot's registration lingers — drop the stale row so it can't
+        # clutter the catalog or be run by mistake.
         try:
-            import skillflow as _sf_pkg
-            from skillflow.plugins.skill_converter.converter import _register_converter_agents
-            _register_converter_agents(sf)
-            conv_path = (Path(_sf_pkg.__file__).parent / "plugins"
-                         / "skill_converter" / "skill_converter.yaml")
-            if conv_path.exists():
-                sf.register_graph(PipelineGraph.from_yaml(conv_path))
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                "skill_converter graph not registered (skill→pipeline conversion "
-                "will be unavailable): %s", e
-            )
+            sf._conn.execute("DELETE FROM skillflow_graphs WHERE name = 'skill_converter'")
+            sf._conn.commit()
+        except Exception:
+            pass
 
-        # Register skillflow's addon_converter graph (sibling of skill_converter):
+        # Register skillflow's addon_converter graph (still used by generate_addon):
         # turns a capability description + a base into a validated addon overlay,
         # driven by the butler's generate_addon tool. Its agents are registered in
         # Python (like skill_converter), and its acceptance test is the native
@@ -238,12 +230,18 @@ def get_skillflow():
 
 
 def register_pipeline_from_run(run_id: str, name: str) -> dict:
-    """Persist + live-register the pipeline a completed skill_converter run made,
-    so it can be launched immediately via ``start_config_run``. Returns
-    ``{config_name, path, action}`` or ``{error}``."""
-    from core.pipeline_registry import register_generated_pipeline
-    return register_generated_pipeline(
-        get_skillflow(), get_config_registry(), run_id, name)
+    """Persist + live-register the pipeline a completed generator run made, so it
+    can be launched immediately via ``start_config_run``. Dispatches by the run's
+    generator: ``pipeline_forge`` (graph + role_table + templates) vs
+    ``skill_converter`` (single YAML). Returns ``{config_name, path, action}`` or
+    ``{error}``."""
+    from core.pipeline_registry import (register_generated_pipeline,
+                                        register_forge_pipeline)
+    sf = get_skillflow()
+    run = sf.get_run(run_id) or {}
+    if run.get("graph_name") == "pipeline_forge":
+        return register_forge_pipeline(sf, get_config_registry(), run_id, name)
+    return register_generated_pipeline(sf, get_config_registry(), run_id, name)
 
 
 def register_addon_from_run(run_id: str) -> dict:
@@ -284,6 +282,13 @@ def get_tool_loader():
         custom = Path(__file__).resolve().parent.parent / "aitelier" / "tools"
         if custom.exists():
             loader.add_tools_dir(custom)
+        # Generated tools authored by pipeline_forge (persisted, boot-scanned) —
+        # mirrors how ~/.AItelier/configs holds generated graphs. register_tool
+        # drops <name>/{tool.yaml,impl.py} here; adding the dir makes them resolve
+        # in list_tools()/load_fn() on the next boot without a code change.
+        gen_tools = Path.home() / ".AItelier" / "tools"
+        gen_tools.mkdir(parents=True, exist_ok=True)
+        loader.add_tools_dir(gen_tools)
         _tool_loader_instance = loader
     return _tool_loader_instance
 

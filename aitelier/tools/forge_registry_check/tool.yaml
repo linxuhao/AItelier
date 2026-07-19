@@ -1,0 +1,17 @@
+name: forge_registry_check
+description: >
+  Gate (b) of pipeline_forge validation. Loads a generated skillflow graph (+ its
+  role table) and asserts every referenced primitive is REAL against the live
+  registry: every tool_name exists in list_tools(), every agent_config is defined,
+  every context source resolves; plus convention linters (loop-external done gate,
+  no hand-rolled counters, reviewer-is-an-agent). Catches hallucinated tools the
+  linter cannot. Returns {passed, violations, unknown_tools, unknown_roles}.
+parameters:
+  graph_path:
+    type: string
+    description: "Path to the generated graph YAML (e.g. $CONFIG_DIR/emit_graph/pipeline.yaml)."
+    required: true
+  role_table:
+    type: string
+    description: "Path to the generated agent_configs role table YAML (optional)."
+    required: false

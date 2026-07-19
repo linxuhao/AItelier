@@ -164,21 +164,22 @@ You will see an [ACTIVE PROJECT CONVERSATION] note telling you the run_id \
 and exactly which tool to call — follow it and do NOT start a new conversation \
 while one is active.
 
-## When the user wants to turn a SKILL or WORKFLOW into a reusable pipeline
-This is different from building software. If the user describes a repeatable \
-multi-step *process / skill* and wants it captured as a pipeline they can re-run \
-(e.g. "make me a pipeline that researches a topic, drafts, then fact-checks"), \
-call generate_pipeline(description=<the skill, verbatim>). It runs the \
-skill_converter pipeline and returns a Design Review checkpoint — relay it; on \
-approval (approve_checkpoint) it lints, emits, and AUTO-REGISTERS the generated \
-pipeline under a name like `gen_<slug>` (reported as `registered_config`). Once \
-registered you can RUN it immediately with start_config_run(config_name=<that \
-gen_ name>, seed_text=<input for its first step>). To UPDATE a generated pipeline, \
-call generate_pipeline again with the SAME name — it overwrites in place, and the \
-next start_config_run uses the new version.
+## When the user wants a reusable pipeline for a repeatable workflow
+This is different from building software. If the user wants a repeatable \
+multi-step workflow captured as a pipeline they can re-run (e.g. "make me a \
+pipeline that researches a topic, drafts, then fact-checks"), call \
+generate_pipeline(description=<the user's request>). It runs the grounded \
+`pipeline_forge` generator — it interprets the request, grounds the design in the \
+real tool registry, builds any missing tools, passes 3 gates (lint + \
+registry-check + dry-run smoke), and returns a Design Review checkpoint — relay it; \
+on approval (approve_checkpoint) it AUTO-REGISTERS the pipeline as `gen_<slug>` \
+(reported as `registered_config`), runnable via start_config_run. To MODIFY an \
+existing generated pipeline, call generate_pipeline(description=<the change>, \
+edit_target=<gen_ name>) — it applies the change surgically and overwrites in place. \
+NOTE: the gates verify STRUCTURE, not runtime behavior — for the full \
+generate-then-test-drive-then-fix loop, use CODING mode (its drive_pipeline tool). \
 Use start_new_project / start_from_aitelier_project for *software* \
-(apps/tools/bug-fixes); generate_pipeline for *converting a skill/workflow into \
-a pipeline graph*.
+(apps/tools/bug-fixes); generate_pipeline for a standalone reusable pipeline.
 
 ## When the user wants to add a reusable CAPABILITY on top of an existing pipeline
 Distinct from both building software and authoring a standalone pipeline. If the \
@@ -688,20 +689,30 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "generate_pipeline",
-            "description": "Turn a SKILL or repeatable WORKFLOW description into a reusable "
-                           "SkillFlow pipeline (a YAML graph) by running the skill_converter "
-                           "pipeline. Use this when the user wants to capture a multi-step "
-                           "process/skill as a pipeline they can re-run — NOT for building an "
-                           "app or fixing code (use start_new_project / start_from_aitelier_project for software). "
-                           "Returns a Design Review checkpoint to relay; on approval it lints "
-                           "and emits the generated pipeline YAML.",
+            "description": "Design a reusable SkillFlow pipeline (a YAML graph) FROM A USER "
+                           "REQUEST by running the grounded `pipeline_forge` generator — it "
+                           "interprets what the user wants, grounds the design in the real "
+                           "tool registry, BUILDS + registers any missing tools, and passes 3 "
+                           "gates (lint + registry-check + dry-run smoke) before a Design "
+                           "Review checkpoint. Use when the user wants a repeatable multi-step "
+                           "workflow captured as a re-runnable pipeline — NOT for building an "
+                           "app or fixing code (use start_new_project / start_from_aitelier_project). "
+                           "To MODIFY an existing generated pipeline (add/remove/change a "
+                           "feature), pass `edit_target=gen_<slug>` — the generator loads it as "
+                           "a baseline and applies your request as a surgical change, preserving "
+                           "the rest. After it registers, ALWAYS `drive_pipeline` to verify "
+                           "runtime behavior (the gates only check structure).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "description": {"type": "string",
-                                    "description": "The skill / workflow to convert into a pipeline."},
+                                    "description": "The user's request: what the pipeline should "
+                                    "accomplish (fresh), OR the change to make (with edit_target)."},
                     "name": {"type": "string",
                              "description": "Optional short name for the generated pipeline."},
+                    "edit_target": {"type": "string",
+                                    "description": "Optional gen_<slug> to EDIT: the request is "
+                                    "applied as a change to this existing pipeline, not a new build."},
                 },
                 "required": ["description"],
             },
@@ -890,6 +901,37 @@ TOOL_DEFINITIONS = [
 # escalate a butler session into an unrestricted coding one).
 
 CODING_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "drive_pipeline",
+            "description": (
+                "Test-drive a GENERATED pipeline (gen_<slug>) on a concrete input you "
+                "synthesize, to VERIFY it actually behaves. Reloads the config from "
+                "disk first (so your edits apply), runs it end-to-end context-isolated "
+                "(its agents run in their own context, not this chat), and returns a "
+                "COMPACT summary: per-step status, the first failure + error, and the "
+                "final outputs (truncated). This is the judgment loop the generator DAG "
+                "can't do — the 3 gates (lint/registry/smoke) verify STRUCTURE, not "
+                "runtime behavior. Loop: generate_pipeline → drive_pipeline → if a step "
+                "failed or the output is wrong, edit ~/.AItelier/configs/<gen>.yaml or "
+                "<gen>.roles.json (via bash) → drive_pipeline again → then present."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string",
+                                    "description": "The gen_<slug> to drive."},
+                    "test_seed": {"type": "string",
+                                  "description": "A concrete input that exercises it "
+                                  "(e.g. for a link-fixer, a doc with known-broken links)."},
+                    "max_steps": {"type": "integer",
+                                  "description": "Step cap (default 40)."},
+                },
+                "required": ["config_name", "test_seed"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -2991,12 +3033,13 @@ class MetaAgent:
                             "outputs": outputs,
                             "message": "Pipeline completed successfully.",
                         }
-                        # Configs flagged registers_generated_pipeline (skill_converter)
-                        # produce a pipeline YAML on completion — persist + live-register
-                        # it (gen_<slug>) so the user can run it immediately via
+                        # Configs flagged registers_generated_pipeline (pipeline_forge)
+                        # produce a pipeline on completion — persist + live-register it
+                        # (gen_<slug>) so the user can run it immediately via
                         # start_config_run, and re-running with the same name updates it.
                         # Manifest-driven so this generic waiter doesn't special-case a
-                        # graph name.
+                        # graph name. (pipeline_forge is scheduler-owned, so its own
+                        # completion hook in the scheduler normally does this first.)
                         from api.dependencies import get_config_registry
                         _mf = get_config_registry().get(run.get("graph_name", ""))
                         if _mf and _mf.registers_generated_pipeline:
@@ -3557,33 +3600,218 @@ class MetaAgent:
             "total_steps": len(steps),
         }
 
+    async def _tool_drive_pipeline(self, args: dict) -> dict:
+        """Test-drive a GENERATED pipeline on a synthesized input, CONTEXT-ISOLATED.
+
+        Reloads the persisted config (picking up edits), runs it end-to-end in a
+        throwaway project (its agents run in their OWN context, not this chat), and
+        returns a COMPACT trace summary — what completed, the first failure + its
+        error, and the final outputs (truncated). This is the judgment loop a fixed
+        DAG can't do: generate → drive → observe → fix → drive again."""
+        import asyncio, uuid as _uuid
+        from api.dependencies import (get_skillflow, get_config_registry,
+                                      register_pipeline_from_run)  # noqa: F401
+        from core.pipeline_registry import reload_generated_pipeline
+        from core.run_launcher import start_config_run
+        from aitelier.runner import AgentStepRunner
+
+        config_name = (args.get("config_name") or "").strip()
+        test_seed = (args.get("test_seed") or "").strip()
+        max_steps = int(args.get("max_steps") or 40)
+        if not config_name:
+            return {"error": "config_name is required (the gen_<slug> to drive)."}
+        if not test_seed:
+            return {"error": "test_seed is required — a concrete input to exercise it."}
+
+        sf = get_skillflow()
+        # Pick up any edits the agent made to the generated config/roles/templates.
+        rel = reload_generated_pipeline(sf, get_config_registry(), config_name)
+        if rel.get("error"):
+            return {"error": f"reload {config_name}: {rel['error']}"}
+
+        pid = "drive-" + self._slugify(config_name) + "-" + _uuid.uuid4().hex[:6]
+        launch = start_config_run(self.db, self.ws, config_name, pid,
+                                  seed_text=test_seed, name=f"drive {config_name}",
+                                  owner_email=self.owner_email)
+        if launch.get("status") == "error":
+            return {"error": launch.get("message")}
+        rid = launch["run_id"]
+
+        runner = AgentStepRunner(db_manager=self.db, workspace_manager=self.ws)
+        attempts: dict[str, int] = {}
+        for _ in range(max_steps):
+            run = sf.get_run(rid) or {}
+            if run.get("status") in ("completed", "failed"):
+                break
+            nxt = sf.advance_run(rid)
+            if (sf.get_run(rid) or {}).get("status") in ("paused", "completed", "failed"):
+                if (sf.get_run(rid) or {}).get("status") == "paused":
+                    sf.approve_checkpoint(rid); continue
+                break
+            if nxt is None:
+                continue
+            try:
+                if sf._get_resolver_for_run(rid).is_tool(nxt):
+                    continue
+            except Exception:
+                pass
+            claimed = sf.claim_next_step(rid)
+            if claimed is None:
+                continue
+            attempts[claimed.step_id] = attempts.get(claimed.step_id, 0) + 1
+            try:
+                res = await runner.execute(claimed)
+                sf.confirm_step(claimed.token, res)
+            except Exception as e:
+                # Surface a persistent step failure fast (don't loop forever).
+                retryable = attempts[claimed.step_id] < 2
+                sf.fail_step(claimed.token, str(e)[:300], retryable=retryable)
+
+        # ── Compact summary ────────────────────────────────────────────────
+        run = sf.get_run(rid) or {}
+        steps = sf.get_steps(rid)
+        per_step, first_failure = [], None
+        for s in steps:
+            entry = {"step": s["step_id"], "status": s["status"]}
+            if s["status"] == "failed" and first_failure is None:
+                err = (s.get("error") or "")[:300]
+                entry["error"] = err
+                first_failure = {"step": s["step_id"], "error": err}
+            per_step.append(entry)
+        outputs = {}
+        try:
+            mf = get_config_registry().get(config_name)
+            out_step = (mf.output_step if mf else None) or (steps[-1]["step_id"] if steps else "")
+            if out_step:
+                od = self.ws.get_final_path(pid, out_step, config_name)
+                if od.exists():
+                    for f in sorted(od.rglob("*")):
+                        if f.is_file() and f.name != "_snapshot.json":
+                            outputs[str(f.relative_to(od))] = f.read_text(
+                                encoding="utf-8", errors="replace")[:1500]
+        except Exception:
+            pass
+        status = run.get("status") or "running"
+        verdict = ("completed" if status == "completed"
+                   else "did-not-terminate (likely an unbounded loop / persistent step failure)"
+                   if status not in ("completed", "failed") else "failed")
+        return {
+            "config_name": config_name, "drive_status": status, "verdict": verdict,
+            "project_id": pid, "steps": per_step, "first_failure": first_failure,
+            "final_outputs": outputs, "run_error": run.get("error"),
+            "hint": ("Judge whether final_outputs are correct for the test_seed. If a "
+                     "step failed or the outputs are wrong, edit the generated config "
+                     "(~/.AItelier/configs/" + config_name + ".yaml), its .roles.json, "
+                     "or a template, then drive_pipeline again."),
+        }
+
+    async def _poll_pipeline_until_checkpoint(self, run_id: str,
+                                              max_wait_s: int = 1800) -> dict:
+        """Poll a SCHEDULER-OWNED run until it pauses (checkpoint) or ends. Unlike
+        _run_pipeline_until_checkpoint this does NOT advance/claim (the scheduler
+        drives), so it never double-drives. Returns a relay dict for the butler."""
+        import asyncio
+        from api.dependencies import get_skillflow
+        sf = get_skillflow()
+        waited, interval = 0, 6
+        while waited < max_wait_s:
+            run = sf.get_run(run_id) or {}
+            status = run.get("status")
+            if status in ("paused", "completed", "failed"):
+                break
+            await asyncio.sleep(interval)
+            waited += interval
+        run = sf.get_run(run_id) or {}
+        status = run.get("status")
+        steps = sf.get_steps(run_id)
+        base = {"status": status, "run_id": run_id,
+                "steps_completed": len([s for s in steps if s["status"] == "completed"])}
+        if status == "paused":
+            resolver = sf._get_resolver(run["graph_name"])
+            checkpoint_step_id, label, data = "", run.get("current_node", "Checkpoint"), None
+            for s in reversed(steps):
+                if s["status"] == "completed":
+                    node = resolver.get_node(s["step_id"]) if resolver else None
+                    if node and node.checkpoint:
+                        checkpoint_step_id = s["step_id"]
+                        label = node.checkpoint_label or s["step_id"]
+                        try:
+                            out_dir = self.ws.get_final_path(run.get("project_id", ""),
+                                s["step_id"], run.get("graph_name") or "pipeline_forge")
+                            if out_dir.exists():
+                                data = {}
+                                for f in sorted(out_dir.rglob("*")):
+                                    if f.is_file() and f.name != "_snapshot.json":
+                                        data[str(f.relative_to(out_dir))] = f.read_text(
+                                            encoding="utf-8", errors="replace")[:6000]
+                        except Exception:
+                            pass
+                        break
+            base.update({"checkpoint": True, "checkpoint_step_id": checkpoint_step_id,
+                         "checkpoint_label": label, "checkpoint_data": data,
+                         "message": (f"Reached checkpoint '{label}'. Review, then "
+                                     f"approve_checkpoint or reject_checkpoint.")})
+        elif status == "completed":
+            base["message"] = "Pipeline completed."
+        elif status == "failed":
+            base["message"] = f"Pipeline failed: {run.get('error') or 'see trace'}"
+        else:
+            base["message"] = f"Still running after {waited}s; poll status later."
+        return base
+
     async def _tool_generate_pipeline(self, args: dict) -> dict:
-        """Generate a reusable SkillFlow pipeline from a skill description by
-        running skillflow's skill_converter pipeline in framework mode, then
-        relaying its design checkpoint. The converter's host-mode agents resolve
-        to HOST_AGENT_MODEL with their embedded prompts (see core/agents.py)."""
+        """Generate (or edit) a reusable SkillFlow pipeline from a user request by
+        running the grounded `pipeline_forge` generator, then relaying its Design
+        Review checkpoint. With `edit_target`, seeds the existing pipeline as a
+        baseline for a surgical change. pipeline_forge is scheduler-owned; the
+        polling scheduler drives it and registers the result on completion."""
         from api.dependencies import get_skillflow
 
         description = (args.get("description") or "").strip()
         if not description:
-            return {"error": "description is required — the skill/workflow to convert."}
+            return {"error": "description is required — what the pipeline should do "
+                             "(or, with edit_target, the change to make)."}
         name = args.get("name") or description[:40]
         # Unique pid per generation so re-running (an "update") always executes a
-        # fresh converter run rather than reusing a prior completed one. The
-        # registered config name is derived from the stable `name` (→ gen_<slug>),
-        # not the pid, so update still overwrites the same config.
+        # fresh run rather than reusing a prior completed one. The registered config
+        # name is derived from the stable `name` (→ gen_<slug>), not the pid, so an
+        # update / edit still overwrites the same config.
         import uuid as _uuid
-        pid = "convert-" + self._slugify(name) + "-" + _uuid.uuid4().hex[:6]
+        pid = "forge-" + self._slugify(name) + "-" + _uuid.uuid4().hex[:6]
         sf = get_skillflow()
 
-        # Launch the skill_converter config via the generic launcher (ensures the
-        # run row tagged config_name='skill_converter', seeds skill_description.md,
-        # creates + starts the run). skill_converter is butler-driven
-        # (scheduler_owned=false), so the polling scheduler never grabs it.
+        # Edit mode: seed the run with the existing pipeline as a BASELINE so the
+        # generator applies `description` as a surgical change instead of designing
+        # from scratch (mirrors DPE's existing-repo mode). Reuse the target's name
+        # so the edited pipeline overwrites it in place.
+        seed_inputs: dict = {}
+        edit_target = (args.get("edit_target") or "").strip()
+        if edit_target:
+            from core.pipeline_registry import generated_configs_dir
+            gy = generated_configs_dir() / f"{edit_target}.yaml"
+            if not gy.exists():
+                return {"error": f"edit_target '{edit_target}' not found "
+                                 f"(no {edit_target}.yaml). Generate it first."}
+            seed_inputs["baseline_graph.yaml"] = gy.read_text(encoding="utf-8")
+            rj = gy.with_suffix(".roles.json")
+            if rj.exists():
+                seed_inputs["baseline_roles.json"] = rj.read_text(encoding="utf-8")
+            # Overwrite the same gen_<slug>: derive name from the target.
+            from core.pipeline_registry import GEN_PREFIX
+            name = edit_target[len(GEN_PREFIX):] if edit_target.startswith(GEN_PREFIX) else name
+
+        # Launch pipeline_forge — a grounded, self-provisioning generator (replaces
+        # the ReAct-shaped skill_converter). It GROUNDS the design in the live tool
+        # registry, BUILDS + registers any missing tools in-graph, emits the graph
+        # + roles + templates, then validates it (lint + registry-check + dry-run
+        # smoke) before a Design Review checkpoint. It is scheduler_owned, so the
+        # polling scheduler drives it; we poll to the checkpoint rather than
+        # actively driving. On completion the scheduler hook registers gen_<slug>.
         from core.run_launcher import start_config_run
         launch = start_config_run(
-            self.db, self.ws, "skill_converter", pid,
-            seed_text=description, name=name, owner_email=self.owner_email,
+            self.db, self.ws, "pipeline_forge", pid,
+            seed_text=description, seed_inputs=seed_inputs or None,
+            name=name, owner_email=self.owner_email,
         )
         if launch.get("status") == "error":
             return {"error": launch.get("message")}
@@ -3595,9 +3823,8 @@ class MetaAgent:
             except Exception:
                 pass
 
-        result = await self._run_pipeline_until_checkpoint(run_id)
+        result = await self._poll_pipeline_until_checkpoint(run_id)
 
-        # Sync project status after skill_converter run completes
         from core.scheduler import _sync_project_status_to_db
         try:
             _sync_project_status_to_db(pid)
@@ -3605,16 +3832,7 @@ class MetaAgent:
             self._log_error(f"project status sync failed for {pid}: {e}")
 
         result["project_id"] = pid
-        result["pipeline"] = "skill_converter"
-        if result.get("status") == "completed":
-            try:
-                from skillflow.plugins.skill_converter import get_output_file
-                p = get_output_file(sf, run_id)
-                if p and p.exists():
-                    result["generated_pipeline_path"] = str(p)
-                    result["generated_pipeline_yaml"] = p.read_text(encoding="utf-8")[:4000]
-            except Exception:
-                pass
+        result["pipeline"] = "pipeline_forge"
         return result
 
     async def _tool_generate_addon(self, args: dict) -> dict:
@@ -3820,6 +4038,7 @@ _TOOL_HANDLERS = {
 # Coding-mode-only tools — schema-visible and dispatchable only when the
 # session mode is "coding" (see _stream_llm / _execute_tool).
 _CODING_TOOL_HANDLERS = {
+    "drive_pipeline": MetaAgent._tool_drive_pipeline,
     "edit_file": MetaAgent._tool_edit_file,
     "create_file": MetaAgent._tool_create_file,
     "bash": MetaAgent._tool_bash,

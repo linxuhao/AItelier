@@ -1,0 +1,77 @@
+# agent_configs/pipeline_forge.yaml — roles for the pipeline_forge generator.
+# Maker/reviewer split (DPE profile): capable+thinking makers; a cheap, cold,
+# read-only reviewer that defaults to fail-on-uncertainty. Context/output/
+# validation live in the GRAPH (configs/pipeline_forge.yaml); only LLM call
+# parameters live here.
+
+research_designer:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.2
+  template: "forge_survey.md"
+  tools: ["read_file", "list_tree"]
+  max_output_tokens: 12288
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: { enable: true, effort: "max" }
+
+graph_architect:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.2
+  template: "forge_architect.md"
+  tools: ["read_file", "list_tree"]
+  max_output_tokens: 16384
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: { enable: true, effort: "max" }
+
+tool_planner:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.2
+  template: "forge_tool_plan.md"
+  tools: ["read_file"]
+  max_output_tokens: 8192
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: { enable: true }
+
+tool_implementer:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.2
+  template: "forge_tool_impl.md"
+  tools: ["read_file"]
+  max_output_tokens: 16384
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: { enable: true }
+
+graph_emitter:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.2
+  template: "forge_emit.md"
+  tools: ["read_file"]
+  max_output_tokens: 24576
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: { enable: true, effort: "max" }
+
+# One shared reviewer profile for every Red slot; its per-step focus comes from
+# the injected maker output + the template.
+reviewer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.1
+  template: "forge_review_red.md"
+  tools: ["read_file"]
+  max_output_tokens: 4096
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: { enable: true }
+
+design_explainer:
+  model: "deepseek/deepseek-v4-flash"
+  temperature: 0.3
+  template: "forge_explain.md"
+  tools: ["read_file"]
+  max_output_tokens: 6144
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: { enable: true }

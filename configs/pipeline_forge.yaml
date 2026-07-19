@@ -1,0 +1,385 @@
+# configs/pipeline_forge.yaml
+# A grounded, self-provisioning skillflow config generator (replaces the built-in
+# skill_converter as the backend for generate_pipeline). Structurally DPE:
+#   survey(ground) -> architect(shape) -> tool_plan -> tool_loop(build+register)
+#   -> emit_graph -> validate(lint+registry+smoke) -> explain(checkpoint) -> done
+# Every creative step is a real agent maker + a real agent reviewer (Green/Red).
+# Missing tools are BUILT and REGISTERED in-graph before the gate runs, so the
+# registry-check stays strict with no unknown-tool exception. See
+# design/pipeline_forge.md.
+
+name: "pipeline_forge"
+description: "Grounded, self-provisioning skillflow config generator"
+
+x-aitelier:
+  label: "Pipeline Forge"
+  scheduler_owned: true
+  registers_generated_pipeline: true      # repo-less authoring run (run_launcher)
+  seed_file: "skill_description.md"
+  output_step: "emit_graph"
+  input_hint: >-
+    seed_text = a description of the skill/workflow to turn into a runnable
+    skillflow pipeline (what it should do, its phases, any special tools it
+    needs). Grounds the design in the LIVE tool registry, BUILDS + registers any
+    missing tools in-graph, emits the graph + roles + templates, then validates
+    it (lint + registry-check + dry-run smoke) before a Design Review checkpoint.
+    On approval the generated pipeline is registered as gen_<slug>, runnable via
+    start_config_run. Prefer this over skill_converter for DAG-executor pipelines.
+  labels:
+    survey: "Survey"
+    survey_review: "Survey Review"
+    architect: "Architect"
+    architect_review: "Architect Review"
+    tool_plan: "Tool Plan"
+    tool_plan_review: "Tool Plan Review"
+    tool_loop: "Tool Loop"
+    t_tool_impl: "Build Tool"
+    t_tool_review: "Tool Review"
+    t_tool_register: "Register Tool"
+    emit_graph: "Emit Graph"
+    emit_review: "Emit Review"
+    v_lint: "Lint"
+    v_registry: "Registry Check"
+    v_smoke: "Dry-run Smoke"
+    explain: "Design Review"
+
+begin: "survey"
+
+end_conditions:
+  combinator: or
+  conditions:
+    - type: node_reached
+      node: "done"
+      result: "completed"
+    - type: max_total_steps
+      limit: 200
+    - type: flag_match
+      flag: { fatal_error: true }
+
+steps:
+  # ─── Survey: grounding ───────────────────────────────────────────────────
+  - id: "survey"
+    step_type: "agent"
+    agent_config: "research_designer"
+    timeout_seconds: 300
+    context:
+      - source: { config: "pipeline_forge", output: "skill_description.md" }
+      - source: { config: "pipeline_forge", output: "baseline_graph.yaml", required: false }
+      - source: { tool: "forge_palette" }
+      - source: { step: "survey" }            # loop-back: own prior draft
+      - source: { step: "survey_review" }     # loop-back: reviewer feedback
+    output:
+      mode: "content"
+      fixed:
+        plan: "forge_plan.md"
+    validation:
+      - files: ["forge_plan.md"]
+        tool: "file_exists"
+    transitions:
+      - to: "survey_review"
+
+  - id: "survey_review"
+    step_type: "agent"
+    agent_config: "reviewer"
+    timeout_seconds: 180
+    context:
+      - source: { config: "pipeline_forge", output: "skill_description.md" }
+      - source: { tool: "forge_palette" }
+      - source: { step: "survey" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
+            suggestions: { type: array, items: { type: string } }
+    transitions:
+      - to: "architect"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "survey"
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # ─── Architect: design the target graph shape + name missing tools ───────
+  - id: "architect"
+    step_type: "agent"
+    agent_config: "graph_architect"
+    timeout_seconds: 400
+    context:
+      - source: { config: "pipeline_forge", output: "skill_description.md" }
+      - source: { config: "pipeline_forge", output: "baseline_graph.yaml", required: false }
+      - source: { tool: "forge_palette" }
+      - source: { step: "survey" }
+      - source: { step: "architect" }
+      - source: { step: "architect_review" }
+      - source: { step: "v_registry" }        # loop-back: validation violations
+      - source: { step: "v_smoke" }
+    output:
+      mode: "content"
+      fixed:
+        spec: "graph_spec.md"
+        missing_tools: { file: "missing_tools.json", on_exists: "new", format: '{"tools": [{"name": str, "purpose": str, "interface": str}, ...]}' }
+    validation:
+      - files: ["graph_spec.md", "missing_tools.json"]
+        tool: "file_exists"
+    transitions:
+      - to: "architect_review"
+
+  - id: "architect_review"
+    step_type: "agent"
+    agent_config: "reviewer"
+    timeout_seconds: 180
+    context:
+      - source: { tool: "forge_palette" }
+      - source: { step: "architect" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+    transitions:
+      - to: "tool_plan"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "architect"
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # ─── Tool plan: manifest of tool-creation tasks (DPE's PM, scoped) ───────
+  - id: "tool_plan"
+    step_type: "agent"
+    agent_config: "tool_planner"
+    timeout_seconds: 240
+    context:
+      - source: { step: "architect", file: "missing_tools.json" }
+    output:
+      mode: "content"
+      fixed:
+        manifest: { file: "tool_tasks_manifest.json", on_exists: "new", format: '{"execution_order": [[str, ...], ...]}' }
+        tool_card: { file: "tools/*.json", format: '{"name": str, "purpose": str, "interface_contract": str, "params_schema": {}}' }
+    validation:
+      - files: ["tool_tasks_manifest.json"]
+        tool: "file_exists"
+    transitions:
+      - to: "tool_plan_review"
+
+  - id: "tool_plan_review"
+    step_type: "agent"
+    agent_config: "reviewer"
+    timeout_seconds: 180
+    context:
+      - source: { step: "architect", file: "missing_tools.json" }
+      - source: { step: "tool_plan" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+    transitions:
+      - to: "tool_loop"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "tool_plan"
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # ─── Tool loop: build + register each missing tool in-graph ──────────────
+  # An empty manifest drains immediately → emit_graph (no new tools needed).
+  - id: "tool_loop"
+    step_type: "loop"
+    loop:
+      source:
+        step: "tool_plan"
+        file: "tool_tasks_manifest.json"
+        field: "execution_order"
+      item_as: "current_tool"
+      max_iterations: 30
+    transitions:
+      - to: "t_tool_impl"
+        max_loop: 30
+      - to: "emit_graph"
+
+  - id: "t_tool_impl"
+    step_type: "agent"
+    agent_config: "tool_implementer"
+    timeout_seconds: 600
+    context:
+      - source: { step: "tool_plan", file: "tools/$current_tool.json" }
+      - source: { tool: "forge_palette" }
+      - source: { step: "t_tool_review" }     # loop-back: reviewer feedback
+    output:
+      mode: "write"                            # writes <name>/{tool.yaml,impl.py,test_<name>.py}
+    transitions:
+      - to: "t_tool_register"
+
+  # Persist + live-register the built tool so emit/validate see it as REAL.
+  # register_tool takes the tool name from the injected task_name (the loop's
+  # current item) — a loop var isn't interpolated in tool_params. Runs BEFORE the
+  # review so the loop-return step is an AGENT (t_tool_review): skillflow only
+  # credits a loop item as done when an agent step returns to the loop (the tool
+  # fast-path does not), so a tool-step loop-return would re-serve the item.
+  # A rejected tool is overwritten on the next iteration's re-register.
+  - id: "t_tool_register"
+    step_type: "tool"
+    tool_name: "register_tool"
+    tool_params:
+      source_dir: "$CONFIG_DIR/t_tool_impl"
+    transitions:
+      - to: "t_tool_review"
+
+  - id: "t_tool_review"
+    step_type: "agent"
+    agent_config: "reviewer"
+    timeout_seconds: 240
+    context:
+      - source: { step: "tool_plan", file: "tools/$current_tool.json" }
+      - source: { step: "t_tool_impl" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+    transitions:
+      - to: "tool_loop"                          # pass → agent returns to loop → item credited
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "t_tool_impl"                         # fail → rebuild (+ re-register), bounded
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # ─── Emit the generated graph (tools now real) ───────────────────────────
+  - id: "emit_graph"
+    step_type: "agent"
+    agent_config: "graph_emitter"
+    timeout_seconds: 500
+    context:
+      - source: { config: "pipeline_forge", output: "skill_description.md" }
+      - source: { config: "pipeline_forge", output: "baseline_graph.yaml", required: false }
+      - source: { tool: "forge_palette" }
+      - source: { step: "architect" }
+      - source: { step: "emit_graph" }         # loop-back: own prior draft
+      - source: { step: "emit_review" }
+    output:
+      mode: "write"                            # writes pipeline.yaml, role_table.yaml, templates/*.md
+    validation:
+      - files: ["pipeline.yaml"]
+        tool: "file_exists"
+    transitions:
+      - to: "emit_review"
+
+  - id: "emit_review"
+    step_type: "agent"
+    agent_config: "reviewer"
+    timeout_seconds: 240
+    context:
+      - source: { tool: "forge_palette" }
+      - source: { step: "emit_graph" }
+    output:
+      mode: "content"
+      fixed:
+        verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+    transitions:
+      - to: "v_lint"
+        match: { from_file: "review_verdict.json", field: "passed", value: true }
+      - to: "emit_graph"
+        match: { from_file: "review_verdict.json", field: "passed", value: false }
+        max_loop: 3
+
+  # ─── 3-part deterministic gate: lint → registry-check → dry-run smoke ────
+  - id: "v_lint"
+    step_type: "tool"
+    tool_name: "skillflow_lint"
+    tool_params:
+      path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
+    transitions:
+      - to: "v_registry"
+        match: { passed: true }
+      - to: "emit_graph"
+        match: { passed: false }
+        max_loop: 3
+
+  - id: "v_registry"
+    step_type: "tool"
+    tool_name: "forge_registry_check"
+    tool_params:
+      graph_path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
+      role_table: "$CONFIG_DIR/emit_graph/role_table.yaml"
+    transitions:
+      - to: "v_smoke"
+        match: { passed: true }
+      - to: "architect"                         # unknown tool ⇒ may need (re)building
+        match: { passed: false }
+        max_loop: 3
+
+  - id: "v_smoke"
+    step_type: "tool"
+    tool_name: "forge_dryrun_smoke"
+    tool_params:
+      graph_path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
+    transitions:
+      - to: "explain"
+        match: { passed: true }
+      - to: "emit_graph"
+        match: { passed: false }
+        max_loop: 3
+
+  # ─── Human design review (checkpoint) ────────────────────────────────────
+  - id: "explain"
+    step_type: "agent"
+    agent_config: "design_explainer"
+    timeout_seconds: 240
+    context:
+      - source: { step: "emit_graph" }
+      - source: { step: "architect", file: "missing_tools.json" }
+    output:
+      mode: "content"
+      fixed:
+        explanation: "design_explanation.md"
+    validation:
+      - files: ["design_explanation.md"]
+        tool: "file_exists"
+    checkpoint: true
+    checkpoint_label: "Generated Pipeline — Design Review"
+    transitions:
+      - to: "done"
+        match: { from: "checkpoint", value: "approved" }
+
+  # Loop-external terminal — reached only after approval; a gate has no completed
+  # step row so node_reached fires at most once (no false-green).
+  - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null

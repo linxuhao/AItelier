@@ -176,8 +176,11 @@ into an isolated place whose transcript you don't pay for.
      correct for your test input?
   3. If a step failed or the output is wrong, FIX it: edit the generated config
      with bash — `~/.AItelier/configs/gen_<slug>.yaml` (graph structure) or
-     `gen_<slug>.roles.json` (a role's `tools` / `system_prompt`) — then
-     `drive_pipeline` again (it reloads from disk). Repeat until it behaves.
+     `gen_<slug>.roles.json` (a role's `model` / `tools` / `system_prompt`) — then
+     `drive_pipeline` again (it reloads from disk). Repeat until it behaves. If you're
+     unsure of a skillflow field/hook/structure, use `skillflow_docs_list` /
+     `skillflow_docs_search` / `skillflow_docs_read` — skillflow's own spec + schema
+     source (don't guess YAML).
   4. Only then present it as ready. (Common fix: a reviewer role should drop
      `read_file` and rely on its injected context, like the DPE reviewers.)
 

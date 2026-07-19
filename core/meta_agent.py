@@ -870,6 +870,53 @@ CODING_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "skillflow_docs_list",
+            "description": "List skillflow's own documentation topics (bundled docs + the "
+                           "authoritative config schema source, graph.py). Start here when "
+                           "unsure of any skillflow config structure, then search/read.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skillflow_docs_search",
+            "description": "Grep skillflow's own docs + schema source for a term; returns "
+                           "line-numbered snippets (topic + line + context). Look up any "
+                           "skillflow field, step type, lifecycle hook, context mode, "
+                           "validation tool, path var, end-condition, or loop rule — the real "
+                           "spec, not a guess. Then skillflow_docs_read around a hit.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "term to look up, e.g. 'lifecycle'"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skillflow_docs_read",
+            "description": "Read a skillflow doc topic (from skillflow_docs_list) WITH LINE "
+                           "NUMBERS. Pass start_line/end_line to read the exact region around a "
+                           "skillflow_docs_search hit (line numbers line up). `schema-source` "
+                           "(graph.py) is the authoritative field list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "topic key from skillflow_docs_list"},
+                    "start_line": {"type": "integer", "description": "1-based first line"},
+                    "end_line": {"type": "integer", "description": "1-based last line (inclusive)"},
+                },
+                "required": ["topic"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_pipeline",
             "description": "Design a reusable SkillFlow pipeline (a YAML graph) FROM A USER "
                            "REQUEST by running the grounded `pipeline_forge` generator — it "
@@ -3705,6 +3752,22 @@ class MetaAgent:
                      "or a template, then drive_pipeline again."),
         }
 
+    async def _tool_skillflow_docs_list(self, args: dict) -> dict:
+        """List skillflow doc topics (real spec + schema source)."""
+        from aitelier.skillflow_docs_lib import list_topics
+        return list_topics()
+
+    async def _tool_skillflow_docs_search(self, args: dict) -> dict:
+        """Grep skillflow's own docs + schema for a term; line-numbered snippets."""
+        from aitelier.skillflow_docs_lib import search_docs
+        return search_docs(args.get("query") or "")
+
+    async def _tool_skillflow_docs_read(self, args: dict) -> dict:
+        """Read a skillflow doc topic with line numbers (couples with search hits)."""
+        from aitelier.skillflow_docs_lib import read_doc
+        return read_doc(args.get("topic") or "", start_line=args.get("start_line") or 0,
+                        end_line=args.get("end_line"))
+
     async def _poll_pipeline_until_checkpoint(self, run_id: str,
                                               max_wait_s: int = 1800) -> dict:
         """Poll a SCHEDULER-OWNED run until it pauses (checkpoint) or ends. Unlike
@@ -4037,6 +4100,9 @@ _TOOL_HANDLERS = {
 # Coding-mode-only tools — schema-visible and dispatchable only when the
 # session mode is "coding" (see _stream_llm / _execute_tool).
 _CODING_TOOL_HANDLERS = {
+    "skillflow_docs_list": MetaAgent._tool_skillflow_docs_list,
+    "skillflow_docs_search": MetaAgent._tool_skillflow_docs_search,
+    "skillflow_docs_read": MetaAgent._tool_skillflow_docs_read,
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "drive_pipeline": MetaAgent._tool_drive_pipeline,
     "edit_file": MetaAgent._tool_edit_file,

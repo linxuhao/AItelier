@@ -8,7 +8,7 @@ research_designer:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "forge_survey.md"
-  tools: ["read_file", "list_tree"]
+  tools: ["read_file", "list_tree", "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read"]
   max_output_tokens: 12288
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -18,7 +18,7 @@ graph_architect:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "forge_architect.md"
-  tools: ["read_file", "list_tree"]
+  tools: ["read_file", "list_tree", "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read"]
   max_output_tokens: 16384
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -48,7 +48,7 @@ graph_emitter:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "forge_emit.md"
-  tools: ["read_file"]
+  tools: ["read_file", "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read"]
   max_output_tokens: 24576
   native_tool_calling: true
   fallback_to_json_mode: true

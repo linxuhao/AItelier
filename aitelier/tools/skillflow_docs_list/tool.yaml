@@ -1,0 +1,7 @@
+name: skillflow_docs_list
+description: >
+  List the available skillflow documentation topics (skillflow's OWN bundled docs +
+  the authoritative config schema source). Start here, then skillflow_docs_search to
+  grep or skillflow_docs_read to read one. Use whenever designing/editing a skillflow
+  graph and unsure of a field, step type, hook, context mode, path var, or loop rule.
+parameters: {}

@@ -47,6 +47,25 @@ CHEATSHEET = """\
   becomes the transition flags).
 - loop  : iterates a workspace-file manifest list (loop.source + item_as).
 - gate  : pure flag routing, no execution; use for the loop-external terminal.
+
+## When in doubt, read the spec — the `skillflow_docs_*` tools
+This cheatsheet is the common case. For ANY field, lifecycle hook, context mode,
+validation tool, path variable, or end-condition type you're unsure of, use
+`skillflow_docs_list` (topics) → `skillflow_docs_search` (grep a term, line-numbered
+hits) → `skillflow_docs_read` (read around a hit). `schema-source` (graph.py) is the
+authoritative field list; `engine-source` (core.py) documents the runtime rules below
+(e.g. `skillflow_docs_search` "credit" for the loop-crediting rule).
+
+## Gate-invisible gotchas (the 3 gates will NOT catch these — get them right)
+- LOOP CREDITING: skillflow only advances a loop to its next item when an **agent**
+  step returns to the loop node (credited in confirm_step). If a **tool** step is the
+  loop-return, the item is never credited and the loop RE-SERVES it forever. So end a
+  loop body on an agent step (`search skillflow_docs credit`).
+- LOOP VARS: a loop var like `$current_x` is interpolated in a step's `context` file
+  paths but NOT in `tool_params`. A tool inside a loop gets the current item via the
+  engine-injected `task_name` kwarg, not via `$current_x` in tool_params.
+- TERMINAL GATE: the completed-terminal gate needs `transitions: [{to: null}]`, NOT an
+  empty list (`[]` → "no matching transition" → the run fails).
 """
 
 # Curated exemplars the architect should read (via read_file) rather than inline —

@@ -61,7 +61,12 @@ class TestModePlumbing:
         assert names == {"edit_file", "create_file", "bash",
                          "runner_start", "runner_submit",
                          "runner_approve", "runner_reject", "skillflow_tool",
-                         "web_search", "web_fetch"}
+                         "web_search", "web_fetch",
+                         # generate_pipeline is coding-only so drive_pipeline,
+                         # its test-drive/fix loop, is always in reach.
+                         "generate_pipeline", "drive_pipeline",
+                         "skillflow_docs_list", "skillflow_docs_search",
+                         "skillflow_docs_read"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
 

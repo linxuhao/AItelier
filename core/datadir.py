@@ -44,6 +44,11 @@ def configs_dir() -> Path:
     return aitelier_home() / "configs"
 
 
+def tools_dir() -> Path:
+    """Generated tools authored by pipeline_forge (persisted, boot-scanned)."""
+    return aitelier_home() / "tools"
+
+
 def meta_dir() -> Path:
     return aitelier_home() / "meta"
 

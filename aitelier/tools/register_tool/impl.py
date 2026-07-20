@@ -12,8 +12,15 @@ from pathlib import Path
 
 
 def generated_tools_dir() -> Path:
-    """The durable, boot-scanned home for generated tools (mirrors ~/.AItelier/configs)."""
-    d = Path.home() / ".AItelier" / "tools"
+    """The durable, boot-scanned home for generated tools (mirrors the configs dir).
+
+    Resolved through core.datadir so an AITELIER_HOME override (tests) is
+    honored — writing to the production dir from a test run is the accident
+    the datadir authority exists to prevent.
+    """
+    from core.datadir import tools_dir
+
+    d = tools_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

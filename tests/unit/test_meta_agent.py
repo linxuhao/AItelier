@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from pathlib import Path
 
 from core.meta_agent import (
-    MetaAgent, TOOL_DEFINITIONS, SYSTEM_PROMPT,
+    MetaAgent, TOOL_DEFINITIONS, CODING_TOOL_DEFINITIONS, SYSTEM_PROMPT,
     _load_meta_agent_config, _resolve_provider,
 )
 
@@ -38,7 +38,7 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        assert len(TOOL_DEFINITIONS) == 34  # +generate_addon
+        assert len(TOOL_DEFINITIONS) == 33  # generate_pipeline is coding-mode only
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -65,9 +65,17 @@ class TestToolDefinitions:
             "list_workspace_tree", "read_workspace_file",
             "retrieve_previous_context",
             "approve_checkpoint", "reject_checkpoint", "get_pipeline_status",
-            "generate_pipeline", "generate_addon",
+            "generate_addon",
         }
         assert required.issubset(names)
+
+    def test_generate_pipeline_is_coding_mode_only(self):
+        """generate_pipeline moved butler->coding so drive_pipeline (its
+        verification loop) is always in reach. Keep the two together."""
+        butler = {td["function"]["name"] for td in TOOL_DEFINITIONS}
+        coding = {td["function"]["name"] for td in CODING_TOOL_DEFINITIONS}
+        assert "generate_pipeline" not in butler
+        assert {"generate_pipeline", "drive_pipeline"}.issubset(coding)
 
 
 class TestConfigLoading:

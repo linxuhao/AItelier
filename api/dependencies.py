@@ -286,7 +286,7 @@ def get_tool_loader():
         # mirrors how ~/.AItelier/configs holds generated graphs. register_tool
         # drops <name>/{tool.yaml,impl.py} here; adding the dir makes them resolve
         # in list_tools()/load_fn() on the next boot without a code change.
-        gen_tools = Path.home() / ".AItelier" / "tools"
+        gen_tools = datadir.tools_dir()
         gen_tools.mkdir(parents=True, exist_ok=True)
         loader.add_tools_dir(gen_tools)
         _tool_loader_instance = loader

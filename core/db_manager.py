@@ -1962,12 +1962,14 @@ class DBManager:
             conn.commit()
         return totals
 
-    def list_chat_sessions(self, project_id: str | None = None, limit: int = 200) -> list[dict]:
+    def list_chat_sessions(self, project_id: str | None = None, limit: int = 200, offset: int = 0) -> list[dict]:
         """List chat sessions with message count and last message preview.
 
         Args:
             project_id: Optional project filter. None returns sessions across all projects.
             limit: Maximum number of sessions to return (default 20).
+            offset: Number of rows to skip before returning results (default 0).
+                Used for pagination together with limit.
 
         Returns:
             List of dicts, each with keys: session_id, project_id, message_count,
@@ -1995,8 +1997,8 @@ class DBManager:
                        GROUP BY s.id
                        HAVING message_count > 0
                        ORDER BY last_msg_id DESC
-                       LIMIT ?""",
-                    (project_id, limit),
+                       LIMIT ? OFFSET ?""",
+                    (project_id, limit, offset),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -2016,8 +2018,8 @@ class DBManager:
                        GROUP BY s.id
                        HAVING message_count > 0
                        ORDER BY last_msg_id DESC
-                       LIMIT ?""",
-                    (limit,),
+                       LIMIT ? OFFSET ?""",
+                    (limit, offset),
                 ).fetchall()
             return [dict(r) for r in rows]
 

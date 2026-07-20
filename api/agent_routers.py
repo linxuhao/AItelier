@@ -271,14 +271,16 @@ def get_chat_history(
 def list_sessions(
     project_id: str | None = None,
     limit: int = 200,
+    offset: int = 0,
     db: DBManager = Depends(get_db_manager),
 ):
     """List chat sessions with message count and last message preview.
 
     Supports optional project_id filter. Only returns sessions with
     at least one message. Ordered by most recent activity first.
+    Use limit and offset for pagination.
     """
-    sessions = db.list_chat_sessions(project_id=project_id, limit=limit)
+    sessions = db.list_chat_sessions(project_id=project_id, limit=limit, offset=offset)
     return {"sessions": sessions}
 
 

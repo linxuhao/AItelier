@@ -350,14 +350,18 @@ export function getChatHistory(
 
 /**
  * List chat sessions with message count and preview.
- * GET /api/agent/sessions?limit=200&project_id=...
+ * GET /api/agent/sessions?limit=...&offset=...&project_id=...
  *
  * @param projectId — optional project_id filter (pass null for all sessions)
+ * @param limit — max sessions to return (default 10)
+ * @param offset — pagination offset (default 0)
  */
 export function listSessions(
   projectId?: string | null,
+  limit: number = 10,
+  offset: number = 0,
 ): Promise<{ sessions: Record<string, unknown>[] }> {
-  let path = '/api/agent/sessions?limit=200';
+  let path = `/api/agent/sessions?limit=${limit}&offset=${offset}`;
   if (projectId) {
     path += '&project_id=' + encodeURIComponent(projectId);
   }

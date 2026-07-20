@@ -67,6 +67,7 @@
   let sessionInitiated = $state(false);
   let sessionList = $state<Record<string, unknown>[]>([]);
   let selectedSessionId = $state<string | null>(null);
+  let hasMoreSessions = $state(false);
 
   // Streaming state
   let abortController: AbortController | null = null;
@@ -285,12 +286,24 @@
     }
   }
 
-  async function _loadSessionList(): Promise<void> {
+  async function _loadSessionList(offset: number = 0, append: boolean = false): Promise<void> {
     try {
-      // List ALL sessions (no project filter) for the global session switcher
-      const response = await listSessions(null);
+      const limit = 10;
+      const response = await listSessions(null, limit, offset);
       if (response && response.sessions && Array.isArray(response.sessions)) {
-        sessionList = response.sessions;
+        const incoming = response.sessions;
+        if (append) {
+          // Deduplicate by session_id before appending
+          const existingIds = new Set(sessionList.map(s => s.session_id as string));
+          const newSessions = incoming.filter(s => !existingIds.has(s.session_id as string));
+          sessionList = [...sessionList, ...newSessions];
+        } else {
+          sessionList = incoming;
+        }
+        // Heuristic: if we got as many as we asked for, there may be more
+        hasMoreSessions = incoming.length >= limit;
+      } else {
+        hasMoreSessions = false;
       }
     } catch {
       // Silently skip
@@ -623,7 +636,7 @@
         }
 
         currentAgentText = '';
-        _loadSessionList();
+        _loadSessionList(0, false);
         break;
       }
 
@@ -897,9 +910,15 @@
     <select
       class="session-selector"
       value={selectedSessionId || ''}
-      onchange={(e) => {
-        const val = (e.target as HTMLSelectElement).value;
-        if (val) {
+      onchange={async (e) => {
+        const sel = e.target as HTMLSelectElement;
+        const val = sel.value;
+        if (val === '__load_more__') {
+          // Not a real selection — fetch the next page, then restore the
+          // selector to whatever session was actually active.
+          await _loadSessionList(sessionList.length, true);
+          sel.value = selectedSessionId || '';
+        } else if (val) {
           _switchSession(val);
         }
       }}
@@ -915,6 +934,11 @@
           {pid ? pid + ': ' : ''}{preview} ({count} msgs)
         </option>
       {/each}
+      {#if hasMoreSessions}
+        <option value="__load_more__" class="load-more-option">
+          — {t('chat.loadMore')} —
+        </option>
+      {/if}
     </select>
     <button class="outline btn-new-session" onclick={_handleNewSession} disabled={!connected}>
       {t('chat.newSession')}

@@ -87,6 +87,10 @@ def list_all_runs(
         # artifact, not a project — the dashboard hides them from the orphan list.
         r["is_authoring"] = bool(
             m and (m.registers_generated_pipeline or m.registers_generated_addon))
+        # Repo-less runs (authoring converters, generated pipelines that never
+        # touch code) have no repo to group under — the dashboard lists them in
+        # the same non-code section rather than the orphan project list.
+        r["repo_less"] = bool(m and m.repo_mode == "none")
         out.append(r)
 
     # Attach cache hit ratio stats per run (batch query).

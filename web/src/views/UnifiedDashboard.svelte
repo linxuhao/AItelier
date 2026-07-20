@@ -83,16 +83,19 @@
     try {
       const data = await listAllRuns();
       const runs = ((data as any)?.runs ?? data) as Record<string, unknown>[];
-      // Authoring-converter runs (generate_addon / generate_pipeline) have no
-      // repo, but are config-authoring tooling — split into their own section
-      // (auditable via traces) rather than mixing with orphan projects.
-      authoringRuns = runs.filter((r) => r.is_authoring);
+      // Non-code runs — authoring converters (generate_addon / generate_pipeline)
+      // and generated pipelines that never touch a repo — have no repo by design.
+      // Split into their own section (auditable via traces) rather than mixing
+      // with orphan projects, which are genuinely repo-less by accident.
+      const isNonCode = (r: Record<string, unknown>) =>
+        Boolean(r.is_authoring || r.repo_less);
+      authoringRuns = runs.filter(isNonCode);
       orphanProjects = runs.filter(
         (r) =>
           (r.repo_path == null ||
             r.repo_path === '' ||
             r.repo_path === undefined) &&
-          !r.is_authoring,
+          !isNonCode(r),
       );
     } catch {
       // Orphan / authoring runs are non-critical — silently ignore

@@ -60,15 +60,13 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     if manifest is None:
         return {"status": "error", "message": f"Unknown config '{config_name}'"}
 
-    # Authoring configs (skill_converter / addon_converter) emit a pipeline or
-    # overlay artifact, NOT a code repo. Give them a repo-less workspace
-    # (repo_type="none" → no repo_path, no throwaway projects/<id>/.git) so they
-    # stay fully repo-independent and never surface as a "fake repo" on the
-    # group-by-repo dashboard — the dashboard lists them in its own auditable
-    # authoring section instead.
-    authoring = bool(manifest.registers_generated_pipeline
-                     or manifest.registers_generated_addon)
-    eff_repo_type = "none" if authoring else repo_type
+    # Repo-ness is DECLARED by the config (manifest.repo_mode), not inferred from
+    # what the config registers. A config that emits an artifact instead of code
+    # (authoring converters, most generated pipelines) declares repo_mode="none"
+    # and gets a repo-less workspace — no repo_path, no throwaway
+    # projects/<id>/.git — so it never surfaces as a "fake repo" on the
+    # group-by-repo dashboard.
+    eff_repo_type = "none" if manifest.repo_mode == "none" else repo_type
 
     if not db.get_project(project_id):
         # Compute default repo_path for new/clone, same as project_routers.py.

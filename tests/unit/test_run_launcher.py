@@ -9,7 +9,8 @@ from core.run_launcher import generate_run_id, start_config_run
 
 def _fake_manifest(**over):
     base = dict(config_name="c", seed_file="x", scheduler_owned=False,
-                registers_generated_pipeline=False, registers_generated_addon=False)
+                registers_generated_pipeline=False, registers_generated_addon=False,
+                repo_mode="code")
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -34,15 +35,22 @@ def _run_start(manifest):
     return ep["repo_path"], ep["repo_type"], ws.setup_workspace.call_args.kwargs["repo_type"]
 
 
-def test_authoring_run_gets_repoless_workspace():
-    # skill_converter / addon_converter emit a config artifact, not a code repo —
+def test_repo_mode_none_gets_repoless_workspace():
+    # A config that emits an artifact instead of code declares repo_mode="none" —
     # no synthetic repo_path (else each surfaces as a "fake repo") AND repo_type
     # "none" so setup_workspace never git-inits a throwaway projects/<id> dir.
-    for m in (_fake_manifest(registers_generated_addon=True),
-              _fake_manifest(registers_generated_pipeline=True)):
-        rp, ep_type, ws_type = _run_start(m)
-        assert rp is None
-        assert ep_type == "none" and ws_type == "none"
+    rp, ep_type, ws_type = _run_start(_fake_manifest(repo_mode="none"))
+    assert rp is None
+    assert ep_type == "none" and ws_type == "none"
+
+
+def test_registering_a_generated_config_does_not_imply_repoless():
+    # The two axes are decoupled: what a run REGISTERS on completion says nothing
+    # about whether it needs a repo. Only repo_mode does.
+    rp, ep_type, ws_type = _run_start(
+        _fake_manifest(registers_generated_pipeline=True, repo_mode="code"))
+    assert rp is not None
+    assert ep_type == "new" and ws_type == "new"
 
 
 def test_plain_new_run_gets_a_repo_path():

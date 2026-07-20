@@ -14,7 +14,8 @@ description: "Grounded, self-provisioning skillflow config generator"
 x-aitelier:
   label: "Pipeline Forge"
   scheduler_owned: true
-  registers_generated_pipeline: true      # repo-less authoring run (run_launcher)
+  registers_generated_pipeline: true      # a completed run registers a runnable config
+  repo_mode: none                         # emits a config artifact, not code (run_launcher)
   seed_file: "skill_description.md"
   output_step: "emit_graph"
   input_hint: >-

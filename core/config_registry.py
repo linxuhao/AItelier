@@ -43,6 +43,7 @@ _DEFAULTS: dict = {
     "output_step": None,
     "registers_generated_pipeline": False,
     "registers_generated_addon": False,
+    "repo_mode": "code",
     "preamble_steps": [],
     "checkpoint_kind": "file-review",
     "checkpoint_kinds": {},
@@ -58,6 +59,7 @@ _EXTERNAL_HINTS: dict[str, dict] = {
         "seed_file": "skill_description.md",
         "output_step": "done",
         "registers_generated_pipeline": True,
+        "repo_mode": "none",
     },
     "addon_converter": {
         "label": "Capability → Addon",
@@ -65,6 +67,7 @@ _EXTERNAL_HINTS: dict[str, dict] = {
         "seed_file": "addon_description.md",
         "output_step": "done",
         "registers_generated_addon": True,
+        "repo_mode": "none",
     },
 }
 
@@ -102,6 +105,13 @@ class ConfigManifest:
     # should register (addon_converter). Parallel to registers_generated_pipeline,
     # so the meta agent's completion handler stays generic.
     registers_generated_addon: bool = False
+    # Does a run of this config produce/modify code in a git repo? "code" (the
+    # default) gets the usual repo workspace; "none" gets a repo-less one (no
+    # repo_path, no throwaway projects/<id>/.git). DECLARED, not inferred from
+    # the config's identity: authoring converters and generated pipelines are
+    # both often repo-less, but for unrelated reasons — conflating them is what
+    # gave test-drives of a generated pipeline a fake empty repo.
+    repo_mode: str = "code"
     # Step ids whose outputs are project-global & stable (e.g. SOTA/architecture).
     # The host hoists these into the shared system preamble for prompt caching.
     preamble_steps: list[str] = field(default_factory=list)
@@ -223,6 +233,7 @@ class ConfigRegistry:
             input_hint=hints.get("input_hint") or "",
             registers_generated_pipeline=bool(hints.get("registers_generated_pipeline")),
             registers_generated_addon=bool(hints.get("registers_generated_addon")),
+            repo_mode=hints.get("repo_mode") or "code",
             preamble_steps=list(hints.get("preamble_steps") or []),
             label_overrides=hints.get("labels") or {},
             checkpoint_kind=hints.get("checkpoint_kind") or "file-review",

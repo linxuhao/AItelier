@@ -21,8 +21,8 @@ aitelier "build me a todo app"
 aitelier server
 
 # Tests
-pytest tests/unit -v        # 360 unit tests
-pytest tests/ -v            # full suite: 364 unit+integration tests
+pytest tests/unit -v        # ~700 unit tests
+pytest tests/ -v            # full suite: ~985 unit+integration tests
 pytest tests/ -m network    # opt-in live tests (SearXNG / PyPI / httpbin), may flake
 
 # Web SPA front-end unit tests (Vitest + jsdom) — separate toolchain, not run by pytest
@@ -207,6 +207,7 @@ web/
 - **`configs/meta_conversation.yaml`** — Meta conversation graph (2 steps)
 - **`configs/coding_task.yaml`** — Plan-gated coding runner graph (plan checkpoint → implement), butler-driven via RunnerService
 - **`configs/code_review.yaml`** — One-shot diff review (butler-driven, `scheduler_owned: false`; verdict returns synchronously)
+- **`x-aitelier: repo_mode`** (per-config, default `code`) — does a run of this config produce/modify code in a git repo? `none` gives a repo-less workspace (no `repo_path`, no throwaway `projects/<id>/.git`) and lists the run in the dashboard's non-code section. DECLARED, never inferred from what a config *registers* — conflating the two axes is what gave `drive_pipeline` test-drives a fake empty repo. Generated `gen_*` pipelines DERIVE it from their graph (`core/pipeline_registry.py:derive_repo_mode`: git-touching tools / `validation.tool` / `from: repository` / role tool lists — read-only tools don't count, since skillflow's code-path resolution is lazy); the derivation is asymmetric on purpose — any signal ⇒ `code`, because a wrong `none` is a hard runtime failure while a wrong `code` only costs an unused repo
 - **`agent_configs/dpe_default.yaml`** — Agent configs by role: model, template, tools list, thinking settings
 - **`agent_configs/meta_conversation.yaml`** — Meta conversation agent configs + meta_agent (incl. `coding_max_tool_turns`, `compact_at_tokens`) + `compacter` (condenser)
 - **`agent_configs/coding_task.yaml`** — Runner-step roles whose `system_prompt` IS the per-step prompt (the butler does the work, no LLM spawned)

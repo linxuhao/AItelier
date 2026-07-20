@@ -231,3 +231,54 @@ def test_invalid_graph_returns_error_and_persists_nothing(sf, registry, gdir,
 def test_wrapper_importable():
     from api.dependencies import register_pipeline_from_run
     assert callable(register_pipeline_from_run)
+
+
+# ── repo_mode derivation ───────────────────────────────────────────────────
+# A generated pipeline gets its workspace shape DERIVED from its graph, not
+# declared by the emitting agent. Asymmetric on purpose: any repo signal ⇒
+# "code" (an unused empty repo is harmless), only a total absence ⇒ "none"
+# (guessing "none" wrongly is a hard runtime failure).
+
+def _graph_with(step_over: dict, roles: dict | None = None):
+    from skillflow.graph import PipelineGraph
+    data = yaml.safe_load(GEN_YAML)
+    data["name"] = "gen_probe"
+    data["steps"][0].update(step_over)
+    return PipelineGraph._from_dict(data), roles
+
+
+def test_repo_mode_none_when_graph_never_touches_a_repo():
+    graph, roles = _graph_with({})
+    assert pr.derive_repo_mode(graph, roles) == "none"
+
+
+@pytest.mark.parametrize("over", [
+    {"step_type": "tool", "tool_name": "repo_apply", "agent_config": ""},
+    {"validation": [{"tool": "pytest", "files": []}]},
+    {"context": [{"from": "repository", "path": "src/"}]},
+])
+def test_repo_signals_force_code_mode(over):
+    graph, roles = _graph_with(over)
+    assert pr.derive_repo_mode(graph, roles) == "code"
+
+
+def test_agent_reaching_the_repo_through_its_role_tools_forces_code_mode():
+    # The graph node itself is innocent — the signal is in the role's tool list.
+    graph, roles = _graph_with({}, {"processor": {"tools": ["read_file", "repo_apply"]}})
+    assert pr.derive_repo_mode(graph, roles) == "code"
+
+
+def test_read_tools_alone_are_not_a_repo_signal():
+    # skillflow's code-path resolution is lazy: a read against a missing repo
+    # finds nothing, it does not fail. Only git-touching tools hard-depend.
+    graph, roles = _graph_with({}, {"processor": {"tools": ["read_file", "list_tree"]}})
+    assert pr.derive_repo_mode(graph, roles) == "none"
+
+
+def test_registered_generated_pipeline_carries_the_derived_repo_mode(sf, registry, gdir):
+    gdir.mkdir(parents=True, exist_ok=True)
+    data = yaml.safe_load(GEN_YAML)
+    data["name"] = "gen_repoless"
+    (gdir / "gen_repoless.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    pr.load_generated_configs(sf, registry)
+    assert registry.get("gen_repoless").repo_mode == "none"

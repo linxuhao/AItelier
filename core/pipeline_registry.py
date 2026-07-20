@@ -50,6 +50,53 @@ GEN_HINTS = {
 }
 _log = logging.getLogger(__name__)
 
+# Tools that HARD-depend on the project's code repo existing as a git repo
+# (they commit / validate / run against it). Read-type tools (read_file,
+# list_tree) are deliberately NOT here: skillflow's get_project_code_path is
+# lazy and happily returns a path that doesn't exist, so a read just finds
+# nothing — only the git-touching tools actually break without a repo.
+_REPO_TOOLS = frozenset({
+    "repo_apply", "draft_commit", "git_sync_pre", "repo_validate",
+    "compose_validate", "pytest", "run_tests",
+})
+
+
+def derive_repo_mode(graph, roles: dict | None = None) -> str:
+    """Does this generated graph need a code repo? ``"code"`` or ``"none"``.
+
+    Derived from the graph itself rather than declared by the emitting agent —
+    a generated pipeline has no say in its own workspace shape, and a derivation
+    can't hallucinate. Deliberately ASYMMETRIC: any repo signal at all ⇒
+    ``"code"``, because guessing "none" wrongly is a hard runtime failure
+    (repo_apply against a nonexistent repo) while guessing "code" wrongly only
+    costs an unused empty repo.
+    """
+    for step in getattr(graph, "steps", []) or []:
+        if (getattr(step, "tool_name", "") or "") in _REPO_TOOLS:
+            return "code"
+        for spec in getattr(step, "validation", []) or []:
+            if (spec or {}).get("tool") in _REPO_TOOLS:
+                return "code"
+        for spec in getattr(step, "context", []) or []:
+            if (spec or {}).get("from") == "repository":
+                return "code"
+        # An agent step reaches the repo through its role's tool list. Graph
+        # agent_configs are namespaced (`<config>__<role>`); role_table keys are bare.
+        ac = (getattr(step, "agent_config", "") or "").split(_ROLE_SEP)[-1]
+        role = (roles or {}).get(ac) or {}
+        if _REPO_TOOLS & set(role.get("tools") or []):
+            return "code"
+    return "none"
+
+
+def _gen_hints(graph, roles: dict | None = None) -> dict:
+    """GEN_HINTS plus the repo_mode derived from this particular graph."""
+    mode = derive_repo_mode(graph, roles)
+    if mode == "none":
+        _log.info("generated pipeline %r has no repo signal → repo-less workspace",
+                  getattr(graph, "name", "?"))
+    return {**GEN_HINTS, "repo_mode": mode}
+
 
 # ── Naming / storage ───────────────────────────────────────────────────────
 
@@ -153,7 +200,8 @@ def ensure_host_agents(sf, graph) -> list[str]:
     return added
 
 
-def _register_text(sf, registry, config_name: str, yaml_text: str):
+def _register_text(sf, registry, config_name: str, yaml_text: str,
+                   roles: dict | None = None):
     """Parse a (already-namespaced, already-seeded) generated pipeline YAML, force
     its name to *config_name*, register host agents + the graph live, and add a
     registry manifest with the generated-pipeline host hints. Raises on validation
@@ -165,7 +213,8 @@ def _register_text(sf, registry, config_name: str, yaml_text: str):
     graph = PipelineGraph._from_dict(data)
     ensure_host_agents(sf, graph)
     sf.register_graph(graph)            # validates graph + agent_config refs
-    registry.register_one(sf, config_name, hint_overrides=GEN_HINTS)
+    registry.register_one(sf, config_name,
+                          hint_overrides=_gen_hints(graph, roles))
     return graph
 
 
@@ -276,7 +325,8 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
         graph = PipelineGraph._from_dict(yaml.safe_load(yaml_text))
         ensure_host_agents(sf, graph)   # any role not in role_table → generic fallback
         sf.register_graph(graph)
-        registry.register_one(sf, config_name, hint_overrides=GEN_HINTS)
+        registry.register_one(sf, config_name,
+                              hint_overrides=_gen_hints(graph, roles))
     except Exception as e:
         return {"error": f"emitted pipeline failed validation: {e}"}
 
@@ -303,11 +353,13 @@ def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
         return {"error": f"no persisted config {config_name}.yaml"}
     try:
         roles_file = f.with_suffix(".roles.json")
+        roles = None
         if roles_file.exists():
             import json
-            _register_forge_roles(sf, config_name,
-                                  json.loads(roles_file.read_text(encoding="utf-8")))
-        _register_text(sf, registry, config_name, f.read_text(encoding="utf-8"))
+            roles = json.loads(roles_file.read_text(encoding="utf-8"))
+            _register_forge_roles(sf, config_name, roles)
+        _register_text(sf, registry, config_name, f.read_text(encoding="utf-8"),
+                       roles=roles)
         return {"config_name": config_name}
     except Exception as e:
         return {"error": f"reload failed: {e}"}
@@ -322,10 +374,13 @@ def load_generated_configs(sf, registry) -> list[str]:
     for f in sorted(generated_configs_dir().glob(f"{GEN_PREFIX}*.yaml")):
         try:
             roles_file = f.with_suffix(".roles.json")
+            roles = None
             if roles_file.exists():
                 import json
-                _register_forge_roles(sf, f.stem, json.loads(roles_file.read_text(encoding="utf-8")))
-            _register_text(sf, registry, f.stem, f.read_text(encoding="utf-8"))
+                roles = json.loads(roles_file.read_text(encoding="utf-8"))
+                _register_forge_roles(sf, f.stem, roles)
+            _register_text(sf, registry, f.stem, f.read_text(encoding="utf-8"),
+                           roles=roles)
             out.append(f.stem)
         except Exception as e:
             _log.warning("skipping invalid generated config %s: %s", f.name, e)

@@ -34,6 +34,7 @@ _SLASH_COMMANDS = [
     ("/frequency", "Scheduler poll interval", True, False),
     ("/cron", "Scheduler cron schedule", True, False),
     ("/restart", "Restart backend server", False, False),
+    ("/mode", "Show/switch butler↔coding mode (/mode coding)", True, False),
     ("/delete", "Delete a project (e.g. /delete hello-world)", True, False),
     # Project-scoped commands (only when inside a project)
     ("/status", "Show current project tasks", False, True),
@@ -622,6 +623,11 @@ class ChatZone(Container):
         self.history: list[dict] = []
         self.current_project: str | None = None
         self.session_id: str | None = None
+        # Butler vs coding mode — user-toggled (never model-toggled, so prompt
+        # injection can't escalate). Sent on every /api/agent/chat request and
+        # persisted server-side to sessions.mode. Coding mode unlocks the
+        # interactive coding agent (edit_file/bash/generate_pipeline/…).
+        self._agent_mode: str = "butler"
         self._agent_streaming = False
         self._completion_matches: list[tuple] = []
         self._completion_index: int = 0
@@ -1126,7 +1132,32 @@ class ChatZone(Container):
         elif cmd == "/restart":
             self._handle_restart_cmd()
             return True
+        elif cmd == "/mode":
+            self._handle_mode_cmd(rest.strip())
+            return True
         return False
+
+    def _handle_mode_cmd(self, arg: str):
+        """Show or switch the butler↔coding agent mode.
+
+        Coding mode unlocks the interactive coding agent (edit_file / bash /
+        generate_pipeline / drive_pipeline / …). Mirrors the web SPA's mode
+        toggle; the request field is the ONLY way to set it (never a model
+        tool), so this stays a user-driven control."""
+        arg = (arg or "").lower()
+        if not arg:
+            self._add_system(
+                f"Agent mode: {self._agent_mode}. "
+                "Use /mode coding or /mode butler to switch.")
+            return
+        if arg not in ("butler", "coding"):
+            self._add_error("Usage: /mode <butler|coding>")
+            return
+        self._agent_mode = arg
+        self._add_system(
+            f"Switched to {arg} mode."
+            + (" Coding agent unlocked (edit_file/bash/generate_pipeline/…)."
+               if arg == "coding" else ""))
 
     def _handle_project_cmd(self, arg: str):
         """Handle /project <number|id>."""
@@ -1797,6 +1828,7 @@ class ChatZone(Container):
                     "history": self.history,
                     "current_project": self.current_project,
                     "session_id": self.session_id,
+                    "mode": self._agent_mode,
                 },
                 timeout=None,
             ) as resp:

@@ -36,6 +36,9 @@ CHEATSHEET = """\
 6. Manifest -> loop fan-out for per-item work: a step emits a manifest
    {"execution_order": [[id,...],...]}; a `step_type: loop` node consumes it with
    loop.source + item_as + $var interpolation in later steps' context paths.
+   A loop node is NOT self-bounding to the lint: put max_loop: N (=max_iterations)
+   on the loop->body edge AND the body->loop return edge, or the lint fails the
+   cycle as unbounded. End the loop body on an AGENT step (loop crediting).
 7. Verdict routing: transitions branch on the verdict file, e.g.
    {to: next, match: {from_file: review_verdict.json, field: passed, value: true}}
    and the reject edge loops back to the maker with max_loop: 3.

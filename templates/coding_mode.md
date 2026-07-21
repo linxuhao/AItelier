@@ -184,6 +184,17 @@ into an isolated place whose transcript you don't pay for.
   4. Only then present it as ready. (Common fix: a reviewer role should drop
      `read_file` and rely on its injected context, like the DPE reviewers.)
 
+  **If `generate_pipeline` FAILS before the checkpoint** (its result is a failure,
+  not a design checkpoint — e.g. the emit loop hit its cycle limit), that is a
+  bug in the `pipeline_forge` generator itself, NOT a per-run artifact to
+  salvage. Do NOT hand-patch the failed run's throwaway workspace. Read the
+  `first_failure` to see which forge step broke, then: if it's a one-off flake,
+  just call `generate_pipeline` again; if it's a real forge defect (the emitter
+  keeps omitting a required file, a forge gate is wrong), fix `pipeline_forge`
+  itself (`configs/pipeline_forge.yaml` / `templates/forge_*.md`) — a repo change,
+  so surface it to the user — then re-run. The generated `gen_<slug>` doesn't
+  exist yet when the run fails pre-checkpoint, so there is nothing to `drive`.
+
 ### Your pipelines
 
 These are registered right now (name [drive mode] — what it does):

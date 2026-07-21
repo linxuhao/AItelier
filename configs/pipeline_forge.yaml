@@ -288,7 +288,14 @@ steps:
     output:
       mode: "write"                            # writes pipeline.yaml, role_table.yaml, templates/*.md
     validation:
-      - files: ["pipeline.yaml"]
+      # role_table.yaml is a HARD requirement, not a review nicety: without it
+      # register_forge_pipeline gives every agent_config a generic stub prompt,
+      # so the generated pipeline registers but is behaviorally empty. Enforcing
+      # it here fails-and-retries the emit step in place (tight feedback via the
+      # injected _validation_error) instead of bouncing through emit_review and
+      # burning its bounded loop — an emitter that stops after pipeline.yaml used
+      # to exhaust max_loop=3 and hard-fail the whole run.
+      - files: ["pipeline.yaml", "role_table.yaml"]
         tool: "file_exists"
     transitions:
       - to: "emit_review"
@@ -317,7 +324,7 @@ steps:
         match: { from_file: "review_verdict.json", field: "passed", value: true }
       - to: "emit_graph"
         match: { from_file: "review_verdict.json", field: "passed", value: false }
-        max_loop: 3
+        max_loop: 5     # emit convergence can take a few rounds; keep headroom
 
   # ─── 3-part deterministic gate: lint → registry-check → dry-run smoke ────
   - id: "v_lint"
@@ -330,7 +337,7 @@ steps:
         match: { passed: true }
       - to: "emit_graph"
         match: { passed: false }
-        max_loop: 3
+        max_loop: 5     # lint fixes can take a few rounds; keep headroom (off-by-one killed a run at 3)
 
   - id: "v_registry"
     step_type: "tool"
@@ -343,7 +350,7 @@ steps:
         match: { passed: true }
       - to: "architect"                         # unknown tool ⇒ may need (re)building
         match: { passed: false }
-        max_loop: 3
+        max_loop: 5
 
   - id: "v_smoke"
     step_type: "tool"
@@ -355,7 +362,7 @@ steps:
         match: { passed: true }
       - to: "emit_graph"
         match: { passed: false }
-        max_loop: 3
+        max_loop: 5
 
   # ─── Human design review (checkpoint) ────────────────────────────────────
   - id: "explain"

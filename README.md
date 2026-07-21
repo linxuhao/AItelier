@@ -23,7 +23,7 @@ Most "AI agent" tooling is built for demos, not trust. The tools that build soft
 AItelier is built on the opposite premise — that an autonomous pipeline should be **trustworthy by construction**:
 
 - **Deterministic** — pipelines are graphs (DAGs) traversed by the engine, not control flow improvised by an LLM. Same config, same path. Loops, gates, retries, and recovery are the engine's job, not the model's.
-- **Minimal LLM surface (least privilege)** — each agent sees only the context it declares, and the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine generates a constrained **write tool per declared output** (and gates reads to declared context) — so an agent *cannot* read or write a file outside its contract. Concretely in the software pipeline: the Researcher can only search the web; the Architect, planners, reviewers, and final verifier are read-only; *only* the Implementer can write code. The model makes the judgment calls; the framework and its generated tools do everything deterministic — *brain to brain, tools to tools*. It's also why cheap models suffice: small, focused, role-scoped context.
+- **Minimal LLM surface (least privilege)** — each agent sees only the context it declares, and the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine generates a constrained **write tool per declared output** (and gates reads to declared context) — so an agent *cannot* read or write a file outside its contract. Concretely in the software pipeline: the Researcher can only search the web; every other role can write only its own declared output (a design doc, a plan, a review verdict, or the project README) — and *only* the Implementer's outputs are code. The model makes the judgment calls; the framework and its generated tools do everything deterministic — *brain to brain, tools to tools*. It's also why cheap models suffice: small, focused, role-scoped context.
 - **Fully traceable** — every run keeps an append-only audit trace that is *never deleted*: each step, prompt, model response, and tool call. "Why did this run do that?" is one query, not forensic archaeology.
 - **Human-in-the-loop** — approval/reject checkpoints are first-class between stages; review and send work back with feedback at any point.
 - **Adversarial quality** — every step is produced by a Green (Maker) agent and reviewed by a Red (Checker) agent before it advances.
@@ -143,7 +143,7 @@ A typical run with the flagship DPE pipeline:
 1. **Describe what you want.** Tell the butler your goal. It picks one of two paths automatically:
    - **Path A — Pipeline Offload** (fast): for small bug fixes or features (~5 files) on existing projects, offloads directly to a subagent/fix_tests/investigate pipeline — no requirements conversation needed.
    - **Path B — DPE** (safe default): for new projects and non-trivial changes, asks scoping questions, drafts a project brief, and — once you approve — starts the full research → architect → plan → build pipeline.
-2. **Watch it work, with checkpoints.** Research → Architect → PM → per-task Plan/Implement/Verify → Final Verification. It **pauses at review checkpoints** so you can **approve** or **reject with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
+2. **Watch it work, with checkpoints.** Research → Architect → PM → per-task Plan/Implement/Review → Final Verification. It **pauses at review checkpoints** so you can **approve** or **reject with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
 3. **Inspect the trace.** Every prompt, response, and tool call is in an append-only audit log — answer "why did it do that?" for any step, after the fact.
 4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.
 
@@ -188,7 +188,7 @@ AItelier is a **host application** on top of the SkillFlow framework:
 ```
 Meta Conversation (gather requirements)
   → DPE Pipeline:
-    Research → Architect → PM → [per task: Plan → Implement → Verify]
+    Research → Architect → PM → [per task: Plan → Implement → Review]
     → Final Verification
 ```
 

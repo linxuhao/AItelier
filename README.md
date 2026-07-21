@@ -36,7 +36,7 @@ AItelier is built on the opposite premise — that an autonomous pipeline should
 AItelier is meant to be used two ways:
 
 1. **Run the flagship software pipeline (DPE)** — ✅ *works today.* Describe a project; it researches, architects, plans, implements, and verifies it end-to-end, with human checkpoints and a complete trace. (That's the demos below.)
-2. **Build your own auditable workflow** — *partly today, mostly roadmap.* Pipelines aren't limited to software. Today you define a workflow as a [SkillFlow](https://github.com/linxuhao/SkillFlow) pipeline (YAML) and run it through AItelier; a no-code visual builder and managed workspaces are on the [roadmap](#roadmap).
+2. **Build your own auditable workflow — just describe it** — ✅ *works today.* Pipelines aren't limited to software. **Describe a workflow in chat** and AItelier's grounded generator turns it into a real SkillFlow pipeline — provisioning any missing tools, wiring and gating the graph, and registering it to run by name (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)). You can still hand-author YAML directly; a no-code *visual* builder and managed workspaces are on the [roadmap](#roadmap).
 
 **Why software-delivery is the wedge _and_ the keystone.** We lead with autonomous software-building because it's the hardest possible proof the engine works — and because **an AI workflow *is* software** (a pipeline is a graph plus tools plus templates). The same deterministic factory that builds software is what will let you *trust a workflow you build on AItelier* — building a new auditable workflow is itself a software-engineering task. A trusted software pipeline builds trusted workflows.
 
@@ -54,6 +54,7 @@ Honest, current state — so nothing here reads as more finished than it is.
 | Green/Red adversarial review · human approve/reject-with-feedback checkpoints · autonomous goal-loop | ✅ Available today |
 | Append-only trace + trace API · Git event-sourcing · Rich CLI/TUI | ✅ Available today |
 | Runs on the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine (deterministic DAG execution, tools, checkpoints, durable trace) | ✅ Available today |
+| **Generate a pipeline from a plain-language description** — grounded generator provisions missing tools, wires + gates the graph, registers it to run by name | ✅ Available today |
 | Final verifier **runs** the generated app (runtime smoke-test) | 🚧 Roadmap — *today it reviews code statically and can miss runtime bugs* |
 | No-code visual workflow builder · managed multi-tenant SaaS · collaboration & compliance tooling | 🚧 Roadmap |
 | Horizontal expansion beyond software delivery, on the same engine | 🔭 Vision |
@@ -146,6 +147,17 @@ A typical run with the flagship DPE pipeline:
 3. **Inspect the trace.** Every prompt, response, and tool call is in an append-only audit log — answer "why did it do that?" for any step, after the fact.
 4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.
 
+## Generate a workflow from a description
+
+**Don't want to hand-write a pipeline? Describe it.** ✅ *Works today.* In the butler's **coding mode**, the `generate_pipeline` tool turns a plain-language workflow into a real, runnable [SkillFlow](https://github.com/linxuhao/SkillFlow) pipeline — grounded in the live tool registry, self-provisioning any tools it needs, and gated before it ships. No YAML by hand, no server restart.
+
+1. **Describe it.** *"Make a pipeline that researches a topic, drafts a summary, then fact-checks it."* The grounded `pipeline_forge` generator surveys the real tool registry → designs the graph → **builds and registers any missing tools** → emits the config → passes a 3-part gate (lint + registry check + dry-run smoke) → pauses at a review checkpoint.
+2. **It's registered automatically.** On approval the graph lands under a namespaced name like `gen_research_draft_factcheck` (the `gen_` prefix can never clash with a built-in config).
+3. **Run it by name.** *"Run it on 'CRISPR gene editing'."* → the butler launches it, and it shows up in the dashboards — and the trace — like any other run.
+4. **Iterate in place.** *"Add a citation step and run it again."* → re-describe it under the **same name** and it's **updated in place**; the next run uses the new version.
+
+Every generated run gets the same deterministic execution, human checkpoints, and append-only trace as the flagship pipeline. Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. This is the working core of the [no-code workflow platform](#roadmap) — the visual builder on top of it is still to come.
+
 ## Configuration
 
 To change which models or agents the pipeline uses, edit the config files directly:
@@ -153,16 +165,7 @@ To change which models or agents the pipeline uses, edit the config files direct
 - **`llm_providers.json`** — LLM providers (base URLs, API-key env var names). Register a provider here before pointing an agent at it.
 - **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the **chat butler / meta agent** lives in `meta_conversation.yaml` (`meta_agent.model`) — so the conversational front-end is configurable exactly like the pipeline roles.
 - **`templates/`** — the LLM prompt templates each step uses
-- **`AITELIER_HOST_AGENT_MODEL`** (env, default `deepseek/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. A **generated** pipeline ships its agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them.
-
-> **Generate a pipeline from a description, then run it.** Beyond building software, the butler's **coding mode** can turn a described workflow into a reusable SkillFlow pipeline *and run it*, without editing YAML or restarting the server:
->
-> 1. In coding mode, ask it to *"make a pipeline that researches a topic, drafts a summary, then fact-checks it."* The `generate_pipeline` tool runs the grounded `pipeline_forge` generator (survey the live tool registry → design the graph → build any missing tools → emit → lint + registry + dry-run gates → review checkpoint).
-> 2. On approval the generated graph is **auto-registered** under a namespaced name like `gen_research_draft_factcheck` (the `gen_` prefix means it can never clash with a built-in config).
-> 3. *"Run it on 'CRISPR gene editing'."* → the butler launches it by name and it appears in the dashboards like any other run.
-> 4. *"Add a citation step and run it again."* → re-describe it under the **same name** and it's **updated in place**; the next run uses the new version.
->
-> Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. Their host-delegated agents ship as `model:"host"` (see `AITELIER_HOST_AGENT_MODEL` above), so no per-role config is needed.
+- **`AITELIER_HOST_AGENT_MODEL`** (env, default `deepseek/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. A **generated** pipeline ships its agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)).
 
 ## How it works
 

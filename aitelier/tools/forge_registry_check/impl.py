@@ -88,6 +88,29 @@ def forge_registry_check(graph_path: str = "", role_table: str = "", **kwargs) -
             violations.append(f"step '{sid}': looks like a reviewer but is a tool — a review "
                               f"must be an `agent` emitting review_verdict.json")
 
+        # Reviewer-reads-its-maker: the #1 behavioral defect that passes lint/smoke
+        # but fails at runtime. A reviewer loops back to its maker on `passed:false`;
+        # if it doesn't READ that maker's output via {step:<maker>} context, it judges
+        # blind, rejects every round, and the loop churns until max_loop kills the run.
+        if stype == "agent" and "review" in str(sid).lower():
+            maker = None
+            for t in (s.get("transitions") or []):
+                if not isinstance(t, dict):
+                    continue
+                m = t.get("match") or {}
+                # reject edge: passed==false loops back to the maker
+                if m.get("field") == "passed" and m.get("value") in (False, "false") and t.get("to"):
+                    maker = t["to"]
+                    break
+            if maker and maker in step_ids:
+                ctx_steps = {(c.get("source") or {}).get("step")
+                             for c in (s.get("context") or []) if isinstance(c, dict)}
+                if maker not in ctx_steps:
+                    violations.append(
+                        f"step '{sid}': reviewer loops back to maker '{maker}' on reject but "
+                        f"does NOT read its output — add a context source {{step: {maker}}} or "
+                        f"it judges blind (rejects every round → loop churns to failure)")
+
         # Context source references resolve.
         for c in (s.get("context") or []):
             src = c.get("source") if isinstance(c, dict) else None

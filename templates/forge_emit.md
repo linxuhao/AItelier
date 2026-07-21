@@ -143,6 +143,65 @@ item re-serves forever). Copy this shape:
         max_loop: 3
 ```
 
+### GOLD maker→reviewer pair — copy this shape, every keyword explained
+
+This is the single most important pattern and the one most often emitted WRONG.
+The defect is always the same: the reviewer can't see what the maker produced, so
+it rejects every round and the loop churns until it hard-fails. Copy this verbatim
+and rename; do not simplify away any field.
+
+```yaml
+  # ── MAKER: an agent that produces a concrete, NAMED artifact ──
+  - id: draft                          # <step id>, unique in the graph
+    step_type: agent                   # agent = an LLM does the work (needs a role)
+    agent_config: drafter              # MUST exist in role_table.yaml
+    context:                           # what is injected into the maker's prompt…
+      - source: { config: my_pipeline, output: task.md }   # …the seed/input
+      - source: { step: review }       # …the reviewer's last verdict, so a redo
+                                        #   FIXES what was flagged (loop-back feedback)
+    output:
+      mode: content                    # content = the maker may write ONLY the files
+                                        #   declared in `fixed` (NOT free-form). Prefer
+                                        #   this over `write` so the artifact has a
+                                        #   KNOWN filename the reviewer can rely on.
+      fixed:
+        brief:                         # a slot name (arbitrary label)
+          file: brief.md               # the exact filename written — the CONTRACT
+          on_exists: replace           # replace = overwrite each redo (a maker output)
+    transitions:
+      - to: review                     # always hand off to the reviewer next
+  # ── REVIEWER: an agent that judges the maker's artifact ──
+  - id: review
+    step_type: agent
+    agent_config: reviewer             # MUST exist in role_table.yaml
+    context:
+      - source: { step: draft }        # ★ CRITICAL ★ reads the maker's output dir
+                                        #   (brief.md). WITHOUT THIS the reviewer sees
+                                        #   nothing, rejects forever → loop churns to
+                                        #   failure. This is the #1 emit bug.
+    output:
+      mode: content
+      fixed:
+        verdict:
+          file: review_verdict.json    # the reviewer's verdict file
+          on_exists: new               # new = fresh each loop iteration (NOT replace),
+                                        #   so a stale prior verdict never leaks forward
+          format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}'
+                                        # REQUIRED on a .json slot: makes the write
+                                        #   constrained-valid (see output.fixed ref below)
+    transitions:
+      - to: next_step                  # pass → move on
+        match: { from_file: review_verdict.json, field: passed, value: true }
+      - to: draft                      # fail → back to the maker WITH its verdict
+        match: { from_file: review_verdict.json, field: passed, value: false }
+        max_loop: 3                    # bound the redo loop (REQUIRED on the cycle)
+```
+
+The reviewer's role template must (a) say the artifact is provided in context —
+never "read_file" it — and (b) demand only what ONE agent turn can deliver (a
+reviewer that requires "cover all 40 stocks in depth" rejects forever; scope the
+maker's job to what's achievable, then the reviewer to that same bar).
+
 ### Rules (a lint/registry/smoke failure comes from breaking one of these)
 - `end_conditions` is a **mapping** `{combinator, conditions: [...]}`; each condition
   has a `type` (`node_reached` needs `node` + `result`; `max_total_steps` needs `limit`).

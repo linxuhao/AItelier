@@ -237,32 +237,6 @@ npm run dev                     # dev server with HMR
 
 The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's test step (`run_tests`, 5_test) gates node projects automatically: it finds `package.json` (root or one level deep, e.g. `web/`) and runs `npm ci` + `npm run build` + `npm test`, folding failures into the goal-loop.
 
-### Unified Dashboard
-
-The **Unified Dashboard** (`/` and `/projects`) merges the former separate Dashboard and Repositories pages into a single view. Projects are **grouped by their parent repository** with collapsible `<details>`/`<summary>` sections, a front-end search bar, and inline git-status thumbnails.
-
-**Key features**:
-- **Repo grouping** — projects are grouped by `repo_path` using the existing `GET /api/repos` endpoint (no backend changes). Each repo section shows the repo name, type badge, project count, and last activity timestamp.
-- **Collapsible sections** — all repo sections are collapsed by default, except the one containing the **most recently updated project** (auto-expanded on page load). Expand/collapse all buttons are provided.
-- **Full RepoPanel** — expanding a repo section lazy-loads the full `RepoPanel.svelte` component showing complete git status (branch, remote, upstream tracking, ahead/behind counts), commit history, download-zip link, and all six action buttons (Commit, Push, Pull, Force Sync, Make PR, Set Remote). Git operation messages are forced to English (`LC_ALL=C`) on the backend regardless of server locale.
-- **Front-end search** — a search bar filters repos and projects in real-time by case-insensitive substring match against repo name, repo path, and project name. During active search, all matching repo sections are auto-expanded.
-- **Orphan projects** — projects without a `repo_path` appear in a dedicated "Projects without a repository" section at the bottom.
-- **Create/delete projects** — the create-project form and delete confirmation dialog are ported from the old Dashboard.
-
-**Routes**:
-
-| Route | Component | Description |
-|-------|-----------|-------------|
-| `/` | `UnifiedDashboard.svelte` | Unified dashboard (primary entry) |
-| `/projects` | `UnifiedDashboard.svelte` | Backward-compatible alias |
-| `/repos` | `RedirectToDashboard.svelte` | Redirects to `/` |
-| `/repos/:repoPath` | `RedirectToDashboard.svelte` | Redirects to `/` |
-| `/projects/:id` | `Project.svelte` | Per-project detail (unchanged) |
-
-**Backend**: No changes — the unified dashboard consumes existing `GET /api/repos`, `GET /api/runs`, and repo-status endpoints as-is.
-
-Navigation: Dashboard → expand repo → click project → Project detail, with the most-recently-active repo pre-expanded.
-
 ### i18n (Internationalization)
 
 The app supports **8 languages**: English (`en`), Simplified Chinese (`zh-CN`), Traditional Chinese (`zh-TW`), Japanese (`ja`), Korean (`ko`), French (`fr`), German (`de`), and Spanish (`es`). The i18n module (`web/src/lib/i18n.svelte.ts`) uses a **Svelte 5 `$state` rune** + `langStore.subscribe()` pattern to make the `t()` translation function reactive — switching languages in the AppBar dropdown triggers an automatic live re-render of all visible components, with no page navigation required.
@@ -272,23 +246,6 @@ node web/audit-i18n.mjs            # verify all t() keys exist in all 8 language
 ```
 
 The persistent language store (`web/src/stores/i18n.ts`) syncs the user's selection to `localStorage` and the backend API (`POST /api/settings/user/language`).
-
-## Recent Delivery — jinyong-heroes Compilation Fixes
-
-**Date**: March 2025
-
-Resolved **4 compilation errors and 2 obsolete-API warnings** in the jinyong-heroes Unity project (Unity 2023.1+). All fixes are pure C# script edits with zero behavioural change.
-
-| Fix | File | Change | Error/Warning |
-|-----|------|--------|---------------|
-| 1 | `SkillEffectResolver.cs:128` | `target.Heal(healed)` | CS0272 — protected setter bypass |
-| 2 | `SkillEffectResolver.cs:147` + `CombatManager.cs` | `combat?.RaiseDamageDealt(...)` + new `RaiseDamageDealt()` method | CS0070 — event invocation from external type |
-| 3 | `Placeholders.cs:166` | `UnityEngine.Sprite.Create(...)` | CS0119 — type/method name ambiguity |
-| 4 | `UIManager.cs:360` | `TextAlignmentOptions.Center` | CS0117 — invalid TMP enum value |
-| 5 | `CameraController.cs:49` | `FindAnyObjectByType<Light>()` | CS0618 — deprecated FindFirstObjectByType |
-| 6 | `TutorialManager.cs:410` | `FindObjectsOfType<Character>()` | CS0618 — deprecated FindObjectsByType overload |
-
-**Status**: ✅ All 6 fixes verified — zero errors, zero warnings. No behavioural changes.
 
 ## License
 

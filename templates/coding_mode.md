@@ -151,7 +151,10 @@ into an isolated place whose transcript you don't pay for.
   missing tools, emits the graph, and passes 3 deterministic gates
   (lint + registry-check + dry-run smoke) before a design checkpoint you relay.
   Registered as `gen_<slug>`. Only for a recurring shape worth reusing — a one-off
-  stays in layer 1/2.
+  stays in layer 1/2. **This is a USER feature, not a source change:** the generated
+  graph, roles, and any built tools are persisted to `~/.AItelier/` (the workspace)
+  and boot-scanned — generating a pipeline NEVER edits or commits to AItelier's
+  source repo. A user can create pipelines without touching the codebase.
 
   **To MODIFY an existing generated pipeline** (add/remove/change a feature), call
   `generate_pipeline(description=<the change>, edit_target="gen_<slug>")` — it loads
@@ -185,15 +188,14 @@ into an isolated place whose transcript you don't pay for.
      `read_file` and rely on its injected context, like the DPE reviewers.)
 
   **If `generate_pipeline` FAILS before the checkpoint** (its result is a failure,
-  not a design checkpoint — e.g. the emit loop hit its cycle limit), that is a
-  bug in the `pipeline_forge` generator itself, NOT a per-run artifact to
-  salvage. Do NOT hand-patch the failed run's throwaway workspace. Read the
-  `first_failure` to see which forge step broke, then: if it's a one-off flake,
-  just call `generate_pipeline` again; if it's a real forge defect (the emitter
-  keeps omitting a required file, a forge gate is wrong), fix `pipeline_forge`
-  itself (`configs/pipeline_forge.yaml` / `templates/forge_*.md`) — a repo change,
-  so surface it to the user — then re-run. The generated `gen_<slug>` doesn't
-  exist yet when the run fails pre-checkpoint, so there is nothing to `drive`.
+  not a design checkpoint — e.g. the emit loop hit its cycle limit), no
+  `gen_<slug>` exists yet, so there is nothing to `drive` and nothing to salvage.
+  Do NOT hand-patch the failed run's throwaway workspace. Read the `first_failure`,
+  then just call `generate_pipeline` again (most forge failures are a transient
+  emit wobble that converges on a retry). If it fails the SAME way several times,
+  the `pipeline_forge` generator has a limitation — report that to the user;
+  improving the generator (its `configs/`/`templates/` in the source repo) is a
+  separate DEV task, not part of generating this pipeline as a user.
 
 ### Your pipelines
 

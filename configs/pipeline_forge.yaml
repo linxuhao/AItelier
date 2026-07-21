@@ -329,7 +329,7 @@ steps:
   # ─── 3-part deterministic gate: lint → registry-check → dry-run smoke ────
   - id: "v_lint"
     step_type: "tool"
-    tool_name: "skillflow_lint"
+    tool_name: "forge_lint"     # wraps skillflow_lint + surfaces issues in `error`
     tool_params:
       path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
     transitions:
@@ -338,6 +338,7 @@ steps:
       - to: "emit_graph"
         match: { passed: false }
         max_loop: 5     # lint fixes can take a few rounds; keep headroom (off-by-one killed a run at 3)
+        feedback: true  # inject the lint errors into emit_graph's next attempt (else it re-emits blind)
 
   - id: "v_registry"
     step_type: "tool"
@@ -351,6 +352,7 @@ steps:
       - to: "architect"                         # unknown tool ⇒ may need (re)building
         match: { passed: false }
         max_loop: 5
+        feedback: true  # inject the registry violations into the architect's next attempt
 
   - id: "v_smoke"
     step_type: "tool"
@@ -363,6 +365,7 @@ steps:
       - to: "emit_graph"
         match: { passed: false }
         max_loop: 5
+        feedback: true  # inject the smoke failure (unresolved tools / non-terminating) into the re-emit
 
   # ─── Human design review (checkpoint) ────────────────────────────────────
   - id: "explain"

@@ -145,6 +145,25 @@ def forge_dryrun_smoke(graph_path: str = "", max_steps: int = 200,
     else:
         passed = status in ("failed", "completed") and status != "max_steps"
 
+    # `error` is what skillflow's tool-gate loop-back injects into the emitter's
+    # feedback (core._inject_feedback_in_tx passes ONLY tool_result["error"]).
+    # Synthesize an actionable one when the drive didn't hand us a raw error, so
+    # a re-emit knows WHY the smoke failed instead of re-emitting blind.
+    error = drive.get("error") or ""
+    if not passed and not error:
+        trail = drive.get("trail")
+        if unresolved:
+            error = ("dry-run smoke failed: these referenced tools don't load: "
+                     + ", ".join(unresolved))
+        elif status == "max_steps":
+            error = ("dry-run smoke failed: the graph never reached its terminal "
+                     "within the step budget — likely an unbounded loop or a "
+                     "transition that never matches. Trail: " + str(trail))
+        elif status == "checkpoint_loop":
+            error = ("dry-run smoke failed: the graph re-paused at a checkpoint "
+                     "without progressing. Trail: " + str(trail))
+        else:
+            error = f"dry-run smoke failed (status={status}). Trail: {trail}"
     return {"passed": bool(passed), "status": status,
             "steps_run": drive.get("steps_run"), "trail": drive.get("trail"),
-            "unresolved_tools": unresolved, "error": drive.get("error", "")}
+            "unresolved_tools": unresolved, "error": error}

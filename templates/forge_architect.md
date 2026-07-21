@@ -21,6 +21,10 @@ reads (context) and writes (output), and its transitions (with `max_loop` on eve
 cycle). Follow the cheatsheet EXACTLY:
 - Every creative `agent` maker is followed by a real `agent` **reviewer** that emits
   `review_verdict.json {passed, feedback, suggestions}`. Never a boolean-tool review.
+  The maker MUST read its reviewer's verdict back — note `context: {step: <reviewer>}`
+  on the maker so a rejection actually reaches it (a loop where the maker can't see
+  the feedback just repeats the mistake). For an objective **tool** gate that loops
+  back to a maker, the edge needs `feedback: true` and the tool must return `error`.
 - Bound every cycle with a native `max_loop` edge. No counter tools/files.
 - The ONLY completed terminal is a `step_type: gate` with `transitions: [{to: null}]`.
   Give-up paths must end failed, never share the success terminal.

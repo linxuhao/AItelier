@@ -128,6 +128,12 @@ def forge_registry_check(graph_path: str = "", role_table: str = "", **kwargs) -
                         f"transition is `to: null` (fail-open false-green risk)")
 
     passed = not violations
-    return {"passed": passed, "violations": violations,
+    # `error` carries the actionable detail back to the emitter: skillflow's
+    # tool-gate loop-back injects ONLY tool_result["error"] into the maker's
+    # feedback (core._inject_feedback_in_tx), so without it a re-emit is blind.
+    error = "" if passed else (
+        "Registry check failed — fix these before re-emitting:\n- "
+        + "\n- ".join(violations))
+    return {"passed": passed, "error": error, "violations": violations,
             "unknown_tools": sorted(set(unknown_tools)),
             "unknown_roles": sorted(set(unknown_roles))}

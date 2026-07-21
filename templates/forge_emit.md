@@ -20,8 +20,11 @@ in the registry (the missing ones were just built), so reference them freely.
 - **`forge_palette`** — the live tool registry (now includes the just-built tools)
   + exemplar configs + the idiom/trap cheatsheet.
 - **Step `architect` → `graph_spec.md`** — the graph shape to render.
-- On a re-run: your prior files + the reviewer's / validator's feedback (e.g. lint
-  errors) — fix exactly what it flagged.
+- On a re-run: your prior files + the reviewer's / validator's feedback. The
+  gate errors (lint / registry / smoke) are injected into THIS prompt as
+  feedback — READ them and fix EXACTLY what they flag; do not re-emit an
+  unchanged graph. A repeated identical gate failure means you ignored the
+  feedback.
 
 ## CRITICAL — use the EXACT skillflow YAML schema below
 Do NOT invent fields. The graph is validated by a strict linter, a registry-check,
@@ -171,6 +174,18 @@ item re-serves forever). Copy this shape:
 - Every `agent_config` used must be defined in `role_table.yaml`; every `tool_name`
   must be a real tool from the palette; every cycle needs `max_loop`; the only
   completed terminal is a `gate` with `transitions: [{to: null}]`.
+- **Wire feedback so a rejected maker SEES why** (a loop where the maker can't read
+  the rejection just repeats the same mistake — the #1 cause of a bounded loop
+  exhausting and hard-failing):
+  - **Agent reviewer → maker**: the maker MUST read the reviewer's verdict. Put
+    `{source: {step: <reviewer_id>}}` in the maker's `context` (it reads
+    `review_verdict.json` with the `feedback` field). This is how DPE does it — no
+    `feedback:` flag needed on the edge.
+  - **Tool gate → maker** (a `step_type: tool` that loops back on `passed:false`,
+    e.g. a lint/test gate): add `feedback: true` to that transition AND make sure
+    the tool returns an `error` field with the reason — skillflow injects ONLY
+    `tool_result["error"]` into the maker on a tool loop-back. A tool that returns
+    just `{passed: false}` loops back silently and the maker re-emits blind.
 
 ## Output — write these files (into your step output dir)
 1. **`pipeline.yaml`** — the generated graph, following the schema above exactly.

@@ -1,0 +1,12 @@
+name: forge_lint
+description: >
+  Gate (a) of pipeline_forge validation. Runs skillflow's native graph linter on a
+  generated pipeline.yaml (unbounded cycles, missing max_loop, bad terminals, schema
+  errors) and returns {passed, error, issues, errors, warnings}. The `error` field
+  summarizes the violations so a failed lint loops back to the emitter WITH the
+  actionable reasons (skillflow's tool-gate feedback injects only tool_result.error).
+parameters:
+  path:
+    type: string
+    description: "Path to the generated graph YAML (e.g. $CONFIG_DIR/emit_graph/pipeline.yaml)."
+    required: true

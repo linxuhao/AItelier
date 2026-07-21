@@ -126,9 +126,11 @@ final_verifier:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "step5_verifier.md"
-  # readme_* tools write+commit README.md directly into the delivered repo
-  # (content-mode staging never reaches the repo at step 5 — no repo_apply).
-  tools: ["list_tree", "readme_read", "readme_search", "readme_create", "readme_edit"]
+  # README.md is a declared content-mode output (see node "5" in dpe_default.yaml):
+  # the verifier writes it via the engine-generated create_readme write tool and it
+  # is delivered by the step's on_deliver repo_apply. No custom readme_* tools — the
+  # repository is read-only for the verifier (via `from: repository` context + list_tree).
+  tools: ["list_tree"]
   max_output_tokens: 16384
   max_tool_turns: 100
   native_tool_calling: true

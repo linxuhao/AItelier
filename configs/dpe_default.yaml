@@ -450,12 +450,25 @@ steps:
       mode: "content"
       fixed:
         report: { file: "final/verify_report.json", format: '{"all_goals_met": bool, "verified_subtasks": [str, ...], "issues": [str, ...], "ready_for_deploy": bool}' }
-    # The verifier owns project documentation, but NOT via content-mode output:
-    # steps 3/5 have no on_deliver:repo_apply, so a staged README.md would never
-    # reach the delivered repo. Instead it uses the readme_* agent tools below,
-    # which write+commit README.md DIRECTLY into the project repo. It runs LAST
-    # (after every task is implemented + verified), so the README reflects the
-    # repo's actual final state.
+        readme: { file: "README.md", format: 'Markdown 项目交付文档：项目简介、安装步骤、运行方法、关键接口/API 端点——反映仓库交付时的真实最终状态' }
+    # The verifier owns project documentation AND runs LAST (after every task is
+    # implemented + verified), so the README reflects the repo's actual final
+    # state. README.md is a DECLARED content-mode output: it is written via the
+    # engine-generated write tool (create_readme) whose target path is bound to
+    # $STEP_DIR by the engine — the agent never supplies a path — and delivered
+    # into the resolved project repo by the on_deliver repo_apply below.
+    # (The retired readme_* custom tools resolved an agent-supplied project_root
+    # against the process CWD, which in the container is the AItelier source repo
+    # bind-mounted at /app, and clobbered AItelier's own README. repo_apply
+    # resolves the real code path, so it can only ever target the project repo.)
+    lifecycle:
+      on_deliver:
+        tool: "repo_apply"
+        params:
+          source_dir: "$STEP_DIR"
+          # Only README.md ships to the delivered repo — keep the verdict out.
+          ignore: ["verify_report.json", "final/*"]
+        on_failure: "skip"
     transitions:
       - to: "5_test"
 

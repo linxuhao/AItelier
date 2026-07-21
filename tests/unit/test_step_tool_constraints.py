@@ -73,13 +73,12 @@ def _get_tool_schemas_for_step(step_id: str) -> dict:
 CONSTRAINED_STEPS = {
     "1": ["write_sota"],
     "2": ["write_design", "write_linter_manifest"],
-    # README is NOT a content-mode output of any step — steps 3/5 have no
-    # repo_apply, so a staged README would never reach the repo. The verifier
-    # (step 5) authors it via the readme_* agent tools that write+commit the
-    # repo directly. So step 3 emits only its task files and step 5 only its
-    # verdict.
+    # README IS a content-mode output of step 5: it is written via the engine-
+    # generated write tool (path bound to the step staging dir) and delivered to
+    # the resolved project repo by step 5's on_deliver:repo_apply. Step 3 has no
+    # repo_apply, so it emits only its task files.
     "3": ["write_tasks_manifest", "write_task_card"],
-    "5": ["write_report"],
+    "5": ["write_readme", "write_report"],
     "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card", "write_research_notes"],
 }
 

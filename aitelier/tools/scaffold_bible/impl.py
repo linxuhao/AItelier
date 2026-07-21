@@ -33,7 +33,16 @@ def scaffold_bible(*, project_root: str = "", workspace_root: str = "",
                    **kwargs) -> dict:
     # The bible lives in the code repo (project_root); design's repo_apply put it
     # there. In unit tests project_root is empty → fall back to workspace_root.
-    ws = Path(project_root or workspace_root or ".")
+    _base = project_root or workspace_root
+    if not _base or not Path(_base).is_absolute():
+        # Never fall back to "." → the process CWD, which in the container is the
+        # AItelier source repo bind-mounted at /app: a missing injection here
+        # would git-commit + tag into AItelier's own repo (cf. the readme_* bug).
+        raise ValueError(
+            "scaffold_bible: project_root/workspace_root must be an absolute path "
+            f"(got project_root={project_root!r}, workspace_root={workspace_root!r}) "
+            "— refusing to resolve against the process CWD")
+    ws = Path(_base)
     bib = ns.bible_dir(ws)
 
     if (ns.state_dir(ws) / "index.yaml").exists():

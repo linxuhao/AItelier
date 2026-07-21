@@ -101,3 +101,51 @@ def test_step5_delivers_readme_via_repo_apply():
         "repo_apply should ignore the verdict file so only README.md is delivered; "
         f"ignore={ignore}"
     )
+
+
+# ── Defense-in-depth: the other commit-writers must reject a CWD-relative path ──
+#
+# These four tools also resolve project_root/workspace_root and then git-commit.
+# They are host-driven graph tool-steps (the host injects an absolute path), so
+# unlike readme_* they are not agent-reachable — but a MISSING injection used to
+# silently fall back to "." → the process CWD (= AItelier's repo at /app). They
+# now hard-fail on a relative/empty path instead of committing into /app.
+
+import pytest
+
+
+def test_scaffold_bible_rejects_relative_root():
+    from aitelier.tools.scaffold_bible.impl import scaffold_bible
+    with pytest.raises(ValueError, match="absolute path"):
+        scaffold_bible(project_root=".", workspace_root="")
+    with pytest.raises(ValueError, match="absolute path"):
+        scaffold_bible(project_root="", workspace_root="")
+
+
+def test_apply_state_rejects_relative_root():
+    from aitelier.tools.apply_state.impl import apply_state
+    with pytest.raises(ValueError, match="absolute path"):
+        apply_state(project_root=".", workspace_root="")
+    with pytest.raises(ValueError, match="absolute path"):
+        apply_state(project_root="", workspace_root="")
+
+
+def test_emit_project_artifacts_rejects_relative_root():
+    from aitelier.tools.emit_project_artifacts.impl import emit_project_artifacts
+    with pytest.raises(ValueError, match="absolute path"):
+        emit_project_artifacts(workspace_root=".")
+    with pytest.raises(ValueError, match="absolute path"):
+        emit_project_artifacts(workspace_root="")
+
+
+def test_repo_delete_rejects_relative_root_before_git(tmp_path):
+    """repo_delete only reaches project_root after finding a non-empty manifest;
+    with a queued deletion + a relative project_root it must error, not git-rm CWD."""
+    import json
+    from aitelier.tools.repo_delete.impl import repo_delete
+    step = tmp_path / "step"
+    step.mkdir()
+    (step / "_deletions.json").write_text(json.dumps(["some/file.py"]), encoding="utf-8")
+    r = repo_delete(source_dir=str(step), project_root=".")
+    assert r["committed"] is False
+    assert "absolute path" in (r.get("error") or ""), r

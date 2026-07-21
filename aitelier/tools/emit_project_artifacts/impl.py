@@ -32,7 +32,14 @@ from core.meta_conversation import (
 def emit_project_artifacts(*, workspace_root: str = "", out_dir: str = "",
                            **kwargs) -> dict:
     """Write project_brief.md + spec.md + step1_goals.json. Returns {written, emitted}."""
-    ws = Path(workspace_root or ".")
+    if not workspace_root or not Path(workspace_root).is_absolute():
+        # Never fall back to "." → the process CWD (= AItelier's own repo,
+        # bind-mounted at /app in the container): a missing injection would write
+        # the project brief into AItelier itself (cf. the readme_* bug).
+        raise ValueError(
+            "emit_project_artifacts: workspace_root must be an absolute path "
+            f"(got {workspace_root!r}) — refusing to resolve against the process CWD")
+    ws = Path(workspace_root)
     written: list[str] = []
 
     # ── 1. Recover the approved brief from the gather step's committed output ──

@@ -35,6 +35,14 @@ def apply_state(*, project_root: str = "", workspace_root: str = "",
     # unit tests both point at the same tmp dir.
     ws = Path(project_root or workspace_root or ".")           # novel/ tree
     stage = Path(workspace_root or project_root or ".")        # step outputs
+    if not ws.is_absolute() or not stage.is_absolute():
+        # Never fall back to "." → the process CWD (= AItelier's own repo,
+        # bind-mounted at /app in the container): a missing injection would
+        # write + git-commit a chapter into AItelier itself (cf. readme_* bug).
+        raise ValueError(
+            "apply_state: project_root/workspace_root must be absolute paths "
+            f"(got project_root={project_root!r}, workspace_root={workspace_root!r}) "
+            "— refusing to resolve against the process CWD")
 
     fin_dir = Path(finalize_step_dir) if finalize_step_dir \
         else stage / "novel_chapter" / "finalize"

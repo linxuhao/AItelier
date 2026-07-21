@@ -48,6 +48,13 @@ def repo_delete(source_dir: str = "", *, project_root: str = "",
     except Exception as e:
         return {"deleted": [], "committed": False, "error": f"bad manifest: {e}"}
 
+    if not project_root or not Path(project_root).is_absolute():
+        # Never fall back to CWD (= AItelier's own repo, /app in the container):
+        # a missing injection would `git rm` + commit against AItelier itself
+        # (cf. the readme_* bug that clobbered AItelier's README).
+        return {"deleted": [], "committed": False,
+                "error": f"repo_delete: project_root must be an absolute path "
+                         f"(got {project_root!r}) — refusing to resolve against the process CWD"}
     repo = Path(project_root).resolve()
     removed, skipped = [], []
     for rel in queued:

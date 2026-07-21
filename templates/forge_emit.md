@@ -141,7 +141,26 @@ item re-serves forever). Copy this shape:
       - to: run_search                 # fail → redo this item
         match: { from_file: review_verdict.json, field: passed, value: false }
         max_loop: 3
+  # AGGREGATOR — runs AFTER the loop drains, reads EVERY item's output.
+  - id: after_loop
+    step_type: agent
+    agent_config: synthesizer
+    context:
+      - source: { step: run_search, scope: all }   # ★ scope: all ★ — see below
+    output: { mode: write }
+    transitions:
+      - to: done
 ```
+
+**★ Per-item output + `scope` — the fan-out aggregation rule.** A loop-body step
+writes a SEPARATE folder per item (`{step}/{item}/…`), so each iteration survives.
+How a later step reads that producer depends on WHERE it sits:
+- **Inside the loop** reading an upstream body step (same item): default
+  `scope: task` → reads only THIS item's folder. Correct, no annotation needed.
+- **After the loop** (an aggregator like `after_loop` above) reading a body
+  producer: you MUST add **`scope: all`** to read every item's folder. Without it
+  the reader silently gets only ONE item — the #1 fan-out bug, and the
+  registry-check gate now FAILS an out-of-loop reader that omits `scope: all`.
 
 ### GOLD maker→reviewer pair — copy this shape, every keyword explained
 

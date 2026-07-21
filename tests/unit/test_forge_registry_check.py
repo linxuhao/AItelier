@@ -75,3 +75,56 @@ def test_error_field_summarizes_violations_for_feedback(tmp_path):
     res = forge_registry_check(graph_path=_write(tmp_path, bad))
     assert res["passed"] is False
     assert "totally_not_a_real_tool" in res["error"]
+
+
+def _fanout(agg_scope=None):
+    """A graph: make → loop → [verify] → make, then aggregate reads verify."""
+    agg_src = {"step": "verify"}
+    if agg_scope:
+        agg_src["scope"] = agg_scope
+    return {
+        "name": "g", "description": "x", "begin": "make",
+        "end_conditions": {"combinator": "or", "conditions": [
+            {"type": "node_reached", "node": "done", "result": "completed"}]},
+        "steps": [
+            {"id": "make", "step_type": "agent", "agent_config": "m",
+             "transitions": [{"to": "loop"}]},
+            {"id": "loop", "step_type": "loop",
+             "loop": {"source": {"step": "make", "file": "m.json", "field": "execution_order"},
+                      "item_as": "item", "max_iterations": 5},
+             "transitions": [{"to": "verify", "max_loop": 5}, {"to": "aggregate"}]},
+            {"id": "verify", "step_type": "agent", "agent_config": "v",
+             "transitions": [{"to": "loop", "max_loop": 5}]},
+            {"id": "aggregate", "step_type": "agent", "agent_config": "a",
+             "context": [{"source": agg_src}],
+             "transitions": [{"to": "done"}]},
+            {"id": "done", "step_type": "gate", "transitions": [{"to": None}]},
+        ],
+    }
+
+
+def test_aggregator_without_scope_all_is_flagged(tmp_path):
+    res = forge_registry_check(graph_path=_write(tmp_path, _fanout(agg_scope=None)))
+    assert res["passed"] is False
+    assert any("scope: all" in v and "aggregate" in v.lower() for v in res["violations"])
+
+
+def test_aggregator_with_scope_all_passes(tmp_path):
+    res = forge_registry_check(graph_path=_write(tmp_path, _fanout(agg_scope="all")))
+    assert res["passed"] is True
+
+
+def test_in_loop_reader_of_body_producer_is_not_flagged(tmp_path):
+    # verify (in the body) reading make (pre-loop) or a sibling body step with
+    # default scope:task is correct — only OUT-of-loop readers need scope:all.
+    g = _fanout(agg_scope="all")
+    # add an in-loop reader: verify reads a sibling body producer without scope:all
+    g["steps"].insert(3, {"id": "verify2", "step_type": "agent", "agent_config": "v2",
+                          "context": [{"source": {"step": "verify"}}],
+                          "transitions": [{"to": "loop", "max_loop": 5}]})
+    # reroute loop→verify2→verify→loop so both are in the body
+    g["steps"][1]["transitions"][0]["to"] = "verify2"
+    g["steps"][3]["transitions"] = [{"to": "verify"}]  # verify2 → verify
+    res = forge_registry_check(graph_path=_write(tmp_path, g))
+    # verify2 (in body) reading verify (in body) must NOT be flagged
+    assert not any("verify2" in v and "scope: all" in v for v in res["violations"])

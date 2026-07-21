@@ -38,6 +38,35 @@ def _live_tools() -> set[str]:
         return set()
 
 
+def _loop_bodies(steps: list) -> dict:
+    """Map each loop node id → set of its body step ids, topologically (mirrors
+    skillflow.core._loop_body_nodes): reachable from the loop's first outgoing
+    transition, following edges, until returning to the loop node. A loop-body
+    step's output is per-item ({step}/{item}/), which changes how it must be read.
+    """
+    by_id = {s.get("id"): s for s in steps if isinstance(s, dict)}
+    bodies: dict[str, set] = {}
+    for s in steps:
+        if not isinstance(s, dict) or s.get("step_type") != "loop":
+            continue
+        lid = s.get("id")
+        trans = s.get("transitions") or []
+        body_target = next((t.get("to") for t in trans
+                            if isinstance(t, dict) and t.get("to")), None)
+        body: set = set()
+        stack = [body_target]
+        while stack:
+            nid = stack.pop()
+            if not nid or nid in body or nid == lid:
+                continue
+            body.add(nid)
+            for t in ((by_id.get(nid) or {}).get("transitions") or []):
+                if isinstance(t, dict) and t.get("to") and t.get("to") != lid:
+                    stack.append(t["to"])
+        bodies[lid] = body
+    return bodies
+
+
 def forge_registry_check(graph_path: str = "", role_table: str = "", **kwargs) -> dict:
     graph = _load_yaml(graph_path)
     if graph is None:
@@ -52,6 +81,9 @@ def forge_registry_check(graph_path: str = "", role_table: str = "", **kwargs) -
     live_tools = _live_tools()
     steps = graph.get("steps") or []
     step_ids = {s.get("id") for s in steps if isinstance(s, dict)}
+    # Loop-body producers write per-item folders; a reader OUTSIDE the loop must
+    # use scope: all to see every item (else it silently gets one).
+    bodies = _loop_bodies(steps)
 
     violations: list[str] = []
     unknown_tools: list[str] = []
@@ -119,6 +151,20 @@ def forge_registry_check(graph_path: str = "", role_table: str = "", **kwargs) -
             ref_step = src.get("step")
             if ref_step and ref_step not in step_ids:
                 violations.append(f"step '{sid}': context references unknown step '{ref_step}'")
+            # Aggregator-scope: reading a loop-body producer from OUTSIDE the loop
+            # without scope:all silently gets only ONE item's output (the fan-out
+            # aggregation trap). A reader INSIDE the same loop body wants its own
+            # item (default scope:task) and is fine.
+            if ref_step:
+                for lid, body in bodies.items():
+                    if ref_step in body and sid not in body and sid != lid:
+                        if src.get("scope") != "all":
+                            violations.append(
+                                f"step '{sid}': reads loop-body producer '{ref_step}' "
+                                f"from outside the loop without scope: all — it will see "
+                                f"only ONE item's output. Add `scope: all` to aggregate "
+                                f"every item.")
+                        break
             ref_tool = src.get("tool")
             if ref_tool and ref_tool not in live_tools:
                 unknown_tools.append(ref_tool)

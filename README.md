@@ -153,16 +153,16 @@ To change which models or agents the pipeline uses, edit the config files direct
 - **`llm_providers.json`** — LLM providers (base URLs, API-key env var names). Register a provider here before pointing an agent at it.
 - **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the **chat butler / meta agent** lives in `meta_conversation.yaml` (`meta_agent.model`) — so the conversational front-end is configurable exactly like the pipeline roles.
 - **`templates/`** — the LLM prompt templates each step uses
-- **`AITELIER_HOST_AGENT_MODEL`** (env, default `deepseek/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. The built-in **skill→pipeline converter** (and any pipeline it generates) ship their agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them.
+- **`AITELIER_HOST_AGENT_MODEL`** (env, default `deepseek/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. A **generated** pipeline ships its agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them.
 
-> **Generate a pipeline from a skill, then run it — in one chat.** Beyond building software, the chat butler can turn a described skill/workflow into a reusable SkillFlow pipeline *and run it*, without editing YAML or restarting the server:
+> **Generate a pipeline from a description, then run it.** Beyond building software, the butler's **coding mode** can turn a described workflow into a reusable SkillFlow pipeline *and run it*, without editing YAML or restarting the server:
 >
-> 1. Ask it to *"make a pipeline that researches a topic, drafts a summary, then fact-checks it."* It runs skillflow's `skill_converter` (analyze → design → **review checkpoint** → lint).
+> 1. In coding mode, ask it to *"make a pipeline that researches a topic, drafts a summary, then fact-checks it."* The `generate_pipeline` tool runs the grounded `pipeline_forge` generator (survey the live tool registry → design the graph → build any missing tools → emit → lint + registry + dry-run gates → review checkpoint).
 > 2. On approval the generated graph is **auto-registered** under a namespaced name like `gen_research_draft_factcheck` (the `gen_` prefix means it can never clash with a built-in config).
 > 3. *"Run it on 'CRISPR gene editing'."* → the butler launches it by name and it appears in the dashboards like any other run.
 > 4. *"Add a citation step and run it again."* → re-describe it under the **same name** and it's **updated in place**; the next run uses the new version.
 >
-> Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. Their agents ship as `model:"host"` (see `AITELIER_HOST_AGENT_MODEL` above), so no per-role config is needed.
+> Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. Their host-delegated agents ship as `model:"host"` (see `AITELIER_HOST_AGENT_MODEL` above), so no per-role config is needed.
 
 ## How it works
 
@@ -204,9 +204,9 @@ Building on the foundation that works today ([Project status](#project-status) a
 ## Tests
 
 ```bash
-pytest tests/unit/ -v          # ~300 unit tests
-pytest tests/integration/ -v   # ~160 integration tests
-pytest tests/ -v               # full suite (~490 tests)
+pytest tests/unit/ -v          # ~700 unit tests
+pytest tests/integration/ -v   # ~245 integration tests
+pytest tests/ -v               # full suite (~945 tests)
 ```
 
 ## Web Frontend
@@ -217,7 +217,7 @@ The web UI is a **Svelte 5 + Vite** SPA (`web/src/`), replacing the original van
 cd web
 npm install                     # install dependencies
 npm run build                   # compile to web/dist/
-npm test                        # run 103 vitest tests (stores, lib, views)
+npm test                        # run ~120 vitest tests (stores, lib, views)
 npm run lint                    # ESLint + eslint-plugin-svelte
 npm run dev                     # dev server with HMR
 ```

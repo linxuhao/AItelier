@@ -62,7 +62,7 @@ Env reference lives in `.env.example`.
 │   ├── core.py, graph.py, workspace.py, tool_loader.py, docs.py, ...
 │   │                        # docs.py backs the native skillflow_docs_* tools:
 │   │                        # search/read skillflow's own docs + schema source (>=1.5.22)
-│   ├── tools/               # 16 native tools (read_file, write, pytest, repo_apply,
+│   ├── tools/               # 17 native tools (read_file, write, pytest, repo_apply,
 │   │                        # skillflow_docs_{list,search,read}, ...)
 │   └── plugins/             # linter, addon_converter, skill_converter (DEPRECATED,
 │                            # not registered — replaced by AItelier's pipeline_forge),
@@ -73,7 +73,11 @@ Env reference lives in `.env.example`.
 ├── configs/                 # Skillflow graph configs (dpe_default.yaml, meta_conversation.yaml)
 ├── agent_configs/           # LLM agent configs by role name (model, template, tools)
 ├── templates/               # LLM prompt templates (*.md)
-├── aitelier/tools/          # AItelier custom tools (web_search, web_fetch, run_tests, user_stories_present)
+├── aitelier/tools/          # ~27 AItelier custom tools: DPE web tools (web_search, web_fetch,
+│                            # run_tests, user_stories_present); pipeline_forge (forge_palette,
+│                            # register_tool, forge_registry_check, forge_dryrun_smoke); novel
+│                            # (scaffold_bible, apply_state, continuity_check, state_probe, …);
+│                            # game harness (godot/unity _compile/_playtest); restage, repo_delete, …
 ├── core/                    # Business logic (agents, scheduler, AI router, DB, workspace)
 ├── api/                     # CLI backend (FastAPI, localhost-only)
 ├── web_api/                 # Web GUI backend (multi-tenant, Cloudflare Access)
@@ -88,11 +92,13 @@ Env reference lives in `.env.example`.
    intent_detect → gather (Q&A loop, checkpoint) → finalize → project_brief.md + step1_goals.json
 
 2. DPE Pipeline (configs/dpe_default.yaml)
-   Researcher (1_5) → 1_5_review → Architect (2) → 2_review
-   → PM (3) → 3_review → task_gate
-   → [per task] t_plan → t_plan_review → t_impl → t_impl_apply (tool)
-   → t_impl_validate (tool) → t_impl_review → t_verify → t_verify_review
-   → task_loop → Final Verifier (5) → 5_review
+   git_sync_pre → Researcher (1) → 1_review → Architect (2) → 2_review
+   → PM (3) → 3_review → task_loop
+   → [per task] t_plan → t_plan_review → t_impl (write + on_deliver repo_apply/repo_delete)
+   → t_impl_review
+   → Final Verifier (5, content: verdict + README) → 5_test (tool) → 5_knowledge (tool) → 5_review → done
+   (node "1" uses agent_config `researcher` + template step1_5_researcher.md — the "1_5"
+    naming survives only in the filename, not the graph node id)
 
 3. Pipeline generation (configs/pipeline_forge.yaml) — a grounded, self-provisioning generator
    that replaces skillflow's built-in `skill_converter` (deprecated: it was ReAct-shaped, ungrounded
@@ -204,7 +210,7 @@ web/
 ### Configuration Files
 
 - **`configs/dpe_default.yaml`** — v2 skillflow graph: steps, transitions, gates, tools, checkpoints
-- **`configs/meta_conversation.yaml`** — Meta conversation graph (2 steps)
+- **`configs/meta_conversation.yaml`** — Meta conversation graph (3 steps: intent_detect → gather → finalize)
 - **`configs/coding_task.yaml`** — Plan-gated coding runner graph (plan checkpoint → implement), butler-driven via RunnerService
 - **`configs/code_review.yaml`** — One-shot diff review (butler-driven, `scheduler_owned: false`; verdict returns synchronously)
 - **`x-aitelier: repo_mode`** (per-config, default `code`) — does a run of this config produce/modify code in a git repo? `none` gives a repo-less workspace (no `repo_path`, no throwaway `projects/<id>/.git`) and lists the run in the dashboard's non-code section. DECLARED, never inferred from what a config *registers* — conflating the two axes is what gave `drive_pipeline` test-drives a fake empty repo. Generated `gen_*` pipelines DERIVE it from their graph (`core/pipeline_registry.py:derive_repo_mode`: git-touching tools / `validation.tool` / `from: repository` / role tool lists — read-only tools don't count, since skillflow's code-path resolution is lazy); the derivation is asymmetric on purpose — any signal ⇒ `code`, because a wrong `none` is a hard runtime failure while a wrong `code` only costs an unused repo
@@ -216,8 +222,8 @@ web/
 - **`configs/pipeline_forge.yaml` + `agent_configs/pipeline_forge.yaml`** — the grounded, self-provisioning pipeline generator (replaces `skill_converter`); backs `generate_pipeline` (coding-mode only, so verification via `drive_pipeline` is always in reach). New tools `aitelier/tools/{forge_palette,register_tool,forge_registry_check,forge_dryrun_smoke}` + `aitelier/stub_runner.py`; templates `templates/forge_*.md`
 - **`skillflow_docs_{list,search,read}`** — NATIVE skillflow tools (skillflow >=1.5.22, backed by `skillflow.docs`) that search/read skillflow's own docs + authoritative schema source (graph.py/core.py). The forge maker agents + coding mode use them to design/edit graphs against the real spec (line-numbered read couples with search hits). Not AItelier tools — the earlier AItelier bridge was removed once 1.5.22 shipped.
 - **`skill_converter`** — skillflow's built-in skill→pipeline converter, now DEPRECATED and no longer registered (see `api/dependencies.py`); superseded by `pipeline_forge`
-- **`templates/`** — Markdown prompt templates (step1_5_researcher.md, task_impl.md, ...)
-- **`aitelier/tools/`** — AItelier custom tools: `web_search` (→ SearXNG), `web_fetch`, `run_tests`, `user_stories_present`
+- **`templates/`** — Markdown prompt templates (step1_5_researcher.md, task_implementer.md, ...)
+- **`aitelier/tools/`** — ~27 AItelier custom tool dirs. DPE web tools: `web_search` (→ SearXNG), `web_fetch`, `run_tests`, `user_stories_present`. Plus the pipeline_forge, novel (scaffold_bible/apply_state/…), game-harness (godot/unity), and repo-op (restage/repo_delete) families
 
 ### Debug Tool (`debugctl.py`)
 

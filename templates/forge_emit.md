@@ -195,5 +195,15 @@ item re-serves forever). Copy this shape:
 3. **`templates/<role>.md`** — one focused prompt per role: its job, its input
    (context) sections, its exact output files. Reviewers emit `review_verdict.json`
    and default to fail-on-uncertainty.
+   - **A role's `context` sources are ALREADY in its prompt — tell it to USE them,
+     never to `read_file` them.** Every `{source: {...}}` on the step (a
+     `{step:...}` output, a `{from: workspace, path:...}` file, the current loop
+     item) is injected into the agent's prompt verbatim before it runs. A template
+     that says "read X from the workspace" makes the agent call `read_file` for a
+     file it was already handed — and `read_file`'s param is `path`, not `file`, so
+     it often crashes on the wrong arg. Write "The research question is provided
+     below" not "Read research_question.txt". Give a role `read_file` in its tools
+     ONLY when it must fetch something NOT in its context (rare); default to no
+     `read_file`, like the DPE reviewers.
 
 Emit valid YAML (2-space indent). Make it pass lint + registry-check + dry-run smoke.

@@ -201,19 +201,6 @@ Building on the foundation that works today ([Project status](#project-status) a
 - **The open format as a standard** — if SkillFlow's YAML becomes a common way to *define* agentic workflows, every config in the ecosystem runs natively here.
 - **Audit-first & EU-resident** — position the immutable, never-deleted trace as the compliance-grade record that environments like the EU AI Act's traceability requirements demand.
 
-## Admin Tools
-
-### Sync Stuck Projects
-
-After a bugfix deployment that ensures inline (butler-driven) pipeline runs sync project status on completion, use this script to repair projects that were stuck in stale states before the fix:
-
-```bash
-python scripts/sync_stuck_projects.py          # dry-run: report what would change
-python scripts/sync_stuck_projects.py --apply  # apply fixes
-```
-
-Only projects whose latest skillflow run is terminal (completed/failed) but whose aitelier DB status doesn't match are updated — actively running projects are never touched.
-
 ## Tests
 
 ```bash

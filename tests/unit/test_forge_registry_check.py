@@ -143,3 +143,29 @@ def test_in_loop_reader_of_body_producer_is_not_flagged(tmp_path):
     res = forge_registry_check(graph_path=_write(tmp_path, g))
     # verify2 (in body) reading verify (in body) must NOT be flagged
     assert not any("verify2" in v and "scope: all" in v for v in res["violations"])
+
+
+def test_giveup_edge_target_is_not_body_reach_back_semantics(tmp_path):
+    """The gate hole from the 1.5.23 review: a post-loop aggregator ALSO reachable
+    from a body step via a give-up edge must NOT be classified in-body (reach-back
+    topology, now taken from skillflow's own loop_body_map). Consequently an
+    explicit scope:task there is a lying annotation and gets flagged."""
+    g = _fanout(agg_scope="task")
+    # add a give-up edge: verify --(passed:false, budget spent)--> aggregate
+    verify = next(s for s in g["steps"] if s["id"] == "verify")
+    verify["transitions"] = [
+        {"to": "loop", "match": {"from_file": "v.json", "field": "p", "value": True},
+         "max_loop": 5},
+        {"to": "aggregate", "match": {"from_file": "v.json", "field": "p", "value": False},
+         "max_loop": 3},
+    ]
+    res = forge_registry_check(graph_path=_write(tmp_path, g))
+    # aggregate is OUT of body despite the drain edge → the scope:task lie fires
+    assert any("scope: task" in v and "aggregate" in v for v in res["violations"]), \
+        res["violations"]
+    # and with the annotation omitted, the same topology passes (engine default)
+    g2 = _fanout(agg_scope=None)
+    v2 = next(s for s in g2["steps"] if s["id"] == "verify")
+    v2["transitions"] = verify["transitions"]
+    res2 = forge_registry_check(graph_path=_write(tmp_path, g2))
+    assert res2["passed"] is True, res2["violations"]

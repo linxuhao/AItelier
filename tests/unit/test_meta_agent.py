@@ -163,6 +163,25 @@ class TestToolDispatch:
         result = await agent._execute_tool("retry_task", {"task_id": 1})
         assert result["status"] == "retried"
 
+    async def test_retry_task_does_not_wipe_task_step_dirs(self, agent, mock_db,
+                                                           mock_ws):
+        """Task step dirs hold EVERY task's per-item output ({t_impl}/{task}/,
+        skillflow >=1.5.23); wiping them to retry ONE task destroyed all sibling
+        tasks' outputs. The retried task's own folders are replaced by its next
+        promotion — no pre-clean allowed here."""
+        mock_db.retry_task.return_value = True
+        result = await agent._execute_tool("retry_task", {"task_id": 1})
+        assert result["status"] == "retried"
+        mock_ws.clean_all_task_step_dirs.assert_not_called()
+
+    async def test_retry_project_still_wipes_task_step_dirs(self, agent, mock_db,
+                                                            mock_ws):
+        """A FULL project retry re-runs everything — the wholesale wipe stays."""
+        mock_db.retry_project.return_value = True
+        result = await agent._execute_tool("retry_project", {"project_id": "p1"})
+        assert result["status"] == "retried"
+        mock_ws.clean_all_task_step_dirs.assert_called_once_with("p1")
+
     async def test_retry_task_not_found(self, agent, mock_db):
         mock_db.retry_task.return_value = False
         result = await agent._execute_tool("retry_task", {"task_id": 999})

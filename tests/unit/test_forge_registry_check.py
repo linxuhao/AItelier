@@ -103,15 +103,30 @@ def _fanout(agg_scope=None):
     }
 
 
-def test_aggregator_without_scope_all_is_flagged(tmp_path):
+def test_aggregator_without_scope_is_fine_engine_defaults_to_all(tmp_path):
+    # skillflow >=1.5.24 routes by position: an out-of-loop reader gets ALL
+    # items by default, so a missing scope is no longer a defect.
     res = forge_registry_check(graph_path=_write(tmp_path, _fanout(agg_scope=None)))
-    assert res["passed"] is False
-    assert any("scope: all" in v and "aggregate" in v.lower() for v in res["violations"])
+    assert res["passed"] is True
 
 
 def test_aggregator_with_scope_all_passes(tmp_path):
     res = forge_registry_check(graph_path=_write(tmp_path, _fanout(agg_scope="all")))
     assert res["passed"] is True
+
+
+def test_explicit_scope_task_on_out_of_loop_reader_is_flagged(tmp_path):
+    # The engine silently overrides an outside reader's scope:task to all-items;
+    # a declaration that lies about behavior is a violation.
+    res = forge_registry_check(graph_path=_write(tmp_path, _fanout(agg_scope="task")))
+    assert res["passed"] is False
+    assert any("scope: task" in v or "scope: all" in v for v in res["violations"])
+
+
+def test_invalid_scope_value_is_flagged(tmp_path):
+    res = forge_registry_check(graph_path=_write(tmp_path, _fanout(agg_scope="al")))
+    assert res["passed"] is False
+    assert any("invalid scope" in v for v in res["violations"])
 
 
 def test_in_loop_reader_of_body_producer_is_not_flagged(tmp_path):

@@ -33,10 +33,10 @@ cycle). Follow the cheatsheet EXACTLY:
 - The ONLY completed terminal is a `step_type: gate` with `transitions: [{to: null}]`.
   Give-up paths must end failed, never share the success terminal.
 - Put an objective tool gate (tests/compile) BEFORE a reviewer where one exists.
-- Use manifest→loop fan-out for per-item work. A loop-body step writes a per-item
-  output folder; a step AFTER the loop that aggregates those outputs must read the
-  producer with `scope: all` (else it sees only one item). An in-loop reader of a
-  body step gets its own item by default.
+- Use manifest→loop fan-out for per-item work. A loop-body AGENT step writes a
+  per-item output folder; the engine routes reads by position (in-loop reader →
+  its own item; a step AFTER the loop → all items). Declare `scope: all` on the
+  aggregator's source for clarity; never `scope: task` from outside the loop.
 
 ### `missing_tools.json`
 The authoritative list of tools to build before this graph can run:

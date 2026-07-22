@@ -2890,7 +2890,11 @@ class MetaAgent:
         ok = self.db.retry_task(task_id)
         if ok:
             if pid:
-                self.ws.clean_all_task_step_dirs(pid)
+                # NOTE: no clean_all_task_step_dirs here. Task step dirs hold
+                # EVERY task's per-item output ({t_impl}/{task}/, skillflow
+                # >=1.5.23); wiping them to retry ONE task destroyed all
+                # siblings' outputs. The retried task's own item folder is
+                # replaced by its next promotion — no pre-clean needed.
                 # Un-fail the project so scheduler picks up the retried task
                 project = self.db.get_project(pid)
             return {"status": "retried", "task_id": task_id, "_wake": True}

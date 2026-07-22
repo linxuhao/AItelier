@@ -152,15 +152,17 @@ item re-serves forever). Copy this shape:
       - to: done
 ```
 
-**★ Per-item output + `scope` — the fan-out aggregation rule.** A loop-body step
-writes a SEPARATE folder per item (`{step}/{item}/…`), so each iteration survives.
-How a later step reads that producer depends on WHERE it sits:
-- **Inside the loop** reading an upstream body step (same item): default
-  `scope: task` → reads only THIS item's folder. Correct, no annotation needed.
-- **After the loop** (an aggregator like `after_loop` above) reading a body
-  producer: you MUST add **`scope: all`** to read every item's folder. Without it
-  the reader silently gets only ONE item — the #1 fan-out bug, and the
-  registry-check gate now FAILS an out-of-loop reader that omits `scope: all`.
+**★ Per-item output + `scope` — the fan-out aggregation rule.** A loop-body AGENT
+step writes a SEPARATE folder per item (`{step}/{item}/…`), so each iteration
+survives. The engine routes reads by position: a reader **inside the same loop**
+gets its own item's folder (default `scope: task`); a reader **outside the loop**
+(an aggregator like `after_loop` above) always gets ALL items. Still declare
+**`scope: all`** on an aggregator's source — the graph then states what happens,
+and a `file:` selector under all-items matches per item (`{step}/*/file`).
+Never write `scope: task` on an out-of-loop reader (the engine overrides it to
+all-items; the registry-check gate flags the lying annotation). `scope` accepts
+ONLY `task` or `all` — anything else fails registration. Loop-body TOOL steps
+are NOT per-item (they write flat and are overwritten each iteration).
 
 ### GOLD maker→reviewer pair — copy this shape, every keyword explained
 

@@ -222,6 +222,7 @@ steps:
   - id: "t_tool_impl"
     step_type: "agent"
     agent_config: "tool_implementer"
+    capability: "tool_creation"                # framework grants write/run_tests/pytest/register_tool
     timeout_seconds: 600
     context:
       - source: { step: "tool_plan", file: "tools/$current_tool.json" }

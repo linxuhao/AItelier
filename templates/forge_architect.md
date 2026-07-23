@@ -39,6 +39,13 @@ cycle). Follow the cheatsheet EXACTLY:
   in a role prompt. A tool's return can be injected directly with `{source: {tool:
   <name>}}` — prefer it over a read_file workaround.
 - Bound every cycle with a native `max_loop` edge. No counter tools/files.
+- **Cross-run state → declare `capability: stateful`.** If a step's tool must
+  persist or read state that OUTLIVES the run (positions carried day to day, an
+  accumulating memo/cache), put `capability: stateful` on that step. The engine
+  hands the tool a durable, mounted `state_dir`; the tool writes relative to it.
+  Never let a generated tool hardcode a home path — it is lost on container
+  recreation. (The forge tool-build loop already uses `capability: tool_creation`;
+  you rarely need that one in a generated pipeline.)
 - The ONLY completed terminal is a `step_type: gate` with `transitions: [{to: null}]`.
   Give-up paths must end failed, never share the success terminal.
 - Put an objective tool gate (tests/compile) BEFORE a reviewer where one exists.

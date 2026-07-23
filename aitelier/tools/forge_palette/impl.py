@@ -51,6 +51,29 @@ CHEATSHEET = """\
 - loop  : iterates a workspace-file manifest list (loop.source + item_as).
 - gate  : pure flag routing, no execution; use for the loop-external terminal.
 
+## Capabilities — let the FRAMEWORK provision a step's tools + folders
+A step may declare `capability: <keyword>`; the engine then hands that step a
+curated toolset + injected context, so neither you nor the agent picks a write
+folder or a toolset (least privilege). Available capabilities:
+- `stateful` — the step's tool receives a durable, per-config, MOUNTED `state_dir`
+  kwarg (survives across runs AND container recreation). Put it on ANY tool step
+  or context-source-tool step that persists/reads cross-run state (positions
+  carried day to day, an accumulating memo). The tool writes RELATIVE to
+  `state_dir` and NEVER computes its own path (a hardcoded `Path.home()/...`
+  escapes the mount and is lost on rebuild). See the durable-state idiom below.
+- `tool_creation` — grants an agent step `write`/`run_tests`/`pytest`/
+  `register_tool` (used by the tool-build loop so a step can author + self-test
+  a tool). You rarely need this in a generated pipeline.
+
+  ```yaml
+    - id: persist_positions
+      step_type: tool
+      tool_name: persist_positions
+      capability: stateful          # → tool receives a durable state_dir kwarg
+      tool_params: { source_path: "$STEP_DIR/positions.json" }
+      transitions: [ { to: done } ]
+  ```
+
 ## When in doubt, read the spec — the `skillflow_docs_*` tools
 This cheatsheet is the common case. For ANY field, lifecycle hook, context mode,
 validation tool, path variable, or end-condition type you're unsure of, use

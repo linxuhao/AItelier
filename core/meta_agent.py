@@ -3878,11 +3878,21 @@ class MetaAgent:
                 _bg, sort_keys=False, allow_unicode=True)
             rj = gy.with_suffix(".roles.json")
             if rj.exists():
-                _rd = json.loads(rj.read_text(encoding="utf-8"))
-                _rd = {(k[len(_pfx):] if isinstance(k, str) and k.startswith(_pfx)
-                        else k): v for k, v in _rd.items()}
-                seed_inputs["baseline_roles.json"] = json.dumps(
-                    _rd, ensure_ascii=False, indent=2)
+                _raw = rj.read_text(encoding="utf-8")
+                try:
+                    _rd = json.loads(_raw)
+                except ValueError:
+                    _rd = None
+                # Guard like the graph branch: only de-namespace a well-formed
+                # object; a malformed/non-dict roles.json passes through raw
+                # rather than crashing edit-mode generation.
+                if isinstance(_rd, dict):
+                    _rd = {(k[len(_pfx):] if isinstance(k, str) and k.startswith(_pfx)
+                            else k): v for k, v in _rd.items()}
+                    seed_inputs["baseline_roles.json"] = json.dumps(
+                        _rd, ensure_ascii=False, indent=2)
+                else:
+                    seed_inputs["baseline_roles.json"] = _raw
             # Overwrite the same gen_<slug>: derive name from the target.
             from core.pipeline_registry import GEN_PREFIX
             name = edit_target[len(GEN_PREFIX):] if edit_target.startswith(GEN_PREFIX) else name

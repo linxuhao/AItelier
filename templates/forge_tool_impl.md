@@ -29,6 +29,10 @@ A tool is a directory `<name>/` with two files:
    contract on at least one real case. It must be runnable standalone (add the tool
    dir to `sys.path`, then `import impl` / `from impl import <name>`).
 
+You have `pytest` available (granted by this step's `capability: tool_creation`) —
+run it on your `test_<name>.py` before finishing to catch import errors and
+contract violations yourself, rather than waiting for the reviewer.
+
 ## Durable, cross-run state — NEVER pick your own folder
 If the tool must persist data that OUTLIVES a single run (positions carried day
 to day, an accumulating memo, a cache), do NOT compute a storage path yourself —

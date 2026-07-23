@@ -29,6 +29,15 @@ cycle). Follow the cheatsheet EXACTLY:
   loops back to a maker, the edge needs `feedback: true` and the tool must return `error`.
   Scope each maker's job to what ONE agent turn can deliver — a reviewer that demands
   the impossible (e.g. "cover all 40 items in depth") rejects forever.
+- **Ground the decision maker in fresh research (data flow, not just execution
+  flow).** A maker that produces the pipeline's DELIVERABLE must read the fresh
+  research/grounding steps it depends on (`context: {step: <research>}`). Do not
+  leave a research maker→reviewer pair as a stranded island whose output feeds
+  nothing downstream — the decision agent then falls back on stale state or model
+  priors and drifts off-domain. Domain invariants (allowed universe, schema,
+  thresholds) go in graph CONTEXT (a seed input or a produced artifact), never only
+  in a role prompt. A tool's return can be injected directly with `{source: {tool:
+  <name>}}` — prefer it over a read_file workaround.
 - Bound every cycle with a native `max_loop` edge. No counter tools/files.
 - The ONLY completed terminal is a `step_type: gate` with `transitions: [{to: null}]`.
   Give-up paths must end failed, never share the success terminal.

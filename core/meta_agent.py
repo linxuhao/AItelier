@@ -3858,15 +3858,31 @@ class MetaAgent:
         seed_inputs: dict = {}
         edit_target = (args.get("edit_target") or "").strip()
         if edit_target:
-            from core.pipeline_registry import generated_configs_dir
+            from core.pipeline_registry import generated_configs_dir, _ROLE_SEP
             gy = generated_configs_dir() / f"{edit_target}.yaml"
             if not gy.exists():
                 return {"error": f"edit_target '{edit_target}' not found "
                                  f"(no {edit_target}.yaml). Generate it first."}
-            seed_inputs["baseline_graph.yaml"] = gy.read_text(encoding="utf-8")
+            # De-namespace the baseline so the forge edits in BARE role-name space;
+            # the host re-applies the `<config>__` namespace exactly once at register
+            # time. Feeding namespaced names back in makes the emitter echo them,
+            # which the registration then double-prefixes (see pipeline_registry).
+            _pfx = edit_target + _ROLE_SEP
+            _bg = yaml.safe_load(gy.read_text(encoding="utf-8")) or {}
+            for _s in _bg.get("steps", []) if isinstance(_bg, dict) else []:
+                if isinstance(_s, dict):
+                    _ac = _s.get("agent_config")
+                    if isinstance(_ac, str) and _ac.startswith(_pfx):
+                        _s["agent_config"] = _ac[len(_pfx):]
+            seed_inputs["baseline_graph.yaml"] = yaml.safe_dump(
+                _bg, sort_keys=False, allow_unicode=True)
             rj = gy.with_suffix(".roles.json")
             if rj.exists():
-                seed_inputs["baseline_roles.json"] = rj.read_text(encoding="utf-8")
+                _rd = json.loads(rj.read_text(encoding="utf-8"))
+                _rd = {(k[len(_pfx):] if isinstance(k, str) and k.startswith(_pfx)
+                        else k): v for k, v in _rd.items()}
+                seed_inputs["baseline_roles.json"] = json.dumps(
+                    _rd, ensure_ascii=False, indent=2)
             # Overwrite the same gen_<slug>: derive name from the target.
             from core.pipeline_registry import GEN_PREFIX
             name = edit_target[len(GEN_PREFIX):] if edit_target.startswith(GEN_PREFIX) else name

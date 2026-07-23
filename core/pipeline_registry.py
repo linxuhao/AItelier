@@ -306,10 +306,17 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
         rt = yaml.safe_load(rt_path.read_text(encoding="utf-8")) if rt_path.exists() else {}
         for role, rcfg in (rt or {}).items():
             rcfg = rcfg if isinstance(rcfg, dict) else {}
-            tmpl = rcfg.get("template") or f"templates/{role}.md"
+            # Idempotent, exactly like _namespace_agents: in EDIT mode the emitter
+            # echoes the baseline's already-namespaced role names, and blindly doing
+            # `prefix + role` would double-prefix (`gen_x__gen_x__role`) — mismatching
+            # the (idempotently single-prefixed) graph agent_config refs, so the real
+            # prompt is silently dropped to the generic host fallback. Strip a leading
+            # current-prefix first so both namespacing sites agree.
+            bare = str(role)[len(prefix):] if str(role).startswith(prefix) else str(role)
+            tmpl = rcfg.get("template") or f"templates/{bare}.md"
             tfile = emit / tmpl
-            prompt = tfile.read_text(encoding="utf-8") if tfile.exists() else _role_prompt(role)
-            roles[prefix + role] = {
+            prompt = tfile.read_text(encoding="utf-8") if tfile.exists() else _role_prompt(bare)
+            roles[prefix + bare] = {
                 "model": "host",
                 "tools": rcfg.get("tools") or ["read_file", "write"],
                 "temperature": rcfg.get("temperature", 0.2),

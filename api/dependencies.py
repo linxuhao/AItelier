@@ -139,6 +139,20 @@ def get_skillflow():
                      code_path_resolver=_existing_repo_code_path,
                      trace_db_path=WS_PATH)
 
+        # Capability registry: a step's `capability` keyword → framework-
+        # provisioned toolset + injected context. LEAST PRIVILEGE — neither the
+        # pipeline author nor the agent picks a tool's write folder or its
+        # toolset; the framework hands them over, keyed on the step's declared
+        # purpose. `stateful` gives a persisting tool a durable, per-config,
+        # MOUNTED state_dir (survives across runs AND container recreation) — it
+        # replaces a generated tool hardcoding an un-mounted ~/.aitelier path.
+        # `tool_creation` grants a tool-building step the register/test toolset.
+        sf.register_capability(
+            "stateful",
+            context_provider=lambda cfg: {"state_dir": str(sf._workspace.state_dir(cfg))})
+        sf.register_capability(
+            "tool_creation", tools=["write", "run_tests", "pytest", "register_tool"])
+
         # Register agent configs into skillflow so graph validation catches
         # missing agent_config references at startup.
         _load_and_register_agent_configs(sf)

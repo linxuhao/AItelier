@@ -2,7 +2,9 @@
 runnable: namespacing, host-agent auto-registration, live register + manifest,
 in-place update, boot-time load, and graceful failures."""
 
+import json
 import textwrap
+from pathlib import Path
 
 import pytest
 import yaml
@@ -200,6 +202,70 @@ def test_register_generated_pipeline_persists_and_updates(sf, registry, gdir,
     # same name again → update in place
     res2 = pr.register_generated_pipeline(sf, registry, "run2", "My Cool Pipeline")
     assert res2["action"] == "updated"
+
+
+def test_edit_mode_prenamespaced_role_table_is_not_double_prefixed(
+        tmp_path, registry, gdir):
+    """EDIT-mode regression (the CAC40 e2e host bug): in edit mode the forge
+    emitter echoes the baseline's already-namespaced role names into
+    role_table.yaml. register_forge_pipeline must re-apply the ``<config>__``
+    prefix IDEMPOTENTLY — a blind ``prefix + role`` double-prefixes
+    (``gen_x__gen_x__role``), mismatching the (single-prefixed) graph
+    agent_config refs, so the real emitted prompt is silently dropped to the
+    generic host fallback."""
+    import skillflow as _sk
+    from skillflow import PipelineGraph
+    from skillflow.tool_loader import ToolLoader
+    loader = ToolLoader(Path(_sk.__file__).parent / "tools")
+    sf = SkillFlow(str(tmp_path / "sf.db"), tool_loader=loader,
+                   workspace_base=str(tmp_path / "ws"),
+                   projects_base=str(tmp_path / "proj"))
+
+    config_name = pr.config_name_for("cac40 daily")          # gen_cac40_daily
+    pfx = config_name + pr._ROLE_SEP
+    graph = {
+        "name": "placeholder", "begin": "make",
+        "end_conditions": {"combinator": "or", "conditions": [
+            {"type": "node_reached", "node": "done", "result": "completed"}]},
+        "steps": [
+            {"id": "make", "step_type": "agent", "agent_config": pfx + "maker",
+             "transitions": [{"to": "done"}]},
+            {"id": "done", "step_type": "gate", "transitions": [{"to": None}]},
+        ],
+    }
+    # A minimal graph named 'pipeline_forge' so create_run has something to bind
+    # to (register_forge_pipeline only reads the run's project_id).
+    forge_run_graph = {**graph, "name": "pipeline_forge"}
+    sf.register_agent_config_from_dict(pfx + "maker", {"model": "host"})
+    sf.register_graph(PipelineGraph._from_dict(forge_run_graph))
+    run_id = sf.create_run("pipeline_forge", {"project_id": "p"})
+
+    emit = sf._workspace.get_step_dir("p", "pipeline_forge", "emit_graph")
+    emit.mkdir(parents=True, exist_ok=True)
+    (emit / "pipeline.yaml").write_text(yaml.safe_dump(graph), encoding="utf-8")
+    (emit / "role_table.yaml").write_text(
+        yaml.safe_dump({pfx + "maker": {"tools": ["read_file", "write"],
+                                        "template": f"templates/{pfx}maker.md"}}),
+        encoding="utf-8")
+    (emit / "templates").mkdir(exist_ok=True)
+    (emit / "templates" / f"{pfx}maker.md").write_text(
+        "REAL MAKER PROMPT", encoding="utf-8")
+
+    res = pr.register_forge_pipeline(sf, registry, run_id, "cac40 daily")
+    assert "error" not in res, res
+
+    role_key = pfx + "maker"
+    assert role_key in sf.agent_registry                     # single prefix
+    assert (pfx + pfx + "maker") not in sf.agent_registry    # NOT double
+    # the registered role kept the REAL emitted prompt, not the generic fallback
+    assert sf.agent_registry.get(role_key).config["system_prompt"] == "REAL MAKER PROMPT"
+    # graph ref stayed single-prefixed and matches the role key
+    persisted = yaml.safe_load((gdir / f"{config_name}.yaml").read_text())
+    refs = [s.get("agent_config") for s in persisted["steps"] if s.get("agent_config")]
+    assert refs == [role_key]
+    # persisted roles.json is single-prefixed too
+    roles_json = json.loads((gdir / f"{config_name}.roles.json").read_text())
+    assert set(roles_json) == {role_key}
 
 
 def test_load_generated_configs_on_boot(sf, registry, gdir):

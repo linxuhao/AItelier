@@ -232,6 +232,19 @@ maker's job to what's achievable, then the reviewer to that same bar).
   `{config: <this pipeline name>, output: <seed_file>}`. The tool that needs it takes
   it from that step's output or from `tool_params`.
 - A **tool** step's inputs are `tool_params` (with `$CONFIG_DIR`/`$STEP_DIR`), never `context`.
+- **A tool that persists cross-run state MUST declare `capability: stateful`** on
+  its step. The engine then hands the tool a durable, per-pipeline `state_dir`
+  (mounted; survives across runs and container recreation). The tool writes
+  RELATIVE to `state_dir` and never computes its own path — a generated tool that
+  hardcodes `Path.home()/...` loses its data on the next container rebuild. Shape:
+  ```yaml
+    - id: persist_positions
+      step_type: tool
+      tool_name: persist_positions
+      capability: stateful          # → tool receives a durable state_dir kwarg
+      tool_params: { source_path: "$STEP_DIR/positions.json" }
+      transitions: [ { to: done } ]
+  ```
 - `output` is a **mapping**: `{mode: content|write}` and, for named files,
   `fixed: {slot: {file: "name"}}`. Not a list. `content` = the agent may write
   ONLY the declared `fixed` files (use for structured/known outputs); `write` =
@@ -266,6 +279,25 @@ maker's job to what's achievable, then the reviewer to that same bar).
     the tool returns an `error` field with the reason — skillflow injects ONLY
     `tool_result["error"]` into the maker on a tool loop-back. A tool that returns
     just `{passed: false}` loops back silently and the maker re-emits blind.
+- **Ground the decision maker in fresh research, not just carried state** (the
+  reviewer-reads-maker rule has a twin). A maker that produces the pipeline's
+  DELIVERABLE (a recommendation, a selection, a plan) MUST read — via
+  `{source: {step: <research/grounding step>}}` — the fresh research/domain steps
+  it depends on. A research maker→reviewer pair whose output flows into NOTHING
+  downstream is a **stranded island**: execution passes through it, but its data
+  never reaches the decision, so the decision agent falls back on stale state
+  (prior positions, an old memo) or model priors and drifts off-domain — it picks
+  an off-universe ticker, an out-of-catalog item. Trace the DATA flow, not just the
+  execution flow: every grounding step's conclusion must land in the decision
+  step's `context`.
+- **Domain invariants belong in context, never only in a prompt.** An allowed
+  universe (the tradeable tickers, the catalog), a schema, thresholds the agents
+  must respect — put them in graph CONTEXT (a seed input, or an artifact a step
+  produces and the others read via `{source: {...}}`) so the constraint sits in
+  front of the model every turn. Buried in a role prompt, the model drifts off it.
+- **Feed a loader/fetcher tool's result straight into the next agent** with
+  `{source: {tool: <tool_name>}}` — that injects the tool's RETURN value into the
+  agent's context. Don't make the agent re-`read_file` what a prior tool produced.
 
 ## Output — write these files (into your step output dir)
 1. **`pipeline.yaml`** — the generated graph, following the schema above exactly.

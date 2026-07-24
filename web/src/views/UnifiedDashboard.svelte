@@ -9,6 +9,8 @@
     listAllRuns,
     createProject,
     deleteProject,
+    listPipelines,
+    pipelineStateFile,
   } from '../lib/api';
   import type { RepoItem, RepoProjectSummary } from '../lib/api';
   import {
@@ -31,6 +33,15 @@
   // config-authoring tooling, not projects. Listed in their own auditable
   // section (trace links) rather than as repos.
   let authoringRuns = $state<Record<string, unknown>[]>([]);
+  // Runs of GENERATED pipelines (repo-less by design, but NOT authoring) — real
+  // work that produces artifacts yet touches no code repo (e.g. gen_cac40).
+  // Their own section, distinct from the generation runs that created them.
+  let pipelineRuns = $state<Record<string, unknown>[]>([]);
+  // Catalog of generated pipelines (gen_*) with the durable state each carries
+  // across runs; state file bodies are lazy-loaded into stateFiles on expand.
+  let pipelines = $state<Record<string, unknown>[]>([]);
+  let stateFiles = $state<Record<string, string>>({});
+  let openState = $state<Set<string>>(new Set());
   let loading = $state(true);
   let error = $state<string | null>(null);
   let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
@@ -89,7 +100,11 @@
       // with orphan projects, which are genuinely repo-less by accident.
       const isNonCode = (r: Record<string, unknown>) =>
         Boolean(r.is_authoring || r.repo_less);
-      authoringRuns = runs.filter(isNonCode);
+      // Generation (authoring) and repo-less pipeline RUNS are different intents
+      // — split them so a gen_cac40 run reads as a pipeline run, not "authoring".
+      authoringRuns = runs.filter((r) => Boolean(r.is_authoring));
+      pipelineRuns = runs.filter(
+        (r) => Boolean(r.repo_less) && !r.is_authoring);
       orphanProjects = runs.filter(
         (r) =>
           (r.repo_path == null ||
@@ -97,6 +112,13 @@
             r.repo_path === undefined) &&
           !isNonCode(r),
       );
+      // Catalog of generated pipelines + their durable cross-run state.
+      try {
+        const pd = await listPipelines();
+        pipelines = ((pd as any)?.pipelines ?? []) as Record<string, unknown>[];
+      } catch {
+        /* catalog is non-critical */
+      }
     } catch {
       // Orphan / authoring runs are non-critical — silently ignore
     }
@@ -301,6 +323,31 @@
       ((project.name as string) || '').toLowerCase().includes(q) ||
       ((project.project_id as string) || '').toLowerCase().includes(q)
     );
+  }
+
+  // ── Durable-state viewer: lazy-load a pipeline_state/<config>/<file> body ──
+  const stateKey = (config: string, file: string) => config + ' ' + file;
+
+  async function toggleState(config: string, file: string) {
+    const key = stateKey(config, file);
+    const next = new Set(openState);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+      if (!(key in stateFiles)) {
+        try {
+          const r = await pipelineStateFile(config, file);
+          stateFiles = {
+            ...stateFiles,
+            [key]: r.content + (r.truncated ? '\n… ' + t('dashboard.stateTruncated') : ''),
+          };
+        } catch {
+          stateFiles = { ...stateFiles, [key]: '(failed to load)' };
+        }
+      }
+    }
+    openState = next;
   }
 </script>
 
@@ -695,23 +742,22 @@
 
     <!-- Authoring runs (pipelines & addons) — repo-independent config tooling,
          auditable via traces. Not repos, not orphan projects. -->
-    {#if authoringRuns.length > 0}
-      {@const filteredAuthoring = searchQuery.trim()
-        ? authoringRuns.filter(o => orphanMatchesSearch(o, searchQuery))
-        : authoringRuns}
-      {#if filteredAuthoring.length > 0}
-        <details class="repo-section authoring-section">
+    <!-- Reusable run table for a repo-less run bucket (generation / pipeline runs). -->
+    {#snippet runSection(runs, titleKey, hintKey, sectionClass)}
+      {@const filtered = searchQuery.trim()
+        ? runs.filter((o) => orphanMatchesSearch(o, searchQuery))
+        : runs}
+      {#if filtered.length > 0}
+        <details class="repo-section {sectionClass}">
           <summary class="repo-summary">
-            <span class="repo-summary-name">
-              <strong>{t('dashboard.authoringRuns')}</strong>
-            </span>
+            <span class="repo-summary-name"><strong>{t(titleKey)}</strong></span>
             <span class="repo-summary-meta">
               <span class="project-count">
-                {t('dashboard.projectCount').replace('{n}', String(filteredAuthoring.length))}
+                {t('dashboard.projectCount').replace('{n}', String(filtered.length))}
               </span>
             </span>
           </summary>
-          <p class="authoring-hint">{t('dashboard.authoringHint')}</p>
+          <p class="authoring-hint">{t(hintKey)}</p>
           <figure>
             <table class="project-table">
               <thead>
@@ -725,52 +771,33 @@
                 </tr>
               </thead>
               <tbody>
-                {#each filteredAuthoring as run, idx}
+                {#each filtered as run, idx}
                   <tr class="project-row">
                     <td>{idx + 1}</td>
                     <td>
                       <a
-                        href="#/projects/{encodeURIComponent(run.project_id as string)}/trace"
-                        onclick={(e) => {
-                          e.preventDefault();
-                          navigateToTrace(run.project_id as string);
-                        }}
-                      >
-                        {run.name || (run.project_id as string)}
-                      </a>
+                        href="#/projects/{encodeURIComponent(run.project_id)}/trace"
+                        onclick={(e) => { e.preventDefault(); navigateToTrace(run.project_id); }}
+                      >{run.name || run.project_id}</a>
                     </td>
                     <td><span class="repo-type-badge">{run.config_label || run.config_name}</span></td>
                     <td>
                       {#if run.status}
-                        {@const parsed = parseStatus(run.status as string)}
-                        <span class="status-badge {parsed.className}" title={parsed.text}>
-                          {parsed.icon} {parsed.text}
-                        </span>
+                        {@const parsed = parseStatus(run.status)}
+                        <span class="status-badge {parsed.className}" title={parsed.text}>{parsed.icon} {parsed.text}</span>
                       {:else}
                         <span class="status-badge">—</span>
                       {/if}
                     </td>
-                    <td>
-                      <span class="timestamp">{formatTime((run.last_update as number) ?? run.updated_at)}</span>
-                    </td>
+                    <td><span class="timestamp">{formatTime(run.last_update ?? run.updated_at)}</span></td>
                     <td>
                       <a
                         class="repo-btn"
-                        href="#/projects/{encodeURIComponent(run.project_id as string)}/trace"
-                        onclick={(e) => {
-                          e.preventDefault();
-                          navigateToTrace(run.project_id as string);
-                        }}
+                        href="#/projects/{encodeURIComponent(run.project_id)}/trace"
+                        onclick={(e) => { e.preventDefault(); navigateToTrace(run.project_id); }}
                       >{t('dashboard.viewTrace')}</a>
                       {#if canWrite}
-                        <button
-                          class="delete-btn"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            confirmDelete(run.project_id as string);
-                          }}
-                          title={t('dashboard.deleteTitle')}
-                        >✕</button>
+                        <button class="delete-btn" onclick={(e) => { e.stopPropagation(); confirmDelete(run.project_id); }} title={t('dashboard.deleteTitle')}>✕</button>
                       {/if}
                     </td>
                   </tr>
@@ -780,6 +807,58 @@
           </figure>
         </details>
       {/if}
+    {/snippet}
+
+    <!-- Pipeline generation (generate_pipeline / generate_addon). -->
+    {@render runSection(authoringRuns, 'dashboard.authoringRuns', 'dashboard.authoringHint', 'authoring-section')}
+    <!-- Repo-less pipeline RUNS (gen_* executions like cac40, novels). -->
+    {@render runSection(pipelineRuns, 'dashboard.pipelineRuns', 'dashboard.pipelineRunsHint', 'pipeline-run-section')}
+
+    <!-- Catalog: the generated pipelines you can run + the durable state each carries. -->
+    {#if pipelines.length > 0}
+      <details class="repo-section pipeline-catalog-section">
+        <summary class="repo-summary">
+          <span class="repo-summary-name"><strong>{t('dashboard.pipelineCatalog')}</strong></span>
+          <span class="repo-summary-meta">
+            <span class="project-count">{t('dashboard.projectCount').replace('{n}', String(pipelines.length))}</span>
+          </span>
+        </summary>
+        <p class="authoring-hint">{t('dashboard.pipelineCatalogHint')}</p>
+        <figure>
+          <table class="project-table">
+            <thead>
+              <tr>
+                <th>{t('dashboard.colProject')}</th>
+                <th>{t('dashboard.colState')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each pipelines as p}
+                <tr class="project-row">
+                  <td><span class="repo-type-badge">{p.label || p.config_name}</span></td>
+                  <td>
+                    {#if p.state_files?.length}
+                      {#each p.state_files as sfile}
+                        {@const key = stateKey(p.config_name, sfile.name)}
+                        <div class="state-file">
+                          <button class="state-toggle" onclick={() => toggleState(p.config_name, sfile.name)}>
+                            {openState.has(key) ? '▾' : '▸'} {sfile.name} <small>({sfile.size} B)</small>
+                          </button>
+                          {#if openState.has(key)}
+                            <pre class="state-body">{stateFiles[key] ?? '…'}</pre>
+                          {/if}
+                        </div>
+                      {/each}
+                    {:else}
+                      <span class="muted">{t('dashboard.noDurableState')}</span>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </figure>
+      </details>
     {/if}
   {/if}
 
@@ -1050,4 +1129,19 @@
     justify-content: flex-end;
     gap: 0.5rem;
   }
+
+  /* ── Pipeline catalog: durable-state viewer ── */
+  .state-file { margin: 0.15rem 0; }
+  .state-toggle {
+    background: none; border: none; padding: 0.1rem 0.2rem; margin: 0;
+    width: auto; font: inherit; cursor: pointer;
+    color: var(--pico-primary, #0669c1);
+  }
+  .state-toggle small { color: var(--pico-muted-color, #8a8a8a); }
+  .state-body {
+    margin: 0.25rem 0 0.5rem; padding: 0.5rem; max-height: 16rem; overflow: auto;
+    font-size: 0.78rem; white-space: pre-wrap; word-break: break-word;
+    background: var(--pico-code-background-color, #f4f4f4); border-radius: 4px;
+  }
+  .muted { color: var(--pico-muted-color, #8a8a8a); font-size: 0.85rem; }
 </style>

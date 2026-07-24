@@ -410,6 +410,24 @@ export function listAllRuns(status?: string): Promise<{ runs: Record<string, unk
   return _get(path);
 }
 
+/** Catalog of generated pipelines (gen_*): each manifest + its durable-state file list. */
+export function listPipelines(): Promise<{ pipelines: Record<string, unknown>[] }> {
+  return _get('/api/pipelines');
+}
+
+/** Read one durable-state file of a generated pipeline (pipeline_state/<config>/<name>). */
+export function pipelineStateFile(
+  config: string,
+  name: string,
+): Promise<{ name: string; content: string; truncated: boolean }> {
+  return _get(
+    '/api/pipelines/' +
+      encodeURIComponent(config) +
+      '/state/file?name=' +
+      encodeURIComponent(name),
+  );
+}
+
 // ═════════════════════════════════════════════════════════════════════
 //  Checkpoints
 // ═════════════════════════════════════════════════════════════════════

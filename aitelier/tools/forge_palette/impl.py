@@ -59,8 +59,9 @@ folder or a toolset (least privilege). Available capabilities:
   kwarg (survives across runs AND container recreation). Put it on ANY tool step
   or context-source-tool step that persists/reads cross-run state (positions
   carried day to day, an accumulating memo). The tool writes RELATIVE to
-  `state_dir` and NEVER computes its own path (a hardcoded `Path.home()/...`
-  escapes the mount and is lost on rebuild). See the durable-state idiom below.
+  `state_dir` and NEVER computes its own path (a hardcoded absolute path under
+  the user's home dir escapes the mount and is lost on the next container
+  rebuild). See the durable-state idiom below.
 - `tool_creation` — grants an agent step `write`/`run_tests`/`pytest`/
   `register_tool` (used by the tool-build loop so a step can author + self-test
   a tool). You rarely need this in a generated pipeline.

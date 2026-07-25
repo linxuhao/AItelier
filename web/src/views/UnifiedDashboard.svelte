@@ -16,6 +16,7 @@
   import {
     formatTime,
     formatTokens,
+    formatBytes,
     formatTaskProgress,
     parseStatus,
     cacheBadgeClass,
@@ -41,6 +42,9 @@
   // across runs; state file bodies are lazy-loaded into stateFiles on expand.
   let pipelines = $state<Record<string, unknown>[]>([]);
   let stateFiles = $state<Record<string, string>>({});
+  // Load failures live here, NOT in stateFiles — a cached error would satisfy
+  // the fetch guard and make the failure permanent for the page's lifetime.
+  let stateErrors = $state<Record<string, string>>({});
   let openState = $state<Set<string>>(new Set());
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -70,12 +74,29 @@
 
   let canWrite = $derived($authStore.permissionResolved && $authStore.canWrite);
   let connected = $derived($connectionStore.connectionOk);
-  let empty = $derived(!loading && !error && repos.length === 0);
 
   let filteredRepos = $derived<RepoItem[]>(
     searchQuery.trim()
       ? repos.filter(r => matchesSearch(r, searchQuery))
       : repos,
+  );
+
+  // ── Repo-less content, search-filtered once here rather than per section ──
+  // These sections used to live inside the repo `{:else}` branch, so a user with
+  // zero code repos (all work in generated pipelines) hit the "no repositories"
+  // empty state and never saw them at all. They now render independently, and
+  // the empty / no-results states below account for them.
+  let matchedAuthoring = $derived(filterRuns(authoringRuns, searchQuery));
+  let matchedPipelineRuns = $derived(filterRuns(pipelineRuns, searchQuery));
+  let matchedOrphans = $derived(filterRuns(orphanProjects, searchQuery));
+  let matchedPipelines = $derived(filterPipelines(pipelines, searchQuery));
+  let repoLessCount = $derived(
+    matchedAuthoring.length + matchedPipelineRuns.length +
+    matchedOrphans.length + matchedPipelines.length,
+  );
+
+  let empty = $derived(
+    !loading && !error && repos.length === 0 && repoLessCount === 0,
   );
 
   // Derived: when searching, auto-expand all matching repos.
@@ -88,41 +109,56 @@
 
   // ── Lifecycle ──
 
-  onMount(async () => {
-    await refreshData();
-    // Fetch orphan projects (no repo_path) once
-    try {
-      const data = await listAllRuns();
-      const runs = ((data as any)?.runs ?? data) as Record<string, unknown>[];
-      // Non-code runs — authoring converters (generate_addon / generate_pipeline)
-      // and generated pipelines that never touch a repo — have no repo by design.
-      // Split into their own section (auditable via traces) rather than mixing
-      // with orphan projects, which are genuinely repo-less by accident.
-      const isNonCode = (r: Record<string, unknown>) =>
-        Boolean(r.is_authoring || r.repo_less);
-      // Generation (authoring) and repo-less pipeline RUNS are different intents
-      // — split them so a gen_cac40 run reads as a pipeline run, not "authoring".
-      authoringRuns = runs.filter((r) => Boolean(r.is_authoring));
-      pipelineRuns = runs.filter(
-        (r) => Boolean(r.repo_less) && !r.is_authoring);
-      orphanProjects = runs.filter(
-        (r) =>
-          (r.repo_path == null ||
-            r.repo_path === '' ||
-            r.repo_path === undefined) &&
-          !isNonCode(r),
-      );
-      // Catalog of generated pipelines + their durable cross-run state.
-      try {
-        const pd = await listPipelines();
-        pipelines = ((pd as any)?.pipelines ?? []) as Record<string, unknown>[];
-      } catch {
-        /* catalog is non-critical */
-      }
-    } catch {
-      // Orphan / authoring runs are non-critical — silently ignore
+  /** Bucket every repo-less run into exactly one section, in one pass.
+   *  Precedence is explicit and structural (else-if), not an artifact of the
+   *  order three independent .filter() calls happen to be written in:
+   *    is_authoring          → pipeline GENERATION (generate_pipeline/addon)
+   *    repo_less             → a RUN of a generated pipeline (gen_cac40, novels)
+   *    no repo_path          → orphan project (repo-less by accident)
+   *  Converters carry BOTH flags (registers_generated_* + repo_mode: none), so
+   *  the first arm is what keeps them in "generation". */
+  function bucketRuns(runs: Record<string, unknown>[]) {
+    const authoring: Record<string, unknown>[] = [];
+    const pipeline: Record<string, unknown>[] = [];
+    const orphans: Record<string, unknown>[] = [];
+    for (const r of runs) {
+      if (r.is_authoring) authoring.push(r);
+      else if (r.repo_less) pipeline.push(r);
+      else if (r.repo_path == null || r.repo_path === '') orphans.push(r);
     }
-    pollTimer = setInterval(refreshData, 10000);
+    authoringRuns = authoring;
+    pipelineRuns = pipeline;
+    orphanProjects = orphans;
+  }
+
+  /** Runs + catalog: independent of each other and of the repo list, so fetch
+   *  them concurrently and let each fail on its own. Previously listPipelines()
+   *  was nested inside the listAllRuns() try, so a slow/500 /api/runs skipped
+   *  the catalog entirely and the whole section vanished with no error. */
+  async function refreshRunsAndCatalog() {
+    const [runsRes, pipesRes] = await Promise.allSettled([
+      listAllRuns(),
+      listPipelines(),
+    ]);
+    if (runsRes.status === 'fulfilled') {
+      const data = runsRes.value;
+      bucketRuns(((data as any)?.runs ?? data) as Record<string, unknown>[]);
+    }
+    if (pipesRes.status === 'fulfilled') {
+      pipelines = ((pipesRes.value as any)?.pipelines ?? []) as Record<string, unknown>[];
+    }
+  }
+
+  onMount(async () => {
+    // The three lists are independent — serialising them added a full RTT each
+    // before first paint (the 4ms catalog call used to wait on the 176ms runs call).
+    await Promise.allSettled([refreshData(), refreshRunsAndCatalog()]);
+    pollTimer = setInterval(() => {
+      // Poll the run tables too: their status badges are the live data on this
+      // page. Refreshing only the repo list made a running pipeline look stuck.
+      refreshData();
+      refreshRunsAndCatalog();
+    }, 10000);
   });
 
   onDestroy(() => {
@@ -325,29 +361,56 @@
     );
   }
 
+  function filterRuns(
+    runs: Record<string, unknown>[],
+    query: string,
+  ): Record<string, unknown>[] {
+    return query.trim() ? runs.filter(r => orphanMatchesSearch(r, query)) : runs;
+  }
+
+  function filterPipelines(
+    list: Record<string, unknown>[],
+    query: string,
+  ): Record<string, unknown>[] {
+    const q = query.toLowerCase().trim();
+    if (!q) return list;
+    return list.filter(
+      p =>
+        ((p.config_name as string) || '').toLowerCase().includes(q) ||
+        ((p.label as string) || '').toLowerCase().includes(q),
+    );
+  }
+
   // ── Durable-state viewer: lazy-load a pipeline_state/<config>/<file> body ──
-  const stateKey = (config: string, file: string) => config + ' ' + file;
+  const stateKey = (config: string, file: string) => config + '\u0000' + file;
 
   async function toggleState(config: string, file: string) {
     const key = stateKey(config, file);
+    // Publish the open/closed flip BEFORE any await. Snapshotting openState and
+    // assigning it back after the fetch made concurrent toggles last-writer-wins:
+    // expanding a second file while the first was in flight silently collapsed it.
     const next = new Set(openState);
-    if (next.has(key)) {
-      next.delete(key);
-    } else {
-      next.add(key);
-      if (!(key in stateFiles)) {
-        try {
-          const r = await pipelineStateFile(config, file);
-          stateFiles = {
-            ...stateFiles,
-            [key]: r.content + (r.truncated ? '\n… ' + t('dashboard.stateTruncated') : ''),
-          };
-        } catch {
-          stateFiles = { ...stateFiles, [key]: '(failed to load)' };
-        }
-      }
-    }
+    const opening = !next.has(key);
+    if (opening) next.add(key);
+    else next.delete(key);
     openState = next;
+    if (!opening || key in stateFiles) return;
+
+    // A failed load is NOT cached — it goes in stateErrors, so collapsing and
+    // re-expanding retries. Caching '(failed to load)' in stateFiles used to
+    // satisfy the fetch guard forever, so one 404/500 poisoned the row until F5.
+    stateErrors = { ...stateErrors, [key]: '' };
+    try {
+      const r = await pipelineStateFile(config, file);
+      // The API returns the TAIL of an over-cap file (newest entries), so the
+      // truncation marker belongs at the top.
+      stateFiles = {
+        ...stateFiles,
+        [key]: (r.truncated ? '… ' + t('dashboard.stateTruncated') + '\n' : '') + r.content,
+      };
+    } catch {
+      stateErrors = { ...stateErrors, [key]: t('dashboard.stateLoadFailed') };
+    }
   }
 </script>
 
@@ -516,7 +579,7 @@
         <p>{t('dashboard.signInForWrite')}</p>
       {/if}
     </article>
-  {:else if searchQuery && filteredRepos.length === 0}
+  {:else if searchQuery && filteredRepos.length === 0 && repoLessCount === 0}
     <!-- No search results -->
     <article class="empty-state">
       <p>{t('dashboard.noSearchResults')}</p>
@@ -643,12 +706,17 @@
         {/if}
       </details>
     {/each}
+  {/if}
 
+  <!-- ── Repo-less sections ──────────────────────────────────────────────
+       Rendered OUTSIDE the repo if/else chain above: a user whose work is
+       entirely repo-less (generated pipelines, novels) has repos.length === 0,
+       which used to land on the "no repositories yet" branch and hide all of
+       this. Each section still guards on its own (search-filtered) contents. -->
+  {#if !loading && !(error && repos.length === 0)}
     <!-- Orphan projects section -->
     {#if orphanProjects.length > 0}
-      {@const filteredOrphans = searchQuery.trim()
-        ? orphanProjects.filter(o => orphanMatchesSearch(o, searchQuery))
-        : orphanProjects}
+      {@const filteredOrphans = matchedOrphans}
       {#if filteredOrphans.length > 0}
         <details class="repo-section orphan-section">
           <summary class="repo-summary">
@@ -740,20 +808,16 @@
       {/if}
     {/if}
 
-    <!-- Authoring runs (pipelines & addons) — repo-independent config tooling,
-         auditable via traces. Not repos, not orphan projects. -->
-    <!-- Reusable run table for a repo-less run bucket (generation / pipeline runs). -->
-    {#snippet runSection(runs, titleKey, hintKey, sectionClass)}
-      {@const filtered = searchQuery.trim()
-        ? runs.filter((o) => orphanMatchesSearch(o, searchQuery))
-        : runs}
-      {#if filtered.length > 0}
-        <details class="repo-section {sectionClass}">
+    <!-- Reusable run table for a repo-less run bucket (generation / pipeline runs).
+         `runs` arrives already search-filtered (matchedAuthoring / matchedPipelineRuns). -->
+    {#snippet runSection(runs, titleKey, hintKey)}
+      {#if runs.length > 0}
+        <details class="repo-section authoring-section">
           <summary class="repo-summary">
             <span class="repo-summary-name"><strong>{t(titleKey)}</strong></span>
             <span class="repo-summary-meta">
               <span class="project-count">
-                {t('dashboard.projectCount').replace('{n}', String(filtered.length))}
+                {t('dashboard.projectCount').replace('{n}', String(runs.length))}
               </span>
             </span>
           </summary>
@@ -771,7 +835,7 @@
                 </tr>
               </thead>
               <tbody>
-                {#each filtered as run, idx}
+                {#each runs as run, idx}
                   <tr class="project-row">
                     <td>{idx + 1}</td>
                     <td>
@@ -810,17 +874,17 @@
     {/snippet}
 
     <!-- Pipeline generation (generate_pipeline / generate_addon). -->
-    {@render runSection(authoringRuns, 'dashboard.authoringRuns', 'dashboard.authoringHint', 'authoring-section')}
+    {@render runSection(matchedAuthoring, 'dashboard.authoringRuns', 'dashboard.authoringHint')}
     <!-- Repo-less pipeline RUNS (gen_* executions like cac40, novels). -->
-    {@render runSection(pipelineRuns, 'dashboard.pipelineRuns', 'dashboard.pipelineRunsHint', 'pipeline-run-section')}
+    {@render runSection(matchedPipelineRuns, 'dashboard.pipelineRuns', 'dashboard.pipelineRunsHint')}
 
     <!-- Catalog: the generated pipelines you can run + the durable state each carries. -->
-    {#if pipelines.length > 0}
-      <details class="repo-section pipeline-catalog-section">
+    {#if matchedPipelines.length > 0}
+      <details class="repo-section authoring-section">
         <summary class="repo-summary">
           <span class="repo-summary-name"><strong>{t('dashboard.pipelineCatalog')}</strong></span>
           <span class="repo-summary-meta">
-            <span class="project-count">{t('dashboard.projectCount').replace('{n}', String(pipelines.length))}</span>
+            <span class="project-count">{t('dashboard.projectCount').replace('{n}', String(matchedPipelines.length))}</span>
           </span>
         </summary>
         <p class="authoring-hint">{t('dashboard.pipelineCatalogHint')}</p>
@@ -833,19 +897,24 @@
               </tr>
             </thead>
             <tbody>
-              {#each pipelines as p}
+              {#each matchedPipelines as p}
                 <tr class="project-row">
                   <td><span class="repo-type-badge">{p.label || p.config_name}</span></td>
                   <td>
                     {#if p.state_files?.length}
                       {#each p.state_files as sfile}
                         {@const key = stateKey(p.config_name, sfile.name)}
+                        {@const open = openState.has(key)}
                         <div class="state-file">
                           <button class="state-toggle" onclick={() => toggleState(p.config_name, sfile.name)}>
-                            {openState.has(key) ? '▾' : '▸'} {sfile.name} <small>({sfile.size} B)</small>
+                            {open ? '▾' : '▸'} {sfile.name} <small>({formatBytes(sfile.size)})</small>
                           </button>
-                          {#if openState.has(key)}
-                            <pre class="state-body">{stateFiles[key] ?? '…'}</pre>
+                          {#if open}
+                            {#if stateErrors[key]}
+                              <pre class="state-body state-error">{stateErrors[key]}</pre>
+                            {:else}
+                              <pre class="state-body">{stateFiles[key] ?? '…'}</pre>
+                            {/if}
                           {/if}
                         </div>
                       {/each}
@@ -1143,5 +1212,6 @@
     font-size: 0.78rem; white-space: pre-wrap; word-break: break-word;
     background: var(--pico-code-background-color, #f4f4f4); border-radius: 4px;
   }
+  .state-error { color: var(--pico-del-color, #b3261e); }
   .muted { color: var(--pico-muted-color, #8a8a8a); font-size: 0.85rem; }
 </style>

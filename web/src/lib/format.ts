@@ -129,6 +129,30 @@ export function formatTokens(n: number | null | undefined): string {
 }
 
 /**
+ * Format a byte count as a human-readable size.
+ * E.g. 512 → "512 B", 2048 → "2 KB", 1572864 → "1.5 MB".
+ *
+ * @param n — size in bytes (number, null, or undefined)
+ * @returns formatted string, or "" for invalid input
+ */
+export function formatBytes(n: number | null | undefined): string {
+  if (n == null || isNaN(n)) {
+    return '';
+  }
+  if (n < 1024) {
+    return `${n} B`;
+  }
+  const units = ['KB', 'MB', 'GB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return (v % 1 === 0 ? v.toFixed(0) : v.toFixed(1).replace(/\.0$/, '')) + ' ' + units[i];
+}
+
+/**
  * Map a pipeline status string to a CSS class name for badge colors.
  *
  * @param status — pipeline status string

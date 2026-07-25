@@ -9,6 +9,7 @@ import {
   escapeHtml,
   formatTime,
   formatTokens,
+  formatBytes,
   statusClass,
   statusIcon,
   stepLabel,
@@ -265,5 +266,31 @@ describe('parseStatus', () => {
     expect(r.text).toBe('');
     expect(r.className).toBe('');
     expect(r.icon).toBe('?');
+  });
+});
+
+// ── formatBytes ─────────────────────────────────────────────────────
+// Added with the pipeline-state viewer: the catalog rendered raw `524288 B`
+// because the size formatter lived inline in the view instead of here.
+describe('formatBytes', () => {
+  it('shows plain bytes under 1 KB', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(1023)).toBe('1023 B');
+  });
+
+  it('scales to KB/MB/GB', () => {
+    expect(formatBytes(1024)).toBe('1 KB');
+    expect(formatBytes(1536)).toBe('1.5 KB');
+    expect(formatBytes(524288)).toBe('512 KB');
+    expect(formatBytes(1024 * 1024)).toBe('1 MB');
+    expect(formatBytes(1572864)).toBe('1.5 MB');
+    expect(formatBytes(1024 ** 3)).toBe('1 GB');
+  });
+
+  it('returns "" for invalid input', () => {
+    expect(formatBytes(null)).toBe('');
+    expect(formatBytes(undefined)).toBe('');
+    expect(formatBytes(NaN)).toBe('');
   });
 });

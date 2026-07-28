@@ -144,6 +144,42 @@ def build_language_instruction(user_lang: str | None) -> str:
     )
 
 
+
+# ── The step's mutation vocabulary — ONE definition, two consumers ───────────
+#
+# `PipelineEngine` imports this to decide which calls are writes; this module
+# uses it to decide which tools to TELL the agent about. They were separately
+# implemented as `name.startswith(("write_", "create_", "append_")) or name ==
+# "write"`, which silently excludes `create` and `edit` — the two mutators
+# skillflow injects into every `mode: write` step.
+#
+# The consequence was not a missing line in a list. For a `mode: write` step
+# WITHOUT `allow_full_write` the schemas are
+# [read_file, create, edit, finish_step, read, search, list], so that filter
+# returned NOTHING and the entire "[Output Delivery — REQUIRED]" section was
+# skipped: the agent was never told it could write at all, never shown a tool
+# name, never shown a parameter list. It guessed — and produced eight different
+# envelope shapes across one investigation, every one reported back as "you
+# wrote nothing". Meanwhile the one tool a lucky step WAS told about carried the
+# advice "Prefer 'edit' for existing files", recommending a tool the prompt did
+# not document.
+GENERIC_MUTATORS = ("write", "create", "edit")
+SLOT_MUTATOR_PREFIXES = ("write_", "create_", "append_", "edit_")
+
+
+def is_mutation_tool(name: str, tool_schemas=None) -> bool:
+    """Would calling `name` write a file in this step?
+
+    Membership in the step's own schemas is required when they are supplied, so
+    an invented name is never advertised or executed.
+    """
+    if not name:
+        return False
+    if tool_schemas is not None and name not in tool_schemas:
+        return False
+    return name in GENERIC_MUTATORS or name.startswith(SLOT_MUTATOR_PREFIXES)
+
+
 class PromptAssembler:
     """
     组装结构化的 Agent 提示词。
@@ -217,8 +253,7 @@ class PromptAssembler:
         # validation. Make the contract explicit so the agent uses the tools.
         if native:
             write_tools = sorted(
-                n for n in (tool_schemas or {})
-                if n.startswith(("write_", "create_", "append_")) or n == "write"
+                n for n in (tool_schemas or {}) if is_mutation_tool(n, tool_schemas)
             )
             if write_tools:
                 tool_list = ", ".join(f"`{t}`" for t in write_tools)
@@ -282,8 +317,7 @@ class PromptAssembler:
             # Tell the LLM what write tools exist, what files they produce, and the
             # JSON format to use (actions + files dict).
             write_tools = sorted(
-                n for n in (tool_schemas or {})
-                if n.startswith(("write_", "create_", "append_")) or n == "write"
+                n for n in (tool_schemas or {}) if is_mutation_tool(n, tool_schemas)
             )
             if write_tools:
                 tool_lines = []

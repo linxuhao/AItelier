@@ -859,6 +859,168 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    # ── Diagnosis: the durable trace, the config catalog, the tool registry ──
+    # A run's *why* lives in its trace (per-project trace.db), not in step files:
+    # gate tools record their error in the trace payload and leave an empty output
+    # dir behind, so no file-reading tool can ever surface it.
+    {
+        "type": "function",
+        "function": {
+            "name": "trace_list",
+            "description": "Recent execution-trace entries for a run — the durable record of "
+                           "what each step did: tool calls and their results, agent responses, "
+                           "review verdicts, errors. THE way to find out why a run failed: a "
+                           "gate's error is recorded here, not in any output file. Returns "
+                           "compact rows; use trace_read for a full payload.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run": {"type": "string",
+                            "description": "Run ID or project ID (either works)."},
+                    "step": {"type": "string",
+                             "description": "Only this step id, e.g. 'v_registry'."},
+                    "category": {"type": "string",
+                                 "description": "Only this category: step, tool_call, "
+                                                "tool_result, response, usage, lifecycle."},
+                    "errors_only": {"type": "boolean",
+                                    "description": "Only entries whose payload records an "
+                                                   "error or a failed verdict. Start here."},
+                    "order": {"type": "string", "enum": ["asc", "desc"],
+                              "description": "desc (newest first, the default) or asc."},
+                    "limit": {"type": "integer", "description": "Max rows (default 50)."},
+                },
+                "required": ["run"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trace_search",
+            "description": "Search a run's execution trace for a substring — a tool name, an "
+                           "error fragment, a file name. Use when you know what went wrong but "
+                           "not which step did it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run": {"type": "string", "description": "Run ID or project ID."},
+                    "query": {"type": "string", "description": "Substring to look for."},
+                    "step": {"type": "string", "description": "Restrict to this step id."},
+                    "limit": {"type": "integer", "description": "Max rows (default 30)."},
+                },
+                "required": ["run", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "trace_read",
+            "description": "Full, untruncated payloads for a small range of trace entries, by "
+                           "the seq numbers trace_list/trace_search returned. Use for the exact "
+                           "prompt, response or tool arguments once you know which rows matter.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run": {"type": "string", "description": "Run ID or project ID."},
+                    "seq": {"type": "integer", "description": "First seq to read."},
+                    "seq_end": {"type": "integer",
+                                "description": "Optional last seq (max 20 rows per call)."},
+                },
+                "required": ["run", "seq"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_list",
+            "description": "Every tool registered in the live registry — built-in and generated "
+                           "alike — with its parameters, purpose, source root and (for generated "
+                           "ones) which pipeline created it. Check here before concluding a "
+                           "capability is missing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter": {"type": "string",
+                               "description": "Only tools whose name contains this."},
+                    "root": {"type": "string", "enum": ["skillflow", "aitelier", "generated"],
+                             "description": "Only tools from this source root."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_search",
+            "description": "Find a registered tool by what it DOES — matches name, description "
+                           "and parameter names. Use before asking for a new tool to be built.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What you need the tool to do."},
+                    "limit": {"type": "integer", "description": "Max matches (default 15)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_read",
+            "description": "Read a registered tool's source — its tool.yaml schema or its "
+                           "impl.py — resolved by name across every registered tools directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Registered tool name."},
+                    "file": {"type": "string",
+                             "description": "'tool.yaml' (default) or 'impl.py'."},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "config_read",
+            "description": "Read a pipeline config's actual source: its graph YAML, its "
+                           "<slug>.roles.json role prompts, or one of its templates. Works for "
+                           "built-in configs and for generated gen_* pipelines.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string",
+                                    "description": "e.g. 'dpe_default' or 'gen_math_olympiad'."},
+                    "file": {"type": "string",
+                             "description": "Omit for the graph YAML; 'roles' for the role "
+                                            "table; or a template path like "
+                                            "'templates/math_verifier.md'."},
+                },
+                "required": ["config_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "config_search",
+            "description": "Search across pipeline config sources — which pipeline uses a given "
+                           "tool, declares a given step, or mentions a keyword.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Substring to look for."},
+                    "limit": {"type": "integer", "description": "Max matches (default 30)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 # ── Coding-mode tool definitions ───────────────────────────────────
@@ -1199,6 +1361,56 @@ CODING_TOOL_DEFINITIONS = [
                                "description": "Character offset to continue from (default 0)"},
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "config_edit",
+            "description": (
+                "Surgically edit a GENERATED pipeline's source — its graph YAML, its role "
+                "table, or one of its templates — and hot-reload it, so the next "
+                "drive_pipeline runs the edited version. This is the repair half of the "
+                "generate → drive → fix loop. Read the file with config_read first; "
+                "old_str must appear exactly once. Only gen_* pipelines are editable."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string", "description": "A gen_* pipeline name."},
+                    "file": {"type": "string",
+                             "description": "Omit for the graph YAML; 'roles' for the role "
+                                            "table; or a template path."},
+                    "old_str": {"type": "string", "description": "Exact text to replace."},
+                    "new_str": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["config_name", "old_str", "new_str"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "archive_pipeline",
+            "description": (
+                "Retire a GENERATED pipeline so it leaves the catalog. Deleting its "
+                "YAML by hand does NOT work: the registry enumerates skillflow's graph "
+                "table, so the pipeline stays listed and runnable with no source file "
+                "behind it. Archiving moves the files aside and records the name; the "
+                "graph row is kept so existing runs stay readable. Use purge=true only "
+                "when the graph itself must be gone — that cannot be undone. Ask the "
+                "user before archiving anything they did not name."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string", "description": "A gen_* pipeline name."},
+                    "purge": {"type": "boolean",
+                              "description": "Also delete skillflow's graph row "
+                                             "(irreversible). Default false."},
+                },
+                "required": ["config_name"],
             },
         },
     },
@@ -2668,7 +2880,11 @@ class MetaAgent:
         r"(_KEY|_TOKEN|_SECRET|_SECRETS|PASSWORD|_CREDENTIAL|_CREDENTIALS)$", re.I)
 
     async def _tool_bash(self, args: dict) -> dict:
-        pid = args["project_id"]
+        pid = (args.get("project_id") or "").strip()
+        if not pid:
+            return {"error": "bash: 'project_id' is required — it selects the code "
+                             "directory the command runs in. Call list_projects if "
+                             "you do not have one."}
         command = args.get("command", "")
         if not command.strip():
             return {"error": "bash: 'command' is required"}
@@ -3338,6 +3554,384 @@ class MetaAgent:
                              f"Call list_pipelines to see all available pipelines."}
         return {"pipelines": matches, "count": len(matches)}
 
+    # ── Diagnosis: trace / tool registry / config source ──────────────────
+
+    @staticmethod
+    def _resolve_run_row(ref: str) -> dict | None:
+        """A run row from either a skillflow run id or a project id.
+
+        The butler mostly holds project ids (that is what start_config_run and
+        drive_pipeline hand back), so every run-keyed tool accepts both — mirrors
+        api.run_routers._resolve_run.
+        """
+        from api.dependencies import get_skillflow
+        sf = get_skillflow()
+        run = sf.get_run(ref)
+        if run:
+            return run
+        runs = sf.list_runs(project_id=ref)      # ORDER BY created_at DESC
+        return runs[0] if runs else None
+
+    @staticmethod
+    def _trace_summary(payload: dict, cap: int = 220) -> str:
+        """The one line of a trace payload worth reading in a list view."""
+        bits: list[str] = []
+        if payload.get("passed") is False:
+            bits.append("passed=false")
+        for key in ("error", "feedback", "preview", "text", "summary", "detail"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                bits.append(val.strip().replace("\n", " "))
+                break
+        if not bits:
+            params = payload.get("params")
+            if isinstance(params, dict):
+                bits.append("params: " + ", ".join(sorted(params)[:8]))
+            elif payload.get("files"):
+                bits.append(f"files: {payload['files']}")
+            elif payload.get("tool"):
+                bits.append(f"tool: {payload['tool']}")
+        text = " | ".join(bits) or json.dumps(payload, ensure_ascii=False)[:cap]
+        return text[:cap] + ("…" if len(text) > cap else "")
+
+    def _trace_rows(self, ref: str, where: str, params: list, limit: int,
+                    order: str = "DESC") -> dict:
+        """Shared SELECT against a run's trace. Never accepts caller SQL."""
+        from api.dependencies import get_skillflow
+        run = self._resolve_run_row(ref)
+        if not run:
+            return {"error": f"No run found for '{ref}' (tried run id, then project id)."}
+        sf = get_skillflow()
+        sql = ("SELECT seq, step_id, category, event, payload_json, created_at "
+               "FROM skillflow_trace WHERE run_id = ? " + where +
+               f" ORDER BY seq {order} LIMIT ?")
+        try:
+            rows = sf.trace_query(run["id"], sql, tuple([run["id"], *params, limit]))
+        except Exception as e:
+            return {"error": f"trace query failed: {e}"}
+        return {"run": run, "rows": [dict(r) for r in rows]}
+
+    def _tool_trace_list(self, args: dict) -> dict:
+        """Compact trace entries — where a failed run's actual reason lives."""
+        where, params = "", []
+        if (step := (args.get("step") or "").strip()):
+            where += " AND step_id = ?"
+            params.append(step)
+        if (cat := (args.get("category") or "").strip()):
+            where += " AND category = ?"
+            params.append(cat)
+        errors_only = bool(args.get("errors_only"))
+        limit = max(1, min(int(args.get("limit") or 50), 200))
+        if errors_only:
+            # Widen in SQL, then drop the false hits (error: "") in Python — an
+            # empty error field is how the passing gates record success.
+            where += " AND (payload_json LIKE '%error%' OR payload_json LIKE '%false%')"
+        order = "ASC" if (args.get("order") or "desc").lower() == "asc" else "DESC"
+        res = self._trace_rows(args.get("run") or "", where, params,
+                               limit * (4 if errors_only else 1), order)
+        if "error" in res:
+            return res
+        out = []
+        for r in res["rows"]:
+            try:
+                payload = json.loads(r["payload_json"])
+            except (ValueError, TypeError):
+                payload = {}
+            if errors_only:
+                err = payload.get("error")
+                failed = payload.get("passed") is False or payload.get("status") == "failed"
+                if not ((isinstance(err, str) and err.strip()) or failed):
+                    continue
+            out.append({"seq": r["seq"], "step": r["step_id"], "category": r["category"],
+                        "event": r["event"], "at": r["created_at"],
+                        "summary": self._trace_summary(payload)})
+            if len(out) >= limit:
+                break
+        run = res["run"]
+        return {"run_id": run["id"], "project_id": run.get("project_id"),
+                "run_status": run.get("status"),
+                "run_error": run.get("error_reason") or run.get("error"),
+                "count": len(out), "entries": out,
+                "hint": "trace_read(run, seq) for a full payload."}
+
+    def _tool_trace_search(self, args: dict) -> dict:
+        """Substring search across a run's trace payloads."""
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"error": "query is required."}
+        where, params = " AND payload_json LIKE ?", [f"%{query}%"]
+        if (step := (args.get("step") or "").strip()):
+            where += " AND step_id = ?"
+            params.append(step)
+        limit = max(1, min(int(args.get("limit") or 30), 100))
+        res = self._trace_rows(args.get("run") or "", where, params, limit)
+        if "error" in res:
+            return res
+        entries = []
+        for r in res["rows"]:
+            try:
+                payload = json.loads(r["payload_json"])
+            except (ValueError, TypeError):
+                payload = {}
+            entries.append({"seq": r["seq"], "step": r["step_id"],
+                            "category": r["category"], "event": r["event"],
+                            "summary": self._trace_summary(payload)})
+        return {"run_id": res["run"]["id"], "query": query,
+                "count": len(entries), "entries": entries}
+
+    def _tool_trace_read(self, args: dict) -> dict:
+        """Full payloads for an explicit, small seq range."""
+        try:
+            start = int(args.get("seq"))
+        except (TypeError, ValueError):
+            return {"error": "seq is required (an integer from trace_list)."}
+        end = args.get("seq_end")
+        end = int(end) if end is not None else start
+        if end < start:
+            start, end = end, start
+        end = min(end, start + 19)                      # hard cap: 20 rows
+        res = self._trace_rows(args.get("run") or "", " AND seq >= ? AND seq <= ?",
+                               [start, end], 20, order="ASC")
+        if "error" in res:
+            return res
+        entries = []
+        for r in res["rows"]:
+            try:
+                payload = json.loads(r["payload_json"])
+            except (ValueError, TypeError):
+                payload = r["payload_json"]
+            entries.append({"seq": r["seq"], "step": r["step_id"],
+                            "category": r["category"], "event": r["event"],
+                            "at": r["created_at"], "payload": payload})
+        return {"run_id": res["run"]["id"], "count": len(entries), "entries": entries}
+
+    # The registry readers resolve through the live ToolLoader, so they cover every
+    # registered root (skillflow native, aitelier/tools, generated) automatically —
+    # the same source register_tool writes into and forge_palette renders from.
+    @staticmethod
+    def _tool_roots() -> dict:
+        from api.dependencies import get_skillflow
+        from core import datadir
+        import skillflow
+        return {
+            "skillflow": Path(skillflow.__file__).parent / "tools",
+            "aitelier": Path(__file__).resolve().parent.parent / "aitelier" / "tools",
+            "generated": datadir.tools_dir(),
+        }
+
+    def _tool_entry(self, loader, name: str, *, with_schema: bool = True) -> dict:
+        entry: dict = {"name": name}
+        try:
+            tool_dir = loader._find_tool_dir(name)
+        except Exception:
+            tool_dir = None
+        if tool_dir:
+            for root, path in self._tool_roots().items():
+                try:
+                    if Path(tool_dir).resolve() == Path(path).resolve():
+                        entry["root"] = root
+                        break
+                except OSError:
+                    continue
+        if with_schema:
+            try:
+                schema = loader.load_schema(name) or {}
+                entry["description"] = (schema.get("description") or "").strip()
+                params = schema.get("parameters") or {}
+                entry["params"] = sorted(params) if isinstance(params, dict) else []
+                if schema.get("x-generated-by"):
+                    entry["generated_by"] = schema["x-generated-by"]
+            except Exception as e:
+                entry["error"] = f"schema unreadable: {e}"
+        return entry
+
+    def _tool_tool_list(self, args: dict) -> dict:
+        """The live tool registry — what actually exists before you build more."""
+        from api.dependencies import get_skillflow
+        loader = get_skillflow()._tool_loader
+        want_root = (args.get("root") or "").strip()
+        filt = (args.get("filter") or "").strip().lower()
+        entries = []
+        for name in sorted(loader.list_tools()):
+            if filt and filt not in name.lower():
+                continue
+            entry = self._tool_entry(loader, name)
+            if want_root and entry.get("root") != want_root:
+                continue
+            entries.append(entry)
+        return {"count": len(entries), "tools": entries}
+
+    def _tool_tool_search(self, args: dict) -> dict:
+        """Find a registered tool by what it does, before asking for a new one."""
+        from api.dependencies import get_skillflow
+        query = (args.get("query") or "").strip().lower()
+        if not query:
+            return {"error": "query is required."}
+        terms = [t for t in re.split(r"\W+", query) if len(t) > 2] or [query]
+        loader = get_skillflow()._tool_loader
+        scored = []
+        for name in sorted(loader.list_tools()):
+            entry = self._tool_entry(loader, name)
+            hay = f"{name} {entry.get('description', '')} {' '.join(entry.get('params', []))}".lower()
+            score = sum(3 if t in name.lower() else 1 for t in terms if t in hay)
+            if score:
+                scored.append((score, entry))
+        scored.sort(key=lambda s: -s[0])
+        limit = max(1, min(int(args.get("limit") or 15), 50))
+        return {"query": query, "count": len(scored[:limit]),
+                "tools": [e for _, e in scored[:limit]]}
+
+    def _tool_tool_read(self, args: dict) -> dict:
+        """Read a registered tool's schema or implementation."""
+        from api.dependencies import get_skillflow
+        name = (args.get("name") or "").strip()
+        if not name:
+            return {"error": "name is required."}
+        loader = get_skillflow()._tool_loader
+        if name not in loader.list_tools():
+            return {"error": f"'{name}' is not registered. Call tool_list to see what is."}
+        which = (args.get("file") or "tool.yaml").strip()
+        if which not in ("tool.yaml", "impl.py"):
+            return {"error": "file must be 'tool.yaml' or 'impl.py'."}
+        try:
+            path = Path(loader._find_tool_dir(name)) / name / which
+            return {"name": name, "file": which, "path": str(path),
+                    "content": path.read_text(encoding="utf-8", errors="replace")[:20000]}
+        except Exception as e:
+            return {"error": f"cannot read {which} for '{name}': {e}"}
+
+    @staticmethod
+    def _config_source_path(config_name: str, which: str = "") -> tuple[Path | None, str]:
+        """Resolve a config's source file inside the allowed roots.
+
+        Read access covers the repo's own configs/templates plus the generated
+        configs dir; nothing else is reachable, and the resolved path is checked
+        against the roots after resolution so a crafted name cannot escape.
+        """
+        from core.pipeline_registry import generated_configs_dir
+        repo = Path(__file__).resolve().parent.parent
+        roots = [generated_configs_dir(), repo / "configs", repo / "templates"]
+        name = (config_name or "").strip()
+        if not name or "/" in name or "\\" in name:
+            return None, "config_name must be a bare pipeline name."
+        which = (which or "").strip()
+
+        if which in ("", "graph", "yaml"):
+            cands = [generated_configs_dir() / f"{name}.yaml", repo / "configs" / f"{name}.yaml"]
+        elif which in ("roles", "role_table", "roles.json"):
+            cands = [generated_configs_dir() / f"{name}.roles.json"]
+        elif which.startswith("templates/"):
+            cands = [repo / which]
+        else:
+            cands = [repo / "templates" / which]
+
+        for cand in cands:
+            try:
+                resolved = cand.resolve()
+            except OSError:
+                continue
+            if not any(str(resolved).startswith(str(Path(r).resolve()) + os.sep) for r in roots):
+                return None, f"path outside the allowed config roots: {cand}"
+            if resolved.exists():
+                return resolved, ""
+        return None, (f"not found: {which or 'graph yaml'} for '{name}'. "
+                      f"Generated pipelines keep their role prompts in "
+                      f"<name>.roles.json (file='roles'), not in template files.")
+
+    def _tool_config_read(self, args: dict) -> dict:
+        """Read a pipeline's real source — graph, role table, or template."""
+        path, err = self._config_source_path(args.get("config_name") or "",
+                                             args.get("file") or "")
+        if err:
+            return {"error": err}
+        return {"config_name": args.get("config_name"), "path": str(path),
+                "content": path.read_text(encoding="utf-8", errors="replace")[:60000]}
+
+    def _tool_config_search(self, args: dict) -> dict:
+        """Which pipeline uses this tool / declares this step / mentions this word."""
+        from core.pipeline_registry import generated_configs_dir
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"error": "query is required."}
+        limit = max(1, min(int(args.get("limit") or 30), 100))
+        repo = Path(__file__).resolve().parent.parent
+        hits = []
+        for root in (repo / "configs", generated_configs_dir()):
+            if not root.is_dir():
+                continue
+            for f in sorted(root.rglob("*.yaml")):
+                try:
+                    lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                for i, line in enumerate(lines, 1):
+                    if query.lower() in line.lower():
+                        hits.append({"config": f.stem, "path": str(f), "line": i,
+                                     "text": line.strip()[:180]})
+                        if len(hits) >= limit:
+                            return {"query": query, "count": len(hits), "hits": hits,
+                                    "truncated": True}
+        return {"query": query, "count": len(hits), "hits": hits}
+
+    def _tool_config_edit(self, args: dict) -> dict:
+        """Surgically edit a generated pipeline's source, then hot-reload it."""
+        from api.dependencies import get_skillflow, get_config_registry
+        from core.pipeline_registry import generated_configs_dir, reload_generated_pipeline
+        config_name = (args.get("config_name") or "").strip()
+        old_str, new_str = args.get("old_str") or "", args.get("new_str") or ""
+        if not config_name:
+            return {"error": "config_name is required."}
+        if not old_str:
+            return {"error": "old_str is required (read the file with config_read first)."}
+        path, err = self._config_source_path(config_name, args.get("file") or "")
+        if err:
+            return {"error": err}
+        # Only generated pipelines are editable: the repo's own configs are code,
+        # and silently rewriting them from a chat session is not a repair loop.
+        if not str(path).startswith(str(Path(generated_configs_dir()).resolve()) + os.sep):
+            # Say which of the two reasons applies — "it's a built-in config" is
+            # simply false when the caller asked for a generated pipeline's template.
+            if config_name.startswith("gen_"):
+                return {"error": f"{path.name} is a repo template, not part of "
+                                 f"{config_name}'s own source, so it is not editable here "
+                                 f"(editing it would change every pipeline that uses it). "
+                                 f"A generated pipeline keeps its prompts in "
+                                 f"{config_name}.roles.json — edit that with file='roles'."}
+            return {"error": f"{config_name} is a built-in config — only gen_* pipelines "
+                             f"are editable here. Edit the repo file through the normal "
+                             f"code tools if that is really what you mean."}
+        text = path.read_text(encoding="utf-8")
+        occurrences = text.count(old_str)
+        if occurrences == 0:
+            return {"error": "old_str not found in the file (read it with config_read first)."}
+        if occurrences > 1:
+            return {"error": f"old_str appears {occurrences} times — include more context "
+                             f"so it identifies exactly one place."}
+        path.write_text(text.replace(old_str, new_str), encoding="utf-8")
+        result = {"config_name": config_name, "path": str(path), "edited": True}
+        reloaded = reload_generated_pipeline(get_skillflow(), get_config_registry(), config_name)
+        if reloaded.get("error"):
+            # The edit stands but the graph no longer loads — say so loudly; the
+            # next drive would otherwise run the last good version and look fine.
+            result["reload_error"] = reloaded["error"]
+            result["warning"] = ("Edited, but the pipeline no longer registers. Fix the file "
+                                 "before driving it — the registry still holds the previous "
+                                 "version.")
+        else:
+            result["reloaded"] = True
+        return result
+
+    def _tool_archive_pipeline(self, args: dict) -> dict:
+        """Retire a generated pipeline (reversible unless purge=true)."""
+        from api.dependencies import get_skillflow, get_config_registry
+        from core.pipeline_registry import archive_generated_pipeline
+        config_name = (args.get("config_name") or "").strip()
+        if not config_name:
+            return {"error": "config_name is required."}
+        return archive_generated_pipeline(
+            get_skillflow(), get_config_registry(), config_name,
+            purge=bool(args.get("purge")))
+
     def _tool_stop_pipeline(self, args: dict) -> dict:
         """Cancel a running pipeline (marks the run failed; the poller then skips it)."""
         from api.dependencies import get_skillflow
@@ -3345,9 +3939,10 @@ class MetaAgent:
         if not run_id:
             return {"error": "run_id is required."}
         sf = get_skillflow()
-        run = sf.get_run(run_id)
+        run = self._resolve_run_row(run_id)
         if not run:
             return {"error": f"Run '{run_id}' not found"}
+        run_id = run["id"]
         if run["status"] in ("completed", "failed"):
             return {"status": run["status"], "run_id": run_id,
                     "message": f"Run already {run['status']}; nothing to stop."}
@@ -3364,13 +3959,16 @@ class MetaAgent:
         if not run_id:
             return {"error": "run_id is required."}
         sf = get_skillflow()
-        run = sf.get_run(run_id)
+        run = self._resolve_run_row(run_id)
         if not run:
-            return {"error": f"Run '{run_id}' not found"}
+            return {"error": f"Run '{run_id}' not found (tried run id, then project id)"}
+        run_id = run["id"]
         status = run["status"]
         if status != "completed":
             return {"status": status, "run_id": run_id,
-                    "message": f"Run is {status}, not completed — no final result yet."}
+                    "message": f"Run is {status}, not completed — no final result yet.",
+                    "hint": "trace_list(run, errors_only=true) shows why." if status == "failed"
+                            else None}
         graph = run.get("graph_name") or "dpe_default"
         pid = run.get("project_id", "")
         manifest = get_config_registry().get(graph)
@@ -3718,6 +4316,17 @@ class MetaAgent:
                 retryable = attempts[claimed.step_id] < 2
                 sf.fail_step(claimed.token, str(e)[:300], retryable=retryable)
 
+        # A drive run is driven HERE, not by the scheduler (generated pipelines are
+        # `scheduler_owned: false`), so no poller tick ever reaches it — without this
+        # the project row sits at 'planning' forever while skillflow says failed, and
+        # the dashboard shows a dead test-drive as still starting up. Every sibling
+        # tool already does this; drive_pipeline was the one that didn't.
+        try:
+            from core.scheduler import _sync_project_status_to_db
+            _sync_project_status_to_db(pid)
+        except Exception as e:
+            self._log_error(f"project status sync failed for {pid}: {e}")
+
         # ── Compact summary ────────────────────────────────────────────────
         run = sf.get_run(rid) or {}
         steps = sf.get_steps(rid)
@@ -3748,12 +4357,17 @@ class MetaAgent:
                    if status not in ("completed", "failed") else "failed")
         return {
             "config_name": config_name, "drive_status": status, "verdict": verdict,
-            "project_id": pid, "steps": per_step, "first_failure": first_failure,
-            "final_outputs": outputs, "run_error": run.get("error"),
+            # Both ids: every run-keyed tool accepts either, but returning only the
+            # project id sent the driver to get_pipeline_result(project_id) → "not found".
+            "project_id": pid, "run_id": rid,
+            "steps": per_step, "first_failure": first_failure,
+            "final_outputs": outputs,
+            "run_error": run.get("error_reason") or run.get("error"),
             "hint": ("Judge whether final_outputs are correct for the test_seed. If a "
-                     "step failed or the outputs are wrong, edit the generated config "
-                     "(~/.AItelier/configs/" + config_name + ".yaml), its .roles.json, "
-                     "or a template, then drive_pipeline again."),
+                     "step failed or the outputs are wrong, use config_read to see the "
+                     "generated graph/roles and config_edit to repair them (it reloads "
+                     "the pipeline for you), then drive_pipeline again. "
+                     "trace_list(run, errors_only=true) explains any step failure."),
         }
 
     def _skillflow_docs_fn(self, name: str):
@@ -3776,11 +4390,21 @@ class MetaAgent:
             topic=args.get("topic") or "", start_line=args.get("start_line") or 0,
             end_line=args.get("end_line"))
 
+    # Below the CLI's stall-release watchdog (cli/tui/chat.py `_STALL_RELEASE_SECONDS`
+    # = 420s) and the server's per-event SSE guard (`_STREAM_IDLE_TIMEOUT` = 600s).
+    # This poll emits nothing while it waits, so a longer budget just guarantees the
+    # turn is killed under it: a 22-minute pipeline_forge run had its chat turn
+    # declared dead at 7 minutes while the run carried on fine in the background.
+    # Returning early is not a loss — the checkpoint modal and the SSE sidebar
+    # surface progress independently of the chat turn.
+    _POLL_BUDGET_S = 240
+
     async def _poll_pipeline_until_checkpoint(self, run_id: str,
-                                              max_wait_s: int = 1800) -> dict:
+                                              max_wait_s: int | None = None) -> dict:
         """Poll a SCHEDULER-OWNED run until it pauses (checkpoint) or ends. Unlike
         _run_pipeline_until_checkpoint this does NOT advance/claim (the scheduler
         drives), so it never double-drives. Returns a relay dict for the butler."""
+        max_wait_s = self._POLL_BUDGET_S if max_wait_s is None else max_wait_s
         import asyncio
         from api.dependencies import get_skillflow
         sf = get_skillflow()
@@ -3827,8 +4451,41 @@ class MetaAgent:
         elif status == "failed":
             base["message"] = f"Pipeline failed: {run.get('error') or 'see trace'}"
         else:
-            base["message"] = f"Still running after {waited}s; poll status later."
+            # Not a failure — a long generation is normal. Say so plainly and END the
+            # turn, so the user gets a live answer instead of a watchdog error at 7
+            # minutes. They keep seeing progress in the sidebar, and the checkpoint
+            # modal opens on its own when the run pauses.
+            base["still_running"] = True
+            base["message"] = (
+                f"Still running after {waited}s — this is normal; a generation takes "
+                f"10–40 minutes. It continues in the background (run_id {run_id}). "
+                f"Tell the user it is under way, that the Design Review will pop up "
+                f"on its own when it is ready, and END YOUR TURN — do not poll again "
+                f"in a loop. To check later, use get_run_status / list_runs.")
         return base
+
+    @staticmethod
+    def _inflight_forge_run(sf, slug: str) -> str | None:
+        """The newest running/paused pipeline_forge run for this slug, if any.
+
+        Keyed on the project id, whose shape is exactly `forge-<slug>-<6 hex>` — the
+        uuid suffix makes every launch unique by design, so the slug is the only
+        thing two calls with the same arguments share. A bare prefix test is not
+        enough: `forge-todo-` also prefixes `forge-todo-app-abc123`, so the slug
+        `todo` would claim an unrelated `todo-app` generation. Require the remainder
+        to BE the suffix.
+        """
+        import re
+        pat = re.compile(rf"^forge-{re.escape(slug)}-[0-9a-f]{{6}}$")
+        try:
+            for status in ("running", "paused"):
+                for r in sf.list_runs(status=status):
+                    if (r.get("graph_name") == "pipeline_forge"
+                            and pat.match(str(r.get("project_id") or ""))):
+                        return r["id"]
+        except Exception:
+            pass        # never let the guard block a legitimate generation
+        return None
 
     async def _tool_generate_pipeline(self, args: dict) -> dict:
         """Generate (or edit) a reusable SkillFlow pipeline from a user request by
@@ -3848,8 +4505,27 @@ class MetaAgent:
         # name is derived from the stable `name` (→ gen_<slug>), not the pid, so an
         # update / edit still overwrites the same config.
         import uuid as _uuid
-        pid = "forge-" + self._slugify(name) + "-" + _uuid.uuid4().hex[:6]
+        slug = self._slugify(name)
+        pid = "forge-" + slug + "-" + _uuid.uuid4().hex[:6]
         sf = get_skillflow()
+
+        # One request must not start two generations. A duplicate tool call (the
+        # model emitted `generate_pipeline` twice, 6s apart) launched a second
+        # pipeline_forge run for the same slug; both then raced to register the
+        # same gen_<slug>, doubling the cost and making the trace unreadable.
+        # Return the run already in flight instead of adding another.
+        inflight = self._inflight_forge_run(sf, slug)
+        if inflight:
+            result = await self._poll_pipeline_until_checkpoint(inflight)
+            result["project_id"] = (sf.get_run(inflight) or {}).get("project_id", "")
+            result.setdefault("run_id", inflight)
+            result["pipeline"] = "pipeline_forge"
+            result["reused_existing_run"] = True
+            result["note"] = (
+                f"A pipeline_forge run for '{slug}' was already in flight; relaying "
+                f"that one instead of starting a second. To abandon it and start "
+                f"over, stop it first.")
+            return result
 
         # Edit mode: seed the run with the existing pipeline as a BASELINE so the
         # generator applies `description` as a surgical change instead of designing
@@ -3929,6 +4605,7 @@ class MetaAgent:
             self._log_error(f"project status sync failed for {pid}: {e}")
 
         result["project_id"] = pid
+        result.setdefault("run_id", run_id)     # so follow-up tools can key on either
         result["pipeline"] = "pipeline_forge"
         return result
 
@@ -4129,6 +4806,14 @@ _TOOL_HANDLERS = {
     "wait_until_next_checkpoint_or_completion": MetaAgent._tool_wait_until_checkpoint,
     "get_pipeline_result": MetaAgent._tool_get_pipeline_result,
     "stop_pipeline": MetaAgent._tool_stop_pipeline,
+    "trace_list": MetaAgent._tool_trace_list,
+    "trace_search": MetaAgent._tool_trace_search,
+    "trace_read": MetaAgent._tool_trace_read,
+    "tool_list": MetaAgent._tool_tool_list,
+    "tool_search": MetaAgent._tool_tool_search,
+    "tool_read": MetaAgent._tool_tool_read,
+    "config_read": MetaAgent._tool_config_read,
+    "config_search": MetaAgent._tool_config_search,
 }
 
 # Coding-mode-only tools — schema-visible and dispatchable only when the
@@ -4149,5 +4834,7 @@ _CODING_TOOL_HANDLERS = {
     "skillflow_tool": MetaAgent._tool_skillflow_tool,
     "web_search": MetaAgent._tool_web_search,
     "web_fetch": MetaAgent._tool_web_fetch,
+    "config_edit": MetaAgent._tool_config_edit,
+    "archive_pipeline": MetaAgent._tool_archive_pipeline,
 }
 _TOOL_HANDLERS.update(_CODING_TOOL_HANDLERS)

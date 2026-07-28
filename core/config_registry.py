@@ -246,7 +246,18 @@ class ConfigRegistry:
         hints (host ``x-aitelier`` block, then framework defaults) on top."""
         reg = cls()
         host_hints = _read_host_hints()  # read once, not per-graph
+        # `sf.list_graphs()` reads skillflow's own table, which outlives the source
+        # file — so an archived generated pipeline would reappear here on every boot
+        # with no YAML behind it. This is the ONE place the exclusion list has to be
+        # honored: every accessor (list/get/names/catalog) reads `_manifests`.
+        try:
+            from core.pipeline_registry import archived_names
+            archived = archived_names()
+        except Exception:
+            archived = set()
         for g in sf.list_graphs():
+            if g["name"] in archived:
+                continue
             m = cls._make_manifest(sf, g["name"], host_hints)
             if m is not None:
                 reg._manifests[g["name"]] = m

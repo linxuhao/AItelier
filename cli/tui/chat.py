@@ -629,6 +629,9 @@ class ChatZone(Container):
         # interactive coding agent (edit_file/bash/generate_pipeline/…).
         self._agent_mode: str = "butler"
         self._agent_streaming = False
+        self._queued_message: str | None = None
+        self._last_agent_event_at: float | None = None
+        self._stall_warned = False
         self._completion_matches: list[tuple] = []
         self._completion_index: int = 0
         self._skip_next_submit: bool = False
@@ -673,6 +676,7 @@ class ChatZone(Container):
         self.query_one("#chat-input").focus()
         # AT-17: periodically update input placeholder based on pipeline state
         self._placeholder_timer = self.set_interval(2.0, self._update_input_placeholder)
+        self._stall_timer = self.set_interval(15.0, self._check_agent_stall)
 
     def _update_input_placeholder(self):
         """AT-17: Show pipeline-aware placeholder in the chat input."""
@@ -1020,6 +1024,15 @@ class ChatZone(Container):
         # Add user message to chat display
         self._add_message("user", text)
         self.history.append({"role": "user", "content": text})
+
+        # Queue BEFORE touching the worker. `_stream_agent_response` is exclusive, so
+        # merely starting it cancels the turn already in flight — the in-body check
+        # runs too late to prevent that. Guard here and the running turn survives.
+        if self._agent_streaming:
+            self._queued_message = text
+            self._add_system("Agent is still responding — your message is queued and "
+                             "will be sent when it finishes.")
+            return
 
         # Stream agent response
         self._stream_agent_response(text)
@@ -1808,14 +1821,63 @@ class ChatZone(Container):
 
     # ── Agent streaming ──────────────────────────────────────────
 
-    @work(exclusive=True)
+    # A turn that dies server-side without closing the stream used to leave the
+    # client waiting forever — and since it refuses to send while a response is in
+    # flight, the session became unusable with no error shown anywhere. Warn, then
+    # cancel the dead worker; its own `finally` releases the input.
+    _STALL_WARN_SECONDS = 180
+    _STALL_RELEASE_SECONDS = 420
+
+    # The stream gets its OWN worker group. Textual's `exclusive=True` cancels every
+    # worker in the same group, and `_reload_session_history` is also an exclusive
+    # worker — on the default group it would cancel a stream that had just started
+    # (silently killing a queued send moments after telling the user it was queued).
+    _STREAM_GROUP = "agent-stream"
+
+    def _check_agent_stall(self) -> None:
+        if not self._agent_streaming:
+            return
+        idle = time.monotonic() - (self._last_agent_event_at or time.monotonic())
+        if idle >= self._STALL_RELEASE_SECONDS:
+            self._add_error(
+                f"No response from the agent for {int(idle) // 60} minutes — the turn "
+                f"looks dead. Input is enabled again; your message was saved, so you "
+                f"can resend it or ask the agent to continue."
+            )
+            # Cancel the worker rather than flipping the flag behind its back: the
+            # worker's `finally` is the single owner of `_agent_streaming`, so the
+            # watchdog stays armed for the next turn and a half-dead stream cannot
+            # keep rendering into the chat.
+            self.workers.cancel_group(self, self._STREAM_GROUP)
+        elif idle >= self._STALL_WARN_SECONDS and not self._stall_warned:
+            self._stall_warned = True
+            self._add_system(
+                f"Still waiting on the agent ({int(idle)}s with no activity). Long "
+                f"tool runs and transcript compaction can take a while."
+            )
+
+    def _flush_queued_message(self) -> None:
+        """Send whatever the user typed while the agent was busy."""
+        queued, self._queued_message = self._queued_message, None
+        if queued:
+            self._add_system("Sending your queued message now.")
+            self._stream_agent_response(queued)
+
+    @work(exclusive=True, group=_STREAM_GROUP)
     async def _stream_agent_response(self, message: str):
-        """POST to /api/agent/chat and stream SSE events."""
+        """POST to /api/agent/chat and stream SSE events.
+
+        Callers must not start this while `_agent_streaming` is set — being exclusive,
+        starting it cancels the turn in flight. `on_input_submitted` queues instead;
+        this is only a backstop for a caller that forgets.
+        """
         if self._agent_streaming:
-            self._add_system("Agent is still responding, please wait...")
+            self._queued_message = message
             return
 
         self._agent_streaming = True
+        self._last_agent_event_at = time.monotonic()
+        self._stall_warned = False
         agent_widget = None
         full_agent_text = ""
 
@@ -1841,6 +1903,7 @@ class ChatZone(Container):
                             continue
 
                         etype = event.get("type")
+                        self._last_agent_event_at = time.monotonic()
 
                         if etype == "session":
                             # Server-minted session id (our request carried
@@ -1924,6 +1987,17 @@ class ChatZone(Container):
                             else:
                                 dashboard._fetch_projects()
 
+                        elif etype == "budget_exhausted":
+                            # The turn stopped because it hit its tool-turn budget —
+                            # not because the work is done. Left unsaid, the user
+                            # reads the silence as a finished (or broken) agent.
+                            self._add_system(
+                                "The agent paused: it used its whole tool-turn budget "
+                                "for this message. Reply 'continue' to let it carry on "
+                                "from where it stopped."
+                            )
+                            self._scroll_to_bottom()
+
                         elif etype == "error":
                             self._add_error(event.get("message", "Unknown error"))
                             self._scroll_to_bottom()
@@ -1934,6 +2008,11 @@ class ChatZone(Container):
             self._agent_streaming = False
             # Reload history to pick up any checkpoint messages injected by scheduler
             self._reload_session_history()
+            # Send the queued message from a timer, not from here: this `finally`
+            # may be unwinding a CANCELLED task (the stall watchdog cancels the
+            # group), and work started from a dying task is not reliably scheduled.
+            if self._queued_message:
+                self.set_timer(0.05, self._flush_queued_message)
 
     # ── Context management ───────────────────────────────────────
 

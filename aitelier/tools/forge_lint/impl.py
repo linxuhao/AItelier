@@ -10,15 +10,27 @@ reproduces the same violation. This surfaces the issues so the re-emit is target
 from __future__ import annotations
 
 
-def forge_lint(path: str = "", **kwargs) -> dict:
+def forge_lint(path: str = "", out_dir: str = "", **kwargs) -> dict:
     from api.dependencies import get_skillflow
-    lint = get_skillflow()._tool_loader.load_fn("skillflow_lint")
-    res = lint(path=path) if path else lint(**kwargs)
+    from aitelier.gate_report import write_gate_report
+    loader = get_skillflow()._tool_loader
+    lint = loader.load_fn("skillflow_lint")
+    # Hand the linter the live registry so it can check tool EXISTENCE — structural
+    # validation cannot tell a real tool from an invented one, which is how a graph
+    # naming a non-existent tool used to lint clean. (Older skillflow builds ignore
+    # the kwarg; retry without it so the gate still runs.)
+    try:
+        res = lint(path=path, tool_loader=loader) if path else lint(tool_loader=loader, **kwargs)
+    except TypeError:
+        res = lint(path=path) if path else lint(**kwargs)
     if not isinstance(res, dict):
-        return {"passed": False, "error": f"skillflow_lint returned {type(res)}"}
+        res = {"passed": False, "error": f"skillflow_lint returned {type(res)}"}
+        write_gate_report(out_dir, "forge_lint", False, res["error"])
+        return res
     issues = res.get("issues") or []
     if res.get("passed"):
         res.setdefault("error", "")
+        write_gate_report(out_dir, "forge_lint", True, "")
         return res
     lines = []
     for it in issues:
@@ -30,4 +42,7 @@ def forge_lint(path: str = "", **kwargs) -> dict:
             lines.append(str(it))
     res["error"] = ("Graph lint failed — fix these before re-emitting:\n- "
                     + "\n- ".join(lines)) if lines else "Graph lint failed."
+    # The `error` field alone does NOT reach the emitter (see aitelier.gate_report);
+    # the file does, via an ordinary context source.
+    write_gate_report(out_dir, "forge_lint", False, res["error"])
     return res

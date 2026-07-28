@@ -334,6 +334,22 @@ def test_agent_reaching_the_repo_through_its_role_tools_forces_code_mode():
     assert pr.derive_repo_mode(graph, roles) == "code"
 
 
+def test_role_tools_are_found_when_both_sides_are_namespaced():
+    """What production actually passes: register_forge_pipeline namespaces the graph's
+    agent_config AND the roles dict keys. Matching only the bare name loses the signal
+    entirely — a pipeline whose agents get pytest/repo_apply via their role would be
+    called repo-less and fail at runtime against a repo that was never created."""
+    graph, _ = _graph_with({"agent_config": "gen_probe__processor"})
+    roles = {"gen_probe__processor": {"tools": ["read_file", "repo_apply"]}}
+    assert pr.derive_repo_mode(graph, roles) == "code"
+
+
+def test_namespaced_graph_with_a_bare_role_table_still_matches():
+    """A role_table.yaml read straight off disk has bare keys — both must work."""
+    graph, _ = _graph_with({"agent_config": "gen_probe__processor"})
+    assert pr.derive_repo_mode(graph, {"processor": {"tools": ["run_tests"]}}) == "code"
+
+
 def test_read_tools_alone_are_not_a_repo_signal():
     # skillflow's code-path resolution is lazy: a read against a missing repo
     # finds nothing, it does not fail. Only git-touching tools hard-depend.
@@ -348,3 +364,161 @@ def test_registered_generated_pipeline_carries_the_derived_repo_mode(sf, registr
     (gdir / "gen_repoless.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
     pr.load_generated_configs(sf, registry)
     assert registry.get("gen_repoless").repo_mode == "none"
+
+
+# ── Role-table normalization (S16) ────────────────────────────────────────
+
+class TestNormalizeRoleTable:
+    def test_top_level_table_is_untouched(self):
+        table = {"maker": {"model": "host"}, "reviewer": {"model": "host"}}
+        roles, note = pr.normalize_role_table(table)
+        assert roles == table and note == ""
+
+    def test_entries_wrapper_is_unwrapped(self):
+        roles, note = pr.normalize_role_table({"entries": {"maker": {"model": "host"}}})
+        assert roles == {"maker": {"model": "host"}}
+        assert "entries" in note
+
+    @pytest.mark.parametrize("key", ["roles", "role_table", "agents", "Entries"])
+    def test_other_wrapper_spellings(self, key):
+        roles, note = pr.normalize_role_table({key: {"maker": {"model": "host"}}})
+        assert roles == {"maker": {"model": "host"}} and note
+
+    def test_a_single_real_role_is_not_unwrapped(self):
+        """A one-role table looks structurally identical to a wrapper — only an
+        explicit wrapper name may be unwrapped, or a lone role would vanish."""
+        table = {"maker": {"model": "host", "template": "t.md"}}
+        roles, note = pr.normalize_role_table(table)
+        assert roles == table and note == ""
+
+    def test_empty_and_junk_are_safe(self):
+        assert pr.normalize_role_table({}) == ({}, "")
+        assert pr.normalize_role_table(None) == ({}, "")
+        assert pr.normalize_role_table({"entries": "not a mapping"})[0] == {"entries": "not a mapping"}
+
+
+# ── Output-step derivation (S8) ───────────────────────────────────────────
+
+def _graph_from(steps, terminal="done_gate"):
+    from skillflow.graph import PipelineGraph
+    return PipelineGraph._from_dict({
+        "name": "gen_probe", "begin": steps[0]["id"],
+        "end_conditions": {"combinator": "or", "conditions": [
+            {"type": "node_reached", "node": terminal, "result": "completed"}]},
+        "steps": steps})
+
+
+class TestDeriveOutputStep:
+    def test_picks_the_step_feeding_the_success_terminal(self):
+        g = _graph_from([
+            {"id": "make", "step_type": "agent", "agent_config": "m",
+             "output": {"mode": "content", "fixed": {"r": {"file": "answer.md"}}},
+             "transitions": [{"to": "done_gate"}]},
+            {"id": "done_gate", "step_type": "gate", "transitions": [{"to": None}]},
+        ])
+        assert pr.derive_output_step(g) == "make"
+
+    def test_ignores_a_give_up_branch(self):
+        """The failed path also ends the run — it must not be mistaken for the result."""
+        g = _graph_from([
+            {"id": "verify", "step_type": "agent", "agent_config": "v",
+             "output": {"mode": "content", "fixed": {"v": {"file": "review_verdict.json"}}},
+             "transitions": [{"to": "success_answer", "match": {"passed": True}},
+                             {"to": "give_up"}]},
+            {"id": "success_answer", "step_type": "agent", "agent_config": "a",
+             "output": {"mode": "content", "fixed": {"r": {"file": "final_answer.md"}}},
+             "transitions": [{"to": "done_gate"}]},
+            {"id": "give_up", "step_type": "agent", "agent_config": "a",
+             "output": {"mode": "content", "fixed": {"r": {"file": "final_answer.md"}}},
+             "transitions": [{"to": None}]},
+            {"id": "done_gate", "step_type": "gate", "transitions": [{"to": None}]},
+        ])
+        assert pr.derive_output_step(g) == "success_answer"
+
+    def test_prefers_a_real_output_over_a_verdict(self):
+        g = _graph_from([
+            {"id": "review", "step_type": "agent", "agent_config": "r",
+             "output": {"mode": "content", "fixed": {"v": {"file": "review_verdict.json"}}},
+             "transitions": [{"to": "done_gate"}]},
+            {"id": "write_up", "step_type": "agent", "agent_config": "w",
+             "output": {"mode": "content", "fixed": {"r": {"file": "report.md"}}},
+             "transitions": [{"to": "done_gate"}]},
+            {"id": "done_gate", "step_type": "gate", "transitions": [{"to": None}]},
+        ])
+        assert pr.derive_output_step(g) == "write_up"
+
+    def test_falls_back_to_the_last_non_gate_step(self):
+        g = _graph_from([{"id": "only", "step_type": "agent", "agent_config": "a",
+                          "transitions": [{"to": None}]}], terminal="nonexistent")
+        assert pr.derive_output_step(g) == "only"
+
+
+def test_generated_manifest_carries_a_derived_output_step_and_label(sf, registry):
+    yml = textwrap.dedent("""
+        name: placeholder
+        begin: make
+        end_conditions:
+          combinator: or
+          conditions:
+            - {type: node_reached, node: done_gate, result: completed}
+        steps:
+          - id: make
+            step_type: agent
+            agent_config: maker
+            output: {mode: content, fixed: {r: {file: answer.md}}}
+            transitions: [{to: done_gate}]
+          - id: done_gate
+            step_type: gate
+            transitions: [{to: null}]
+    """)
+    pr._register_text(sf, registry, "gen_answers", yml)
+    m = registry.get("gen_answers")
+    assert m.output_step == "make"          # not the gate, not None
+    assert m.label == "Answers"
+
+
+# ── Declared outputs: BOTH legal `fixed:` forms (review follow-up) ────────
+
+class TestDeclaredOutputFiles:
+    @pytest.mark.parametrize("fixed,expected", [
+        ({"answer": "final_answer.md"}, ["final_answer.md"]),                 # shorthand
+        ({"answer": {"file": "final_answer.md"}}, ["final_answer.md"]),       # long form
+        ({"a": "one.md", "b": {"file": "two.md"}}, ["one.md", "two.md"]),     # mixed
+    ])
+    def test_both_forms_are_read(self, fixed, expected):
+        files, knowable = pr.declared_output_files({"output": {"mode": "content",
+                                                              "fixed": fixed}})
+        assert knowable and sorted(files) == sorted(expected)
+
+    def test_write_mode_is_not_knowable(self):
+        assert pr.declared_output_files({"output": {"mode": "write"}}) == ([], False)
+
+    def test_no_output_block_is_not_knowable(self):
+        assert pr.declared_output_files({"id": "x"}) == ([], False)
+
+    def test_reads_a_parsed_step_node(self):
+        from skillflow.graph import PipelineGraph
+        g = PipelineGraph._from_dict({
+            "name": "g", "begin": "a",
+            "end_conditions": {"combinator": "or", "conditions": [
+                {"type": "node_reached", "node": "a", "result": "completed"}]},
+            "steps": [{"id": "a", "step_type": "agent", "agent_config": "m",
+                       "output": {"mode": "content", "fixed": {"r": "out.md"}},
+                       "transitions": [{"to": None}]}]})
+        files, knowable = pr.declared_output_files(g.steps[0])
+        assert knowable and files == ["out.md"]
+
+
+def test_output_step_prefers_a_shorthand_writer_over_a_reviewer():
+    """The shorthand `fixed: {answer: "report.md"}` is legal and used in this repo's
+    own configs; reading only the long form points output_step at the verdict."""
+    g = _graph_from([
+        {"id": "review", "step_type": "agent", "agent_config": "r",
+         "output": {"mode": "content", "fixed": {"v": {"file": "review_verdict.json"}}},
+         "transitions": [{"to": "done_gate"}]},
+        {"id": "write_up", "step_type": "agent", "agent_config": "w",
+         "output": {"mode": "content", "fixed": {"answer": "report.md"}},
+         "transitions": [{"to": "done_gate"}]},
+        {"id": "done_gate", "step_type": "gate", "transitions": [{"to": None}]},
+    ])
+    assert pr.derive_output_step(g) == "write_up"

@@ -10,3 +10,13 @@ parameters:
     type: string
     description: "Path to the generated graph YAML (e.g. $CONFIG_DIR/emit_graph/pipeline.yaml)."
     required: true
+  out_dir:
+    type: string
+    description: "Step dir ($STEP_DIR) to write gate_error.md into on failure, so the
+      maker can read it as context (the feedback: edge does not survive a backward
+      loop-back). Removed on pass."
+    required: false
+
+# Its result carries passed/error, so a graph step running it MUST route the
+# failure branch — read by forge_registry_check (fallible_tools_unrouted).
+x-fallible: true

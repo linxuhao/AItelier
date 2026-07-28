@@ -5,8 +5,10 @@
 #   GET  /api/agent/sessions       — session list with metadata
 #   POST /api/agent/chat/message   — save a single message
 
+import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,6 +22,10 @@ from api.dependencies import get_db_manager, get_workspace_manager
 from api.auth import CurrentUser, get_optional_user, creator_email
 
 router = APIRouter(prefix="/api/agent", tags=["Meta Agent"])
+
+# Seconds of complete silence from an agent turn before the stream is closed with an
+# error. Generous: a slow provider call or a long tool run must never trip it.
+_STREAM_IDLE_TIMEOUT = int(os.getenv("AITELIER_STREAM_IDLE_TIMEOUT", "600"))
 
 _log = logging.getLogger("aitelier.agent_chat")
 
@@ -140,9 +146,31 @@ async def agent_chat(
         except Exception:
             _log.exception("chat user-message persistence failed")  # best-effort
         try:
-            async for event in agent.chat(
-                request.message, history, request.current_project
-            ):
+            # Per-EVENT inactivity guard, not a total-turn timeout: a healthy turn
+            # emits deltas/tool events continuously, so total elapsed time says
+            # nothing, but complete silence for this long means the turn died. An
+            # exception here already yields an `error` event; a HANG used to leave
+            # the stream open forever, and the client — which refuses to send while
+            # a response is in flight — became permanently unusable with no error
+            # anywhere. Always terminate the stream.
+            agen = agent.chat(request.message, history, request.current_project).__aiter__()
+            while True:
+                try:
+                    event = await asyncio.wait_for(agen.__anext__(),
+                                                   timeout=_STREAM_IDLE_TIMEOUT)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    _log.error("agent turn produced no event for %ss (session %s) — "
+                               "closing the stream", _STREAM_IDLE_TIMEOUT, session_id)
+                    yield ("data: " + json.dumps({
+                        "type": "error",
+                        "message": (f"The agent stopped responding (no activity for "
+                                    f"{_STREAM_IDLE_TIMEOUT // 60} minutes). The turn was "
+                                    f"abandoned — your message is saved; send it again or "
+                                    f"ask it to continue."),
+                    }) + "\n\n")
+                    break
                 collected_events.append(event)
                 # If a tool result carries _wake, trigger scheduler poll
                 if event.get("type") == "tool_result":
@@ -152,6 +180,7 @@ async def agent_chat(
                         wake_scheduler()
                 yield f"data: {json.dumps(event, default=str, ensure_ascii=False)}\n\n"
         except Exception as e:
+            _log.exception("agent chat stream failed (session %s)", session_id)
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
         # Persist the assistant response

@@ -640,7 +640,25 @@ async def _execute_skillflow_tick(project_id: str, loop):
 async def _run_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step."""
     sf = get_skillflow()
-    run_id = _get_or_create_skillflow_run(project_id)
+    try:
+        run_id = _get_or_create_skillflow_run(project_id)
+    except Exception as e:
+        # A run that dies inside create_run has no run row, so no trace and no
+        # failed status to enrich — the project just sits at 'planning' forever
+        # while every tick re-raises into APScheduler, and the only record is a
+        # container log line. (A config with two max_loop edges on one (from, to)
+        # pair does exactly this: UNIQUE constraint on skillflow_edge_counts.)
+        # Write a terminal status so the user sees the reason and the project
+        # stops being re-picked by get_next_active_project's planning guard.
+        import logging
+        logging.getLogger("aitelier.scheduler").error(
+            f"could not start a skillflow run for {project_id}: {e}", exc_info=True)
+        try:
+            db.update_project(project_id,
+                              status=f"failed:could not start run — {e}"[:160])
+        except Exception:
+            pass    # a DB write failure here must not mask the original error
+        return
     if not run_id:
         # Self-heal stuck task states when the DPE run is terminal.
         # _sync_project_status_to_db marks running tasks as completed/failed
@@ -789,6 +807,67 @@ def _emit_checkpoint_sse(project_id: str, run_id: str, step_id: str, label: str)
         pass  # Best-effort; checkpoint polling via GET still works
 
 
+# A failed run's own error is often useless on its own: skillflow reports loop
+# exhaustion as a bare "Cycle limit exceeded" and frequently leaves error_reason
+# unset entirely. The text that actually tells you what to fix — which gate failed
+# and why — was written to the trace by the failing tool. Recover it here so the
+# dashboard shows the reason instead of a shrug.
+_VAGUE_FAILURES = ("", "unknown", "cycle limit exceeded", "none",
+                   "max total steps", "max_total_steps")
+
+
+def _last_trace_error(run_id: str) -> str:
+    """Newest trace payload for this run that records an error or a failed check."""
+    from api.dependencies import get_skillflow
+    try:
+        rows = get_skillflow().trace_query(
+            run_id,
+            "SELECT step_id, payload_json FROM skillflow_trace "
+            "WHERE run_id = ? AND (payload_json LIKE '%error%' OR payload_json LIKE '%false%') "
+            "ORDER BY seq DESC LIMIT 25",
+            (run_id,))
+    except Exception:
+        return ""
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (ValueError, TypeError):
+            continue
+        err = payload.get("error")
+        if isinstance(err, str) and err.strip():
+            return f"{row['step_id']}: {' '.join(err.split())}"
+        if payload.get("passed") is False:
+            fb = payload.get("feedback")
+            detail = " ".join(fb.split()) if isinstance(fb, str) and fb.strip() else "check failed"
+            return f"{row['step_id']}: {detail}"
+    return ""
+
+
+# A failed run is terminal: its reason cannot change, but the status sync runs on
+# EVERY poll tick for such a project (_get_or_create_skillflow_run returns None for
+# a failed run, so the tick falls through to _sync_project_status_to_db). Without a
+# cache that is an unindexed LIKE scan of the whole trace table, forever.
+_failure_reason_cache: dict[str, str] = {}
+_FAILURE_CACHE_MAX = 256
+
+
+def _failure_reason(run: dict) -> str:
+    """The most actionable description of why a run failed (computed once per run)."""
+    base = (run.get("error_reason") or run.get("error") or "").strip()
+    if base and base.lower() not in _VAGUE_FAILURES:
+        return base
+    run_id = run.get("id") or ""
+    if run_id in _failure_reason_cache:
+        return _failure_reason_cache[run_id]
+    detail = _last_trace_error(run_id)
+    reason = (f"{base} — {detail}" if base else detail) if detail else (base or "unknown")
+    if run_id:
+        if len(_failure_reason_cache) >= _FAILURE_CACHE_MAX:
+            _failure_reason_cache.clear()      # bounded; recompute is cheap and rare
+        _failure_reason_cache[run_id] = reason
+    return reason
+
+
 def _sync_project_status_to_db(project_id: str):
     """Write skillflow run status back to AItelier DB so the UI is not stale.
 
@@ -830,6 +909,8 @@ def _sync_project_status_to_db(project_id: str):
             has_task_loop = bool(manifest and manifest.has_task_loop)
         except Exception:
             has_task_loop = run["graph_name"] == "dpe_default_v2"
+
+        # (see _failure_reason below for why a failed run's status is enriched)
 
         # Scheduler-owned generator (e.g. pipeline_forge): on completion, persist +
         # live-register the pipeline it produced so it's runnable as gen_<slug>.
@@ -888,7 +969,7 @@ def _sync_project_status_to_db(project_id: str):
             # "▶ Implementer" instead of "▶ PM" for all task-loop steps.
             status = f"running:{current_step}"
         elif status == "failed":
-            status = f"failed:{run.get('error_reason', 'unknown')[:80]}"
+            status = f"failed:{_failure_reason(run)[:160]}"
 
         # Clear checkpoint emission keys when run leaves paused — enables
         # re-emission on the NEXT pause (e.g. rejection loop-back, task loop).

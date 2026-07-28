@@ -390,3 +390,55 @@ class TestDropPreambleSteps:
 
     def test_empty_context(self):
         assert PromptAssembler.drop_preamble_steps(None, ["1"]) == {}
+
+
+class TestTheWriteVocabularyIsActuallyStated:
+    """A step must be TOLD it can write, and with what.
+
+    `write_tools` was selected by name prefix — `write_`/`create_`/`append_` or
+    exactly `write` — which excludes `create` and `edit`, the two mutators
+    skillflow injects into every `mode: write` step. For a step WITHOUT
+    `allow_full_write` the schemas are
+    [read_file, create, edit, finish_step, read, search, list], so the selection
+    came back EMPTY and the whole "[Output Delivery — REQUIRED]" section was
+    skipped: never told it could write, never shown a tool name, never shown a
+    parameter list.
+
+    That is the root of the shape-guessing family. One step produced eight
+    different envelopes across one investigation — `{"files": …}`,
+    `{"file": …, "content": …}`, `{"read_file": {...}}`, `{"tools": [...]}`,
+    `{"command": "create", …}` — every one answered "you wrote nothing". It was
+    guessing at a contract nobody had stated. Meanwhile the one tool a luckier
+    step WAS shown carried the advice "Prefer 'edit' for existing files",
+    recommending a tool the prompt did not document.
+    """
+    WRITE_MODE = {"read_file": {}, "create": {"parameters": {"file": {}, "content": {}}},
+                  "edit": {"parameters": {"file": {}, "old_str": {}, "new_str": {}}},
+                  "finish_step": {}, "read": {}, "search": {}, "list": {}}
+
+    def test_create_and_edit_are_mutators(self):
+        from core.prompt_assembler import is_mutation_tool
+        assert is_mutation_tool("create", self.WRITE_MODE)
+        assert is_mutation_tool("edit", self.WRITE_MODE)
+        assert is_mutation_tool("write", {"write": {}})
+
+    def test_reads_and_step_control_are_not(self):
+        from core.prompt_assembler import is_mutation_tool
+        assert not is_mutation_tool("read_file", self.WRITE_MODE)
+        assert not is_mutation_tool("finish_step", self.WRITE_MODE)
+
+    def test_slot_tools_are(self):
+        from core.prompt_assembler import is_mutation_tool
+        ts = {"create_verdict": {}, "write_verdict": {}, "edit_verdict": {}}
+        assert all(is_mutation_tool(t, ts) for t in ts)
+
+    def test_a_tool_the_step_lacks_is_never_advertised(self):
+        from core.prompt_assembler import is_mutation_tool
+        assert not is_mutation_tool("write_file", self.WRITE_MODE)
+
+    def test_a_create_edit_step_now_gets_a_write_vocabulary(self):
+        """The regression that mattered: this selection used to be empty."""
+        from core.prompt_assembler import is_mutation_tool
+        selected = sorted(n for n in self.WRITE_MODE
+                          if is_mutation_tool(n, self.WRITE_MODE))
+        assert selected == ["create", "edit"]

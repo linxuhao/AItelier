@@ -15,4 +15,14 @@ parameters:
     description: >
       Directory containing the built tool. Either <source_dir>/<tool_name>/{tool.yaml,impl.py}
       or <source_dir>/{tool.yaml,impl.py}. Set to the implementer step's output dir.
+      The tool is located by its OWN identity (dir name, or the `name` its tool.yaml
+      declares) — never by "first tool.yaml found" — so a fan-out loop whose items
+      share one source_dir cannot register a sibling's code under this name.
     required: true
+  owner:
+    type: string
+    description: >
+      Who is generating this tool (defaults to the injected project_id). Recorded as
+      `x-generated-by` in the installed tool.yaml; replacing a tool owned by someone
+      else is reported back in `replaced_owner` rather than happening silently.
+    required: false

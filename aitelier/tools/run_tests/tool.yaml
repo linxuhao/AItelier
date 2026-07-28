@@ -12,3 +12,7 @@ parameters:
     type: string
     description: "Directory to write test_report.json (set to $STEP_DIR)"
     required: false
+
+# Its result carries passed/error, so a graph step running it MUST route the
+# failure branch — read by forge_registry_check (fallible_tools_unrouted).
+x-fallible: true

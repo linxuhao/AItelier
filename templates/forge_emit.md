@@ -15,16 +15,26 @@ in the registry (the missing ones were just built), so reference them freely.
 - **`baseline_graph.yaml`** (may be absent) — if present, **EDIT MODE**: your
   `pipeline.yaml` is the baseline with the architect's change applied. Copy the
   baseline verbatim and modify only the nodes/roles the change touches; keep the
-  `name`, unchanged steps, and their transitions identical. Re-emit `role_table.yaml`
-  and `templates/` only for roles you added or changed (keep the rest).
+  `name`, unchanged steps, and their transitions identical. Author fresh CONTENT only
+  for roles you added or changed — but still WRITE every file (see the output-directory
+  note below; "keep the rest" means keep it identical, not skip writing it).
 - **`forge_palette`** — the live tool registry (now includes the just-built tools)
   + exemplar configs + the idiom/trap cheatsheet.
 - **Step `architect` → `graph_spec.md`** — the graph shape to render.
-- On a re-run: your prior files + the reviewer's / validator's feedback. The
-  gate errors (lint / registry / smoke) are injected into THIS prompt as
-  feedback — READ them and fix EXACTLY what they flag; do not re-emit an
-  unchanged graph. A repeated identical gate failure means you ignored the
-  feedback.
+- On a re-run: your prior files + the reviewer's feedback, plus each failing gate's
+  `gate_error.md` (from steps `v_lint` / `v_registry` / `v_smoke`) as its own context
+  section. READ them and fix EXACTLY what they flag; do not re-emit an unchanged
+  graph. A repeated identical gate failure means you ignored the feedback.
+
+> ## Your output directory starts EMPTY on every attempt, and REPLACES the last one
+> You are shown your prior files as context, and it is tempting to write only what
+> changed. **Do not.** Promotion deletes your previous output directory and renames
+> this attempt's staging directory onto it, so anything you do not write this time is
+> GONE — a re-emit that writes only the templates destroys `pipeline.yaml` and
+> `role_table.yaml`, and the step fails validation with "File not found". Write the
+> COMPLETE file set every single attempt: the graph, the role table, and every
+> template — copying forward, verbatim, whatever you are not changing. "It is already
+> there" is never true here.
 
 ## CRITICAL — use the EXACT skillflow YAML schema below
 Do NOT invent fields. The graph is validated by a strict linter, a registry-check,
@@ -304,6 +314,17 @@ maker's job to what's achievable, then the reviewer to that same bar).
 2. **`role_table.yaml`** — one entry per `agent_config` in `pipeline.yaml`:
    `model: "host"`, `temperature: 0.2`, `template: "templates/<role>.md"`,
    `tools: [<real tool names or omit>]`, `thinking: {enable: true}`.
+   - **`tools:` lists REGISTRY tools only** (`web_search`, `run_tests`, `read_file`, a
+     tool you just built…). Every name must exist in the palette — a name that does not
+     resolve is DROPPED SILENTLY and the step runs without it.
+   - **NEVER list write tools there.** The framework injects them from the step's
+     `output.mode`: `mode: write` → `create(file, content)`, `edit(file, old_str,
+     new_str)`, `finish_step` (+ `write(file, content)` only with
+     `allow_full_write: true`); `mode: content` → `write_<slot>` / `create_<slot>` /
+     `edit_<slot>` per fixed slot, plus `finish_step`.
+   - There is **no** `write_file`, `create_file` or `edit_file`. Those belong to a
+     different application. A maker told to use them writes nothing while its step still
+     reports success — the reviewer then rejects an empty result until the loop dies.
 3. **`templates/<role>.md`** — one focused prompt per role: its job, its input
    (context) sections, its exact output files. Reviewers emit `review_verdict.json`
    and default to fail-on-uncertainty.
@@ -317,5 +338,10 @@ maker's job to what's achievable, then the reviewer to that same bar).
      below" not "Read research_question.txt". Give a role `read_file` in its tools
      ONLY when it must fetch something NOT in its context (rare); default to no
      `read_file`, like the DPE reviewers.
+   - **Only name tools the role actually HAS.** The agent follows its prompt over its
+     toolset: a template promising `create_file(path, content)` yields an agent that
+     emits its files as prose, writes zero of them, and whose step still reports
+     success. Use the injected names for the step's mode (see 2 above) — for
+     `mode: write` that is `create` / `edit`, not `create_file` / `write_file`.
 
 Emit valid YAML (2-space indent). Make it pass lint + registry-check + dry-run smoke.

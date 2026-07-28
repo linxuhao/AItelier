@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Any, Optional
 from core.agents import AgentFactory
 from core.workspace_manager import WorkspaceManager, DPE_GRAPH_NAME
-from core.prompt_assembler import PromptAssembler, build_language_instruction
+from core.prompt_assembler import (PromptAssembler, build_language_instruction,
+                                   is_mutation_tool)
 
 # F2 (default ON): the stable design docs move into the shared system preamble
 # (cached cross-step) and the growing-code-repo dump is dropped from the user
@@ -351,6 +352,10 @@ class PipelineEngine:
 
 
         payload = self._extract_json(response)
+        if payload is not None:
+            payload, _norm = self._normalize_payload(payload, self._tool_schemas)
+            if _norm:
+                self._emit("payload_normalized", _norm)
         if payload is None:
             raise MaxRetriesExceeded(
                 f"Step {step_id}: Failed to parse JSON. Response: {response[:200]}"
@@ -393,6 +398,186 @@ class PipelineEngine:
                      "preview": f"Written {len(written_files)} file(s) to Draft"})
         return True
     # ── Category B: Read tools + content output ──────────────────────
+
+    # The mutation vocabulary skillflow actually injects for a step, from its
+    # `output.mode`: `mode: write` gives generic `create` / `edit` / `write`,
+    # `mode: content` gives per-slot `create_<slot>` / `write_<slot>` / `edit_<slot>`.
+    _GENERIC_MUTATORS = ("write", "create", "edit")
+    _SLOT_MUTATOR_PREFIXES = ("write_", "create_", "append_", "edit_")
+
+    @staticmethod
+    def _is_mutation_tool(name: str, tool_schemas: dict | None) -> bool:
+        """Would calling `name` write a file in THIS step?
+
+        Classification used to be by name prefix alone — `write_*`, `create_*`,
+        `append_*`, plus the bare `write`. That silently excluded `create` and
+        `edit`, which are exactly the two tools skillflow injects into every
+        `mode: write` step and exactly the two the forge palette teaches agents to
+        use. An agent calling `create(file, content)` had its call classified as
+        neither a write, nor a read, nor an unknown write — so it was dropped
+        without a word, the step produced nothing, and the retry feedback said
+        "Nothing was written". Four attempts, four complete deliveries discarded.
+
+        Membership in the step's own schemas is required, so an invented name is
+        still not executed — it falls through to the unknown-write branch, which
+        tells the agent what it may actually call.
+        """
+        return is_mutation_tool(name, tool_schemas or {})
+
+    @staticmethod
+    def _normalize_payload(payload: dict, tool_schemas: dict | None) -> tuple[dict, dict | None]:
+        """Coerce a model's JSON into the canonical {files, actions} shape.
+
+        Extracted from the tool loop so it can be tested directly — the shapes it
+        absorbs were each found by reading a trace of a step that had genuinely done
+        the work and had it thrown away.
+
+        Returns (payload, emit-payload-or-None). The payload is mutated in place and
+        also returned, so callers read naturally.
+        """
+        # `actions` and its per-call keys have as many spellings as the file
+        # envelope does. Observed live, all carrying complete work:
+        #   {"tools": [{"tool": "write_file", "args": {...}}]}
+        #   {"command": "create", "path": ..., "content": ...}
+        # Canonicalise the container and the per-call keys FIRST, so everything
+        # below (and the unknown-write branch, which teaches the agent what it may
+        # actually call) sees one shape.
+        _known_names = set(tool_schemas or {}) | {
+            "read_file", "list_tree", "web_search", "web_fetch",
+            "finish_step", "end_step", "ask_more_turns", "message"}
+
+        def _looks_like_calls(entries) -> bool:
+            """Guard against a CONTENT key that happens to be named `tools`.
+
+            A spec-writing step legitimately returns
+            `{"tools": [{"name": "word_frequency", "description": ...}]}` as its
+            OUTPUT. Converting that to actions would invent a call to a tool named
+            `word_frequency`, produce no writes, and fail the step — trading one
+            discard for another. Only convert when an entry actually names a tool
+            this step can call.
+            """
+            for e in entries:
+                if not isinstance(e, dict):
+                    continue
+                # A CALL carries arguments; a content record carries prose.
+                if any(isinstance(e.get(k), dict)
+                       for k in ("args", "params", "arguments", "parameters", "input")):
+                    return True
+                # Or it names a tool this step can actually call (a no-arg call).
+                if any(e.get(k) in _known_names
+                       for k in ("tool", "name", "command", "function")):
+                    return True
+            return False
+
+        for alias in ("tools", "tool_calls", "calls"):
+            entries = payload.get(alias)
+            if (not payload.get("actions") and isinstance(entries, list)
+                    and _looks_like_calls(entries)):
+                payload["actions"] = payload.pop(alias)
+                break
+        if isinstance(payload.get("actions"), list):
+            for a in payload["actions"]:
+                if not isinstance(a, dict):
+                    continue
+                for k in ("args", "arguments", "parameters", "input"):
+                    if "params" not in a and isinstance(a.get(k), dict):
+                        a["params"] = a.pop(k)
+                        break
+                for k in ("name", "command", "function"):
+                    if not a.get("tool") and isinstance(a.get(k), str):
+                        a["tool"] = a[k]
+                        break
+
+        if payload.get("files") or payload.get("actions"):
+            return payload, None
+
+        _PATH_KEYS = ("path", "file", "file_path", "filename", "filepath")
+
+        # {"path": "x.py", "content": "..."} — the shape a model reaches for when it
+        # has ONE file to deliver. A step wrote a complete pytest suite as
+        # {"file": "tests/test_tools.py", "content": ...} and then, next attempt, as
+        # {"file_path": ..., "content": ...}; both were discarded and both answered
+        # with "Nothing was written", until the step failed. The work existed — only
+        # the envelope was unrecognised.
+        name = next((payload[k] for k in _PATH_KEYS
+                     if isinstance(payload.get(k), str) and payload[k].strip()), None)
+        body = payload.get("content")
+        if name and isinstance(body, str):
+            payload["files"] = {name: body}
+            # Emit the equivalent ACTION too. `_run_tool_step` — the handler every
+            # `mode: write` step in this repo uses — reads only `actions` and
+            # ignores `files` entirely, so normalising to `files` alone left the
+            # delivery in a dead end there. Handlers that read `files` take it
+            # first and stop, so this cannot double-write.
+            # An explicitly named tool WINS. Live failure: after `create` correctly
+            # refused ("already exists — use 'edit'"), the agent came back with
+            # {"tool": "edit", "file_path": …, "content": …} — the right call — and
+            # this rule rewrote it back to `create`, which failed identically. The
+            # agent had already corrected itself and was overruled. If `edit` is then
+            # the wrong shape for a full rewrite, `edit`'s OWN error says so, and the
+            # agent gets a turn to act on it.
+            # Restricted to MUTATORS: this envelope carries a file body, so a named
+            # `read_file` here would emit a read call with a `content` param — a call
+            # that cannot do what the payload plainly intends.
+            named = next((payload[k] for k in ("tool", "action", "command")
+                          if isinstance(payload.get(k), str)
+                          and PipelineEngine._is_mutation_tool(payload[k], tool_schemas)),
+                         None)
+            mutator = named or next((t for t in ("create", "write", "edit")
+                                     if t in (tool_schemas or {})), None)
+            if mutator:
+                payload["actions"] = [{"tool": mutator,
+                                       "params": {"file": name, "content": body}}]
+            return payload, {"pattern": "single-file-envelope", "files": [name],
+                             "preview": f"Normalized {{path, content}} -> files ({name})"}
+
+        # {"filename.md": "content", ...} — bare filename keys. `content` and the
+        # path aliases are excluded because they are the envelope above; treating
+        # `content` as a FILENAME writes a file literally called "content".
+        meta_keys = {"thoughts", "thought", "actions", "action", "files", "message",
+                     "content", "reasoning", "summary", *_PATH_KEYS}
+        file_keys = {k: v for k, v in payload.items()
+                     if k not in meta_keys and isinstance(v, str)
+                     and ("." in k or v.strip().startswith(("#", "{", "[", "<")))}
+        if file_keys:
+            payload["files"] = file_keys
+            return payload, {"pattern": "bare-filename-keys",
+                             "files": list(file_keys.keys()),
+                             "preview": f"Normalized {len(file_keys)} bare key(s) -> files"}
+
+        # {"<tool_name>": {params}} or {"action": "<tool>", ...} — a tool call that
+        # never reached the dispatcher. A model asking to READ before writing emitted
+        # {"read_file": {"file_path": "src/..."}} and, next attempt,
+        # {"thought": "...", "action": "read_file", "path": "src/..."}. The read never
+        # happened, the step ended empty, and the retry feedback ("you wrote nothing")
+        # never answered the question the agent was actually asking.
+        known = set(tool_schemas or {}) | {
+            "read_file", "list_tree", "web_search", "web_fetch",
+            "finish_step", "end_step", "ask_more_turns", "message"}
+        # The flat form names its tool under any of these. `tool` was missing here
+        # and it is the most natural spelling of all: an agent that had been told
+        # "use 'edit'", read the file to obtain `old_str`, and returned
+        # {"tool": "edit", "path": …, "old_str": …, "new_str": …} — a perfectly
+        # formed call — had it dropped, because only `action` was recognised.
+        _NAME_KEYS = ("action", "tool", "command", "function")
+        act = None
+        named = next((k for k in _NAME_KEYS
+                      if isinstance(payload.get(k), str) and payload[k] in known), None)
+        if named:
+            act = {"tool": payload[named],
+                   "params": {k: v for k, v in payload.items()
+                              if k not in _NAME_KEYS + ("thought", "thoughts")}}
+        else:
+            hit = next((k for k in payload
+                        if k in known and isinstance(payload[k], dict)), None)
+            if hit:
+                act = {"tool": hit, "params": payload[hit]}
+        if act:
+            payload["actions"] = [act]
+            return payload, {"pattern": "bare-tool-call", "files": [],
+                             "preview": f"Normalized bare tool call -> actions ({act['tool']})"}
+
+        return payload, None
 
     def _run_tool_content_step(self, task_id: int, step_id: str, workspace: Any,
                                project_id: str, subtask_id: str | None = None,
@@ -539,23 +724,12 @@ class PipelineEngine:
                 # LLMs produce varied JSON shapes. Normalize common patterns into
                 # the standard {actions, files} shape BEFORE the switch below so
                 # the existing dispatch logic handles them without duplication.
-                # Pattern: {"filename.md": "content", ...} → wrap in files dict
-                if not payload.get("files") and not payload.get("actions"):
-                    # Keys that look like output filenames (not metadata keys)
-                    meta_keys = {"thoughts", "actions", "files", "message"}
-                    file_keys = {
-                        k: v for k, v in payload.items()
-                        if k not in meta_keys
-                        and isinstance(v, str)
-                        and ("." in k or v.strip().startswith(("#", "{", "[", "<")))
-                    }
-                    if file_keys:
-                        payload["files"] = file_keys
-                        self._emit("payload_normalized", {
-                            "pattern": "bare-filename-keys",
-                            "files": list(file_keys.keys()),
-                            "preview": f"Normalized {len(file_keys)} bare key(s) → files dict",
-                        })
+                # LLMs produce varied JSON shapes for the same intent. Normalize
+                # them into the standard {actions, files} shape BEFORE the dispatch
+                # below, so the existing logic handles them without duplication.
+                payload, _norm = self._normalize_payload(payload, self._tool_schemas)
+                if _norm:
+                    self._emit("payload_normalized", _norm)
 
                 # Check for final output (files dict or list)
                 files_data = payload.get("files")
@@ -655,9 +829,9 @@ class PipelineEngine:
                     # no output → retry loop with no feedback.
                     unknown_writes = [
                         a for a in actions
-                        if (a.get("tool", "").startswith("write")
-                            or a.get("tool", "").startswith("create_")
-                            or a.get("tool", "").startswith("append_"))
+                        if (a.get("tool", "").startswith(
+                                ("write", "create", "append", "edit"))
+                            or a.get("tool", "") in self._GENERIC_MUTATORS)
                         and a.get("tool") not in constrained_writes
                         and a.get("tool") != "write"
                     ]
@@ -689,7 +863,11 @@ class PipelineEngine:
                         tool_turn += 1
                         continue
                 else:
-                    write_calls = [a for a in actions if a.get("tool", "").startswith("write_") or a.get("tool") == "write"]
+                    # No fixed slots → `mode: write`, whose vocabulary is the
+                    # generic create/edit/write. See _is_mutation_tool.
+                    write_calls = [a for a in actions
+                                   if self._is_mutation_tool(a.get("tool", ""),
+                                                             self._tool_schemas)]
 
                 if message_calls:
                     for action in message_calls:
@@ -722,6 +900,23 @@ class PipelineEngine:
                         written_file = self._written_name(result)
                         if written_file:
                             written_files.append(written_file)
+                    # Only stop when a write actually LANDED. `break` used to fire
+                    # unconditionally, so a turn whose every write errored ended the
+                    # loop with the reason captured in `tool_results` and never
+                    # shown to anyone. Live example: on a fix-loop step's second
+                    # visit, `create` returned "'tests/test_tools.py' already exists
+                    # — use 'edit'" (the file was in the repo from the first pass,
+                    # though this step's staging was empty). The agent was never
+                    # given the turn in which it could have switched to `edit`; the
+                    # step reported writing nothing and failed validation.
+                    if not written_files:
+                        feedback = ("Every write in your last response failed:\n"
+                                    + "\n".join(tool_results[-len(write_calls):]))
+                        self._emit("write_failed", {
+                            "error": feedback,
+                            "preview": f"All {len(write_calls)} write(s) failed"})
+                        tool_turn += 1
+                        continue
                     self._emit("files_written", {"files": written_files,
                                                  "preview": f"Written {len(written_files)} file(s)"})
                     # end_step or step 3 (multi-file): accumulate, don't break
@@ -883,6 +1078,11 @@ class PipelineEngine:
 
 
                 payload = self._extract_json(response)
+                if payload is not None:
+                    payload, _norm = self._normalize_payload(
+                        payload, self._tool_schemas)
+                    if _norm:
+                        self._emit("payload_normalized", _norm)
                 if payload is None:
                     # Prose fallback: auto-convert non-JSON output to user-visible message
                     message_count += 1
@@ -907,12 +1107,25 @@ class PipelineEngine:
 
                 actions = payload.get("actions", [])
                 if not actions:
-                    feedback = "System Error: No actions found in response."
-                    self._emit("parse_error", {"error": feedback, "preview": "No actions in response"})
-                    break
+                    # Costs a TURN, not the step. This used to `break`, so one
+                    # unrecognised shape ended the step outright — the agent asked
+                    # a question, got no answer, and the step reported having
+                    # written nothing. The turn budget still bounds the loop.
+                    feedback = (
+                        "System Error: No actions found in your response. Reply with "
+                        '{"thoughts": "...", "actions": [{"tool": "<name>", '
+                        '"params": {...}}]} — `actions` is a list, each entry needs '
+                        "`tool` and `params`. Available tools: "
+                        f"{', '.join(sorted(self._tool_schemas or {})) or '(none)'}.")
+                    self._emit("parse_error", {"error": feedback,
+                                               "preview": "No actions in response"})
+                    tool_turn += 1
+                    continue
 
                 tool_calls = [a for a in actions if a.get("tool") in ("read_file", "list_tree", "web_search", "web_fetch")]
-                write_calls = [a for a in actions if a.get("tool", "").startswith("write_") or a.get("tool") == "write"]
+                write_calls = [a for a in actions
+                               if self._is_mutation_tool(a.get("tool", ""),
+                                                         self._tool_schemas)]
                 message_calls = [a for a in actions if a.get("tool") == "message"]
 
                 # Handle message actions — emit to user, count toward budget
@@ -957,6 +1170,23 @@ class PipelineEngine:
                         if written_file:
                             written_files.append(written_file)
 
+                    # Only stop when a write actually LANDED. `break` used to fire
+                    # unconditionally, so a turn whose every write errored ended the
+                    # loop with the reason captured in `tool_results` and never
+                    # shown to anyone. Live example: on a fix-loop step's second
+                    # visit, `create` returned "'tests/test_tools.py' already exists
+                    # — use 'edit'" (the file was in the repo from the first pass,
+                    # though this step's staging was empty). The agent was never
+                    # given the turn in which it could have switched to `edit`; the
+                    # step reported writing nothing and failed validation.
+                    if not written_files:
+                        feedback = ("Every write in your last response failed:\n"
+                                    + "\n".join(tool_results[-len(write_calls):]))
+                        self._emit("write_failed", {
+                            "error": feedback,
+                            "preview": f"All {len(write_calls)} write(s) failed"})
+                        tool_turn += 1
+                        continue
                     self._emit("files_written", {"files": written_files,
                                                  "preview": f"Written {len(written_files)} file(s)"})
                     break
@@ -1559,6 +1789,15 @@ class PipelineEngine:
 
         # Dispatch based on skillflow-provided tool_schemas
         ts = self._tool_schemas
+        # NOTE: these two predicates are deliberately left as prefix tests.
+        # `create`/`edit` are invisible to them, so a `mode: write` step without
+        # `allow_full_write` lands in the `_run_tool_step` branch below — which is
+        # where EVERY write-mode step in this repo has always landed (26 of them,
+        # including dpe_default's `t_impl` and pipeline_forge's own `emit_graph`),
+        # and that handler writes perfectly well. Making them mutation-aware would
+        # re-route all 26 onto a different handler to fix a defect that lives in
+        # `_run_tool_step`'s own write-call classification, which is fixed there
+        # instead. Changing the routing of the entire system is not the smaller fix.
         has_read_tools = any(
             not k.startswith("write") and k != "write"
             for k in ts

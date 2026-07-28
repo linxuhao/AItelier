@@ -83,7 +83,7 @@ hits) → `skillflow_docs_read` (read around a hit). `schema-source` (graph.py) 
 authoritative field list; `engine-source` (core.py) documents the runtime rules below
 (e.g. `skillflow_docs_search` "credit" for the loop-crediting rule).
 
-## Gate-invisible gotchas (the 3 gates will NOT catch these — get them right)
+## Gotchas the gates CANNOT see (nothing will catch these for you)
 - LOOP CREDITING: skillflow only advances a loop to its next item when an **agent**
   step returns to the loop node (credited in confirm_step). If a **tool** step is the
   loop-return, the item is never credited and the loop RE-SERVES it forever. So end a
@@ -93,7 +93,36 @@ authoritative field list; `engine-source` (core.py) documents the runtime rules 
   engine-injected `task_name` kwarg, not via `$current_x` in tool_params.
 - TERMINAL GATE: the completed-terminal gate needs `transitions: [{to: null}]`, NOT an
   empty list (`[]` → "no matching transition" → the run fails).
+- `draft_commit` COMMITS ITS OWN STEP DIR. With no `source_dir` it commits what THIS
+  step staged — a step that writes nothing commits nothing and returns
+  `{"error": "Source dir not found: .../<step>"}`. To commit another step's output,
+  pass `source_dir` explicitly in `tool_params`.
+- TOOL NAMES ARE GLOBAL. Generated tools live in one flat namespace shared by every
+  pipeline, and registering a name replaces whatever held it. Prefer
+  `<domain>_<verb>`; never claim a generic name like `edit_file` or `fetch_data`.
 """
+
+
+def _enforced_rules_section() -> str:
+    """Render the registry gate's OWN rule table.
+
+    Rendered, not restated. A gate rule the emitter is never taught costs one
+    guaranteed rework round on every generation forever — which is exactly what
+    happened when the write-mode `validation` rule shipped as a check while the
+    palette mentioned validation only in passing. One table, two consumers: the
+    gate runs the checks, this renders them.
+    """
+    try:
+        from aitelier.tools.forge_registry_check.impl import RULES
+    except Exception as e:  # pragma: no cover - defensive
+        return (f"## Rules the registry gate enforces\n\n> WARNING: could not load "
+                f"the gate's rule table ({e}) — check `forge_registry_check`.\n")
+    out = ["## Rules the registry gate enforces — fix these BEFORE emitting\n",
+           "Each one is an automatic rejection that costs a full rework round.\n"]
+    for r in RULES:
+        mark = "" if r.enforced else "  *(not auto-checked — but every surface shows it)*\n"
+        out.append(f"- **{r.id}** — {r.teaches}\n{mark}")
+    return "\n".join(out)
 
 # Curated exemplars the architect should read (via read_file) rather than inline —
 # keeps grounding token-bounded while pointing at battle-tested structures.
@@ -152,5 +181,8 @@ def forge_palette(include_signatures: bool = True, **kwargs) -> dict:
 
     # ── Cheatsheet ────────────────────────────────────────────────────────
     lines.append(CHEATSHEET)
+
+    # ── What the gate will reject (rendered from the gate's own table) ────
+    lines.append(_enforced_rules_section())
 
     return {"palette_markdown": "\n".join(lines), "tool_count": len(names)}

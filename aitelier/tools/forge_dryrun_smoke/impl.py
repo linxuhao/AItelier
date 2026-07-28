@@ -45,7 +45,11 @@ def _drive(sf, run_id: str, runner, max_steps: int) -> dict:
                 sf.approve_checkpoint(run_id)
                 approvals += 1
                 continue
-            return {"status": status, "steps_run": steps_run, "trail": trail}
+            # error_reason is where skillflow puts the ONLY actionable text on a
+            # failed run ("No matching transition from 'X' with flags {...}"), and
+            # the smoke runs with trace_enabled=False, so nothing else records it.
+            return {"status": status, "steps_run": steps_run, "trail": trail,
+                    "error_reason": run.get("error_reason")}
 
         claimed = sf.claim_next_step(run_id)
         if claimed is None:
@@ -54,7 +58,8 @@ def _drive(sf, run_id: str, runner, max_steps: int) -> dict:
                 sf.approve_checkpoint(run_id)
                 approvals += 1
                 continue
-            return {"status": run.get("status"), "steps_run": steps_run, "trail": trail}
+            return {"status": run.get("status"), "steps_run": steps_run,
+                    "trail": trail, "error_reason": run.get("error_reason")}
 
         trail.append(claimed.step_id)
         try:
@@ -68,18 +73,25 @@ def _drive(sf, run_id: str, runner, max_steps: int) -> dict:
 
 
 def forge_dryrun_smoke(graph_path: str = "", max_steps: int = 200,
-                       verdict: bool = True, **kwargs) -> dict:
+                       verdict: bool = True, out_dir: str = "", **kwargs) -> dict:
+    from aitelier.gate_report import write_gate_report
+
+    def _fail(payload: dict) -> dict:
+        write_gate_report(out_dir, "forge_dryrun_smoke", False,
+                          payload.get("error", ""))
+        return payload
+
     p = Path(graph_path)
     if not p.exists():
-        return {"passed": False, "status": "no_graph",
-                "error": f"graph not found: {graph_path}"}
+        return _fail({"passed": False, "status": "no_graph",
+                      "error": f"graph not found: {graph_path}"})
     try:
         data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     except Exception as e:
-        return {"passed": False, "status": "parse_error", "error": str(e)}
+        return _fail({"passed": False, "status": "parse_error", "error": str(e)})
     if not isinstance(data, dict) or not data.get("steps"):
-        return {"passed": False, "status": "invalid_graph",
-                "error": "graph has no steps"}
+        return _fail({"passed": False, "status": "invalid_graph",
+                      "error": "graph has no steps"})
 
     # Structural smoke: strip validation (canned outputs needn't satisfy schemas)
     # and give the graph a unique name so it can't clobber a live registration.
@@ -109,7 +121,7 @@ def forge_dryrun_smoke(graph_path: str = "", max_steps: int = 200,
         from aitelier.stub_runner import StubStepRunner
         from api.dependencies import get_skillflow
     except Exception as e:  # pragma: no cover
-        return {"passed": False, "status": "import_error", "error": str(e)}
+        return _fail({"passed": False, "status": "import_error", "error": str(e)})
 
     live_loader = get_skillflow()._tool_loader
 
@@ -132,10 +144,11 @@ def forge_dryrun_smoke(graph_path: str = "", max_steps: int = 200,
         sf.register_graph(graph)        # validates graph structure + agent refs
         run_id = sf.create_run(graph.name, project_id="forge_smoke")
         sf.start_run(run_id)
-        drive = _drive(sf, run_id, StubStepRunner(verdict=verdict), int(max_steps))
+        drive = _drive(sf, run_id, StubStepRunner(verdict=verdict, graph=data),
+                       int(max_steps))
     except Exception as e:
-        return {"passed": False, "status": "boot_error", "error": str(e),
-                "unresolved_tools": unresolved}
+        return _fail({"passed": False, "status": "boot_error", "error": str(e),
+                      "unresolved_tools": unresolved})
 
     status = drive.get("status")
     reached_done = status == "completed"
@@ -150,6 +163,7 @@ def forge_dryrun_smoke(graph_path: str = "", max_steps: int = 200,
     # Synthesize an actionable one when the drive didn't hand us a raw error, so
     # a re-emit knows WHY the smoke failed instead of re-emitting blind.
     error = drive.get("error") or ""
+    reason = (drive.get("error_reason") or "").strip()
     if not passed and not error:
         trail = drive.get("trail")
         if unresolved:
@@ -163,7 +177,16 @@ def forge_dryrun_smoke(graph_path: str = "", max_steps: int = 200,
             error = ("dry-run smoke failed: the graph re-paused at a checkpoint "
                      "without progressing. Trail: " + str(trail))
         else:
-            error = f"dry-run smoke failed (status={status}). Trail: {trail}"
+            # Without the reason this branch says only WHERE it stopped, never WHY,
+            # which cost several blind re-emit rounds. skillflow's own message names
+            # the step and the flags that matched nothing — quote it verbatim.
+            last = (trail or [])[-1] if trail else ""
+            where = f" after '{last}'" if last else ""
+            detail = f" Reason: {reason}." if reason else ""
+            error = (f"dry-run smoke failed{where} (status={status})."
+                     f"{detail} Trail: {trail}")
+    write_gate_report(out_dir, "forge_dryrun_smoke", bool(passed), error)
     return {"passed": bool(passed), "status": status,
             "steps_run": drive.get("steps_run"), "trail": drive.get("trail"),
-            "unresolved_tools": unresolved, "error": error}
+            "unresolved_tools": unresolved, "error_reason": reason or None,
+            "error": error}

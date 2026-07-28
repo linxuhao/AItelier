@@ -160,17 +160,23 @@ steps:
         max_loop: 3
 
   # ─── Tool plan: manifest of tool-creation tasks (DPE's PM, scoped) ───────
+  # NOTE: tool_plan and tool_plan_review carry the palette for a reason — they are
+  # the steps that decide what gets BUILT. Without it they judge missing_tools.json
+  # against nothing, and a capability the registry already provides gets rebuilt
+  # under a new name (generated tools share one flat namespace, so a duplicate can
+  # also displace another pipeline's tool).
   - id: "tool_plan"
     step_type: "agent"
     agent_config: "tool_planner"
     timeout_seconds: 240
     context:
+      - source: { tool: "forge_palette" }
       - source: { step: "architect", file: "missing_tools.json" }
     output:
       mode: "content"
       fixed:
         manifest: { file: "tool_tasks_manifest.json", on_exists: "new", format: '{"execution_order": [[str, ...], ...]}' }
-        tool_card: { file: "tools/*.json", format: '{"name": str, "purpose": str, "interface_contract": str, "params_schema": {}}' }
+        tool_card: { file: "tools/*.json", format: '{"name": str, "purpose": str, "interface_contract": str, "params_schema": {}, "why_not_existing": str}' }
     validation:
       - files: ["tool_tasks_manifest.json"]
         tool: "file_exists"
@@ -182,8 +188,13 @@ steps:
     agent_config: "reviewer"
     timeout_seconds: 180
     context:
-      - source: { step: "architect", file: "missing_tools.json" }
+      # The maker's output goes FIRST. The palette is a large blob and, placed
+      # ahead of a 27-byte manifest, the reviewer read straight past it and
+      # rejected a legitimately empty plan with "No preceding maker step output
+      # found in context". It still needs the palette — just not in front.
       - source: { step: "tool_plan" }
+      - source: { step: "architect", file: "missing_tools.json" }
+      - source: { tool: "forge_palette" }
     output:
       mode: "content"
       fixed:
@@ -286,6 +297,15 @@ steps:
       - source: { step: "architect" }
       - source: { step: "emit_graph" }         # loop-back: own prior draft
       - source: { step: "emit_review" }
+      # The three gates' verdicts, read as ORDINARY context — the same rule the
+      # palette gives for agent reviewers. `feedback: true` on their edges is NOT
+      # enough: it writes `_feedback` into a pending row, and on a backward
+      # loop-back the emitter's next instance does not exist yet, so the write hits
+      # nothing. Measured: 7 emit attempts, 0 carrying a gate error, 3 identical
+      # smoke failures. These entries are what actually close the loop.
+      - source: { step: "v_lint", file: "gate_error.md", required: false }
+      - source: { step: "v_registry", file: "gate_error.md", required: false }
+      - source: { step: "v_smoke", file: "gate_error.md", required: false }
     output:
       mode: "write"                            # writes pipeline.yaml, role_table.yaml, templates/*.md
     validation:
@@ -333,6 +353,7 @@ steps:
     tool_name: "forge_lint"     # wraps skillflow_lint + surfaces issues in `error`
     tool_params:
       path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
+      out_dir: "$STEP_DIR"      # gate_error.md — the channel `feedback:` can't provide
     transitions:
       - to: "v_registry"
         match: { passed: true }
@@ -347,19 +368,34 @@ steps:
     tool_params:
       graph_path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
       role_table: "$CONFIG_DIR/emit_graph/role_table.yaml"
+      out_dir: "$STEP_DIR"
     transitions:
       - to: "v_smoke"
         match: { passed: true }
-      - to: "architect"                         # unknown tool ⇒ may need (re)building
-        match: { passed: false }
-        max_loop: 5
+      # Route by FAILURE CLASS, not by gate. Only a hallucinated/missing tool needs
+      # the plan revisited; a graph-shape or role-table defect is a repair to files
+      # that were already reviewed, and rewinding those to the architect re-runs the
+      # entire planning chain and discards an accepted design.
+      - to: "architect"                         # unknown tool ⇒ (re)build it
+        match: { failure_class: "unknown_tool" }
+        max_loop: 3
         feedback: true  # inject the registry violations into the architect's next attempt
+      - to: "emit_graph"                        # defect in the emitted files
+        match: { failure_class: "emit_fixable" }
+        max_loop: 5
+        feedback: true
+      # NO third edge back to `architect`: skillflow keys edge counters on
+      # (run_id, from_step, to_step), so a second v_registry→architect edge makes
+      # the whole graph un-runnable (UNIQUE constraint at create_run). Every
+      # failure is classified instead — forge_registry_check always sets
+      # failure_class when passed is false, including on a missing/unparseable graph.
 
   - id: "v_smoke"
     step_type: "tool"
     tool_name: "forge_dryrun_smoke"
     tool_params:
       graph_path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
+      out_dir: "$STEP_DIR"
     transitions:
       - to: "explain"
         match: { passed: true }
@@ -384,7 +420,13 @@ steps:
       - files: ["design_explanation.md"]
         tool: "file_exists"
     checkpoint: true
-    checkpoint_label: "Generated Pipeline — Design Review"
+    checkpoint_label: "Generated Pipeline — Design Review (reject + feedback = re-emit the graph)"
+    # Without this, a rejection re-runs `explain` — which only writes prose — so
+    # "Request Changes" rewrote the EXPLANATION while the graph, roles and
+    # templates stayed exactly as they were. The emitter is what the feedback is
+    # about, so send it there; skillflow's feedback log carries every round of the
+    # user's wording into the re-emit, and the re-emit re-enters the 3 gates.
+    checkpoint_reject_to: "emit_graph"
     transitions:
       - to: "done"
         match: { from: "checkpoint", value: "approved" }

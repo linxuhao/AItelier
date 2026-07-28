@@ -29,3 +29,7 @@ parameters:
     type: integer
     description: "伏笔陈旧提醒阈值：重要伏笔连续N章无暗示则提醒 (default 12)"
     required: false
+
+# Its result carries passed/error, so a graph step running it MUST route the
+# failure branch — read by forge_registry_check (fallible_tools_unrouted).
+x-fallible: true

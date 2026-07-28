@@ -66,7 +66,12 @@ class TestModePlumbing:
                          # its test-drive/fix loop, is always in reach.
                          "generate_pipeline", "drive_pipeline",
                          "skillflow_docs_list", "skillflow_docs_search",
-                         "skillflow_docs_read"}
+                         "skillflow_docs_read",
+                         # editing a generated pipeline mutates it, so it lives
+                         # here; the config_read/search half is butler-visible.
+                         "config_edit",
+                         # retiring one is destructive — coding-mode only
+                         "archive_pipeline"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
 

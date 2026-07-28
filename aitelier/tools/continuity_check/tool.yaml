@@ -24,3 +24,7 @@ parameters:
     type: string
     description: "Dir containing chapter_final.md (defaults to novel_chapter/humanize under the root)"
     required: false
+
+# Its result carries passed/error, so a graph step running it MUST route the
+# failure branch — read by forge_registry_check (fallible_tools_unrouted).
+x-fallible: true

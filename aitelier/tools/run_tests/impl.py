@@ -20,6 +20,7 @@ the goal-loop chasing a phantom failure.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -50,14 +51,68 @@ def _kill_group(proc) -> None:
         pass
 
 
-def _install_project_deps(venv_py: str, repo: Path) -> None:
-    """Best-effort install of the project's declared deps into the venv.
+def _lead_with_install_error(report: dict) -> str:
+    """Put the install failure ABOVE the pytest output, when there was one.
+
+    Ordering is the whole point. An unimportable package produces a
+    `ModuleNotFoundError` whose real cause is the failed editable install; a
+    reader handed only the symptom rewrites packaging metadata that was never
+    wrong. That is exactly what happened, on every lap of two separate drives.
+    """
+    err = report.get("install_error")
+    if not err or report.get("passed"):
+        return report.get("summary", "")
+    return ("The project could not be installed into the test environment, so its "
+            "own package may be unimportable. Fix this FIRST — a "
+            "ModuleNotFoundError below is most likely a consequence of it, not a "
+            f"packaging-discovery problem:\n    {err}\n\n"
+            + report.get("summary", ""))
+
+
+def _install_failure_reason(proc) -> str:
+    """The ONE line worth showing from a failed pip run.
+
+    A raw tail is traceback noise — the last four lines of a pip failure are
+    usually caret markers and vendored frames. The line that matters is the
+    exception, e.g. `BackendUnavailable: Cannot import
+    'setuptools.backends._legacy'`, which names the exact cause. Prefer it;
+    fall back to the tail only when nothing looks like an error.
+    """
+    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        # An exception line looks like `SomeError: message` at column 0-ish, and
+        # is not a file/frame reference or a caret ruler.
+        if (re.match(r"^[A-Za-z_][\w.]*(Error|Exception|Unavailable|NotFound)\b", ln)
+                and not ln.startswith(("File ", "  File "))):
+            return ln[:600]
+    for ln in reversed(lines):
+        if "error" in ln.lower() and not ln.startswith(("File ", "^")):
+            return ln[:600]
+    return " | ".join(lines[-3:])[:600] if lines else f"exit {proc.returncode}"
+
+
+def _install_project_deps(venv_py: str, repo: Path) -> str:
+    """Best-effort install of the project's declared deps. Returns "" or WHY it failed.
 
     Tries ``requirements.txt``; else an editable install of the project itself
-    (reads ``pyproject.toml`` ``[project.dependencies]`` / ``setup.py``). Never
-    raises and never `check=True`s — the ``--system-site-packages`` base usually
-    already satisfies imports, and a non-installable generated project (an app,
-    not a package) must NOT fail the test gate.
+    (reads ``pyproject.toml`` ``[project.dependencies]`` / ``setup.py``). Still
+    never raises and never `check=True`s — the ``--system-site-packages`` base
+    usually already satisfies imports, and a non-installable generated project
+    (an app, not a package) must NOT fail the test gate.
+
+    But the failure is RETURNED rather than discarded. It used to be swallowed
+    twice over (`check=False` plus `except: pass`), and that hid the one fact
+    that explained everything downstream. Observed: a generated project declared
+
+        build-backend = "setuptools.backends._legacy:_Backend"   # does not exist
+
+    so `pip install -e .` died with `BackendUnavailable: Cannot import
+    'setuptools.backends._legacy'` — an error naming the exact cause. It was
+    thrown away, pytest then reported `ModuleNotFoundError: No module named
+    'word_frequency'`, and the maker — reading a symptom with the cause hidden —
+    concluded "package discovery" and rewrote `[tool.setuptools.packages.find]`,
+    which is irrelevant. Same loop, every lap.
     """
     try:
         if (repo / "requirements.txt").exists():
@@ -67,11 +122,145 @@ def _install_project_deps(venv_py: str, repo: Path) -> None:
                  for f in ("pyproject.toml", "setup.py", "setup.cfg")):
             cmd = [venv_py, "-m", "pip", "install", "-q", "-e", str(repo)]
         else:
-            return
-        subprocess.run(cmd, capture_output=True, text=True,
-                       timeout=300, check=False)
-    except Exception:
-        pass  # deps best-effort; base site-packages usually covers imports
+            return ""
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=300, check=False)
+        if proc.returncode != 0:
+            return _install_failure_reason(proc)
+        return ""
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"[:300]
+
+
+def _closest(wanted: str, names: str) -> list[str]:
+    """Nearest real names to a wrong one.
+
+    A prefix or substring test is not enough: `decode_all` shares no substring
+    with `decode`, and `InitializationCapabilities` differs from
+    `InitializationOptions` only in its tail. Fuzzy matching catches both, which
+    is the whole value — the agent needs the ONE name it meant, not a list to
+    re-scan.
+    """
+    import difflib
+    return difflib.get_close_matches(wanted, names.split(", "), n=3, cutoff=0.5)
+
+
+_ATTR_RE = re.compile(r"AttributeError: ['\"](\w+)['\"] object has no attribute ['\"](\w+)['\"]")
+_FROM_IMPORT_RE = re.compile(r"from ([\w.]+) import ([\w, ]+)")
+
+_IMPORT_NAME_RE = re.compile(
+    r"cannot import name ['\"]([\w.]+)['\"] from ['\"]([\w.]+)['\"]")
+
+
+def _explain_missing_names(py: str, summary: str) -> str:
+    """Append what a module ACTUALLY exports when an import of a name fails.
+
+    `ImportError: cannot import name 'InitializationCapabilities' from
+    'mcp.server.models'` means the module imported fine — the answer is sitting
+    in the interpreter that just raised. Without it the agent can only guess
+    again: the read tools are closures over the project root / step staging /
+    step output, so `site-packages` is unreachable by design, and it guessed the
+    same wrong symbol on three separate drives.
+
+    Runs in the SAME interpreter pytest used, so the names are the real ones.
+    Best-effort and silent on failure — this only ever adds information.
+    """
+    # No early return on "no import-name hits": the ATTRIBUTE pass below is a
+    # separate failure mode, and short-circuiting here meant it never ran.
+    hits = _IMPORT_NAME_RE.findall(summary or "")
+    notes = []
+    for wanted, module in dict.fromkeys(hits):
+        try:
+            proc = subprocess.run(
+                [py, "-c",
+                 "import importlib,sys;m=importlib.import_module(sys.argv[1]);"
+                 "print(', '.join(sorted(n for n in dir(m) "
+                 "if not n.startswith('_'))))", module],
+                capture_output=True, text=True, timeout=30)
+            names = (proc.stdout or "").strip()
+        except Exception:
+            names = ""
+        if not names:
+            continue
+        close = _closest(wanted, names)
+        notes.append(
+            f"'{module}' has no '{wanted}'. It actually exports: {names[:800]}"
+            + (f"\n  Closest by name: {', '.join(close)}" if close else ""))
+    notes += _explain_missing_attrs(py, summary)
+    if not notes:
+        return summary
+    return (summary + "\n\n[what those modules/objects really provide]\n"
+            + "\n".join(notes))
+
+
+def _explain_missing_attrs(py: str, summary: str) -> list[str]:
+    """Same idea one layer deeper: `'X' object has no attribute 'y'`.
+
+    The class is real and importable — it is named in a `from M import X` line in
+    the same traceback — so its actual attributes are knowable. Observed after the
+    import-level guess was fixed: the agent moved to `@server.tool()`, which is
+    FastMCP's decorator and does not exist on the low-level `Server`. Without this
+    it guesses again at the next layer, and the failure walks one attribute at a
+    time through a fix budget.
+    """
+    hits = _ATTR_RE.findall(summary or "")
+    if not hits:
+        return []
+    modules = {m for m, _ in _FROM_IMPORT_RE.findall(summary or "")}
+    if not modules:
+        return []
+    notes = []
+    for cls, attr in dict.fromkeys(hits):
+        for mod in sorted(modules):
+            try:
+                proc = subprocess.run(
+                    [py, "-c",
+                     "import importlib,sys;m=importlib.import_module(sys.argv[1]);"
+                     "c=getattr(m,sys.argv[2],None);print('' if c is None else "
+                     "', '.join(sorted(n for n in dir(c) if not n.startswith('_'))))",
+                     mod, cls],
+                    capture_output=True, text=True, timeout=30)
+                names = (proc.stdout or "").strip()
+            except Exception:
+                names = ""
+            if names:
+                close = _closest(attr, names)
+                notes.append(
+                    f"'{cls}' (from {mod}) has no '{attr}'. Its attributes are: "
+                    f"{names[:800]}"
+                    + (f"\n  Closest by name: {', '.join(close)}" if close else ""))
+                break
+    return notes
+
+
+def _pythonpath_for(repo: Path) -> str:
+    """PYTHONPATH for the pytest subprocess: the repo root, plus `src/`.
+
+    Only the root used to be on the path, so a FLAT layout imported fine and the
+    standard `src/` layout could not import its own package at all — every test
+    module died on `ModuleNotFoundError`, on every attempt, unfixably.
+
+    The project install that would otherwise cover this
+    (`_install_project_deps` → `pip install -e .`) runs ONLY on the
+    venv-provisioning path: `_resolve_pytest_python` returns the current
+    interpreter immediately when pytest is already importable, which in the
+    container it always is. So on the common path the project under test was
+    never installed and nothing put `src` on the path.
+
+    Adding it here rather than installing is deliberate: `pip install -e .` into
+    the SERVER's own interpreter would mutate the container's site-packages with
+    LLM-generated package metadata on every test run. This is the same thing
+    pytest's own `pythonpath = ["src"]` ini option does, and it touches nothing.
+    """
+    roots = [str(repo)]
+    for name in ("src",):
+        d = repo / name
+        if d.is_dir():
+            roots.append(str(d))
+    existing = os.environ.get("PYTHONPATH", "")
+    if existing:
+        roots.append(existing)
+    return os.pathsep.join(roots)
 
 
 def _pytest_timeout_args(py: str) -> list[str]:
@@ -134,7 +323,12 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
                 capture_output=True, text=True, timeout=300, check=True,
             )
             # Project's own deps — best-effort, must not skip the gate on failure.
-            _install_project_deps(venv_py, repo)
+            install_err = _install_project_deps(venv_py, repo)
+            if install_err:
+                # Surfaced, not fatal: the gate still runs, but the agent is told
+                # WHY its package may be unimportable instead of being handed a
+                # bare ModuleNotFoundError with the cause removed.
+                report["install_error"] = install_err
             return venv_py, venv_dir
         except Exception as e:
             last_err = e
@@ -257,7 +451,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # point to AItelier's own source tree, causing pytest to discover
             # AItelier's tests instead of the project's.  Only the project root
             # belongs on the path.
-            env = {**os.environ, "PYTHONPATH": str(repo)}
+            env = {**os.environ, "PYTHONPATH": _pythonpath_for(repo)}
             # start_new_session=True → pytest leads its own process group so we
             # can SIGKILL the whole tree (incl. git subprocesses it spawns) on
             # timeout or any error; otherwise those grandchildren leak as zombies.
@@ -287,6 +481,12 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                                       if ln.startswith("FAILED") or " FAILED " in ln][:50]
                 report["summary"] = ("No tests were collected." if proc.returncode == 5
                                      else out[-3000:])
+                # Lead with the install failure when there was one. An
+                # unimportable package produces a ModuleNotFoundError whose real
+                # cause is the failed editable install, and a reader given only
+                # the symptom rewrites packaging metadata that was never wrong.
+                report["summary"] = _explain_missing_names(
+                    py, _lead_with_install_error(report))
             except subprocess.TimeoutExpired:
                 _kill_group(proc)
                 report.update(passed=False, summary="pytest timed out after 75s")

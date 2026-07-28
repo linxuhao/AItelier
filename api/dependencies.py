@@ -359,9 +359,19 @@ def enrich_project_status(project: dict | None) -> dict | None:
             # over skillflow's raw status ("running"). The scheduler writes
             # the detailed status; only fall back to run["status"] if the DB
             # column hasn't been synced yet.
+            #
+            # The enrichment is "<raw>:<detail>", so the DB value is authoritative
+            # exactly when its prefix still agrees with skillflow. That covers
+            # "failed:<why>" too — which this used to throw away, leaving the user
+            # with a bare "failed" even though the scheduler had already written
+            # "failed:Cycle limit exceeded — v_smoke: ...". A DB status whose prefix
+            # DISAGREES is stale (e.g. a reactivated run), so skillflow wins.
             run_status = run["status"]
+            db_status = project.get("status") or ""
             if run_status == "running" and run.get("current_node"):
                 project["status"] = f"running:{run['current_node']}"
+            elif db_status.split(":", 1)[0] == run_status and db_status != run_status:
+                pass                      # keep the enriched value
             else:
                 project["status"] = run_status
             project["current_project_step"] = run["current_node"] or ""

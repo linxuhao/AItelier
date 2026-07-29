@@ -121,12 +121,26 @@ def _format_tool_result(name: str, result: dict) -> str:
 
 
 
+class _CheckpointContent(VerticalScroll, can_focus=False):
+    """The checkpoint content pane — deliberately NOT focusable.
+
+    Textual's ScrollableContainer is `can_focus=True` and owns `up`/`down`
+    bindings. When the modal opens, Textual auto-focuses it, so for any
+    content long enough to scroll the arrow keys are consumed there and the
+    modal's own cursor actions never run — the Approve/Request Changes
+    selection became unreachable (2026-07-29, project `greet` step 2). With
+    focus off, every key reaches the modal's bindings; the wheel and the
+    modal's explicit scroll_up()/scroll_down() calls still scroll the pane.
+    """
+
+
 class CheckpointModal(ModalScreen[bool]):
     """Interactive checkpoint review — Approve or Request Changes.
 
-    Content is scrollable. Arrow keys navigate content first; when the scroll
-    hits the boundary (top/bottom), the next press moves the Approve/Reject
-    selection cursor. Enter to select, Esc to dismiss.
+    Content is scrollable. Up/Down scroll it; at the top/bottom boundary the
+    next press moves the Approve/Reject selection cursor. Left/Right/Tab move
+    the selection directly, so it is reachable regardless of scroll position.
+    Enter to select, Esc to dismiss.
     On "Request Changes": an Input appears for rejection feedback.
 
     AT-13: constrained to 70% width x 80% height, centered, so the
@@ -145,7 +159,7 @@ class CheckpointModal(ModalScreen[bool]):
         background: $surface;
         padding: 1 2;
     }
-    CheckpointModal > VerticalScroll {
+    CheckpointModal > #cp-content {
         height: 1fr;
     }
     """
@@ -153,6 +167,17 @@ class CheckpointModal(ModalScreen[bool]):
     BINDINGS = [
         Binding("up", "cursor_up", "Up", show=False),
         Binding("down", "cursor_down", "Down", show=False),
+        Binding("left", "cursor_prev", "Prev option", show=False),
+        Binding("right", "cursor_next", "Next option", show=False),
+        Binding("tab", "cursor_next", "Next option", show=False),
+        Binding("shift+tab", "cursor_prev", "Prev option", show=False),
+        # The content pane is not focusable, so its own page/home/end bindings
+        # are out of reach — forward them from here or a long checkpoint can
+        # only be read one line at a time.
+        Binding("pageup", "scroll_content('scroll_page_up')", "Page up", show=False),
+        Binding("pagedown", "scroll_content('scroll_page_down')", "Page down", show=False),
+        Binding("home", "scroll_content('scroll_home')", "Top", show=False),
+        Binding("end", "scroll_content('scroll_end')", "Bottom", show=False),
         Binding("enter", "select_option", "Confirm", show=False),
         Binding("ctrl+j", "select_option", "", show=False),
         Binding("escape", "dismiss_modal", "Cancel", show=True),
@@ -179,10 +204,12 @@ class CheckpointModal(ModalScreen[bool]):
             f"Checkpoint: {self.checkpoint_label} (step {self.checkpoint_step})",
             id="cp-header"
         )
-        yield VerticalScroll(id="cp-content")
+        yield _CheckpointContent(id="cp-content")
         yield Static("", id="cp-prompt")
         yield Static("", id="cp-options-display")
-        yield Static("[↑↓] navigate  [Enter] confirm  [Esc] dismiss", id="cp-hint")
+        # Backslash-escape: Textual reads [Enter]/[Esc] as markup tags and eats them.
+        yield Static(r"[↑↓] scroll  [←→/Tab] choose  \[Enter] confirm  \[Esc] dismiss",
+                     id="cp-hint")
         yield Input(placeholder="Describe what needs to change...", id="cp-feedback-input", disabled=True)
 
     def on_mount(self):
@@ -243,22 +270,44 @@ class CheckpointModal(ModalScreen[bool]):
             lines.append(f"  {cursor} {label}")
         self.query_one("#cp-options-display").update("\n".join(lines))
 
+    def action_scroll_content(self, method: str):
+        """Drive the content pane's own scrolling from a modal binding."""
+        try:
+            content = self.query_one("#cp-content")
+        except Exception:
+            return  # modal tearing down
+        getattr(content, method)()   # a bad name must raise, not vanish
+
+    def action_cursor_prev(self):
+        """Move the selection — never scrolls, so it works at any position."""
+        if self._mode != "select":
+            return
+        self._cursor = (self._cursor - 1) % len(self._OPTIONS)
+        self._refresh_options()
+
+    def action_cursor_next(self):
+        if self._mode != "select":
+            return
+        self._cursor = (self._cursor + 1) % len(self._OPTIONS)
+        self._refresh_options()
+
     def action_cursor_up(self):
         if self._mode != "select":
             return
         # UX-2: if content is scrollable and not at the top, scroll it first.
         # Once the user reaches the top boundary, the next Up moves the
-        # Approve/Reject selection cursor. This prevents the scrollable
-        # checkpoint content from hijacking the arrow keys permanently.
+        # Approve/Reject selection cursor.
+        # Compare the scroll TARGET, not scroll_offset: the offset is animated
+        # and lags behind, so a held arrow key would never look like it had
+        # reached the boundary.
         try:
             content = self.query_one("#cp-content")
-            if content.scroll_offset.y > 0:
+            if content.scroll_target_y > 0:
                 content.scroll_up()
                 return
         except Exception:
             pass
-        self._cursor = (self._cursor - 1) % len(self._OPTIONS)
-        self._refresh_options()
+        self.action_cursor_prev()
 
     def action_cursor_down(self):
         if self._mode != "select":
@@ -266,14 +315,12 @@ class CheckpointModal(ModalScreen[bool]):
         # UX-2: scroll first; at the bottom boundary, move selection cursor.
         try:
             content = self.query_one("#cp-content")
-            max_y = content.virtual_size.height - content.container_size.height
-            if content.scroll_offset.y < max_y:
+            if content.scroll_target_y < content.max_scroll_y:
                 content.scroll_down()
                 return
         except Exception:
             pass
-        self._cursor = (self._cursor + 1) % len(self._OPTIONS)
-        self._refresh_options()
+        self.action_cursor_next()
 
     def action_select_option(self):
         if self._mode == "select":

@@ -2,73 +2,10 @@
 
 Tests the _format_ctx method and all event types in _handle_event.
 Verifies timestamp formatting, project name, step name, and task ID display.
-
-NOTE: Must mock Textual BEFORE importing any AItelier module because
-cli/tui/__init__.py → cli.tui.app → textual.app.
 """
 
-import sys
 from unittest.mock import MagicMock
 
-# ── Pre-import mocking: must happen before cli.tui is touched ─────────
-# cli/tui/__init__.py imports AItelierApp which imports textual.app
-_mock_textual_app = MagicMock()
-_mock_textual_app.ComposeResult = list
-_mock_textual_app.App = type("App", (), {})
-
-# VerticalScroll must be a proper class (not MagicMock) for __new__ to work
-class _MockVerticalScroll:
-    can_focus = True
-    def __init__(self, *a, **kw): pass
-    def compose(self): return []
-    def mount(self): pass
-    def set_interval(self, *a): pass
-    def query_one(self, *a): return MagicMock()
-    def scroll_end(self, *a, **kw): pass
-    def refresh(self, *a, **kw): pass
-
-# textual.containers must have VerticalScroll as a proper class
-_mock_containers = MagicMock()
-_mock_containers.VerticalScroll = _MockVerticalScroll
-
-_dummy_modules = {
-    "textual": MagicMock(),
-    "textual.app": _mock_textual_app,
-    "textual.widgets": MagicMock(),
-    "textual.containers": _mock_containers,
-    "textual.widget": MagicMock(),
-    "textual.container": MagicMock(),
-    "textual.css": MagicMock(),
-    "textual.css.query": MagicMock(),
-    "textual.work": MagicMock(),
-    "textual.message": MagicMock(),
-    "textual.dom": MagicMock(),
-    "textual.events": MagicMock(),
-    "textual.reactive": MagicMock(),
-    "textual.strip": MagicMock(),
-    "textual._arrange": MagicMock(),
-    "textual.screen": MagicMock(),
-    "textual.coordinate": MagicMock(),
-    "textual.geometry": MagicMock(),
-    "textual.keys": MagicMock(),
-    "textual.binding": MagicMock(),
-    "textual.timer": MagicMock(),
-    "textual.worker": MagicMock(),
-    "textual._context": MagicMock(),
-    "textual.color": MagicMock(),
-    "textual.renderables": MagicMock(),
-    "textual.widgets.Static": type("Static", (), {}),
-    # cli.tui.app imports these
-    "cli.tui.dashboard": MagicMock(),
-    "cli.tui.chat": MagicMock(),
-    "cli.tui.flash": MagicMock(),
-    "cli.tui.keys": MagicMock(),
-    "cli.completer": MagicMock(),
-}
-for name, mod in _dummy_modules.items():
-    sys.modules[name] = mod
-
-# Now safe to import
 from cli.tui.notifications import NotificationZone, STEP_NAMES
 
 import pytest
@@ -82,6 +19,8 @@ def zone():
     z.server_url = "http://localhost:4444"
     z._lines = []
     z._display = MagicMock()
+    # Never mounted, so the real Textual scroll needs stubbing.
+    z.scroll_end = MagicMock()
     z._project_name_cache = {}
     return z
 

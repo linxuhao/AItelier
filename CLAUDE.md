@@ -240,6 +240,45 @@ python3 debugctl.py watch <project_id> # Watch workspace changes
 python3 debugctl.py inspect <project_id>  # Tree + diff + log
 ```
 
+### Scheduler tick log (`~/.AItelier/logs/scheduler_ticks.log`)
+
+The poller advances **one project per tick** (`get_next_active_project()`, ordered
+`updated_at ASC`) — by design. The consequence is that a project which cannot
+advance is picked again every tick and blocks the others, so "nothing is moving"
+is a state you need to be able to read. The tick has eight ways to return and
+most used to be silent: a stuck project looked exactly like an idle one.
+
+`core/scheduler.py:tick_log(project, outcome, **detail)` writes one line per tick
+to its own rotating file (5MB × 3, on the mounted `~/.AItelier` so it survives
+container recreation — the container log does not). Outcome tokens are short and
+stable, so the log greps cleanly:
+
+| outcome | meaning |
+|---|---|
+| `idle` | no active project (coalesced to one heartbeat/min) |
+| `locked` | a tick for this project is already in flight |
+| `run_start_failed` | `_get_or_create_skillflow_run` raised |
+| `active_claim` | a step is still executing |
+| `terminal` | run paused/completed/failed |
+| `claim_failed` | `claim_next_step` raised — carries the reason |
+| `no_claim` | nothing claimable at `node` |
+| `executed` | step ran; carries step id, confirmed, elapsed |
+
+```bash
+grep 'outcome=claim_failed' ~/.AItelier/logs/scheduler_ticks.log   # why a run is stuck
+grep 'project=<id>' ~/.AItelier/logs/scheduler_ticks.log           # one project's history
+```
+
+Idle ticks coalesce because ~17k lines/day of "nothing to do" would evict the
+informative lines from the rotation window; every tick that picks a project is
+logged in full. Logging can never break a tick (NullHandler fallback, errors
+swallowed).
+
+This exists because a `dpe_default` run started without its `meta_conversation`
+predecessor sat at `running:1` for 47 minutes: `claim_next_step` raised
+`RequiredContextMissing: … no content: finalize` on every tick and a bare
+`except Exception: return` threw it away each time.
+
 ### Tech Stack
 
 Python 3.12, Skillflow (graph executor), FastAPI, Pydantic V2, SQLite (WAL), APScheduler, LiteLLM, Typer, Rich, httpx.

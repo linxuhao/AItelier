@@ -99,6 +99,20 @@ docker compose up -d              # multi-stage build (Node.js → Svelte bundle
 docker compose logs -f
 ```
 
+**If a run looks stuck**, read the scheduler tick log rather than the container
+log. The scheduler advances one project per tick, so a project that cannot
+advance blocks the others — and the tick log is where it says why:
+
+```bash
+grep 'outcome=claim_failed' ~/.AItelier/logs/scheduler_ticks.log
+# project=my-project outcome=claim_failed run=2f6c30c4
+#   error=Required context source resolved to no content: finalize.
+```
+
+It rotates (5MB × 3) and lives on the mounted volume, so it survives container
+recreation. One line per tick; outcomes are `idle`, `locked`, `run_start_failed`,
+`active_claim`, `terminal`, `claim_failed`, `no_claim`, `executed`.
+
 In Docker the **API key is a secret file, not an env var** (so the pipeline's test/build subprocesses never inherit it). Put the key outside the repo and mount it:
 
 ```bash

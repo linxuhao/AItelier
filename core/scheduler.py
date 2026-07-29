@@ -834,6 +834,41 @@ _VAGUE_FAILURES = ("", "unknown", "cycle limit exceeded", "none",
                    "max total steps", "max_total_steps")
 
 
+def _is_vague(base: str) -> bool:
+    """Is this failure reason still a shrug once its framework detail is stripped?
+
+    skillflow >=1.5.30 no longer computes-and-discards the reason on its own side:
+    a run that dies on an exhausted `max_loop` re-reads the `from_file` targets of
+    the edges it could not match and prepends the human-readable field, then names
+    the edge —
+
+        Cycle limit exceeded — continuity_report.json violations: 字数超限 …
+                               (edges: All transitions from 'continuity_check' …)
+
+    That is strictly more than we had, but it broke the check it fed: an EXACT
+    match against the whole string stopped recognising "Cycle limit exceeded", so
+    the tool feedback in the trace — often more specific than the routing file, and
+    the only thing that speaks when the gate wrote no file at all — stopped being
+    looked up. Match the HEAD of the reason instead, so both details survive and
+    are concatenated. skillflow leaves the bare base byte-identical when it finds
+    no reason (a flag-routed loop has no `from_file` edge to read), so the plain
+    string must keep testing vague too.
+    """
+    head = base.lower().split(" — ")[0].split(" (edges:")[0].strip()
+    return head in _VAGUE_FAILURES
+
+
+def _already_said(base: str, detail: str) -> bool:
+    """True when the trace detail is what skillflow already put in the base.
+
+    Both sides can end up quoting the same routing file, and "X — Y — Y" reads
+    like two failures. The detail is `"<step_id>: <message>"`; only the message is
+    comparable, since the base never carries a step id.
+    """
+    message = detail.split(": ", 1)[1] if ": " in detail else detail
+    return bool(message) and message in base
+
+
 def _advance_recording_crashes(sf, run_id: str, project_id: str = ""):
     """``sf.advance_run`` — but a tool-step crash lands in the TRACE first.
 
@@ -987,12 +1022,14 @@ _FAILURE_CACHE_MAX = 256
 def _failure_reason(run: dict) -> str:
     """The most actionable description of why a run failed (computed once per run)."""
     base = (run.get("error_reason") or run.get("error") or "").strip()
-    if base and base.lower() not in _VAGUE_FAILURES:
+    if base and not _is_vague(base):
         return base
     run_id = run.get("id") or ""
     if run_id in _failure_reason_cache:
         return _failure_reason_cache[run_id]
     detail = _last_trace_error(run_id)
+    if detail and _already_said(base, detail):
+        detail = ""
     reason = (f"{base} — {detail}" if base else detail) if detail else (base or "unknown")
     if run_id:
         if len(_failure_reason_cache) >= _FAILURE_CACHE_MAX:

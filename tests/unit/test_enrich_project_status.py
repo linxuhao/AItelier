@@ -146,6 +146,38 @@ class TestTheReasonIsEnrichedNotTheFrameworkArtifact:
         out = deps.enrich_project_status({"project_id": "p1", "status": "failed"})
         assert "字数超限" in out["error_reason"]
 
+    def test_skillflows_own_enrichment_does_not_shut_the_resolver_out(self, monkeypatch):
+        """skillflow >=1.5.30 names the routing file itself; the trace still speaks.
+
+        The reason above stopped arriving verbatim — it now reads "Cycle limit
+        exceeded — continuity_report.json summary: … (edges: …)" — and the
+        scheduler's vagueness test was an exact string match, so the enriched base
+        counted as specific and the tool feedback was dropped. Both details belong
+        on the page. Nothing is monkeypatched between the two layers here: the whole
+        path from the run row to `error_reason` runs.
+        """
+        from core import scheduler
+
+        scheduler._failure_reason_cache.clear()
+        run = _run("failed")
+        run["error_reason"] = ("Cycle limit exceeded — continuity_report.json summary: "
+                               "continuity check finished (edges: All transitions from "
+                               "'continuity_check' are exhausted)")
+
+        class _SFWithTrace(_FakeSF):
+            def trace_query(self, run_id, sql, params):
+                return [{"step_id": "continuity_check",
+                         "payload_json":
+                             '{"passed": false, "feedback": "字数超限: 5662 字（上限 4500）"}'}]
+
+        monkeypatch.setattr(deps, "get_skillflow", lambda: _SFWithTrace(run))
+        monkeypatch.setattr(deps, "get_config_registry", lambda: None)
+
+        out = deps.enrich_project_status({"project_id": "p1", "status": "failed"})
+        assert "字数超限" in out["error_reason"]
+        assert out["error_reason"].startswith("Cycle limit exceeded — continuity_report.json")
+        scheduler._failure_reason_cache.clear()
+
     def test_a_non_failed_run_keeps_the_plain_column(self, patched):
         import api.dependencies as deps
         run = _run("running", "C1")

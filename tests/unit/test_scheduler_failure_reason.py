@@ -47,6 +47,58 @@ def test_cycle_limit_is_enriched_from_the_trace(patched_sf):
     assert "spec_maker" in reason
 
 
+class TestSkillflowsOwnDetailDoesNotSuppressTheTrace:
+    """skillflow >=1.5.30 enriches the reason itself — that must not cost us ours.
+
+    A loop that exhausts `max_loop` now names the `from_file` field of the edges it
+    failed to match, and then the edge:
+
+        Cycle limit exceeded — continuity_report.json violations: 字数超限 …
+                               (edges: All transitions from 'continuity_check' …)
+
+    The vagueness test was an EXACT match on the whole string, so the moment the
+    base stopped being *literally* "Cycle limit exceeded" it counted as specific
+    and `_last_trace_error` was never consulted — the same class of loss the
+    enrichment was shipped to fix, one layer up. The head of the reason is what
+    decides; the two details concatenate.
+    """
+
+    def test_an_enriched_cycle_limit_still_reaches_the_trace(self, patched_sf):
+        patched_sf([{"step_id": "continuity_check",
+                     "payload_json": '{"passed": false, "feedback": "第 3 段与第 1 章设定冲突"}'}])
+        base = ("Cycle limit exceeded — continuity_report.json summary: continuity check "
+                "finished (edges: All transitions from 'continuity_check' are exhausted)")
+        reason = scheduler._failure_reason({"id": "r", "error_reason": base})
+        assert reason.startswith(base + " — continuity_check:")
+        assert "第 3 段与第 1 章设定冲突" in reason
+
+    def test_the_edge_detail_alone_is_still_vague(self, patched_sf):
+        """No `from_file` to read (a flag-routed loop) — skillflow appends only the edge."""
+        patched_sf([{"step_id": "v_smoke", "payload_json": '{"error": "graph does not terminate"}'}])
+        base = "Cycle limit exceeded (edges: 'a' -> 'b' (max_loop=3 reached))"
+        assert scheduler._failure_reason({"id": "r", "error_reason": base}) == \
+            f"{base} — v_smoke: graph does not terminate"
+
+    def test_a_bare_cycle_limit_is_unchanged(self, patched_sf):
+        """skillflow leaves the base byte-identical when it finds no reason."""
+        patched_sf([{"step_id": "v_smoke", "payload_json": '{"error": "boom"}'}])
+        assert scheduler._failure_reason({"id": "r", "error_reason": "Cycle limit exceeded"}) == \
+            "Cycle limit exceeded — v_smoke: boom"
+
+    def test_the_same_detail_is_not_said_twice(self, patched_sf):
+        """Both sides can quote the same routing file; "X — Y — Y" reads as two failures."""
+        patched_sf([{"step_id": "continuity_check",
+                     "payload_json": '{"passed": false, "feedback": "字数超限: 5662 字（上限 4500）"}'}])
+        base = "Cycle limit exceeded — continuity_report.json violations: 字数超限: 5662 字（上限 4500）"
+        assert scheduler._failure_reason({"id": "r", "error_reason": base}) == base
+
+    def test_a_real_error_carrying_an_em_dash_is_left_alone(self, patched_sf):
+        """The head is what decides — a specific reason stays specific."""
+        patched_sf([{"step_id": "v_smoke", "payload_json": '{"error": "never read"}'}])
+        base = "Tool step 'apply_state' crashed 3 times — failing (likely a bug in the tool)"
+        assert scheduler._failure_reason({"id": "r", "error_reason": base}) == base
+
+
 def test_missing_error_reason_falls_back_to_the_trace(patched_sf):
     patched_sf([{"step_id": "v_smoke", "payload_json": '{"error": "graph does not terminate"}'}])
     assert scheduler._failure_reason({"id": "r"}) == "v_smoke: graph does not terminate"

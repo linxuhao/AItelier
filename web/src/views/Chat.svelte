@@ -684,7 +684,7 @@
     if (!text || typeof text !== 'string') return;
 
     if (!connected) {
-      messages = [...messages, { role: 'error', content: 'Cannot send message while disconnected.' }];
+      messages = [...messages, { role: 'error', content: t('chat.disconnectedSend') }];
       return;
     }
 
@@ -793,7 +793,7 @@
         }
         // Retry once after a short delay for transient network errors
         if (attempt === 0 && connected) {
-          messages = [...messages, { role: 'system', content: 'Stream interrupted — retrying…' }];
+          messages = [...messages, { role: 'system', content: t('chat.streamInterrupted') }];
           await new Promise(r => setTimeout(r, 1500));
           continue;
         }

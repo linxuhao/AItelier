@@ -14,12 +14,27 @@
   let submitting = $state(false);
   let errorMsg = $state('');
   let contentLoading = $state(false);
-  let loadedContentHtml = $state('');
   let loadedLabel = $state('');
+
+  // The RAW payload, not its rendered HTML: the renderers call t(), so holding
+  // the data and deriving the markup is what makes the checkpoint body follow a
+  // language switch made while the modal is open. Baking t() into a stored HTML
+  // string froze it at load time, leaving a modal whose buttons were translated
+  // and whose body was not.
+  let contentData = $state<Record<string, unknown> | null>(null);
+  let loadError = $state<{ message: string } | null>(null);
 
   let staleTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── Derived ───────────────────────────────────────────────────────
+
+  let loadedContentHtml = $derived.by(() => {
+    if (loadError) {
+      return '<p class="cp-error-text">' + escapeHtml(t('modal.loadFailed')) + ' '
+        + escapeHtml(loadError.message || t('modal.unknownError')) + '</p>';
+    }
+    return contentData ? renderCheckpointContent(contentData) : '';
+  });
 
   let storeVal = $derived($checkpointStore);
   let visible = $derived(storeVal.visible);
@@ -47,7 +62,8 @@
       feedbackMode = false;
       submitting = false;
       errorMsg = '';
-      loadedContentHtml = '';
+      contentData = null;
+      loadError = null;
       const data = checkpointData;
       loadedLabel = data?.label ? String(data.label) : '';
 
@@ -64,7 +80,8 @@
       feedbackMode = false;
       submitting = false;
       errorMsg = '';
-      loadedContentHtml = '';
+      contentData = null;
+      loadError = null;
       loadedLabel = '';
     }
 
@@ -144,9 +161,12 @@
     if (rejectionHistory && rejectionHistory.length > 0) {
       const latest = rejectionHistory[rejectionHistory.length - 1] as Record<string, unknown>;
       const lastFeedback = String(latest?.user_feedback || latest?.reason || '');
-      html += '<div class="cp-revision-note"><strong>Revised ' + rejectionHistory.length + ' time(s)</strong>';
+      html += '<div class="cp-revision-note"><strong>'
+        + escapeHtml(t('modal.revisedTimes').replace('{n}', String(rejectionHistory.length)))
+        + '</strong>';
       if (lastFeedback) {
-        html += '<div class="cp-revision-feedback">Last feedback: ' + escapeHtml(lastFeedback) + '</div>';
+        html += '<div class="cp-revision-feedback">' + escapeHtml(t('modal.lastFeedback')) + ' '
+          + escapeHtml(lastFeedback) + '</div>';
       }
       html += '</div>';
     }
@@ -160,7 +180,7 @@
     });
 
     if (fileKeys.length === 0) {
-      html += '<p class="empty-state">(No file output to review)</p>';
+      html += '<p class="empty-state">' + escapeHtml(t('modal.noFileOutput')) + '</p>';
       return html;
     }
 
@@ -177,7 +197,7 @@
     const isLarge = fcontent.length > MAX_FILE_SIZE;
     let displayContent = fcontent;
     if (isLarge) {
-      displayContent = fcontent.slice(0, MAX_FILE_SIZE) + '\n\n[File truncated — showing first 50KB]';
+      displayContent = fcontent.slice(0, MAX_FILE_SIZE) + '\n\n' + t('modal.fileTruncated');
     }
 
     const isMarkdown = fname.toLowerCase().endsWith('.md');
@@ -196,7 +216,7 @@
     }
 
     if (isLarge) {
-      sectionHtml += '<div class="cp-truncated-note">(File truncated — showing first 50KB)</div>';
+      sectionHtml += '<div class="cp-truncated-note">' + escapeHtml(t('modal.fileTruncated')) + '</div>';
     }
 
     return sectionHtml;
@@ -207,7 +227,8 @@
 
     if (needsFetch) {
       contentLoading = true;
-      loadedContentHtml = '';
+      contentData = null;
+      loadError = null;
       try {
         const fetched = await getCheckpoint(pid);
         if (!visible) return;
@@ -219,7 +240,7 @@
         if (fetched.label) {
           loadedLabel = String(fetched.label);
         }
-        loadedContentHtml = renderCheckpointContent(fetched as Record<string, unknown>);
+        contentData = fetched as Record<string, unknown>;
       } catch (err: unknown) {
         if (!visible) return;
         const status = (err as any)?.status;
@@ -228,7 +249,9 @@
           hideCheckpoint();
           return;
         }
-        loadedContentHtml = '<p class="cp-error-text">Failed to load checkpoint data: ' + escapeHtml((err as Error)?.message || 'Unknown error') + '</p>';
+        // Store the raw message, not a rendered sentence: the wording around it
+        // is translated in the derived above and must follow a language switch.
+        loadError = { message: (err as Error)?.message || '' };
       } finally {
         contentLoading = false;
       }
@@ -236,7 +259,8 @@
       if (data.label) {
         loadedLabel = String(data.label);
       }
-      loadedContentHtml = renderCheckpointContent(data);
+      contentData = data;
+      loadError = null;
     }
   }
 
@@ -262,7 +286,7 @@
         hideCheckpoint();
         return;
       }
-      errorMsg = 'Approve failed: ' + ((err as Error)?.message || 'Unknown error');
+      errorMsg = t('modal.approveFailed') + ' ' + ((err as Error)?.message || t('modal.unknownError'));
     } finally {
       submitting = false;
     }
@@ -309,7 +333,7 @@
         hideCheckpoint();
         return;
       }
-      errorMsg = 'Reject failed: ' + ((err as Error)?.message || 'Unknown error');
+      errorMsg = t('modal.rejectFailed') + ' ' + ((err as Error)?.message || t('modal.unknownError'));
     } finally {
       submitting = false;
     }

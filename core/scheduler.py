@@ -630,6 +630,7 @@ async def _execute_skillflow_tick(project_id: str, loop):
     """
     lock = _get_tick_lock(project_id)
     if not lock.acquire(blocking=False):
+        tick_log(project_id, "locked")      # a tick for this project is in flight
         return
     try:
         await _run_skillflow_tick(project_id, loop)
@@ -658,6 +659,7 @@ async def _run_skillflow_tick(project_id: str, loop):
                               status=f"failed:could not start run — {e}"[:160])
         except Exception:
             pass    # a DB write failure here must not mask the original error
+        tick_log(project_id, "run_start_failed", error=str(e)[:160])
         return
     if not run_id:
         # Self-heal stuck task states when the DPE run is terminal.
@@ -671,6 +673,7 @@ async def _run_skillflow_tick(project_id: str, loop):
     # With max_instances=1 (SF-5 fix), concurrent ticks are prevented at the
     # APScheduler level. This is a safety net for edge cases.
     if _has_active_claim(sf, run_id):
+        tick_log(project_id, "active_claim", run=run_id[:8])
         return
 
     # NB-1 safety valve: bound any runaway loop regardless of root cause. If a run
@@ -721,6 +724,7 @@ async def _run_skillflow_tick(project_id: str, loop):
     if next_node is None:
         # Handle terminal states
         run = sf.get_run(run_id)
+        tick_log(project_id, "terminal", run=run_id[:8], status=run["status"])
         if run["status"] in ("paused", "completed", "failed"):
             # skillflow notification bus emits checkpoint_paused / run_completed /
             # run_failed; we just sync the AItelier DB status.
@@ -742,8 +746,10 @@ async def _run_skillflow_tick(project_id: str, loop):
         # still retries next tick); only the silence is removed.
         _record_tick_error(sf, run_id, project_id, e, "claim_failed")
         _sync_project_status_to_db(project_id)
+        tick_log(project_id, "claim_failed", run=run_id[:8], error=str(e)[:160])
         return
     if claimed is None:
+        tick_log(project_id, "no_claim", run=run_id[:8], node=next_node)
         _sync_project_status_to_db(project_id)
         return
 
@@ -797,6 +803,8 @@ async def _run_skillflow_tick(project_id: str, loop):
 
     # Sync project status to DB after each tick
     _sync_project_status_to_db(project_id)
+    tick_log(project_id, "executed", run=run_id[:8], step=claimed.step_id,
+             confirmed=_executed, elapsed=f"{_time.time() - _t0:.1f}s")
     _odbg(f"{_cid} tick END step={claimed.step_id} confirmed={_executed}")
 
 
@@ -851,6 +859,72 @@ def _advance_recording_crashes(sf, run_id: str, project_id: str = ""):
     except Exception as e:
         _record_tick_error(sf, run_id, project_id, e, "tool_step_crashed")
         raise
+
+
+# ── Tick log ────────────────────────────────────────────────────────
+# The tick has nine ways to return and most of them were silent, so "the run is
+# not moving" gave you nothing to look at: a stuck project looked exactly like an
+# idle one. This is a rolling per-tick record of WHICH project was considered and
+# WHAT the tick decided, on its own file so the 5-second cadence does not drown
+# the container log.
+#
+# Idle ticks are coalesced to one heartbeat a minute. At 5s they are ~17k lines a
+# day of "nothing to do", which would push the informative lines out of the
+# rotation window — the opposite of the point. Every tick that picks a project is
+# logged in full.
+_TICK_LOG_MAX_BYTES = 5 * 1024 * 1024
+_TICK_LOG_BACKUPS = 3
+_TICK_IDLE_HEARTBEAT_S = 60
+_tick_logger = None
+_tick_last_idle = 0.0
+
+
+def _get_tick_logger():
+    global _tick_logger
+    if _tick_logger is not None:
+        return _tick_logger
+    import logging
+    from logging.handlers import RotatingFileHandler
+    lg = logging.getLogger("aitelier.scheduler.tick")
+    lg.propagate = False          # its own file; not the container log
+    lg.setLevel(logging.INFO)
+    if not lg.handlers:
+        try:
+            from core.datadir import aitelier_home
+            d = aitelier_home() / "logs"
+            d.mkdir(parents=True, exist_ok=True)
+            h = RotatingFileHandler(d / "scheduler_ticks.log",
+                                    maxBytes=_TICK_LOG_MAX_BYTES,
+                                    backupCount=_TICK_LOG_BACKUPS,
+                                    encoding="utf-8")
+            h.setFormatter(logging.Formatter(
+                "%(asctime)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"))
+            lg.addHandler(h)
+        except Exception:
+            lg.addHandler(logging.NullHandler())   # never break a tick over logging
+    _tick_logger = lg
+    return lg
+
+
+def tick_log(project_id: str, outcome: str, **detail) -> None:
+    """One line per tick: which project, what the tick decided, why.
+
+    `outcome` is a short stable token so the log greps cleanly — `idle`,
+    `locked`, `advanced`, `claim_failed`, `no_claim`, `executed`, `terminal`.
+    """
+    global _tick_last_idle
+    try:
+        if outcome == "idle":
+            now = _time.time()
+            if now - _tick_last_idle < _TICK_IDLE_HEARTBEAT_S:
+                return
+            _tick_last_idle = now
+        bits = " ".join(f"{k}={v}" for k, v in detail.items() if v not in (None, ""))
+        _get_tick_logger().info(
+            "project=%s outcome=%s%s", project_id or "-", outcome,
+            (" " + bits) if bits else "")
+    except Exception:
+        pass          # observability must never be able to break the thing observed
 
 
 def _record_tick_error(sf, run_id: str, project_id: str, exc: BaseException,
@@ -1192,6 +1266,7 @@ async def poll_and_execute():
 
     project = db.get_next_active_project()
     if not project:
+        tick_log("", "idle")
         return
     await _execute_skillflow_tick(project["project_id"], loop)
 

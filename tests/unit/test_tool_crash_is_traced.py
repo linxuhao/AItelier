@@ -74,3 +74,41 @@ class TestTheCrashReachesTheTrace:
             _advance_recording_crashes(sf, "r1", "p1")
         payload = sf.trace.call_args[0][3]
         assert isinstance(payload.get("error"), str) and payload["error"].strip()
+
+
+class TestAClaimFailureIsNotSwallowed:
+    """`claim_next_step` raising used to be caught by a bare `except Exception:`
+    that returned with NO log, NO trace and NO status change — so the tick simply
+    did nothing, forever, while the run sat at its node looking healthy.
+
+    Live: a dpe_default run started without its meta_conversation predecessor sat
+    at `running:1` for 47 minutes. Every tick, `claim_next_step` raised
+    `RequiredContextMissing: Required context source resolved to no content:
+    finalize` — an actionable sentence naming the exact missing input — and every
+    tick threw it away. It took calling claim_next_step by hand to see it.
+    """
+
+    def test_the_reason_is_recorded(self):
+        from core.scheduler import _record_tick_error
+        sf = _sf(current_node="1")
+        _record_tick_error(sf, "r1", "p1",
+                           RuntimeError("Required context source resolved to no "
+                                        "content: finalize"), "claim_failed")
+        sf.trace.assert_called_once()
+        args = sf.trace.call_args[0]
+        assert args[2] == "claim_failed"
+        assert "finalize" in args[3]["error"]
+        assert args[3]["step_id"] == "1"
+
+    def test_it_never_replaces_the_original_error(self):
+        """It runs while something is already going wrong."""
+        from core.scheduler import _record_tick_error
+        sf = _sf()
+        sf.trace.side_effect = RuntimeError("trace db gone")
+        _record_tick_error(sf, "r1", "p1", ValueError("real"), "claim_failed")
+
+    def test_an_unreadable_run_row_is_survived_too(self):
+        from core.scheduler import _record_tick_error
+        sf = _sf()
+        sf.get_run.side_effect = RuntimeError("db locked")
+        _record_tick_error(sf, "r1", "p1", ValueError("real"), "claim_failed")

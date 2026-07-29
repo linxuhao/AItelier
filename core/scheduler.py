@@ -730,7 +730,17 @@ async def _run_skillflow_tick(project_id: str, loop):
     # Phase B: Claim
     try:
         claimed = sf.claim_next_step(run_id)
-    except Exception:
+    except Exception as e:
+        # This swallowed the reason ENTIRELY — no log, no trace, no status — and
+        # the tick just returned, so the run sat at its current node looking
+        # healthy while every tick re-raised and re-swallowed. Live: a dpe_default
+        # run started without its meta_conversation predecessor sat at
+        # `running:1` for 47 minutes; `claim_next_step` was raising
+        # `RequiredContextMissing: Required context source resolved to no
+        # content: finalize` every single tick — a perfectly actionable sentence
+        # that no surface ever showed. Control flow is unchanged (still returns,
+        # still retries next tick); only the silence is removed.
+        _record_tick_error(sf, run_id, project_id, e, "claim_failed")
         _sync_project_status_to_db(project_id)
         return
     if claimed is None:
@@ -839,18 +849,30 @@ def _advance_recording_crashes(sf, run_id: str, project_id: str = ""):
     try:
         return sf.advance_run(run_id)
     except Exception as e:
-        try:
-            run = sf.get_run(run_id) or {}
-            sf.trace(run_id, "tool_result", "tool_step_crashed",
-                     {"error": f"{type(e).__name__}: {e}",
-                      "step_id": run.get("current_node") or ""},
-                     step_id=run.get("current_node") or "",
-                     project_id=project_id or run.get("project_id") or "")
-        except Exception:
-            import logging as _lg
-            _lg.getLogger("aitelier.scheduler").warning(
-                "could not record a tool-step crash into the trace", exc_info=True)
+        _record_tick_error(sf, run_id, project_id, e, "tool_step_crashed")
         raise
+
+
+def _record_tick_error(sf, run_id: str, project_id: str, exc: BaseException,
+                       event: str) -> None:
+    """Put a tick-path exception where someone can read it.
+
+    Shared by the two phases that can blow up with the answer in hand and no
+    surface to put it on. Best-effort: it runs while something is already going
+    wrong and must never replace the original error with its own.
+    """
+    try:
+        run = sf.get_run(run_id) or {}
+        node = run.get("current_node") or ""
+        sf.trace(run_id, "tool_result", event,
+                 {"error": f"{type(exc).__name__}: {exc}", "step_id": node},
+                 step_id=node,
+                 project_id=project_id or run.get("project_id") or "")
+    except Exception:
+        pass          # the logging below is the fallback surface
+    import logging as _lg
+    _lg.getLogger("aitelier.scheduler").warning(
+        "%s on run %s (%s): %s", event, run_id, project_id, exc)
 
 
 def _last_trace_error(run_id: str) -> str:

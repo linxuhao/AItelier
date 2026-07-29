@@ -72,40 +72,47 @@ def apply_state(*, project_root: str = "", workspace_root: str = "",
     if not summary:
         raise ValueError("apply_state: summary is empty — the digest and future "
                          "context depend on it")
-
-    # ── 1. Immutable chapter record ──
     ch_dir = ns.chapter_dir(ws, n)
     if ch_dir.exists():
         raise ValueError(f"apply_state: {ch_dir} already exists — chapters are "
                          "append-only (rollback goes through git)")
-    ch_dir.mkdir(parents=True)
-    (ch_dir / "prose.md").write_text(prose, encoding="utf-8")
+    # Every entity refusal, before a single byte is written (see validate_events).
+    ns.validate_events(ws, record.get("events") or [])
+
     title = str(record.get("title") or "").strip()
-    (ch_dir / "summary.md").write_text(
-        (f"# 第{n}章：{title}\n\n" if title else "") + summary + "\n",
-        encoding="utf-8")
-    ns.dump_yaml(ch_dir / "events.yaml", {
-        "chapter": n, "title": title,
-        "word_count": ns.char_count(prose),
-        "events": record.get("events") or [],
-        "appearances": record.get("appearances") or [],
-        "locations": record.get("locations") or [],
-        "thread_updates": record.get("thread_updates") or [],
-        "arc_updates": record.get("arc_updates") or [],
-    })
-
-    # ── 2. Post to balances ──
     warnings: list[str] = []
-    warnings += ns.apply_events(ws, record.get("events") or [], n)
-    warnings += ns.log_appearances(ws, record.get("appearances") or [], n)
-    warnings += ns.apply_thread_updates(ws, record.get("thread_updates") or [], n)
-    warnings += ns.apply_arc_updates(ws, record.get("arc_updates") or [], n)
+    drift: list[str] = []
 
-    # ── 3. Derived state + audit ──
-    ns.rebuild_digest(ws)
-    ns.rebuild_index(ws)
-    drift = ns.reconcile(ws)
-    warnings += drift
+    # Steps 1-3 are ONE unit: a failure anywhere rolls the novel tree back to
+    # what it was, so a crashed apply can simply be retried.
+    with ns.state_transaction(ws):
+        # ── 1. Immutable chapter record ──
+        ch_dir.mkdir(parents=True)
+        (ch_dir / "prose.md").write_text(prose, encoding="utf-8")
+        (ch_dir / "summary.md").write_text(
+            (f"# 第{n}章：{title}\n\n" if title else "") + summary + "\n",
+            encoding="utf-8")
+        ns.dump_yaml(ch_dir / "events.yaml", {
+            "chapter": n, "title": title,
+            "word_count": ns.char_count(prose),
+            "events": record.get("events") or [],
+            "appearances": record.get("appearances") or [],
+            "locations": record.get("locations") or [],
+            "thread_updates": record.get("thread_updates") or [],
+            "arc_updates": record.get("arc_updates") or [],
+        })
+
+        # ── 2. Post to balances ──
+        warnings += ns.apply_events(ws, record.get("events") or [], n)
+        warnings += ns.log_appearances(ws, record.get("appearances") or [], n)
+        warnings += ns.apply_thread_updates(ws, record.get("thread_updates") or [], n)
+        warnings += ns.apply_arc_updates(ws, record.get("arc_updates") or [], n)
+
+        # ── 3. Derived state + audit ──
+        ns.rebuild_digest(ws)
+        ns.rebuild_index(ws)
+        drift = ns.reconcile(ws)
+        warnings += drift
 
     # ── 4. Commit the chapter into the code repo (git history + download) ──
     committed = ns.git_commit(ws, f"第{n}章：{title}" if title else f"第{n}章")

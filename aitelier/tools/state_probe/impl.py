@@ -101,6 +101,19 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
                   "progression，可用 read 按需查）",
                   "", _yaml_block(cards), ""]
 
+    # 出场过、但从没记过事件 → 还没有档案。这一名单存在于反向索引与角色卡之差，
+    # 谁也不会主动去算；不说出来，第一次给他们记分录时 apply_state 才拒绝，
+    # 而那已经是本章的最后一步了（live: 王超 ch3 出场、ch5 才记事件）。
+    index = ns.load_yaml(ns.state_dir(base) / "index.yaml", {}) or {}
+    cardless = sorted(nm for nm in (index.get("by_character") or {})
+                      if nm not in characters)
+    if cardless:
+        parts += ["## 出场过但还没有档案的角色（首次记事件时 `create: true`）", "",
+                  "、".join(cardless)
+                  + "——他们只是在 appearances 里出现过（出场不建档，记事件才建档）。"
+                    "本章若给其中谁记 events 分录，该条必须写 `create: true`，"
+                    "否则 apply_state 拒绝入册。", ""]
+
     # ── Plot frontier (node-driven: what each arc advances next) ──
     arcs = ns.load_yaml(bib / "arcs.yaml", []) or []
     active_arcs = [a for a in arcs if a.get("status", "active") == "active"]

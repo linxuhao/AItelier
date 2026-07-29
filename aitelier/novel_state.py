@@ -39,7 +39,10 @@ from __future__ import annotations
 import copy
 import json
 import re
+import shutil
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
@@ -202,6 +205,70 @@ def safe_filename(name: str) -> str:
     return cleaned or "_unnamed"
 
 
+# ── Transaction (all-or-nothing writes) ──────────────────────────────────────
+
+# The two subtrees a chapter apply MUTATES. chapters/ is append-only, so it is
+# not copied — the rollback just removes whatever the failed apply added.
+_MUTABLE_SUBTREES = ("bible", "state")
+
+
+@contextmanager
+def state_transaction(ws):
+    """Make a block of novel-tree writes all-or-nothing.
+
+    Snapshots bible/ + state/ and remembers which chapter dirs exist; if the
+    body raises, the snapshot is restored and anything the failed run created is
+    removed, leaving the tree byte-identical to what it was (``git status``
+    clean — the novel tree is a git repo, so the guarantee is checkable).
+
+    Why: apply_state wrote the chapter record, THEN posted the events. A refusal
+    on the second event (live: 王超 had no card, chapter 5) left ch0005/ on disk
+    with index.yaml still saying 4 chapters — after which every retry failed
+    differently, because the next chapter number is derived from the dirs on
+    disk while the journal declared the old one. Recovering that needed a human
+    who knew the internals.
+    """
+    root = novel_root(ws)
+    backup = Path(tempfile.mkdtemp(prefix="novel_txn_"))
+    saved = {name: (root / name).is_dir() for name in _MUTABLE_SUBTREES}
+    for name, existed in saved.items():
+        if existed:
+            shutil.copytree(root / name, backup / name, symlinks=True)
+    chapters = chapters_dir(ws)
+    before = {p.name for p in chapters.iterdir()} if chapters.is_dir() else set()
+    try:
+        yield
+    except BaseException as exc:
+        try:
+            _rollback(root, backup, saved, before)
+        except Exception as rb:
+            # Never hide the original cause, and never claim a clean tree we
+            # did not restore — this one needs a human.
+            raise RuntimeError(
+                f"novel state ROLLBACK FAILED ({rb}) after {exc!r} — the tree "
+                f"under {root} may be partially written; `git status` / "
+                "`git checkout` it before retrying") from exc
+        raise
+    finally:
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+def _rollback(root: Path, backup: Path, saved: dict[str, bool],
+              before: set[str]) -> None:
+    for name, existed in saved.items():
+        live = root / name
+        if live.is_dir():
+            shutil.rmtree(live)
+        if existed:
+            shutil.copytree(backup / name, live, symlinks=True)
+    chapters = root / "chapters"
+    if chapters.is_dir():
+        for p in chapters.iterdir():
+            if p.name in before:
+                continue
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+
+
 # ── Chapter numbering ────────────────────────────────────────────────────────
 
 _CH_RE = re.compile(r"^ch(\d{4})$")
@@ -274,15 +341,71 @@ def _appeared_in(ws, name: str) -> list:
         return []
 
 
+def _no_card_error(ws, name: str) -> ValueError:
+    """Teach, don't just refuse. `create` asks "does a card exist yet?", but it
+    READS as "is this person new to the story?" — and an agent that has read the
+    earlier chapters answers the second question truthfully and is refused.
+    Live: chapter 5 wrote create:false for 王超, on stage since chapter 3 but
+    never given a booked event, so he had no card."""
+    seen = sorted(_appeared_in(ws, name))
+    where = (f"（他在第 {', '.join(map(str, seen))} 章出场过，"
+             "但从没记过事件，所以没有档案）" if seen
+             else "（此前从未出现）")
+    return ValueError(
+        f"events: 角色『{name}』还没有档案{where}。"
+        f"给某角色第一次记事件时必须写 create: true —— 它会建档并"
+        f"记下开账状态。`create` 问的是「档案存在吗」，"
+        f"不是「这人是不是新出场的」：出场不建档，记事件才建档。")
+
+
+def validate_events(ws, events: list[dict]) -> None:
+    """Every refusal ``apply_events`` can make, raised BEFORE the first write.
+
+    This is where the entity guards live now. They used to fire mid-loop, after
+    earlier entries had already been dumped to disk: chapter 5 booked 林凌漆's
+    card and then raised on 王超, so the chapter files and the ledger
+    disagreed. Entities created earlier in the same list count as known, so a
+    ``create: true`` entry followed by a second entry for the same name passes.
+    """
+    characters = load_characters(ws)
+    known = set(characters)
+    protagonist = _find_protagonist(characters)
+    factions = set((load_yaml(bible_dir(ws) / "world.yaml", {}) or {})
+                   .get("factions") or {})
+
+    for ev in events or []:
+        etype = ev.get("entity_type")
+        name = str(ev.get("entity_name") or "")
+        if etype not in KNOWN_ENTITY_TYPES:
+            raise ValueError(f"events: unknown entity_type {etype!r} (entry: {ev})")
+        if not name:
+            raise ValueError(f"events: entity_name missing (entry: {ev})")
+
+        if etype in ("character", "protagonist"):
+            if etype == "protagonist" and name not in known and protagonist:
+                name = protagonist
+            if name not in known:
+                if not ev.get("create"):
+                    raise _no_card_error(ws, name)
+                known.add(name)
+        elif etype == "faction" and name not in factions:
+            if not ev.get("create"):
+                raise ValueError(
+                    f"events: faction '{name}' not in world.yaml and create!=true")
+            factions.add(name)
+
+
 def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
     """Post journal entries to the bible balances. Returns human warnings.
 
     Character/protagonist changes shallow-merge into the card and append a
     ``progression`` entry {chapter, changes, reason} — the card stays a time
     series, never just a snapshot. Unknown entities are a hard error unless
-    the entry carries ``create: true`` (new characters must be deliberate).
+    the entry carries ``create: true`` (new characters must be deliberate) —
+    checked for the WHOLE list up front, so a bad entry writes nothing.
     """
     warnings: list[str] = []
+    validate_events(ws, events)
     characters = load_characters(ws)
     world_path = bible_dir(ws) / "world.yaml"
     world = load_yaml(world_path, {}) or {}
@@ -292,10 +415,6 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
         name = str(ev.get("entity_name") or "")
         changes = ev.get("changes") or {}
         reason = str(ev.get("reason") or "")
-        if etype not in KNOWN_ENTITY_TYPES:
-            raise ValueError(f"events: unknown entity_type {etype!r} (entry: {ev})")
-        if not name:
-            raise ValueError(f"events: entity_name missing (entry: {ev})")
 
         if etype in ("character", "protagonist"):
             if etype == "protagonist" and name not in characters:
@@ -304,25 +423,7 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
                     name = resolved
             card = characters.get(name)
             created = card is None
-            if card is None:
-                if not ev.get("create"):
-                    # Teach, don't just refuse. `create` asks "does a card exist
-                    # yet?", but it READS as "is this person new to the story?" —
-                    # and an agent that has read the earlier chapters answers the
-                    # second question truthfully and is refused. Live: chapter 5
-                    # wrote create:false for 王超, on stage since chapter 3 but
-                    # never given a booked event, so he had no card. The chapter
-                    # died and apply_state's partial write left the ledger and the
-                    # chapter files disagreeing.
-                    seen = sorted(_appeared_in(ws, name))
-                    where = (f"（他在第 {', '.join(map(str, seen))} 章出场过，"
-                             "但从没记过事件，所以没有档案）" if seen
-                             else "（此前从未出现）")
-                    raise ValueError(
-                        f"events: 角色『{name}』还没有档案{where}。"
-                        f"给某角色第一次记事件时必须写 create: true —— 它会建档并"
-                        f"记下开账状态。`create` 问的是「档案存在吗」，"
-                        f"不是「这人是不是新出场的」：出场不建档，记事件才建档。")
+            if card is None:                # validated above: carries create:true
                 card = {"name": name, "status": "alive", "progression": []}
                 characters[name] = card
             # Guardrails the reviewer relies on:
@@ -352,10 +453,7 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
 
         elif etype == "faction":
             factions = world.setdefault("factions", {})
-            if name not in factions and not ev.get("create"):
-                raise ValueError(
-                    f"events: faction '{name}' not in world.yaml and create!=true")
-            entry = factions.setdefault(name, {})
+            entry = factions.setdefault(name, {})   # validated: known or create
             for k, v in changes.items():
                 entry[k] = v
             entry.setdefault("progression", []).append(

@@ -3200,3 +3200,56 @@ verified live, the field now reads
 
 That is the same defect as everything else in this document, committed by me,
 in the fix for it, two turns after writing the section that warns about it.
+
+## `apply_state` made all-or-nothing (2026-07-29)
+
+The partial write that cost chapter 5 of `novel-chapter-98264c92`. The sequence
+was: write `ch0005/` → post the events → rebuild the derived state. Event 1
+(林凌漆) posted; event 2 (王超, no bible card) was refused. What was left on
+disk was a chapter directory, a modified character card, and an `index.yaml`
+still saying `chapters_written: 4`.
+
+**The second failure is the expensive one.** `next_chapter_number()` derives
+from the dirs on disk, so it now answered 6 while `chapter_events.json` still
+declared 5 — every retry failed with a *different* error than the first, and
+skillflow reported only `Tool step 'apply_state' crashed 3 times — likely a bug
+in the tool`. The three distinct causes were in container stdout and nowhere
+else. Recovery was `git checkout` the card, `rm -rf` the unbooked chapter, fix
+the flag, retry — a human who knew the internals.
+
+Two changes, both in the host:
+
+* **`novel_state.validate_events`** — every refusal `apply_events` can make
+  (unknown `entity_type`, missing `entity_name`, a character with no card and no
+  `create: true`, an unknown faction) now runs over the WHOLE list before the
+  first write. Entities created earlier in the same list count as known.
+  `apply_events` calls it first, so the guarantee holds for direct callers too.
+  The refusal message from `9cdfdfe` is unchanged — it moved into
+  `_no_card_error`, one definition, still teaching.
+* **`novel_state.state_transaction`** — the write phase is wrapped: `bible/` and
+  `state/` are snapshotted, new entries under `chapters/` are remembered, and any
+  exception restores the snapshot and removes what the failed run created.
+  `chapters/` is append-only so it is never copied, only pruned. If the rollback
+  itself fails, the error names both causes and says the tree needs a human —
+  the one thing it must not do is claim a clean tree it did not restore.
+
+The guarantee is checkable rather than asserted: the novel tree is a git repo,
+so `tests/unit/test_apply_state_atomic.py` runs the live failure and asserts
+`git status --porcelain -- novel` is **empty** — then that the corrected retry
+just works, which is the recovery that used to need a human.
+
+**Validation alone would not have been enough.** The refusal fired between two
+writes in *different* functions (`ch_dir.mkdir` in the tool, the raise in
+`apply_events`); pre-validating makes the common failure cost nothing, and the
+transaction is what makes any *other* failure — a bad rebuild, a disk error, a
+bug — cost nothing too. Both, because they cover different halves.
+
+**The related gap this exposed, not yet closed:** `apply_state` is a terminal
+tool step with no failure edge back to `finalize`, so a refusal still ends the
+run after 3 identical crashes — cleanly now, but the finalizer never sees the
+error it could act on. That is the feedback gap again, one step further out.
+Mitigated where the fact actually lives: `state_probe` now lists the characters
+who are in `by_character` but have no card (live: 李默, 周小雨 — on stage since
+chapter 3), with the `create: true` remedy, in the bundle the finalizer reads.
+Nobody was computing that difference, and it is only discoverable at the
+chapter's last step.

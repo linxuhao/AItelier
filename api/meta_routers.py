@@ -564,15 +564,27 @@ def _read_rejection_rounds(project_id: str, step_id: str,
     starts = [m.start() for m in _FEEDBACK_ROUND_RE.finditer(text)]
     if not starts:
         body = text.strip()
-        return [{"user_feedback": body}] if body else None
+        return [_round("", body)] if body else None
     rounds = []
     for i, s in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else len(text)
         block = text[s:end]
         heading, _, body = block.partition("\n")
-        rounds.append({"round": heading.lstrip("# ").strip(),
-                       "user_feedback": body.strip()})
+        rounds.append(_round(heading.lstrip("# ").strip(), body.strip()))
     return rounds or None
+
+
+def _round(heading: str, body: str) -> dict:
+    """One rejection round, carrying the text under BOTH key names.
+
+    There are three consumers and they do not agree: the web modal and the TUI
+    chat pane read `user_feedback or reason`, while `cli/app.py` reads only
+    `reason` and would print "Last feedback: N/A". Emitting one name would have
+    fixed two surfaces out of three — the same know-one-key defect this whole
+    change set is about, so the payload carries both rather than making each
+    reader guess.
+    """
+    return {"round": heading, "user_feedback": body, "reason": body}
 
 
 def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:

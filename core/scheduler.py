@@ -700,7 +700,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         pass  # never let the guard itself break a tick
 
     # Phase A: Resolve next step
-    next_node = sf.advance_run(run_id)
+    next_node = _advance_recording_crashes(sf, run_id, project_id)
 
     # Drain consecutive inline tool steps. advance_run() executes ONE inline tool
     # per call (framework mode) and returns the FOLLOWING node; when two tool
@@ -713,7 +713,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         _resolver = sf._get_resolver_for_run(run_id)
         _drain = 0
         while next_node is not None and _drain < 20 and _resolver.is_tool(next_node):
-            next_node = sf.advance_run(run_id)
+            next_node = _advance_recording_crashes(sf, run_id, project_id)
             _drain += 1
     except Exception:
         pass
@@ -814,6 +814,43 @@ def _emit_checkpoint_sse(project_id: str, run_id: str, step_id: str, label: str)
 # dashboard shows the reason instead of a shrug.
 _VAGUE_FAILURES = ("", "unknown", "cycle limit exceeded", "none",
                    "max total steps", "max_total_steps")
+
+
+def _advance_recording_crashes(sf, run_id: str, project_id: str = ""):
+    """``sf.advance_run`` — but a tool-step crash lands in the TRACE first.
+
+    An inline tool step that raises produces a `tool_call` trace row and nothing
+    else: no `tool_result`, no error. The exception unwinds through advance_run
+    to APScheduler, which prints it to container stdout, and skillflow eventually
+    fails the run with the generic "Tool step 'X' crashed 3 times — failing
+    (likely a bug in the tool, not a transient error)". So the ONE fact that
+    explains the failure exists only in a log nobody reads, while every surface
+    that could show it — the trace viewer, `_failure_reason`, the dashboard — has
+    nothing to work with.
+
+    Observed on a live novel run whose three retries raised three DIFFERENT
+    errors: an unregistered character, then a chapter-number mismatch caused by
+    the first crash's partial write. The generic message hid both, and the
+    second one is the interesting one — it says the tool is not atomic.
+
+    Record, then re-raise: skillflow's crash counter and every retry semantic
+    stay exactly as they were; only the silence is removed.
+    """
+    try:
+        return sf.advance_run(run_id)
+    except Exception as e:
+        try:
+            run = sf.get_run(run_id) or {}
+            sf.trace(run_id, "tool_result", "tool_step_crashed",
+                     {"error": f"{type(e).__name__}: {e}",
+                      "step_id": run.get("current_node") or ""},
+                     step_id=run.get("current_node") or "",
+                     project_id=project_id or run.get("project_id") or "")
+        except Exception:
+            import logging as _lg
+            _lg.getLogger("aitelier.scheduler").warning(
+                "could not record a tool-step crash into the trace", exc_info=True)
+        raise
 
 
 def _last_trace_error(run_id: str) -> str:

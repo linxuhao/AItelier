@@ -166,3 +166,46 @@ class TestTheReasonIsEnrichedNotTheFrameworkArtifact:
         monkeypatch.setattr("core.scheduler._failure_reason", _boom)
         out = deps.enrich_project_status({"project_id": "p1", "status": "failed"})
         assert out["error_reason"] == "Cycle limit exceeded"
+
+
+class TestRejectionRoundsCarryBothKeyNames:
+    """Three consumers, two spellings: the web modal and the TUI chat pane read
+    `user_feedback or reason`; `cli/app.py` reads only `reason`. Emitting one name
+    fixes two surfaces out of three and prints "Last feedback: N/A" on the
+    third."""
+
+    def _rounds(self, tmp_path, text):
+        import api.meta_routers as mr
+        from unittest.mock import MagicMock, patch
+        log = tmp_path / "_feedback" / "outline.md"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(text, encoding="utf-8")
+        sf = MagicMock()
+        sf._get_resolver.return_value.get_node.return_value = None
+        sf._workspace.get_config_path.return_value = tmp_path
+        with patch.object(mr, "get_skillflow", return_value=sf):
+            return mr._read_rejection_rounds("p1", "outline", "novel_chapter")
+
+    def test_both_keys_are_present(self, tmp_path):
+        rounds = self._rounds(tmp_path, "## 反馈轮 #1 · ts\n\n王超哪来的问题？\n")
+        assert len(rounds) == 1
+        assert rounds[0]["user_feedback"] == "王超哪来的问题？"
+        assert rounds[0]["reason"] == rounds[0]["user_feedback"]
+
+    def test_multiple_rounds_are_split(self, tmp_path):
+        rounds = self._rounds(
+            tmp_path, "## 轮 #1 · a\n\nfirst\n\n## 轮 #2 · b\n\nsecond\n")
+        assert [r["reason"] for r in rounds] == ["first", "second"]
+
+    def test_a_log_without_headings_is_still_one_round(self, tmp_path):
+        rounds = self._rounds(tmp_path, "just some feedback text\n")
+        assert rounds[0]["reason"] == "just some feedback text"
+
+    def test_an_absent_log_is_none_not_an_empty_banner(self, tmp_path):
+        import api.meta_routers as mr
+        from unittest.mock import MagicMock, patch
+        sf = MagicMock()
+        sf._get_resolver.return_value.get_node.return_value = None
+        sf._workspace.get_config_path.return_value = tmp_path
+        with patch.object(mr, "get_skillflow", return_value=sf):
+            assert mr._read_rejection_rounds("p1", "outline", "novel_chapter") is None

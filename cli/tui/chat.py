@@ -452,7 +452,7 @@ class CheckpointModal(ModalScreen[bool]):
             "Suggest changes — you are reviewing as Red Agent:"
         )
         self.query_one("#cp-options-display").display = False
-        self.query_one("#cp-hint").update("[Enter] submit feedback  [Esc] cancel")
+        self.query_one("#cp-hint").update(r"\[Enter] submit feedback  \[Esc] cancel")
         inp = self.query_one("#cp-feedback-input")
         inp.placeholder = "Describe what needs to change in the output..."
         inp.display = True

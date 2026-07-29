@@ -137,6 +137,26 @@ async def test_request_changes_selectable_without_scrolling_to_the_bottom():
 
 
 @pytest.mark.asyncio
+async def test_hints_name_their_keys():
+    """Textual eats [Enter]/[Esc] as markup tags — they must be escaped, or
+    the hint reads 'submit feedback   cancel' and names no key at all."""
+    app = _Harness()
+    async with app.run_test(size=(100, 40)) as pilot:
+        modal, _ = await _open_modal(pilot, app)
+        hint = modal.query_one("#cp-hint")
+
+        def rendered():
+            return hint.visual.plain   # markup already applied
+
+        assert "[Enter]" in rendered() and "[Esc]" in rendered()
+
+        await pilot.press("right")
+        await pilot.press("enter")          # -> feedback mode, hint is rewritten
+        await pilot.pause()
+        assert "[Enter]" in rendered() and "[Esc]" in rendered()
+
+
+@pytest.mark.asyncio
 async def test_tab_and_left_right_cycle_the_selection():
     app = _Harness()
     async with app.run_test(size=(100, 40)) as pilot:

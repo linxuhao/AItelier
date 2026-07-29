@@ -256,6 +256,24 @@ def _find_protagonist(characters: dict[str, dict]) -> str | None:
     return None
 
 
+def _appeared_in(ws, name: str) -> list:
+    """Chapters this character has been ON STAGE in, per the reverse index.
+
+    Only used to make the "no card yet" refusal legible: appearing is recorded
+    in `by_character` (built from each chapter's appearances), while a CARD is
+    only created when the character first gets a booked event. Those are two
+    different facts and the error is exactly the place people confuse them.
+    Best-effort — a missing or unreadable index must never turn a clear
+    validation error into a crash.
+    """
+    try:
+        index = load_yaml(state_dir(ws) / "index.yaml", {}) or {}
+        return [c for c in (index.get("by_character") or {}).get(name, [])
+                if isinstance(c, int)]
+    except Exception:
+        return []
+
+
 def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
     """Post journal entries to the bible balances. Returns human warnings.
 
@@ -288,9 +306,23 @@ def apply_events(ws, events: list[dict], chapter: int) -> list[str]:
             created = card is None
             if card is None:
                 if not ev.get("create"):
+                    # Teach, don't just refuse. `create` asks "does a card exist
+                    # yet?", but it READS as "is this person new to the story?" —
+                    # and an agent that has read the earlier chapters answers the
+                    # second question truthfully and is refused. Live: chapter 5
+                    # wrote create:false for 王超, on stage since chapter 3 but
+                    # never given a booked event, so he had no card. The chapter
+                    # died and apply_state's partial write left the ledger and the
+                    # chapter files disagreeing.
+                    seen = sorted(_appeared_in(ws, name))
+                    where = (f"（他在第 {', '.join(map(str, seen))} 章出场过，"
+                             "但从没记过事件，所以没有档案）" if seen
+                             else "（此前从未出现）")
                     raise ValueError(
-                        f"events: character '{name}' not in bible and create!=true — "
-                        "new characters must be explicitly created")
+                        f"events: 角色『{name}』还没有档案{where}。"
+                        f"给某角色第一次记事件时必须写 create: true —— 它会建档并"
+                        f"记下开账状态。`create` 问的是「档案存在吗」，"
+                        f"不是「这人是不是新出场的」：出场不建档，记事件才建档。")
                 card = {"name": name, "status": "alive", "progression": []}
                 characters[name] = card
             # Guardrails the reviewer relies on:

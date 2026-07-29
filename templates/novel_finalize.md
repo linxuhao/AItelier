@@ -15,9 +15,9 @@
   "events": [
     {"entity_type": "protagonist", "entity_name": "主角名",
      "changes": {"power_level": 500, "tier": 2}, "reason": "筑基成功"},
-    {"entity_type": "character", "entity_name": "角色名", "create": false,
+    {"entity_type": "character", "entity_name": "已有档案的角色名", "create": false,
      "changes": {"status": "dead"}, "reason": "战死"},
-    {"entity_type": "character", "entity_name": "新角色名", "create": true,
+    {"entity_type": "character", "entity_name": "首次记事件的角色名", "create": true,
      "changes": {"role": "villain", "power_level": 800, "tier": 3,
                  "personality": ["阴鸷"], "aliases": ["血手人屠"]},
      "reason": "本章登场（章纲已提案）"},
@@ -41,7 +41,13 @@
 ## 提取纪律
 1. **只记正文实际发生的**：changes 的每个值都要能在正文找到依据；没变化的实体不写。
 2. **changes 写终值不写增量**（`power_level: 500` 是新值，不是 +490）；数值与正文文字一致。
-3. **新角色必须 `create: true`** 且只有章纲提案过的才允许；顺手给 aliases（正文出现过的称呼）。
+3. **`create` 问的是「档案存在吗」，不是「这人是不是新出场的」**。第一次给某角色
+   记事件（events 里出现 entity_name）就必须 `create: true`——即使他前面几章
+   已经露过面。只在 appearances 里出现过的角色**没有档案**：出场不建档，记事件才建档。
+   写错方向会硬失败：第 5 章给王超（第 3 章就登场、但从没记过事件）写了
+   `create: false`，apply_state 直接拒绝，整章卡死。
+   已经有档案的角色写 `create: true` 也是错的（会被当成重复建档）。
+   新角色仍只允许章纲提案过的；顺手给 aliases（正文出现过的称呼）。
 4. **appearances 列出全部具名出场角色**（防配角蒸发的出场台账，路人龙套不算）。
 4b. **locations 列出本章实际发生场景的地点**（具名的城市/空间/副本/建筑；一笔带过的提及不算）。这是反向索引的锚点——将来"回到蜂巢"的章节靠它查到这里。名字与正文/世界设定一致。
 5. **thread/arc 名字必须与登记表逐字一致**（记账工具按名字对账，错名报 warning）。

@@ -261,6 +261,14 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': 'No files found.',
     'wsbrowser.close': 'Close',
     'wsbrowser.binary': 'Binary file (preview not available)',
+
+    // Errors
+    'error.notAuthenticated': 'Not signed in — sign in with an authorized account to make changes.',
+    'error.notAWriter': 'Your account has no write permission — this session is read-only.',
+    'error.badAdminToken': 'The admin token is missing or invalid.',
+    'error.forbidden': 'The server refused this request.',
+    'error.network': 'Connection error — could not reach the server.',
+    'error.requestFailed': 'The request failed.',
   },
 
   // ── Simplified Chinese ──
@@ -477,6 +485,12 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': '未找到文件。',
     'wsbrowser.close': '关闭',
     'wsbrowser.binary': '二进制文件（无法预览）',
+    'error.notAuthenticated': '未登录 — 请使用已授权的账号登录后再进行修改。',
+    'error.notAWriter': '您的账号没有写入权限 — 当前会话为只读。',
+    'error.badAdminToken': '管理员令牌缺失或无效。',
+    'error.forbidden': '服务器拒绝了此请求。',
+    'error.network': '连接错误 — 无法连接到服务器。',
+    'error.requestFailed': '请求失败。',
   },
 
   // ── Traditional Chinese ──
@@ -692,6 +706,12 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': '未找到檔案。',
     'wsbrowser.close': '關閉',
     'wsbrowser.binary': '二進位檔案（無法預覽）',
+    'error.notAuthenticated': '未登入 — 請使用已授權的帳號登入後再進行變更。',
+    'error.notAWriter': '您的帳號沒有寫入權限 — 目前工作階段為唯讀。',
+    'error.badAdminToken': '管理員權杖遺失或無效。',
+    'error.forbidden': '伺服器拒絕了此請求。',
+    'error.network': '連線錯誤 — 無法連線至伺服器。',
+    'error.requestFailed': '請求失敗。',
   },
 
   // ── Japanese ──
@@ -907,6 +927,12 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': 'ファイルが見つかりません。',
     'wsbrowser.close': '閉じる',
     'wsbrowser.binary': 'バイナリファイル（プレビュー不可）',
+    'error.notAuthenticated': 'サインインしていません — 変更するには権限のあるアカウントでサインインしてください。',
+    'error.notAWriter': 'このアカウントには書き込み権限がありません — このセッションは読み取り専用です。',
+    'error.badAdminToken': '管理者トークンが未設定または無効です。',
+    'error.forbidden': 'サーバーがこのリクエストを拒否しました。',
+    'error.network': '接続エラー — サーバーに接続できませんでした。',
+    'error.requestFailed': 'リクエストに失敗しました。',
   },
 
   // ── Korean ──
@@ -1122,6 +1148,12 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': '파일을 찾을 수 없습니다.',
     'wsbrowser.close': '닫기',
     'wsbrowser.binary': '바이너리 파일(미리보기 불가)',
+    'error.notAuthenticated': '로그인되어 있지 않습니다 — 변경하려면 권한이 있는 계정으로 로그인하세요.',
+    'error.notAWriter': '이 계정에는 쓰기 권한이 없습니다 — 이 세션은 읽기 전용입니다.',
+    'error.badAdminToken': '관리자 토큰이 없거나 유효하지 않습니다.',
+    'error.forbidden': '서버가 이 요청을 거부했습니다.',
+    'error.network': '연결 오류 — 서버에 연결할 수 없습니다.',
+    'error.requestFailed': '요청에 실패했습니다.',
   },
 
   // ── French ──
@@ -1337,6 +1369,12 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': 'Aucun fichier trouvé.',
     'wsbrowser.close': 'Fermer',
     'wsbrowser.binary': 'Fichier binaire (aperçu non disponible)',
+    'error.notAuthenticated': 'Non connecté — connectez-vous avec un compte autorisé pour effectuer des modifications.',
+    'error.notAWriter': 'Votre compte n\'a pas la permission d\'écriture — cette session est en lecture seule.',
+    'error.badAdminToken': 'Le jeton d\'administration est manquant ou invalide.',
+    'error.forbidden': 'Le serveur a refusé cette requête.',
+    'error.network': 'Erreur de connexion — impossible de joindre le serveur.',
+    'error.requestFailed': 'La requête a échoué.',
   },
 
   // ── German ──
@@ -1552,6 +1590,12 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': 'Keine Dateien gefunden.',
     'wsbrowser.close': 'Schließen',
     'wsbrowser.binary': 'Binärdatei (Vorschau nicht verfügbar)',
+    'error.notAuthenticated': 'Nicht angemeldet — melden Sie sich mit einem berechtigten Konto an, um Änderungen vorzunehmen.',
+    'error.notAWriter': 'Ihr Konto hat keine Schreibberechtigung — diese Sitzung ist schreibgeschützt.',
+    'error.badAdminToken': 'Das Admin-Token fehlt oder ist ungültig.',
+    'error.forbidden': 'Der Server hat diese Anfrage abgelehnt.',
+    'error.network': 'Verbindungsfehler — der Server ist nicht erreichbar.',
+    'error.requestFailed': 'Die Anfrage ist fehlgeschlagen.',
   },
 
   // ── Spanish ──
@@ -1766,6 +1810,12 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.empty': 'No se encontraron archivos.',
     'wsbrowser.close': 'Cerrar',
     'wsbrowser.binary': 'Archivo binario (vista previa no disponible)',
+    'error.notAuthenticated': 'No has iniciado sesión — inicia sesión con una cuenta autorizada para hacer cambios.',
+    'error.notAWriter': 'Tu cuenta no tiene permiso de escritura — esta sesión es de solo lectura.',
+    'error.badAdminToken': 'Falta el token de administrador o no es válido.',
+    'error.forbidden': 'El servidor rechazó esta solicitud.',
+    'error.network': 'Error de conexión — no se pudo contactar con el servidor.',
+    'error.requestFailed': 'La solicitud falló.',
   },
 };
 

@@ -28,12 +28,65 @@ const _SAFE_METHODS: Record<string, boolean> = {
 
 export class ApiError extends Error {
   public status: number;
+  /** Stable machine-readable reason from the server body (api/authz.py), or
+   *  null when the response carried none. `status === 0` means the request
+   *  never got an answer (network failure / timeout) — that, and only that,
+   *  is a connection problem. */
+  public code: string | null;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code: string | null = null) {
     super(message);
     this.status = status;
+    this.code = code;
     this.name = 'ApiError';
   }
+}
+
+
+// ── Error → i18n key ───────────────────────────────────────────────
+
+/** Write-denial codes emitted by api/authz.py → translation keys. */
+const _DENIAL_KEYS: Record<string, string> = {
+  write_denied_not_authenticated: 'error.notAuthenticated',
+  write_denied_not_a_writer: 'error.notAWriter',
+  write_denied_bad_admin_token: 'error.badAdminToken',
+};
+
+/**
+ * Translation key describing an error — the single place that decides whether
+ * something was a server refusal or a genuine connection failure. Callers do
+ * `t(errorMessageKey(err))` instead of inventing their own wording.
+ */
+export function errorMessageKey(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.code && _DENIAL_KEYS[err.code]) return _DENIAL_KEYS[err.code];
+    if (err.status === 403) return 'error.forbidden';
+    if (err.status === 0) return 'error.network';
+    return 'error.requestFailed';
+  }
+  // A rejected fetch() never reached the server → genuine connection failure.
+  if (err instanceof TypeError) return 'error.network';
+  return 'error.requestFailed';
+}
+
+/**
+ * Build an ApiError from a non-OK Response, preserving the server's denial
+ * code. Exported because streaming callers (the chat SSE POST) can't go
+ * through _request but must classify failures the same way.
+ */
+export async function errorFromResponse(response: Response): Promise<ApiError> {
+  let data: Record<string, unknown> = {};
+  try {
+    data = (await response.json()) as Record<string, unknown>;
+  } catch {
+    // Non-JSON error body — fall back to the status line.
+  }
+  const message =
+    (data?.detail as string) ||
+    (data?.message as string) ||
+    response.statusText ||
+    'Request failed';
+  return new ApiError(response.status, String(message), (data?.code as string) || null);
 }
 
 
@@ -56,9 +109,12 @@ async function _request<T = unknown>(
   // Read-only guard
   const $auth = get(authStore);
   if (!$auth.canWrite && !_SAFE_METHODS[method]) {
+    // Mirror the server's codes so the UI wording is the same whether the
+    // refusal came from here or from api/main.py:write_gate.
     throw new ApiError(
       403,
       'Read-only access — sign in as an authorized user to make changes.',
+      $auth.email ? 'write_denied_not_a_writer' : 'write_denied_not_authenticated',
     );
   }
 
@@ -128,20 +184,10 @@ function _handleResponse<T>(response: Response): Promise<T> {
     return response.json() as Promise<T>;
   }
 
-  // Non-OK → parse error detail from body
-  return response.json().then(
-    (errData: Record<string, unknown>) => {
-      const message =
-        (errData?.detail as string) ||
-        (errData?.message as string) ||
-        response.statusText ||
-        'Request failed';
-      throw new ApiError(response.status, String(message));
-    },
-    () => {
-      throw new ApiError(response.status, response.statusText || 'Request failed');
-    },
-  );
+  // Non-OK → parse error detail (and any denial code) from the body
+  return errorFromResponse(response).then((err) => {
+    throw err;
+  });
 }
 
 

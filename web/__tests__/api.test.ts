@@ -15,6 +15,8 @@ import {
   createProject,
   getProject,
   ApiError,
+  errorFromResponse,
+  errorMessageKey,
 } from '../src/lib/api';
 
 // ── Mock global fetch ───────────────────────────────────────────────
@@ -181,5 +183,104 @@ describe('ApiError', () => {
     expect(err.status).toBe(404);
     expect(err.message).toBe('Not found');
     expect(err.name).toBe('ApiError');
+    expect(err.code).toBeNull();
+  });
+});
+
+// ── 403 vs. connection failure ──────────────────────────────────────
+//
+// A refusal the server answered with and a request that never reached it are
+// different failures. Conflating them is what made a read-only user's denied
+// write read as "connection error".
+
+function mockDenial(code: string, detail = 'denied') {
+  return Promise.resolve({
+    ok: false,
+    status: 403,
+    statusText: 'Forbidden',
+    json: () => Promise.resolve({ detail, code }),
+  } as Response);
+}
+
+describe('write-denial codes', () => {
+  it('carries the server denial code onto the ApiError', async () => {
+    mockFetch.mockResolvedValue(
+      mockDenial('write_denied_not_authenticated', 'Not signed in.'),
+    );
+
+    await expect(createProject({ name: 'x' })).rejects.toMatchObject({
+      status: 403,
+      code: 'write_denied_not_authenticated',
+      message: 'Not signed in.',
+    });
+  });
+
+  it('does NOT mark the connection down on a 403', async () => {
+    connectionStore.set({ connectionOk: true, reconnectAttempt: 0 });
+    mockFetch.mockResolvedValue(mockDenial('write_denied_not_a_writer'));
+
+    await expect(createProject({ name: 'x' })).rejects.toThrow(ApiError);
+    expect(get(connectionStore).connectionOk).toBe(true);
+  });
+
+  it('tags the client-side read-only refusal with the same codes', async () => {
+    setAuth({ canWrite: false, email: 'reader@example.com' });
+    await expect(createProject({ name: 'x' })).rejects.toMatchObject({
+      status: 403,
+      code: 'write_denied_not_a_writer',
+    });
+
+    setAuth({ canWrite: false, email: '' });
+    await expect(createProject({ name: 'x' })).rejects.toMatchObject({
+      status: 403,
+      code: 'write_denied_not_authenticated',
+    });
+  });
+});
+
+describe('errorFromResponse', () => {
+  it('reads detail + code from the body', async () => {
+    const err = await errorFromResponse(
+      (await mockDenial('write_denied_bad_admin_token', 'Bad token.')) as Response,
+    );
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe('write_denied_bad_admin_token');
+    expect(err.message).toBe('Bad token.');
+  });
+
+  it('falls back to the status line on a non-JSON body', async () => {
+    const err = await errorFromResponse({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      json: () => Promise.reject(new SyntaxError('not json')),
+    } as unknown as Response);
+    expect(err.status).toBe(502);
+    expect(err.code).toBeNull();
+    expect(err.message).toBe('Bad Gateway');
+  });
+});
+
+describe('errorMessageKey', () => {
+  it('maps each denial code to its own key', () => {
+    expect(errorMessageKey(new ApiError(403, '', 'write_denied_not_authenticated')))
+      .toBe('error.notAuthenticated');
+    expect(errorMessageKey(new ApiError(403, '', 'write_denied_not_a_writer')))
+      .toBe('error.notAWriter');
+    expect(errorMessageKey(new ApiError(403, '', 'write_denied_bad_admin_token')))
+      .toBe('error.badAdminToken');
+  });
+
+  it('keeps a code-less 403 a refusal, not a connection error', () => {
+    expect(errorMessageKey(new ApiError(403, 'Forbidden'))).toBe('error.forbidden');
+    expect(errorMessageKey(new ApiError(403, 'Forbidden', 'something_new')))
+      .toBe('error.forbidden');
+  });
+
+  it('reports only unanswered requests as connection errors', () => {
+    expect(errorMessageKey(new ApiError(0, 'Network error'))).toBe('error.network');
+    expect(errorMessageKey(new TypeError('Failed to fetch'))).toBe('error.network');
+    expect(errorMessageKey(new ApiError(500, 'boom'))).toBe('error.requestFailed');
   });
 });

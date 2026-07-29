@@ -8,6 +8,9 @@
     createSession,
     getChatHistory,
     listSessions,
+    ApiError,
+    errorFromResponse,
+    errorMessageKey,
   } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
   import { formatTime, escapeHtml, truncate } from '../lib/format';
@@ -738,7 +741,9 @@
         });
 
         if (!response.ok) {
-          throw new Error('HTTP ' + response.status + ': ' + response.statusText);
+          // The server answered — a refusal, not a connection problem. Carry
+          // its denial code so the message below can say what actually failed.
+          throw await errorFromResponse(response);
         }
 
         const reader = response.body!.getReader();
@@ -783,6 +788,9 @@
         if (err instanceof Error && err.name === 'AbortError') {
           break; // user-initiated abort — don't retry
         }
+        if (err instanceof ApiError && err.status !== 0) {
+          break; // the server refused (e.g. 403) — retrying changes nothing
+        }
         // Retry once after a short delay for transient network errors
         if (attempt === 0 && connected) {
           messages = [...messages, { role: 'system', content: 'Stream interrupted — retrying…' }];
@@ -794,7 +802,7 @@
     }
 
     if (lastError && !((lastError instanceof Error) && (lastError as Error).name === 'AbortError')) {
-      messages = [...messages, { role: 'error', content: 'Connection error: ' + ((lastError as Error).message || 'Failed to reach agent') }];
+      messages = [...messages, { role: 'error', content: t(errorMessageKey(lastError)) }];
     }
 
     sending = false;

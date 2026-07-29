@@ -18,7 +18,13 @@ const mockApi = vi.hoisted(() => ({
   listSessions: vi.fn(),
 }));
 
-vi.mock('../../lib/api', () => mockApi);
+// Partial mock: Chat.svelte also imports the real ApiError/errorFromResponse/
+// errorMessageKey to classify a failed stream, so keep the module's other
+// exports intact.
+vi.mock('../../lib/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../lib/api')>()),
+  ...mockApi,
+}));
 
 const mockPush = vi.fn();
 vi.mock('svelte-spa-router', () => ({

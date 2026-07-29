@@ -261,12 +261,10 @@ async def write_gate(request: Request, call_next):
         return await call_next(request)
     if request.method in _SAFE_METHODS or request.url.path == "/health":
         return await call_next(request)
-    if authz.request_can_write(request):
+    code = authz.write_denial_reason(request)
+    if not code:
         return await call_next(request)
-    return JSONResponse(
-        {"detail": "Write access denied — read-only. Sign in as an authorized user."},
-        status_code=403,
-    )
+    return JSONResponse(authz.denial_body(code), status_code=403)
 
 
 @app.get("/health")

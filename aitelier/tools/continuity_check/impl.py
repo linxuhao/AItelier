@@ -96,10 +96,20 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
         count = ns.char_count(prose)
         lo = int(pacing.get("min_chars_per_chapter", DEFAULT_MIN_CHARS))
         hi = int(pacing.get("max_chars_per_chapter", DEFAULT_MAX_CHARS))
+        # 只卡下限，上限降为 advisory。上限本来就卡错了步骤：篇幅是 draft 定的，
+        # humanize 只许改语言——而下面的「润色字数漂移 ±10%」明令它不得增删情节。
+        # 两条规则合起来常常无解：第 5 章初稿 5743 字，上限 4500 要求砍到 -22%，
+        # 漂移规则只允许 ±10%。humanize 在两个互相矛盾的要求之间来回改了三轮
+        # （5739 → 4656 → 5662），循环耗尽，整章报废。真实 trace 见
+        # design/pipeline_generation_ux_test_2026-07-26.md。
+        # 太短是真缺陷（没写完）；太长只是啰嗦，交给 Red/人工判断。
         if count < lo:
             violations.append(f"字数不足: {count} 字（下限 {lo}）")
         elif count > hi:
-            violations.append(f"字数超限: {count} 字（上限 {hi}）")
+            advisories.append(
+                f"字数偏长: {count} 字（参考上限 {hi}）—— 篇幅由 draft/章纲决定，"
+                "humanize 不得为压字数删情节（与下方漂移规则冲突）。"
+                "若确需压缩，应在 outline/draft 阶段收口。")
 
         # ── Known AI-ism density (crude first pass; semantic slop is Red's job) ──
         hits: dict[str, int] = {}

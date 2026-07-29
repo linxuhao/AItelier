@@ -511,3 +511,208 @@ class TestUnknownWriteToolFeedback:
         ]
         assert len(write_calls) >= 1
         assert write_calls[0][0][0]["tool"] == "write_sota"
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Turn accounting: an action naming a tool the step does not have must be
+# ANSWERED, not discarded. Before this, both handlers fell through to the
+# no-op branch and returned SUCCESS with zero files written — a false
+# success, which is how the repo's own end-to-end pipeline test passed on a
+# t_impl that had implemented nothing.
+# ════════════════════════════════════════════════════════════════════════
+
+# What skillflow grants a `mode: write` step without allow_full_write.
+TS_MODE_WRITE = {"read_file": {}, "create": {}, "edit": {}, "finish_step": {}}
+# A step that also has the generic `write` → routes to _run_tool_content_step.
+TS_GENERIC_WRITE = {"read_file": {}, "write": {}, "create": {}, "edit": {}}
+
+
+def _engine_for_unknown_tool(engine, replies):
+    engine.factory.get_max_retries.return_value = 2
+    engine.factory.get_max_tool_turns.return_value = 4
+    engine.factory.is_native.return_value = False
+    engine._exec_tool = MagicMock(side_effect=lambda a: (
+        {"created": a["params"].get("file")}
+        if a["tool"] in ("create", "write", "edit") else {"output": "..."}))
+    prompts = []
+    mg = MagicMock()
+    mg.gateway.litellm_model = "mock-model"
+
+    def _run(p):
+        prompts.append(p)
+        return replies[min(len(prompts) - 1, len(replies) - 1)]
+
+    mg.run.side_effect = _run
+    engine.factory.get_agent.return_value = mg
+    return prompts
+
+
+class TestUnknownToolIsAnsweredNotDiscarded:
+
+    @pytest.mark.parametrize("schemas,step_id", [
+        (TS_MODE_WRITE, "C1"),        # → _run_tool_step
+        (TS_GENERIC_WRITE, "C2"),     # → _run_tool_content_step
+    ])
+    def test_agent_is_told_what_it_may_call_and_recovers(self, engine, schemas, step_id):
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+        ws = MockWorkspace(tmp_path)
+        _setup_workspace(tmp_path, step_id=step_id)
+
+        good = "create" if "create" in schemas else "write"
+        prompts = _engine_for_unknown_tool(engine, [
+            # Turn 1: names a tool this step does not have — the live failure.
+            json.dumps({"thoughts": "writing", "actions": [
+                {"tool": "write_file",
+                 "params": {"path": "tests/t.py", "content": "import pytest\n"}}]}),
+            # Turn 2: corrects itself using what the feedback named.
+            json.dumps({"thoughts": "using the real tool", "actions": [
+                {"tool": good,
+                 "params": {"file": "tests/t.py", "content": "import pytest\n"}}]}),
+        ])
+        events = []
+        engine._emit = lambda t, d: events.append((t, d))
+
+        result = engine.run_step(task_id=1, step_id=step_id, workspace=ws,
+                                 project_id="default", agent_config_name="maker",
+                                 tool_schemas=schemas)
+
+        assert result is True
+        # It cost a TURN, not the step, and not a false success on turn 1.
+        assert len(prompts) == 2
+        unknown = [d for t, d in events if t == "unknown_tool"]
+        assert unknown, f"no unknown_tool event; got {[t for t, _ in events]}"
+        assert "'write_file'" in unknown[0]["error"]
+        assert good in unknown[0]["error"]
+        # The correction reached the agent's next prompt.
+        assert "write_file" in prompts[1]
+        assert "files_written" in [t for t, _ in events]
+
+    def test_a_step_that_only_named_unavailable_tools_does_not_report_success(
+            self, engine):
+        """The old no-op branch returned True with zero files — "No change
+        needed (no writes)" — for an agent that had delivered a complete file."""
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+        ws = MockWorkspace(tmp_path)
+        _setup_workspace(tmp_path, step_id="C1")
+
+        _engine_for_unknown_tool(engine, [
+            json.dumps({"thoughts": "writing", "actions": [
+                {"tool": "write_file",
+                 "params": {"path": "t.py", "content": "x"}}]}),
+        ])
+        engine._emit = lambda t, d: None
+
+        with pytest.raises(MaxRetriesExceeded):
+            engine.run_step(task_id=1, step_id="C1", workspace=ws,
+                            project_id="default", agent_config_name="maker",
+                            tool_schemas=TS_MODE_WRITE)
+        assert ws.written_drafts == {}
+
+    def test_finish_step_alone_is_still_a_clean_no_op(self, engine):
+        """Turn accounting must not turn the legitimate "nothing to change"
+        signal into an error."""
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+        ws = MockWorkspace(tmp_path)
+        _setup_workspace(tmp_path, step_id="C1")
+
+        _engine_for_unknown_tool(engine, [
+            json.dumps({"thoughts": "nothing to do",
+                        "actions": [{"tool": "finish_step", "params": {}}]}),
+        ])
+        events = []
+        engine._emit = lambda t, d: events.append((t, d))
+
+        result = engine.run_step(task_id=1, step_id="C1", workspace=ws,
+                                 project_id="default", agent_config_name="maker",
+                                 tool_schemas=TS_MODE_WRITE)
+        assert result is True
+        assert "unknown_tool" not in [t for t, _ in events]
+
+
+class TestFilesEnvelopeReachesTheHandler:
+    """The defect was never in the normalizer — `_run_tool_step` reads only
+    `actions`. Covering it at normalizer level alone means reinstating the old
+    early-return leaves the whole normalizer suite green."""
+
+    def test_a_files_delivery_actually_writes(self, engine):
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+        ws = MockWorkspace(tmp_path)
+        _setup_workspace(tmp_path, step_id="C1")
+        _engine_for_unknown_tool(engine, [
+            json.dumps({"thoughts": "delivering",
+                        "files": {"tests/t.py": "import pytest\n"}}),
+        ])
+        events = []
+        engine._emit = lambda t, d: events.append((t, d))
+
+        result = engine.run_step(task_id=1, step_id="C1", workspace=ws,
+                                 project_id="default", agent_config_name="maker",
+                                 tool_schemas=TS_MODE_WRITE)
+        assert result is True
+        assert "files_written" in [t for t, _ in events]
+        engine._exec_tool.assert_called()
+        called = [c.args[0]["tool"] for c in engine._exec_tool.call_args_list]
+        assert "create" in called
+
+
+class TestAStepThatOnlyChangedStateStillCounts:
+    """A deletion is real output. Counting only files made a correct delete-only
+    turn look like a no-op: the engine ran the deletion, then failed the step for
+    'no file writes produced'."""
+
+    def test_a_delete_only_turn_completes(self, engine):
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+        ws = MockWorkspace(tmp_path)
+        _setup_workspace(tmp_path, step_id="C1")
+
+        engine.factory.get_max_retries.return_value = 2
+        engine.factory.get_max_tool_turns.return_value = 3
+        engine.factory.is_native.return_value = False
+        engine._exec_tool = MagicMock(side_effect=lambda a: (
+            {"queued_for_deletion": "old.py", "pending_deletions": 1}
+            if a["tool"] == "delete_file" else {"output": "..."}))
+
+        mg = MagicMock()
+        mg.gateway.litellm_model = "mock-model"
+        mg.run.return_value = json.dumps({
+            "thoughts": "this task is a deletion",
+            "actions": [{"tool": "delete_file", "params": {"name": "old.py"}},
+                        {"tool": "finish_step", "params": {}}]})
+        engine.factory.get_agent.return_value = mg
+        engine._emit = lambda t, d: None
+
+        schemas = dict(TS_MODE_WRITE, delete_file={})
+        result = engine.run_step(task_id=1, step_id="C1", workspace=ws,
+                                 project_id="default", agent_config_name="maker",
+                                 tool_schemas=schemas)
+        assert result is True
+        assert engine._exec_tool.call_args_list[0].args[0]["tool"] == "delete_file"
+
+    def test_a_turn_that_did_nothing_at_all_still_fails(self, engine):
+        """The relaxation must not swallow a genuine no-op."""
+        import tempfile
+        tmp_path = Path(tempfile.mkdtemp())
+        ws = MockWorkspace(tmp_path)
+        _setup_workspace(tmp_path, step_id="C1")
+        engine.factory.get_max_retries.return_value = 1
+        engine.factory.get_max_tool_turns.return_value = 2
+        engine.factory.is_native.return_value = False
+        engine._exec_tool = MagicMock(return_value={"content": "file text"})
+
+        mg = MagicMock()
+        mg.gateway.litellm_model = "mock-model"
+        mg.run.return_value = json.dumps({
+            "thoughts": "just looking",
+            "actions": [{"tool": "read_file", "params": {"path": "a.py"}}]})
+        engine.factory.get_agent.return_value = mg
+        engine._emit = lambda t, d: None
+
+        with pytest.raises(MaxRetriesExceeded):
+            engine.run_step(task_id=1, step_id="C1", workspace=ws,
+                            project_id="default", agent_config_name="maker",
+                            tool_schemas=TS_MODE_WRITE)

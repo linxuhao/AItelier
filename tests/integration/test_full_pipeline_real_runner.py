@@ -150,9 +150,15 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True):
     if specific:
         return json.dumps({"thoughts": "out", "actions": [_action(specific[0], content="# output")]})
 
-    # Generic write (t_impl): emit valid Python so any non-stubbed check is happy.
+    # `mode: write` step (t_impl): the tools skillflow actually grants are
+    # `create`/`edit` — NOT `write`, which needs `allow_full_write`. This mock
+    # used to call `write`, a name t_impl does not have; the engine discarded the
+    # call without a word and the step returned SUCCESS with zero files, so this
+    # end-to-end test passed on a pipeline that had implemented nothing. Turn
+    # accounting turned that into a visible failure. Emit valid Python so any
+    # non-stubbed check is happy.
     return json.dumps({"thoughts": "implement", "actions": [
-        _action("write", file="main.py", content="def add(a, b):\n    return a + b\n")]})
+        _action("create", file="main.py", content="def add(a, b):\n    return a + b\n")]})
 
 
 async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=120,

@@ -161,6 +161,17 @@ RULES: tuple[Rule, ...] = (
          "under `<skill-name>/` instead was rejected as 'SKILL.md not found'. The "
          "maker oscillated between the two until the loop exhausted — on every run. "
          "Take the expected name as an explicit parameter, or from the content.")),
+    Rule("prompt_build_backend_is_real",
+         "A CODE TEMPLATE YOU PASTE INTO A ROLE PROMPT IS EXECUTED VERBATIM ON "
+         "EVERY RUN, FOREVER. `gen_mcp_server_builder`'s scaffold role shipped "
+         "`build-backend = \"setuptools.backends._legacy:_Backend\"` — a symbol that "
+         "does not exist — so `pip install -e .` died with `BackendUnavailable` on "
+         "the first attempt of every run, and a fix lap was spent re-deriving the "
+         "same correction each time. setuptools' backend is "
+         "`setuptools.build_meta` (or `setuptools.build_meta:__legacy__`). More "
+         "generally: a template is not a suggestion the maker will sanity-check, "
+         "so do not paste an API you are not certain of — describe what the file "
+         "must contain and let the maker write it against the error it gets."),
     Rule("step_ids_are_legible", enforced=False, teaches=(
          "Name step ids for what they DO (`interview`, `draft`, `validate`, "
          "`package`) — not `A1`/`B2`/`C1`. Step ids are what every surface shows: "
@@ -362,11 +373,11 @@ _INJECTED_WRITE_TOOLS = {"create", "edit", "write", "finish_step"}
 def _role_tools_unknown(rt, live_tools: set) -> list[str]:
     """Every tool a ROLE is granted must exist.
 
-    skillflow drops an unresolvable name silently (`agent_registry.resolve_tool_schemas`
-    swallows the ImportError), so a role granted `write_file`/`create_file`/`edit_file`
-    registers, runs, and quietly lacks them. At emit time the role table is still a file
-    on disk — skillflow has not seen it — so this is the only place the mistake can be
-    caught before it ships.
+    skillflow DROPS an unresolvable name — the role registers, runs, and quietly lacks
+    the tool. Since 1.5.29 it at least records the miss (`SkillFlow.unresolved_tools()`,
+    surfaced by the engine on a step that produced nothing), but recording it is
+    after the fact: at emit time the role table is still a file on disk, skillflow has
+    not seen it, and this is the only place the mistake can be caught BEFORE it ships.
     """
     out = []
     if not isinstance(rt, dict):
@@ -528,6 +539,27 @@ def _passthrough_target(start, by_id: dict, depth: int = 5):
     return node_id
 
 
+def _edge_polarity(t: dict) -> str | None:
+    """Does this transition assert SUCCESS, assert FAILURE, or catch everything?
+
+    Judged from the match VALUES, never from the flag names or the edge's position.
+    A tool signals success under whatever key it likes — `passed`, `applied`, `ok` —
+    so a name list would go stale on the first tool that picks a new one, and
+    position is not a contract at all: skillflow evaluates matches in order, and
+    writing the failure edge first is the correct idiom for a tool that returns no
+    `passed` on success.
+    """
+    m = t.get("match")
+    if not isinstance(m, dict) or not m:
+        return None                      # unconditional catch-all
+    vals = list(m.values())
+    if all(v is True for v in vals):
+        return "success"
+    if any(v is False for v in vals):
+        return "failure"
+    return None                          # matching on a non-boolean: undecidable
+
+
 def _failure_rejoins_success(steps: list, by_id: dict, fallible: set) -> list[str]:
     """A failure branch that lands back on the success target is still fail-open.
 
@@ -538,6 +570,15 @@ def _failure_rejoins_success(steps: list, by_id: dict, fallible: set) -> list[st
     phase exactly as if it had succeeded, which is the entire defect. Only a human
     caught it. Routing a failure into a gate that rejoins the success path is a
     no-op dressed as a branch.
+
+    Which edge is which is decided by POLARITY. This used to take the first matched
+    edge as the success edge and everything after it as failures. That is right for
+    the ordering the ten generated graphs happen to use and inverts for the other
+    one — write the failure edge first, which is the correct idiom for a tool with
+    no `passed` on success, and the rule silently checks the wrong direction: a real
+    fail-open goes unreported, and two failure edges sharing a target get reported
+    as one "rejoining the SUCCESS target" that is in fact the fix step. Being right
+    on today's inputs for a reason that is not the rule is how a gate rots.
     """
     out = []
     for s in steps:
@@ -548,19 +589,74 @@ def _failure_rejoins_success(steps: list, by_id: dict, fallible: set) -> list[st
             continue
         trans = [t for t in (s.get("transitions") or [])
                  if isinstance(t, dict) and t.get("to")]
-        matched = [t for t in trans if t.get("match")]
-        if not matched or len(trans) < 2:
+        if len(trans) < 2:
             continue                      # covered by _fallible_tools_unrouted
-        success = _passthrough_target(matched[0]["to"], by_id)
-        for t in trans[1:]:
-            if _passthrough_target(t["to"], by_id) == success:
+        succeeds = [t for t in trans if _edge_polarity(t) == "success"]
+        fails = [t for t in trans if _edge_polarity(t) == "failure"]
+        catch_all = [t for t in trans if _edge_polarity(t) is None]
+        # Exactly one side stated explicitly → the catch-all is the other side.
+        if succeeds and not fails:
+            fails = catch_all
+        elif fails and not succeeds:
+            succeeds = catch_all
+        if not succeeds or not fails:
+            continue                      # nothing to compare, or undecidable
+        success_targets = {_passthrough_target(t["to"], by_id) for t in succeeds}
+        for t in fails:
+            landing = _passthrough_target(t["to"], by_id)
+            if landing in success_targets:
                 out.append(
                     f"step '{s.get('id')}': the failure branch → '{t['to']}' rejoins the "
-                    f"SUCCESS target '{success}', so a failed '{tname}' advances exactly "
+                    f"SUCCESS target '{landing}', so a failed '{tname}' advances exactly "
                     f"as if it had succeeded. A gate that forwards to the success step "
                     f"is not handling the failure. Send it somewhere that does: back to "
                     f"the maker with the error, or a terminal that ends the run failed.")
                 break
+    return out
+
+
+# The only build backends that actually exist. `setuptools.backends._legacy:_Backend`
+# — hallucinated, and pasted into a shipped role prompt — is the one that cost a lap
+# on every run. Membership is checked, not the spelling of the module path, because a
+# near-miss is exactly the failure mode.
+_REAL_BUILD_BACKENDS = {
+    "setuptools.build_meta", "setuptools.build_meta:__legacy__",
+    "hatchling.build", "flit_core.buildapi", "poetry.core.masonry.api",
+    "pdm.backend", "maturin", "scikit_build_core.build", "mesonpy",
+}
+_BUILD_BACKEND_RE = re.compile(r"""build-backend\s*=\s*["']([^"']+)["']""")
+
+
+def _prompt_build_backend_is_real(role_table) -> list[str]:
+    """A role prompt's pasted `pyproject.toml` must name a build backend that exists.
+
+    Checked here rather than at runtime because the container has no setuptools and
+    none of the generated project's dependencies, so nothing downstream can resolve
+    an arbitrary symbol — the general "does this API exist" check would be blind. A
+    build backend is different: it is a short, closed set of published constants, so
+    membership is decidable anywhere.
+
+    This is the one defect that recurred with perfect reliability: the emitter wrote
+    the bad constant INTO the role prompt, so the maker was following instructions,
+    and `run_tests` correctly named the failure on every single run while the wrong
+    line sat in the artifact producing it again next time. A fix loop that converges
+    every run and starts from scratch the next one is a fix the generator never made.
+    """
+    out = []
+    for role, cfg in (role_table or {}).items():
+        if not isinstance(cfg, dict):
+            continue
+        text = cfg.get("system_prompt") or cfg.get("template") or ""
+        if not isinstance(text, str):
+            continue
+        for backend in set(_BUILD_BACKEND_RE.findall(text)):
+            if backend not in _REAL_BUILD_BACKENDS:
+                out.append(
+                    f"role '{role}': the pyproject template in its prompt sets "
+                    f"build-backend = '{backend}', which does not exist. Every run "
+                    f"of this pipeline will fail `pip install -e .` with "
+                    f"BackendUnavailable and spend a fix lap rediscovering it. Use "
+                    f"'setuptools.build_meta'.")
     return out
 
 
@@ -855,6 +951,7 @@ def forge_registry_check(graph_path: str = "", role_table: str = "",
     violations.extend(_fallible_tools_unrouted(steps, fallible))
     violations.extend(_failure_rejoins_success(steps, by_id, fallible))
     violations.extend(_duplicate_max_loop_edges(steps))
+    violations.extend(_prompt_build_backend_is_real(rt if isinstance(rt, dict) else {}))
     violations.extend(_unreachable_terminals(steps, ends))
 
     passed = not violations

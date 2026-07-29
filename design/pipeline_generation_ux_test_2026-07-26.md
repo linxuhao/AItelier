@@ -2897,3 +2897,306 @@ true for that single call to happen, and none of them was true this morning:
    turn rather than ending the step on the first error (AA9).
 
 Prompt → gate → execution. The agent was never the problem.
+
+---
+
+# The feedback gap, reviewed as a class (2026-07-29)
+
+Twelve instances over six drives were fixed one at a time. This pass asks what
+*generates* them, on the premise that a thirteenth was already in the tree.
+
+## The census was aimed at the wrong syntax
+
+The 2026-07-08 audit (`silent-swallow-audit`) AST-scanned for
+`except Exception|BaseException|bare:` whose body discards the error, classified
+172 sites, and fixed ~14 on "wiring/registration/execution" paths. It is recorded
+as having missed `resolve_tool_schemas` despite that being a registration path.
+
+It did not miss it. **It could not have seen it.** The original source was
+
+```python
+except ImportError:
+    pass  # tool not found — graph validation will catch
+```
+
+a NARROW handler, outside the census's own stated filter. And that is the smaller
+half of the problem: **ten of the twelve defects contain no exception handler at
+all.** Their syntactic forms:
+
+| form | instance |
+|---|---|
+| narrow `except X: pass` with a justifying comment | `resolve_tool_schemas`, capability grant |
+| `check=False`, result discarded | `_install_project_deps` |
+| `.get(key, <uninformative default>)` | `"Tool failed"` banner |
+| if/elif chain with no `else` | payload normalizer |
+| name-prefix classification instead of asking the registry | `create`/`edit`, `write_*`, `_is_mutation_tool` |
+| a predicate that is simply wrong | `file_exists` and `is_file()` |
+| empty filter ⇒ skip the whole section | `prompt_assembler` |
+| `break` before the reason is rendered | the turn loop, twice |
+| reading the field off the wrong instance | `_validation_error` |
+
+A second census of `except: pass` would have found at most two of twelve. Counting
+it is not the exercise.
+
+**Reproduced today** (AST, excluding `.venv` and worktree copies): AItelier 125
+broad-discarding handlers + 44 narrow; skillflow 39 + 14 in `src/`. The "629"
+figure counts the same source five times — `.claude/worktrees/` holds four
+additional checkouts (202 `.py` files in the main tree, ~1030 across all five).
+
+## The mechanism: an unverified hand-off
+
+What every instance shares is not a syntax. It is a **belief about a downstream
+owner that nobody checked.**
+
+| discarded fact | the belief | the reality |
+|---|---|---|
+| unresolvable tool name | "graph validation will catch" | `graph.validate()` sees only YAML; a role's `tools:` is not in it |
+| same, on the capability path | same comment, copy-pasted | the linter cannot see capabilities at all |
+| `pip install` stderr | pytest's error will explain | `ModuleNotFoundError`, cause removed |
+| tool failure detail | every tool sets `error` | `run_tests` reports through `passed` |
+| an invented tool name | "falls through to the unknown-write branch" | that branch existed only on the constrained-slot path |
+| `SkillFlow.unresolved_tools()` | "a host can surface this" | no host did |
+| `files` envelope | the handler reads it | `_run_tool_step` reads only `actions` |
+
+The last three were live in the tree at the start of this pass — two of them
+*inside the fixes for earlier instances*. The class is generative, not a finished
+list, which is why site-hunting cannot end it.
+
+## What was built
+
+**1. Turn accounting** (`PipelineEngine._classify_actions`). One partition —
+writes + reads + messages + controls + unclaimed == actions — used by both JSON
+handlers. `unclaimed` is answered by naming the tools the step really has, at the
+cost of a turn.
+
+Two things it made visible immediately:
+
+* An action naming a tool the step lacks used to reach `if not tool_calls and not
+  written_files: return True` — **the step reported SUCCESS with zero files**,
+  preview `"No change needed (no writes)"`. Reproduced before the fix: one turn,
+  no second turn, `run_step` True, nothing written.
+* `tests/integration/test_full_pipeline_real_runner.py` — the repo's own offline
+  end-to-end proof — was passing on exactly that. Its mock called `write`;
+  `t_impl` is `mode: write` without `allow_full_write`, so skillflow grants
+  `create, delete_file, edit, finish_step, list, list_tree, read,
+  read_test_written, search, test_write` and **no `write`**. The call was
+  discarded, the step "succeeded", the pipeline "completed". Verified by printing
+  the live schemas, not inferred.
+
+The read bucket was a hardcoded four-name list, so `read`/`search`/`list` —
+skillflow's unified read surface, injected into every step — were dropped too.
+Reads now route by the step's own grant.
+
+**2. A detector for the class** (`_note_feedback`). The runtime signature is the
+same whichever syntax caused it: the step is handed the identical failure text
+again. Three unchanged deliveries raise `feedback_repeated`, and the count rides
+on the step's final error, where an operator reads it without opening a trace.
+Detection only; the prompt is untouched. It would have flagged ~10 of the 12
+within one drive. It does not see AA1 (the run ends without a retry).
+
+**3. The recorded fact reaches the step that needs it** (`_unresolved_note`).
+`SkillFlow.unresolved_tools()` is read on the failure path of a step that
+produced nothing — which is the only symptom a dropped tool grant has.
+
+**4. `files` mirrored into actions.** Found by reading the previous session's
+live trace: after `create` refused ("already exists — use 'edit'"), the step
+delivered via `files` and was answered *"No actions found in your response"*.
+AA8 fixed this for `{path, content}` and left the shape the prompt documents
+unhandled.
+
+## Open items
+
+* **`enrich_project_status`** — the run's `error_reason` sat unread in the row
+  skillflow had just returned. Attached. Then verified against a live response:
+  still absent, because `response_model=ProjectWithStats` filtered it out. **The
+  fix for produce-then-discard was itself produce-then-discard**, one layer
+  further along, and only reading the live artifact caught it (trap 1 earns its
+  keep).
+* **`_failure_rejoins_success`** — success/failure is now decided by match
+  POLARITY, not edge position. Measured over all 22 configs on this host: no
+  behaviour change. On synthetic inputs the old rule missed a real fail-open when
+  the failure edge was written first and **falsely accused** a correct graph with
+  two failure edges to one fix step, calling the fix step "the SUCCESS target".
+* **The hallucinated build-backend** — not a maker hallucination. It is
+  hardcoded in the *shipped role prompt*
+  (`gen_mcp_server_builder.roles.json:scaffold_maker`), together with
+  `from mcp.server.models import InitializationCapabilities` (real name:
+  `InitializationOptions`) and `@server.tool()` (`Server` has no such decorator).
+  AA12's "the agent guessed on three drives" was the emitter's paste, replayed
+  verbatim every run. New enforced rule `prompt_build_backend_is_real` — limited
+  to build backends on purpose: the gate runs in a container with neither
+  setuptools nor any generated project's dependencies, so a general "does this
+  API exist" check would be blind there, while a build backend is a short closed
+  set decidable anywhere. The stored prompt was corrected and its pasted API
+  replaced with a description.
+* **`mcp` is not installed in the container.** `gen_mcp_server_builder`'s suite
+  cannot go green there regardless of what its maker writes.
+
+## What none of this covers
+
+Turn accounting covers the agent-turn boundary in `PipelineEngine` only — not
+skillflow's runner-mode proxy, not the butler's coding loop, not discards inside
+a tool. `_unresolved_note` covers tool-name resolution only. The detector reports
+a repeat; it is blind to a failure that gets a *different* uninformative message
+each time, and it prevents nothing. And none of the three would have caught
+`file_exists` being blind to directories — a wrong predicate returning a
+confident wrong answer, with no discarded fact anywhere. That still needs a drive.
+
+## The verification drive (2026-07-29)
+
+`gen_mcp_server_builder`, fresh run `de25b3f1`, with all of the above deployed.
+
+```
+A1 A2 B1 B2  B1 B2  B1 B2  B1 B2
+status: failed   error_reason: Cycle limit exceeded:
+  All transitions from 'B2' are exhausted: 'B2' -> 'B1' (max_loop=3 …)
+```
+
+**What the harness did right.** Trace of the whole run: 8 prompts, 8 responses,
+**8 `create` tool_calls and 8 `create` tool_results**. Zero `parse_error`, zero
+`unknown_tool`, zero `write_failed`, zero discarded envelopes. Every turn an agent
+took produced an executed write. That is the chain the twelve defects used to break.
+
+**What the prompt fix did.** With the pasted `Server` template replaced by a
+description, the maker wrote the REAL low-level API — `@server.list_tools()` and
+`@server.call_tool()`, both correct — instead of the hallucinated `@server.tool()`
+it had copied on every previous drive. The failure moved strictly forward, to
+`server.run(transport='stdio')`: a FastMCP signature on a low-level `Server`,
+whose `run` is a coroutine taking two streams and an options object.
+
+**What is actually blocking this pipeline, and it is not the feedback gap.**
+`mcp` is not installed in the container. Neither the maker nor the reviewer can
+inspect the API they are arguing about — the read tools are closures over project
+root / staging / step output, so `site-packages` is unreachable by design. The
+reviewer flagged the sync/async symptom correctly and its *suggested fix* was
+wrong ("call `main()` directly, remove `asyncio.run`" — the maker had already done
+exactly that), so the maker complied and was rejected again. Three laps, budget
+spent. This is AA12's capability gap, unresolved and now clearly the binding
+constraint on this pipeline.
+
+### A rule I measured and did NOT add
+
+B2's only failure edge is `max_loop: 3` with no unconditional fallback, so an
+unsatisfied reviewer produces `Cycle limit exceeded` rather than a declared
+give-up terminal. `forge_registry_check` passes the graph. The obvious rule —
+"a `max_loop` edge needs an exit for when the budget is spent" — was calibrated
+first: it fails **17 of 22 configs on this host**, including `dpe_default`
+(all six review loops), `pipeline_forge` (all eight), `novel_chapter`, `subagent`,
+`coding_impl` and `fix_tests`. The shape is the system's normal way to end an
+unconvergeable loop. Not a rule.
+
+The real defect is the MESSAGE. `Cycle limit exceeded: All transitions from 'B2'
+are exhausted` names the edge and not the reason the loop never converged — the
+reviewer's last verdict, which is sitting in `review_verdict.json` in the step
+output the engine just promoted. Same shape as everything above, one level up, at
+the run's own terminal. **It belongs in skillflow** (the host does not compose
+that string), which is why it is recorded here rather than fixed: a skillflow
+change needs a PyPI release before the container sees it, and an unverified fix is
+what this whole document is about.
+
+## The checkpoint rejection that looked like it failed (2026-07-29)
+
+Reported as "I rejected once, but after reject the modal is still on the web UI
+and the UI is not updated, so I approved". Traced on the live novel run
+`9d9d1c5f` / `novel-chapter-98264c92`:
+
+```
+07:05:02  outline_gate  checkpoint_paused
+07:07:51  POST /checkpoint/reject -> 200 OK
+07:07:51  outline       claimed  {"attempt_feedback": true}   <- the reject WORKED
+07:09:17  outline_gate  checkpoint_paused  (same gate, same label)
+07:10:29  POST /checkpoint/approve -> 200 OK
+```
+
+The rejection was never broken. The feedback was persisted by skillflow and
+delivered to the outliner, which acted on it (an `edit_outline` removing the
+section the user complained about). Exactly one reject POST exists in the log,
+and it succeeded synchronously.
+
+**What failed is the only surface that could have told the user any of that.**
+The modal's "Revised N time(s) / Last feedback: …" banner reads
+`stepOutput.rejection_history`, which the API fills from
+`{step_dir}/user_rejection_history.json`. That file has **three readers in this
+repo — `api/meta_routers.py`, `core/prompt_assembler.py`, and `restage`'s
+skip-list — and no writer anywhere**; `find` over a live workspace turns up none,
+and `git log -S` shows one was never removed. It has never existed.
+
+skillflow is what persists the feedback (`_append_feedback_log`, since 1.5.15),
+and two things make it easy to look in the wrong place — the old code got both
+wrong. The log lives beside the config dir, not inside the step's output, and it
+is keyed by the step the reject REWINDS to (`checkpoint_reject_to` → `outline`),
+not by the gate. The user's actual words were on disk the whole time:
+
+```
+~/.AItelier/workspaces/novel-chapter-98264c92/novel_chapter/_feedback/outline.md
+## 反馈轮 #1 · 2026-07-29 07:07 UTC
+王超哪来的问题，是beat出错了吗，本来不就是设计出来用来死的新人吗？
+```
+
+So the gate re-paused with the same label and no banner, and the only rational
+reading from the UI was "nothing happened". `rejection_count` was hardcoded `0`
+in the same response, and the modal does not read it anyway.
+
+Fixed by resolving the path through skillflow's own `feedback_log_path` helper,
+following `checkpoint_reject_to`, and parsing the rounds out of the log.
+Verified against the running server: `rejection_count: 1` and the user's verbatim
+text now reach the client. No frontend change was needed — the modal already
+renders exactly that shape.
+
+**Not a regression.** It is the oldest instance of the class in this document:
+the system had the fact, in the user's own words, timestamped, and the surface
+read a different file. It is also the first instance whose victim was the USER
+rather than an agent — the same defect shape, one audience further out.
+
+*(Two hypotheses discarded on evidence before this one: that my container
+restarts had interfered — they were 04:01–04:07, the session was 07:05–07:10 —
+and that the deployed SPA was stale relative to source. A fresh `npm run build`
+produced byte-identical content hashes to the bundle in the image, so the
+deployed UI was current and the code I was reading is what ran.)*
+
+## Two rules that could not both be satisfied (2026-07-29)
+
+`novel-chapter-98264c92` chapter 5 died `Cycle limit exceeded` at `continuity`.
+It is NOT a feedback gap — the reason reached the agent every lap:
+
+| lap | humanize output | continuity verdict |
+|---|---|---|
+| 1 | 5739 字 | 字数超限 5739（上限 4500） |
+| 2 | 4656 字 | 字数超限 4656 **and** 润色字数漂移 -19%（初稿 5743 → 终稿 4656），超出 ±10% |
+| 3 | 5662 字 | 字数超限 5662 |
+
+From a 5743-字 draft the ±10% fidelity rule permits 5169–6317; the 4500 ceiling
+demands ≤4500, which is -22% drift. **No output satisfies both.** The agent read
+the feedback correctly each lap and oscillated between two impossible demands
+until the loop exhausted and the chapter was lost.
+
+The ceiling was enforced on the wrong step. Length is set by `draft`; `humanize`
+only polishes language, and the very next rule forbids it from adding or removing
+plot. Fixed per the author's call — **the hard gate is the FLOOR, the ceiling is
+advisory**:
+
+* `字数不足` stays a violation (a short chapter is genuinely unfinished).
+* `字数超限` becomes an advisory naming why it is not humanize's to fix.
+* `templates/novel_{humanize,draft,design}.md` updated in the same change — a
+  gate rule the maker is taught wrongly costs a rework round on every run
+  (see the RULES/`teaches` binding above).
+
+The final draft was 5662 字 at **-1% drift** — a textbook humanize result,
+rejected purely for the ceiling. Under the new rule it passes.
+
+*(Metric note: everything here is 字数 = non-whitespace CHARACTER count,
+`novel_state.char_count`, the CJK prose convention — not words.)*
+
+### The tool result that was hidden one layer up
+
+`skillflow_runs.error_reason` for that run is the bare `Cycle limit exceeded`.
+The scheduler already resolves the real cause (`_failure_reason` →
+`_last_trace_error`, which finds the tool's own `error` string), and the project
+`status` carried it. But `enrich_project_status`'s new `error_reason` field
+served the RAW column — so the API handed clients the framework artifact while
+the host had already dug out the cause. Fixed to serve the resolved reason;
+verified live, the field now reads
+`Cycle limit exceeded — continuity: continuity_check 未通过: - 字数超限: 5662 字（上限 4500）`.
+
+That is the same defect as everything else in this document, committed by me,
+in the fix for it, two turns after writing the section that warns about it.

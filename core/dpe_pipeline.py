@@ -8,6 +8,7 @@
 
 import os
 import json
+import threading
 import re
 import time
 from pathlib import Path
@@ -66,6 +67,133 @@ class PipelineEngine:
         self._repo_type = repo_type
         self._resolved_context: dict | None = None
         self._user_lang = user_lang
+        # See _note_feedback: how many times each distinct failure message has
+        # been handed to a step.
+        self._feedback_seen: dict[tuple[str, str], int] = {}
+        self._feedback_repeats: dict[str, int] = {}
+        # True while the pending feedback came from an exploratory turn (thoughts
+        # with no actions) rather than a rejection. See _note_feedback.
+        self._feedback_exploratory = False
+
+    # Delivered three times unchanged: a recovering agent essentially never sees
+    # this, and every one of the twelve harness defects did.
+    _FEEDBACK_REPEAT_ALARM = 3
+    # Process-wide, keyed by (run_id, step_id, message) — see _note_feedback for
+    # why it cannot live on the instance. FIFO-evicted at the cap.
+    #
+    # GUARDED, because agent steps run in a thread pool (scheduler.py's tick
+    # notes, runner.py's `loop.run_in_executor`) and 42 same-run overlapping step
+    # executions are on record in this host's own DB. Unsynchronised, the eviction
+    # sweep below races: `list()` against a concurrent insert raises RuntimeError,
+    # and two threads passing the size check both delete the same keys. Either
+    # would abort the step — a diagnostic must never be able to kill the thing it
+    # observes.
+    _FEEDBACK_SEEN: dict[tuple[str, str, str], int] = {}
+    _FEEDBACK_SEEN_CAP = 2000
+    _FEEDBACK_LOCK = threading.Lock()
+
+    def _note_feedback(self, step_id: str, feedback: str,
+                       *, exploratory: bool = False) -> int:
+        """Count how often this step has been handed the SAME failure text.
+
+        This is a detector for the defect CLASS rather than for any one site.
+        Twelve times over six drives the harness computed the fact that explained
+        a failure and dropped it before the agent could act on it; the agent then
+        retried and was handed the identical, cause-free sentence again. That
+        repetition is the observable runtime signature, and it is the same
+        whichever of the seven syntactic forms produced it — a swallowed
+        exception, an uninformative `.get` default, an if/elif chain with no else,
+        a name-prefix test, `check=False`, an empty filter, or a `break` before
+        the reason was rendered. Nothing in the system looked at it, so each
+        instance cost a drive to find.
+
+        A message that does not name a cause cannot be acted on, so it comes back
+        verbatim. When it does, say so: `_FEEDBACK_REPEAT_ALARM` deliveries raise
+        an event, and the count rides along on the step's final error, where an
+        operator reads it without opening a trace.
+
+        An EXPLORATORY turn does not count. A response carrying thoughts but no
+        actions is the agent using its message path, which the loop deliberately
+        allows — not the harness failing to explain itself. Replaying this detector
+        over 108 runs / 60k trace rows: counting every feedback-bearing prompt
+        fires 16 times with 10 false alarms (38% precision), and 9 of those 10
+        carry the thinking-turn message. Skipping it leaves 7 alarms, 1 false,
+        and all 6 genuinely-stuck steps still caught — 86%.
+
+        (Measured, not assumed: my first idea was to count per ASSIGNMENT instead
+        of per turn. Replayed, that scored 12% — worse — because the write-failure
+        branches are exactly the true positives and they cannot be reconstructed
+        from an agent response alone. The turn is the right unit; the exploratory
+        branch was the wrong input.)
+
+        Detection only — the prompt is not altered. What to do about an
+        unactionable message is a judgement about that message.
+        """
+        if not feedback or exploratory or self._feedback_exploratory:
+            return 0
+        key = (getattr(self, "_run_id", "") or "", step_id,
+               " ".join(feedback.split()))
+        # Counted across STEP CLAIMS, not just across the retries inside one.
+        # A PipelineEngine is built per claimed step, so per-instance counting
+        # would see only the in-step retry loop — and the repetition that
+        # actually cost drives spans FIX LAPS, where a graph returns to the same
+        # maker again and again with the same complaint. Keyed by run so two
+        # runs never pool, and bounded so a long-lived server cannot grow it
+        # without limit.
+        with self._FEEDBACK_LOCK:
+            n = self._FEEDBACK_SEEN.get(key, 0) + 1
+            if len(self._FEEDBACK_SEEN) >= self._FEEDBACK_SEEN_CAP:
+                for stale in list(self._FEEDBACK_SEEN)[:self._FEEDBACK_SEEN_CAP // 4]:
+                    self._FEEDBACK_SEEN.pop(stale, None)
+            self._FEEDBACK_SEEN[key] = n
+        self._feedback_seen[key] = n
+        self._feedback_repeats[step_id] = max(
+            self._feedback_repeats.get(step_id, 0), n)
+        if n == self._FEEDBACK_REPEAT_ALARM:
+            payload = {"step_id": step_id, "count": n,
+                       "feedback": feedback[:500],
+                       "preview": (f"Same failure message handed to {step_id} "
+                                   f"{n}x — it may not name a cause")}
+            self._emit("feedback_repeated", payload)
+            self._trace("diagnostic", "feedback_repeated", payload)
+        return n
+
+    @staticmethod
+    def _unresolved_note(agent_config_name: str) -> str:
+        """Name the role's tool grants that do not resolve, on the step that failed.
+
+        skillflow records these (`SkillFlow.unresolved_tools()`, whose own
+        docstring says "a host can surface this after registration") and no host
+        ever did — the fact was produced and left sitting, which is the same shape
+        as the defect it was added to fix. A role granted a tool that does not
+        exist registers clean and runs WITHOUT it, so the only symptom is a step
+        that mysteriously produces nothing. That is exactly the step raising here,
+        so this is where the answer belongs.
+        """
+        if not agent_config_name:
+            return ""
+        try:
+            from api.dependencies import get_skillflow
+            missing = get_skillflow().unresolved_tools().get(
+                f"agent_config:{agent_config_name}")
+        except Exception:
+            import logging
+            logging.getLogger("aitelier.dpe").warning(
+                "could not read unresolved tool grants", exc_info=True)
+            return ""
+        if not missing:
+            return ""
+        return (f" NOTE: role '{agent_config_name}' is granted tool(s) that do "
+                f"not exist and were silently dropped at registration: "
+                f"{', '.join(sorted(missing))}. The step ran without them.")
+
+    def _repeat_note(self, step_id: str) -> str:
+        """Tail for a step's final error, when its feedback never changed."""
+        n = self._feedback_repeats.get(step_id, 0)
+        if n < self._FEEDBACK_REPEAT_ALARM:
+            return ""
+        return (f" (the same message was delivered {n}x unchanged — if it does "
+                f"not name a cause, the gap is in the harness, not the agent)")
 
     @staticmethod
     def _extract_json(text: str, try_multiple: bool = False) -> dict | None:
@@ -405,6 +533,80 @@ class PipelineEngine:
     _GENERIC_MUTATORS = ("write", "create", "edit")
     _SLOT_MUTATOR_PREFIXES = ("write_", "create_", "append_", "edit_")
 
+    # Read tools the engine executes itself, plus the step-control pseudo-tools.
+    # Everything an agent may legitimately ask for is one of: a read, a write
+    # (see `_is_mutation_tool`), a message, or one of these controls.
+    _READ_TOOLS = ("read_file", "list_tree", "web_search", "web_fetch")
+    _CONTROL_TOOLS = ("finish_step", "end_step", "ask_more_turn", "ask_more_turns")
+
+    @classmethod
+    def _classify_actions(cls, actions: list, tool_schemas: dict | None,
+                          write_calls: list) -> tuple[list, list, list, list]:
+        """Partition a turn's actions into (reads, messages, controls, unclaimed).
+
+        This is turn accounting, and it exists because the same defect has now been
+        found thirteen times: the engine receives a complete delivery, fails to
+        recognise how it was spelled, and drops it without a word. Each earlier
+        instance was fixed by teaching the parser one more spelling; the partition
+        is what makes the NEXT unrecognised spelling report itself.
+
+        The identity every handler holds: writes + reads + messages + controls +
+        unclaimed == actions. Nothing an agent asked for may vanish. `write_calls`
+        is passed in already computed because the two write vocabularies differ
+        (constrained `write_<slot>` vs generic `create`/`edit`); everything else is
+        classified here, once.
+
+        A read is anything the step was GRANTED, not a hardcoded name list. The
+        list was `read_file`/`list_tree`/`web_search`/`web_fetch`, so an agent
+        calling `read`, `search` or `list` — the unified read surface skillflow
+        injects into every step, tools the step demonstrably HAS — had the call
+        silently dropped. Asking the grant instead of the spelling is the same
+        correction `_is_mutation_tool` already made for writes.
+        """
+        claimed = {id(a) for a in write_calls}
+        reads: list = []
+        messages: list = []
+        controls: list = []
+        unclaimed: list = []
+        for a in actions:
+            if id(a) in claimed:
+                continue
+            if not isinstance(a, dict):
+                unclaimed.append(a)
+                continue
+            name = a.get("tool") or ""
+            if name in cls._CONTROL_TOOLS:
+                controls.append(a)
+            elif name == "message":
+                messages.append(a)
+            elif name in cls._READ_TOOLS or name in (tool_schemas or {}):
+                reads.append(a)
+            else:
+                unclaimed.append(a)
+        return reads, messages, controls, unclaimed
+
+    @staticmethod
+    def _unclaimed_feedback(unclaimed: list, tool_schemas: dict | None) -> str:
+        """Answer a discarded action instead of swallowing it.
+
+        Names what was not understood AND what the step can actually call — an
+        agent told only "that didn't work" re-guesses, which is exactly how one
+        step produced eight different envelope shapes across four drives.
+        """
+        names = []
+        for a in unclaimed:
+            if not isinstance(a, dict):
+                names.append(f"(not an object: {type(a).__name__})")
+            else:
+                names.append(f"'{a.get('tool') or a.get('name') or '(unnamed)'}'")
+        available = ", ".join(sorted(tool_schemas or {})) or "(none)"
+        return (
+            f"ERROR: {len(unclaimed)} action(s) in your last response were not "
+            f"executed because this step has no such tool: {', '.join(names)}. "
+            f"Nothing was written for them. This step can ONLY call: {available}. "
+            f"Re-send the same work using one of those exact names."
+        )
+
     @staticmethod
     def _is_mutation_tool(name: str, tool_schemas: dict | None) -> bool:
         """Would calling `name` write a file in THIS step?
@@ -419,8 +621,12 @@ class PipelineEngine:
         "Nothing was written". Four attempts, four complete deliveries discarded.
 
         Membership in the step's own schemas is required, so an invented name is
-        still not executed — it falls through to the unknown-write branch, which
-        tells the agent what it may actually call.
+        still not executed. It is not dropped either: `_classify_actions` leaves it
+        unclaimed and both handlers answer it with the names the step really has.
+        (This docstring used to assert that hand-off as already true. It was not —
+        the branch it named existed only on the constrained-slot path — and an
+        unverified claim about a downstream owner is precisely how the rest of this
+        family of defects survived. Turn accounting is what makes it true.)
         """
         return is_mutation_tool(name, tool_schemas or {})
 
@@ -464,8 +670,23 @@ class PipelineEngine:
                        for k in ("args", "params", "arguments", "parameters", "input")):
                     return True
                 # Or it names a tool this step can actually call (a no-arg call).
-                if any(e.get(k) in _known_names
+                # `isinstance(..., str)` is load-bearing: OpenAI's own envelope
+                # puts a DICT under `function` ({"name":…, "arguments":…}), and
+                # `dict in set` raises `TypeError: unhashable type: 'dict'`, which
+                # propagates out of the turn loop and fails the step with a
+                # framework traceback. A real C1 response in this host's traces
+                # (gen-mcp-server-builder-c8168ed4, seq 227) is exactly that shape;
+                # it predates this function by eleven hours, which is the only
+                # reason it has never fired.
+                if any(isinstance(e.get(k), str) and e.get(k) in _known_names
                        for k in ("tool", "name", "command", "function")):
+                    return True
+                # The OpenAI tool-call shape itself. `_run_native_step` already
+                # understands it; guarding without ABSORBING it would just trade a
+                # crash for a silent discard, which is the defect this whole file
+                # is about.
+                fn = e.get("function")
+                if isinstance(fn, dict) and isinstance(fn.get("name"), str):
                     return True
             return False
 
@@ -483,15 +704,79 @@ class PipelineEngine:
                     if "params" not in a and isinstance(a.get(k), dict):
                         a["params"] = a.pop(k)
                         break
+                # OpenAI's nested form: {"function": {"name": …, "arguments": …}}.
+                # `arguments` is a JSON *string* there, so parse it — a raw string
+                # under `params` is not a call the dispatcher can make.
+                fn = a.get("function")
+                if isinstance(fn, dict):
+                    if not a.get("tool") and isinstance(fn.get("name"), str):
+                        a["tool"] = fn["name"]
+                    if "params" not in a:
+                        args = fn.get("arguments")
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except (json.JSONDecodeError, ValueError):
+                                args = None
+                        if isinstance(args, dict):
+                            a["params"] = args
                 for k in ("name", "command", "function"):
                     if not a.get("tool") and isinstance(a.get(k), str):
                         a["tool"] = a[k]
                         break
 
-        if payload.get("files") or payload.get("actions"):
+        _PATH_KEYS = ("path", "file", "file_path", "filename", "filepath")
+
+        if payload.get("actions"):
             return payload, None
 
-        _PATH_KEYS = ("path", "file", "file_path", "filename", "filepath")
+        files = payload.get("files")
+        if files:
+            # `files` is the CANONICAL, documented delivery shape — and
+            # `_run_tool_step`, the handler every `mode: write` step uses, reads
+            # only `actions`, so a payload that arrives already in the right shape
+            # was answered "No actions found in your response". Seen live: after
+            # `create` refused ("already exists — use 'edit'"), the step delivered
+            # via `files` and was told it had sent nothing, then spent its
+            # remaining turns reading. AA8 fixed this for the {path, content}
+            # envelope by emitting an equivalent action and left the shape the
+            # prompt actually documents unhandled.
+            # Handlers that read `files` write from it and break before actions
+            # run, so emitting both cannot double-write.
+            mutator = next((t for t in ("create", "write", "edit")
+                            if t in (tool_schemas or {})), None)
+            # All three shapes `_run_tool_content_step` accepts, so the two
+            # handlers agree on what a delivery is. A JSON-object body is the
+            # natural shape for a `.json` deliverable and a str-only filter drops
+            # it; the list form is rarer but is on record in this host's traces.
+            pairs: list = []
+            if isinstance(files, dict):
+                for k, v in files.items():
+                    if not isinstance(k, str) or not k.strip():
+                        continue
+                    pairs.append((k, v if isinstance(v, str)
+                                  else json.dumps(v, ensure_ascii=False, indent=2)))
+            elif isinstance(files, list):
+                for entry in files:
+                    if not isinstance(entry, dict):
+                        continue
+                    name_ = next((entry[x] for x in _PATH_KEYS
+                                  if isinstance(entry.get(x), str) and entry[x].strip()), None)
+                    if not name_ or "content" not in entry:
+                        continue
+                    body_ = entry["content"]
+                    pairs.append((name_, body_ if isinstance(body_, str)
+                                  else json.dumps(body_, ensure_ascii=False, indent=2)))
+            if mutator and pairs:
+                payload["actions"] = [
+                    {"tool": mutator, "params": {"file": name, "content": body}}
+                    for name, body in pairs]
+                return payload, {"pattern": "files-envelope-to-actions",
+                                 "files": [n for n, _ in pairs],
+                                 "preview": (f"Mirrored files -> {len(pairs)} "
+                                             f"{mutator} action(s)")}
+            return payload, None
+
 
         # {"path": "x.py", "content": "..."} — the shape a model reaches for when it
         # has ONE file to deliver. A step wrote a complete pytest suite as
@@ -619,12 +904,14 @@ class PipelineEngine:
 
             tool_results = []
             written_files = []
+            effects: list[str] = []   # non-file output: see _effect_name
             current_max_turns = max_turns
             tool_turn = 0
             ended_early = False
 
             while tool_turn < current_max_turns:
                 remaining = current_max_turns - tool_turn
+                self._note_feedback(step_id, feedback)
                 prompt = self.assembler.assemble(
                     step_id, project_path, "", feedback, task_id=task_id, code_path=code_path,
                     resolved_context=self._resolved_context,
@@ -709,6 +996,7 @@ class PipelineEngine:
                         })
                         # A7 fix #2: inline concrete JSON schema + stuck-run guidance
                         # so the agent can recover from a parse failure.
+                        self._feedback_exploratory = False
                         feedback = (
                             f"[Your previous response was not valid JSON. "
                             f"Here is what you said]:\n\n{response}\n\n"
@@ -779,6 +1067,7 @@ class PipelineEngine:
                     })
                     # A7 fix #2: inline concrete JSON schema + stuck-run guidance
                     # so the verifier escapes the parse-failure feedback loop.
+                    self._feedback_exploratory = True
                     feedback = (
                         f"[Your previous response contained thoughts but no actions or files. "
                         f"Here is what you thought]:\n\n{thoughts or response}\n\n"
@@ -809,26 +1098,33 @@ class PipelineEngine:
                         "preview": f"Agent asked for +{extra} turns ({reason[:80]})",
                     })
 
-                tool_calls = [a for a in actions if a.get("tool") in ("read_file", "list_tree", "web_search", "web_fetch")]
-                message_calls = [a for a in actions if a.get("tool") == "message"]
 
                 # Resolve ALL allowed write/create/append tools from tool_schemas.
                 # Must include create_* and append_* — the unknown-write check
                 # below also matches these prefixes, so constraining to only
                 # write_* would falsely flag create_verdict etc. as unknown.
+                # `edit_` belongs here. skillflow emits write_/create_/edit_ per
+                # slot together (write_tools.py), and its own description marks
+                # `edit_<slot>` PREFERRED on a revision round — "a full rewrite
+                # from memory silently corrupts unflagged parts". Omitting the
+                # prefix put every granted `edit_<slot>` into `unknown_writes`,
+                # which told the agent a tool it HAS does not exist and pushed it
+                # onto a full rewrite. The three prefixes always appear together,
+                # so this cannot change which branch a step takes.
                 constrained_writes = {
                     k for k in self._tool_schemas
-                    if k.startswith(("write_", "create_", "append_"))
+                    if k.startswith(("write_", "create_", "append_", "edit_"))
                 }
                 if constrained_writes:
-                    write_calls = [a for a in actions if a.get("tool") in constrained_writes]
-                    generic_writes = [a for a in actions if a.get("tool") == "write"]
+                    _dicts = [a for a in actions if isinstance(a, dict)]
+                    write_calls = [a for a in _dicts if a.get("tool") in constrained_writes]
+                    generic_writes = [a for a in _dicts if a.get("tool") == "write"]
                     # Detect write-like tools that aren't in the allowed set
                     # (e.g. LLM invents "write_file" instead of "write_sota").
                     # Without this, unknown write tools are silently ignored →
                     # no output → retry loop with no feedback.
                     unknown_writes = [
-                        a for a in actions
+                        a for a in _dicts
                         if (a.get("tool", "").startswith(
                                 ("write", "create", "append", "edit"))
                             or a.get("tool", "") in self._GENERIC_MUTATORS)
@@ -837,6 +1133,7 @@ class PipelineEngine:
                     ]
                     if generic_writes:
                         allowed_names = ", ".join(sorted(constrained_writes))
+                        self._feedback_exploratory = False
                         feedback = (
                             f"ERROR: You used the generic 'write' tool, but this step only allows "
                             f"constrained write tools: {allowed_names}. "
@@ -852,6 +1149,7 @@ class PipelineEngine:
                         bad_names = ", ".join(
                             f"'{a.get('tool','')}'" for a in unknown_writes
                         )
+                        self._feedback_exploratory = False
                         feedback = (
                             f"ERROR: Unknown write tool(s): {bad_names}. "
                             f"This step ONLY allows: {allowed_names}. "
@@ -865,9 +1163,30 @@ class PipelineEngine:
                 else:
                     # No fixed slots → `mode: write`, whose vocabulary is the
                     # generic create/edit/write. See _is_mutation_tool.
-                    write_calls = [a for a in actions
-                                   if self._is_mutation_tool(a.get("tool", ""),
-                                                             self._tool_schemas)]
+                    write_calls = [a for a in actions if isinstance(a, dict)
+                                   and self._is_mutation_tool(a.get("tool", ""),
+                                                              self._tool_schemas)]
+
+                # Turn accounting — see `_classify_actions`. The two branches above
+                # answer an unknown WRITE-shaped name on the constrained-slot path;
+                # nothing answered anything else. An action naming `bash`,
+                # `str_replace` or `apply_patch` — or any name at all on the
+                # `mode: write` path — was claimed by no bucket and fell through to
+                # the no-op branch below, which returns SUCCESS with zero files.
+                (tool_calls, message_calls, _control_calls,
+                 unclaimed) = self._classify_actions(
+                     actions, self._tool_schemas, write_calls)
+                if unclaimed:
+                    self._feedback_exploratory = False
+                    feedback = self._unclaimed_feedback(unclaimed, self._tool_schemas)
+                    self._emit("unknown_tool", {
+                        "error": feedback,
+                        "tools": [a.get("tool") if isinstance(a, dict) else None
+                                  for a in unclaimed],
+                        "preview": f"{len(unclaimed)} action(s) named an unavailable tool"})
+                    tool_results.append(feedback)
+                    tool_turn += 1
+                    continue
 
                 if message_calls:
                     for action in message_calls:
@@ -888,6 +1207,16 @@ class PipelineEngine:
                         turn_results.append(entry)
                         # C3: Cache all exploration results
                         cached_exploration.append(entry)
+                        # A granted tool that CHANGED something counts as output
+                        # even though it left no file in staging (delete_file, a
+                        # durable state write). See _effect_name.
+                        wf = self._written_name(result)
+                        if wf:
+                            written_files.append(wf)
+                        else:
+                            eff = self._effect_name(result)
+                            if eff:
+                                effects.append(eff)
                     tool_results.extend(turn_results)
                     self._emit("tool_calls", {"count": len(tool_calls), "preview": f"Executed {len(tool_calls)} tool call(s)"})
 
@@ -910,6 +1239,7 @@ class PipelineEngine:
                     # given the turn in which it could have switched to `edit`; the
                     # step reported writing nothing and failed validation.
                     if not written_files:
+                        self._feedback_exploratory = False
                         feedback = ("Every write in your last response failed:\n"
                                     + "\n".join(tool_results[-len(write_calls):]))
                         self._emit("write_failed", {
@@ -947,6 +1277,18 @@ class PipelineEngine:
                 # the work is already done (no-op). Complete cleanly with empty
                 # output instead of copying the whole repo into the draft (which
                 # produced wholesale commits and corrupted binaries).
+                # The agent signalled completion and the step DID something, just
+                # not to a file in staging — a queued deletion, a durable state
+                # write. Counting only files made that look like a no-op: the engine
+                # performed the change, then spent the rest of the budget before
+                # failing for "no file writes produced".
+                if _control_calls and effects and not written_files:
+                    self._emit("step_done", {
+                        "step_id": step_id, "files": [], "effects": effects,
+                        "preview": f"No file written; {len(effects)} state change(s)",
+                    })
+                    return True
+
                 if not tool_calls and not written_files:
                     self._emit("step_done", {
                         "step_id": step_id, "files": [],
@@ -970,17 +1312,20 @@ class PipelineEngine:
                 self._emit("exploration", {"turn": tool_turn, "preview": f"Exploration turn {tool_turn}"})
             else:
                 # Max tool turns exceeded without producing files
+                self._feedback_exploratory = False
                 feedback = f"Max tool exploration turns ({max_turns}) exceeded."
                 self._emit("tool_turns_exceeded", {"max_turns": max_turns, "preview": "Max tool turns exceeded"})
                 # If no files were produced across ALL turns, fail immediately
-                if not written_files:
+                if not written_files and not effects:
                     raise MaxRetriesExceeded(
                         f"Step {step_id}: Agent exhausted {max_turns} tool exploration turns without producing any write actions. "
                         "The agent must produce at least one 'write' action to complete this step."
+                        + self._repeat_note(step_id) + self._unresolved_note(agent_config_name)
                     )
                 continue
 
-            if not written_files:
+            if not written_files and not effects:
+                self._feedback_exploratory = False
                 feedback = feedback or "System Error: No files were produced."
                 continue
 
@@ -992,7 +1337,7 @@ class PipelineEngine:
 
         raise MaxRetriesExceeded(
             f"Task {task_id} Step {step_id} aborted: Max retries ({max_retries}) exceeded. "
-            f"Last feedback: {feedback}"
+            f"Last feedback: {feedback}" + self._repeat_note(step_id) + self._unresolved_note(agent_config_name)
         )
 
     # ── Category C: Full tool step (read + write, dynamic filenames) ──
@@ -1031,6 +1376,7 @@ class PipelineEngine:
 
             tool_results = []
             written_files = []
+            effects: list[str] = []   # non-file output: see _effect_name
 
             # C2: Re-inject previously passed files so agent only fixes failing ones
             if previously_passed_files and attempt > 1:
@@ -1041,6 +1387,7 @@ class PipelineEngine:
                 tool_results.insert(0, prev_files_section)
 
             for tool_turn in range(max_turns):
+                self._note_feedback(step_id, feedback)
                 prompt = self.assembler.assemble(
                     step_id, project_path, "", feedback, task_id=task_id, code_path=code_path,
                     resolved_context=self._resolved_context,
@@ -1093,6 +1440,7 @@ class PipelineEngine:
                             "auto_converted": True,
                             "preview": f"[auto] {response[:200]}"
                         })
+                    self._feedback_exploratory = False
                     feedback = (
                         "System Error: Failed to parse JSON. "
                         "You MUST respond with ONLY a JSON object like: "
@@ -1111,6 +1459,7 @@ class PipelineEngine:
                     # unrecognised shape ended the step outright — the agent asked
                     # a question, got no answer, and the step reported having
                     # written nothing. The turn budget still bounds the loop.
+                    self._feedback_exploratory = False
                     feedback = (
                         "System Error: No actions found in your response. Reply with "
                         '{"thoughts": "...", "actions": [{"tool": "<name>", '
@@ -1122,11 +1471,33 @@ class PipelineEngine:
                     tool_turn += 1
                     continue
 
-                tool_calls = [a for a in actions if a.get("tool") in ("read_file", "list_tree", "web_search", "web_fetch")]
-                write_calls = [a for a in actions
-                               if self._is_mutation_tool(a.get("tool", ""),
-                                                         self._tool_schemas)]
-                message_calls = [a for a in actions if a.get("tool") == "message"]
+                write_calls = [a for a in actions if isinstance(a, dict)
+                               and self._is_mutation_tool(a.get("tool", ""),
+                                                          self._tool_schemas)]
+                (tool_calls, message_calls, _control_calls,
+                 unclaimed) = self._classify_actions(
+                     actions, self._tool_schemas, write_calls)
+
+                # Turn accounting. Anything no bucket claimed is a delivery about
+                # to be dropped: it used to fall through to the no-op branch at the
+                # bottom of this loop, which returns SUCCESS with zero files. So an
+                # agent that named a tool this step does not have — `write_file`
+                # where the step has `create` — had its file discarded, was given
+                # no turn to correct itself, and the step reported "No change
+                # needed (no writes)". Verified before the fix: one turn, no
+                # second turn, run_step True, nothing written. The docstring of
+                # `_is_mutation_tool` claimed an invented name "falls through to
+                # the unknown-write branch"; that branch exists only on the
+                # constrained-slot path in `_run_tool_content_step`, never here.
+                if unclaimed:
+                    self._feedback_exploratory = False
+                    feedback = self._unclaimed_feedback(unclaimed, self._tool_schemas)
+                    self._emit("unknown_tool", {
+                        "error": feedback,
+                        "tools": [a.get("tool") if isinstance(a, dict) else None
+                                  for a in unclaimed],
+                        "preview": f"{len(unclaimed)} action(s) named an unavailable tool"})
+                    continue
 
                 # Handle message actions — emit to user, count toward budget
                 if message_calls:
@@ -1156,6 +1527,16 @@ class PipelineEngine:
                         turn_results.append(entry)
                         # C3: Cache all exploration results
                         cached_exploration.append(entry)
+                        # A granted tool that CHANGED something counts as output
+                        # even though it left no file in staging (delete_file, a
+                        # durable state write). See _effect_name.
+                        wf = self._written_name(result)
+                        if wf:
+                            written_files.append(wf)
+                        else:
+                            eff = self._effect_name(result)
+                            if eff:
+                                effects.append(eff)
                     tool_results.extend(turn_results)
                     self._emit("tool_calls", {"count": len(tool_calls), "tools": [a.get("tool") for a in tool_calls],
                                               "preview": f"Executed {len(tool_calls)} tool call(s)"})
@@ -1180,6 +1561,7 @@ class PipelineEngine:
                     # given the turn in which it could have switched to `edit`; the
                     # step reported writing nothing and failed validation.
                     if not written_files:
+                        self._feedback_exploratory = False
                         feedback = ("Every write in your last response failed:\n"
                                     + "\n".join(tool_results[-len(write_calls):]))
                         self._emit("write_failed", {
@@ -1195,6 +1577,18 @@ class PipelineEngine:
                 # completion. Complete cleanly with empty output instead of
                 # copying the whole repo into the draft (which produced wholesale
                 # commits and corrupted binaries).
+                # The agent signalled completion and the step DID something, just
+                # not to a file in staging — a queued deletion, a durable state
+                # write. Counting only files made that look like a no-op: the engine
+                # performed the change, then spent the rest of the budget before
+                # failing for "no file writes produced".
+                if _control_calls and effects and not written_files:
+                    self._emit("step_done", {
+                        "step_id": step_id, "files": [], "effects": effects,
+                        "preview": f"No file written; {len(effects)} state change(s)",
+                    })
+                    return True
+
                 if not tool_calls and not written_files:
                     self._emit("step_done", {
                         "step_id": step_id, "files": [],
@@ -1205,13 +1599,15 @@ class PipelineEngine:
                 self._emit("exploration", {"turn": tool_turn + 1, "preview": f"Exploration turn {tool_turn + 1}, continuing..."})
             else:
                 self._emit("tool_turns_exceeded", {"max_turns": max_turns, "preview": "Max tool turns exceeded"})
-                if not written_files:
+                if not written_files and not effects:
                     self._emit("no_files_written", {"max_turns": max_turns})
                     raise MaxRetriesExceeded(
                         f"Task {task_id} Step {step_id}: No file writes produced after {max_turns} tool exploration turn(s). "
                         "The agent must produce at least one 'write' action to complete this step. "
                         "Sending messages or making read/list calls is not sufficient — you MUST write files."
+                        + self._repeat_note(step_id) + self._unresolved_note(agent_config_name)
                     )
+                self._feedback_exploratory = False
                 feedback = (f"Max tool exploration turns ({max_turns}) exceeded. "
                             "You MUST produce write actions now.")
                 continue
@@ -1235,7 +1631,7 @@ class PipelineEngine:
 
         raise MaxRetriesExceeded(
             f"Task {task_id} Step {step_id} aborted: Max retries ({max_retries}) exceeded. "
-            f"Last feedback: {feedback}"
+            f"Last feedback: {feedback}" + self._repeat_note(step_id) + self._unresolved_note(agent_config_name)
         )
 
     # ── Step dispatch ─────────────────────────────────────────────────
@@ -1298,6 +1694,30 @@ class PipelineEngine:
         """
         return (result.get("written") or result.get("edited")
                 or result.get("created") or "")
+
+    # Keys by which a tool reports that it CHANGED something without leaving a
+    # file in this step's staging. A deletion is real output; so is a durable
+    # state write. Counting only files made a correct delete-only turn look like
+    # a no-op — the engine executed the deletion and then failed the step for
+    # "no file writes produced".
+    _EFFECT_KEYS = ("queued_for_deletion", "deleted", "removed",
+                    "applied", "state_written", "state_updated", "committed")
+
+    @classmethod
+    def _effect_name(cls, result: dict) -> str:
+        """What this tool changed, if it changed something but wrote no file.
+
+        Separate from `_written_name` on purpose: a step's staging can be empty
+        and the step still have done its job. `t_impl` is granted `delete_file`,
+        whose success is `{"queued_for_deletion": …}` — no file, a real effect.
+        """
+        if not isinstance(result, dict) or result.get("error"):
+            return ""
+        for k in cls._EFFECT_KEYS:
+            v = result.get(k)
+            if v:
+                return f"{k}: {v}" if not isinstance(v, bool) else k
+        return ""
 
     def _run_native_step(self, task_id: int, step_id: str, workspace: Any,
                          project_id: str, agent_config_name: str = "",

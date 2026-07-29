@@ -592,6 +592,71 @@ class TestFailureBranchRejoinsSuccess:
         res = forge_registry_check(graph_path=_write(tmp_path, g), role_table="")
         assert not [v for v in res["violations"] if "rejoins" in v]
 
+    # ── Which edge is the success edge is decided by POLARITY, not position ──
+    # The rule used to take the FIRST matched edge as the success edge. That is
+    # right for the ordering every generated graph on this host happens to use,
+    # and inverts the moment the failure edge is written first — which is the
+    # correct idiom for a tool that returns no `passed` on success.
+
+    def test_failure_edge_written_first_is_still_caught(self, tmp_path):
+        """`match: {applied: false} -> fix` first, then an unconditional edge to
+        the success step. Positionally the first match is the FAILURE edge, so the
+        old rule took `fix` for the success target and found nothing to report."""
+        g = self._graph("gave_up")
+        g["steps"][0]["transitions"] = [
+            {"to": "fix", "match": {"applied": False}},
+            {"to": "next_phase"},
+        ]
+        g["steps"].append({"id": "fix", "step_type": "gate",
+                           "transitions": [{"to": "next_phase"}]})
+        res = forge_registry_check(graph_path=_write(tmp_path, g), role_table="")
+        assert any("rejoins the SUCCESS target" in v
+                   for v in res["violations"]), res["violations"]
+
+    def test_failure_edge_first_that_really_handles_the_failure_passes(self, tmp_path):
+        g = self._graph("gave_up")
+        g["steps"][0]["transitions"] = [
+            {"to": "gave_up", "match": {"applied": False}},
+            {"to": "next_phase"},
+        ]
+        res = forge_registry_check(graph_path=_write(tmp_path, g), role_table="")
+        assert not [v for v in res["violations"] if "rejoins" in v], res["violations"]
+
+    def test_two_failure_edges_sharing_a_target_are_not_accused(self, tmp_path):
+        """Both edges route failure to the same fix step — correct, and the old
+        rule reported it as a failure branch "rejoining the SUCCESS target",
+        naming the fix step as the success target."""
+        g = self._graph("gave_up")
+        g["steps"][0]["transitions"] = [
+            {"to": "fix", "match": {"applied": False}},
+            {"to": "fix", "match": {"passed": False}},
+            {"to": "next_phase"},
+        ]
+        g["steps"].append({"id": "fix", "step_type": "gate",
+                           "transitions": [{"to": "gave_up"}]})
+        res = forge_registry_check(graph_path=_write(tmp_path, g), role_table="")
+        assert not [v for v in res["violations"] if "rejoins" in v], res["violations"]
+
+    def test_both_polarities_explicit_and_fail_open_is_caught(self, tmp_path):
+        g = self._graph("gave_up")
+        g["steps"][0]["transitions"] = [
+            {"to": "next_phase", "match": {"applied": True}},
+            {"to": "next_phase", "match": {"applied": False}},
+        ]
+        res = forge_registry_check(graph_path=_write(tmp_path, g), role_table="")
+        assert any("rejoins the SUCCESS target" in v for v in res["violations"])
+
+    def test_a_non_boolean_match_is_declined_rather_than_guessed(self, tmp_path):
+        """Undecidable polarity must produce no accusation — a wrong violation
+        costs the maker a rework round on a graph that was fine."""
+        g = self._graph("gave_up")
+        g["steps"][0]["transitions"] = [
+            {"to": "next_phase", "match": {"status": "ok"}},
+            {"to": "next_phase", "match": {"status": "error"}},
+        ]
+        res = forge_registry_check(graph_path=_write(tmp_path, g), role_table="")
+        assert not [v for v in res["violations"] if "rejoins" in v], res["violations"]
+
 
 class TestDuplicateMaxLoopEdges:
     """Two max_loop edges on one (from, to) pair make the graph un-runnable.
@@ -643,11 +708,11 @@ class TestDuplicateMaxLoopEdges:
 class TestRoleToolsMustExist:
     """A role granted a tool that does not exist runs silently without it.
 
-    skillflow's `resolve_tool_schemas` swallows the ImportError, so
-    `write_file`/`create_file`/`edit_file` — a different application's coding tools —
-    registered cleanly and the maker wrote nothing while its step reported success.
-    At emit time the role table is still a file on disk, so this is the only place the
-    mistake can be caught before it ships.
+    skillflow drops the name, so `write_file`/`create_file`/`edit_file` — a different
+    application's coding tools — registered cleanly and the maker wrote nothing while
+    its step reported success. Since 1.5.29 the miss is at least RECORDED, but that is
+    after the fact; at emit time the role table is still a file on disk, so this is the
+    only place the mistake can be caught before it ships.
     """
 
     _GRAPH = {"name": "g", "description": "x", "begin": "make",
@@ -957,3 +1022,52 @@ class TestTheWriteModeRemedySuggestsTheRoutingFile:
                                  role_table="")["violations"]
         msg = next(x for x in v if "declares no `validation`" in x)
         assert '["*"]' in msg
+
+
+class TestPastedBuildBackendMustExist:
+    """A code template pasted into a role prompt is executed verbatim on every run.
+
+    `gen_mcp_server_builder`'s scaffold role shipped
+    `build-backend = "setuptools.backends._legacy:_Backend"` — a symbol that does
+    not exist — so `pip install -e .` died with BackendUnavailable on the FIRST
+    attempt of every run and a fix lap was spent re-deriving the same correction
+    each time. The maker was not hallucinating; it was following instructions. A
+    fix loop that converges every run and starts from scratch the next one is a fix
+    the generator never made.
+
+    Only the build backend is checked, not APIs in general: the gate runs in a
+    container that has neither setuptools nor any generated project's dependencies,
+    so an arbitrary symbol cannot be resolved there. A build backend is a short,
+    closed set of published constants, so membership is decidable anywhere.
+    """
+
+    def _check(self, prompt):
+        from aitelier.tools.forge_registry_check.impl import (
+            _prompt_build_backend_is_real)
+        return _prompt_build_backend_is_real({"maker": {"system_prompt": prompt}})
+
+    def test_the_hallucinated_backend_is_flagged(self):
+        v = self._check('[build-system]\nbuild-backend = "setuptools.backends._legacy:_Backend"\n')
+        assert v and "does not exist" in v[0]
+        assert "setuptools.build_meta" in v[0]
+
+    def test_the_real_backends_pass(self):
+        for good in ("setuptools.build_meta", "setuptools.build_meta:__legacy__",
+                     "hatchling.build", "poetry.core.masonry.api", "flit_core.buildapi"):
+            assert self._check(f'build-backend = "{good}"') == [], good
+
+    def test_single_quotes_are_read_too(self):
+        assert self._check("build-backend = 'nope.backend'")
+
+    def test_a_prompt_without_a_pyproject_is_untouched(self):
+        assert self._check("Write a markdown report.") == []
+
+    def test_a_role_entry_that_is_not_a_dict_is_survived(self):
+        from aitelier.tools.forge_registry_check.impl import (
+            _prompt_build_backend_is_real)
+        assert _prompt_build_backend_is_real({"maker": "just a string"}) == []
+        assert _prompt_build_backend_is_real(None) == []
+
+    def test_the_role_is_named_so_the_emitter_knows_where_to_look(self):
+        v = self._check('build-backend = "bogus"')
+        assert "maker" in v[0]

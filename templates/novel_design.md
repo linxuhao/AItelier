@@ -38,7 +38,9 @@ high_to_buffer_ratio: "3:1"
 hook_types_rotation: ["对话断句", "动作未完成", "信息不对称", "留白反转", "新设定"]
 notes: "按题材调整数字：玄幻/都市密、悬疑/言情疏"
 ```
-`min/max_chars_per_chapter` 是机器硬门槛（写作时按它卡字数），务必现实（通常 1500-6000，min<max）。
+`min_chars_per_chapter` 是机器硬门槛；`max_chars_per_chapter` 是 draft 阶段的写作目标
+（终稿只给 advisory，不卡死——否则与「润色不得增删情节」互相矛盾，循环无解）。
+务必现实（通常 1500-6000，min<max）。
 
 ### 5. `novel/bible/characters.yaml`（角色卡，一个 YAML **列表**，每项一张卡）
 

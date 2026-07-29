@@ -85,3 +85,84 @@ def test_enriched_running_status_from_the_db_is_replaced_by_the_live_node(patche
     patched(_run("running", node="7"))
     p = {"project_id": "p1", "status": "running:3"}
     assert deps.enrich_project_status(p)["status"] == "running:7"
+
+
+class TestTheRunsOwnReasonIsNotDiscarded:
+    """The reconciliation above picks a STATUS between two producers. The run's
+    `error_reason` is a third thing — the authoritative cause, sitting in the same
+    row skillflow just returned — and it reached no client at all. When the DB's
+    enriched status is stale its prefix disagrees, skillflow's bare "failed" wins,
+    and the user is left with a status and no cause."""
+
+    def test_error_reason_is_attached(self, patched):
+        run = _run("failed")
+        run["error_reason"] = "Node 'give_up_gate' reached"
+        patched(run)
+        out = deps.enrich_project_status({"project_id": "p1", "status": "failed"})
+        assert out["error_reason"] == "Node 'give_up_gate' reached"
+
+    def test_it_survives_the_branch_that_discards_the_db_status(self, patched):
+        """Prefix mismatch → skillflow wins → previously the only surviving text
+        was the bare word "failed"."""
+        run = _run("failed")
+        run["error_reason"] = "Output validation failed: Nothing matching '*' was written"
+        patched(run)
+        out = deps.enrich_project_status(
+            {"project_id": "p1", "status": "running:C1"})   # stale DB value
+        assert out["status"] == "failed"
+        assert "Nothing matching" in out["error_reason"]
+
+    def test_absent_reason_is_an_empty_string_not_a_missing_key(self, patched):
+        patched(_run("completed"))
+        out = deps.enrich_project_status({"project_id": "p1", "status": "completed"})
+        assert out["error_reason"] == ""
+
+
+def test_the_api_response_model_declares_error_reason():
+    """A response_model is a FILTER. `enrich_project_status` attached
+    `error_reason` and FastAPI dropped it on the way out, so the reason was
+    produced and discarded one layer further along than the defect it was added
+    to fix — caught only by reading a live response instead of the source. A
+    field a client is meant to read must be declared, or it does not exist."""
+    from models.schemas import ProjectWithStats
+    assert "error_reason" in ProjectWithStats.model_fields
+
+
+class TestTheReasonIsEnrichedNotTheFrameworkArtifact:
+    """skillflow's `error_reason` often names the EDGE, not the cause. A novel
+    chapter died with "Cycle limit exceeded" while the tool that rejected it had
+    said "continuity_check 未通过: 字数超限 5662 字（上限 4500）". The scheduler
+    already resolves that; serving the raw column would hide a tool result the
+    host had already dug out."""
+
+    def test_a_vague_reason_is_replaced_by_the_resolved_one(self, patched, monkeypatch):
+        import api.dependencies as deps
+        run = _run("failed")
+        run["error_reason"] = "Cycle limit exceeded"
+        patched(run)
+        monkeypatch.setattr(
+            "core.scheduler._failure_reason",
+            lambda r: "Cycle limit exceeded — continuity: 字数超限 5662 字（上限 4500）")
+        out = deps.enrich_project_status({"project_id": "p1", "status": "failed"})
+        assert "字数超限" in out["error_reason"]
+
+    def test_a_non_failed_run_keeps_the_plain_column(self, patched):
+        import api.dependencies as deps
+        run = _run("running", "C1")
+        run["error_reason"] = None
+        patched(run)
+        out = deps.enrich_project_status({"project_id": "p1", "status": "running"})
+        assert out["error_reason"] == ""
+
+    def test_a_resolver_failure_falls_back_instead_of_raising(self, patched, monkeypatch):
+        """This runs on every project list; it must never break the page."""
+        import api.dependencies as deps
+        run = _run("failed")
+        run["error_reason"] = "Cycle limit exceeded"
+        patched(run)
+
+        def _boom(_r):
+            raise RuntimeError("trace db gone")
+        monkeypatch.setattr("core.scheduler._failure_reason", _boom)
+        out = deps.enrich_project_status({"project_id": "p1", "status": "failed"})
+        assert out["error_reason"] == "Cycle limit exceeded"

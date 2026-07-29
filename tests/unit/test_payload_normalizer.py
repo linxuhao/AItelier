@@ -67,10 +67,26 @@ class TestBareToolCall:
 
 
 class TestItLeavesCanonicalShapesAlone:
-    def test_a_files_payload_is_untouched(self):
-        src = {"files": {"a.md": "x"}}
-        p, e = norm(dict(src), SCHEMAS)
-        assert p == src and e is None
+    def test_a_files_payload_keeps_its_files_and_gains_equivalent_actions(self):
+        """`files` is the canonical, documented delivery shape — and it used to be
+        passed through untouched, which meant `_run_tool_step` (the handler every
+        `mode: write` step uses, and which reads only `actions`) answered a
+        correctly-shaped delivery with "No actions found in your response". Seen
+        live: after `create` refused ("already exists — use 'edit'"), the step
+        delivered via `files`, was told it had sent nothing, and spent its
+        remaining turns reading. Handlers that read `files` write from it and
+        break before actions run, so mirroring cannot double-write."""
+        p, e = norm({"files": {"a.md": "x"}}, SCHEMAS)
+        assert p["files"] == {"a.md": "x"}
+        assert p["actions"] == [
+            {"tool": "create", "params": {"file": "a.md", "content": "x"}}]
+        assert e["pattern"] == "files-envelope-to-actions"
+
+    def test_a_files_payload_with_no_mutator_granted_is_left_alone(self):
+        """A reviewer step has no write tool; inventing one would be worse."""
+        p, e = norm({"files": {"a.md": "x"}}, {"read_file": {}})
+        assert p["files"] == {"a.md": "x"}
+        assert not p.get("actions") and e is None
 
     def test_an_actions_payload_is_untouched(self):
         src = {"actions": [{"tool": "write", "params": {"file": "a.md", "content": "x"}}]}
@@ -365,3 +381,66 @@ class TestTheFlatCallFormNamesItsToolAnyWay:
     def test_an_unknown_name_is_not_turned_into_a_call(self):
         p, e = norm({"tool": "summon_daemon", "path": "t.py"}, self.SCHEMAS)
         assert not p.get("actions") and e is None
+
+
+class TestTheOpenAIToolCallEnvelope:
+    """A real C1 response in this host's traces (gen-mcp-server-builder-c8168ed4,
+    seq 227) is a textbook OpenAI envelope carrying a complete `read_file`
+    request. It CRASHED the normalizer with `TypeError: unhashable type: 'dict'`
+    — `_looks_like_calls` tested `e.get("function") in <set>` and `function` is a
+    dict. It never fired in production only because the response predates that
+    code by eleven hours. Guarding without absorbing would trade a crash for a
+    silent discard, which is the defect this file exists to prevent."""
+
+    REAL = {
+        "messages": [{"role": "user", "content": "..."}],
+        "tool_calls": [{
+            "id": "call_read_server", "type": "function",
+            "function": {"name": "read_file",
+                         "arguments": '{"path": "src/word_frequency/server.py"}'},
+        }],
+    }
+
+    def test_it_does_not_crash(self):
+        p, _ = norm(json.loads(json.dumps(self.REAL)), SCHEMAS)
+        assert p["actions"]
+
+    def test_the_call_is_recovered_with_parsed_arguments(self):
+        p, _ = norm(json.loads(json.dumps(self.REAL)), SCHEMAS)
+        act = p["actions"][0]
+        assert act["tool"] == "read_file"
+        assert act["params"] == {"path": "src/word_frequency/server.py"}
+
+    def test_unparseable_arguments_do_not_crash(self):
+        payload = {"tool_calls": [{"type": "function",
+                                   "function": {"name": "read_file",
+                                                "arguments": "{not json"}}]}
+        p, _ = norm(payload, SCHEMAS)
+        assert p["actions"][0]["tool"] == "read_file"
+
+    def test_a_non_string_under_a_name_key_is_not_a_call(self):
+        """The crash generalises beyond `function` — any name key holding a dict."""
+        for key in ("tool", "name", "command"):
+            norm({"tools": [{key: {"nested": 1}}]}, SCHEMAS)   # must not raise
+
+
+class TestEveryFilesShapeSurvives:
+    """`_run_tool_step` reads only `actions`, so each shape `_run_tool_content_step`
+    accepts must also become actions or the two handlers disagree about what a
+    delivery is. The list form is on record in this host's traces."""
+
+    def test_list_of_path_content(self):
+        p, _ = norm({"files": [{"path": "a.py", "content": "x"},
+                               {"path": "b.py", "content": "y"}]}, SCHEMAS)
+        assert [(a["tool"], a["params"]["file"]) for a in p["actions"]] == [
+            ("create", "a.py"), ("create", "b.py")]
+
+    def test_a_json_object_body_is_serialised_not_dropped(self):
+        """The natural shape for a `.json` deliverable; a str-only filter drops it."""
+        p, _ = norm({"files": {"spec.json": {"tools": [1, 2]}}}, SCHEMAS)
+        assert p["actions"][0]["params"]["file"] == "spec.json"
+        assert json.loads(p["actions"][0]["params"]["content"]) == {"tools": [1, 2]}
+
+    def test_a_list_entry_without_content_is_skipped_not_invented(self):
+        p, _ = norm({"files": [{"path": "a.py"}]}, SCHEMAS)
+        assert not p.get("actions")

@@ -4,6 +4,7 @@
 # Auth-optional: ownership checks are no-ops when user=None (CLI mode).
 
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -509,17 +510,69 @@ def _read_step_output(project_id: str, step_id: str,
             except Exception:
                 pass
 
-    # Read rejection history for this step (migrated from Inbox_{step_id}/ to {step_id}/)
-    rejection_file = final_dir / "user_rejection_history.json"
-    rejection_history = None
-    if rejection_file.exists():
-        import json
-        rejection_history = json.loads(rejection_file.read_text())
-
     return {
         "files": files if files else None,
-        "rejection_history": rejection_history
+        "rejection_history": _read_rejection_rounds(project_id, step_id, graph_name),
     }
+
+
+# One `## <heading>` per rejection round, written by skillflow's
+# `_append_feedback_log`. Matched loosely on purpose: the host must not depend on
+# the heading's wording (it is localised — "反馈轮 #1 · <ts>"), only on the fact
+# that each round starts a level-2 section.
+_FEEDBACK_ROUND_RE = re.compile(r"^##[ \t]+(.*)$", re.MULTILINE)
+
+
+def _read_rejection_rounds(project_id: str, step_id: str,
+                           graph_name: str) -> Optional[list]:
+    """The user's own rejection feedback, for the checkpoint modal's banner.
+
+    This used to read `user_rejection_history.json` out of the step's final dir.
+    That file has THREE readers in this repo — here, `prompt_assembler`, and
+    `restage`'s skip-list — and NO writer anywhere; `find` over a live workspace
+    turns up none. So the banner never rendered: a user who rejected with
+    feedback saw the modal reopen looking identical and concluded the rejection
+    had failed. The feedback had in fact been saved AND delivered to the agent,
+    which acted on it.
+
+    skillflow is the one that persists it (`_append_feedback_log`, since 1.5.15),
+    at `<config_dir>/_feedback/<step>.md`. Two things make it easy to look in the
+    wrong place, and the old code got both wrong: the log is keyed by the step the
+    reject REWINDS to (`checkpoint_reject_to` — `outline`, not `outline_gate`),
+    and it lives beside the config dir rather than inside the step's output.
+    Resolve the path through skillflow's own helper so this cannot drift.
+    """
+    try:
+        from skillflow.context import feedback_log_path
+        sf = get_skillflow()
+        target = step_id
+        try:
+            node = sf._get_resolver(graph_name).get_node(step_id)
+            target = (node.checkpoint_reject_to or step_id) if node else step_id
+        except Exception:
+            pass
+        cfg_dir = sf._workspace.get_config_path(project_id, graph_name)
+        path = feedback_log_path(cfg_dir, target)
+        if not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "could not read the checkpoint feedback log", exc_info=True)
+        return None
+
+    starts = [m.start() for m in _FEEDBACK_ROUND_RE.finditer(text)]
+    if not starts:
+        body = text.strip()
+        return [{"user_feedback": body}] if body else None
+    rounds = []
+    for i, s in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        block = text[s:end]
+        heading, _, body = block.partition("\n")
+        rounds.append({"round": heading.lstrip("# ").strip(),
+                       "user_feedback": body.strip()})
+    return rounds or None
 
 
 def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:
@@ -600,7 +653,15 @@ def get_pending_checkpoint(
         step=step_id,
         project_id=project_id,
         step_output=step_output,
-        interaction=for_checkpoint_waiting(step_label=label, rejection_count=0),
+        # The real count, not a hardcoded 0. A user who rejects has no other way
+        # to tell their feedback landed: this is the same pause label on the same
+        # gate, so without it the modal is indistinguishable from the one they
+        # just rejected.
+        rejection_count=len((step_output or {}).get("rejection_history") or []),
+        interaction=for_checkpoint_waiting(
+            step_label=label,
+            rejection_count=len((step_output or {}).get("rejection_history") or []),
+        ),
     )
 
 

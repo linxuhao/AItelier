@@ -77,6 +77,12 @@ class ProjectWithStats(BaseModel):
     latest_status: Optional[str] = None
     latest_step: Optional[str] = None
     last_update: Optional[str] = None
+    # The run's own cause, from skillflow. Declared HERE because a response_model
+    # is a filter: `enrich_project_status` attached error_reason and FastAPI
+    # dropped it on the way out, so the reason was produced and discarded one
+    # layer further along than the bug it was added to fix. A field a client is
+    # meant to read must be declared, or it does not exist.
+    error_reason: Optional[str] = None
 
 class InteractionMeta(BaseModel):
     """Structured interaction guidance for API clients (CLI, web GUI).

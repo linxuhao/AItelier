@@ -366,6 +366,25 @@ def enrich_project_status(project: dict | None) -> dict | None:
             # with a bare "failed" even though the scheduler had already written
             # "failed:Cycle limit exceeded — v_smoke: ...". A DB status whose prefix
             # DISAGREES is stale (e.g. a reactivated run), so skillflow wins.
+            # The reason, ENRICHED — never the raw column alone. skillflow's
+            # `error_reason` is often a framework artifact that names the edge and
+            # not the cause: a novel chapter died with "Cycle limit exceeded" while
+            # the tool that actually rejected it had said
+            # "continuity_check 未通过: 字数超限 5662 字（上限 4500）". The scheduler
+            # already resolves that (`_failure_reason` → `_last_trace_error`), so
+            # serving the raw column here would hide a tool result the host had
+            # already dug out — reintroducing the defect one layer further along.
+            # Reconciliation below can also discard the DB's enriched status when
+            # its prefix disagrees, so this must not depend on which producer won.
+            try:
+                from core.scheduler import _failure_reason
+                project["error_reason"] = _failure_reason(run) if (
+                    run.get("status") == "failed") else (run.get("error_reason") or "")
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "could not resolve the enriched failure reason", exc_info=True)
+                project["error_reason"] = run.get("error_reason") or ""
             run_status = run["status"]
             db_status = project.get("status") or ""
             if run_status == "running" and run.get("current_node"):

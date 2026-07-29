@@ -294,7 +294,10 @@ def next_chapter_number(ws) -> int:
 # ── Characters ───────────────────────────────────────────────────────────────
 
 def load_characters(ws) -> dict[str, dict]:
-    """name → card. Also indexes aliases so mention-scans catch both."""
+    """Canonical name → card. Keyed on ``name`` ONLY — an alias is not a key
+    here (``alias_owners`` maps those), because the key is also what
+    ``character_path`` turns into a filename: indexing 郑队 → 郑毅's card would
+    make the next write land in 郑队.yaml and split the character in two."""
     out: dict[str, dict] = {}
     d = characters_dir(ws)
     if not d.is_dir():
@@ -309,6 +312,25 @@ def load_characters(ws) -> dict[str, dict]:
 
 def character_path(ws, name: str) -> Path:
     return characters_dir(ws) / f"{safe_filename(name)}.yaml"
+
+
+def alias_owners(characters: dict[str, dict]) -> dict[str, str]:
+    """alias → the canonical name whose card carries it.
+
+    Cards keep ``aliases`` (郑毅 → 郑队/老郑) because that is what the prose
+    actually says, and appearances get logged under whichever form the chapter
+    used. Everything downstream keys on the canonical name, so an alias reads as
+    an unknown character — and "unknown character" is one `create: true` away
+    from a SECOND card for somebody who already has one. A real character's own
+    name never resolves as someone else's alias.
+    """
+    out: dict[str, str] = {}
+    for canonical, card in characters.items():
+        for a in card.get("aliases") or []:
+            a = str(a).strip()
+            if a and a not in characters:
+                out.setdefault(a, canonical)
+    return out
 
 
 # ── Events (journal entries) ─────────────────────────────────────────────────
@@ -369,6 +391,7 @@ def validate_events(ws, events: list[dict]) -> None:
     """
     characters = load_characters(ws)
     known = set(characters)
+    aliases = alias_owners(characters)
     protagonist = _find_protagonist(characters)
     factions = set((load_yaml(bible_dir(ws) / "world.yaml", {}) or {})
                    .get("factions") or {})
@@ -385,6 +408,14 @@ def validate_events(ws, events: list[dict]) -> None:
             if etype == "protagonist" and name not in known and protagonist:
                 name = protagonist
             if name not in known:
+                # An alias is never a new person — and `create: true` on one
+                # would write a second card for somebody who already has one.
+                if name in aliases:
+                    raise ValueError(
+                        f"events: 『{name}』是『{aliases[name]}』的别名（见其角色卡"
+                        f"的 aliases），不是另一个人。记账一律用本名"
+                        f"『{aliases[name]}』——用别名建卡会把同一个人拆成两张卡，"
+                        "此后余额各记各的。正文里怎么称呼不影响分录用哪个名字。")
                 if not ev.get("create"):
                     raise _no_card_error(ws, name)
                 known.add(name)

@@ -163,6 +163,57 @@ class TestTheProbeNamesWhoHasNoCardYet:
         assert "还没有档案的角色" not in text
 
 
+class TestAnAliasIsNotANewCharacter:
+    """Cards carry the forms the prose uses (郑毅 → 郑队/老郑, and the seed's
+    王老 → 王长老), and appearances get logged under whichever one the chapter
+    said. Everything downstream keys on the canonical name, so an alias reads as
+    an unknown character — one `create: true` away from a SECOND card for
+    somebody who already has one, with the balances then split across both."""
+
+    def test_the_probe_does_not_offer_an_alias_as_cardless(self, tmp_path):
+        _seed(tmp_path)
+        ns.dump_yaml(ns.state_dir(tmp_path) / "index.yaml",
+                     {"by_character": {"王长老": [3], "李默": [3]}})
+        state_probe(workspace_root=str(tmp_path), out_dir=str(tmp_path / "probe"))
+        text = (tmp_path / "probe" / "novel_context.md").read_text(encoding="utf-8")
+        section = text.split("出场过但还没有档案的角色")[1].split("\n## ")[0]
+        assert "李默" in section
+        assert "王长老" not in section, "王长老 is 王老's alias — he has a card"
+
+    def test_booking_under_an_alias_is_refused_with_the_real_name(self, tmp_path):
+        _seed(tmp_path)
+        with pytest.raises(ValueError, match="别名") as e:
+            ns.validate_events(tmp_path, [
+                {"entity_type": "character", "entity_name": "王长老",
+                 "create": True, "changes": {"tier": 3}, "reason": "x"}])
+        assert "王老" in str(e.value)          # the name to use instead
+
+    def test_no_duplicate_card_reaches_the_bible(self, tmp_path):
+        _seed(tmp_path, git=True)
+        _write_prose(tmp_path, GOOD_PROSE)
+        _write_events(tmp_path, {
+            "chapter": 1, "title": "x", "summary": "王长老现身。",
+            "events": [{"entity_type": "character", "entity_name": "王长老",
+                        "create": True, "changes": {"tier": 3}, "reason": "x"}],
+            "appearances": [{"name": "王长老"}]})
+        with pytest.raises(ValueError, match="别名"):
+            apply_state(workspace_root=str(tmp_path))
+        assert not ns.character_path(tmp_path, "王长老").exists()
+        assert _git_status(tmp_path) == ""
+
+    def test_a_real_characters_own_name_is_never_shadowed(self, tmp_path):
+        """Sloppy data: 赵四's card lists a real character's name as an alias.
+        The real card must win — 林凡's events keep going to 林凡."""
+        _seed(tmp_path)
+        card = ns.load_characters(tmp_path)["赵四"]
+        card["aliases"] = ["林凡"]
+        ns.dump_yaml(ns.character_path(tmp_path, "赵四"), card)
+        assert "林凡" not in ns.alias_owners(ns.load_characters(tmp_path))
+        ns.validate_events(tmp_path, [
+            {"entity_type": "character", "entity_name": "林凡",
+             "changes": {"power_level": 12}, "reason": "ok"}])
+
+
 class TestValidateEvents:
     def test_a_created_entity_is_known_to_later_entries(self, tmp_path):
         _seed(tmp_path)

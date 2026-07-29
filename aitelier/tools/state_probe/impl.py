@@ -104,9 +104,12 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
     # 出场过、但从没记过事件 → 还没有档案。这一名单存在于反向索引与角色卡之差，
     # 谁也不会主动去算；不说出来，第一次给他们记分录时 apply_state 才拒绝，
     # 而那已经是本章的最后一步了（live: 王超 ch3 出场、ch5 才记事件）。
+    # 别名不是无档案：appearances 常按正文的称呼写（郑队/老郑），把别名报成"还没
+    # 建档的人"，就是在教 finalizer 给同一个人再建一张卡。
     index = ns.load_yaml(ns.state_dir(base) / "index.yaml", {}) or {}
+    aliases = ns.alias_owners(characters)
     cardless = sorted(nm for nm in (index.get("by_character") or {})
-                      if nm not in characters)
+                      if nm not in characters and nm not in aliases)
     if cardless:
         parts += ["## 出场过但还没有档案的角色（首次记事件时 `create: true`）", "",
                   "、".join(cardless)

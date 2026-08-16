@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/meta", tags=["Meta Conversation"])
 
+# Free-text intake cap (chars). Not a UX limit — it only exists so a runaway or
+# hostile client can't push an unbounded body through the LLM calls these
+# endpoints make. It must stay large enough for the real intake: users paste
+# whole requirements documents (a 42 KB API spec is ordinary), and that verbatim
+# text is what survives into project/spec.md — truncating it at the door would
+# silently drop requirements the pipeline is supposed to build against.
+MAX_INTAKE_CHARS = 200_000
+
 
 # ── Request / Response models ──
 
@@ -38,14 +46,14 @@ class HistoryTurn(BaseModel):
 
 
 class MetaStartRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=4000)
+    prompt: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
     project_id: str
 
 
 class MetaNextRequest(BaseModel):
     project_id: str
     history: list[HistoryTurn] = []
-    answer: str = Field(..., min_length=1, max_length=4000)
+    answer: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
 
 
 class MetaForceRequest(BaseModel):
@@ -64,13 +72,13 @@ class MetaResponse(BaseModel):
 class ReviseBriefRequest(BaseModel):
     project_id: str
     project_brief: dict
-    feedback: str = Field(..., min_length=1, max_length=4000)
+    feedback: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
 
 
 # ── Intent detection ──
 
 class IntentDetectRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=4000)
+    prompt: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
 
 
 class IntentDetectResponse(BaseModel):
@@ -94,7 +102,7 @@ def meta_detect_intent(
 # ── Pre-project assessment (no project_id required) ──
 
 class AssessRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=4000)
+    prompt: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
     history: list[HistoryTurn] = []
 
 
@@ -291,13 +299,13 @@ def revise_brief(
 
 class TaskMetaStartRequest(BaseModel):
     project_id: str
-    prompt: str = Field(..., min_length=1, max_length=4000)
+    prompt: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
 
 
 class TaskMetaNextRequest(BaseModel):
     task_id: int
     history: list[HistoryTurn] = []
-    answer: str = Field(..., min_length=1, max_length=4000)
+    answer: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
 
 
 class TaskMetaForceRequest(BaseModel):
@@ -485,7 +493,7 @@ class CheckpointApprovalRequest(BaseModel):
 class CheckpointRejectionRequest(BaseModel):
     project_id: str = ""   # optional — defaults to URL path project_id
     checkpoint: str
-    feedback: str = Field(..., min_length=1, max_length=4000)
+    feedback: str = Field(..., min_length=1, max_length=MAX_INTAKE_CHARS)
 
 
 def _read_step_output(project_id: str, step_id: str,

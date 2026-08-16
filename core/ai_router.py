@@ -291,13 +291,23 @@ class AIGateway:
         # Thinking mode: inject reasoning params, remove incompatible temperature
         if self.enable_thinking:
             kwargs.pop("temperature", None)
-            if self.thinking_effort:
-                kwargs["reasoning_effort"] = self.thinking_effort
             extra_body = {}
             if self.provider == "minimax":
                 extra_body["reasoning_split"] = True
             else:
                 extra_body["thinking"] = {"type": "enabled"}
+            if self.thinking_effort:
+                # litellm's DeepSeekChatConfig pops `reasoning_effort` and maps
+                # it to a bare `thinking: {"type": "enabled"}`, dropping the
+                # level (BerriAI/litellm#27439), so every effort silently
+                # collapses to DeepSeek's default `high`. extra_body is
+                # forwarded verbatim, so route the level through it for
+                # DeepSeek and keep the normal top-level param elsewhere.
+                model = (self.litellm_model or "").lower()
+                if self.provider == "deepseek" or "deepseek" in model:
+                    extra_body["reasoning_effort"] = self.thinking_effort
+                else:
+                    kwargs["reasoning_effort"] = self.thinking_effort
             kwargs["extra_body"] = extra_body
 
         kwargs.update(extra)

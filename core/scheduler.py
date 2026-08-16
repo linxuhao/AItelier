@@ -12,6 +12,7 @@ import threading
 import time as _time
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from skillflow.exceptions import RequiredContextMissing
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow
 from core.dpe_pipeline import PipelineEngine, MaxRetriesExceeded
 from core.workspace_manager import DPE_GRAPH_NAME
@@ -734,6 +735,23 @@ async def _run_skillflow_tick(project_id: str, loop):
     # Phase B: Claim
     try:
         claimed = sf.claim_next_step(run_id)
+    except RequiredContextMissing as e:
+        # TERMINAL, not retryable. claim_next_step resolves the same node's
+        # context every tick, and the only thing that would ever write the
+        # missing file is a step this run will never reach — so the next tick
+        # raises the identical error, forever. That is the 47-minute running:1
+        # wedge: a dpe_default run started without its meta_conversation
+        # predecessor, missing `finalize`, re-claiming every tick with nobody
+        # watching. Fail the run so the reason reaches the dashboard and the
+        # project stops being re-picked.
+        _record_tick_error(sf, run_id, project_id, e, "claim_failed")
+        try:
+            sf.fail_run(run_id, f"Missing required input: {e}")
+        except Exception:
+            pass    # a fail_run failure must not mask the original error
+        _sync_project_status_to_db(project_id)
+        tick_log(project_id, "claim_terminal", run=run_id[:8], error=str(e)[:160])
+        return
     except Exception as e:
         # This swallowed the reason ENTIRELY — no log, no trace, no status — and
         # the tick just returned, so the run sat at its current node looking

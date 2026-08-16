@@ -47,17 +47,37 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     # direct start that skipped meta does not. (skillflow's required-context flag
     # on step 1 also catches this at run time; this fails earlier, at submit, with
     # a clear message.)
+    def _refuse(message: str) -> dict:
+        # Returning {"status": "error"} does NOT stop the build on its own: the
+        # caller (api/project_routers.py::submit_project) has already cleared the
+        # drafting gate, and the scheduler starts a DPE run for ANY project that
+        # is 'planning' and not 'drafting' — nothing downstream reads this return
+        # value. Live: a submit this guard refused still got a dpe_default run
+        # created on the next tick, which then spun on "Required context source
+        # resolved to no content: finalize" for 47 minutes at running:1. Re-arm
+        # the drafting gate (the existing "brief isn't ready" flag, honoured by
+        # both get_next_active_project and _get_or_create_skillflow_run) so the
+        # refusal actually holds.
+        db.set_project_meta_state(project_id, "drafting")
+        return {"status": "error", "project_id": project_id, "message": message}
+
     try:
         from api.dependencies import get_skillflow
         goals = (get_skillflow()._workspace.get_project_path(project_id)
                  / "meta_conversation" / "finalize" / "step1_goals.json")
         if not (goals.is_file() and goals.read_text(encoding="utf-8").strip()):
-            return {"status": "error", "project_id": project_id, "message":
-                    "Cannot start the build: no finalized brief (the meta "
-                    "conversation must produce step1_goals.json first). Start the "
-                    "build through the butler / meta conversation, not directly."}
-    except Exception:
-        pass  # never block the proper flow on a guard-internal error
+            return _refuse(
+                "Cannot start the build: no finalized brief (the meta "
+                "conversation must produce step1_goals.json first). Start the "
+                "build through the butler / meta conversation, not directly.")
+    except Exception as e:
+        # Fail CLOSED. This used to be `pass` ("never block the proper flow on a
+        # guard-internal error"), but a guard whose whole job is to refuse must
+        # not degrade to "allow" — that starts exactly the brief-less build it
+        # exists to prevent, and the failure is invisible.
+        return _refuse(
+            f"Cannot start the build: the finalized-brief guard could not run "
+            f"({type(e).__name__}: {e}).")
 
     # Clear the drafting gate so the scheduler can pick up this project.
     db.set_project_meta_state(project_id, None)

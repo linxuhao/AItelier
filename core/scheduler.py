@@ -23,6 +23,10 @@ from core.orphan_dbg import odbg as _odbg
 # A normal DPE run is well under this; this only trips on a non-converging loop.
 import os as _os
 _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
+# Per-instance companion: how often ONE step instance may be re-claimed before the
+# run is force-failed. In-framework re-claims of a single instance are bounded by
+# max_retries (3); anything far above that is a resumed terminal state.
+_MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
 
 # Hung-step detection: warn when a claimed step has run longer than
 # timeout_seconds * this multiplier.  Detection runs on a separate periodic
@@ -698,6 +702,32 @@ async def _run_skillflow_tick(project_id: str, loop):
             sf.fail_run(run_id, f"Aborted: exceeded {_MAX_STEPS_PER_RUN} step "
                                 f"executions ({n_exec}) — likely a non-converging "
                                 f"loop (e.g. a verify gate that never passes).")
+            _sync_project_status_to_db(project_id)
+            return
+        # …and bound re-execution of a SINGLE step instance, which trips far
+        # earlier and on a sharper signal. A legitimate loop opens a NEW instance
+        # row per iteration (a 15-task run claims t_impl 15 times across 15 rows);
+        # re-claiming ONE instance only happens when something reset a completed
+        # row back to pending. In-framework that is bounded (validation/fail_step
+        # retries stop at max_retries=3); out-of-framework it is not — a resume
+        # (reactivate_run, reject_checkpoint) recycles the row with no counter at
+        # all. That is the shape all three of today's spins share: a TERMINAL
+        # condition the host kept treating as retryable. On the benchmark's
+        # arxiv-mcp-server task, 5_review's instance 256 was claimed 227 times
+        # while every other instance in the run was claimed exactly once, and the
+        # whole-run valve above finished 1 claim short of firing (301 vs 300)
+        # when the 3-hour wall clock killed the task.
+        inst = sf.trace_query(run_id,
+            "SELECT step_id, step_instance_id, COUNT(*) FROM skillflow_trace "
+            "WHERE run_id = ? AND event = 'claimed' "
+            "AND step_instance_id IS NOT NULL "
+            "GROUP BY step_instance_id ORDER BY 3 DESC LIMIT 1",
+            (run_id,))
+        if inst and inst[0][2] > _MAX_CLAIMS_PER_INSTANCE:
+            sf.fail_run(run_id,
+                        f"Aborted: step '{inst[0][0]}' (instance {inst[0][1]}) was "
+                        f"re-executed {inst[0][2]} times without the run advancing "
+                        f"— a terminal state is being resumed instead of ending.")
             _sync_project_status_to_db(project_id)
             return
     except Exception:

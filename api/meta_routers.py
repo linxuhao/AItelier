@@ -595,6 +595,29 @@ def _round(heading: str, body: str) -> dict:
     return {"round": heading, "user_feedback": body, "reason": body}
 
 
+# A run that failed on ROUTING cannot be rescued by approving a checkpoint, so
+# it must not be offered as one. The A3 rescue path below resumes a failed run
+# with sf.reactivate_run(), which re-opens the step named in error_reason — and
+# for a routing dead end that step re-executes, produces the same verdict, and
+# dead-ends on the same spent edge, because a step's own re-run can never lower
+# an edge count. Live on the NL2Repo benchmark (arxiv-mcp-server, 2026-08-17):
+# dpe_default's `5_review` spent its `→ 3` goal-loop budget (max_loop=2),
+# skillflow failed the run correctly ("Cycle limit exceeded … '5_review' -> '3'
+# (max_loop=2 reached)"), and then the heuristic fallback below reported step 3's
+# long-passed checkpoint as pending; the harness's auto-approver resurrected the
+# run 229 times in 100 minutes (one step instance re-claimed 227 times) until the
+# 3-hour wall clock killed the task.
+_ROUTING_DEAD_END_MARKERS = ("cycle limit exceeded", "no matching transition")
+
+
+def _failed_on_routing(run: dict | None) -> bool:
+    """True when a failed run's reason is a dead end no re-run can clear."""
+    if not run or run.get("status") != "failed":
+        return False
+    reason = (run.get("error_reason") or "").lower()
+    return any(m in reason for m in _ROUTING_DEAD_END_MARKERS)
+
+
 def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:
     """Get checkpoint state from skillflow (source of truth).
 
@@ -604,11 +627,14 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:
     completed step is a checkpoint. This allows the user to approve a
     checkpoint after a downstream step (e.g. the verifier) failed
     catastrophically. The approve_checkpoint handler will then reactivate
-    the run via sf.reactivate_run() before resuming.
+    the run via sf.reactivate_run() before resuming. A run that failed on
+    ROUTING is excluded — see _failed_on_routing.
     """
     sf = get_skillflow()
     run = sf.get_run_by_project(project_id)
     if not run or run["status"] not in ("paused", "failed"):
+        return "", "", "", ""
+    if _failed_on_routing(run):
         return "", "", "", ""
 
     run_id = run["id"]

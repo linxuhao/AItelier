@@ -725,7 +725,15 @@ async def _run_skillflow_tick(project_id: str, loop):
     if next_node is None:
         # Handle terminal states
         run = sf.get_run(run_id)
-        tick_log(project_id, "terminal", run=run_id[:8], status=run["status"])
+        # Carry error_reason on a FAILED run. advance_run() ends a routing dead
+        # end by failing the run in-DB ("No matching transition from
+        # 't_impl_review' with flags {}") rather than raising, so this branch is
+        # the only tick surface that sees it — and logging just `status=failed`
+        # sent the operator of the 104-task sweep to sqlite to find out why one
+        # project stopped.
+        tick_log(project_id, "terminal", run=run_id[:8], status=run["status"],
+                 reason=(run.get("error_reason") or "")[:200]
+                 if run["status"] == "failed" else None)
         if run["status"] in ("paused", "completed", "failed"):
             # skillflow notification bus emits checkpoint_paused / run_completed /
             # run_failed; we just sync the AItelier DB status.

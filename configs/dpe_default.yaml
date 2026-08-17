@@ -346,6 +346,17 @@ steps:
       - to: "t_plan"
         match: { from_file: "review_verdict.json", field: "passed", value: false }
         max_loop: 3
+      # Same dead end as t_impl_review below (see the long note there): an
+      # absent/unparseable verdict, or a `passed` that is neither true nor false,
+      # matches NEITHER edge and kills the run mid-task-loop. Re-run the reviewer
+      # first — the plan under review is unchanged, so nothing is discarded —
+      # bounded so a systematically broken reviewer can't spin.
+      - to: "t_plan_review"
+        max_loop: 2
+      # Then proceed with the plan UNREVIEWED rather than discard every task the
+      # loop already built: t_impl_review and the project-level gate still stand
+      # between this plan and `done`.
+      - to: "t_impl"
 
   # ─── Task Implement → Review ───
   # Lifecycle hooks:
@@ -432,6 +443,33 @@ steps:
       - to: "t_impl"
         match: { from_file: "review_verdict.json", field: "passed", value: false }
         max_loop: 3
+      # ── Unroutable verdict: bounded reviewer retry, then forward ───────────
+      # Both edges above read `passed` out of review_verdict.json. When the file
+      # is absent or unparseable, or `passed` is not a bool, NEITHER matches and
+      # the run DIES — "No matching transition from 't_impl_review' with flags
+      # {}" — discarding every task the loop had already finished. Live, in the
+      # 104-task benchmark sweep (project nl2repo-asteval, task core_astutils):
+      # the reviewer spent all ten of its tool turns emitting reasoning at
+      # max_output_tokens 4096, never called `create_verdict`, and the step
+      # committed "0 file(s)" with empty flags. A harness dead end scored as a
+      # model failure.
+      #
+      # 1) Re-run the REVIEWER, not the implementer. An empty/garbled verdict is
+      #    a transient LLM failure; the code under review is unchanged, and
+      #    bouncing to t_impl would re-write work nobody objected to. max_loop
+      #    bounds it, and the loop resets body edge counts per item, so the
+      #    budget is per task and a broken reviewer cannot spin.
+      - to: "t_impl_review"
+        max_loop: 2
+      # 2) Give up on THIS review and move on. `task_loop` credits the current
+      #    item and dispatches the next, so this edge can only make progress —
+      #    unlike an `_error:` edge, which re-enters the loop WITHOUT crediting
+      #    and would re-run the same item forever. Skipping one task's review
+      #    beats losing the run: 5 → 5_test → 5_review (goal-looping back to the
+      #    PM) still has to pass before anything ships. This also rescues the
+      #    reject edge's own dead end — once its max_loop is spent, every edge
+      #    used to be exhausted and the run died with CycleLimitExceeded.
+      - to: "task_loop"
 
   # ─── Final Verify ───
   - id: "5"

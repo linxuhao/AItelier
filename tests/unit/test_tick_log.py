@@ -87,3 +87,46 @@ class TestItCannotBreakTheTick:
             def __repr__(self):
                 raise ValueError("nope")
         scheduler.tick_log("p1", "executed", weird=_Bad())   # must not raise
+
+
+class TestATerminalTickSaysWhy:
+    """A routing dead end is reported by skillflow as a FAILED RUN, not an
+    exception: advance_run() writes the reason onto the run row and returns
+    None, so the terminal branch is the tick's only chance to say it. Logging
+    just `status=failed` is what sent the operator of the 104-task benchmark
+    sweep into sqlite to find out why nl2repo-asteval had stopped.
+    """
+
+    @staticmethod
+    def _stub(monkeypatch, run):
+        from unittest.mock import MagicMock
+        sf = MagicMock()
+        sf.trace_query.return_value = [[0]]
+        sf.get_run.return_value = run
+        monkeypatch.setattr(scheduler, "get_skillflow", lambda: sf)
+        monkeypatch.setattr(scheduler, "_get_or_create_skillflow_run", lambda pid: "run1")
+        monkeypatch.setattr(scheduler, "_has_active_claim", lambda *a: False)
+        monkeypatch.setattr(scheduler, "_advance_recording_crashes", lambda *a: None)
+        monkeypatch.setattr(scheduler, "_sync_project_status_to_db", lambda pid: None)
+        return sf
+
+    async def test_a_failed_run_logs_its_error_reason(self, caplines, monkeypatch):
+        self._stub(monkeypatch, {
+            "status": "failed",
+            "error_reason": "No matching transition from 't_impl_review' with flags {}",
+        })
+
+        await scheduler._run_skillflow_tick("nl2repo-asteval", None)
+
+        line = next(l for l in caplines if "outcome=terminal" in l)
+        assert "status=failed" in line
+        assert "No matching transition from 't_impl_review'" in line
+
+    async def test_a_completed_run_carries_no_reason(self, caplines, monkeypatch):
+        self._stub(monkeypatch, {"status": "completed", "error_reason": None})
+
+        await scheduler._run_skillflow_tick("p1", None)
+
+        line = next(l for l in caplines if "outcome=terminal" in l)
+        assert "status=completed" in line
+        assert "reason=" not in line

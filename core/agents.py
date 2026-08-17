@@ -13,6 +13,9 @@ from core.ai_router import AIGateway, NativeTurn
 # roles, or any generated pipeline's agents). Such configs declare model:"host"
 # with their prompt embedded as system_prompt; AItelier maps that single token to
 # one real model instead of requiring a per-role agent_config. Override via env.
+# It only decides what the sentinel MEANS — to pin every agent (explicit
+# per-role models included) to one model for a benchmark, see
+# core/ai_router.py:resolve_agent_model.
 HOST_AGENT_MODEL = os.getenv("AITELIER_HOST_AGENT_MODEL", "deepseek/deepseek-v4-flash")
 
 

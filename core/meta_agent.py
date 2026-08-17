@@ -20,7 +20,8 @@ from tenacity import (
     retry_if_exception_type,
 )
 
-from core.ai_router import AIGateway, RETRYABLE_EXCEPTIONS, _read_secret
+from core.ai_router import (AIGateway, RETRYABLE_EXCEPTIONS, _read_secret,
+                            resolve_agent_model)
 
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
 _DEFAULT_CONFIG_PATH_V2 = "agent_configs/meta_conversation.yaml"
@@ -1518,7 +1519,10 @@ class MetaAgent:
         self._usage_totals: dict | None = None
 
         cfg = _load_meta_agent_config()
-        raw_model = cfg.get("model", "deepseek/deepseek-v4-flash")
+        # resolve_agent_model: benchmark runs pin every agent, butler included,
+        # to one model (see core/ai_router.py). This path never touches
+        # AIGateway, so it applies the pin itself.
+        raw_model = resolve_agent_model(cfg.get("model", "deepseek/deepseek-v4-flash"))
         self._raw_model = raw_model
         self.litellm_model, self.api_base, self.api_key = _resolve_provider(raw_model)
         self.enable_thinking = cfg.get("enable_thinking", False)
@@ -1939,7 +1943,7 @@ class MetaAgent:
 
     async def _summarize_chunk(self, chunk_text: str) -> str | None:
         cfg = _load_agent_role_config("compacter")
-        raw_model = cfg.get("model", "deepseek/deepseek-v4-flash")
+        raw_model = resolve_agent_model(cfg.get("model", "deepseek/deepseek-v4-flash"))
         model, api_base, api_key = _resolve_provider(raw_model)
         try:
             base = Path(__file__).resolve().parent.parent

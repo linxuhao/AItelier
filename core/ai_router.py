@@ -120,6 +120,25 @@ class NativeTurn:
     reasoning_content: str = ""
 
 
+def resolve_agent_model(model_name: str) -> str:
+    """Apply the single-model pin, if one is set, to an already-resolved model.
+
+    Benchmark / ablation escape hatch. The production DPE mix deliberately puts
+    a few roles (architect, pm, final_verifier) on a stronger model than the
+    rest, which makes a benchmark number unattributable: a reviewer can always
+    say the stronger model produced the win, not the harness. Setting
+    AITELIER_FORCE_ALL_AGENT_MODELS forces *every* agent onto one model, so a
+    harness-vs-harness comparison holds the model fixed — and running the same
+    benchmark with and without it measures the Pro-vs-Flash delta instead. The
+    production config stays the default; nothing is edited to run a benchmark.
+
+    Distinct from AITELIER_HOST_AGENT_MODEL (core/agents.py), which only says
+    what the skillflow "host"/"default" sentinel means: this one overrides
+    explicit per-role models too. Unset (the normal case) is a no-op.
+    """
+    return os.getenv("AITELIER_FORCE_ALL_AGENT_MODELS") or model_name
+
+
 class AIGateway:
     """
     AItelier 统一模型路由网关
@@ -129,6 +148,7 @@ class AIGateway:
     def __init__(self, model_name: str, config_path: str = "llm_providers.json",
                  enable_thinking: bool = False, thinking_effort: str | None = None,
                  temperature: float = 0.2, max_output_tokens: int = 8192):
+        model_name = resolve_agent_model(model_name)
         self.api_base = None
         self.api_key = None
         self.litellm_model = model_name

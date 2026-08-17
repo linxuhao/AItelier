@@ -4,6 +4,20 @@
 # max_output_tokens: LLM completion max tokens (default 8192, increase for high-output steps)
 # native_tool_calling: true = use native function calling instead of JSON-mode dispatch
 # fallback_to_json_mode: true = auto fallback to JSON mode if native fails
+#
+# thinking.effort on the *_reviewer roles is NOT a cost knob — it is what keeps
+# the review from silently not happening. DeepSeek bills reasoning inside
+# max_output_tokens (completion_tokens includes reasoning_tokens; there is no
+# separate budget parameter — budget_tokens / thinking.max_tokens /
+# max_reasoning_tokens are all accepted and ignored), and with no effort set the
+# server defaults to ~high. Measured on deepseek-v4-flash with a reviewer-shaped
+# prompt at the old 4096 cap: default effort truncated 5/8 turns to
+# finish_reason=length with zero text and zero tool_calls — the create_verdict
+# call the reviewer exists to make was never emitted, and the step read as a
+# clean no-op. At effort "low" the same prompt truncated 0/8 and every run still
+# found the planted defect, so detection quality was bounded by truncation, not
+# by reasoning depth. 8192 then covers the tail: reviewer reasoning in the run
+# traces reaches ~18k chars (~6k tokens) at p99, which does not fit under 4096.
 
 researcher:
   model: "deepseek/deepseek-v4-flash"
@@ -22,11 +36,12 @@ researcher_reviewer:
   temperature: 0.1
   template: "step1_5_researcher_red.md"
   tools: ["list_tree"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"
 
 architect:
   model: "deepseek/deepseek-v4-pro"
@@ -45,11 +60,12 @@ architect_reviewer:
   temperature: 0.1
   template: "step2_architect_red.md"
   tools: ["list_tree"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"
 
 pm:
   model: "deepseek/deepseek-v4-pro"
@@ -67,11 +83,12 @@ pm_reviewer:
   temperature: 0.1
   template: "step3_pm_red.md"
   tools: ["list_tree"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"
 
 task_planner:
   model: "deepseek/deepseek-v4-flash"
@@ -90,11 +107,12 @@ task_planner_reviewer:
   temperature: 0.1
   template: "task_plan_red.md"
   tools: ["list_tree"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"
 
 task_implementer:
   model: "deepseek/deepseek-v4-flash"
@@ -115,11 +133,12 @@ task_implementer_reviewer:
   temperature: 0.1
   template: "task_implementer_red.md"
   tools: ["list_tree"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"
 
 
 final_verifier:
@@ -145,8 +164,9 @@ final_verifier_reviewer:
   temperature: 0.1
   template: "step5_verifier_red.md"
   tools: ["list_tree"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"

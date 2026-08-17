@@ -1975,6 +1975,31 @@ class PipelineEngine:
                     ],
                 })
 
+                # The turn hit max_output_tokens and produced neither text nor a
+                # tool call: on DeepSeek that cap covers reasoning + visible
+                # output together, so an over-long chain of thought can consume
+                # the entire budget and the step's write/verdict is never
+                # emitted. Untagged this looks exactly like a well-behaved
+                # no-op, which is how a reviewer step "passed" without ever
+                # reviewing anything. Say so loudly, in the event stream and in
+                # the durable trace, so the role's budget can be re-sized.
+                if result.truncated and not result.tool_calls and not result.text:
+                    starved = {
+                        "step_id": step_id, "agent_role": role,
+                        "attempt": attempt, "turn": turn_count + 1,
+                        "reasoning_chars": len(result.reasoning_content or ""),
+                        "completion_tokens": usage.get("completion_tokens"),
+                        "reasoning_tokens": usage.get("reasoning_tokens"),
+                        "max_output_tokens": agent.gateway.max_output_tokens,
+                    }
+                    self._emit("output_cap_starved", {
+                        **starved, "level": "warning",
+                        "preview": (f"{role_label} turn {turn_count + 1}: output cap "
+                                    f"({agent.gateway.max_output_tokens}) consumed by "
+                                    f"reasoning — no text, no tool call"),
+                    })
+                    self._trace("response", "output_cap_starved", starved)
+
                 if result.text:
                     self._emit("agent_message", {
                         "content": result.text[:500],

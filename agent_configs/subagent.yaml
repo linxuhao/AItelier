@@ -16,13 +16,17 @@ subagent_worker:
   thinking:
     enable: true
 
+# Reviewer budget: see agent_configs/dpe_default.yaml's header — DeepSeek counts
+# reasoning inside max_output_tokens, so an unbounded default-effort chain of
+# thought at 4096 silently ate the verdict tool call. effort "low" + 8192 headroom.
 subagent_reviewer:
   model: "deepseek/deepseek-v4-flash"
   temperature: 0.1               # cold — a reviewer, not a brainstormer
   template: "subagent_review.md"
   tools: ["list_tree"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"

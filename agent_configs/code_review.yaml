@@ -3,13 +3,17 @@
 # Same red-checker conventions as the DPE reviewers: cold temperature, JSON
 # verdict via native tool calling, thinking on.
 
+# Reviewer budget: see agent_configs/dpe_default.yaml's header — DeepSeek counts
+# reasoning inside max_output_tokens, so an unbounded default-effort chain of
+# thought at 4096 silently ate the verdict tool call. effort "low" + 8192 headroom.
 diff_reviewer:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.1
   template: "code_review_diff.md"
   tools: []
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
+    effort: "low"

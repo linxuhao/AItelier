@@ -114,10 +114,16 @@ class NativeTurn:
         reasoning_content: DeepSeek-style chain-of-thought content.
             Must be passed back on subsequent turns when thinking + tools
             are used together, otherwise the API returns a 400 error.
+        truncated: finish_reason was "length" — the turn was cut off by
+            max_output_tokens. On DeepSeek that cap covers reasoning AND
+            visible output together, so a long chain of thought can consume
+            the whole budget and leave text/tool_calls empty; without this
+            flag such a turn is indistinguishable from a deliberate no-op.
     """
     text: str = ""
     tool_calls: list[dict] = field(default_factory=list)
     reasoning_content: str = ""
+    truncated: bool = False
 
 
 def resolve_agent_model(model_name: str) -> str:
@@ -212,6 +218,14 @@ class AIGateway:
         try:
             prompt_tokens = _num(getattr(usage, "prompt_tokens", None)) or 0
             completion_tokens = _num(getattr(usage, "completion_tokens", None)) or 0
+            # completion_tokens INCLUDES reasoning_tokens on DeepSeek (verified
+            # against the live API: a capped turn reports completion_tokens ==
+            # max_tokens == reasoning_tokens with empty content). Recording the
+            # split is what makes "reasoning ate the whole budget" visible in a
+            # trace instead of looking like an ordinary short answer.
+            completion_details = getattr(usage, "completion_tokens_details", None)
+            reasoning_tokens = (_num(getattr(completion_details, "reasoning_tokens", None))
+                                if completion_details else None)
 
             # DeepSeek exposes explicit hit/miss split.
             hit = _num(getattr(usage, "prompt_cache_hit_tokens", None))
@@ -230,13 +244,16 @@ class AIGateway:
             hit = hit or 0
             miss = miss if miss is not None else (prompt_tokens - hit)
             hit_ratio = (hit / prompt_tokens) if prompt_tokens else 0.0
-            return {
+            out = {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "cache_hit_tokens": hit,
                 "cache_miss_tokens": max(miss, 0),
                 "hit_ratio": round(hit_ratio, 4),
             }
+            if reasoning_tokens is not None:
+                out["reasoning_tokens"] = reasoning_tokens
+            return out
         except (TypeError, ValueError):
             return {}
 
@@ -409,7 +426,9 @@ class AIGateway:
         try:
             response = litellm.completion(**kwargs)
             self.last_usage = self._extract_usage(response)
-            msg = response.choices[0].message
+            choice = response.choices[0]
+            msg = choice.message
+            finish_reason = getattr(choice, "finish_reason", "") or ""
         except Exception as e:
             raise e
 
@@ -441,4 +460,5 @@ class AIGateway:
             text=text,
             tool_calls=tool_calls,
             reasoning_content=getattr(msg, "reasoning_content", "") or "",
+            truncated=(finish_reason == "length"),
         )

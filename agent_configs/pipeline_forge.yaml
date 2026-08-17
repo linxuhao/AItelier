@@ -56,22 +56,29 @@ graph_emitter:
 
 # One shared reviewer profile for every Red slot; its per-step focus comes from
 # the injected maker output + the template.
+# Reviewer budget: see agent_configs/dpe_default.yaml's header — DeepSeek counts
+# reasoning inside max_output_tokens, so an unbounded default-effort chain of
+# thought at 4096 silently ate the verdict tool call. effort "low" + 8192 headroom.
 reviewer:
   model: "deepseek/deepseek-v4-flash"
   temperature: 0.1
   template: "forge_review_red.md"
   tools: ["read_file"]
-  max_output_tokens: 4096
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
-  thinking: { enable: true }
+  thinking: { enable: true, effort: "low" }
 
 design_explainer:
   model: "deepseek/deepseek-v4-flash"
   temperature: 0.3
   template: "forge_explain.md"
   tools: ["read_file"]
-  max_output_tokens: 6144
+  # 6144 sat under the observed default-effort reasoning ceiling (~6.8k tokens,
+  # and reasoning is billed inside this cap), so the explanation could be cut
+  # off before a single character of it was written. Effort stays at the default
+  # here — this role writes the prose the user reads at the checkpoint.
+  max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking: { enable: true }

@@ -50,9 +50,9 @@ def _setup(tmp, project_id="default", step_id="t_impl"):
     (code / "README.md").write_text("# existing\n")
 
 
-def _turn(text="", tool_calls=None, reasoning=""):
+def _turn(text="", tool_calls=None, reasoning="", truncated=False):
     return SimpleNamespace(text=text, tool_calls=tool_calls or [],
-                           reasoning_content=reasoning)
+                           reasoning_content=reasoning, truncated=truncated)
 
 
 def _tc(name, args=None, cid="c1"):
@@ -176,3 +176,34 @@ def test_retry_continues_conversation_for_cache_reuse(engine):
     assert "tool" in retry_first_roles
     # The cached prefix (system + initial user prompt) is byte-identical.
     assert snapshots[2][1] == snapshots[0][1]
+
+
+def test_reasoning_starved_turn_is_reported_not_silent(engine):
+    """A turn cut off at max_output_tokens with no text and no tool call is the
+    silent-review failure: DeepSeek bills reasoning inside that cap, so an
+    over-long chain of thought can consume the whole budget and the step's
+    write/verdict is never emitted. Untagged it is indistinguishable from a
+    deliberate no-op — the shape that let task_implementer_reviewer burn ten
+    turns at 4096 and 'review' nothing."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    engine.factory.get_max_tool_turns.return_value = 3
+    nat = engine.factory.get_native_agent.return_value
+    nat.gateway.max_output_tokens = 4096
+    nat.gateway.last_usage = {"completion_tokens": 4096, "reasoning_tokens": 4096}
+    nat.turn.side_effect = [
+        _turn(reasoning="t" * 900, truncated=True),                          # starved
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    assert _run(engine, ws) is True
+
+    starved = [p for ev, p in events if ev == "output_cap_starved"]
+    assert len(starved) == 1, [ev for ev, _ in events]
+    assert starved[0]["max_output_tokens"] == 4096
+    assert starved[0]["reasoning_tokens"] == 4096
+    # Exactly one: the two healthy turns that followed must NOT be reported, or
+    # the warning stops meaning anything.
+    assert starved[0]["turn"] == 1

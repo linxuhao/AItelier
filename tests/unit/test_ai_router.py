@@ -174,3 +174,77 @@ def test_build_kwargs_omits_cache_control_for_deepseek():
     gw = AIGateway("deepseek/deepseek-v4-flash")
     kwargs = gw._build_kwargs([{"role": "user", "content": "hi"}])
     assert "cache_control_injection_points" not in kwargs
+
+
+# ── Reasoning-starved turns: DeepSeek bills reasoning inside max_tokens ──
+def _native_response(*, finish_reason, content="", tool_calls=None,
+                     reasoning_content="", usage=None):
+    msg = MagicMock()
+    msg.tool_calls = tool_calls
+    msg.content = content
+    msg.reasoning_content = reasoning_content
+    choice = MagicMock(message=msg)
+    choice.finish_reason = finish_reason
+    resp = MagicMock()
+    resp.choices = [choice]
+    resp.usage = usage
+    return resp
+
+
+def test_extract_usage_reports_reasoning_tokens():
+    """reasoning_tokens is the split that shows reasoning ate the cap."""
+    resp = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=500, completion_tokens=4096,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=4096),
+    ))
+    u = AIGateway._extract_usage(resp)
+    assert u["completion_tokens"] == 4096
+    assert u["reasoning_tokens"] == 4096
+
+
+def test_extract_usage_omits_reasoning_tokens_when_absent():
+    """Providers without a reasoning split must not gain a bogus zero."""
+    resp = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=500, completion_tokens=40))
+    assert "reasoning_tokens" not in AIGateway._extract_usage(resp)
+
+
+def test_generate_native_flags_output_cap_truncation():
+    """finish_reason=length with no text and no tool call is the silent-review
+    failure: the whole budget went to reasoning_content."""
+    gw = AIGateway("deepseek/deepseek-v4-flash")
+    resp = _native_response(finish_reason="length", content="",
+                            reasoning_content="thinking " * 500,
+                            usage=SimpleNamespace(
+                                prompt_tokens=900, completion_tokens=4096,
+                                completion_tokens_details=SimpleNamespace(
+                                    reasoning_tokens=4096)))
+    with patch('litellm.completion', return_value=resp):
+        turn = gw.generate_native([{"role": "user", "content": "review"}],
+                                  tools=[{"x": 1}])
+    assert turn.truncated is True
+    assert turn.text == "" and turn.tool_calls == []
+    assert gw.last_usage["reasoning_tokens"] == 4096
+
+
+def test_generate_native_not_truncated_on_normal_stop():
+    gw = AIGateway("deepseek/deepseek-v4-flash")
+    resp = _native_response(finish_reason="tool_calls", content="",
+                            tool_calls=[MagicMock(
+                                id="c1",
+                                function=SimpleNamespace(
+                                    name="create_verdict", arguments="{}"))])
+    with patch('litellm.completion', return_value=resp):
+        turn = gw.generate_native([{"role": "user", "content": "review"}],
+                                  tools=[{"x": 1}])
+    assert turn.truncated is False
+    assert turn.tool_calls[0]["function"]["name"] == "create_verdict"
+
+
+def test_deepseek_thinking_effort_rides_extra_body():
+    """The reviewer fix is inert unless the level actually reaches DeepSeek."""
+    gw = AIGateway("deepseek/deepseek-v4-flash", enable_thinking=True,
+                   thinking_effort="low")
+    kwargs = gw._build_kwargs([{"role": "user", "content": "hi"}])
+    assert kwargs["extra_body"]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in kwargs

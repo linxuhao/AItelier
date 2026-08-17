@@ -207,3 +207,139 @@ def test_reasoning_starved_turn_is_reported_not_silent(engine):
     # Exactly one: the two healthy turns that followed must NOT be reported, or
     # the warning stops meaning anything.
     assert starved[0]["turn"] == 1
+
+
+# ── Starved-turn recovery: escalate the cap instead of repeating the call ──
+#
+# Detecting the starve was only half of it. The step used to reissue a
+# byte-identical call — same model, prompt, effort and cap — which necessarily
+# starves again; observed live as task_implementer burning two consecutive full
+# 32768-token budgets on pure reasoning and buying nothing with either.
+
+def _wire_real_escalation(nat, cap):
+    """Give the mock gateway the REAL escalation, so these tests exercise the
+    pipeline↔gateway contract rather than a mock that agrees with itself."""
+    from core.ai_router import AIGateway
+    nat.gateway.max_output_tokens = cap
+    nat.gateway.escalate_output_cap = lambda: AIGateway.escalate_output_cap(
+        nat.gateway)
+    return nat
+
+
+def test_starved_turn_escalates_output_cap_for_the_retry(engine):
+    """The retry after a starve must be a DIFFERENT call: same everything, but
+    double the cap that caused the truncation."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
+    nat.turn.side_effect = [
+        _turn(reasoning="t" * 900, truncated=True),                          # starved
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    assert _run(engine, ws) is True
+
+    esc = [p for ev, p in events if ev == "output_cap_escalated"]
+    assert len(esc) == 1, [ev for ev, _ in events]
+    assert esc[0]["previous_cap"] == 8192
+    assert esc[0]["new_cap"] == 16384
+    assert esc[0]["turn"] == 1
+    # The point of the whole change: the cap the next turn actually uses moved.
+    assert nat.gateway.max_output_tokens == 16384
+
+
+def test_escalated_cap_persists_across_the_rest_of_the_step(engine):
+    """The condition that starved turn 1 — a huge stable prefix plus deep
+    reasoning — is still there on turn 2, so the raised cap must not reset per
+    turn. A second starve escalates again, from the already-raised value."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    engine.factory.get_max_tool_turns.return_value = 5
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
+    nat.turn.side_effect = [
+        _turn(reasoning="t" * 900, truncated=True),                          # starved
+        _turn(reasoning="t" * 900, truncated=True),                          # starved again
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    assert _run(engine, ws) is True
+
+    esc = [p for ev, p in events if ev == "output_cap_escalated"]
+    assert [(e["previous_cap"], e["new_cap"]) for e in esc] == [
+        (8192, 16384), (16384, 32768)]
+    assert nat.gateway.max_output_tokens == 32768
+
+
+def test_starve_at_the_ceiling_reports_instead_of_escalating(engine):
+    """At the ceiling there is nothing left to double into but an API error.
+    The step must say so rather than claim an escalation it did not make."""
+    from core.ai_router import OUTPUT_CAP_CEILING
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value,
+                                OUTPUT_CAP_CEILING)
+    nat.turn.side_effect = [
+        _turn(reasoning="t" * 900, truncated=True),                          # starved
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    assert _run(engine, ws) is True
+
+    assert [p for ev, p in events if ev == "output_cap_escalated"] == []
+    ceil = [p for ev, p in events if ev == "output_cap_ceiling"]
+    assert len(ceil) == 1
+    assert ceil[0]["previous_cap"] == OUTPUT_CAP_CEILING
+    assert ceil[0]["new_cap"] is None
+    assert nat.gateway.max_output_tokens == OUTPUT_CAP_CEILING
+
+
+def test_healthy_turns_never_escalate(engine):
+    """A truncated turn that still produced a tool call is not starved, and a
+    complete turn certainly is not. Escalating on either would inflate every
+    step's budget and make the warning meaningless."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
+    nat.turn.side_effect = [
+        # truncated, but it got its tool call out — that is not a starve
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})],
+              reasoning="t" * 900, truncated=True),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    assert _run(engine, ws) is True
+
+    assert [ev for ev, _ in events if ev.startswith("output_cap_")] == []
+    assert nat.gateway.max_output_tokens == 8192
+
+
+def test_starved_turns_truncated_reasoning_is_not_replayed(engine):
+    """The starved chain of thought is a full cap's worth of tokens, cut off
+    mid-sentence. Replaying it into every later turn would grow the prompt by
+    exactly the budget just doubled, pushing the request toward the context
+    window the raised cap has to share."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 8192)
+    dead = "TRUNCATED-COT-" + "t" * 900
+    nat.turn.side_effect = [
+        _turn(reasoning=dead, truncated=True),                               # starved
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    assert _run(engine, ws) is True
+
+    # `messages` is mutated in place, so the last call carries the final history.
+    final = nat.turn.call_args_list[-1].kwargs["messages"]
+    assert not any(dead in str(m.get("reasoning_content", "")) for m in final), \
+        "starved turn's truncated reasoning was carried into the prompt"
+    # The turn still has to appear in the history — dropping it silently would
+    # leave the follow-up nudge answering nothing.
+    assert any(m.get("role") == "assistant" for m in final)

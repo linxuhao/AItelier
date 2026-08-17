@@ -126,6 +126,14 @@ class NativeTurn:
     truncated: bool = False
 
 
+# Hard ceiling for output-cap escalation (see AIGateway.escalate_output_cap).
+# DeepSeek documents 64K as the maximum `max_tokens`, inside a 128K context
+# window that the request's prompt also has to fit in. Doubling past this turns
+# a starved turn into an outright API error, which is strictly worse than the
+# starve it was trying to fix — so escalation clamps here and then stops.
+OUTPUT_CAP_CEILING = 65536
+
+
 def resolve_agent_model(model_name: str) -> str:
     """Apply the single-model pin, if one is set, to an already-resolved model.
 
@@ -296,6 +304,26 @@ class AIGateway:
         if not is_anthropic:
             return None
         return [{"location": "message", "role": "system"}]
+
+    def escalate_output_cap(self) -> int | None:
+        """Double this gateway's output cap, clamped to OUTPUT_CAP_CEILING.
+
+        Called when a turn was truncated having emitted only reasoning. On
+        DeepSeek `max_tokens` bounds reasoning and visible output together, so
+        such a turn did not *choose* to stay silent — it ran out of room before
+        it could speak. Reissuing it unchanged necessarily reproduces the same
+        outcome, and the cap is the single setting that caused it, so raising
+        the cap is what makes the retry a genuinely different call.
+
+        Returns the new cap, or None when already at the ceiling — the caller
+        then knows it has no escalation left and should stop expecting the
+        retry to behave differently.
+        """
+        if self.max_output_tokens >= OUTPUT_CAP_CEILING:
+            return None
+        self.max_output_tokens = min(self.max_output_tokens * 2,
+                                     OUTPUT_CAP_CEILING)
+        return self.max_output_tokens
 
     def _build_kwargs(self, messages: list[dict], **extra) -> dict:
         """Build litellm completion kwargs from state + extra."""

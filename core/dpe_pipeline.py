@@ -1983,7 +1983,9 @@ class PipelineEngine:
                 # no-op, which is how a reviewer step "passed" without ever
                 # reviewing anything. Say so loudly, in the event stream and in
                 # the durable trace, so the role's budget can be re-sized.
-                if result.truncated and not result.tool_calls and not result.text:
+                starved_turn = bool(result.truncated and not result.tool_calls
+                                    and not result.text)
+                if starved_turn:
                     starved = {
                         "step_id": step_id, "agent_role": role,
                         "attempt": attempt, "turn": turn_count + 1,
@@ -1999,6 +2001,50 @@ class PipelineEngine:
                                     f"reasoning — no text, no tool call"),
                     })
                     self._trace("response", "output_cap_starved", starved)
+
+                    # Detection on its own changes nothing: the next turn (and
+                    # the next attempt) reissues a byte-identical call — same
+                    # model, prompt, effort and cap — which necessarily starves
+                    # again. Observed live: task_implementer burned two full
+                    # 32768-token budgets on pure reasoning back to back. So
+                    # raise the one setting that produced the truncation and let
+                    # the existing retry path make the call again.
+                    #
+                    # This needs no limit of its own, and deliberately has none.
+                    # Magnitude is bounded by OUTPUT_CAP_CEILING, past which
+                    # escalate_output_cap() declines. Frequency is bounded by
+                    # the step's existing turn budget, because the escalated
+                    # retry IS the next ordinary turn rather than an inner loop
+                    # — and a starved turn emits no tool call, so it can never
+                    # reach ask_more_turns to extend that budget. The raised cap
+                    # rides on the gateway, which get_native_agent() builds once
+                    # per step, so it persists across this step's remaining
+                    # turns and attempts (the condition that starved turn 1 is
+                    # still there on turn 2) and resets for the next step.
+                    previous_cap = starved["max_output_tokens"]
+                    escalated = agent.gateway.escalate_output_cap()
+                    detail = {**starved, "previous_cap": previous_cap,
+                              "new_cap": escalated}
+                    if escalated:
+                        self._emit("output_cap_escalated", {
+                            **detail, "level": "warning",
+                            "preview": (f"{role_label} turn {turn_count + 1}: raising "
+                                        f"output cap {previous_cap} → {escalated} "
+                                        f"for the retry"),
+                        })
+                        self._trace("response", "output_cap_escalated", detail)
+                    else:
+                        # Already at the ceiling — doubling again would only buy
+                        # an API error. Say so, so a role that keeps landing
+                        # here is visible as needing a smaller prompt or less
+                        # reasoning rather than a bigger budget.
+                        self._emit("output_cap_ceiling", {
+                            **detail, "level": "warning",
+                            "preview": (f"{role_label} turn {turn_count + 1}: output cap "
+                                        f"already at the ceiling ({previous_cap}) — "
+                                        f"cannot escalate"),
+                        })
+                        self._trace("response", "output_cap_ceiling", detail)
 
                 if result.text:
                     self._emit("agent_message", {
@@ -2017,7 +2063,17 @@ class PipelineEngine:
                             # empty (the step likely has real output to produce).
                             salvage_msg: dict = {"role": "assistant",
                                                  "content": result.text or None}
-                            if result.reasoning_content:
+                            # A starved turn's reasoning is a chain of thought
+                            # cut off mid-sentence, and on these prompts it is
+                            # the full cap's worth of tokens. Replaying it into
+                            # every later turn would grow the prompt by exactly
+                            # the budget we just doubled, pushing the request
+                            # toward the context window the raised cap has to
+                            # share — so keep the last COMPLETE reasoning
+                            # instead. Same state a turn that reasoned not at
+                            # all would leave behind, which this path already
+                            # handles.
+                            if result.reasoning_content and not starved_turn:
                                 last_reasoning = result.reasoning_content
                             if last_reasoning:
                                 salvage_msg["reasoning_content"] = last_reasoning

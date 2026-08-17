@@ -248,3 +248,57 @@ def test_deepseek_thinking_effort_rides_extra_body():
     kwargs = gw._build_kwargs([{"role": "user", "content": "hi"}])
     assert kwargs["extra_body"]["reasoning_effort"] == "low"
     assert "reasoning_effort" not in kwargs
+
+
+# ── Output-cap escalation (starved-turn recovery) ──────────────────────
+#
+# A turn truncated at max_tokens having emitted only reasoning did not choose
+# to stay silent — DeepSeek bills reasoning inside the same cap as visible
+# output, so it ran out of room before it could speak. Reissuing that call
+# unchanged reproduces it exactly, so the cap is the setting that has to move.
+
+def test_escalate_output_cap_doubles():
+    gateway = AIGateway("deepseek/deepseek-v4-flash", max_output_tokens=8192)
+    assert gateway.escalate_output_cap() == 16384
+    assert gateway.max_output_tokens == 16384
+
+
+def test_escalate_output_cap_reaches_ceiling_by_clamping_not_overshooting():
+    """A cap that would overshoot lands exactly on the ceiling. Doubling into a
+    max_tokens the provider rejects trades a starved turn for an API error."""
+    from core.ai_router import OUTPUT_CAP_CEILING
+    gateway = AIGateway("deepseek/deepseek-v4-flash",
+                        max_output_tokens=OUTPUT_CAP_CEILING - 1000)
+    assert gateway.escalate_output_cap() == OUTPUT_CAP_CEILING
+    assert gateway.max_output_tokens == OUTPUT_CAP_CEILING
+
+
+def test_escalate_output_cap_declines_at_ceiling_and_leaves_cap_alone():
+    from core.ai_router import OUTPUT_CAP_CEILING
+    gateway = AIGateway("deepseek/deepseek-v4-flash",
+                        max_output_tokens=OUTPUT_CAP_CEILING)
+    assert gateway.escalate_output_cap() is None
+    assert gateway.max_output_tokens == OUTPUT_CAP_CEILING
+
+
+def test_escalate_output_cap_declines_when_configured_above_ceiling():
+    """A role configured above the ceiling must not be silently lowered — the
+    escalation declines and leaves the operator's value intact."""
+    from core.ai_router import OUTPUT_CAP_CEILING
+    over = OUTPUT_CAP_CEILING * 2
+    gateway = AIGateway("deepseek/deepseek-v4-flash", max_output_tokens=over)
+    assert gateway.escalate_output_cap() is None
+    assert gateway.max_output_tokens == over
+
+
+def test_escalation_is_self_bounding():
+    """The magnitude needs no counter of its own: escalating until it declines
+    terminates, from the smallest cap in use, in a handful of steps."""
+    from core.ai_router import OUTPUT_CAP_CEILING
+    gateway = AIGateway("deepseek/deepseek-v4-flash", max_output_tokens=4096)
+    steps = 0
+    while gateway.escalate_output_cap() is not None:
+        steps += 1
+        assert steps < 100, "escalation failed to terminate"
+    assert gateway.max_output_tokens == OUTPUT_CAP_CEILING
+    assert steps == 4  # 4096 → 8192 → 16384 → 32768 → 65536

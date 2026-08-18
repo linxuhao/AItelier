@@ -198,3 +198,93 @@ def test_loop_reviewer_fallbacks_stay_inside_the_loop_body():
     resolver = _dpe_resolver()
     body = set(resolver.loop_bodies().get("task_loop", ()))
     assert {"t_plan", "t_plan_review", "t_impl", "t_impl_review"} <= body, body
+
+
+# ── A step that promotes nothing must fail, not complete ────────────────────
+# `_step_commit` returns {"passed": True, "files": []} for an empty staging dir
+# — an explicit success — and the engine's zero-file warning is gated on
+# `output_mode == "write"`, which none of these content-mode steps is. So a
+# `t_plan` that wrote no file at all completed green, handed an empty workspace
+# to `t_plan_review`, and burned two of the three replan retries on a rejection
+# that had nothing to do with the real problem. `output.fixed` is not a
+# contract (it only generates the per-slot write tools), so the only mechanism
+# that makes a slot mandatory is `validation:`.
+
+# step id → the file whose absence must fail the step.
+MUST_PROMOTE = {
+    "t_plan": "task_plan.md",
+    "t_plan_review": "review_verdict.json",
+    "t_impl_review": "review_verdict.json",
+}
+
+
+def _dpe_node(step):
+    return _dpe_resolver().get_node(step)
+
+
+@pytest.mark.parametrize("step,required_file", sorted(MUST_PROMOTE.items()))
+def test_task_loop_steps_validate_their_load_bearing_output(step, required_file):
+    """Without this the step completes green on zero files."""
+    specs = _dpe_node(step).validation or []
+    guarded = [s for s in specs if required_file in (s.get("files") or [])]
+    assert guarded, (
+        f"{step} declares no validation for {required_file}: an empty staging dir "
+        f"commits as a success and the step completes, so downstream reviews an "
+        f"empty workspace instead of the step being retried."
+    )
+
+
+@pytest.mark.parametrize("step", sorted(MUST_PROMOTE))
+def test_validation_exhaustion_routes_instead_of_killing_the_run(step):
+    """Validation exhaustion goes through `_fail_step_in_tx(retryable=False)`.
+
+    That path consults `find_error_transition` and, finding none, fails the RUN
+    — discarding every task the loop already implemented. Adding validation to a
+    task-loop step therefore has to come with an `_error` edge, or it re-opens
+    the dead end the fallback chain above was added to close.
+    """
+    resolver = _dpe_resolver()
+    target = resolver.find_error_transition(step)
+    assert target is not None, (
+        f"{step} is validated but has no `match: {{_error: true}}` transition: "
+        f"once its retry budget is spent the whole run fails."
+    )
+    body = set(resolver.loop_bodies().get("task_loop", ()))
+    assert target in body | {"task_loop"}, (
+        f"{step} escapes validation failure to {target}, outside the task loop"
+    )
+    assert target != step, f"{step} routes validation failure back to itself"
+
+
+def test_error_edge_does_not_shadow_t_plans_forward_edge():
+    """`match: {_error: true}` must never fire on an ordinary completion.
+
+    (The reviewers' own routing is pinned by
+    `test_loop_reviewer_verdict_routing_is_unchanged` above.)
+    """
+    resolver = _dpe_resolver()
+    assert resolver.next_node("t_plan", {}, {}, file_reader=_no_verdict) == "t_plan_review"
+
+
+def test_reviewer_verdict_schema_only_gates_the_field_that_routes():
+    """`passed` is what both edges read; anything stricter is the step-"3" trap.
+
+    The comment at step "3" records why strict schema validation was removed
+    there: LLM JSON formatting varies and a strict schema retried forever. A
+    schema that requires only the boolean the transitions already read cannot
+    reject a verdict that would have routed.
+    """
+    for step in ("t_plan_review", "t_impl_review"):
+        specs = [s for s in (_dpe_node(step).validation or [])
+                 if "review_verdict.json" in (s.get("files") or [])]
+        for spec in specs:
+            if spec.get("tool") != "json_schema":
+                continue
+            schema = spec.get("inline_schema") or {}
+            assert schema.get("required") == ["passed"], (
+                f"{step} requires {schema.get('required')} — only `passed` is read "
+                f"by the transitions, so anything more can fail a routable verdict"
+            )
+            assert schema.get("additionalProperties") is not False, (
+                f"{step} forbids extra keys; the reviewers legitimately emit more"
+            )

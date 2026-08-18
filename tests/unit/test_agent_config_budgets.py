@@ -65,3 +65,31 @@ def test_dpe_reviewers_pin_an_explicit_reasoning_effort():
         assert thinking and thinking.get("effort"), (
             f"{name} enables thinking without pinning thinking.effort"
         )
+
+
+def test_task_planner_has_maker_sized_output_budget():
+    """The planner writes a multi-section plan; 16384 starved it into silence.
+
+    Both observed zero-file `t_plan` steps reached turn 10 of 10 having spent
+    the entire budget on 55–65k-char reasoning chains without ever emitting a
+    write call — the step then committed 0 files and completed green. It is a
+    maker, not a reviewer, so its budget tracks task_implementer's.
+    """
+    with open(os.path.join(CONFIG_DIR, "dpe_default.yaml"), encoding="utf-8") as f:
+        doc = yaml.safe_load(f)
+    planner = doc["task_planner"].get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
+    implementer = doc["task_implementer"].get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
+    assert planner >= implementer, (
+        f"task_planner max_output_tokens={planner} is below task_implementer's "
+        f"{implementer}; the planner produces comparable output volume"
+    )
+
+
+def test_task_planner_turn_budget_is_not_the_knob():
+    """Measured: t_plan instances that hit the 10-turn ceiling produced complete
+    4-slot output 24% of the time vs 54% for shorter ones. More turns correlate
+    with WORSE output, so starvation is fixed with tokens per turn, never by
+    handing the planner more turns."""
+    with open(os.path.join(CONFIG_DIR, "dpe_default.yaml"), encoding="utf-8") as f:
+        doc = yaml.safe_load(f)
+    assert doc["task_planner"]["max_tool_turns"] <= 10

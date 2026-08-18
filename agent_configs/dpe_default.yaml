@@ -95,7 +95,16 @@ task_planner:
   temperature: 0.2
   template: "task_plan.md"
   tools: ["web_search", "web_fetch", "list_tree"]
-  max_output_tokens: 16384
+  # 32768 (was 16384), matching task_implementer. At 16384 the planner starved:
+  # both observed zero-file t_plan steps spent the WHOLE budget on reasoning
+  # chains of 55–65k chars and reached turn 10 of 10 having emitted no write
+  # call, so the step committed 0 files and completed green. The per-turn cap
+  # escalation only fires on the last turn, where it buys nothing — and the
+  # three post-escalation rescue turns already needed more than 16384 anyway.
+  max_output_tokens: 32768
+  # NOT raised: instances that hit the 10-turn ceiling produced complete 4-slot
+  # output 24% of the time vs 54% for shorter ones — more turns correlates with
+  # WORSE output, so the fix is tokens per turn, not more turns.
   max_tool_turns: 10
   native_tool_calling: true
   fallback_to_json_mode: true

@@ -327,8 +327,35 @@ steps:
         subtask_manifest: { file: "subtasks_manifest.json", format: '{"subtasks": [subtask, ...], "execution_order": [[str, ...], ...]}' }
         subtask_card: { file: "subtasks/*.json", format: '{"id": str, "description": str, "dependencies": [str, ...], "artifact_requirement": str, "interface_contract": str}' }
         research_notes: { file: "research_notes.md", format: "Literal external references the implementer needs but cannot look up (it has no web access and no shell — only read/list_tree/create/edit on the repo): exact API signatures, import paths, config keys, and version-specific gotchas for any third-party/unfamiliar library this task uses. Use web_fetch on the official docs and record the verbatim signatures — NOT prose summaries. These notes must be SELF-CONTAINED: never defer to a link ('canonical source at <URL>', 'see the repo for the rest') — whatever the implementer needs literally, paste literally here. Signatures yes, implementation bodies no: the implementer writes the bodies from the behavioural contract, so never state or imply that matching an upstream source byte-for-byte is the acceptance bar. If the task only uses the standard library or already-known APIs, write a single line: 'No external references needed.'" }
+    # A planner that promotes NOTHING used to complete green: `_step_commit`
+    # returns {"passed": true, "files": []} for an empty staging dir, and the
+    # engine's zero-file warning only fires for `output.mode: write` — this step
+    # is `content`, so it got neither flag nor log line. t_plan_review then
+    # reviewed an empty workspace, fell back to reviewing the repository,
+    # rejected for an unrelated reason, and burned two of its three replan
+    # retries. `output.fixed` is NOT a contract (it only generates the write
+    # tools), so validation is the only thing that makes the slot mandatory.
+    # Only task_plan.md: it is the sole slot the template's "输出" section
+    # actually mandates, and the only one t_plan_review and t_impl both depend
+    # on. The manifest/cards are optional by the planner's own prompt, and
+    # research_notes.md is never asked for in the output section — gating on it
+    # would fail otherwise-good plans on a slot nobody instructed the agent to
+    # write.
+    validation:
+      - files: ["task_plan.md"]
+        tool: "file_exists"
     transitions:
       - to: "t_plan_review"
+      # Validation exhaustion goes through _fail_step_in_tx(retryable=False),
+      # which needs an `_error` edge or it fails the RUN — throwing away every
+      # task the loop already finished, the same dead end c9ad09d fixed for the
+      # two loop reviewers. After 3 retries with $._validation_error in the
+      # prompt, give up on the PLAN and let t_impl work from the task card +
+      # repo (its t_plan context source is not `required`). t_impl_review, 5 and
+      # 5_review still stand between that and `done`. NOT t_plan_review: that
+      # would re-enact the original bug of reviewing an empty plan.
+      - to: "t_impl"
+        match: { _error: true }
 
   - id: "t_plan_review"
     step_type: "agent"
@@ -340,6 +367,26 @@ steps:
       mode: "content"
       fixed:
         verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    # Same shape the other four reviewers validate. json_schema, not file_exists:
+    # both edges below read `passed` out of this file, so a verdict whose
+    # `passed` is missing or not a bool is exactly as unroutable as no verdict at
+    # all — this schema validates precisely what the routing needs and nothing
+    # more. It is NOT the strict-schema failure the comment at step "3" warns
+    # about: that one gated a nested manifest whose LLM formatting genuinely
+    # varies, whereas one boolean has no format latitude, and the retries here
+    # are bounded by max_retries and then escape via the `_error` edge, so no
+    # infinite retry loop is reachable. A validation retry re-asks THIS reviewer
+    # with $._validation_error in the prompt, which is a better first response to
+    # a missing verdict than spending the routing fallback below.
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
     transitions:
       - to: "t_impl"
         match: { from_file: "review_verdict.json", field: "passed", value: true }
@@ -357,6 +404,13 @@ steps:
       # loop already built: t_impl_review and the project-level gate still stand
       # between this plan and `done`.
       - to: "t_impl"
+      # The routing fallbacks above only fire once the step COMPLETES. With the
+      # validation block added, a verdict-less reviewer no longer completes — it
+      # retries and then hits _fail_step_in_tx(retryable=False), which without an
+      # `_error` edge kills the run. Land it on the same escape so validation
+      # cannot re-open the dead end c9ad09d closed.
+      - to: "t_impl"
+        match: { _error: true }
 
   # ─── Task Implement → Review ───
   # Lifecycle hooks:
@@ -437,6 +491,21 @@ steps:
       mode: "content"
       fixed:
         verdict: { file: "review_verdict.json", on_exists: "new", format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}' }
+    # See t_plan_review for why json_schema on just `passed`: it validates
+    # exactly what the two edges below read, so an unroutable verdict is caught
+    # and re-asked on this step's own retry budget instead of consuming the
+    # routing fallback. The live failure documented below — reviewer burns ten
+    # turns reasoning, never calls create_verdict, step commits "0 file(s)" — is
+    # now a validation failure the reviewer is told about, not a silent green.
+    validation:
+      - files: ["review_verdict.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [passed]
+          properties:
+            passed: { type: boolean }
+            feedback: { type: string }
     transitions:
       - to: "task_loop"
         match: { from_file: "review_verdict.json", field: "passed", value: true }
@@ -470,6 +539,12 @@ steps:
       #    reject edge's own dead end — once its max_loop is spent, every edge
       #    used to be exhausted and the run died with CycleLimitExceeded.
       - to: "task_loop"
+      # 3) Both edges above need the step to COMPLETE. Validation exhaustion
+      #    never completes it — it ends in _fail_step_in_tx(retryable=False),
+      #    which fails the RUN unless an `_error` edge says otherwise. Same
+      #    escape, so adding validation cannot cost us the rescue above.
+      - to: "task_loop"
+        match: { _error: true }
 
   # ─── Final Verify ───
   - id: "5"

@@ -433,11 +433,35 @@ steps:
       - source: { tool: "dir_tree" }
     output:
       mode: "write"
+    # The importability gate. `lint` dispatches .py to the `ruff` backend, which
+    # the host replaces with a check-only one (api/dependencies.py:
+    # _ruff_check_only, `--select E9,F63,F7,F82`) — syntax errors, and F821
+    # undefined-name, which is the ONE static check that sees the defect class
+    # that zeroes a whole repo: a name used but never imported. A retry re-asks
+    # THIS implementer with the ruff findings in its prompt, so the loop that
+    # fixes it is the one that wrote it.
+    # NL2Repo sweep 2026-08-18, task `fastapi-users`: a missing TypeVar
+    # import (`AP` in authentication/strategy/db/strategy.py) made the package
+    # unimportable and zeroed all 556 tests. Five tasks / ~3200 tests lost the
+    # same way.
+    #
+    # It was already declared here — and it never ran. `workspace_root:
+    # "$STEP_DIR"` is passed through VERBATIM: StepValidator resolves no
+    # variables (only the on_deliver tool-hook path does, see the note below), so
+    # `lint` rglob'd a directory literally named `$STEP_DIR`, matched zero files,
+    # and returned `{all_passed: true, results: []}` — a vacuous pass. 36 lint
+    # calls in that run, every one of them a no-op. Omitting the key is what makes
+    # it work: StepValidator defaults workspace_root to the step's staging dir,
+    # which is exactly the tree this step just wrote.
+    #
+    # manifest_path is omitted too, so the built-in default (.py → ruff) applies.
+    # The architect's linter_manifest.json is LLM-authored and `lint` returns
+    # passed=True for a backend name it does not recognise — one invented linter
+    # name would switch this gate off again, silently, exactly as $STEP_DIR did.
+    # Which checker guards importability is not the architect's to choose.
     validation:
       - files: ["*.py"]
         tool: "lint"
-        workspace_root: "$STEP_DIR"
-        manifest_path: "linter_manifest.json"
     lifecycle:
       # on_deliver is a SEQUENCE of repo-mutating tool hooks, run in order with
       # full variable resolution (needs skillflow-py >= 1.4.1). repo_apply
@@ -463,20 +487,41 @@ steps:
           on_failure: "retry"
           max_retries: 2
       after_deliver:
-        # Lint the post-apply, post-deletion tree.
+        # Lint the post-apply, post-deletion tree. Same $STEP_DIR no-op as the
+        # validation block above: dropping the key lets skillflow supply the
+        # after_deliver root, which for this hook IS the project repo — so this
+        # is the whole-tree pass, catching a name that a LATER task broke in an
+        # EARLIER task's file (which the staging-scoped validation cannot see).
+        #
+        # warn, not retry: skillflow only honours per-spec `on_failure` for the
+        # value "warn" — a check-list hook resolves its hook-level policy to
+        # "fail" (core.py: `hook_spec.get(...) if isinstance(hook_spec, dict)`,
+        # and this spec is a list), so `retry` here was never retry. It would be
+        # `_handle_lifecycle_failure` → retryable=False, with no feedback turn:
+        # one undefined name left anywhere in the repo would hard-fail the
+        # after_deliver of every REMAINING task, on a defect that task did not
+        # write and is never told about. The fatal gate is the validation block
+        # above, which does re-ask the implementer with the ruff output in its
+        # prompt; repo-wide drift is reported here.
         - tool: "lint"
           files: ["**/*.py"]
-          workspace_root: "$STEP_DIR"
-          manifest_path: "linter_manifest.json"
-          on_failure: "retry"
-          max_retries: 3
+          on_failure: "warn"
         - tool: "lint"
           files: ["**/*.js", "**/*.html", "**/*.css"]
-          workspace_root: "$STEP_DIR"
           manifest_path: "linter_manifest.json"
           on_failure: "warn"
     transitions:
       - to: "t_impl_review"
+      # Validation exhaustion goes through _fail_step_in_tx(retryable=False),
+      # which without an `_error` edge fails the RUN — discarding every task the
+      # loop already finished (the dead end c9ad09d closed for the two loop
+      # reviewers). t_impl had no validation that could actually fail until the
+      # gate above was un-broken, so it had no such edge either. After the retry
+      # budget is spent with the ruff findings in the prompt, hand the code to
+      # the reviewer rather than throwing the run away: t_impl_review reads the
+      # repository, and its reject edge comes back here for another attempt.
+      - to: "t_impl_review"
+        match: { _error: true }
 
   - id: "t_impl_review"
     step_type: "agent"

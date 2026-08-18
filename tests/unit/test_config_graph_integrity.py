@@ -234,7 +234,24 @@ def test_task_loop_steps_validate_their_load_bearing_output(step, required_file)
     )
 
 
-@pytest.mark.parametrize("step", sorted(MUST_PROMOTE))
+def _validated_task_loop_steps() -> list[str]:
+    """Every task-loop step that declares validation — not just MUST_PROMOTE.
+
+    The escape below is owed by whatever CAN fail validation, and the two sets
+    diverged: `t_impl` validates `*.py` for importability and was never in
+    MUST_PROMOTE (it has no single load-bearing file), so nothing checked that it
+    could survive its own gate. That was harmless only for as long as the gate
+    was a no-op.
+    """
+    resolver = _dpe_resolver()
+    body = resolver.loop_bodies().get("task_loop", ())
+    steps = sorted(s for s in body if resolver.get_node(s).validation)
+    # A derived list that quietly came back empty would pass every case below.
+    assert set(MUST_PROMOTE) | {"t_impl"} <= set(steps), steps
+    return steps
+
+
+@pytest.mark.parametrize("step", _validated_task_loop_steps())
 def test_validation_exhaustion_routes_instead_of_killing_the_run(step):
     """Validation exhaustion goes through `_fail_step_in_tx(retryable=False)`.
 

@@ -51,6 +51,58 @@ def _existing_repo_code_path(project_id: str) -> str | None:
         return None
 
 
+def _ruff_check_only(fp: Path) -> dict:
+    """Check-only `.py` lint backend, registered OVER skillflow's built-in `ruff`.
+
+    Same rules the built-in selects — E9 (syntax), F63/F7 (real bugs), F82
+    (undefined name) — and F821 undefined-name is the one that matters: it is the
+    only static check that sees a name used but never imported, the defect that
+    zeroes an entire repo (NL2Repo 2026-08-18: `AP` in fastapi-users cost all 556
+    tests). Scoped to exactly that; no style rules, because a gate that fails on
+    formatting turns into a retry loop, which is why step "3" had to drop its
+    schema validation.
+
+    What is dropped is the built-in's FIRST pass: `ruff check --fix` with ruff's
+    DEFAULT rule set, which rewrites the file before checking it. Replayed over
+    the 12 delivered repos of that sweep, it deleted imports the tests depend on —
+    freezegun's `from datetime import date as date_alias` (an import that exists
+    precisely so the test can watch it get patched) and a function-local re-import
+    in test_class_import.py. Both read as F401-unused to a per-file linter. The
+    t_impl lint was a no-op until now, so nothing had ever run that pass on
+    delivered code; un-breaking the gate without dropping it would have made a
+    checker into an editor.
+
+    Never invents a failure: findings on stdout fail the file, and anything else
+    (including a ruff that will not start) leaves the compile() check as the whole
+    verdict — the run_tests rule that a missing runner must not masquerade as a
+    failure applies here too.
+    """
+    import subprocess
+    import sys
+
+    if fp.suffix.lower() != ".py":
+        return {"file": str(fp), "passed": True, "error_message": ""}
+    try:
+        compile(fp.read_text(encoding="utf-8"), str(fp), "exec")
+    except SyntaxError as e:
+        return {"file": str(fp), "passed": False, "error_message": f"SyntaxError: {e}"}
+    except OSError as e:
+        return {"file": str(fp), "passed": False, "error_message": f"Cannot read file: {e}"}
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", str(fp), "--quiet", "--no-cache",
+             "--select", "E9,F63,F7,F82"],
+            capture_output=True, text=True, timeout=60)
+        findings = (proc.stdout or "").strip()
+    except Exception as e:
+        return {"file": str(fp), "passed": True,
+                "error_message": f"ruff unavailable ({e}); syntax checked only"}
+    if findings:
+        return {"file": str(fp), "passed": False, "error_message": findings}
+    return {"file": str(fp), "passed": True, "error_message": ""}
+
+
 # ── skillflow integration ────────────────────────────────────────────
 
 _skillflow_instance = None
@@ -152,6 +204,13 @@ def get_skillflow():
             context_provider=lambda cfg: {"state_dir": str(sf._workspace.state_dir(cfg))})
         sf.register_capability(
             "tool_creation", tools=["write", "run_tests", "pytest", "register_tool"])
+
+        # Custom lint backends are consulted BEFORE built-ins, so this replaces
+        # skillflow's `ruff` — the name t_impl's importability gate dispatches to
+        # — with a check-only one. See _ruff_check_only for why the built-in's
+        # auto-fix pass cannot be allowed to run on delivered code.
+        from skillflow.lint_backends import register_backend
+        register_backend("ruff", _ruff_check_only)
 
         # Register agent configs into skillflow so graph validation catches
         # missing agent_config references at startup.

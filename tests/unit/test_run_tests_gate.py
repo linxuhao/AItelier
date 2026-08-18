@@ -212,3 +212,73 @@ def test_node_skips_scripts_it_does_not_have(tmp_path, monkeypatch):
     assert node["passed"] is True
     assert set(node["checks"]) == {"install"}
     assert "run build" not in log.read_text()
+
+
+# ── collection errors: ALL of them, in one run ──────────────────────
+# NL2Repo sweep 2026-08-18: one unimportable module INTERRUPTS the session, so
+# the report was a single traceback and zero test results even where the other
+# 1600 tests would have run. 5_review can only open a fix-task per defect it can
+# see, and the `5_review → 3` goal loop is capped at two laps — so a report that
+# reveals one defect per run cannot clear three.
+
+
+def _broken_repo(tmp_path, n_broken=2, with_good=True):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(n_broken):
+        (repo / f"test_broken_{i}.py").write_text(
+            f"from missing_pkg_{i} import thing\n\ndef test_x():\n    assert thing()\n")
+    if with_good:
+        (repo / "test_good.py").write_text("def test_ok():\n    assert True\n")
+    return repo
+
+
+def test_every_collection_error_is_reported_not_just_the_first(tmp_path):
+    repo = _broken_repo(tmp_path, n_broken=3)
+    out = tmp_path / "out"
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+
+    assert res["passed"] is False
+    assert len(rep["collection_errors"]) == 3, rep["collection_errors"]
+    for i in range(3):
+        assert any(f"test_broken_{i}.py" in e for e in rep["collection_errors"])
+        # the CAUSE travels with the file — pytest's own short summary prints
+        # only "ERROR test_broken_0.py", which names no defect to fix
+        assert any(f"missing_pkg_{i}" in e for e in rep["collection_errors"])
+
+
+def test_collection_errors_lead_the_summary_instead_of_being_tailed_off(tmp_path):
+    repo = _broken_repo(tmp_path, n_broken=2)
+    out = tmp_path / "out"
+    rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+
+    head = rep["summary"][:400]
+    assert "could not be imported" in head
+    assert "test_broken_0.py" in head and "test_broken_1.py" in head
+    # and they are reachable as failures, which is what 5_review iterates
+    assert all(e in rep["failures"] for e in rep["collection_errors"])
+
+
+def test_importable_tests_still_run_alongside_a_broken_module(tmp_path):
+    """The point of --continue-on-collection-errors: one bad module no longer
+    reduces the whole suite to zero results."""
+    repo = _broken_repo(tmp_path, n_broken=1, with_good=True)
+    out = tmp_path / "out"
+    rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+    assert rep["collection_errors"]
+    assert "1 passed" in rep["summary"]
+
+
+def test_clean_repo_reports_no_collection_errors(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    out = tmp_path / "out"
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+    assert res["passed"] is True
+    assert rep["collection_errors"] == []
+    assert "could not be imported" not in rep["summary"]

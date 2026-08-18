@@ -145,6 +145,35 @@ def _closest(wanted: str, names: str) -> list[str]:
     return difflib.get_close_matches(wanted, names.split(", "), n=3, cutoff=0.5)
 
 
+_COLLECT_HEADER_RE = re.compile(r"^_+ ERROR collecting (\S+) _+$")
+
+
+def _collection_errors(out: str) -> list[str]:
+    """Every module pytest could not import, each with the exception that stopped it.
+
+    Two things hid these. pytest without ``--continue-on-collection-errors``
+    interrupts before running a single test, so one broken module reports as a
+    suite with zero results — and the flag alone is not enough, because pytest's
+    own short summary names the file and NOT the cause ("ERROR tests/test_x.py"),
+    while the causes live in the per-module ERROR blocks, up in the part of the
+    output an `out[-3000:]` tail drops. Pairing header to cause here is what turns
+    a run into a list of every import defect, which is the point: the reviewer
+    that reads this report can only open one fix-task per defect it can SEE, and
+    the `5_review → 3` goal loop is capped at two laps.
+    """
+    errors: list[str] = []
+    current: str | None = None
+    for line in out.splitlines():
+        header = _COLLECT_HEADER_RE.match(line.strip())
+        if header:
+            current = header.group(1)
+            continue
+        if current and line.startswith("E   "):
+            errors.append(f"ERROR {current} - {line[4:].strip()}"[:400])
+            current = None  # first E line is the exception; skip the rest of the block
+    return errors
+
+
 _ATTR_RE = re.compile(r"AttributeError: ['\"](\w+)['\"] object has no attribute ['\"](\w+)['\"]")
 _FROM_IMPORT_RE = re.compile(r"from ([\w.]+) import ([\w, ]+)")
 
@@ -434,11 +463,13 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
     Returns {written, passed}. The report holds {passed, returncode, summary,
-    failures[], skipped?} for the reviewer to read, plus a ``node`` section
-    (npm install/build/test) when the repo contains a node project.
+    failures[], collection_errors[], skipped?} for the reviewer to read, plus a
+    ``node`` section (npm install/build/test) when the repo contains a node
+    project.
     """
     repo = Path(project_root or workspace_root).resolve()
-    report = {"passed": True, "returncode": 0, "summary": "", "failures": []}
+    report = {"passed": True, "returncode": 0, "summary": "", "failures": [],
+              "collection_errors": []}
 
     if not repo.exists():
         report.update(passed=False, summary=f"Project root not found: {repo}")
@@ -460,9 +491,16 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 # --rootdir forces pytest root to the project repo so it doesn't
                 # walk up and find AItelier's pytest.ini (whose testpaths=tests
                 # would cause discovery of AItelier's own test suite).
+                # --continue-on-collection-errors: without it a single
+                # unimportable module INTERRUPTS the session, so the report is
+                # one traceback and zero test results even when the other 1600
+                # tests would have run and passed. With it, every module is
+                # imported (all import defects reported in one pass) and the
+                # tests that do collect still run, so the reviewer sees the
+                # whole picture instead of the first thing that broke.
                 proc = subprocess.Popen(
                     [py, "-m", "pytest", str(repo), "-q", "--tb=short",
-                     "-p", "no:cacheprovider",
+                     "-p", "no:cacheprovider", "--continue-on-collection-errors",
                      "--rootdir", str(repo), *_pytest_timeout_args(py)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     cwd=str(repo), env=env, start_new_session=True,
@@ -477,10 +515,26 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 report["returncode"] = proc.returncode
                 # pytest: 0=all passed, 5=no tests collected (not a failure), 1=failures
                 report["passed"] = proc.returncode in (0, 5)
-                report["failures"] = [ln.strip() for ln in out.splitlines()
-                                      if ln.startswith("FAILED") or " FAILED " in ln][:50]
+                collection_errors = _collection_errors(out)[:50]
+                report["collection_errors"] = collection_errors
+                failed_lines = [ln.strip() for ln in out.splitlines()
+                                if ln.startswith("FAILED") or " FAILED " in ln][:50]
+                report["failures"] = collection_errors + failed_lines
                 report["summary"] = ("No tests were collected." if proc.returncode == 5
                                      else out[-3000:])
+                # Collection errors go ABOVE the tail, and in full. They are the
+                # defects that make every OTHER result meaningless (an
+                # unimportable module contributes zero passing tests), and they
+                # are printed first — so the tail slice is exactly what drops
+                # them. Kept together so one fix pass can address all of them
+                # instead of one per goal-loop lap.
+                if collection_errors:
+                    report["summary"] = (
+                        f"{len(collection_errors)} module(s) could not be imported. "
+                        "Every test in them counts as failed; fix ALL of these, not "
+                        "just the first:\n  "
+                        + "\n  ".join(collection_errors)
+                        + "\n\n" + report["summary"])
                 # Lead with the install failure when there was one. An
                 # unimportable package produces a ModuleNotFoundError whose real
                 # cause is the failed editable install, and a reader given only

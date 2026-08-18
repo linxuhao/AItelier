@@ -20,7 +20,7 @@
 
 此时：
 - **不要从头重新分解**，也不要重写或删除已有的任务卡片与已完成的代码。
-- **先读 `5_review` 的 `review_verdict.json` 的 `feedback`**（这就是本轮必须修复的根因清单，已在你的上下文里）。再配合 `verify_report.json` 的 `issues`、`test_report.json` 的 `failures`/`summary`，用 `read_file` 查看相关现有代码文件，逐条定位根因。
+- **先读 `5_review` 的 `review_verdict.json` 的 `feedback`**（这就是本轮必须修复的根因清单，已在你的上下文里）。再配合 `verify_report.json` 的 `issues`、`test_report.json` 的 `failures`/`summary`，用 `read` 查看相关现有代码文件，逐条定位根因。
 - **⚠️ 绝不要靠"重发已完成任务"来修它**：上一轮已完成的任务 id 都已在引擎的 `completed_items` 里，**再次列出同一个 id 会被直接跳过、永不重跑——你的修复会被静默丢弃**（这正是目标循环"修了却没效果"的根因）。不要为了"重跑某个任务"而沿用它的旧 id。
 - **为每条问题新建一个"修复任务"，用全新的、体现修复意图的 id**（如 `fix_input_touch_type`、`fix_checkout_cookie`）：
   - `detailed_requirements` 具体引用失败原因（哪个文件、哪行、哪个测试、期望行为）。

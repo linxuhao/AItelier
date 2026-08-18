@@ -442,3 +442,36 @@ class TestTheWriteVocabularyIsActuallyStated:
         selected = sorted(n for n in self.WRITE_MODE
                           if is_mutation_tool(n, self.WRITE_MODE))
         assert selected == ["create", "edit"]
+
+
+class TestTruncationResumeHintIsCallable:
+    """The clip marker's `read(...)` call must actually resolve.
+
+    A clipped entry is always a step source, whose file lives in that step's
+    PROMOTED dir. `read` without `source=` searches only staging + repo, so the
+    hint used to answer "File not found" for exactly the case it exists for.
+    """
+
+    def _clip(self, label):
+        from core.prompt_assembler import PromptAssembler, MAX_CONTEXT_LINES
+        huge = "### task_plan.md\n" + "\n".join(
+            f"line {i}" for i in range(MAX_CONTEXT_LINES + 200))
+        return PromptAssembler._clip_context_entry(label, huge, "t_impl")
+
+    def test_hint_carries_the_source_step(self):
+        out = self._clip("Step t_plan")
+        assert "source='step:t_plan'" in out
+        assert "read(path='task_plan.md', source='step:t_plan'" in out
+
+    def test_step_id_survives_a_file_qualified_label(self):
+        # skillflow labels a single-file step source "Step <id> — <file>"
+        # (context.py); only the id belongs in the source key.
+        out = self._clip("Step 3 — tasks/t1.json")
+        assert "source='step:3'" in out
+        assert "step:3 — " not in out
+
+    def test_non_step_entries_keep_the_bare_read(self):
+        # A repository/workspace entry IS served by the default working tree —
+        # naming a source there would break a hint that works.
+        out = self._clip("Repository — src/app.py")
+        assert "source=" not in out

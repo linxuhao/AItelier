@@ -831,8 +831,19 @@ class PromptAssembler:
         # path so the resume hint is copy-pasteable.
         head = lines[0].strip()
         target = head[4:].strip() if head.startswith("### ") else ""
-        resume = (f"read(path='{target}', start_line={MAX_CONTEXT_LINES})" if target
-                  else f"read(path=<上面 ### 标出的文件>, start_line={MAX_CONTEXT_LINES})")
+        # `source=` is NOT optional in the hint: a clipped entry is a step-source
+        # file living in that step's PROMOTED dir, which a bare read() never
+        # searches (it sees only staging + repo) — it answered "File not found"
+        # for exactly the case this hint exists for. skillflow labels step
+        # entries "Step <id>" / "Step <id> — <file>" (context.py), so the
+        # source step id is right there in the label.
+        src = ""
+        if label.startswith("Step "):
+            src_id = label[5:].split(" — ")[0].strip()
+            if src_id:
+                src = f", source='step:{src_id}'"
+        resume = (f"read(path='{target}'{src}, start_line={MAX_CONTEXT_LINES})" if target
+                  else f"read(path=<上面 ### 标出的文件>{src}, start_line={MAX_CONTEXT_LINES})")
         logger.warning(
             "prompt context %r truncated at line %d/%d (step=%s) — the agent must "
             "page the remainder via read()", label, MAX_CONTEXT_LINES, len(lines),

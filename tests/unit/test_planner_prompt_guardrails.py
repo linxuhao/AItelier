@@ -72,3 +72,66 @@ def test_implementer_role_really_has_no_network_or_shell_tools():
     tools = set(roles["task_implementer"]["tools"])
     assert not (tools & {"web_search", "web_fetch", "bash", "shell", "run_tests"}), \
         f"task_implementer gained a network/shell tool: {sorted(tools)}"
+
+
+# ── Templates may only name tools their own role can actually call ──────
+# This class of defect showed up three times: task_plan.md told the planner to
+# explore with `read_file` (a REGISTRY tool it was never granted — one planner
+# obeyed and got a tool-not-allowed error), and step3_pm.md said the same to
+# the PM. The gated trio is named `read`/`search`/`list` and is DERIVED from a
+# step's context specs, so the confusion is easy to repeat.
+#
+# Registry tools are gated by the role's `tools:` list; the derived trio and the
+# create/edit/write slots are not, so only registry names are checked here.
+
+# (template, tool) pairs where the name is deliberately mentioned for a role
+# OTHER than the reader — a denial ("you do NOT have `write`"), another role's
+# toolset, or engine machinery the step never invokes itself.
+_NAMED_BUT_NOT_CALLED = {
+    ("task_plan.md", "test_write"),          # describing t_impl's toolset
+    ("task_plan.md", "read_test_written"),
+    ("task_plan.md", "delete_file"),
+    ("task_plan_red.md", "test_write"),      # same list, from the reviewer side
+    ("task_plan_red.md", "read_test_written"),
+    ("task_plan_red.md", "delete_file"),
+    ("task_implementer.md", "write"),        # "你没有整文件覆写的 `write` 工具"
+    ("step5_verifier.md", "repo_apply"),     # on_deliver hook, not an agent call
+}
+
+
+def _registry_tool_names() -> set[str]:
+    # Located through the installed package, not a checkout path: skillflow is
+    # an editable install on the host and a PyPI wheel in the container.
+    import skillflow
+    names = {p.name for p in (ROOT / "aitelier" / "tools").iterdir() if p.is_dir()}
+    names |= {p.name for p in (Path(skillflow.__file__).parent / "tools").iterdir()
+              if p.is_dir() and not p.name.startswith("__")}
+    return names
+
+
+def test_dpe_templates_only_name_registry_tools_their_role_has():
+    import re
+    registry = _registry_tool_names()
+    roles = yaml.safe_load(
+        (ROOT / "agent_configs" / "dpe_default.yaml").read_text(encoding="utf-8"))
+    offenders = []
+    for role, cfg in roles.items():
+        if not isinstance(cfg, dict) or not cfg.get("template"):
+            continue
+        tpl = cfg["template"]
+        path = TEMPLATES / tpl
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        named = set(re.findall(r"`([a-z_]+)`", text))
+        for tool in sorted((named & registry) - set(cfg.get("tools") or [])):
+            if (tpl, tool) not in _NAMED_BUT_NOT_CALLED:
+                offenders.append(f"{role}/{tpl} names `{tool}`")
+    assert not offenders, (
+        "template names a registry tool the role cannot call: " + "; ".join(offenders))
+
+
+def test_planner_template_does_not_send_the_planner_to_read_file():
+    """`read_file` is registry-gated and task_planner has web/list_tree only."""
+    text = (TEMPLATES / "task_plan.md").read_text(encoding="utf-8")
+    assert "read_file" not in text

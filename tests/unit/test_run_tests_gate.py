@@ -282,3 +282,160 @@ def test_clean_repo_reports_no_collection_errors(tmp_path):
     assert res["passed"] is True
     assert rep["collection_errors"] == []
     assert "could not be imported" not in rep["summary"]
+
+
+# ── test extras: the deps the project declares for its own tests ─────
+# NL2Repo sweep 2026-08-18: `pip install -e .` never installs
+# [project.optional-dependencies], so test-only deps (asgi_lifespan, freezegun,
+# …) were missing in 6 of 12 audited runs. The gate then died on an ENVIRONMENT
+# fault no DPE role can fix, six lines above the real defect.
+
+
+def _pyproject_with_extras(repo: Path, groups: dict):
+    body = "[project]\nname='x'\n\n[project.optional-dependencies]\n"
+    for name, deps in groups.items():
+        body += f"{name} = {deps!r}\n"
+    (repo / "pyproject.toml").write_text(body)
+
+
+def test_install_deps_adds_declared_test_extras(monkeypatch):
+    calls = _capture_pip(monkeypatch)
+    repo = Path(tempfile.mkdtemp())
+    _pyproject_with_extras(repo, {"test": ["asgi_lifespan"], "dev": ["ruff"]})
+    rt._install_project_deps("py", repo)
+    assert calls and calls[0][-1] == f"{repo}[test,dev]"
+
+
+def test_install_deps_only_requests_extras_the_project_declares(monkeypatch):
+    """pip errors on an unknown extra — so guessing `[test]` blindly would break
+    the install for every project that doesn't declare one."""
+    calls = _capture_pip(monkeypatch)
+    repo = Path(tempfile.mkdtemp())
+    _pyproject_with_extras(repo, {"docs": ["sphinx"]})   # nothing test-shaped
+    rt._install_project_deps("py", repo)
+    assert calls and calls[0][-1] == str(repo)
+
+
+def test_install_deps_falls_back_to_plain_editable_when_extras_fail(monkeypatch):
+    """A broken extra must cost nothing: degrade to today's behaviour."""
+    calls = []
+
+    class _Proc:
+        def __init__(self, rc):
+            self.returncode, self.stdout, self.stderr = rc, "", ""
+
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+        return _Proc(1 if "[" in cmd[-1] else 0)   # extras fail, plain succeeds
+
+    monkeypatch.setattr(rt.subprocess, "run", fake_run)
+    repo = Path(tempfile.mkdtemp())
+    _pyproject_with_extras(repo, {"test": ["nope-does-not-exist"]})
+    assert rt._install_project_deps("py", repo) == ""   # not an install failure
+    assert len(calls) == 2 and calls[1][-1] == str(repo)
+
+
+def test_install_deps_unreadable_pyproject_is_not_fatal(monkeypatch):
+    calls = _capture_pip(monkeypatch)
+    repo = Path(tempfile.mkdtemp())
+    (repo / "pyproject.toml").write_text("this is not [ valid toml")
+    rt._install_project_deps("py", repo)
+    assert calls and calls[0][-1] == str(repo)   # behaves exactly as before
+
+
+# ── no evidence is not a pass ───────────────────────────────────────
+# `autopep8` benchmark task: the implementer never delivered the test dir, the
+# gate collected nothing, reported passed:true, 5_review passed on that basis,
+# and a 0.128-scoring repo shipped as `completed`. A gate that checked NOTHING
+# has not passed.
+
+
+def test_no_tests_collected_does_not_pass(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n")   # code, no tests
+    out = tmp_path / "out"
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+
+    assert rep["returncode"] == 5
+    assert rep["no_tests_collected"] is True
+    assert rep["passed"] is False and res["passed"] is False
+    assert "not verified" in rep["summary"] or "verified" in rep["summary"]
+    assert any("collected" in f for f in rep["failures"])
+
+
+def test_no_python_sources_means_not_applicable_not_failure(tmp_path):
+    """A Godot/node project has no pytest suite by construction — failing it
+    would spin the goal loop on something no task can fix. Its own gate
+    (node / compile section) is the real one."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.gd").write_text("extends Node\n")
+    out = tmp_path / "out"
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+
+    assert rep["returncode"] == 5
+    assert rep["no_tests_collected"] is True
+    assert rep["passed"] is True and res["passed"] is True
+    assert "not applicable" in rep["summary"]
+
+
+# ── import smoke check: does the delivered package even load? ────────
+# NL2Repo `fastapi-users`: one wrong import (`SecurityBase` from
+# `fastapi.security`) made conftest.py unimportable, pytest exited 4 before
+# collection and all 556 cases scored zero. A prior attempt on the same task
+# died on a bare NameError. Both are `python -c "import <pkg>"`.
+
+
+def _pkg_repo(tmp_path, body, dist_name="broken-pkg", mod="broken_pkg"):
+    repo = tmp_path / "repo"
+    (repo / mod).mkdir(parents=True)
+    (repo / "pyproject.toml").write_text(f"[project]\nname='{dist_name}'\n")
+    (repo / mod / "__init__.py").write_text(body)
+    # a green test alongside it: pytest exits 0, so ONLY the smoke check sees it
+    (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    return repo
+
+
+def test_unimportable_package_fails_even_when_pytest_is_green(tmp_path):
+    repo = _pkg_repo(tmp_path, "AP\n")   # NameError at import time
+    out = tmp_path / "out"
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+
+    assert rep["returncode"] == 0          # pytest itself was happy
+    assert rep["passed"] is False and res["passed"] is False
+    assert "NameError" in rep["import_error"]
+    assert rep["summary"].startswith("The delivered package does not import")
+    assert rep["import_error"] in rep["failures"]
+
+
+def test_importable_package_is_silent(tmp_path):
+    repo = _pkg_repo(tmp_path, "VALUE = 1\n")
+    out = tmp_path / "out"
+    res = rt.run_tests(project_root=str(repo), out_dir=str(out))
+    rep = _report(out)
+    assert res["passed"] is True
+    assert "import_error" not in rep
+
+
+def test_smoke_check_skipped_when_the_module_cannot_be_identified(tmp_path):
+    """A dist name that matches nothing in the tree is a name we'd only guess
+    wrong with — skip rather than fabricate a failure."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='nothing-here'\n")
+    (repo / "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    assert rt._package_module(repo) is None
+    out = tmp_path / "out"
+    assert rt.run_tests(project_root=str(repo), out_dir=str(out))["passed"] is True
+
+
+def test_package_module_normalises_the_distribution_name(tmp_path):
+    """`Broken.Pkg` on the dist side is `broken_pkg` on the import side."""
+    repo = _pkg_repo(tmp_path, "VALUE = 1\n", dist_name="Broken.Pkg")
+    # .lower(): a case-insensitive filesystem resolves the un-lowered candidate
+    # first, and either spelling imports there.
+    assert rt._package_module(repo).lower() == "broken_pkg"

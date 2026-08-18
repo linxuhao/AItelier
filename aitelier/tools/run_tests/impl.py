@@ -11,10 +11,15 @@ Runner resolution: prefer pytest in the current interpreter; if it is missing
 the test toolchain — pytest + pytest-asyncio (REQUIRED by ``asyncio_mode=auto``
 configs; without it every async test errors out) + pytest-timeout — plus the
 project's declared dependencies (``requirements.txt``, or an editable install
-that reads ``pyproject.toml``/``setup.py``). If the runner cannot be
-provisioned at all (e.g. no network), the gate is SKIPPED (passed=True) — a
-missing test runner must never masquerade as failing tests, which would spin
-the goal-loop chasing a phantom failure.
+that reads ``pyproject.toml``/``setup.py``, INCLUDING its declared test extras).
+If the runner cannot be provisioned at all (e.g. no network), the gate is
+SKIPPED (passed=True) — a missing test runner must never masquerade as failing
+tests, which would spin the goal-loop chasing a phantom failure.
+
+Three outcomes, not two: pass, fail, and NO EVIDENCE. "pytest collected nothing"
+(exit 5) is the third, and it is not a pass — see the returncode handling in
+`run_tests` — unless the repo holds no Python at all, in which case the node /
+compile sections are the real gate.
 """
 
 import importlib.util
@@ -69,6 +74,28 @@ def _lead_with_install_error(report: dict) -> str:
             + report.get("summary", ""))
 
 
+def _lead_with_import_error(report: dict) -> str:
+    """Put the failed `import <pkg>` ABOVE the pytest output, when there was one.
+
+    A package that doesn't import makes every number below it meaningless — and
+    pytest is a poor messenger for it: it exits 4 (usage error) before
+    collection, so the report reads as a conftest problem several lines away
+    from the actual defect.
+    """
+    err = report.get("import_error")
+    if not err:
+        return report.get("summary", "")
+    # A failed install outranks it: the missing module is then a CONSEQUENCE, and
+    # a reader handed only the symptom rewrites packaging metadata (see
+    # `_lead_with_install_error`, written for exactly that loop).
+    note = ("\n    NOTE: the project's install into the test environment also "
+            "failed — see `install_error` below; that is the likelier root cause."
+            if report.get("install_error") else "")
+    return ("The delivered package does not import. Fix this FIRST — no test "
+            "result below means anything until it does:\n    "
+            f"{err}{note}\n\n" + report.get("summary", ""))
+
+
 def _install_failure_reason(proc) -> str:
     """The ONE line worth showing from a failed pip run.
 
@@ -90,6 +117,41 @@ def _install_failure_reason(proc) -> str:
         if "error" in ln.lower() and not ln.startswith(("File ", "^")):
             return ln[:600]
     return " | ".join(lines[-3:])[:600] if lines else f"exit {proc.returncode}"
+
+
+_TEST_EXTRA_NAMES = ("test", "tests", "dev", "testing")
+
+
+def _pyproject(repo: Path) -> dict:
+    """Parsed ``pyproject.toml``, or {} — never raises."""
+    try:
+        import tomllib
+        return tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _test_extras(repo: Path) -> list[str]:
+    """The project's DECLARED optional-dependency groups that carry test deps.
+
+    Test-only deps live in ``[project.optional-dependencies]``, which
+    ``pip install -e .`` does not touch — so every one of them was missing from
+    the test environment, always. NL2Repo sweep 2026-08-18: 6 of 12 runs had a
+    test-gate iteration blinded by exactly this (`asgi_lifespan`, `freezegun`,
+    `sqlalchemy`, `pytest-benchmark`), and 2 were blind on every iteration. The
+    gate then reported a `ModuleNotFoundError` in ``conftest.py`` — an
+    ENVIRONMENT fault no DPE role can fix (none has a shell or an install tool)
+    — while the real defect six lines below it was never reached.
+
+    Only names the project actually declares are returned: pip errors out on an
+    unknown extra, so guessing `[test]` blindly would break the install for
+    every project that doesn't have one.
+    """
+    declared = (_pyproject(repo).get("project") or {}).get(
+        "optional-dependencies") or {}
+    if not isinstance(declared, dict):
+        return []
+    return [g for g in _TEST_EXTRA_NAMES if g in declared]
 
 
 def _install_project_deps(venv_py: str, repo: Path) -> str:
@@ -115,16 +177,26 @@ def _install_project_deps(venv_py: str, repo: Path) -> str:
     which is irrelevant. Same loop, every lap.
     """
     try:
+        extras: list[str] = []
         if (repo / "requirements.txt").exists():
             cmd = [venv_py, "-m", "pip", "install", "-q", "-r",
                    str(repo / "requirements.txt")]
         elif any((repo / f).exists()
                  for f in ("pyproject.toml", "setup.py", "setup.cfg")):
-            cmd = [venv_py, "-m", "pip", "install", "-q", "-e", str(repo)]
+            # Test extras when the project declares them: `-e .[test,dev]`.
+            extras = _test_extras(repo)
+            target = f"{repo}[{','.join(extras)}]" if extras else str(repo)
+            cmd = [venv_py, "-m", "pip", "install", "-q", "-e", target]
         else:
             return ""
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=300, check=False)
+        if proc.returncode != 0 and extras:
+            # An extra that fails to resolve must not cost us the base install:
+            # degrade to exactly what this did before extras existed.
+            proc = subprocess.run(
+                [venv_py, "-m", "pip", "install", "-q", "-e", str(repo)],
+                capture_output=True, text=True, timeout=300, check=False)
         if proc.returncode != 0:
             return _install_failure_reason(proc)
         return ""
@@ -290,6 +362,73 @@ def _pythonpath_for(repo: Path) -> str:
     if existing:
         roots.append(existing)
     return os.pathsep.join(roots)
+
+
+_SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox"}
+
+
+def _package_module(repo: Path) -> str | None:
+    """The delivered package's IMPORT name, or None if it can't be established.
+
+    Derived from ``[project] name`` (distribution names normalise `-`/`.` to
+    `_`) and then CONFIRMED against the tree: a name that doesn't correspond to
+    a package/module actually in the repo is a name we'd only guess wrong with,
+    so the smoke check is skipped rather than fabricating a failure.
+    """
+    name = (_pyproject(repo).get("project") or {}).get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    normalised = re.sub(r"[-_.]+", "_", name.strip())
+    for mod in dict.fromkeys((normalised, normalised.lower())):
+        for probe in (repo / mod / "__init__.py", repo / "src" / mod / "__init__.py",
+                      repo / f"{mod}.py", repo / "src" / f"{mod}.py"):
+            if probe.exists():
+                return mod
+    return None
+
+
+def _import_smoke_error(py: str, repo: Path, env: dict) -> str:
+    """`python -c "import <pkg>"` — the one line that says the code even loads.
+
+    A package that does not import makes EVERY test meaningless, and the pytest
+    output rarely says so plainly: NL2Repo `fastapi-users` shipped one wrong
+    import (`SecurityBase` from `fastapi.security`, which lives in
+    `fastapi.security.base`), `tests/conftest.py` became unimportable, pytest
+    exited 4 before collection, and all 556 cases scored zero. A prior attempt
+    on the same task died on a bare `NameError` in a strategy module. Both are
+    this one line; neither was visible in the gate's report.
+
+    Returns "" when the package imports (or can't be identified — see
+    `_package_module`). Never raises: this only ever adds information.
+    """
+    mod = _package_module(repo)
+    if not mod:
+        return ""
+    try:
+        proc = subprocess.run([py, "-c", f"import {mod}"], capture_output=True,
+                              text=True, cwd=str(repo), env=env, timeout=60)
+        if proc.returncode == 0:
+            return ""
+        lines = [ln.strip() for ln in (proc.stderr or "").splitlines() if ln.strip()]
+        cause = lines[-1] if lines else f"exit {proc.returncode}"
+        return f"import {mod} failed: {cause}"[:600]
+    except Exception:
+        return ""
+
+
+def _has_python_sources(repo: Path) -> bool:
+    """Does this repo contain Python code at all?
+
+    Decides whether "pytest collected nothing" means MISSING EVIDENCE (a Python
+    project that shipped no tests) or NOT APPLICABLE (a node/Godot project whose
+    real gate is the node or compile section — failing those on an empty pytest
+    run would spin the goal loop on something no task can fix).
+    """
+    for _root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]  # prune, don't just skip:
+        if any(f.endswith(".py") for f in files):           # node_modules is huge
+            return True
+    return False
 
 
 def _pytest_timeout_args(py: str) -> list[str]:
@@ -483,6 +622,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # AItelier's tests instead of the project's.  Only the project root
             # belongs on the path.
             env = {**os.environ, "PYTHONPATH": _pythonpath_for(repo)}
+            # Cheapest possible check, and the one that would have caught two
+            # failed drives on the same task: does the delivered package import?
+            import_error = _import_smoke_error(py, repo, env)
+            if import_error:
+                report["import_error"] = import_error
             # start_new_session=True → pytest leads its own process group so we
             # can SIGKILL the whole tree (incl. git subprocesses it spawns) on
             # timeout or any error; otherwise those grandchildren leak as zombies.
@@ -513,15 +657,37 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 stdout, stderr = proc.communicate(timeout=75)
                 out = ((stdout or "") + "\n" + (stderr or "")).strip()
                 report["returncode"] = proc.returncode
-                # pytest: 0=all passed, 5=no tests collected (not a failure), 1=failures
-                report["passed"] = proc.returncode in (0, 5)
+                # pytest: 0=all passed, 1=failures, 5=NOTHING COLLECTED.
+                # 5 is a third outcome — no evidence — and it used to be routed
+                # forward as a pass: on the `autopep8` benchmark task the
+                # implementer never delivered the test directory, the gate found
+                # nothing, said `passed: true`, 5_review passed on that basis and
+                # a 0.128-scoring repo shipped as `completed`. A gate that
+                # checked nothing has not passed; it is only "not applicable"
+                # when the repo holds no Python code at all (a node or Godot
+                # project, gated by its own section below).
+                report["passed"] = proc.returncode == 0
+                if proc.returncode == 5:
+                    report["no_tests_collected"] = True
+                    report["passed"] = not _has_python_sources(repo)
                 collection_errors = _collection_errors(out)[:50]
                 report["collection_errors"] = collection_errors
                 failed_lines = [ln.strip() for ln in out.splitlines()
                                 if ln.startswith("FAILED") or " FAILED " in ln][:50]
                 report["failures"] = collection_errors + failed_lines
-                report["summary"] = ("No tests were collected." if proc.returncode == 5
-                                     else out[-3000:])
+                if proc.returncode == 5 and not report["passed"]:
+                    report["failures"].append(
+                        "No tests were collected — the gate verified NOTHING.")
+                    report["summary"] = (
+                        "No tests were collected, so nothing about this project "
+                        "was verified. This is NOT a pass: the suite is missing "
+                        "(or unreachable by pytest). Deliver tests under `tests/` "
+                        "covering the MVP goals and re-run.")
+                elif proc.returncode == 5:
+                    report["summary"] = ("No tests were collected (no Python "
+                                         "sources — pytest not applicable).")
+                else:
+                    report["summary"] = out[-3000:]
                 # Collection errors go ABOVE the tail, and in full. They are the
                 # defects that make every OTHER result meaningless (an
                 # unimportable module contributes zero passing tests), and they
@@ -554,6 +720,14 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     _kill_group(proc)
                 if venv_dir:
                     shutil.rmtree(venv_dir, ignore_errors=True)
+
+            # A package that doesn't import fails the gate whatever pytest said
+            # (it can still exit 0 — e.g. when the broken module is only reached
+            # by a conftest that pytest never got to).
+            if report.get("import_error"):
+                report["passed"] = False
+                report["failures"].insert(0, report["import_error"])
+                report["summary"] = _lead_with_import_error(report)
 
     # Node gate (npm install/build/test) — folded into the same report so
     # 5_review loops frontend breakage back through the goal-loop exactly

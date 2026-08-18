@@ -38,6 +38,7 @@ x-aitelier:
     "2_review": "Architecture Review"
     "3": "PM"
     "3_review": "PM Review"
+    "3_budget": "Step Budget"
     task_loop: "Task Loop"
     t_plan: "Task Planner"
     t_plan_review: "Plan Review"
@@ -247,10 +248,55 @@ steps:
     checkpoint: true
     checkpoint_label: "Review Task Breakdown"
     transitions:
-      - to: "3_review"
+      - to: "3_budget"
         match: { from: "checkpoint", value: "approved" }
       - to: "task_loop"
         match: { _error: true }
+
+  # ─── Step-budget gate (deterministic, no LLM) ───
+  # The PM's list has to be executable by the ENGINE, not just sensible to a
+  # reader, and that is arithmetic: 4 steps per task + the linear chain, against
+  # `max_total_steps` above. Nothing checked it. On the `boltons` benchmark the
+  # PM listed 33 tasks (145 steps); the 5_review goal loop appended 21 fix tasks
+  # → 54 tasks / 227 steps against a 200 cap, and the run was killed by the cap
+  # with every completed task discarded. It could not have finished with
+  # unlimited time — the failure was countable the moment the manifest existed.
+  #
+  # The gate can only REJECT. `max_total_steps` is read from the registered
+  # GRAPH (skillflow core.py: `resolver.graph.end_conditions`), never from the
+  # run row — `create_run` copies per-node config and edge counts and not the
+  # end conditions — so there is no per-run budget to raise. Rewriting the graph
+  # would move the cap for every other run of this config.
+  #
+  # It sits BEFORE `3_review`, not between it and `task_loop`, because an inline
+  # tool step routes with `_complete_tool_step`, which sets current_node and
+  # returns it WITHOUT resolving a loop node (only advance_run's own paths do
+  # that). A tool edge pointing straight at `task_loop` therefore hands the loop
+  # id to the next claim, and it gets claimed as an agent step. Every edge out of
+  # this gate targets an agent step; the loop is still entered from `3_review`,
+  # exactly as before. It also means the arithmetic is checked before the
+  # reviewer spends a step reading a list the engine cannot execute.
+  - id: "3_budget"
+    step_type: "tool"
+    tool_name: "task_budget_check"
+    tool_params:
+      out_dir: "$STEP_DIR"
+    transitions:
+      - to: "3_review"
+        match: { within_budget: true }
+      # Back to the PM with the numbers. `feedback: true` puts the tool's
+      # `reason` — "your N tasks need R steps, the budget is M, cut to K" — in
+      # the PM's MUST-ADDRESS banner, which is the only place it is sure to be
+      # read (the PM's re-run context does not include this step).
+      - to: "3"
+        match: { within_budget: false }
+        feedback: true
+        max_loop: 2
+      # Retries spent and the list still overshoots: proceed rather than fail the
+      # run here. That is exactly today's behaviour — partial work, then the cap —
+      # and it beats delivering nothing at all. The bounded rounds above are the
+      # fix; this edge is the floor under it.
+      - to: "3_review"
 
   - id: "3_review"
     step_type: "agent"

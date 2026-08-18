@@ -1,0 +1,22 @@
+name: task_budget_check
+description: >
+  Deterministic gate between the PM and the task loop. Counts the tasks the PM
+  emitted, computes how many pipeline steps that list needs (linear chain + one
+  loop body per task + headroom for one fix round), and compares it with the
+  run's `max_total_steps` end condition. Returns within_budget:true when the
+  list fits, or within_budget:false plus the concrete numbers (needed R,
+  budget M, cut to K tasks) so the PM can re-plan. Never fails the run: when the
+  graph or the manifest cannot be read it passes with a reason.
+parameters:
+  out_dir:
+    type: string
+    description: "Step dir (set to $STEP_DIR); locates sibling step dirs and holds budget_report.json"
+    required: false
+  config_name:
+    type: string
+    description: "Graph name (auto-injected); resolves the graph whose budget is being checked"
+    required: false
+  workspace_root:
+    type: string
+    description: "Pipeline workspace root (auto-injected); fallback locator for step dirs"
+    required: false

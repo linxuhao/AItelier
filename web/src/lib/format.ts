@@ -16,6 +16,7 @@ const _STEP_LABELS: Record<string, string> = {
   '2_review': 'Architecture Review',
   '3': 'PM',
   '3_review': 'PM Review',
+  '3_budget': 'Step Budget',
   '5': 'Final Verifier',
   '5_review': 'Final Review',
   '5_test': 'Unit Tests',

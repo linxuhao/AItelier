@@ -67,21 +67,32 @@ def test_dpe_reviewers_pin_an_explicit_reasoning_effort():
         )
 
 
-def test_task_planner_has_maker_sized_output_budget():
-    """The planner writes a multi-section plan; 16384 starved it into silence.
+def test_task_planner_starts_small_and_can_grow():
+    """The planner is sized to ESCALATE, not to be provisioned for its worst case.
 
-    Both observed zero-file `t_plan` steps reached turn 10 of 10 having spent
-    the entire budget on 55–65k-char reasoning chains without ever emitting a
-    write call — the step then committed 0 files and completed green. It is a
-    maker, not a reviewer, so its budget tracks task_implementer's.
+    Handing it task_implementer's 32768 up front made it write a longer essay,
+    not a better plan: on `boltons` t_plan burned 39% of the run and emitted
+    1.2 MB of markdown for 1.0 MB of delivered Python. It is back at 16384,
+    which is safe only because a starved turn doubles the cap for the retry
+    (core/dpe_pipeline.py:_run_native_step → AIGateway.escalate_output_cap).
+    Two invariants keep that true: the cap must sit BELOW the escalation ceiling
+    (at or above it, escalate_output_cap() declines and a starve is terminal),
+    and one doubling must reach the maker-sized budget the planner needs on the
+    rare task that really is that big.
     """
+    from core.ai_router import OUTPUT_CAP_CEILING
+
     with open(os.path.join(CONFIG_DIR, "dpe_default.yaml"), encoding="utf-8") as f:
         doc = yaml.safe_load(f)
     planner = doc["task_planner"].get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
     implementer = doc["task_implementer"].get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS)
-    assert planner >= implementer, (
-        f"task_planner max_output_tokens={planner} is below task_implementer's "
-        f"{implementer}; the planner produces comparable output volume"
+    assert planner < OUTPUT_CAP_CEILING, (
+        f"task_planner max_output_tokens={planner} is at the escalation ceiling "
+        f"({OUTPUT_CAP_CEILING}); a starved turn could not be retried any wider"
+    )
+    assert planner * 2 >= implementer, (
+        f"task_planner max_output_tokens={planner} cannot reach task_implementer's "
+        f"{implementer} in one escalation step"
     )
 
 
@@ -89,7 +100,12 @@ def test_task_planner_turn_budget_is_not_the_knob():
     """Measured: t_plan instances that hit the 10-turn ceiling produced complete
     4-slot output 24% of the time vs 54% for shorter ones. More turns correlate
     with WORSE output, so starvation is fixed with tokens per turn, never by
-    handing the planner more turns."""
+    handing the planner more turns.
+
+    Tightened to 6 from the `boltons` run: 312 turns over 42 executions, with 51
+    of 91 web_fetch calls repeating an already-fetched URL and 86% of all reads
+    re-reading an already-read path — the non-redundant exploration is ~2 turns.
+    A task that genuinely needs more calls ask_more_turns."""
     with open(os.path.join(CONFIG_DIR, "dpe_default.yaml"), encoding="utf-8") as f:
         doc = yaml.safe_load(f)
-    assert doc["task_planner"]["max_tool_turns"] <= 10
+    assert doc["task_planner"]["max_tool_turns"] <= 6

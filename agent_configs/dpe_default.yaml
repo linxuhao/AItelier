@@ -95,17 +95,33 @@ task_planner:
   temperature: 0.2
   template: "task_plan.md"
   tools: ["web_search", "web_fetch", "list_tree"]
-  # 32768 (was 16384), matching task_implementer. At 16384 the planner starved:
-  # both observed zero-file t_plan steps spent the WHOLE budget on reasoning
-  # chains of 55–65k chars and reached turn 10 of 10 having emitted no write
-  # call, so the step committed 0 files and completed green. The per-turn cap
-  # escalation only fires on the last turn, where it buys nothing — and the
-  # three post-escalation rescue turns already needed more than 16384 anyway.
-  max_output_tokens: 32768
-  # NOT raised: instances that hit the 10-turn ceiling produced complete 4-slot
-  # output 24% of the time vs 54% for shorter ones — more turns correlates with
-  # WORSE output, so the fix is tokens per turn, not more turns.
-  max_tool_turns: 10
+  # 16384, back down from the 32768 that was meant to cure an observed starve.
+  # It cured it by making every plan longer instead: on the `boltons` benchmark
+  # t_plan emitted 1.2 MB of markdown for 1.0 MB of delivered Python and took
+  # 141 minutes — 39% of the whole run — re-specifying what step 2 and the task
+  # card already said. A bigger sheet of paper buys a longer essay, not a better
+  # plan.
+  #
+  # Starting small is safe ONLY because the cap now grows on demand: a turn that
+  # is truncated with neither text nor a tool call is a STARVE, and
+  # core/dpe_pipeline.py:_run_native_step detects it and calls
+  # AIGateway.escalate_output_cap(), which DOUBLES this cap (clamped at
+  # OUTPUT_CAP_CEILING = 65536) before the retry. The raised cap rides on the
+  # gateway that get_native_agent() builds once per step, so a planner that
+  # genuinely needs 32768 gets there on its own, on the one task that needed it,
+  # instead of every task paying for it up front.
+  max_output_tokens: 16384
+  # 6, down from 10. On `boltons` the planner spent 312 turns over 42 executions
+  # (7.4/execution) of which most bought nothing: 51 of its 91 web_fetch calls
+  # repeated a URL it had already fetched, and 86% of all reads in the run
+  # re-read a path already read — so the non-redundant exploration in a typical
+  # execution is ~2 turns. 6 leaves those 2 plus one write turn per output slot.
+  # It is not a hard ceiling either: ask_more_turns is in every native step's
+  # tool schema and extends the budget on request, so a task that really needs
+  # more asks for it. Never RAISE this: instances that hit the old 10-turn
+  # ceiling produced complete 4-slot output 24% of the time vs 54% for shorter
+  # ones — more turns correlates with WORSE output.
+  max_tool_turns: 6
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:

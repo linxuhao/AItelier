@@ -80,5 +80,7 @@ Produce `step1_sota.md`:
 
 ## Error Handling
 - If the brief goals are not specific enough, base your research on the explicitly listed goals
-- Use web_search to find relevant technical solutions — don't guess
+- You have NO web access. Ground every technical claim in the spec text or in code already
+  present in the repository, and quote it. Where neither pins an answer, say so explicitly
+  and state the assumption — never present a guess as a looked-up fact
 - Document any assumptions for downstream steps

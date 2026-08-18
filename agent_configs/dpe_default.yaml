@@ -23,7 +23,7 @@ researcher:
   model: "deepseek/deepseek-v4-flash"
   temperature: 0.2
   template: "step1_5_researcher.md"
-  tools: ["web_search", "web_fetch", "list_tree"]
+  tools: ["list_tree"]
   max_output_tokens: 16384
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -47,7 +47,7 @@ architect:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "step2_architect.md"
-  tools: ["web_search", "web_fetch", "list_tree"]
+  tools: ["list_tree"]
   max_output_tokens: 32768
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -71,7 +71,7 @@ pm:
   model: "deepseek/deepseek-v4-pro"
   temperature: 0.2
   template: "step3_pm.md"
-  tools: ["web_search", "web_fetch", "list_tree"]
+  tools: ["list_tree"]
   max_output_tokens: 32768
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -94,7 +94,7 @@ task_planner:
   model: "deepseek/deepseek-v4-flash"
   temperature: 0.2
   template: "task_plan.md"
-  tools: ["web_search", "web_fetch", "list_tree"]
+  tools: ["list_tree"]
   # 16384, back down from the 32768 that was meant to cure an observed starve.
   # It cured it by making every plan longer instead: on the `boltons` benchmark
   # t_plan emitted 1.2 MB of markdown for 1.0 MB of delivered Python and took

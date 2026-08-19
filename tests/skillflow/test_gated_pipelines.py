@@ -83,9 +83,20 @@ def _wire_fix_tests(tmp_path, test_results):
     return sf, run_id, calls
 
 
+def _stage_one_file(sf, run_id, step_id):
+    """A maker step has to promote something: skillflow >= 1.5.32 re-asks a step
+    whose `on_deliver` would have nothing to deliver, so a worker confirmed with
+    an empty staging dir never advances."""
+    tmp = Path(sf._workspace.get_step_tmp_dir(
+        "p", sf.get_run(run_id)["graph_name"], step_id))
+    tmp.mkdir(parents=True, exist_ok=True)
+    (tmp / "impl.py").write_text("x = 1\n", encoding="utf-8")
+
+
 def _drive_worker(sf, run_id, worker_step, max_ticks=40):
     """Advance to termination; only the agent `worker_step` is claimable —
-    confirm it empty (routing test). Returns (status, worker_runs)."""
+    confirm it with one staged file and empty flags (routing test).
+    Returns (status, worker_runs)."""
     worker_runs = 0
     for _ in range(max_ticks):
         node = sf.advance_run(run_id)
@@ -100,6 +111,7 @@ def _drive_worker(sf, run_id, worker_step, max_ticks=40):
         assert claimed.step_id == worker_step, (
             f"only `{worker_step}` should be claimable, got {claimed.step_id}")
         worker_runs += 1
+        _stage_one_file(sf, run_id, claimed.step_id)
         sf.confirm_step(claimed.token, StepResult(flags={}))
     return "TIMEOUT", worker_runs
 
@@ -174,6 +186,7 @@ def _wire_subagent(tmp_path, verdicts, test_results=None):
                 continue
             if claimed.step_id == "work":
                 work_runs += 1
+                _stage_one_file(sf, run_id, claimed.step_id)
                 sf.confirm_step(claimed.token, StepResult(flags={}))
             elif claimed.step_id == "review":
                 passed = seq[min(calls["review"], len(seq) - 1)]

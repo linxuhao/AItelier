@@ -88,7 +88,10 @@ def _wire(tmp_path, test_results):
 def _drive(sf, run_id, max_ticks=40):
     """Advance the real graph to termination. `test` (tool) and `done` (gate)
     resolve inline; only `implement` (agent) is claimable — confirm it with an
-    empty result (routing test, no LLM). Returns (status, implement_runs)."""
+    empty result (routing test, no LLM), after staging one file so the step has
+    something for its `on_deliver` to deliver (skillflow >= 1.5.32 re-asks a
+    maker that promoted nothing instead of delivering an empty step dir).
+    Returns (status, implement_runs)."""
     implement_runs = 0
     for _ in range(max_ticks):
         node = sf.advance_run(run_id)
@@ -103,6 +106,10 @@ def _drive(sf, run_id, max_ticks=40):
         assert claimed.step_id == "implement", (
             f"only `implement` should be claimable, got {claimed.step_id}")
         implement_runs += 1
+        tmp = sf._workspace.get_step_tmp_dir("p", sf.get_run(run_id)["graph_name"],
+                                             claimed.step_id)
+        Path(tmp).mkdir(parents=True, exist_ok=True)
+        (Path(tmp) / "impl.py").write_text("x = 1\n", encoding="utf-8")
         sf.confirm_step(claimed.token, StepResult(flags={}))
     return "TIMEOUT", implement_runs
 

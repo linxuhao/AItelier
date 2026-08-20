@@ -76,6 +76,9 @@ def _validate(staging: Path) -> dict:
     just wrote — supplied by the engine, never by the config.
     """
     loader = ToolLoader(Path(skillflow.__file__).resolve().parent / "tools")
+    # The gate also runs gdscript_check, an AItelier tool — mirror the loader
+    # api/dependencies.py builds at boot, or every spec fails "Tool not found".
+    loader.add_tools_dir(Path(__file__).resolve().parents[2] / "aitelier" / "tools")
     return StepValidator(loader, staging).validate(_t_impl()["validation"])
 
 

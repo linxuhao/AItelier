@@ -1,0 +1,20 @@
+name: gdscript_check
+description: >
+  Parse-check GDScript files with `godot --check-only --script` via the
+  godot-builder sidecar and return {all_passed, results[{file, passed,
+  error_message}]} where each message carries the parse diagnosis and the
+  res:// line. One file at a time, no project import — cheap enough to run as a
+  per-step validation, unlike godot_compile. Wired as t_impl's validation for
+  *.gd, so a syntax error is caught by the step that wrote it and re-asked of
+  the same implementer, instead of surviving the whole task loop and surfacing
+  at 5_compile. No-ops (passes) when the step wrote no .gd files, and degrades
+  to a LOUD skip if the builder is unreachable.
+parameters:
+  files:
+    type: array
+    description: "Glob patterns relative to workspace_root (defaults to *.gd)"
+    required: false
+  workspace_root:
+    type: string
+    description: "Root for file resolution (injected by StepValidator: the step's staging dir)"
+    required: false

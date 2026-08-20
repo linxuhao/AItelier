@@ -612,6 +612,7 @@ def _normalize_asserts(raw) -> list:
 
 
 _TIMELINE_KEYS = {"at", "press", "release", "actions", "assert"}
+_MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
 
 
 def _normalize_timeline(timeline: list) -> tuple[list, list]:
@@ -691,7 +692,22 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
         # Run long enough to REACH the last timeline event (+margin) -- default_frames
         # is a floor, not a ceiling. Capped for safety. Truncating here would drop a
         # scenario's late assertions (e.g. one that checks at frame 300).
-        sframes = min(max(max_at + 30, default_frames), 3000) if timeline else default_frames
+        want = max(max_at + 30, default_frames) if timeline else default_frames
+        sframes = min(want, _MAX_SPEC_FRAMES)
+        if want > _MAX_SPEC_FRAMES:
+            # The cap is a safety limit, not a truncation the author consented
+            # to: an assertion scheduled past it simply never fires, vanishes
+            # from asserts[], and `all(a.passed)` then holds over whatever did
+            # run. A scenario losing its terminal assertion must not read as a
+            # scenario that passed it.
+            dropped = sorted({int(e.get("at", 0)) for e in timeline
+                              if e.get("assert") and int(e.get("at", 0)) >= _MAX_SPEC_FRAMES})
+            if dropped:
+                spec_errors.append(
+                    "scenario %r: assertion(s) scheduled at frame(s) %s, past the "
+                    "%d-frame cap - they would never be evaluated. Reach the same "
+                    "state sooner, or assert earlier."
+                    % (name, ", ".join(str(d) for d in dropped), _MAX_SPEC_FRAMES))
         spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline}))
         probe, errs, timed_out = _run_probe(
             dst, state_path, sframes, timeout,
@@ -805,6 +821,70 @@ def _import_resources(dst: Path, timeout: int) -> None:
         pass
 
 
+# A single-file --check-only run has no project.godot, so it cannot see
+# autoloads, res:// paths or sibling classes. Every one of these diagnostics
+# means "I cannot see the rest of the project" — NOT a defect in the file.
+# Measured on a working 21-script repo: 17 of 21 files "failed", every failure
+# one of these three. Ignoring them makes this a SYNTAX gate, which is exactly
+# the defect class it exists for (structure, indentation, unbalanced blocks).
+# Cross-file resolution is 5_compile's job — it imports the whole project once,
+# with autoloads live, and it is the gate that catches a typo'd identifier.
+_RESOLUTION_ERRORS = (
+    "not declared in the current scope",
+    "Could not resolve super class path",
+    "Preload file",
+    "Could not find type",
+    "Could not resolve external class member",
+)
+
+
+def _is_resolution_error(line: str) -> bool:
+    return any(frag in line for frag in _RESOLUTION_ERRORS)
+
+
+def check_gdscript(files: list[str], timeout: int = 120) -> dict:
+    """Parse-check GDScript files one at a time — the PER-TASK syntax gate.
+
+    ``--check-only --script`` parses ONE file with no project import, which is
+    why this can run after every implementation step where the full
+    ``compile_project`` (copy the project, import every resource, boot the
+    engine) is far too heavy. Without it a GDScript syntax error survives the
+    whole task loop and only surfaces at the end, because the base pipeline's
+    importability validation globs ``*.py`` and a Godot project has none: run
+    jinyong-play shipped a corrupted BFS loop (tab depths 3/4/5/7 plus a
+    duplicated guard) that no gate caught — only a reviewer reading the
+    indentation by eye rejected it.
+
+    Returns the shape StepValidator reads: ``{all_passed, results: [{file,
+    passed, error_message}]}``."""
+    results = []
+    for f in files or []:
+        fp = Path(f)
+        if not fp.is_file():
+            continue
+        try:
+            cp = _run(["--check-only", "--script", str(fp)], timeout=timeout)
+        except subprocess.TimeoutExpired:
+            results.append({"file": str(fp), "passed": False,
+                            "error_message": "godot --check-only timed out"})
+            continue
+        if cp.returncode == 0:
+            results.append({"file": str(fp), "passed": True, "error_message": ""})
+            continue
+        # Keep the parse diagnosis and the res:// line number, drop the engine
+        # banner and the generic "Failed to load script" tail.
+        lines = [ln.strip() for ln in cp.stderr.splitlines() if "Parse Error" in ln]
+        real = [ln for ln in lines if not _is_resolution_error(ln)]
+        if not real:
+            # Every complaint was "I cannot see the rest of the project", which
+            # is true and expected: one file, no project.godot. Not a defect.
+            results.append({"file": str(fp), "passed": True, "error_message": ""})
+            continue
+        results.append({"file": str(fp), "passed": False,
+                        "error_message": " ".join(real)[:800]})
+    return {"all_passed": all(r["passed"] for r in results), "results": results}
+
+
 # ── HTTP transport (mirrors the Unity sidecar) ─────────────────────────────
 class _Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, payload: dict) -> None:
@@ -834,6 +914,9 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/compile":
                 self._send(200, compile_project(proj))
+            elif self.path == "/checkgd":
+                self._send(200, check_gdscript(
+                    req.get("files") or [], timeout=req.get("timeout", 120)))
             elif self.path == "/playtest":
                 self._send(200, playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),

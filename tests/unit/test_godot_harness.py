@@ -190,6 +190,66 @@ def test_normalize_asserts_understands_changed_and_unchanged():
     assert out[1]["mode"] == "unchanged"
 
 
+class _CP:
+    def __init__(self, rc, err=""):
+        self.returncode, self.stderr, self.stdout = rc, err, ""
+
+
+def test_check_gdscript_passes_a_clean_file(monkeypatch, tmp_path):
+    f = tmp_path / "ok.gd"
+    f.write_text("extends Node\n")
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: _CP(0))
+    r = gh.check_gdscript([str(f)])
+    assert r["all_passed"] is True
+    assert r["results"][0]["passed"] is True
+
+
+def test_check_gdscript_fails_a_syntax_error(monkeypatch, tmp_path):
+    f = tmp_path / "bad.gd"
+    f.write_text("extends Node\n")
+    err = ('SCRIPT ERROR: Parse Error: Expected statement, found "Indent" instead.\n'
+           "          at: GDScript::reload (res://bad.gd:4)\n")
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: _CP(1, err))
+    r = gh.check_gdscript([str(f)])
+    assert r["all_passed"] is False
+    assert "Expected statement" in r["results"][0]["error_message"]
+
+
+def test_check_gdscript_ignores_missing_project_context(monkeypatch, tmp_path):
+    # One file, no project.godot: autoloads, res:// paths and sibling classes are
+    # all unresolvable. 17 of 21 files in a WORKING repo reported exactly these,
+    # so treating them as defects would fail almost every task.
+    f = tmp_path / "ai.gd"
+    f.write_text("extends RefCounted\n")
+    err = ('SCRIPT ERROR: Parse Error: Identifier "GridManager" not declared in '
+           "the current scope.\n"
+           'SCRIPT ERROR: Parse Error: Could not resolve super class path "res://a.gd".\n'
+           'SCRIPT ERROR: Parse Error: Preload file "res://b.gd" does not exist.\n')
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: _CP(1, err))
+    r = gh.check_gdscript([str(f)])
+    assert r["all_passed"] is True
+
+
+def test_check_gdscript_reports_only_the_real_error_when_mixed(monkeypatch, tmp_path):
+    f = tmp_path / "mixed.gd"
+    f.write_text("extends Node\n")
+    err = ('SCRIPT ERROR: Parse Error: Identifier "GridManager" not declared in '
+           "the current scope.\n"
+           'SCRIPT ERROR: Parse Error: Unexpected "Indent" in class body.\n')
+    monkeypatch.setattr(gh, "_run", lambda *a, **k: _CP(1, err))
+    r = gh.check_gdscript([str(f)])
+    assert r["all_passed"] is False
+    msg = r["results"][0]["error_message"]
+    assert "Unexpected" in msg and "GridManager" not in msg
+
+
+def test_spec_frame_cap_is_declared_and_generous():
+    # The cap only bites on scenarios longer than ~50s at 60fps; _playtest_spec
+    # turns an assertion scheduled past it into a spec_error rather than letting
+    # it silently vanish from the results.
+    assert gh._MAX_SPEC_FRAMES == 3000
+
+
 def test_digest_drops_the_probes_own_bookkeeping():
     nodes = {"/root/_AItelierProbe": {"vars": {"_frame": 400}},
              "/root/Main/Bird": {"vars": {"alive": True}}}

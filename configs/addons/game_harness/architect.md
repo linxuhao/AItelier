@@ -6,7 +6,7 @@
 - **跨场景单例用 autoload**：`GameManager`、分数等设为 autoload（`project.godot` 的 `[autoload]` 段），用信号（`signal`/`emit`）广播状态变化。
 - **交付物清单里必须包含**：一份 `README.md`（说明装 Godot 4.4+、F5 开玩、操作键，以及美术/音效资源分别是什么、哪些是占位）。工程根 `.gitignore`（含 `.godot/`）由系统自动加入，无需设计。
 - **可运行性**：整仓脚本被自动 headless 导入解析校验、主场景被自动 headless 运行冒烟（捕获运行时异常 + 快照运行时各节点脚本变量状态）。确保脚本间接口（`class_name`/信号名/方法签名/节点路径）一致、主场景能被无头加载。
-- **linter_manifest**：`.gd` 由 Godot 导入自动解析，**不必写进 manifest**；manifest 只覆盖其它文本文件（`.json`/`.md` 用 `basic`）。只有 GDScript/场景时可为 `{}`。
+- **linter_manifest**：`.gd` **不要写进 manifest** —— 它由 `gdscript_check` 闸门在每个实现步骤之后用 `godot --check-only` 逐文件解析（宿主控制，不经 manifest，免得一个拼错的后端名把闸门静默关掉）。manifest 只覆盖其它文本文件（`.json`/`.md` 用 `basic`）。只有 GDScript/场景时可为 `{}`。
 
 ## 行为测试契约 `playtest_spec.yaml`（你负责"可观测面 + 剧本骨架"）
 运行时 playtest 已升级为**脚本化剧本 + 断言的 TDD 式测试**：工程根的 `playtest_spec.yaml` 是"预期"，闸门按剧本时间线按键、并在指定帧用 `Expression` 对活节点求值断言。该文件由你与 PM 分工产出——**你定义可观测面 + 剧本骨架，PM 填断言阈值**：

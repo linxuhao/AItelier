@@ -508,6 +508,20 @@ steps:
     validation:
       - files: ["*.py"]
         tool: "lint"
+      # The same gate for GDScript. `lint` cannot serve it: its file glob is the
+      # first filter, so *.py never sees a .gd file, and routing .gd through the
+      # architect's linter_manifest.json would put the gate under LLM control —
+      # lint returns passed=True for a backend name it does not recognise, so one
+      # typo switches it off in silence, exactly as $STEP_DIR did above.
+      # gdscript_check shells `godot --check-only --script` per file through the
+      # sidecar: no project import, cheap enough to run every task, and it passes
+      # trivially for the projects that have no .gd at all.
+      # jinyong-play, task 1: a get_move_range() BFS loop shipped with tab depths
+      # 3/4/5/7 and a duplicated guard — a parse error that reached the repo
+      # because nothing mechanical looked at a .gd file until 5_compile, six
+      # tasks later. The reviewer caught it by counting tabs.
+      - files: ["*.gd"]
+        tool: "gdscript_check"
     lifecycle:
       # on_deliver is a SEQUENCE of repo-mutating tool hooks, run in order with
       # full variable resolution (needs skillflow-py >= 1.4.1). repo_apply

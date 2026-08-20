@@ -8,15 +8,37 @@
 # its input `timeline`, and at each `assert` frame evaluates each assertion
 # against the live node (as `self`) via Godot's Expression class.
 #
+# INPUT — a timeline entry presses keys with EXACTLY one of these two keys:
+#   - { at: 0, press: flap }                    # one action on that frame
+#   - { at: 7, actions: [move_right, skill_1] } # several on the same frame
+# Any other key (`keys:`, `input:`, a typo) is a HARD failure reporting
+# "unknown key" — the gate no longer skips what it cannot read. Don't confuse
+# the TOP-LEVEL `actions:` (the list of action names the game uses) with a
+# timeline entry's `actions:` (what to press this frame); both are legal.
+#
 # `assert` is a MAP of `Node.attr.path: expected`:
 #   * scalar (true/false/number)        → equality  (paused: true → paused == true)
 #   * string with a comparison operator → GDScript expression, verbatim
+#   * "changed" / "unchanged"           → DIFFERENTIAL: compare against this
+#     attr's value on frame 0 of this scenario. `actual` reports both
+#     {baseline, current}. USE THIS for anything a keypress is supposed to move.
 #   * node name is the key up to the 1st dot (scene sub-paths use '/', e.g.
 #     "HUD/PausedLabel.visible").
 #
-# Gate semantics: a CRASH or scene-didn't-run is a HARD failure (loops the
-# goal-loop). Assertion outcomes are ADVISORY — a prominent signal the verifier
-# weighs, but a wrong/flaky spec can never stall an otherwise-clean build.
+# WHY differential matters: presence assertions ("visible == true",
+# "grid_pos != null") score full marks on a game that ignores every keypress.
+# That is not hypothetical — a shipped build passed every assertion while the
+# player never moved, no enemy ever acted, and no damage was ever dealt.
+#
+# Gate semantics — FOUR hard failures (they loop the goal-loop):
+#   1. a crash / the main scene didn't run;
+#   2. a timeline entry with an unrecognised key;
+#   3. a scenario that PRESSED input and ended in exactly the state a no-input
+#      control run reaches → the input never reached the game (the gate runs
+#      that control pass itself, headless, once per distinct frame budget);
+#   4. the main scene failed to load.
+# Assertion outcomes themselves stay ADVISORY — a wrong or flaky assertion is a
+# prominent signal the verifier weighs, never a stalled build.
 #
 # Absent → the gate falls back to the legacy canned smoke test (auto-press
 # ui_accept, one end snapshot). This example targets a Flappy-Bird-style game.
@@ -29,9 +51,11 @@ actions: [flap]
 
 # ARCHITECT: the observable surface — nodes + script vars an assertion may touch.
 # This is the contract the implementer must match (exact node & var names).
+# Include what proves PROGRESS (score, health, state), not just `visible`.
 surface:
-  Bird: [velocity, position]
+  Bird: [velocity, position, alive]
   ScoreLabel: [score]
+  GameManager: [state]
 
 scenarios:
   # PM authors the `assert` maps; ARCHITECT provided name + timeline shape.
@@ -47,9 +71,20 @@ scenarios:
       - at: 8
         assert:
           Bird.velocity.y: "velocity.y < 0"
+          Bird.position: changed        # differential: it actually MOVED
 
   - name: passing a pipe increments the score
     timeline:
       - at: 180
         assert:
           ScoreLabel.score: "score >= 1"
+
+  # REQUIRED: at least one scenario drives the game all the way to a terminal
+  # outcome. A suite that only checks intermediate state verifies that the game
+  # boots, not that it can be played.
+  - name: flying into a pipe ends the run
+    timeline:
+      - at: 260
+        assert:
+          Bird.alive: false
+          GameManager.state: changed

@@ -154,9 +154,46 @@ def test_normalize_asserts_list_passthrough():
 def test_normalize_timeline_only_touches_assert_entries():
     tl = [{"at": 0, "press": "flap"},
           {"at": 5, "assert": {"Bird.velocity.y": "velocity.y < 0"}}]
-    out = gh._normalize_timeline(tl)
+    out, errors = gh._normalize_timeline(tl)
+    assert errors == []
     assert out[0] == {"at": 0, "press": "flap"}
     assert out[1]["assert"] == [{"node": "Bird", "expr": "velocity.y < 0", "name": "Bird.velocity.y"}]
+
+
+def test_normalize_timeline_expands_actions_into_presses():
+    # `actions:` is what every LLM-authored spec reaches for; it used to be
+    # dropped on the floor because the probe only reads `press:`.
+    out, errors = gh._normalize_timeline([{"at": 7, "actions": ["move_right", "skill_1"]}])
+    assert errors == []
+    assert out == [{"at": 7, "press": "move_right"}, {"at": 7, "press": "skill_1"}]
+
+
+def test_normalize_timeline_keeps_the_assert_when_actions_share_the_frame():
+    out, errors = gh._normalize_timeline(
+        [{"at": 7, "actions": ["move_right"], "assert": {"Bird.alive": True}}])
+    assert errors == []
+    assert {"at": 7, "press": "move_right"} in out
+    assert any("assert" in e for e in out)
+
+
+def test_normalize_timeline_rejects_an_unknown_key():
+    out, errors = gh._normalize_timeline([{"at": 3, "keys": ["ui_accept"]}])
+    assert out == []
+    assert len(errors) == 1 and "keys" in errors[0] and "at: 3" in errors[0]
+
+
+def test_normalize_asserts_understands_changed_and_unchanged():
+    out = gh._normalize_asserts({"Player.grid_pos": "changed",
+                                 "Score.value": "UNCHANGED"})
+    assert out[0] == {"node": "Player", "attr": "grid_pos",
+                      "name": "Player.grid_pos", "mode": "changed"}
+    assert out[1]["mode"] == "unchanged"
+
+
+def test_digest_drops_the_probes_own_bookkeeping():
+    nodes = {"/root/_AItelierProbe": {"vars": {"_frame": 400}},
+             "/root/Main/Bird": {"vars": {"alive": True}}}
+    assert gh._digest(nodes) == {"/root/Main/Bird": {"vars": {"alive": True}}}
 
 
 def test_playtest_project_dispatches_on_spec(monkeypatch, tmp_path):
@@ -164,6 +201,9 @@ def test_playtest_project_dispatches_on_spec(monkeypatch, tmp_path):
     monkeypatch.setattr(gh, "_copy_project", lambda p: tmp_path / "proj" / "proj")
     (tmp_path / "proj" / "proj").mkdir(parents=True)
     monkeypatch.setattr(gh, "_inject_probe", lambda d: None)
+    # Stubbed for the same reason as _copy_project: this test is about WHICH
+    # play-test path runs, and the real one would shell out to Godot.
+    monkeypatch.setattr(gh, "_import_resources", lambda d, t: None)
     monkeypatch.setattr(gh.shutil, "rmtree", lambda *a, **k: None)
     called = {}
     monkeypatch.setattr(gh, "_playtest_spec", lambda *a, **k: called.setdefault("spec", True) or {"passed": True})

@@ -3,9 +3,10 @@
 # The Godot analogue of Dockerfile.unity, but trivial by comparison: Godot's
 # headless binary is a free ~120MB download with NO license activation, NO
 # account, NO editor image. Base = python-slim (for the harness) + the Godot 4
-# binary + the handful of X/GL libs the linux build links against even in
-# --headless mode (it never opens a display, but the binary is dynamically
-# linked). Serves docker/godot/godot_harness.py over HTTP on :8080.
+# binary + the X/GL libs the linux build links against, plus Xvfb and Mesa's
+# software rasteriser: the playtest gate captures real rendered frames, so it
+# DOES open a display (--headless forces the dummy renderer, which draws no
+# pixels at all). Serves docker/godot/godot_harness.py over HTTP on :8080.
 
 FROM python:3.12-slim
 
@@ -16,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         wget unzip ca-certificates \
         libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxext6 \
         libgl1 libglu1-mesa fontconfig libfontconfig1 \
+        xvfb xauth libgl1-mesa-dri \
     && rm -rf /var/lib/apt/lists/*
 
 # Fetch the headless-capable Godot 4 binary.

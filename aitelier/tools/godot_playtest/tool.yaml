@@ -1,10 +1,25 @@
 name: godot_playtest
 description: >
-  Headless play-test of the Godot scene via the godot-builder sidecar: runs the
+  Play-test of the Godot scene via the godot-builder sidecar: runs the
   main scene for a bounded number of frames with an autoload probe, then writes
-  playtest_report.json {passed, frames, errors[], state, summary} where errors
-  carry res:// file + line and state is a live snapshot of every node's script
-  variables. Always succeeds as a step; no-ops for non-Godot projects and
+  playtest_report.json {passed, frames, errors[], spec_errors[], state,
+  captures[], render_mode, behavior, summary} where errors carry res:// file +
+  line and state is a live snapshot of every node's script variables.
+  passed is the HARD gate and covers four ways a run proves nothing: a crash,
+  a main scene that would not load, spec_errors[] (a timeline entry whose key
+  the gate does not recognise — unknown keys are rejected, never skipped), and
+  behavior.scenarios[].input_dead (that scenario pressed input yet ended in
+  exactly the state a no-input control run reaches, i.e. the input never
+  reached the game — the gate runs that control pass itself, headless, once
+  per distinct frame budget). Assertions support "changed"/"unchanged" for a
+  differential check against frame 0, whose actual reports {baseline, current};
+  a presence-only suite passes on a game that ignores every keypress. captures[] are REAL RENDERED
+  FRAMES: PNGs written next to the report under frames/, each {frame, file,
+  scenario}, grabbed at every assert frame plus an even stride so the pixels
+  pair with the state that assertion saw. render_mode tells you whether they
+  came from a real GL context ("render") or the run fell back to the pixel-less
+  dummy renderer ("headless"), in which case captures[] is empty. Always
+  succeeds as a step; no-ops for non-Godot projects and
   degrades to a LOUD gate_skipped pass if the builder is unreachable. Chained by
   godot_compile after a passing parse; not a standalone graph step.
 parameters:

@@ -8,6 +8,7 @@ action so the game progresses), and reports:
   * every runtime error (SCRIPT ERROR / push_error) with a res:// file + line
   * a JSON snapshot of the live scene tree's script variables — the runtime
     state an agent needs to actually SEE what the game is doing.
+  * PNGs of real rendered frames, unpacked into ``<out_dir>/frames/``.
 The outcome lands in ``playtest_report.json`` for 5_review to fold into its
 verdict, so runtime failures loop back through the goal-loop alongside parse
 errors.
@@ -19,6 +20,7 @@ It ALWAYS succeeds as a step:
   shipped without a runtime smoke test, so 5_review must see it).
 """
 
+import base64
 import json
 import os
 import urllib.error
@@ -42,6 +44,25 @@ def _read_spec(repo: Path) -> dict | None:
         return spec if isinstance(spec, dict) and spec.get("scenarios") else None
     except Exception:
         return None
+
+
+def _unpack_frames(report: dict, target_dir: Path) -> None:
+    """Materialise the sidecar's base64 frame captures under ``<out_dir>/frames/``
+    and leave a relative path behind.
+
+    The sidecar mounts the workspace read-only and copies projects to a container-
+    local temp dir, so the PNGs cannot be written where they belong — they ride
+    home inside the JSON. Unpacking them here is what makes the report readable:
+    a reviewer opens frames/..., and playtest_report.json never holds a blob."""
+    frames_dir = target_dir / "frames"
+    for cap in report.get("captures") or []:
+        blob = cap.pop("png_b64", "")
+        if not blob:
+            continue
+        name = os.path.basename(str(cap.get("file") or "frame.png"))
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        (frames_dir / name).write_bytes(base64.b64decode(blob))
+        cap["file"] = f"frames/{name}"
 
 
 def godot_playtest(*, project_root: str = "", out_dir: str = "",
@@ -71,7 +92,7 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
             _BUILDER_URL.rstrip("/") + "/playtest", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=240) as resp:
+            with urllib.request.urlopen(req, timeout=420) as resp:
                 report = json.loads(resp.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError,
                 TimeoutError) as e:
@@ -82,6 +103,7 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
 
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)
+    _unpack_frames(report, target_dir)
     (target_dir / "playtest_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
     return {"written": "playtest_report.json", "passed": report.get("passed", True)}

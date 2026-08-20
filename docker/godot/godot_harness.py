@@ -13,18 +13,21 @@ Two capabilities, exposed over HTTP and CLI:
               GDScript parse errors / failed script loads. Returns CS####-style
               diagnostics with res:// file + line.
 
-  playtest -> copy the project, inject an autoload probe, run the game headless
-              for N frames with a dummy renderer, then return:
+  playtest -> copy the project, inject an autoload probe, run the game for N
+              frames on a virtual X display (Xvfb + software GL), then return:
                 * every runtime error (SCRIPT ERROR / push_error) with file+line
                 * a JSON snapshot of the live scene tree's script variables
                   (score, velocity, game_state, ...) — the thing that makes an
                   agent actually SEE runtime state, which Unity could never give.
+                * PNGs of real rendered frames, base64'd home over HTTP — the
+                  thing that makes an agent actually SEE the game.
 
 The gate_skipped fail-open->observable contract is enforced on the *tool* side
 (aitelier/tools/godot_compile), not here; this service just reports facts.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -37,7 +40,13 @@ from pathlib import Path
 
 GODOT_BIN = os.environ.get("GODOT_BIN", "godot")
 DEFAULT_PLAYTEST_FRAMES = int(os.environ.get("GODOT_PLAYTEST_FRAMES", "180"))
+# How many frames to photograph per playtest run. 0 disables rendering entirely
+# and falls back to the pure-headless run — the opt-out for anyone who only wants
+# the state snapshot (or whose host has no working software GL).
+PLAYTEST_CAPTURES = int(os.environ.get("GODOT_PLAYTEST_CAPTURES", "4"))
+RENDER_RES = os.environ.get("GODOT_PLAYTEST_RES", "1280x720")
 PORT = int(os.environ.get("PORT", "8080"))
+_MAX_CAPTURES = 8       # hard ceiling: every PNG rides home inside the JSON body
 
 # ── error parsing ──────────────────────────────────────────────────────────
 # Godot always exits 0 even on script errors, so correctness lives in stderr.
@@ -96,13 +105,24 @@ def _parse_errors(stderr: str) -> list[dict]:
     return out
 
 
-def _run(args: list[str], timeout: int, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+def _run(args: list[str], timeout: int, extra_env: dict | None = None,
+         render: bool = False) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)
+    if render:
+        # --headless FORCES the dummy rendering driver, which draws nothing, so a
+        # viewport capture comes back empty. To photograph frames Godot needs a
+        # real display: Xvfb gives it one, and llvmpipe gives it a GL stack (this
+        # container has no GPU). Compile stays on --headless — it needs no display
+        # and skipping the display is faster.
+        env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+        cmd = ["xvfb-run", "-a", "-s", f"-screen 0 {RENDER_RES}x24", GODOT_BIN,
+               "--display-driver", "x11", "--rendering-driver", "opengl3", *args]
+    else:
+        cmd = [GODOT_BIN, "--headless", *args]
     return subprocess.run(
-        [GODOT_BIN, "--headless", *args],
-        capture_output=True, text=True, timeout=timeout, env=env,
+        cmd, capture_output=True, text=True, timeout=timeout, env=env,
     )
 
 
@@ -126,6 +146,15 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
     gd_files = [p for p in proj.rglob("*.gd") if ".godot/" not in str(p)]
     dst = _copy_project(proj)
     try:
+        # TWO passes, and the second one is the authoritative diagnosis. Godot
+        # imports resources and parses scripts in the SAME pass, so on a cold
+        # cache every `preload("res://…​.wav")` is read before its importer has
+        # run and reports "no resource loaders (unrecognized file extension)" —
+        # a phantom. Measured on a project with six sound effects: pass one
+        # reports 18 errors, pass two reports the 6 that are real. Blaming the
+        # agent for the other 12 makes the goal loop burn iterations chasing
+        # errors that do not exist.
+        _run(["--path", str(dst), "--import"], timeout=timeout)
         cp = _run(["--path", str(dst), "--import"], timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"passed": False, "returncode": -1, "file_count": len(gd_files),
@@ -150,7 +179,9 @@ _PROBE_GD = r'''extends Node
 #     objective, per-game behavioural checks (the TDD oracle).
 #   * LEGACY mode (no spec): run N frames auto-pressing one action every 20
 #     frames, then snapshot — the old canned smoke test (still the fallback).
-# Always writes {frames, asserts[], nodes{}} to AITELIER_PROBE_OUT and quits.
+# Orthogonally, if AITELIER_PROBE_CAPTURE names a directory it saves the viewport
+# as a PNG at each frame listed in AITELIER_PROBE_CAPTURE_AT.
+# Always writes {frames, asserts[], nodes{}, captures[]} to AITELIER_PROBE_OUT.
 # Indented with spaces (GDScript accepts consistent spaces or tabs).
 var _frame := 0
 var _max := 180
@@ -160,6 +191,11 @@ var _spec_mode := false
 var _timeline := []      # SPEC: [{at:int, press?:String, release?:String, assert?:[{name,node,expr}]}]
 var _releases := {}      # frame -> [action, ...] auto-release schedule
 var _results := []       # [{name, node, expr, passed, actual, error, frame}]
+var _capture_dir := ""
+var _capture_at := {}    # frame -> true, consumed as each one is photographed
+var _captures := []      # [{frame, file}]
+var _watch := []         # [{node, attr}] whose frame-0 value a delta assert needs
+var _baselines := {}     # "node|attr" -> frame-0 value
 func _ready() -> void:
     # Keep ticking even when the game calls get_tree().paused = true — otherwise
     # the probe freezes with the game and can neither un-pause nor assert, so a
@@ -177,6 +213,32 @@ func _ready() -> void:
         _legacy_action = OS.get_environment("AITELIER_PROBE_INPUT")
         if _legacy_action != "" and not InputMap.has_action(_legacy_action):
             InputMap.add_action(_legacy_action)
+    _capture_dir = OS.get_environment("AITELIER_PROBE_CAPTURE")
+    if _capture_dir != "":
+        for s in OS.get_environment("AITELIER_PROBE_CAPTURE_AT").split(",", false):
+            _capture_at[int(s)] = true
+        # frame_post_draw is the ONLY moment the viewport texture holds the frame
+        # that was just drawn; reading it from _process yields the PREVIOUS one.
+        RenderingServer.frame_post_draw.connect(_on_post_draw)
+func _on_post_draw() -> void:
+    # _process bumps _frame at its END and post-draw fires after _process, so the
+    # frame just drawn is _frame - 1, not _frame.
+    var drawn := _frame - 1
+    if not _capture_at.has(drawn):
+        return
+    _capture_at.erase(drawn)
+    var vp := get_viewport()
+    if vp == null:
+        return
+    var tex := vp.get_texture()
+    if tex == null:
+        return
+    var img := tex.get_image()
+    if img == null:
+        return
+    var path := _capture_dir.path_join("frame_%04d.png" % drawn)
+    if img.save_png(path) == OK:
+        _captures.append({"frame": drawn, "file": path})
 func _load_spec(path: String) -> void:
     var f := FileAccess.open(path, FileAccess.READ)
     if f == null:
@@ -198,9 +260,18 @@ func _load_spec(path: String) -> void:
             var act = e.get(key, "")
             if act != "" and not InputMap.has_action(act):
                 InputMap.add_action(act)
+    # A "changed"/"unchanged" assertion needs the value it is changing FROM.
+    for e in _timeline:
+        var asserts = e.get("assert", [])
+        if typeof(asserts) == TYPE_ARRAY:
+            for a in asserts:
+                if a.has("mode"):
+                    _watch.append({"node": str(a.get("node", "")), "attr": str(a.get("attr", ""))})
 func _process(_d: float) -> void:
     # 0-based frames: apply this frame's scheduled releases + timeline entries,
     # THEN advance. Incrementing first would make `at: 0` unreachable.
+    if _frame == 0:
+        _capture_baselines()
     if _releases.has(_frame):
         for act in _releases[_frame]:
             if InputMap.has_action(act):
@@ -253,6 +324,9 @@ func _eval_assert(a: Dictionary) -> void:
         res["error"] = "node not found: " + node_name
         _results.append(res)
         return
+    if a.has("mode"):
+        _eval_delta(a, target, res)
+        return
     var expr := Expression.new()
     if expr.parse(expr_str) != OK:
         res["error"] = "parse error: " + expr.get_error_text()
@@ -268,6 +342,31 @@ func _eval_assert(a: Dictionary) -> void:
         return
     res["actual"] = _jsonable(val)
     res["passed"] = bool(val)
+    _results.append(res)
+func _capture_baselines() -> void:
+    for w in _watch:
+        var t := _resolve(str(w["node"]))
+        if t != null:
+            _baselines[str(w["node"]) + "|" + str(w["attr"])] = _read_attr(t, str(w["attr"]))
+func _read_attr(target: Object, attr: String):
+    # Same Expression machinery the assertions use, so "velocity.y" reads as
+    # naturally as "grid_pos".
+    var e := Expression.new()
+    if e.parse(attr) != OK:
+        return null
+    var v = e.execute([], target, false)
+    if e.has_execute_failed():
+        return null
+    return _jsonable(v)
+func _eval_delta(a: Dictionary, target: Node, res: Dictionary) -> void:
+    var attr := str(a.get("attr", ""))
+    var mode := str(a.get("mode", "changed"))
+    var key := str(a.get("node", "")) + "|" + attr
+    var cur = _read_attr(target, attr)
+    var base = _baselines.get(key, null)
+    res["expr"] = attr + " " + mode + " since frame 0"
+    res["actual"] = {"baseline": base, "current": cur}
+    res["passed"] = (cur != base) if mode == "changed" else (cur == base)
     _results.append(res)
 func _resolve(name: String) -> Node:
     if name == "":
@@ -301,7 +400,7 @@ func _finish() -> void:
     if _dumped:
         return
     _dumped = true
-    var out := {"frames": _frame, "asserts": _results, "nodes": {}}
+    var out := {"frames": _frame, "asserts": _results, "nodes": {}, "captures": _captures}
     _walk(get_tree().get_root(), out["nodes"])
     var path := OS.get_environment("AITELIER_PROBE_OUT")
     if path == "":
@@ -349,22 +448,48 @@ def _inject_probe(dst: Path) -> None:
     pg.write_text(text)
 
 
-def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
-               extra: dict, scene: str = "") -> tuple[dict, list, bool]:
-    """One headless probe run. Returns (probe_report, errors, timed_out)."""
+def _capture_frames(total: int, timeline: list | None = None) -> list[int]:
+    """Which frames to photograph. Assert frames come FIRST: a PNG earns its
+    bandwidth by showing the very state an assertion judged. The stride only
+    spends whatever budget is left, so a run with no asserts still comes back
+    with a filmstrip instead of nothing.
+
+    Never schedules the last frame: the probe calls _finish() and quit() from
+    _process once _frame >= _max, so that frame's post-draw never fires and the
+    JSON would name a PNG that was never written."""
+    limit = min(PLAYTEST_CAPTURES, _MAX_CAPTURES)
+    last = total - 2
+    if limit <= 0 or last < 0:
+        return []
+    picked = [int(e.get("at", 0)) for e in (timeline or []) if e.get("assert")]
+    stride = max(1, total // (limit + 1))
+    picked += [i * stride for i in range(1, limit + 1)]
+    out: list[int] = []
+    for f in picked:
+        f = min(max(f, 0), last)
+        if f not in out:
+            out.append(f)
+        if len(out) == limit:
+            break
+    return sorted(out)
+
+
+def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
+                render: bool) -> tuple[dict, list, bool]:
     if state_path.exists():
         state_path.unlink()
-    args = ["--path", str(dst)]
-    if scene:
-        args.append(scene)              # run a specific scene instead of main
-    env = {"AITELIER_PROBE_OUT": str(state_path), "AITELIER_PROBE_FRAMES": str(frames)}
-    env.update(extra)
     try:
-        cp = _run(args, timeout=timeout, extra_env=env)
+        cp = _run(args, timeout=timeout, extra_env=env, render=render)
         stderr, timed_out = cp.stderr, False
     except subprocess.TimeoutExpired as e:
         stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
         timed_out = True
+    except FileNotFoundError as e:
+        # Render mode shells out to xvfb-run; if the image lacks it there is no
+        # run at all. The caller's headless retry is what keeps the gate alive.
+        if not render:
+            raise
+        stderr, timed_out = str(e), False
     errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
     probe = {}
     if state_path.is_file():
@@ -375,12 +500,60 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
     return probe, errs, timed_out
 
 
+def _attach_pngs(captures: list, cap_dir: Path) -> list:
+    """Inline each captured PNG as base64 and keep only its basename: the sidecar
+    mounts the workspace read-only, so the bytes have to ride home in the JSON
+    body, and the container-local path means nothing to the caller."""
+    out = []
+    for c in captures:
+        png = cap_dir / Path(str(c.get("file", ""))).name
+        if png.is_file():
+            out.append({"frame": c.get("frame"), "file": png.name,
+                        "png_b64": base64.b64encode(png.read_bytes()).decode()})
+    return out
+
+
+def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
+               extra: dict, scene: str = "",
+               capture_at: list[int] | None = None) -> tuple[dict, list, bool]:
+    """One probe run. Returns (probe_report, errors, timed_out) — the captures
+    ride inside probe_report, because callers (and the unit tests that fake this)
+    depend on the 3-tuple."""
+    args = ["--path", str(dst)]
+    if scene:
+        args.append(scene)              # run a specific scene instead of main
+    env = {"AITELIER_PROBE_OUT": str(state_path), "AITELIER_PROBE_FRAMES": str(frames)}
+    env.update(extra)
+    render = bool(capture_at)
+    cap_dir = dst.parent / "captures"
+    if render:
+        shutil.rmtree(cap_dir, ignore_errors=True)
+        cap_dir.mkdir(parents=True, exist_ok=True)
+        env["AITELIER_PROBE_CAPTURE"] = str(cap_dir)
+        env["AITELIER_PROBE_CAPTURE_AT"] = ",".join(str(f) for f in capture_at)
+    probe, errs, timed_out = _probe_once(args, env, state_path, timeout, render)
+    if render and not probe:
+        # A broken X/GL setup must degrade to yesterday's behaviour, not take the
+        # whole playtest gate down: retry once, headless, with capture off.
+        env.pop("AITELIER_PROBE_CAPTURE")
+        env.pop("AITELIER_PROBE_CAPTURE_AT")
+        render = False
+        probe, errs, timed_out = _probe_once(args, env, state_path, timeout, False)
+    if probe:
+        # Report which mode actually produced this, so a silent fallback to the
+        # pixel-blind path is visible rather than looking like "no captures".
+        probe["render_mode"] = "render" if render else "headless"
+        probe["captures"] = _attach_pngs(probe.get("captures", []), cap_dir) if render else []
+    return probe, errs, timed_out
+
+
 def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) -> dict:
     """The old canned smoke test: run the main scene auto-pressing one action,
     snapshot the end state. HARD-fails only on crash / didn't-run."""
     state_path = dst.parent / "probe_state.json"
     probe, errs, timed_out = _run_probe(
-        dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action})
+        dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action},
+        capture_at=_capture_frames(frames))
     ran = bool(probe) or not timed_out
     passed = not errs and ran
     if not ran:
@@ -391,10 +564,15 @@ def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) ->
         summary = "Playtest surfaced %d runtime error(s)." % len(errs)
     return {"passed": passed, "frames": probe.get("frames", frames), "errors": errs,
             "state": probe.get("nodes", {}), "behavior": None,
+            "captures": probe.get("captures", []),
+            "render_mode": probe.get("render_mode", "headless"),
             "spec_used": False, "summary": summary}
 
 
 _CMP_OPS = ("==", "!=", "<=", ">=", "<", ">", " and ", " or ", " in ", " not ")
+
+
+_DELTA_MODES = ("changed", "unchanged")
 
 
 def _normalize_asserts(raw) -> list:
@@ -414,6 +592,13 @@ def _normalize_asserts(raw) -> list:
     if isinstance(raw, dict):
         for key, val in raw.items():
             node, _, attr = str(key).partition(".")
+            if isinstance(val, str) and val.strip().lower() in _DELTA_MODES:
+                # Differential assertion: did this value MOVE since the scenario
+                # started? A presence check ("visible == true") passes on a game
+                # that ignores every keypress. This one cannot.
+                out.append({"node": node, "attr": attr, "name": str(key),
+                            "mode": val.strip().lower()})
+                continue
             if isinstance(val, bool):
                 expr = f"{attr} == {'true' if val else 'false'}"
             elif isinstance(val, (int, float)):
@@ -426,45 +611,92 @@ def _normalize_asserts(raw) -> list:
     return out
 
 
-def _normalize_timeline(timeline: list) -> list:
-    """Normalise every entry's ``assert`` (dict → {node,expr} list) so the probe
-    receives a uniform shape regardless of which format the spec author used."""
-    out = []
-    for e in timeline or []:
-        if isinstance(e, dict) and "assert" in e:
-            e = {**e, "assert": _normalize_asserts(e["assert"])}
-        out.append(e)
-    return out
+_TIMELINE_KEYS = {"at", "press", "release", "actions", "assert"}
+
+
+def _normalize_timeline(timeline: list) -> tuple[list, list]:
+    """Normalise one scenario's timeline and REJECT anything unrecognised.
+
+    Returns ``(entries, errors)``. Input comes in two accepted shapes:
+    ``press: <action>`` (one action) and ``actions: [<a>, <b>]`` (several on the
+    same frame, expanded here into one ``press`` entry each).
+
+    An unknown key is an ERROR, never a silent skip. Both shipped game specs put
+    ``actions:`` INSIDE timeline entries while the probe only ever read
+    ``press:``; every entry was dropped, no input was ever delivered, and each
+    scenario still passed because its assertions only checked that UI nodes
+    existed. Ignoring a key we do not understand is how a gate ends up grading a
+    game nobody played."""
+    out, errors = [], []
+    for i, e in enumerate(timeline or []):
+        if not isinstance(e, dict):
+            errors.append("timeline entry %d is %s, expected a mapping"
+                          % (i, type(e).__name__))
+            continue
+        unknown = sorted(set(e) - _TIMELINE_KEYS)
+        if unknown:
+            errors.append("timeline entry %d (at: %s) has unknown key(s) %s - allowed: %s"
+                          % (i, e.get("at", "?"), ", ".join(unknown),
+                             ", ".join(sorted(_TIMELINE_KEYS))))
+            continue
+        at = e.get("at", 0)
+        acts = e.get("actions") or []
+        if isinstance(acts, str):
+            acts = [acts]
+        base = {k: v for k, v in e.items() if k != "actions"}
+        if "assert" in base:
+            base["assert"] = _normalize_asserts(base["assert"])
+        # The probe fires every entry whose `at` matches the frame, so several
+        # presses on one frame are simply several entries.
+        for a in acts:
+            out.append({"at": at, "press": a})
+        if base.get("press") or base.get("release") or base.get("assert") or not acts:
+            out.append(base)
+    return out, errors
+
+
+def _digest(nodes: dict) -> dict:
+    """Node state minus the probe's own bookkeeping - its frame counter and
+    capture paths differ between any two runs, which would defeat the
+    no-input comparison in _playtest_spec."""
+    return {k: v for k, v in (nodes or {}).items() if "_AItelierProbe" not in k}
 
 
 def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     """Authored-spec playtest: run ONE isolated headless pass per scenario, driving
     its input timeline and evaluating its Expression assertions against live nodes.
 
-    Gate split: ``passed`` (HARD, loops the goal-loop) covers only crash / didn't-
-    run; per-scenario assertion outcomes are ADVISORY (``behavior``) so a wrong or
-    flaky spec can never stall a build that otherwise runs clean."""
+    Gate split: ``passed`` (HARD, loops the goal-loop) covers crash / didn't-run,
+    plus the two ways a scenario can look green without testing anything -- a
+    malformed timeline, and input that never reached the game. Per-scenario
+    assertion outcomes stay ADVISORY (``behavior``) so a wrong or flaky assertion
+    can never stall a build that otherwise runs clean."""
     scene = str(spec.get("scene", "") or "")
     default_frames = int(spec.get("frames", frames) or frames)
     scenarios = spec.get("scenarios") or []
     state_path = dst.parent / "probe_state.json"
     spec_path = dst.parent / "scenario_spec.json"
 
-    scen_results, all_errors = [], []
+    scen_results, all_errors, captures, spec_errors = [], [], [], []
+    scen_nodes: list[dict] = []
+    scen_frames: list[int] = []
     ran_any = crashed = False
     last_state: dict = {}
-    for sc in scenarios:
+    render_mode = "headless"
+    for i, sc in enumerate(scenarios):
         name = str(sc.get("name", "scenario"))
-        timeline = _normalize_timeline(sc.get("timeline") or [])
+        timeline, terrs = _normalize_timeline(sc.get("timeline") or [])
+        spec_errors.extend("scenario %r: %s" % (name, m) for m in terrs)
         max_at = max([int(e.get("at", 0)) for e in timeline], default=0)
-        # Run long enough to REACH the last timeline event (+margin) — default_frames
+        # Run long enough to REACH the last timeline event (+margin) -- default_frames
         # is a floor, not a ceiling. Capped for safety. Truncating here would drop a
         # scenario's late assertions (e.g. one that checks at frame 300).
         sframes = min(max(max_at + 30, default_frames), 3000) if timeline else default_frames
         spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline}))
         probe, errs, timed_out = _run_probe(
             dst, state_path, sframes, timeout,
-            {"AITELIER_PROBE_SPEC": str(spec_path)}, scene=scene)
+            {"AITELIER_PROBE_SPEC": str(spec_path)}, scene=scene,
+            capture_at=_capture_frames(sframes, timeline))
         ran = bool(probe) or not timed_out
         ran_any = ran_any or ran
         if errs:
@@ -473,22 +705,66 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
         asserts = probe.get("asserts", [])
         scen_passed = ran and not errs and bool(asserts) and all(a.get("passed") for a in asserts)
         scen_results.append({"name": name, "ran": ran, "errors": errs,
-                             "asserts": asserts, "passed": scen_passed})
+                             "asserts": asserts, "passed": scen_passed,
+                             "pressed": any(e.get("press") for e in timeline),
+                             "input_dead": False})
+        scen_nodes.append(_digest(probe.get("nodes", {})))
+        scen_frames.append(sframes)
         last_state = probe.get("nodes", last_state)
+        render_mode = probe.get("render_mode", render_mode)
+        # Every scenario re-runs from frame 0, so basenames collide across them --
+        # prefix with the scenario index and tag with its name.
+        captures.extend({**c, "scenario": name, "file": "s%d_%s" % (i, c["file"])}
+                        for c in probe.get("captures", []))
 
+    # -- L0: did the input reach the game at all? ----------------------------
+    # A scenario that presses keys and ends in EXACTLY the state an untouched run
+    # reaches tested nothing, however green its assertions look. One extra probe
+    # pass per distinct frame budget buys the answer -- headless, no captures, so
+    # it is the cheapest run in the file. This is the gate that would have caught
+    # the `actions:`-vs-`press:` mismatch on day one instead of two games later.
+    driven = [i for i, r in enumerate(scen_results) if r["pressed"] and r["ran"]]
+    controls: dict[int, dict] = {}
+    if driven and not crashed:
+        for i in driven:
+            n = scen_frames[i]
+            if n not in controls:
+                spec_path.write_text(json.dumps({"frames": n, "timeline": []}))
+                ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
+                                          {"AITELIER_PROBE_SPEC": str(spec_path)},
+                                          scene=scene)
+                controls[n] = _digest(ctrl.get("nodes", {}))
+            # An empty control means the control pass itself failed to report --
+            # stay quiet rather than accuse the game on missing evidence.
+            if controls[n] and scen_nodes[i] == controls[n]:
+                scen_results[i]["input_dead"] = True
+                scen_results[i]["passed"] = False
+
+    dead = [r["name"] for r in scen_results if r["input_dead"]]
     behavior_passed = bool(scen_results) and all(s["passed"] for s in scen_results)
-    hard_passed = ran_any and not crashed      # HARD gate = crash / didn't-run only
+    hard_passed = ran_any and not crashed and not spec_errors and not dead
     n_fail = sum(1 for s in scen_results if not s["passed"])
-    if not hard_passed:
+    if spec_errors:
+        summary = ("Playtest HARD-failed: %d malformed timeline entr%s -- %s"
+                   % (len(spec_errors), "y" if len(spec_errors) == 1 else "ies",
+                      spec_errors[0]))
+    elif not ran_any or crashed:
         summary = ("Playtest HARD-failed: %s."
                    % ("runtime error(s)" if crashed else "scene did not run"))
+    elif dead:
+        summary = ("Playtest HARD-failed: scenario(s) %s pressed input and ended in "
+                   "EXACTLY the state a no-input control run reaches -- the game "
+                   "never received it. Check the action names against "
+                   "project.godot [input] and how the game reads them."
+                   % ", ".join(repr(d) for d in dead))
     elif behavior_passed:
         summary = "Playtest ran %d scenario(s); all assertions passed." % len(scen_results)
     else:
         summary = ("Playtest ran clean but %d/%d scenario(s) failed assertions (advisory)."
                    % (n_fail, len(scen_results)))
     return {"passed": hard_passed, "frames": default_frames, "errors": all_errors,
-            "state": last_state, "spec_used": True,
+            "state": last_state, "spec_used": True, "spec_errors": spec_errors,
+            "captures": captures, "render_mode": render_mode,
             "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
             "summary": summary}
 
@@ -504,11 +780,29 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
     dst = _copy_project(proj)
     try:
         _inject_probe(dst)
+        _import_resources(dst, timeout)
         if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
             return _playtest_spec(dst, spec, frames, timeout)
         return _playtest_legacy(dst, frames, input_action, timeout)
     finally:
         shutil.rmtree(dst.parent, ignore_errors=True)
+
+
+def _import_resources(dst: Path, timeout: int) -> None:
+    """Build the import cache before running the scene.
+
+    `_copy_project` strips `.godot/`, and Godot resolves a texture or a sound
+    through that cache — an un-imported PNG makes `ExtResource("bgtex")` resolve
+    to nothing, so the Sprite2D draws NOTHING and the run still exits cleanly
+    with zero errors. A game whose art had been replaced by real files therefore
+    play-tested as a flat grey screen and passed. The compile gate already
+    imports, but on its own temp copy, which it then deletes; this path needs its
+    own. Best-effort: a project with no importable resources (the primitives-only
+    case this harness was written for) is unaffected either way."""
+    try:
+        _run(["--path", str(dst), "--import"], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 # ── HTTP transport (mirrors the Unity sidecar) ─────────────────────────────

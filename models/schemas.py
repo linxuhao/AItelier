@@ -77,6 +77,15 @@ class ProjectWithStats(BaseModel):
     latest_status: Optional[str] = None
     latest_step: Optional[str] = None
     last_update: Optional[str] = None
+    # Which repo this run works in. list_projects_with_stats has SELECTed these
+    # three columns all along; undeclared here they were fetched from SQLite,
+    # carried through the router and thrown away at the response boundary — so
+    # the project list and detail views could not say which repository a run
+    # belonged to, and separate runs against copies of one game looked unrelated.
+    # Same trap as error_reason below, one release later.
+    repo_type: Optional[str] = None
+    repo_path: Optional[str] = None
+    repo_url: Optional[str] = None
     # The run's own cause, from skillflow. Declared HERE because a response_model
     # is a filter: `enrich_project_status` attached error_reason and FastAPI
     # dropped it on the way out, so the reason was produced and discarded one

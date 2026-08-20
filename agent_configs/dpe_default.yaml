@@ -145,7 +145,12 @@ task_implementer:
   template: "task_implementer.md"
   # No "write": create/edit are derived from the step's output.mode (write).
   # Surgical create/edit prevents whole-file rewrites silently dropping unread code.
-  tools: ["list_tree", "test_write", "read_test_written", "delete_file"]
+  # gen_image_asset/gen_audio_asset let the implementer ship REAL art and sound
+  # instead of ColorRect placeholders — the single biggest lever on how a
+  # generated game is perceived. Offered to every run; only the game addon's
+  # prompt fragment actually asks for them.
+  tools: ["list_tree", "test_write", "read_test_written", "delete_file",
+          "gen_image_asset", "gen_audio_asset"]
   max_output_tokens: 32768
   max_tool_turns: 15
   native_tool_calling: true

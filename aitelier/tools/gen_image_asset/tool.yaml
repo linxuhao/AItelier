@@ -1,0 +1,65 @@
+name: gen_image_asset
+description: >
+  Generate a REAL image asset (sprite, background, tileset, icon) and write it
+  into the project repo, so the game can ship art instead of ColorRect/Polygon2D
+  placeholders. Chains generate_image -> remove_bg -> slice_sheet on the shared
+  MCP media server. transparent=true (the default, and what you want for any
+  character/obstacle sprite) converts to a REAL alpha channel — the image model
+  cannot output alpha and will otherwise paint a grey-white checkerboard as
+  opaque pixels. Set transparent=false for full-bleed backdrops. rows/cols cut a
+  generated grid into numbered frames. Every render is ALSO checked by a vision
+  model against `subject`, because the image model will cheerfully draw the WRONG
+  THING — a style line that names the game's objects bleeds them into every
+  prompt, so a "ground" sprite comes back as a bird, and no alpha statistic can
+  see that. Returns {written, source_url, warning}; a non-empty warning means the
+  cutout or the SUBJECT is probably wrong — open the file before shipping it.
+  Writes into the working tree; a later repo_apply commits it.
+parameters:
+  prompt:
+    type: string
+    description: "What to draw. English works best. Name the style and the framing (e.g. 'pixel art side-view green pipe, flat colors, no background')"
+    required: true
+  dest:
+    type: string
+    description: "Repo-relative destination path, e.g. assets/bird.png. With rows/cols it is a stem: assets/bird.png -> assets/bird_0.png, bird_1.png, ..."
+    required: true
+  width:
+    type: integer
+    description: "Pixels, clamped to 768 (default 512)"
+    required: false
+  height:
+    type: integer
+    description: "Pixels, clamped to 768 (default 512)"
+    required: false
+  seed:
+    type: integer
+    description: "Fixes the result so a re-run reproduces the same asset"
+    required: false
+  transparent:
+    type: boolean
+    description: "Cut the background to real alpha (default true). false for backdrops"
+    required: false
+  subject:
+    type: string
+    description: "What the image must show, in a few words (e.g. 'the scrolling ground strip'). Used for the automatic subject check; defaults to the full prompt"
+    required: false
+  verify:
+    type: boolean
+    description: "Ask a vision model whether the render actually shows `subject` (default true). A mismatch lands in `warning`; it never blocks"
+    required: false
+  rows:
+    type: integer
+    description: "Grid rows to slice the result into (default 0 = do not slice)"
+    required: false
+  cols:
+    type: integer
+    description: "Grid columns to slice the result into (default 0 = do not slice)"
+    required: false
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Step output dir (auto-injected)"
+    required: false

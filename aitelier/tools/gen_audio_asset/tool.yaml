@@ -1,0 +1,43 @@
+name: gen_audio_asset
+description: >
+  Generate a REAL sound asset and write it into the project repo, so the game
+  ships audio instead of silence. Two kinds, and the choice matters:
+  kind="sfx" synthesises a game effect procedurally (sfxr-style) from one of the
+  presets jump/coin/hit/explosion/powerup/laser/select/hurt — instant,
+  deterministic, and the right tool for a short transient; kind="bgm" generates a
+  background music bed from a prompt (caps at 47s, mono, and gives NO seamless
+  loop point, so do not promise a perfect loop). Returns {written, source_url}.
+  Writes into the working tree; a later repo_apply commits it.
+parameters:
+  dest:
+    type: string
+    description: "Repo-relative destination path, e.g. assets/sfx/flap.wav"
+    required: true
+  kind:
+    type: string
+    description: "'sfx' (default, procedural effect) or 'bgm' (generated music bed)"
+    required: false
+  preset:
+    type: string
+    description: "kind='sfx' only: jump | coin | hit | explosion | powerup | laser | select | hurt"
+    required: false
+  prompt:
+    type: string
+    description: "kind='bgm' only: the music to generate. English works best"
+    required: false
+  duration:
+    type: number
+    description: "kind='bgm' only: seconds, capped at 47 (default 20)"
+    required: false
+  seed:
+    type: integer
+    description: "Fixes the result so a re-run reproduces the same asset"
+    required: false
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  out_dir:
+    type: string
+    description: "Step output dir (auto-injected)"
+    required: false

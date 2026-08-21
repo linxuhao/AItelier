@@ -61,6 +61,22 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
             report["summary"] = (
                 f"godot-builder unreachable ({_BUILDER_URL}): {e}. "
                 "Compile gate skipped — GDScript NOT verified.")
+        # The sidecar says there is no Godot project at a path where THIS
+        # process just stat'd project.godot. It is not looking at the same
+        # bytes we are — a bind mount whose source directory was replaced keeps
+        # resolving to the old, unlinked inode. That is a hard failure, not a
+        # skip: on run jinyong-ui it returned passed:true with file_count 0 and
+        # captures 0, the reviewer read it as clean, and 21 scripts plus a real
+        # failing assertion went unseen for the whole run. gate_skipped does not
+        # cover this — the builder was perfectly reachable; it was blind.
+        if report.get("no_project"):
+            report["passed"] = False
+            report["blind_builder"] = True
+            report["summary"] = (
+                f"godot-builder cannot see {repo} — it reports no project.godot "
+                f"at a path this process can read. Its workspace mount is stale; "
+                f"recreate the container (a restart is not enough). "
+                f"Compile gate NOT run.")
 
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)

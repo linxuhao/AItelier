@@ -140,8 +140,13 @@ def _copy_project(proj: Path) -> Path:
 def compile_project(project_dir: str, timeout: int = 120) -> dict:
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
+        # `no_project` is the machine-readable half of this answer, and the
+        # caller needs it: "I cannot see a project here" is a PASS when the repo
+        # really is a Python one, and a hard FAILURE when the caller is looking
+        # at project.godot as it asks. Only the caller can tell those apart, and
+        # it cannot tell them apart from prose.
         return {"passed": True, "returncode": 0, "file_count": 0,
-                "errors": [], "warning_count": 0,
+                "errors": [], "warning_count": 0, "no_project": True,
                 "summary": "No Godot project (project.godot absent) — nothing to compile."}
     gd_files = [p for p in proj.rglob("*.gd") if ".godot/" not in str(p)]
     dst = _copy_project(proj)
@@ -791,7 +796,7 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
         return {"passed": True, "frames": 0, "errors": [], "state": {},
-                "behavior": None, "spec_used": False,
+                "behavior": None, "spec_used": False, "no_project": True,
                 "summary": "No Godot project — playtest skipped."}
     dst = _copy_project(proj)
     try:
@@ -857,10 +862,15 @@ def check_gdscript(files: list[str], timeout: int = 120) -> dict:
 
     Returns the shape StepValidator reads: ``{all_passed, results: [{file,
     passed, error_message}]}``."""
-    results = []
+    results, unseen = [], []
     for f in files or []:
         fp = Path(f)
         if not fp.is_file():
+            # The caller globbed this path and could stat it; if this process
+            # cannot, its view of the workspace is broken (a bind mount whose
+            # source was replaced keeps resolving to the old, unlinked inode).
+            # Dropping it silently turns "checked nothing" into a clean pass.
+            unseen.append(str(fp))
             continue
         try:
             cp = _run(["--check-only", "--script", str(fp)], timeout=timeout)
@@ -882,6 +892,12 @@ def check_gdscript(files: list[str], timeout: int = 120) -> dict:
             continue
         results.append({"file": str(fp), "passed": False,
                         "error_message": " ".join(real)[:800]})
+    if unseen:
+        return {"all_passed": False, "results": results, "unseen": unseen,
+                "error_message": (
+                    "%d of %d file(s) are not visible to the godot sidecar "
+                    "(first: %s) — its workspace mount is stale; recreate the "
+                    "container." % (len(unseen), len(files or []), unseen[0]))}
     return {"all_passed": all(r["passed"] for r in results), "results": results}
 
 

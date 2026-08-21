@@ -63,6 +63,17 @@ def gdscript_check(files: list[str] | None = None, workspace_root: str = "",
               flush=True)
         return {"all_passed": True, "results": [], "gate_skipped": True}
 
+    # "Sent 21 files, got 0 results back" must never read as a pass. The sidecar
+    # drops every path it cannot stat, so a stale mount there turns a real check
+    # into an empty one — the exact shape that let run jinyong-ui ship unverified.
+    checked = len(report.get("results", []))
+    if checked < len(paths):
+        return {"all_passed": False, "results": report.get("results", []),
+                "error_message": report.get("error_message") or (
+                    "godot-builder checked %d of the %d .gd file(s) it was given "
+                    "— it cannot see the rest. Its workspace mount is stale; "
+                    "recreate the container." % (checked, len(paths)))}
+
     # Report paths relative to the staging root: the absolute container path is
     # noise in an agent's retry prompt.
     for r in report.get("results", []):

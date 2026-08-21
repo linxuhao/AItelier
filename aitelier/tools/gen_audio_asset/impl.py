@@ -20,10 +20,26 @@ _PRESETS = ("jump", "coin", "hit", "explosion", "powerup", "laser", "select", "h
 _MAX_BGM_SECONDS = 47
 
 
+def _ensure_actor(name: str, voice: str, seed) -> None:
+    """Cast a voice once and keep it.
+
+    Idempotent for the same reason casting a face is: the roster outlives the
+    run, and re-casting would give the character a new voice that no longer
+    matches the lines already sitting in the repo."""
+    if name in call_tool("list_actors", {}):
+        return
+    if not voice:
+        raise MCPError(f"{name!r} has no voice yet - pass `voice` to cast it")
+    call_tool("create_actor", {"name": name, "voice": voice,
+                               **({"seed": int(seed)} if seed is not None else {})})
+
+
 def gen_audio_asset(*, dest: str = "", kind: str = "sfx", preset: str = "",
                     prompt: str = "", seed: int | None = None, duration: float = 20.0,
                     project_root: str = "", workspace_root: str = "",
                     step_tmp_dir: str = "", out_dir: str = "",
+                    actor: str = "", voice: str = "", text: str = "",
+                    speaking_rate: float = 0.0,
                     **kwargs) -> dict:
     """Generate one audio asset into the repo. Returns {written, source_url}."""
     repo = _target_root(step_tmp_dir, project_root, workspace_root)
@@ -41,8 +57,23 @@ def gen_audio_asset(*, dest: str = "", kind: str = "sfx", preset: str = "",
             return {"written": [], "error": "kind='bgm' needs a prompt"}
         tool = "generate_music"
         args = {"prompt": prompt, "duration": min(float(duration), _MAX_BGM_SECONDS)}
+    elif kind == "voice":
+        # Plain text-to-speech drifts line to line even at a fixed seed and
+        # voice description — timbre is a function of the TEXT, so an NPC's five
+        # lines come back as five different people. Casting the actor once
+        # records a reference clip and every later line is spoken against it.
+        if not actor or not text:
+            return {"written": [], "error": "kind='voice' needs `actor` and `text`"}
+        try:
+            _ensure_actor(actor, voice, seed)
+        except MCPError as e:
+            return {"written": [], "error": str(e)}
+        tool = "actor_tts"
+        args = {"actor": actor, "text": text}
+        if speaking_rate:
+            args["speaking_rate"] = float(speaking_rate)
     else:
-        return {"written": [], "error": "kind must be 'sfx' or 'bgm'"}
+        return {"written": [], "error": "kind must be 'sfx', 'bgm' or 'voice'"}
     if seed is not None:
         args["seed"] = int(seed)
 

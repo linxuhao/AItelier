@@ -6,7 +6,13 @@ description: >
   presets jump/coin/hit/explosion/powerup/laser/select/hurt — instant,
   deterministic, and the right tool for a short transient; kind="bgm" generates a
   background music bed from a prompt (caps at 47s, mono, and gives NO seamless
-  loop point, so do not promise a perfect loop). Returns {written, source_url}.
+  loop point, so do not promise a perfect loop); kind="voice" speaks one line of
+  NPC dialogue in a CAST voice. Use "voice" rather than raw text-to-speech for
+  anything a character says more than once: timbre there is a function of the
+  text, not of the seed, so the same character's lines come back as different
+  people. Casting the actor once from `voice` records a reference clip and every
+  later line is spoken against it; casting is idempotent, so a re-run keeps the
+  voice already in the repo. Returns {written, source_url}.
   Writes into the working tree; a later repo_apply commits it.
 parameters:
   dest:
@@ -40,4 +46,20 @@ parameters:
   out_dir:
     type: string
     description: "Step output dir (auto-injected)"
+    required: false
+  actor:
+    type: string
+    description: "kind='voice' only: the character speaking. First use casts them from `voice`; later uses reuse that timbre"
+    required: false
+  voice:
+    type: string
+    description: "kind='voice' only, NEW actor: natural-language description of the voice — age, gender, timbre, pace, temperament. English works best. e.g. 'An elderly Chinese man, gravelly chest voice, commanding'"
+    required: false
+  text:
+    type: string
+    description: "kind='voice' only: the line to speak, max ~200 characters (~45s); longer is truncated"
+    required: false
+  speaking_rate:
+    type: number
+    description: "kind='voice' only: speed multiplier (optional)"
     required: false

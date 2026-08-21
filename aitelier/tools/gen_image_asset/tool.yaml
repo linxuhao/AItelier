@@ -13,6 +13,18 @@ description: >
   prompt, so a "ground" sprite comes back as a bird, and no alpha statistic can
   see that. Returns {written, source_url, warning}; a non-empty warning means the
   cutout or the SUBJECT is probably wrong — open the file before shipping it.
+  CONTINUITY: pass `cast` to keep a character/creature/prop looking like ITSELF
+  across every image it appears in. Plain text-to-image draws a different-looking
+  person each call, which is why a generated game can only afford one picture per
+  character; with `cast` the first call locks the look from `appearance` and every
+  later call renders that same subject doing whatever `prompt` says — idle, attack
+  and hurt frames of one hero, a portrait and a battle sprite that match, a chest
+  drawn from two angles. `appearance` is the identity (age, build, face, hair, the
+  prop that follows them everywhere; for an object it is the GEOMETRY — colour and
+  material alone will not hold a lid's shape still). `prompt` is the moment, and
+  costume belongs there: "wearing heavy red armor" re-dresses without changing the
+  face. Casting is idempotent — a re-run reuses the existing look rather than
+  minting a new one, so assets already in the repo stay consistent.
   Writes into the working tree; a later repo_apply commits it.
 parameters:
   prompt:
@@ -62,4 +74,16 @@ parameters:
   out_dir:
     type: string
     description: "Step output dir (auto-injected)"
+    required: false
+  cast:
+    type: string
+    description: "Name of a persistent subject to draw. First use casts it from `appearance`; later uses reproduce the same look. Omit for one-off art that never reappears."
+    required: false
+  appearance:
+    type: string
+    description: "Identity of a NEW cast subject — written once, consulted only at casting. Age/build/face/hair/signature prop for a character; species/markings/proportions for an animal; silhouette + geometry + hardware placement for an object. NOT the scene, pose or angle."
+    required: false
+  cast_kind:
+    type: string
+    description: "'character' (default) | 'animal' | 'object' — which casting call to use for a new subject"
     required: false

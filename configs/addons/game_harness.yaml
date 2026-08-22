@@ -55,6 +55,19 @@ overlay:
   - add_context: "@verifier_review"
     source: { step: "5_compile" }
 
+  # 3b. And the PM — because the PM is who authors the FIX tasks. On a goal-loop
+  #     iteration (5_review failed → back to "3") the PM is asked to plan repairs
+  #     for a runtime failure whose only full account is playtest_report.json:
+  #     per-scenario results, the assertion that failed, the captured node state,
+  #     the frames. Without this the PM plans from the reviewer's prose summary
+  #     of the report instead of the report.
+  #     Live, jinyong-turn 2026-08-22: the PM called list(source="step:5_compile")
+  #     and got "unknown source", then tried step:5 and found no playtest report
+  #     there either — it was planning the turn-engine repair blind to the gate
+  #     output that described the break.
+  - add_context: "@pm"
+    source: { step: "5_compile" }
+
   # ── PROMPT FRAGMENTS (add_template) ────────────────────────────────────────
   # 4. Godot conventions reach the architect/pm/implementer/verifier prompts ONLY
   #    when this addon is applied — the base templates stay engine-agnostic.

@@ -151,22 +151,23 @@ task_implementer:
   # prompt fragment actually asks for them.
   tools: ["list_tree", "test_write", "read_test_written", "delete_file",
           "gen_image_asset", "gen_audio_asset"]
+  # Stays at 32768 — deliberately BELOW core.ai_router.OUTPUT_CAP_CEILING (65536)
+  # so a starved turn still has one doubling left. Raising it to the ceiling
+  # would trade a real safety net for nothing: measured on jinyong-turn's
+  # combat_engine, 2026-08-22, attempt 2 ran AT 65536 and still returned empty
+  # text with zero tool calls, while attempt 3 ran at the same 65536 and
+  # succeeded using 37,661. Same cap, opposite outcomes — the cap is not what
+  # discriminates. Reasoning is billed inside it (DeepSeek exposes no separate
+  # reasoning budget), so what actually starves a turn is how long the model
+  # deliberates, and the fix for that lives in the prompt: see the
+  # "兄弟任务还没落地时，照架构契约写" directive in templates/task_implementer.md,
+  # which removes the specific thing those 242k reasoning chars were spent on.
   max_output_tokens: 32768
   max_tool_turns: 15
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:
     enable: true
-    # Same reason as the *_reviewer roles above, now proven on the MAKER side:
-    # reasoning is billed inside max_output_tokens, and with no effort set the
-    # server defaults to ~high. Live (jinyong-turn, combat_engine, 2026-08-22):
-    # attempt 1 spent 123,872 reasoning chars to fill all 32,768 completion
-    # tokens; attempt 2 spent 242,630 to fill 65,536. Both returned empty text
-    # and ZERO tool calls, so the retry prompt was literally "No output
-    # produced" — the step burned ~98k output tokens writing nothing and only
-    # landed on its last of three attempts. Note the escalation ladder makes
-    # this WORSE, not better: a bigger cap is more room to reason into.
-    effort: "low"
 
 task_implementer_reviewer:
   model: "deepseek/deepseek-v4-flash"

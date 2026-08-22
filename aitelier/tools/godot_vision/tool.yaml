@@ -1,0 +1,46 @@
+name: godot_vision
+description: >
+  READABILITY gate: look at the frames the play-test already rendered and fail
+  when the game is unreadable even though every behaviour assertion passed.
+  Reads the prior step's playtest_report.json (captures[] + frames/*.png),
+  groups the captures by scenario, sends each scenario's frames in
+  CHRONOLOGICAL order to a vision model in one call (batched to fit the model's
+  context), and asks a fixed six-question checklist drawn from the game's own
+  design record (design/30_presentation.md, 可读性硬要求): tile grid visible,
+  skill buttons distinguishable from one another, skill buttons changing across
+  frames, turn/action state changing visibly, health bars recognisable as
+  health bars, no truncated or clipped text. Questions are DIFFERENTIAL
+  (cross-frame) or recognisability questions only — single-frame geometry
+  ("does A overlap B") is measurably unreliable in the vision model and belongs
+  in playtest_spec.yaml assertions instead. Writes vision_report.json
+  {passed, blind, blind_reason, questions[], batches[], summary}.
+  No-ops (passes) for non-Godot projects. Every other way of not seeing —
+  no report, no captures, missing PNGs, unreachable/erroring endpoint,
+  unparseable answer, a batch over the token budget — is a LOUD FAILURE, never
+  a pass: a vision check that cannot see and reports green is the exact defect
+  this gate exists to catch.
+parameters:
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine); no project.godot → no-op pass"
+    required: false
+  workspace_root:
+    type: string
+    description: "Skillflow workspace root (auto-injected); the source step dir is <ws>/<config>/<from_step>"
+    required: false
+  config_name:
+    type: string
+    description: "Graph name (auto-injected); the config subdir under the workspace"
+    required: false
+  from_step:
+    type: string
+    description: "Step id whose promoted output holds playtest_report.json + frames/ (default 5_compile)"
+    required: false
+  out_dir:
+    type: string
+    description: "Directory to write vision_report.json (set to $STEP_DIR)"
+    required: false
+
+# Its result carries passed/error, so a graph step running it MUST route the
+# failure branch — read by forge_registry_check (fallible_tools_unrouted).
+x-fallible: true

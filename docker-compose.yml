@@ -46,6 +46,15 @@ services:
       # path here for a license-free parse-check + headless play-test. Non-game
       # (Python/web) projects never call it.
       GODOT_BUILDER_URL: "http://godot-builder:8080"
+      # The readability gate (godot_vision) shows the frames the play-test
+      # already rendered to a vision model and fails when the game is
+      # unreadable despite green assertions. Reached over Tailscale, so the
+      # host IP — not a compose service. Context length is the model's
+      # max_model_len, and the tool derives from it how many frames fit per
+      # call; it refuses to look at a subset rather than dropping frames.
+      GODOT_VISION_URL: "http://100.68.74.107:8000/v1/chat/completions"
+      GODOT_VISION_MODEL: "qwen3"
+      GODOT_VISION_CONTEXT_TOKENS: "12288"
     env_file:
       - .env
     secrets:

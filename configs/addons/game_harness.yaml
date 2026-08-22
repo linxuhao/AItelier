@@ -9,10 +9,13 @@
 # What it adds: a deterministic Godot gate after the test gate that
 #   1. parse-checks every GDScript + scene in the repo (import), then
 #   2. if that passed, headless-play-tests the main scene, capturing runtime
-#      errors (with res:// file+line) AND a live snapshot of scene-tree state.
-# Both land in compile_report.json / playtest_report.json, folded into 5_review
-# so parse + runtime failures loop back through the goal-loop. No-ops (passes)
-# for non-Godot projects, so applying it unconditionally is safe.
+#      errors (with res:// file+line) AND a live snapshot of scene-tree state,
+#   3. then LOOKS at the frames step 2 rendered and fails when the game is
+#      unreadable even though every behaviour assertion passed.
+# All three land in compile_report.json / playtest_report.json /
+# vision_report.json, folded into 5_review so parse, runtime and readability
+# failures loop back through the goal-loop. No-ops (passes) for non-Godot
+# projects, so applying it unconditionally is safe.
 
 name: "game_harness"
 # Base binding: this addon targets dpe_default_v2's anchors, so it is specific to
@@ -48,12 +51,54 @@ overlay:
         timeout_seconds: 300
         tool_params:
           out_dir: "$STEP_DIR"
+        # No transitions: a step LIST wires sequentially, so this falls through
+        # to 5_vision below, and 5_vision inherits 5_test's original target.
+
+      # 2b. THE READABILITY GATE. 5_compile asserts STATE; this asserts that
+      #     a player can SEE the state. jinyong-turn, 2026-08-22: scenario
+      #     `two_phase_skill_unlock_and_hp_gate` passed 20/20 asserting
+      #     `SkillButton5..8.disabled == true/false` — and in the frames that
+      #     same run rendered, all eight buttons were pixel-identical across
+      #     three rounds and two actor changes, no tile grid was visible in a
+      #     tactical GRID game, five name labels were truncated to ellipses,
+      #     and the health bars were unrecognisable as health bars. Every
+      #     assertion was green. The play-test gate structurally cannot catch
+      #     this: it reads the scene tree, not the pixels. So this step reads
+      #     5_compile's OWN captures[] + frames/*.png — no extra playthrough,
+      #     no extra render — and puts them in front of a vision model.
+      #     The checklist is the game's own design record
+      #     (design/30_presentation.md § 可读性硬要求), which also fixes the
+      #     split: GEOMETRY (does the health bar follow its actor, do two rects
+      #     intersect) stays in playtest_spec.yaml where numbers judge numbers,
+      #     because the model scores a measured 0/2 on single-frame spatial
+      #     questions; only RECOGNISABILITY and CROSS-FRAME DIFFERENTIAL
+      #     questions come here, where it scores 3/3 and tracked a changing
+      #     actor across four frames correctly. Frames go one scenario per
+      #     call, chronologically, batched to the model's context — never
+      #     sampled down.
+      #     No project.godot → no-op pass, exactly like 5_compile. EVERY other
+      #     way of not seeing (no report, no captures, missing PNGs, endpoint
+      #     down, unparseable answer, a batch over budget) is a LOUD named
+      #     failure rather than a pass: a vision check that cannot see and
+      #     reports green is the precise defect this gate was built to catch.
+      - id: "5_vision"
+        step_type: "tool"
+        tool_name: "godot_vision"
+        timeout_seconds: 900
+        tool_params:
+          from_step: "5_compile"
+          out_dir: "$STEP_DIR"
         # no transitions → auto-wired to 5_test's original target (5_knowledge)
 
   # ── CONTEXT ────────────────────────────────────────────────────────────────
   # 3. Let the final verifier read the gate's reports.
   - add_context: "@verifier_review"
     source: { step: "5_compile" }
+  # 3a. …including the readability verdict. A verifier that reads only
+  #     playtest_report.json reads 20/20 green over a screen no player could
+  #     use, and signs the run off.
+  - add_context: "@verifier_review"
+    source: { step: "5_vision" }
 
   # 3b. And the PM — because the PM is who authors the FIX tasks. On a goal-loop
   #     iteration (5_review failed → back to "3") the PM is asked to plan repairs
@@ -67,6 +112,13 @@ overlay:
   #     output that described the break.
   - add_context: "@pm"
     source: { step: "5_compile" }
+  #     Same argument for 5_vision, and it bites harder: the readability
+  #     failures ARE the task list ("no tile grid", "five names ellipsised"),
+  #     and vision_report.json names the requirement each one broke. Without
+  #     this the PM plans a UI repair from a one-line summary of what was
+  #     unreadable.
+  - add_context: "@pm"
+    source: { step: "5_vision" }
 
   # ── PROMPT FRAGMENTS (add_template) ────────────────────────────────────────
   # 4. Godot conventions reach the architect/pm/implementer/verifier prompts ONLY

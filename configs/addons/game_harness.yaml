@@ -184,6 +184,12 @@ overlay:
           - source: { step: "2" }
           - source: { step: "5" }
           - source: { step: "5_compile" }
+          # …and the readability verdict. The design keeper records what SHIPPED,
+          # and "the buttons have no visual state at all" is a fact about the
+          # shipped game exactly as much as a failed assertion is. Without this
+          # the record would describe a build as delivered while the one gate
+          # that looked at it said it was unreadable.
+          - source: { step: "5_vision" }
         output:
           mode: "write"
         # No validation: a run that changed no design writes NOTHING, and that is

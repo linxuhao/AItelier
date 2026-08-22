@@ -433,6 +433,11 @@ class PipelineEngine:
             run_id=getattr(self, '_run_id', ''),
             step_id=self._current_step or '',
             step_instance_id=getattr(self, '_step_instance_id', None),
+            # Fencing token: an executor that was reclaimed mid-step is refused
+            # here instead of invoking tools alongside its replacement. 0 means
+            # unfenced, and skillflow skips the check when either side is 0, so
+            # a claim already in flight across the upgrade is never rejected.
+            claim_epoch=getattr(self, '_claim_epoch', 0),
             project_root=str(self._code_path) if hasattr(self, '_code_path') else '',
         )
 
@@ -2250,7 +2255,8 @@ class PipelineEngine:
                  output_dir: str = "",
                  max_tool_turns: int = 0,
                  run_id: str = "",
-                 step_instance_id: int | None = None) -> bool:
+                 step_instance_id: int | None = None,
+                 claim_epoch: int = 0) -> bool:
         """
         Dispatch to the appropriate step execution path.
 
@@ -2266,6 +2272,7 @@ class PipelineEngine:
         self._max_tool_turns = max_tool_turns
         self._run_id = run_id
         self._step_instance_id = step_instance_id
+        self._claim_epoch = claim_epoch
 
         # Prefer native tool calling if agent config enables it
         if self.factory.is_native(agent_config_name):

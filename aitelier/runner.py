@@ -144,6 +144,9 @@ class AgentStepRunner:
                         max_tool_turns=max_tool_turns,
                         run_id=run_id,
                         step_instance_id=step.token.step_instance_id,
+                        # Fencing token (skillflow >=1.5.36). getattr so a
+                        # hand-built or older token degrades to 0 = unfenced.
+                        claim_epoch=getattr(step.token, 'claim_epoch', 0),
                     )
                 finally:
                     _odbg(f"{_cid} run_step EXIT thread={_tid} step={step_id} "

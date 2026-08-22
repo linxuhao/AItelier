@@ -332,16 +332,29 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
         status API) shows the project is done — no fresh run
     """
     sf = get_skillflow()
+    project = db.get_project(project_id)
+    if not project:
+        return None
+    config_name = project.get("config_name") or "dpe_default_v2"
 
     # Skillflow's get_run_by_project only sees active runs; we need
     # ANY recent run (including completed) to detect the "already done"
     # case. Query skillflow_runs directly.
-    conn = sf._lock.__class__ and sf._conn  # cheap accessor
+    #
+    # Scoped to THIS project's pipeline graph. Without the graph_name filter a
+    # project's `meta_conversation` run counts as "the project's most recent
+    # run" — and a completed meta run then reads as "pipeline already done", so
+    # the tick returns None forever and the real pipeline never advances. That
+    # is invisible in the normal ordering (meta is created first, so the DPE run
+    # is always newer), and fires the moment a meta run is created or re-run
+    # after the pipeline run exists. Live: jinyong-turn, 2026-08-22 — a DPE run
+    # created at 11:45 sat at gh_scaffold while a meta run finalized at 11:47
+    # answered this query.
     row = sf._conn.execute(
         """SELECT id, status FROM skillflow_runs
-           WHERE project_id = ?
+           WHERE project_id = ? AND graph_name = ?
            ORDER BY created_at DESC LIMIT 1""",
-        (project_id,),
+        (project_id, config_name),
     ).fetchone()
     if row:
         run_id, status = row[0], row[1]
@@ -360,9 +373,6 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
 
     # No run at all (shouldn't happen for projects that went through
     # submit_project) — create one.
-    project = db.get_project(project_id)
-    if not project:
-        return None
 
     # Gate: don't create a run for projects whose meta conversation hasn't
     # finished. The meta agent sets meta_state='drafting' on create_project
@@ -372,7 +382,6 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
     if project.get("meta_state") == "drafting":
         return None
 
-    config_name = project.get("config_name") or "dpe_default_v2"
     run_id = sf.get_or_create_run(config_name, project_id, {
         "project_id": project_id,
         "brief": project.get("brief", ""),
@@ -672,6 +681,11 @@ async def _run_skillflow_tick(project_id: str, loop):
         # and bumps updated_at so the project no longer starves active
         # projects in get_next_active_project's ORDER BY updated_at ASC.
         _sync_project_status_to_db(project_id)
+        # Was the one tick outcome with no log line. A project that
+        # get_next_active_project keeps handing us while this returns None reads
+        # exactly like an idle scheduler — which is how a stalled run hid behind
+        # "nothing to do" for 20 minutes.
+        tick_log(project_id, "no_run")
         return
 
     # Don't re-enter a run that's actively executing (in-flight guard).

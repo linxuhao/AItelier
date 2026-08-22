@@ -186,8 +186,21 @@ def get_skillflow():
         # goal-loop re-run of a step no longer wipes the prior output —
         # recoverable via sf.step_output_versions() for tracing. Pass
         # artifact_history=False here to disable.
+        #
+        # stale_threshold_seconds: how long a claimed step may stay SILENT
+        # before the reaper resets it to pending. Silence, not runtime —
+        # skillflow heartbeats updated_at from every trace(), throttled to one
+        # write per 25s per step — and skillflow widens the window per-node for
+        # TOOL steps only, so every AGENT step gets exactly this flat number.
+        # 60 was 2.4 heartbeat intervals: one long reasoning completion with no
+        # intervening tool call could outlast it, and a premature reap
+        # re-dispatches the step while the original executor is still writing,
+        # whose eventual confirm_step then dies on "version mismatch". 180 is
+        # ~7 intervals — room for a slow completion — and still well under
+        # skillflow's own 300 default, so a truly dead worker is recovered
+        # inside three minutes rather than five.
         sf = SkillFlow(SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
-                     projects_base=PROJECTS_PATH, stale_threshold_seconds=60,
+                     projects_base=PROJECTS_PATH, stale_threshold_seconds=180,
                      code_path_resolver=_existing_repo_code_path,
                      trace_db_path=WS_PATH)
 

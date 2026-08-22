@@ -275,6 +275,7 @@ stable, so the log greps cleanly:
 | `claim_failed` | `claim_next_step` raised — carries the reason |
 | `no_claim` | nothing claimable at `node` |
 | `executed` | step ran; carries step id, confirmed, elapsed |
+| `reclaimed` | the 30s supervisor reaped a silent claim back to pending |
 
 ```bash
 grep 'outcome=claim_failed' ~/.AItelier/logs/scheduler_ticks.log   # why a run is stuck

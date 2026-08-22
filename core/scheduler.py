@@ -486,15 +486,33 @@ def _has_active_claim(sf, run_id: str) -> bool:
 # ── Hung-step detection ─────────────────────────────────────────────
 
 async def _check_hung_claims():
-    """Periodic check: warn if any claimed step exceeds its timeout window.
+    """Periodic supervisor: RECLAIM dead claims, warn about merely tardy ones.
 
     Runs independently from the main scheduler tick so it fires even when
-    poll_and_execute is blocked awaiting a hung LLM call.
+    poll_and_execute is blocked awaiting a hung LLM call. That independence was
+    the right instinct and, until now, entirely wasted: skillflow's reaper
+    (recover_stale_claims) was called from exactly ONE place — the top of
+    advance_run — and _run_skillflow_tick returns before reaching it on five
+    paths (run_start_failed, no_run, active_claim, and both runaway valves).
+    Combine that with one-project-per-tick and the consequence is that whenever
+    the single project the poller picked merely LOOKED in-flight, nothing was
+    swept anywhere in the system that tick — including a genuinely dead claim on
+    a different project. So the loop with the right cadence could not reclaim and
+    the code that could reclaim had the wrong cadence, and the only cure left in
+    the runbook was "restart the container" (used three times on 2026-08-22).
 
-    Detection policy:
-      - A step is "hung" when its claim duration > timeout_seconds * _HUNG_WARN_MULTIPLIER.
-      - We only *detect and surface* — never auto-kill. The user can restart the
-        server to trigger recover_claims_on_startup.
+    Policy — two signals, never merged:
+      - DEAD: silent longer than skillflow's stale window. Silence is measured on
+        the ACTIVITY clock (every trace() heartbeats updated_at), so a slow-but-
+        talking step is never touched, and a tool step with timeout_seconds == 0
+        is never stale. Reaped back to 'pending' — reap is not fail: the step did
+        not fail, its owner vanished, and those are different facts.
+      - TARDY: still heartbeating, but claimed for longer than timeout_seconds *
+        _HUNG_WARN_MULTIPLIER. There is nothing to reclaim (it is alive), so it is
+        only warned about — the early signal that a step is going long, which is
+        worth keeping precisely because the reaper will never fire on it.
+      The reap runs FIRST, so anything the warning scan still finds 'claimed' is
+      by construction under the reclaim threshold.
       - Warnings are rate-limited by _HUNG_WARNING_COOLDOWN to avoid log spam.
     """
     import time as _time
@@ -505,6 +523,30 @@ async def _check_hung_claims():
     try:
         sf = get_skillflow()
 
+        # Reap first — this is the authority the loop was missing. skillflow's
+        # reaper is safe to run on a fixed interval (activity clock + the
+        # never-stale tool guard), it just had nowhere to run FROM. Returns the
+        # run ids it reset to pending.
+        try:
+            reclaimed = sf.recover_stale_claims(sf._stale_threshold) or []
+        except Exception as e:
+            reclaimed = []
+            logger.warning("stale-claim reclaim failed: %s", e)
+        for _rid in reclaimed:
+            try:
+                _pid = (sf.get_run(_rid) or {}).get("project_id") or "unknown"
+            except Exception:
+                _pid = "unknown"
+            # Into the tick log next to the other outcomes: that file exists so
+            # "nothing is moving" is answerable from one place, and a reclaim is
+            # the single most load-bearing thing that can happen to a stuck run.
+            tick_log(_pid, "reclaimed", run=str(_rid)[:8],
+                     silent_s=sf._stale_threshold)
+            logger.warning(
+                "RECLAIMED stale claim: project=%s run=%s (silent > %ss) — "
+                "reset to pending; no restart needed", _pid, _rid,
+                sf._stale_threshold)
+
         # Scan all running skillflow runs
         runs = sf.list_runs(status="running")
         if not runs:
@@ -514,15 +556,23 @@ async def _check_hung_claims():
             run_id = run["id"]
             project_id = run.get("project_id", "unknown")
 
-            # Find any claimed step in this run
+            # Find any claimed step in this run. `step_instance_id` IS the
+            # skillflow_steps row id — skillflow only spells it that way in
+            # skillflow_trace (core.py: "step_instance_id": step_row["id"]).
+            # skillflow_steps has no such column, so this SELECT raised
+            # OperationalError on EVERY run and the bare `except: continue`
+            # below swallowed it, silently reducing the entire supervisor —
+            # hung warnings AND the orphan snapshot — to a no-op. Which is the
+            # real reason nobody ever caught the orphan in the act.
             try:
                 row = sf._conn.execute(
-                    "SELECT step_id, claimed_at, step_instance_id "
+                    "SELECT id AS step_instance_id, step_id, claimed_at "
                     "FROM skillflow_steps "
                     "WHERE run_id = ? AND status = 'claimed' LIMIT 1",
                     (run_id,),
                 ).fetchone()
-            except Exception:
+            except Exception as e:
+                logger.warning("hung-claim scan failed for run %s: %s", run_id, e)
                 continue
             if not row:
                 continue
@@ -551,11 +601,21 @@ async def _check_hung_claims():
 
             # ORPHAN-DBG: trace-recency heartbeat. A claimed step whose latest
             # skillflow_trace row is stale = executor dead/zombie/hung. Dump a
-            # ONE-SHOT forensic snapshot (all thread stacks) BEFORE skillflow's
-            # blunt stale-timeout re-dispatches it (~300s), so the next occurrence
-            # is captured in the act. Fires well under the 900s hung-warn gate.
+            # ONE-SHOT forensic snapshot (all thread stacks) BEFORE the reaper
+            # above resets it to pending, so the next occurrence is captured in
+            # the act rather than after the fact.
+            #
+            # This was a hardcoded 120 under a comment claiming re-dispatch at
+            # "~300s" — skillflow's DEFAULT, not the threshold AItelier actually
+            # passes to SkillFlow(). Against the real value the trap sprang
+            # strictly AFTER the event it exists to catch, every single time. A
+            # restated constant drifts from the configured one, so derive it:
+            # half the live window is comfortably before the reap and still
+            # several 25s heartbeat intervals of silence, so it cannot fire on a
+            # merely slow step. Floor at 50s for the same reason.
             try:
-                _ORPHAN_TRACE_STALE_S = 120
+                _ORPHAN_TRACE_STALE_S = max(
+                    50.0, float(getattr(sf, "_stale_threshold", 300)) / 2.0)
                 _osnap_key = (run_id, row["step_instance_id"])
                 if _osnap_key not in _orphan_snapshots:
                     rows = sf.trace_query(run_id,
@@ -610,7 +670,8 @@ async def _check_hung_claims():
                 f"claimed for {duration_min:.0f} min "
                 f"(threshold: {warn_threshold_s}s = {window_s}s timeout "
                 f"× {_HUNG_WARN_MULTIPLIER}). "
-                f"Restart the server if the step does not progress."
+                f"Still heartbeating, so the reaper leaves it alone — slow, not "
+                f"dead. No restart needed either way."
             )
 
             # Publish event for TUI / API consumers

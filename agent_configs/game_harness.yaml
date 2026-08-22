@@ -1,0 +1,22 @@
+# agent_configs/game_harness.yaml
+# Roles introduced by the `game_harness` addon (configs/addons/game_harness.yaml).
+# Role names are FLAT across all agent_configs/*.yaml (api/dependencies.py:
+# _load_and_register_agent_configs aborts boot on a duplicate), so these must not
+# collide with dpe_default's.
+
+# The design keeper. Runs after 5_review passes and EDITS the repo's design/
+# record so it describes the game that actually shipped.
+#
+# tools: [] — the step is output.mode "write", so the engine supplies
+# create/edit/write itself, and `{from: repository, mode: tool}` supplies the
+# read surface. Nothing to declare here.
+game_designer:
+  model: "deepseek/deepseek-v4-pro"
+  temperature: 0.1
+  template: "game_designer.md"
+  tools: []
+  max_tool_turns: 40
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true

@@ -43,3 +43,8 @@ scenarios:
 ```
 
 产出：把补全断言后的**完整 `playtest_spec.yaml`** 写进你的计划产物，并指示实现者原样落地到工程根（`playtest_spec.yaml`）。
+
+## 游戏设计档案 `design/`（全文已注入你的上下文）
+拆任务、写 `playtest_spec.yaml` 的断言阈值时，**数值一律以 `design/20_content.md` 为准**（血量 / 伤害 / 冷却 / 移动力 / 阵容 / 关卡构成）——不要自己发明数字，也不要照抄 `playtest_spec.example.yaml` 里 Flappy Bird 的示例值。
+- 档案与 architect 的 `step2_design.md` 冲突时：以 `step2_design.md` 里**显式声明的"设计变更"**为准；那一节没提到的，一律以档案为准。两边都没说的，当成没变。
+- 任务卡里引用规则时直接引原文（"移动力 3 格 / 黯然销魂掌 25 伤害 1 格击退 冷却 4"），而不是"参考设计档案"——实现者拿到的是任务卡，不是整份档案。

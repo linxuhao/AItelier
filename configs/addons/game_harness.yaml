@@ -71,3 +71,66 @@ overlay:
     fragment: "game_harness/implementer.md"
   - add_template: "@verifier_review"
     fragment: "game_harness/verifier.md"
+
+  # ── DURABLE GAME DESIGN (design/) ──────────────────────────────────────────
+  # 5. The design record that outlives a run. `step2_design.md` is per-run and
+  #    disposable (it describes THIS run's change program); the game's actual
+  #    systems, rules and content had no home in the repo at all — they lived in
+  #    the meta_conversation brief, i.e. in the database. When the database went,
+  #    every design decision ever made about the game went with it. Only the git
+  #    repo survived. So the design record lives in the git repo.
+  #
+  #    Three channels, all in this addon:
+  #      * gh_scaffold seeds the assets/design/ skeleton into a new repo
+  #        (scaffold never clobbers, so an existing record is safe),
+  #      * the architect and PM get it INLINE in their prompt — a contract they
+  #        cannot forget to read, not a tool they might not call,
+  #      * 5_design edits it after the run passes.
+  - add_context: "@architect"
+    source: { from: "repository", path: "design/", mode: "inline" }
+  - add_context: "@pm"
+    source: { from: "repository", path: "design/", mode: "inline" }
+
+  # 6. The design keeper. Spliced onto 5_review's PASS edge — NOT at
+  #    @post_verify_tests — because the record must describe what SHIPPED. At
+  #    @post_verify_tests it would also run on goal-loop iterations that then
+  #    fail and get thrown away, recording a design that never existed.
+  #
+  #    `output.mode: write` (same discipline as t_impl and novel_init's `design`)
+  #    is the whole point: with `{from: repository}` as the baseline, the agent
+  #    `edit`s the handful of design files this run actually changed and the rest
+  #    are PHYSICALLY untouched. A content-mode slot would force a full rewrite of
+  #    the document on every run — which does not scale past a small game, and
+  #    quietly loses accumulated decisions the first time a model reorganises
+  #    while regenerating.
+  #
+  #    Both transitions go to `done`, including the error branch: a failed design
+  #    update must never sink an otherwise-green run. The cost is a stale record
+  #    — visible in the run's step log, and recoverable, because it is in git.
+  - insert_after: "@verifier_review"
+    after_match: { from_file: "review_verdict.json", field: "passed", value: true }
+    steps:
+      - id: "5_design"
+        step_type: "agent"
+        agent_config: "game_designer"
+        timeout_seconds: 600
+        context:
+          - source: { from: "repository", mode: "tool" }
+          - source: { step: "2" }
+          - source: { step: "5" }
+          - source: { step: "5_compile" }
+        output:
+          mode: "write"
+        # No validation: a run that changed no design writes NOTHING, and that is
+        # the correct outcome — a file_exists gate here would push the agent to
+        # invent a change to satisfy it.
+        lifecycle:
+          on_deliver:
+            - tool: "repo_apply"
+              params:
+                source_dir: "$STEP_DIR"
+              on_failure: "skip"
+        transitions:
+          - to: "done"
+            match: { _error: true }
+          - to: "done"

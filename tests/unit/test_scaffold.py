@@ -14,7 +14,7 @@ def test_merges_into_existing_gitignore_without_clobber(tmp_path):
     # The workspace pre-creates a default .gitignore — scaffold must MERGE, not skip.
     (tmp_path / ".gitignore").write_text("__pycache__/\n*.pyc\n")
     r = scaffold(project_root=str(tmp_path), addon="game_harness")
-    assert ".gitignore" in r["merged"] and r["written"] == []
+    assert ".gitignore" in r["merged"] and ".gitignore" not in r["written"]
     gi = (tmp_path / ".gitignore").read_text()
     assert "__pycache__/" in gi   # original preserved
     assert ".godot/" in gi        # Godot lines merged in
@@ -37,3 +37,23 @@ def test_unknown_addon_is_noop(tmp_path):
 def test_missing_repo_is_noop():
     r = scaffold(project_root="/nonexistent/xyz", addon="game_harness")
     assert r["written"] == [] and "repo not found" in r["reason"]
+
+
+def test_seeds_the_design_record(tmp_path):
+    r = scaffold(project_root=str(tmp_path), addon="game_harness")
+    assert "design/README.md" in r["written"]
+    assert "design/99_changelog.md" in r["written"]
+    assert "Append only" in (tmp_path / "design" / "99_changelog.md").read_text()
+
+
+def test_existing_design_record_is_never_clobbered(tmp_path):
+    # The design record accumulates across runs and is the ONE artifact that
+    # survives a lost database — a re-scaffold must not reset it to the template.
+    d = tmp_path / "design"
+    d.mkdir()
+    (d / "10_systems.md").write_text("# Core systems\n\nturn-based, initiative order\n")
+    r = scaffold(project_root=str(tmp_path), addon="game_harness")
+    assert "design/10_systems.md" in r["skipped"]
+    assert "turn-based" in (d / "10_systems.md").read_text()
+    # ...while the files it does not have are still seeded.
+    assert "design/99_changelog.md" in r["written"]

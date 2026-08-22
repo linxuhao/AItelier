@@ -11,6 +11,10 @@ Composite commands (save tool calls):
   cmd <text>       — type text + Enter (saves 2 calls: send + key)
   snapshot [pid]   — capture screen + workspace tree/log (saves 3 calls)
   inspect <pid>    — tree + diff + log combined (saves 2 calls)
+
+Blocking command (do NOT poll for a checkpoint — this pushes):
+  await <pid>      — block on the server's SSE stream until the run pauses at a
+                     checkpoint, fails, or completes; print one line and exit.
 """
 
 import argparse
@@ -327,6 +331,68 @@ def _run_id_for_project(conn, pid: str):
     return row[0] if row else None
 
 
+def cmd_await(args):
+    """Block until a run reaches a checkpoint / terminal state, then exit.
+
+    The server already PUSHES these — `GET /api/events/stream` carries a
+    `checkpoint_paused` event carrying {step_id, label, next_node, project_id}.
+    Polling `/api/runs` in a sleep loop burns a request every few seconds and
+    still reports the pause late; this blocks on the stream and returns the
+    instant it fires.
+
+    Exits 0 on a checkpoint, 0 on completion, 1 on run failure, 2 on timeout —
+    so a caller can `debugctl.py await <pid> && do-the-next-thing`, and an agent
+    can run it in the background and be woken by its exit.
+
+    Terminal events are matched as well as checkpoints on purpose: a watcher
+    that only greps for the happy path stays silent through a failure, and
+    silence is indistinguishable from "still running".
+    """
+    import json as _json
+    import urllib.request
+
+    pid = args.project_id
+    url = args.url.rstrip("/") + "/api/events/stream"
+    deadline = time.time() + args.timeout
+    want = {"checkpoint_paused", "run_completed", "run_failed", "pipeline_failed"}
+
+    try:
+        resp = urllib.request.urlopen(url, timeout=args.timeout)
+    except Exception as e:
+        _die(f"cannot open the event stream at {url}: {e}")
+
+    for raw in resp:
+        if time.time() > deadline:
+            print(f"TIMEOUT after {args.timeout}s waiting on {pid}")
+            sys.exit(2)
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            # The stream wraps each event as {"log": "<json string>"}.
+            outer = _json.loads(line[5:].strip())
+            ev = _json.loads(outer["log"]) if isinstance(outer.get("log"), str) else outer
+        except Exception:
+            continue
+        if ev.get("project_id") != pid:
+            continue
+        kind = ev.get("type", "")
+        if kind not in want:
+            continue
+        if kind == "checkpoint_paused":
+            print(f"CHECKPOINT {pid} step={ev.get('step_id')} "
+                  f"label={ev.get('label')!r} next={ev.get('next_node')}")
+            sys.exit(0)
+        if kind == "run_completed":
+            print(f"COMPLETED {pid}")
+            sys.exit(0)
+        print(f"FAILED {pid} {ev.get('error_reason') or ev.get('detail') or ''}".rstrip())
+        sys.exit(1)
+
+    print(f"STREAM CLOSED before {pid} reached a checkpoint or terminal state")
+    sys.exit(2)
+
+
 def cmd_trace(args):
     """Dump the durable skillflow run trace chronologically.
 
@@ -496,6 +562,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("project_id")
     s.add_argument("--lines", type=int, default=20)
     s.set_defaults(func=cmd_log)
+
+    # ── await ──
+    s = sub.add_parser("await", help="Block on the SSE stream until a checkpoint / terminal state")
+    s.add_argument("project_id")
+    s.add_argument("--url", default="http://localhost:4444", help="API base URL")
+    s.add_argument("--timeout", type=int, default=3600, help="Give up after N seconds (exit 2)")
+    s.set_defaults(func=cmd_await)
 
     # ── trace ──
     s = sub.add_parser("trace", help="Dump durable skillflow run trace (events/prompts/actions)")

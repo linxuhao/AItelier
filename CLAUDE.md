@@ -238,7 +238,19 @@ python3 debugctl.py key Enter          # Press a key
 python3 debugctl.py stop               # Kill session
 python3 debugctl.py watch <project_id> # Watch workspace changes
 python3 debugctl.py inspect <project_id>  # Tree + diff + log
+python3 debugctl.py await <project_id> # BLOCK until a checkpoint / terminal state
 ```
+
+**Never poll for a checkpoint.** The server already pushes one:
+`GET /api/events/stream` carries a `checkpoint_paused` event
+(`{step_id, label, next_node, project_id}`) the moment a run pauses, plus the
+terminal events. `debugctl.py await <pid>` blocks on that stream and exits the
+instant it fires — 0 on a checkpoint or completion, 1 on failure, 2 on timeout.
+So `await <pid> && <next step>` chains, and an agent can run it in the
+background and be woken by its exit instead of sleeping in a loop. It matches
+the terminal events as well as the checkpoint on purpose: a watcher that greps
+only for the happy path stays silent through a failure, and silence looks
+exactly like "still running".
 
 ### Scheduler tick log (`~/.AItelier/logs/scheduler_ticks.log`)
 

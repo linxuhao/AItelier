@@ -157,6 +157,16 @@ task_implementer:
   fallback_to_json_mode: true
   thinking:
     enable: true
+    # Same reason as the *_reviewer roles above, now proven on the MAKER side:
+    # reasoning is billed inside max_output_tokens, and with no effort set the
+    # server defaults to ~high. Live (jinyong-turn, combat_engine, 2026-08-22):
+    # attempt 1 spent 123,872 reasoning chars to fill all 32,768 completion
+    # tokens; attempt 2 spent 242,630 to fill 65,536. Both returned empty text
+    # and ZERO tool calls, so the retry prompt was literally "No output
+    # produced" — the step burned ~98k output tokens writing nothing and only
+    # landed on its last of three attempts. Note the escalation ladder makes
+    # this WORSE, not better: a bigger cap is more room to reason into.
+    effort: "low"
 
 task_implementer_reviewer:
   model: "deepseek/deepseek-v4-flash"

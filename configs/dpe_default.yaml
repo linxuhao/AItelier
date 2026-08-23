@@ -134,6 +134,28 @@ steps:
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "1" }
+      # …and what the USER demanded about that output at its checkpoint.
+      #
+      # Without this the reviewer enforces a hard gate ("every blocking issue
+      # in the previous feedback must have a NEW repair task") while being blind
+      # to the one message that can retire a blocking issue. The two then
+      # deadlock, and the deadlock burns the plan loop until the run dies.
+      #
+      # Live, jinyong-encounter 2026-08-23: two of 5_review's three blocking
+      # issues were gate defects fixed OUTSIDE the repo (a unit gate looking for
+      # a binary that is not in the container; a play-test report that existed
+      # but had been truncated out of the prompt). The user rejected the plan at
+      # the checkpoint and said, with reasons, to delete the task for one of
+      # them. The PM complied. 3_review then failed the run for a plan that
+      # "only covers ONE of the three hard-gate failures" — enforcing the rule
+      # against an instruction it could not see. `3_review -> 3` hit 3/3 and the
+      # run ended one repair short, with `5_review -> 3` still at 2 of 4.
+      #
+      # skillflow's own note on this source says it plainly: reject feedback is
+      # otherwise injected ONLY into the rejected step's re-run, so the reviewer
+      # stays blind to what the user demanded. novel_chapter/novel_init already
+      # wire it onto their reviewers; the DPE reviewers never did.
+      - source: { feedback_of: "1" }
     output:
       mode: "content"
       fixed:
@@ -192,6 +214,28 @@ steps:
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "2" }
+      # …and what the USER demanded about that output at its checkpoint.
+      #
+      # Without this the reviewer enforces a hard gate ("every blocking issue
+      # in the previous feedback must have a NEW repair task") while being blind
+      # to the one message that can retire a blocking issue. The two then
+      # deadlock, and the deadlock burns the plan loop until the run dies.
+      #
+      # Live, jinyong-encounter 2026-08-23: two of 5_review's three blocking
+      # issues were gate defects fixed OUTSIDE the repo (a unit gate looking for
+      # a binary that is not in the container; a play-test report that existed
+      # but had been truncated out of the prompt). The user rejected the plan at
+      # the checkpoint and said, with reasons, to delete the task for one of
+      # them. The PM complied. 3_review then failed the run for a plan that
+      # "only covers ONE of the three hard-gate failures" — enforcing the rule
+      # against an instruction it could not see. `3_review -> 3` hit 3/3 and the
+      # run ended one repair short, with `5_review -> 3` still at 2 of 4.
+      #
+      # skillflow's own note on this source says it plainly: reject feedback is
+      # otherwise injected ONLY into the rejected step's re-run, so the reviewer
+      # stays blind to what the user demanded. novel_chapter/novel_init already
+      # wire it onto their reviewers; the DPE reviewers never did.
+      - source: { feedback_of: "2" }
     output:
       mode: "content"
       fixed:
@@ -305,6 +349,28 @@ steps:
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "3" }
+      # …and what the USER demanded about that output at its checkpoint.
+      #
+      # Without this the reviewer enforces a hard gate ("every blocking issue
+      # in the previous feedback must have a NEW repair task") while being blind
+      # to the one message that can retire a blocking issue. The two then
+      # deadlock, and the deadlock burns the plan loop until the run dies.
+      #
+      # Live, jinyong-encounter 2026-08-23: two of 5_review's three blocking
+      # issues were gate defects fixed OUTSIDE the repo (a unit gate looking for
+      # a binary that is not in the container; a play-test report that existed
+      # but had been truncated out of the prompt). The user rejected the plan at
+      # the checkpoint and said, with reasons, to delete the task for one of
+      # them. The PM complied. 3_review then failed the run for a plan that
+      # "only covers ONE of the three hard-gate failures" — enforcing the rule
+      # against an instruction it could not see. `3_review -> 3` hit 3/3 and the
+      # run ended one repair short, with `5_review -> 3` still at 2 of 4.
+      #
+      # skillflow's own note on this source says it plainly: reject feedback is
+      # otherwise injected ONLY into the rejected step's re-run, so the reviewer
+      # stays blind to what the user demanded. novel_chapter/novel_init already
+      # wire it onto their reviewers; the DPE reviewers never did.
+      - source: { feedback_of: "3" }
       # Goal-loop: the verifier's verdict the PM was supposed to fix. Lets the
       # reviewer check each reported issue has a NEW fix-task (empty first pass).
       - source: { step: "5_review" }
@@ -767,7 +833,17 @@ steps:
       # To DISABLE the goal-loop: set `to: "5"` (re-verify only) or delete this edge.
       - to: "3"
         match: { from_file: "review_verdict.json", field: "passed", value: false }
-        max_loop: 2
+        # 4, not 2. The cap exists to stop a run that cannot converge from
+        # burning forever — it should not cut off one that plainly IS
+        # converging. Three consecutive dpe_game runs died here while doing
+        # exactly that: the readability gate went 5-of-6 red, then 3-of-6, then
+        # 1-of-6 across them, and each run was finished by hand afterwards.
+        # jinyong-spine is the clearest case: 24 of 24 tasks done and the
+        # tutorial-to-ending spine passing 12/12, ended `failed` because a
+        # single `Array[Dictionary]()` typo needed one more repair pass than
+        # the cap allowed. At 2 the budget is "implement once, repair once",
+        # which a 20-plus-task run spends before it has seen its own gates.
+        max_loop: 4
 
   # Loop-external terminal — reached only after the final verifier passes; the
   # node the end-condition fires on. Gate = no completed step row, so it fires

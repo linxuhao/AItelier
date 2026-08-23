@@ -191,3 +191,38 @@ async def test_a_normal_task_loop_does_not_trip_the_guard(tick_sf):
     await scheduler._run_skillflow_tick("p1", None)
 
     tick_sf.fail_run.assert_not_called()
+
+
+# ── The reviewer must be able to see what the user demanded ─────────────────
+def _dpe_steps():
+    import yaml
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    d = yaml.safe_load((root / "configs" / "dpe_default.yaml").read_text(encoding="utf-8"))
+    return {s["id"]: s for s in d["steps"]}
+
+
+def test_every_checkpointed_maker_has_a_reviewer_that_reads_its_reject_feedback():
+    """A reviewer downstream of a checkpoint enforces "every blocking issue must
+    have a NEW repair task" — while the one message that can RETIRE a blocking
+    issue (the user's checkpoint rejection) went only to the maker. The two
+    deadlock, and the deadlock burns the plan loop until the run dies.
+
+    jinyong-encounter 2026-08-23: two of 5_review's three blocking issues were
+    gate defects fixed outside the repo. The user rejected the plan and said,
+    with reasons, to drop the task for one of them; the PM complied; 3_review
+    then failed the run for covering "only ONE of the three hard-gate failures".
+    `3_review -> 3` hit 3/3 with `5_review -> 3` still at 2 of 4 — the goal loop
+    had budget left and never got to use it.
+    """
+    steps = _dpe_steps()
+    checkpointed = [sid for sid, s in steps.items() if s.get("checkpoint")]
+    assert checkpointed, "no checkpoints in dpe_default — this test is vacuous"
+
+    for maker in checkpointed:
+        reviewer = f"{maker}_review"
+        assert reviewer in steps, f"{maker} is checkpointed but has no {reviewer}"
+        sources = [c.get("source", c) for c in (steps[reviewer].get("context") or [])]
+        assert any(src.get("feedback_of") == maker for src in sources), (
+            f"{reviewer} judges {maker} but cannot see the user's rejection of "
+            f"{maker} — it will enforce rules against instructions it never read")

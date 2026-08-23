@@ -92,8 +92,24 @@ overlay:
 
   # ── CONTEXT ────────────────────────────────────────────────────────────────
   # 3. Let the final verifier read the gate's reports.
+  # ── WHY THESE THREE ARE FILE-SCOPED, not `{step: "5_compile"}` ────────────
+  #     Because a whole-step source inlines the step DIRECTORY, and this step's
+  #     directory holds the 100+ PNGs the readability gate photographs. skillflow
+  #     rglob's them and reads each as UTF-8-with-replacement (~56MB of binary),
+  #     then the prompt assembler cuts the block at MAX_CONTEXT_LINES. Sorted
+  #     order is compile_report.json, frames/*.png, playtest_report.json — so the
+  #     file that gets cut is ALWAYS the play-test report.
+  #     Live, jinyong-encounter 2026-08-23: 5_review blocked the run on
+  #     "playtest gate NOT RUN — playtest_report.json ABSENT" while that file sat
+  #     on disk at 98KB / 3526 lines with `passed: true` and 23 scenarios
+  #     evaluated; the PM then planned the next round around a gate it believed
+  #     had never run. Naming the files keeps the binary out and puts the
+  #     play-test verdict where every reader can actually see it. The full JSON
+  #     stays reachable through the step's read tool (`mode: both`).
   - add_context: "@verifier_review"
-    source: { step: "5_compile" }
+    source: { step: "5_compile", output: "compile_report.json" }
+  - add_context: "@verifier_review"
+    source: { step: "5_compile", output: "playtest_summary.md" }
   # 3a. …including the readability verdict. A verifier that reads only
   #     playtest_report.json reads 20/20 green over a screen no player could
   #     use, and signs the run off.
@@ -111,7 +127,9 @@ overlay:
   #     there either — it was planning the turn-engine repair blind to the gate
   #     output that described the break.
   - add_context: "@pm"
-    source: { step: "5_compile" }
+    source: { step: "5_compile", output: "compile_report.json" }
+  - add_context: "@pm"
+    source: { step: "5_compile", output: "playtest_summary.md" }
   #     Same argument for 5_vision, and it bites harder: the readability
   #     failures ARE the task list ("no tile grid", "five names ellipsised"),
   #     and vision_report.json names the requirement each one broke. Without
@@ -183,7 +201,8 @@ overlay:
           - source: { from: "repository", mode: "tool" }
           - source: { step: "2" }
           - source: { step: "5" }
-          - source: { step: "5_compile" }
+          - source: { step: "5_compile", output: "compile_report.json" }
+          - source: { step: "5_compile", output: "playtest_summary.md" }
           # …and the readability verdict. The design keeper records what SHIPPED,
           # and "the buttons have no visual state at all" is a fact about the
           # shipped game exactly as much as a failed assertion is. Without this

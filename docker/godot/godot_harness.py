@@ -901,6 +901,64 @@ def check_gdscript(files: list[str], timeout: int = 120) -> dict:
     return {"all_passed": all(r["passed"] for r in results), "results": results}
 
 
+# ── script gate (GDScript unit suite) ──────────────────────────
+# Godot's own SCRIPT ERROR / stack-dump lines, plus the conventional markers a
+# hand-rolled GDScript runner prints. The exit code alone is NOT enough: Godot
+# exits 0 on an uncaught script error, so a suite that printed FAILED and died
+# would otherwise be recorded as a pass.
+_FAILURE_MARKERS = ("SCRIPT ERROR", "Stack frames", "--- Debugging parse error",
+                    "FAILED:", "FAIL:", "ASSERT FAILED", "Assertion failed")
+
+
+def _has_failure_marker(out: str, err: str) -> bool:
+    blob = (out or "") + (err or "")
+    return any(m in blob for m in _FAILURE_MARKERS)
+
+
+def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
+    """Run ``godot --headless --path <proj> -s <res://...>`` for each script.
+
+    The GDScript unit suite is the project's fastest, most targeted feedback,
+    and it was DEAD: ``run_tests.sh`` shells out to a bare ``godot``, and there
+    is no godot binary in the aitelier container -- only in this sidecar. Every
+    round the unit gate failed with "godot binary not found", 5_review blocked
+    on it, and the PM planned a repair the implementer could not possibly make:
+    no amount of PATH resolution finds a binary that is not in the filesystem.
+    Give the suite the same HTTP route /compile and /playtest already use.
+    """
+    proj = Path(project_dir)
+    if not (proj / "project.godot").is_file():
+        return {"passed": True, "no_project": True, "results": [],
+                "summary": "No project.godot -- not a Godot project; script gate skipped."}
+    if not scripts:
+        return {"passed": True, "results": [], "summary": "No scripts requested."}
+
+    dst = _copy_project(proj)
+    try:
+        # The suite loads scenes and resources exactly like the game does, so it
+        # needs the same import cache the play-test builds.
+        _import_resources(dst, timeout=min(timeout, 300))
+        results = []
+        for rel in scripts:
+            try:
+                cp = _run(["--path", str(dst), "-s", rel], timeout=timeout)
+                rc, out, err = cp.returncode, cp.stdout, cp.stderr
+            except subprocess.TimeoutExpired:
+                rc, out, err = 124, "", "timed out after %ss" % timeout
+            failed = rc != 0 or _has_failure_marker(out, err)
+            results.append({"script": rel, "returncode": rc, "passed": not failed,
+                            "stdout": out[-4000:], "stderr": err[-4000:],
+                            "errors": _parse_errors(err)})
+        ok = all(r["passed"] for r in results)
+        bad = [r["script"] for r in results if not r["passed"]]
+        return {"passed": ok, "results": results,
+                "summary": ("%d script(s) ran, all passed." % len(results) if ok
+                            else "%d/%d script(s) failed: %s"
+                                 % (len(bad), len(results), ", ".join(bad)))}
+    finally:
+        shutil.rmtree(dst.parent, ignore_errors=True)
+
+
 # ── HTTP transport (mirrors the Unity sidecar) ─────────────────────────────
 class _Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, payload: dict) -> None:
@@ -933,6 +991,10 @@ class _Handler(BaseHTTPRequestHandler):
             elif self.path == "/checkgd":
                 self._send(200, check_gdscript(
                     req.get("files") or [], timeout=req.get("timeout", 120)))
+            elif self.path == "/script":
+                self._send(200, run_script(
+                    proj, req.get("scripts") or [],
+                    timeout=req.get("timeout", 600)))
             elif self.path == "/playtest":
                 self._send(200, playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),

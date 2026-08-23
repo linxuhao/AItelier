@@ -424,3 +424,66 @@ def test_markdown_and_loose_punctuation_still_parse(tmp_path, monkeypatch):
         for q in _ASKED))
     rep = _run(tmp_path)
     assert [q["id"] for q in rep["questions"] if q["failed"]] == ["Q5"]
+
+
+# ── Differential questions: any, not majority ────────────────────────────────
+def test_a_quiet_scenario_cannot_outvote_a_scenario_that_showed_the_change(
+        tmp_path, monkeypatch):
+    """Q3/Q4 are answered over the frames SAMPLED from a scenario, and whether
+    those frames straddle a state change is a property of the sampling, not of
+    the UI. Most scenarios are quiet by design (a save/load round-trip, a menu
+    walk), so their honest answer is NO.
+
+    jinyong-encounter 2026-08-23: Q3 read 7 bad / 7 good and failed the run on
+    the tie, while the play-test asserted the same button states on live nodes
+    and passed `skill_button_visual_states` 9/9. The buttons were changing; the
+    gate had photographed quiet moments.
+    """
+    diff = [q["id"] for q in _QUESTIONS if q["differential"]]
+    assert diff, "this test is meaningless without a differential question"
+
+    # Four scenarios: one shows the change, three were sampled while quiet.
+    def _per_call(n):
+        # _serve appends before it asks, so the call index is 1-based.
+        return _sheet(**{q: ("YES" if n == 1 else "NO") for q in diff})
+
+    calls = []
+    _serve(monkeypatch, _per_call, calls=calls)
+    ws = _workspace(tmp_path, scenarios=(("a", 2), ("b", 2), ("c", 2), ("d", 2)))
+    rep = _run(tmp_path, workspace_root=str(ws))
+
+    for q in rep["questions"]:
+        if q["id"] in diff:
+            assert q["failed"] is False, f"{q['id']} failed on 1 good / 3 bad"
+    assert rep["passed"] is True
+
+
+def test_a_ui_that_never_changes_in_any_scenario_still_fails(tmp_path, monkeypatch):
+    """The any-rule must not turn the check off. Zero good answers across every
+    scenario IS the static UI this question exists for."""
+    diff = [q["id"] for q in _QUESTIONS if q["differential"]]
+    _serve(monkeypatch, _sheet(**{q: "NO" for q in diff}))
+    ws = _workspace(tmp_path, scenarios=(("a", 2), ("b", 2), ("c", 2)))
+    rep = _run(tmp_path, workspace_root=str(ws))
+
+    assert sorted(q["id"] for q in rep["questions"] if q["failed"]) == sorted(diff)
+    assert rep["passed"] is False
+
+
+def test_a_per_frame_question_still_needs_a_majority(tmp_path, monkeypatch):
+    """Only differential questions moved. Q2/Q5 judge a single frame, where a
+    NO is a fact about the screen and not about when it was photographed."""
+    static = [q["id"] for q in _QUESTIONS
+              if not q["differential"] and q["applies_to"] == "battle"]
+    victim = static[0]
+
+    def _per_call(n):
+        return _sheet(**{victim: ("YES" if n == 1 else "NO")})
+
+    calls = []
+    _serve(monkeypatch, _per_call, calls=calls)
+    ws = _workspace(tmp_path, scenarios=(("a", 2), ("b", 2), ("c", 2)))
+    rep = _run(tmp_path, workspace_root=str(ws))
+
+    assert [q["id"] for q in rep["questions"] if q["failed"]] == [victim]
+    assert rep["passed"] is False

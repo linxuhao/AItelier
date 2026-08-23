@@ -30,6 +30,87 @@ def _is_godot(repo: Path) -> bool:
     return (repo / "project.godot").is_file()
 
 
+def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
+    """Distil playtest_report.json into a prompt-sized `playtest_summary.md`.
+
+    WHY THIS EXISTS. A context source of `{step: "5_compile"}` inlines the
+    step directory by `rglob("*")` — and this step's directory holds the 100+
+    rendered PNGs the readability gate photographs. skillflow reads every one of
+    them as UTF-8-with-replacement, so ~56MB of binary lands in the prompt, and
+    AItelier's assembler then cuts the block at MAX_CONTEXT_LINES (1500). Sorted
+    order puts `frames/` before `playtest_report.json`, so the file that gets
+    cut is ALWAYS the play-test report — the single most informative artefact in
+    the run.
+
+    Live, jinyong-encounter 2026-08-23: 5_review reported "playtest gate NOT RUN
+    — playtest_report.json ABSENT" as a blocking finding while the file sat on
+    disk, 98KB, 3526 lines, `passed: true`, with 23 scenarios evaluated. The PM
+    then planned the next round around a gate it believed had never run. The
+    file was never absent; it was inlined past the cut.
+
+    So: emit a summary that fits. The full report stays on disk and stays
+    reachable through the step's read tool for anyone who wants the state dumps.
+    """
+    b = pt.get("behavior") or {}
+    scenarios = b.get("scenarios") or []
+    errors = pt.get("errors") or []
+    lines = [
+        "# playtest_summary.md",
+        "",
+        "> Distilled from `playtest_report.json` (full report on disk — read it "
+        "for node-state snapshots and per-frame captures).",
+        "",
+        f"- hard gate `passed`: **{pt.get('passed')}**  "
+        f"(crash / scene-load / illegal spec key / input-not-received)",
+        f"- `spec_used`: {pt.get('spec_used')}   `frames`: {pt.get('frames')}   "
+        f"runtime errors: {len(errors)}",
+        f"- summary: {pt.get('summary', '')}",
+        "",
+    ]
+
+    lines.append("## Runtime errors (hard)")
+    if errors:
+        for e in errors[:40]:
+            lines.append(f"- {e if isinstance(e, str) else json.dumps(e, ensure_ascii=False)}")
+    else:
+        lines.append("- none")
+    lines.append("")
+
+    if scenarios:
+        failed = [s for s in scenarios if not s.get("passed")]
+        lines.append(f"## Scenarios — {len(failed)}/{len(scenarios)} with failing "
+                     f"assertions (advisory, does not flip the hard gate)")
+        for s in scenarios:
+            a = s.get("asserts") or []
+            ok = sum(1 for x in a if x.get("passed"))
+            mark = "PASS" if s.get("passed") else "FAIL"
+            lines.append(f"- `{mark}`  {s.get('name')}  **{ok}/{len(a)}**")
+        lines.append("")
+
+        if failed:
+            lines.append("## Failing assertions")
+            for s in failed:
+                lines.append(f"### {s.get('name')}")
+                for x in s.get("asserts") or []:
+                    if x.get("passed"):
+                        continue
+                    parts = [f"- `{x.get('name')}`",
+                             f"expr `{str(x.get('expr'))[:160]}`",
+                             f"actual `{str(x.get('actual'))[:120]}`"]
+                    if x.get("error"):
+                        parts.append(f"error `{str(x.get('error'))[:160]}`")
+                    lines.append(" | ".join(parts))
+                lines.append("")
+    else:
+        lines.append("## Scenarios")
+        lines.append("- no `playtest_spec.yaml` behaviour contract was evaluated "
+                     "(`spec_used: false`) — only the state snapshot exists.")
+        lines.append("")
+
+    (target_dir / "playtest_summary.md").write_text(
+        "\n".join(lines), encoding="utf-8")
+
+
 def godot_compile(*, project_root: str = "", out_dir: str = "",
                   workspace_root: str = "", **kwargs) -> dict:
     """Parse-check the repo's GDScript via godot-builder, then (if it passed)
@@ -101,14 +182,25 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
         from aitelier.tools.godot_playtest.impl import godot_playtest
         pt = godot_playtest(project_root=str(repo), out_dir=str(target_dir))
         pt_passed = pt.get("passed", True)
+        try:
+            _write_playtest_summary(target_dir, json.loads(
+                (target_dir / "playtest_report.json").read_text(encoding="utf-8")))
+        except Exception as e:  # a summary is an aid, never a reason to fail
+            (target_dir / "playtest_summary.md").write_text(
+                f"# playtest_summary.md\n\nCould not summarise "
+                f"playtest_report.json: {e}\nRead the full report instead.\n",
+                encoding="utf-8")
     else:
         reason = ("Parse failed — play-test skipped (fix parse errors first)."
                   if not report.get("passed", True)
                   else "No project.godot — not a Godot project; play-test skipped.")
-        (target_dir / "playtest_report.json").write_text(json.dumps(
-            {"passed": True, "frames": 0, "errors": [], "state": {},
-             "summary": reason}, indent=2), encoding="utf-8")
+        skipped = {"passed": True, "frames": 0, "errors": [], "state": {},
+                   "summary": reason}
+        (target_dir / "playtest_report.json").write_text(
+            json.dumps(skipped, indent=2), encoding="utf-8")
+        _write_playtest_summary(target_dir, skipped)
         pt_passed = True
 
-    return {"written": ["compile_report.json", "playtest_report.json"],
+    return {"written": ["compile_report.json", "playtest_report.json",
+                        "playtest_summary.md"],
             "passed": report.get("passed", True) and pt_passed}

@@ -93,3 +93,58 @@ def test_read_fragments_resolves_addon_files():
 def test_read_fragments_ignores_missing_and_escapes():
     frags = ar.read_fragments(["game_harness/nope.md", "../../etc/passwd"])
     assert frags == {}
+
+
+def test_no_reader_of_5_compile_would_inline_the_rendered_frames(sf_with_addons):
+    """5_compile's directory holds the 100+ PNGs the readability gate
+    photographs. A whole-step context source rglob's them, reads each as
+    UTF-8-with-replacement, and the prompt assembler cuts the block at
+    MAX_CONTEXT_LINES — and sorted order (compile_report.json, frames/*.png,
+    playtest_report.json) means the file that gets cut is ALWAYS the play-test
+    report.
+
+    Live, jinyong-encounter 2026-08-23: 5_review blocked the run on "playtest
+    gate NOT RUN — playtest_report.json ABSENT" while the file sat on disk at
+    98KB / 3526 lines with `passed: true` and 23 scenarios evaluated, and the PM
+    planned the next round around a gate it believed had never run.
+
+    So every reader of this step must name the file it wants.
+    """
+    sf = sf_with_addons
+    ar.register_addon_combo(sf, MagicMock(), "dpe_default_v2", ["game_harness"],
+                            name="dpe_game")
+    naked = []
+    for node in sf._graphs["dpe_game"].steps:
+        for src in (getattr(node, "context", None) or []):
+            d = src if isinstance(src, dict) else getattr(src, "__dict__", {})
+            if d.get("step_id") != "5_compile" and d.get("step") != "5_compile":
+                continue
+            if not (d.get("output") or d.get("file") or d.get("files")):
+                naked.append(node.id)
+    assert not naked, (
+        f"{naked} read 5_compile as a whole step — the frames would crowd the "
+        f"play-test report out of the prompt")
+
+
+def test_the_readers_of_5_compile_get_the_playtest_verdict(sf_with_addons):
+    """Naming files is only half the fix: the file they name has to be the one
+    that says whether the play-test passed. Pinning this stops a future edit
+    from trimming the source list down to compile_report.json and reintroducing
+    a reviewer that can see the parse gate but not the run."""
+    sf = sf_with_addons
+    ar.register_addon_combo(sf, MagicMock(), "dpe_default_v2", ["game_harness"],
+                            name="dpe_game")
+    seen = {}
+    for node in sf._graphs["dpe_game"].steps:
+        for src in (getattr(node, "context", None) or []):
+            d = src if isinstance(src, dict) else getattr(src, "__dict__", {})
+            if d.get("step_id") != "5_compile" and d.get("step") != "5_compile":
+                continue
+            files = d.get("files") or [d.get("output") or d.get("file")]
+            seen.setdefault(node.id, set()).update(f for f in files if f)
+
+    assert {"5_review", "3", "5_design"} <= set(seen), (
+        f"a reader of the play-test gate disappeared: {sorted(seen)}")
+    for node_id, files in seen.items():
+        assert "playtest_summary.md" in files, (
+            f"{node_id} reads 5_compile but not the play-test verdict: {sorted(files)}")

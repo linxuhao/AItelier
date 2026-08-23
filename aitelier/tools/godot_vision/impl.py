@@ -451,10 +451,32 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
     # but a UI that never changes in ANY scenario is the static UI this gate was
     # built for. Ties fail — a checklist item the model could not call more
     # often right than wrong has not been shown to be readable.
+    # …which is why differential questions pass on ANY scenario showing the
+    # change, while per-frame questions keep the majority rule.
+    #
+    # The majority rule contradicted the paragraph above it. A differential
+    # question is answered over the 4 frames SAMPLED from a scenario, and
+    # whether those 4 straddle a state change is a property of the sampling,
+    # not of the UI. Most scenarios are quiet by design (a save/load round-trip,
+    # a menu walk), so their honest answer is NO — and under a majority rule
+    # enough honest NOs outvote the scenarios that did show the change.
+    #
+    # Live, jinyong-encounter 2026-08-23: Q3 ("does at least one skill button
+    # change between frames") read 7 bad / 7 good and failed the run on the tie,
+    # while the play-test's own `skill_button_visual_states` asserted the button
+    # states on live nodes and passed 9/9 and `skill_button_turn_overlay` 6/6.
+    # The buttons were changing. The gate had photographed quiet moments.
+    #
+    # An any-rule still catches the defect this question exists for: a UI that
+    # never changes in ANY scenario has no good answers at all, and fails. What
+    # it stops doing is failing a game for being sampled while nothing happened.
     for q in _QUESTIONS:
         t = tally[q["id"]]
         n = t["good"] + t["bad"]
-        failed = bool(n) and t["bad"] * 2 >= n
+        if q["differential"]:
+            failed = bool(n) and t["good"] == 0
+        else:
+            failed = bool(n) and t["bad"] * 2 >= n
         report["questions"].append({
             **{k: q[k] for k in ("id", "requirement", "differential",
                                  "applies_to", "topic", "text")},

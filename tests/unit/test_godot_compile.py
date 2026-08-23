@@ -133,3 +133,80 @@ def test_builder_unreachable_degrades_to_pass(tmp_path, monkeypatch):
     report = _read_report(out)
     assert "unreachable" in report["summary"]
     assert report["gate_skipped"] is True
+
+
+# ── The summary that survives the prompt ─────────────────────────────────────
+def test_the_playtest_summary_carries_the_failing_assertions(tmp_path, monkeypatch):
+    """`playtest_report.json` is unreadable where it matters most.
+
+    A context source of `{step: "5_compile"}` inlines the step DIRECTORY, and
+    this step's directory holds the 100+ PNGs the readability gate photographs.
+    skillflow rglob's them and reads each as UTF-8-with-replacement, and the
+    prompt assembler then cuts the block at MAX_CONTEXT_LINES. Sorted order is
+    compile_report.json, frames/*.png, playtest_report.json — so the file that
+    gets cut is ALWAYS the play-test report.
+
+    Live, jinyong-encounter 2026-08-23: 5_review blocked the run on "playtest
+    gate NOT RUN — playtest_report.json ABSENT" while that file sat on disk at
+    98KB / 3526 lines, `passed: true`, 23 scenarios evaluated. The PM then
+    planned the next round around a gate it believed had never run.
+    """
+    _make_godot_project(tmp_path)
+    behaviour = {
+        "all_passed": False,
+        "scenarios": [
+            {"name": "quiet_one", "passed": True,
+             "asserts": [{"name": "a", "passed": True}]},
+            {"name": "cultivation_changes_combat", "passed": False,
+             "asserts": [
+                 {"name": "SkillButton1.fahui_text", "passed": False,
+                  "expr": 'fahui_text == "发挥 ×0.7"', "actual": None,
+                  "error": "node not found: SkillButton1"},
+                 {"name": "Sparring_Partner.health", "passed": True},
+             ]},
+        ],
+    }
+    calls = {"n": 0}
+
+    def _fake(req, timeout=0):
+        calls["n"] += 1
+        payload = ({"passed": True, "errors": [], "file_count": 1, "summary": "ok"}
+                   if calls["n"] == 1 else
+                   {"passed": True, "spec_used": True, "frames": 180,
+                    "errors": [], "state": {}, "behavior": behaviour,
+                    "summary": "ran clean but 1/2 scenario(s) failed asserts"})
+
+        class _R:
+            def read(self): return json.dumps(payload).encode()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return _R()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake)
+
+    out = tmp_path / "out"
+    r = godot_compile(project_root=str(tmp_path), out_dir=str(out))
+    assert "playtest_summary.md" in r["written"]
+
+    md = (out / "playtest_summary.md").read_text()
+    # It must be readable proof the gate RAN, at a size a prompt can hold.
+    assert len(md.splitlines()) < 400
+    assert "hard gate `passed`: **True**" in md
+    # …and it must carry the actual failure, not just a count.
+    assert "cultivation_changes_combat" in md and "**1/2**" in md
+    assert "node not found: SkillButton1" in md
+    # A passing scenario's asserts are not worth the prompt space.
+    assert "Sparring_Partner.health" not in md
+
+
+def test_the_summary_exists_even_when_the_playtest_was_skipped(tmp_path, monkeypatch):
+    """A reader must never have to distinguish "no summary" from "no run" —
+    that ambiguity is the whole defect. The skipped case says so in words."""
+    (tmp_path / "app.py").write_text("print('hi')")
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("builder must not be called")))
+    out = tmp_path / "out"
+    godot_compile(project_root=str(tmp_path), out_dir=str(out))
+    md = (out / "playtest_summary.md").read_text()
+    assert "not a Godot project" in md

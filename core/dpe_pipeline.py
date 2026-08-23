@@ -1905,8 +1905,19 @@ class PipelineEngine:
             # simply failed to produce output.
             agent_signaled_done = False
 
-            for turn_count in range(max_turns):
-                remaining = max_turns - turn_count
+            # The turn budget is MUTABLE — two separate mechanisms below raise
+            # it mid-step — but `for … in range(max_turns)` freezes the bound at
+            # loop entry, so both raises were discarded and the loop stopped at
+            # the original count. Hoist the bound into a variable the loop
+            # actually re-reads. `continue` appears throughout this body, so the
+            # counter is incremented at the TOP: exactly range()'s semantics.
+            current_max_turns = max_turns
+            turn_count = -1
+            while True:
+                turn_count += 1
+                if turn_count >= current_max_turns:
+                    break
+                remaining = current_max_turns - turn_count
                 if remaining > 1:
                     tool_choice = "auto"
                 elif not written_files and write_tool_names:
@@ -2038,6 +2049,35 @@ class PipelineEngine:
                                         f"for the retry"),
                         })
                         self._trace("response", "output_cap_escalated", detail)
+                        # The cap is raised "for the retry" — and on the LAST
+                        # turn there is no retry: the no-tool-call branch below
+                        # completes the step EMPTY and the freshly-raised
+                        # gateway is thrown away. So the escalation could only
+                        # ever help a starve that happened early, and the loop
+                        # head aims the biggest write demand at the final turn
+                        # ("Your VERY NEXT action MUST be a write_ call"),
+                        # making the final turn the likeliest to starve.
+                        # Live, jinyong-usable 2026-08-23: nine consecutive
+                        # t_plan executions each starved on turn 6 of 6, each
+                        # logged "16384 → 32768 for the retry", and each
+                        # returned a 0-byte task_plan.md. The second escalation
+                        # never once appeared in the log — no turn ever ran at
+                        # the raised cap. The empty plans were then confirmed as
+                        # "no change needed", and the reviewer's (correct)
+                        # rejections burned the run's plan-loop budget to its
+                        # limit. Buy back the turn.
+                        # Bounded without a counter of its own: a grant requires
+                        # a SUCCESSFUL escalation, and escalate_output_cap()
+                        # returns None at OUTPUT_CAP_CEILING — so a role
+                        # starting at 16384 gets at most two.
+                        if not written_files and turn_count >= current_max_turns - 1:
+                            current_max_turns += 1
+                            self._emit("turn_granted_for_escalation", {
+                                **detail, "level": "warning",
+                                "preview": (f"{role_label}: last turn starved — granting "
+                                            f"turn {current_max_turns} so the raised cap "
+                                            f"({escalated}) is actually used"),
+                            })
                     else:
                         # Already at the ceiling — doubling again would only buy
                         # an API error. Say so, so a role that keeps landing
@@ -2063,7 +2103,7 @@ class PipelineEngine:
                     # only "the agent is done / has nothing more" signal, and is
                     # handled in parity with JSON mode:
                     if not written_files and write_tool_names:
-                        if turn_count < max_turns - 1:
+                        if turn_count < current_max_turns - 1:
                             # Budget remains: nudge to WRITE rather than ending
                             # empty (the step likely has real output to produce).
                             salvage_msg: dict = {"role": "assistant",
@@ -2167,11 +2207,14 @@ class PipelineEngine:
                 # Apply ask_more_turns budget extension after all tool calls
                 # in this turn have been processed.
                 if ask_more_extra > 0:
-                    max_turns += ask_more_extra
+                    # Was `max_turns += …`, which the frozen range() ignored:
+                    # the agent asked for more turns, was told it had them, and
+                    # the loop still stopped at the original bound.
+                    current_max_turns += ask_more_extra
                     self._emit("agent_turn_request", {
                         "extra_turns": ask_more_extra,
                         "reason": ask_more_reason,
-                        "remaining": max_turns - turn_count - 1,
+                        "remaining": current_max_turns - turn_count - 1,
                         "preview": f"Agent asked for +{ask_more_extra} turns ({ask_more_reason[:80]})",
                     })
 
@@ -2207,8 +2250,8 @@ class PipelineEngine:
                     f"Step {step_id}: No output produced. "
                     f"Use write_*/create_*/append_* tools to write output files."
                 )
-                if turn_count >= max_turns - 1:
-                    feedback = f"Max turns ({max_turns}) exceeded. " + feedback
+                if turn_count >= current_max_turns - 1:
+                    feedback = f"Max turns ({current_max_turns}) exceeded. " + feedback
                 self._emit("step_retry", {"attempt": attempt, "error": feedback[:200]})
                 continue
 

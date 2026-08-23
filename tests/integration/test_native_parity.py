@@ -343,3 +343,79 @@ def test_starved_turns_truncated_reasoning_is_not_replayed(engine):
     # The turn still has to appear in the history — dropping it silently would
     # leave the follow-up nudge answering nothing.
     assert any(m.get("role") == "assistant" for m in final)
+
+
+# The escalation is raised "for the retry" — but `for … in range(max_turns)`
+# freezes the bound at loop entry, so a starve on the LAST turn raised the cap
+# and then immediately ended the step empty. Live, jinyong-usable 2026-08-23:
+# nine consecutive t_plan executions starved on turn 6 of 6, each logged
+# "16384 → 32768 for the retry", each returned a 0-byte task_plan.md, and the
+# second escalation never once appeared — no turn ever ran at the raised cap.
+
+def test_last_turn_starve_grants_the_turn_the_escalation_was_raised_for(engine):
+    """A raised cap that no turn ever uses is not a fix, it is a log line."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    engine.factory.get_max_tool_turns.return_value = 1      # turn 1 IS the last
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 16384)
+    nat.turn.side_effect = [
+        _turn(reasoning="t" * 900, truncated=True),                          # starved
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    assert _run(engine, ws) is True
+
+    granted = [p for ev, p in events if ev == "turn_granted_for_escalation"]
+    assert len(granted) == 1, [ev for ev, _ in events]
+    assert nat.gateway.max_output_tokens == 32768
+    # The whole point: the step produced its output instead of completing empty.
+    # (_exec_tool is mocked, so the write is observed through the event, not ws.)
+    assert [p for ev, p in events if ev == "files_written"], [ev for ev, _ in events]
+    assert not [p for ev, p in events if ev == "step_done"
+                and "budget reached" in (p.get("preview") or "")]
+
+
+def test_last_turn_starve_at_the_ceiling_grants_nothing(engine):
+    """The grant is bounded by the escalation, not by a counter of its own: at
+    OUTPUT_CAP_CEILING escalate_output_cap() declines, so there is nothing to
+    buy a turn for and the loop must still end."""
+    from core.ai_router import OUTPUT_CAP_CEILING
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    engine.factory.get_max_tool_turns.return_value = 1
+    nat = _wire_real_escalation(engine.factory.get_native_agent.return_value,
+                                OUTPUT_CAP_CEILING)
+    nat.turn.side_effect = [_turn(reasoning="t" * 900, truncated=True)]      # starved
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    _run(engine, ws)
+
+    assert [p for ev, p in events if ev == "turn_granted_for_escalation"] == []
+    assert nat.gateway.max_output_tokens == OUTPUT_CAP_CEILING
+    assert nat.turn.call_count == 1          # no extra turn was taken
+
+
+def test_ask_more_turns_actually_extends_the_native_loop(engine):
+    """Same frozen-range() defect, second symptom: the native path answered
+    "+N granted" and then stopped at the original bound anyway."""
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    engine.factory.get_max_tool_turns.return_value = 2
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.side_effect = [
+        _turn(tool_calls=[_tc("ask_more_turns", {"turns": 2, "reason": "big file"})]),
+        _turn(tool_calls=[_tc("list_tree", {})]),
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+        _turn(tool_calls=[_tc("finish_step")]),
+    ]
+    events = []
+    engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
+    assert _run(engine, ws) is True
+
+    req = [p for ev, p in events if ev == "agent_turn_request"]
+    assert len(req) == 1 and req[0]["extra_turns"] == 2
+    # Granted means USED: the write lands on turn 3, past the original bound.
+    assert [p for ev, p in events if ev == "files_written"], [ev for ev, _ in events]
+    assert nat.turn.call_count == 4

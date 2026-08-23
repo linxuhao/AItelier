@@ -915,6 +915,31 @@ def _has_failure_marker(out: str, err: str) -> bool:
     return any(m in blob for m in _FAILURE_MARKERS)
 
 
+def _discover_entry_points(proj: Path) -> list:
+    """Every `tests/*.gd` that `extends SceneTree` — the scripts `-s` can run.
+
+    Discovered, not configured, because a hard-coded list goes stale silently:
+    the caller keeps passing five names while the project grows a sixth suite,
+    and the new one is never run by anything. `extends SceneTree` is the exact
+    property `-s` requires, so it is also the exact right filter — a plain
+    `test_*.gd` glob would sweep in the 12 static test files that the runner
+    script collects, and running one of those directly is an error, not a test
+    failure.
+    """
+    tests = proj / "tests"
+    if not tests.is_dir():
+        return []
+    found = []
+    for f in sorted(tests.glob("*.gd")):
+        try:
+            head = f.read_text(encoding="utf-8", errors="replace")[:4000]
+        except OSError:
+            continue
+        if "extends SceneTree" in head:
+            found.append("res://tests/" + f.name)
+    return found
+
+
 def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
     """Run ``godot --headless --path <proj> -s <res://...>`` for each script.
 
@@ -930,8 +955,10 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
     if not (proj / "project.godot").is_file():
         return {"passed": True, "no_project": True, "results": [],
                 "summary": "No project.godot -- not a Godot project; script gate skipped."}
+    scripts = list(scripts or []) or _discover_entry_points(proj)
     if not scripts:
-        return {"passed": True, "results": [], "summary": "No scripts requested."}
+        return {"passed": True, "results": [], "discovered": [],
+                "summary": "No `extends SceneTree` entry point under tests/."}
 
     dst = _copy_project(proj)
     try:
@@ -951,7 +978,7 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
                             "errors": _parse_errors(err)})
         ok = all(r["passed"] for r in results)
         bad = [r["script"] for r in results if not r["passed"]]
-        return {"passed": ok, "results": results,
+        return {"passed": ok, "results": results, "discovered": scripts,
                 "summary": ("%d script(s) ran, all passed." % len(results) if ok
                             else "%d/%d script(s) failed: %s"
                                  % (len(bad), len(results), ", ".join(bad)))}

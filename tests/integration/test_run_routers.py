@@ -45,7 +45,19 @@ def test_start_run_unknown_config_404(client):
 def test_run_detail_includes_cache_stats(client):
     """GET /api/runs/{run_id} includes cache_stats at run and step level."""
     client.post("/api/projects", json={"project_id": "cache_test_proj", "name": "CacheTest"})
-    # Start a run so skillflow has a run to query.
+    # dpe_default_v2 step "1" reads meta_conversation/finalize/step1_goals.json
+    # as a REQUIRED cross-config input, so run_launcher refuses to start one for
+    # a project that never had a meta conversation. Seed that artifact — the
+    # same thing `finalize` writes — rather than dropping the start: this test
+    # needs a real skillflow run to query, and POST /api/projects alone does not
+    # create one.
+    from api.dependencies import get_skillflow
+    finalize = (get_skillflow()._workspace.get_project_path("cache_test_proj")
+                / "meta_conversation" / "finalize")
+    finalize.mkdir(parents=True, exist_ok=True)
+    (finalize / "step1_goals.json").write_text(
+        '{"goals": ["ship it"]}', encoding="utf-8")
+
     start_resp = client.post("/api/runs", json={
         "config_name": "dpe_default_v2",
         "project_id": "cache_test_proj",

@@ -37,6 +37,50 @@ def generate_run_id(config_name: str) -> str:
     return f"{slug}-{uuid.uuid4().hex[:8]}"
 
 
+def missing_cross_config_inputs(sf, config_name: str, project_id: str) -> list[dict]:
+    """Required inputs *config_name* imports from ANOTHER config's run and that
+    do not exist yet under *project_id*.
+
+    A ``{config: X, step: Y, output: Z, required: true}`` context source is a
+    PRECONDITION, not an input this run can produce: the artifact is written by a
+    run of X, and no step of this graph will ever create it. dpe_default_v2's
+    step "1" imports ``meta_conversation/finalize/step1_goals.json`` that way, so
+    a dpe_* run started without its meta conversation is dead at its first claim.
+    Same-config sources are excluded — those are the run's own seed/step output.
+
+    Existence is decided by skillflow's OWN resolver (``ContextResolver`` and the
+    ``RequiredContextMissing`` it raises for an empty required source), never by
+    re-deriving the path math here: a private copy that drifted would start
+    refusing launches skillflow would have served, and admitting ones it would
+    not. Each entry is ``{config, step, output, reader}``.
+    """
+    from skillflow.context import ContextResolver
+    from skillflow.exceptions import RequiredContextMissing
+
+    graph = sf._get_resolver(config_name).graph
+    resolver = ContextResolver(sf._workspace.get_project_path(project_id))
+    missing: list[dict] = []
+    seen: set[tuple] = set()
+    for node in graph.steps:
+        for spec in (node.context or []):
+            source = spec.get("source", spec)
+            producer = source.get("config") or ""
+            if not (spec.get("required") or source.get("required")):
+                continue
+            if not producer or producer == config_name:
+                continue
+            key = (producer, source.get("step", ""), source.get("output", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                resolver.resolve([spec], current_config=config_name)
+            except RequiredContextMissing:
+                missing.append({"config": producer, "step": source.get("step", ""),
+                                "output": source.get("output", ""), "reader": node.id})
+    return missing
+
+
 def start_config_run(db, ws, config_name: str, project_id: str, *,
                      seed_text: str | None = None,
                      seed_inputs: dict | None = None,
@@ -111,9 +155,44 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         result["scheduler_owned"] = manifest.scheduler_owned
         return result
 
+    sf = get_skillflow()
+
+    # A required cross-config input is a precondition this run cannot satisfy for
+    # itself, so a launch that lacks one has already failed — say so here instead
+    # of handing back a run id that will never claim a step. Checked before the
+    # workspace is set up, so a refused launch leaves no half-built repo behind.
+    #
+    # Live 2026-08-23, jinyong-usable: POST /api/runs started dpe_game and
+    # answered 201 {"status":"started"}. Thirty seconds later the run was failed,
+    # and the whole trace was one scheduler tick line — `claim_terminal …
+    # Required context source resolved to no content: finalize` — because no
+    # meta_conversation run had ever produced step1_goals.json for that project.
+    # The caller had every reason to believe a build was under way. The sibling
+    # entry path (core/project_submit.py:seed_and_trigger) has refused exactly
+    # this since a brief-less DPE run spun on the same message for 47 minutes;
+    # the generic launcher never grew the guard, so it kept reporting success for
+    # runs that had no first move.
+    missing = missing_cross_config_inputs(sf, config_name, project_id)
+    if missing:
+        needs = "; ".join(
+            f"{m['output']} (produced by config '{m['config']}'"
+            + (f" step '{m['step']}'" if m["step"] else "")
+            + f", read by step '{m['reader']}')"
+            for m in missing)
+        remedy = (
+            "Run the meta conversation for this project first — start the build "
+            "through the butler, which drives meta_conversation to finalize and "
+            "then launches the pipeline."
+            if any(m["config"] == "meta_conversation" for m in missing)
+            else "Run the producing config for this project first, then start "
+                 "this one.")
+        return {"status": "error", "message":
+                f"Cannot start '{config_name}' for project '{project_id}': it "
+                f"requires input that only another config produces, and that "
+                f"input does not exist: {needs}. {remedy}"}
+
     ws.setup_workspace(project_id, repo_type=eff_repo_type,
                        repo_path=repo_path, repo_url=repo_url)
-    sf = get_skillflow()
 
     # Write seeds into the config's seed dir (read by the first step's
     # {from: config} context spec).

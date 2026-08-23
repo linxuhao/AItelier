@@ -347,6 +347,23 @@ def cmd_await(args):
     Terminal events are matched as well as checkpoints on purpose: a watcher
     that only greps for the happy path stays silent through a failure, and
     silence is indistinguishable from "still running".
+
+    `--follow` keeps the stream open PAST a checkpoint and prints one line per
+    event, exiting only when the run reaches a terminal state. Without it this
+    is single-shot, and single-shot leaves a hole exactly where the driver is
+    busiest: the watcher exits at the checkpoint, the driver reads the plan,
+    approves, and re-arms — and anything that happens in between is unwitnessed.
+
+    Live, jinyong-encounter 2026-08-23: checkpoint at 16:12:16, approved at
+    16:12:57, run dead at 16:13:18 on an exhausted plan loop. The `await` had
+    already exited at the checkpoint and the replacement watcher was a log grep
+    whose filter did not include the terminal outcome, so nothing reported the
+    death — the driver found out when the user said so. One `--follow` watcher
+    armed once covers the whole run: every checkpoint is a line, and so is the
+    ending.
+
+    Pair it with a per-line consumer (each line is an event) rather than an
+    exit-code consumer, since with `--follow` the exit comes only at the end.
     """
     import json as _json
     import urllib.request
@@ -381,15 +398,23 @@ def cmd_await(args):
             continue
         if kind == "checkpoint_paused":
             print(f"CHECKPOINT {pid} step={ev.get('step_id')} "
-                  f"label={ev.get('label')!r} next={ev.get('next_node')}")
-            sys.exit(0)
+                  f"label={ev.get('label')!r} next={ev.get('next_node')}",
+                  flush=True)
+            if not args.follow:
+                sys.exit(0)
+            continue
         if kind == "run_completed":
-            print(f"COMPLETED {pid}")
+            print(f"COMPLETED {pid}", flush=True)
             sys.exit(0)
-        print(f"FAILED {pid} {ev.get('error_reason') or ev.get('detail') or ''}".rstrip())
+        # Terminal failure ends the watch even under --follow: there is nothing
+        # further to witness, and a watcher that kept waiting here would go
+        # quiet forever on the one event that most needs reporting.
+        print(f"FAILED {pid} {ev.get('error_reason') or ev.get('reason') or ev.get('detail') or ''}".rstrip(),
+              flush=True)
         sys.exit(1)
 
-    print(f"STREAM CLOSED before {pid} reached a checkpoint or terminal state")
+    print(f"STREAM CLOSED before {pid} reached a checkpoint or terminal state",
+          flush=True)
     sys.exit(2)
 
 
@@ -568,6 +593,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("project_id")
     s.add_argument("--url", default="http://localhost:4444", help="API base URL")
     s.add_argument("--timeout", type=int, default=3600, help="Give up after N seconds (exit 2)")
+    s.add_argument("--follow", action="store_true",
+                   help="Keep watching past each checkpoint; exit only on a "
+                        "terminal state (one line per event)")
     s.set_defaults(func=cmd_await)
 
     # ── trace ──

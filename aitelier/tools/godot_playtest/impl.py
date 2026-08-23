@@ -92,7 +92,14 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
             _BUILDER_URL.rstrip("/") + "/playtest", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=420) as resp:
+            # 1200s, not 420. The play-test scales with the project and this gate
+            # does not degrade gracefully: on timeout the caller records
+            # gate_skipped + passed:true, so as a project grows the gate does not
+            # get slower, it DISAPPEARS — and it disappears as a pass.
+            # jinyong-spine, 2026-08-23: 24 scripts/11 scenarios -> 55/20, and the
+            # builder log shows the exception on wfile.write(body) while sending
+            # the 200 — the run had FINISHED and the answer had nowhere to go.
+            with urllib.request.urlopen(req, timeout=1200) as resp:
                 report = json.loads(resp.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError,
                 TimeoutError) as e:

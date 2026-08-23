@@ -49,7 +49,18 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
             _BUILDER_URL.rstrip("/") + "/compile", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            # 600s, not 180. The play-test scales with the project: jinyong-spine
+            # grew from 24 scripts to 55 and from 11 scenarios to 20, and the
+            # builder started finishing the run only AFTER the client had hung
+            # up — its log shows the exception on `wfile.write(body)` while
+            # sending the 200, i.e. the work was done and the answer had nowhere
+            # to go. The caller then recorded gate_skipped + passed:true.
+            #
+            # That is the failure mode worth naming: at 180s the gate does not
+            # get slower as a project grows, it DISAPPEARS — and it disappears
+            # as a pass. Keep this comfortably under the 5_compile step's own
+            # timeout_seconds so the step budget, not this socket, is the bound.
+            with urllib.request.urlopen(req, timeout=600) as resp:
                 report = json.loads(resp.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError,
                 TimeoutError) as e:

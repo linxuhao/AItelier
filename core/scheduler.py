@@ -13,6 +13,7 @@ import time as _time
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from skillflow.exceptions import RequiredContextMissing
+from skillflow.identity import owner_is_dead
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow
 from core.dpe_pipeline import PipelineEngine, MaxRetriesExceeded
 from core.workspace_manager import DPE_GRAPH_NAME
@@ -428,30 +429,41 @@ def recover_claims_on_startup():
 
 
 def _has_active_claim(sf, run_id: str) -> bool:
-    """A claimed step still within its timeout is considered in-flight.
+    """Is somebody still working on a step of this run?
 
-    Uses the step node's timeout_seconds (from the graph config) as the
-    guard window.  Falls back to 600 s if the resolver or node isn't
-    available.  This prevents re-entrant execution of the same run when
-    max_instances > 1 (interval + wake date job).
+    Ask the owner, not the clock. Every claim records the process that made it
+    — `skillflow_steps.claimed_by` carries host, pid, boot id, pid namespace
+    and process start time — so "is the worker still working?" has a real
+    answer, and the answer does not expire.
 
-    This is an optimization, not a safety mechanism. skillflow's
-    advance_run() independently detects and times out stale claims.
-    The early return merely avoids wasted advance_run() calls while a
-    step is healthy and executing. If this function breaks (e.g. due
-    to skillflow API changes), the except clause returns False and the
-    tick proceeds normally — worst case is one extra advance_run()
-    call per tick, which is harmless.
+    It used to be a stopwatch: a claim counted as in-flight only while it was
+    younger than the node's `timeout_seconds` (600 s otherwise). Past that the
+    tick walked straight into a step that was still executing, because the only
+    thing the guard actually knew was how long ago the claim was made. Agent
+    steps legitimately run past ten minutes here (measured: 1367 s), so the
+    window expired on healthy work routinely.
+
+      alive   → in flight. The tick returns and the next one asks again.
+      dead    → NOT in flight, whatever the clock says: nothing is running, so
+                let the tick proceed and let skillflow's reaper reset the row.
+      unknown → no identity to probe (a pre-1.5.36 claim, another kernel boot,
+                no /proc). Fall back to the old window, which is all there was
+                before and is still the only thing available there.
     """
     try:
         row = sf._conn.execute(
-            "SELECT step_id, claimed_at FROM skillflow_steps "
+            "SELECT step_id, claimed_at, claimed_by FROM skillflow_steps "
             "WHERE run_id = ? AND status = 'claimed' LIMIT 1",
             (run_id,),
         ).fetchone()
         if not row:
             return False
 
+        dead = owner_is_dead(row["claimed_by"])
+        if dead is not None:
+            return not dead
+
+        # Unknown owner — the pre-identity fallback, unchanged.
         # Look up the step node's configured timeout to use as the window.
         # Default 600 s covers all DPE steps (max configured is 300 s).
         window_s = 600
@@ -502,15 +514,20 @@ async def _check_hung_claims():
     the runbook was "restart the container" (used three times on 2026-08-22).
 
     Policy — two signals, never merged:
-      - DEAD: silent longer than skillflow's stale window. Silence is measured on
-        the ACTIVITY clock (every trace() heartbeats updated_at), so a slow-but-
-        talking step is never touched, and a tool step with timeout_seconds == 0
-        is never stale. Reaped back to 'pending' — reap is not fail: the step did
-        not fail, its owner vanished, and those are different facts.
-      - TARDY: still heartbeating, but claimed for longer than timeout_seconds *
+      - DEAD: the process named in `claimed_by` is gone — checked against the OS,
+        not the clock (skillflow.identity). Reaped back to 'pending' — reap is not
+        fail: the step did not fail, its owner vanished, and those are different
+        facts. A claim whose owner cannot be probed at all (pre-identity row,
+        other kernel boot, no /proc) still falls back to the silence lease.
+      - TARDY: alive, but claimed for longer than timeout_seconds *
         _HUNG_WARN_MULTIPLIER. There is nothing to reclaim (it is alive), so it is
         only warned about — the early signal that a step is going long, which is
         worth keeping precisely because the reaper will never fire on it.
+        This sentence was already written here and was already untrue: the reaper
+        DID fire on live steps, because it was reading the activity clock, and an
+        agent step inside a single ten-minute LLM call emits no trace to
+        heartbeat with. 8 reclaims against 13 t_impl executions on one run, each
+        one throwing away work that was still being done.
       The reap runs FIRST, so anything the warning scan still finds 'claimed' is
       by construction under the reclaim threshold.
       - Warnings are rate-limited by _HUNG_WARNING_COOLDOWN to avoid log spam.
@@ -540,12 +557,11 @@ async def _check_hung_claims():
             # Into the tick log next to the other outcomes: that file exists so
             # "nothing is moving" is answerable from one place, and a reclaim is
             # the single most load-bearing thing that can happen to a stuck run.
-            tick_log(_pid, "reclaimed", run=str(_rid)[:8],
-                     silent_s=sf._stale_threshold)
+            tick_log(_pid, "reclaimed", run=str(_rid)[:8], reason="owner_gone")
             logger.warning(
-                "RECLAIMED stale claim: project=%s run=%s (silent > %ss) — "
-                "reset to pending; no restart needed", _pid, _rid,
-                sf._stale_threshold)
+                "RECLAIMED abandoned claim: project=%s run=%s — the process "
+                "that held it is gone; reset to pending, no restart needed",
+                _pid, _rid)
 
         # Scan all running skillflow runs
         runs = sf.list_runs(status="running")
@@ -809,7 +825,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         pass  # never let the guard itself break a tick
 
     # Phase A: Resolve next step
-    next_node = _advance_recording_crashes(sf, run_id, project_id)
+    next_node = await _advance_off_the_loop(sf, run_id, project_id)
 
     # Drain consecutive inline tool steps. advance_run() executes ONE inline tool
     # per call (framework mode) and returns the FOLLOWING node; when two tool
@@ -822,7 +838,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         _resolver = sf._get_resolver_for_run(run_id)
         _drain = 0
         while next_node is not None and _drain < 20 and _resolver.is_tool(next_node):
-            next_node = _advance_recording_crashes(sf, run_id, project_id)
+            next_node = await _advance_off_the_loop(sf, run_id, project_id)
             _drain += 1
     except Exception:
         pass
@@ -998,6 +1014,40 @@ def _already_said(base: str, detail: str) -> bool:
     """
     message = detail.split(": ", 1)[1] if ": " in detail else detail
     return bool(message) and message in base
+
+
+async def _advance_off_the_loop(sf, run_id: str, project_id: str = ""):
+    """``advance_run`` in a worker thread, so a tool step cannot stop the server.
+
+    advance_run executes inline TOOL steps itself, synchronously. Those are not
+    all quick: the Godot gates POST to the builder sidecar with
+    ``urllib.request.urlopen`` and wait — 5m41s for the play-test and 4m43s for
+    the vision pass, measured 2026-08-23. Called straight from the tick, that
+    ran on the event loop, so for those twelve minutes the process answered
+    nothing: /health, the SSE stream and every API request returned code 000
+    while `docker stats` showed the container at 102% CPU, cheerfully working.
+    It came back only after a restart. Raising or lowering the gate timeouts is
+    no answer — they were raised on purpose, because at 420 s the play-test gate
+    timed out silently and recorded `gate_skipped: true` beside `passed: true`,
+    which is a gate vanishing as a pass.
+
+    Nothing about the tick needed to be ON the loop; it blocked there only
+    because a tick that blocks is a tick that cannot be re-entered, and that
+    accident was carrying the mutual exclusion. It no longer has to: the
+    per-project lock in `_execute_skillflow_tick` is a threading.Lock held
+    across every await of the tick, so a second tick for the same project still
+    fails its non-blocking acquire and logs `locked` — and a claim now names its
+    owner, so nothing has to infer "still working" from "still blocked". Two
+    concurrent `godot_compile` runs writing one $STEP_DIR is exactly what this
+    ordering exists to prevent.
+
+    skillflow's connection is opened with check_same_thread=False and its
+    notifications bridge back to the loop with call_soon_threadsafe — agent
+    steps have run in the executor pool all along, so this is the same
+    boundary, not a new one.
+    """
+    return await asyncio.to_thread(
+        _advance_recording_crashes, sf, run_id, project_id)
 
 
 def _advance_recording_crashes(sf, run_id: str, project_id: str = ""):

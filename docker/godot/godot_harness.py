@@ -970,8 +970,22 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
             try:
                 cp = _run(["--path", str(dst), "-s", rel], timeout=timeout)
                 rc, out, err = cp.returncode, cp.stdout, cp.stderr
-            except subprocess.TimeoutExpired:
-                rc, out, err = 124, "", "timed out after %ss" % timeout
+            except subprocess.TimeoutExpired as e:
+                # TimeoutExpired CARRIES the output produced before the kill —
+                # discarding it blinded the gate at the one moment its output
+                # matters most. A GDScript suite that hangs does so because a
+                # runtime error aborted the function holding the final quit():
+                # the SceneTree keeps spinning and the process runs to the wall.
+                # The error, and every PASS/FAIL printed before it, are already
+                # in that buffer. Live, jinyong-usable 2026-08-23:
+                # test_game_manager_fsm.gd reported rc=124 with an EMPTY stdout,
+                # so the report said only "it hung" about a run that had already
+                # said where and why.
+                def _s(v):
+                    return v.decode(errors="replace") if isinstance(v, bytes) else (v or "")
+                rc = 124
+                out = _s(e.stdout)
+                err = (_s(e.stderr) + "\ntimed out after %ss" % timeout).lstrip()
             failed = rc != 0 or _has_failure_marker(out, err)
             results.append({"script": rel, "returncode": rc, "passed": not failed,
                             "stdout": out[-4000:], "stderr": err[-4000:],

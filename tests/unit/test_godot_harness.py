@@ -385,3 +385,36 @@ def test_real_playtest_spec_reports_bad_node(good_project):
     assert r["passed"] is True
     a = r["behavior"]["scenarios"][0]["asserts"][0]
     assert a["passed"] is False and "not found" in a["error"]
+
+
+# A hanging GDScript suite is the case where the output matters MOST: the
+# SceneTree spins forever precisely because a runtime error aborted the function
+# holding the final quit(), and that error — plus every PASS/FAIL printed before
+# it — is already in the buffer when the wall-clock kill lands.
+
+def test_script_timeout_keeps_the_output_the_run_already_produced(monkeypatch, tmp_path):
+    """The timeout branch used to report `out=""`, so the report said only "it
+    hung" about a run that had already said where and why."""
+    import subprocess
+    (tmp_path / "project.godot").write_text("[application]\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t_fsm.gd").write_text("extends SceneTree\n")
+
+    def _boom(*a, **k):
+        raise subprocess.TimeoutExpired(
+            cmd="godot", timeout=140,
+            output="PASS test_a\nPASS test_b\n",
+            stderr="SCRIPT ERROR: Invalid access to property 'state_changed'\n"
+                   "          at: _run (res://tests/t_fsm.gd:46)\n")
+
+    monkeypatch.setattr(gh, "_copy_project", lambda proj: proj)
+    monkeypatch.setattr(gh, "_import_resources", lambda dst, timeout=0: None)
+    monkeypatch.setattr(gh, "_run", _boom)
+
+    r = gh.run_script(str(tmp_path), [], timeout=140)
+    assert r["passed"] is False
+    res = r["results"][0]
+    assert res["returncode"] == 124
+    assert "PASS test_a" in res["stdout"]                 # the run's own account
+    assert "t_fsm.gd:46" in res["stderr"]                 # ...and where it died
+    assert "timed out after 140s" in res["stderr"]        # ...without losing why

@@ -22,9 +22,17 @@ import urllib.request
 import pytest
 
 from aitelier.tools.godot_vision import impl as vision_impl
-from aitelier.tools.godot_vision.impl import _QUESTIONS, godot_vision
+from aitelier.tools.godot_vision.impl import _GATE, _GATE_ID, _QUESTIONS, godot_vision
 
-_STATIC = [q["id"] for q in _QUESTIONS if not q["differential"]]
+# What the tool actually puts in one request: the scope gate rides along with
+# the checks, so a stand-in reply that answers only _QUESTIONS is short by one
+# and every call comes back `unparseable_response`. Derived, never restated —
+# this file listed the checks by hand and silently stopped testing the gate the
+# day the gate was added.
+_ASKED = [_GATE] + _QUESTIONS
+# A scenario that captured one frame is asked the gate plus the non-differential
+# checks; nothing can be compared across a single frame.
+_STATIC = [_GATE_ID] + [q["id"] for q in _QUESTIONS if not q["differential"]]
 
 
 def _png(w=960, h=704):
@@ -95,9 +103,14 @@ def _reply(text, status=200):
 
 
 def _sheet(**overrides):
-    """A well-formed checklist reply; every answer defaults to the healthy YES."""
+    """A well-formed checklist reply; every answer defaults to the healthy YES.
+
+    Includes the scope gate. YES there means "these frames are a battlefield",
+    which is what keeps the battle-scoped checks in play — answer it NO and the
+    tool correctly records them n/a instead of good or bad.
+    """
     return "\n".join(f"{q['id']}: {overrides.get(q['id'], 'YES')} - a reason"
-                     for q in _QUESTIONS)
+                     for q in _ASKED)
 
 
 def _serve(monkeypatch, text, status=200, calls=None):
@@ -216,7 +229,7 @@ def test_an_unparseable_reply_fails_loudly(tmp_path, monkeypatch):
     _serve(monkeypatch, "The game looks great to me!")
     rep = _run(tmp_path)
     _assert_blind(rep, "unparseable_response")
-    assert "answered 0 of the 6" in rep["summary"]
+    assert f"answered 0 of the {len(_ASKED)}" in rep["summary"]
 
 
 def test_a_reply_answering_fewer_questions_than_asked_fails_loudly(tmp_path, monkeypatch):
@@ -304,6 +317,52 @@ def test_a_tie_counts_against_the_game(tmp_path, monkeypatch, bad, failed):
     assert {q["id"]: q["failed"] for q in rep["questions"]}["Q1"] is failed
 
 
+def test_a_menu_screen_is_scoped_out_rather_than_counted_against_the_game(
+        tmp_path, monkeypatch):
+    """A battle check asked about a menu is n/a, not a failure.
+
+    The gate exists because a run went 12 NO of 21 on the skill-button checks
+    and every one of the NOs was a menu or a transition with no skill bar in it
+    — a gate that gets structurally redder each time the game grows a screen,
+    for reasons that have nothing to do with readability. Scenario 'a' is a
+    battlefield and 'b' is a menu: 'b' must contribute neither a good answer
+    nor a bad one to the battle-scoped checks, while the unscoped Q6 is still
+    answered by both.
+    """
+    calls = []
+    _serve(monkeypatch, lambda n: _sheet(**({} if n == 1 else {_GATE_ID: "NO"})),
+           calls=calls)
+    ws = _workspace(tmp_path, scenarios=(("a", 2), ("b", 2)))
+    rep = _run(tmp_path, workspace_root=str(ws))
+
+    assert [b["screen_kind"] for b in rep["batches"]] == ["battle", "menu"]
+    assert rep["batches"][0]["not_applicable"] == []
+    assert rep["batches"][1]["not_applicable"] == [
+        q["id"] for q in _QUESTIONS if q["applies_to"] == "battle"]
+
+    by_id = {q["id"]: q for q in rep["questions"]}
+    assert by_id["Q1"]["scenarios_answered"] == 1        # the battle one only
+    assert by_id["Q1"]["scenarios_not_applicable"] == 1
+    assert by_id["Q6"]["scenarios_answered"] == 2        # applies_to "any"
+    assert rep["passed"] is True and rep["blind"] is False
+
+
+def test_a_menu_that_answers_no_is_not_laundered_into_a_pass(tmp_path,
+                                                             monkeypatch):
+    """Scoping out must not be able to hide a real failure.
+
+    If EVERY scenario is a menu, the battle requirements were not satisfied —
+    they were never looked at, and the tool must say so rather than report a
+    clean sheet over the checks that happened to survive.
+    """
+    _serve(monkeypatch, _sheet(**{_GATE_ID: "NO"}))
+    ws = _workspace(tmp_path, scenarios=(("a", 2), ("b", 2)))
+    rep = _run(tmp_path, workspace_root=str(ws))
+
+    _assert_blind(rep, "unchecked_questions")
+    assert "scoped out as a non-battle screen" in rep["summary"]
+
+
 # ── Batching ─────────────────────────────────────────────────────────────────
 def test_frames_are_split_across_calls_never_dropped(tmp_path, monkeypatch):
     calls = []
@@ -362,6 +421,6 @@ def test_the_think_block_and_the_over_answering_are_parsed_through(tmp_path, mon
 def test_markdown_and_loose_punctuation_still_parse(tmp_path, monkeypatch):
     _serve(monkeypatch, "\n".join(
         f"- **{q['id']}**: {'no' if q['id'] == 'Q5' else 'Yes'} — reason"
-        for q in _QUESTIONS))
+        for q in _ASKED))
     rep = _run(tmp_path)
     assert [q["id"] for q in rep["questions"] if q["failed"]] == ["Q5"]

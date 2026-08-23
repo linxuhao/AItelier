@@ -38,6 +38,26 @@ def _dpe_resolver():
     return GraphResolver(PipelineGraph.from_yaml(DPE_CONFIG))
 
 
+def _goal_loop_budget(resolver) -> int:
+    """How many times the shipped config lets `5_review` send the run back to 3.
+
+    Read from the graph, never restated. This test used to hardcode 2, so
+    raising the edge's `max_loop` to 4 — a deliberate change, because three
+    dpe_game runs died one repair pass short of converging — broke a test about
+    something else entirely. What is being pinned here is that a SPENT budget
+    dead-ends, whatever the budget happens to be.
+    """
+    for node in resolver.graph.steps:
+        if node.id != "5_review":
+            continue
+        for t in node.transitions:
+            if t.to == "3" and t.max_loop is not None:
+                return t.max_loop
+    raise AssertionError(
+        "the 5_review -> 3 goal-loop edge, or its max_loop, is gone from "
+        f"{DPE_CONFIG.name} — this regression no longer has a subject")
+
+
 def test_spent_goal_loop_dead_ends_in_the_shipped_config():
     """The precondition, over the real graph: there IS no edge left to take.
 
@@ -46,19 +66,33 @@ def test_spent_goal_loop_dead_ends_in_the_shipped_config():
     """
     resolver = _dpe_resolver()
     failing = lambda p: json.dumps({"passed": False})   # noqa: E731
-    spent = {("5_review", "3"): 2}
+    budget = _goal_loop_budget(resolver)
+    assert budget >= 1, "a goal loop with no budget is not a goal loop"
 
+    # Unspent: the failing verdict routes back to the PM, which is the loop.
     assert resolver.next_node("5_review", {}, {}, file_reader=failing) == "3"
+    # One short of the budget: still open — the bound must not fire early.
+    assert resolver.next_node("5_review", {}, {("5_review", "3"): budget - 1},
+                              file_reader=failing) == "3"
+    # Spent: there is no edge left to take, and skillflow says so.
     with pytest.raises(CycleLimitExceeded):
-        resolver.next_node("5_review", {}, spent, file_reader=failing)
+        resolver.next_node("5_review", {}, {("5_review", "3"): budget},
+                           file_reader=failing)
 
 
 def test_passing_verdict_still_reaches_done_with_the_loop_spent():
-    """The terminal test must not shadow the one edge that is still open."""
+    """The terminal test must not shadow the one edge that is still open.
+
+    The spent count comes from the config for the same reason as above, and
+    here it was load-bearing in a quieter way: hardcoded at 2 against a budget
+    of 4 this test still passed, while no longer testing what its name says —
+    the loop it claimed was spent had two firings left.
+    """
     resolver = _dpe_resolver()
     passing = lambda p: json.dumps({"passed": True})    # noqa: E731
+    spent = {("5_review", "3"): _goal_loop_budget(resolver)}
     assert resolver.next_node(
-        "5_review", {}, {("5_review", "3"): 2}, file_reader=passing) == "done"
+        "5_review", {}, spent, file_reader=passing) == "done"
 
 
 # ── host side: a routing failure must not be offered as a checkpoint ──────────

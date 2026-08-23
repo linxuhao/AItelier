@@ -122,7 +122,7 @@ _QUESTIONS = [
              "change showing whose turn it is or what the acting character can "
              "still do (an active-actor highlight, a turn or round indicator, "
              "remaining move points)?"},
-    {"id": "Q5", "requirement": 4, "differential": False, "applies_to": "battle", "applies_to": "battle", "applies_to": "battle",
+    {"id": "Q5", "requirement": 4, "differential": False, "applies_to": "battle",
      "topic": "health bars recognisable",
      "text": "Above or attached to the characters, is there something clearly "
              "recognisable as a health bar (a bar with a filled portion and an "

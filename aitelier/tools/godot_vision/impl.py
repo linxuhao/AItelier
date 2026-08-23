@@ -73,37 +73,77 @@ _PROMPT_RESERVE = 600
 # already routes them to playtest_spec.yaml assertions.
 # Every question is phrased so YES is the healthy answer — one polarity for the
 # model to hold, one rule for the tally.
+# ── Scope gate ─────────────────────────────────────────────────────────────
+# Most of these checks are about the BATTLEFIELD. As the game grew segments
+# (character creation, sect select, cultivation, save/load, world map), the
+# gate started asking "is a tile grid visible" of a menu screen and counting
+# the honest NO as a readability failure.
+#
+# jinyong-spine, 2026-08-23, measured: Q1/Q2/Q4/Q6 each scored exactly 15/20
+# with 5 non-battle scenarios in the set — i.e. EVERY battlefield scenario
+# passed and the 5 menus dragged the tally down. Q3 read 8/20, of which 8 of
+# the 12 NOs were menus and transitions with no skill bar at all. Left alone,
+# this gate gets structurally redder every time the game gains a screen, for
+# reasons that have nothing to do with whether the game is readable.
+#
+# So each question declares what it applies to, and one gate question per
+# scenario decides which kind of screen the frames show. A question that does
+# not apply is recorded n/a — NOT as a bad answer.
+#
+# The gate is deliberately NOT Q1. "No grid because this is a menu" and "no
+# grid because the grid was never drawn" are exactly the two things Q1 exists
+# to tell apart; reusing it as the classifier would launder the second into
+# the first. The gate asks about CONTENT, Q1 asks about QUALITY.
+_GATE_ID = "Q0"
+_GATE = {"id": _GATE_ID, "requirement": 0, "differential": False,
+         "applies_to": "any", "topic": "screen kind (scope gate, not a check)",
+         "text": "Do these frames show a BATTLEFIELD — character figures "
+                 "standing on a playing field with a row of action buttons "
+                 "along the bottom — rather than a menu, a text screen, a "
+                 "form, or a list of options?"}
+
 _QUESTIONS = [
-    {"id": "Q1", "requirement": 1, "differential": False,
+    {"id": "Q1", "requirement": 1, "differential": False, "applies_to": "battle",
      "topic": "tile grid visible",
      "text": "Is a grid of separate square tiles visible on the battlefield — "
              "can you see lines or borders dividing the ground into cells?"},
-    {"id": "Q2", "requirement": 2, "differential": False,
+    {"id": "Q2", "requirement": 2, "differential": False, "applies_to": "battle",
      "topic": "skill buttons differ from one another",
      "text": "Within any single frame, do the skill buttons in the bottom bar "
              "differ visually from one another (some dimmed, greyed out or "
              "marked unavailable while others are bright)?"},
-    {"id": "Q3", "requirement": 2, "differential": True,
+    {"id": "Q3", "requirement": 2, "differential": True, "applies_to": "battle",
      "topic": "skill button appearance changes over time",
      "text": "Comparing the frames in chronological order, does the appearance "
              "of at least one skill button change from one frame to another?"},
-    {"id": "Q4", "requirement": 3, "differential": True,
+    {"id": "Q4", "requirement": 3, "differential": True, "applies_to": "battle",
      "topic": "turn / action state changes visibly",
      "text": "Comparing the frames in chronological order, is there a visible "
              "change showing whose turn it is or what the acting character can "
              "still do (an active-actor highlight, a turn or round indicator, "
              "remaining move points)?"},
-    {"id": "Q5", "requirement": 4, "differential": False,
+    {"id": "Q5", "requirement": 4, "differential": False, "applies_to": "battle", "applies_to": "battle", "applies_to": "battle",
      "topic": "health bars recognisable",
      "text": "Above or attached to the characters, is there something clearly "
              "recognisable as a health bar (a bar with a filled portion and an "
              "empty portion showing remaining HP)?"},
-    {"id": "Q6", "requirement": 5, "differential": False,
+    {"id": "Q6", "requirement": 5, "differential": False, "applies_to": "any",
      "topic": "no truncated or clipped text",
      "text": "Is every piece of visible text fully readable, with no word "
              "ending in an ellipsis and nothing cut off by the edge of the "
              "screen?"},
 ]
+# Every check must declare its scope. Without this assertion a question added
+# later without applies_to would KeyError at tally time — or worse, if someone
+# "fixed" that with a .get() default, it would silently be treated as applying
+# everywhere and start counting menus as readability failures again, which is
+# the exact bug the scope gate was added to remove.
+_ALLOWED_SCOPES = {"battle", "any"}
+for _q in _QUESTIONS:
+    assert _q.get("applies_to") in _ALLOWED_SCOPES, (
+        f"{_q['id']} has no valid applies_to (got {_q.get('applies_to')!r}); "
+        f"every question must declare {_ALLOWED_SCOPES}")
+
 _GOOD = "YES"
 
 _PROMPT_HEAD = (
@@ -352,14 +392,17 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
     report["scenarios"] = len(by_scenario)
     report["frames_checked"] = len(frames)
 
-    tally = {q["id"]: {"good": 0, "bad": 0} for q in _QUESTIONS}
+    tally = {q["id"]: {"good": 0, "bad": 0, "n/a": 0} for q in _QUESTIONS}
     for scen, batch in batches:
         # A one-frame batch can only be a scenario that captured one frame;
         # asking it to compare frames would manufacture a NO. Ask the
         # recognisability half and let the tally get its differential evidence
         # from the other scenarios (or fail as unchecked_questions if none).
         asked = ([q for q in _QUESTIONS if not q["differential"]]
-                 if len(batch) < 2 else _QUESTIONS)
+                 if len(batch) < 2 else list(_QUESTIONS))
+        # The gate rides along in the same call — one request either way, and
+        # asking it separately would double the vision spend per scenario.
+        asked = [_GATE] + asked
         try:
             raw = _ask([f["path"] for f in batch], asked)
         except Exception as e:                          # noqa: BLE001
@@ -381,11 +424,21 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
                 f"read as a verdict, so there is no verdict. Raw reply: "
                 f"{' '.join(raw.split())[:400]}"), out_dir, repo)
         kept = {q["id"]: answers[q["id"]] for q in asked}
+        is_battle = kept[_GATE_ID]["answer"] == _GOOD
+        skipped = []
         for q in asked:
+            if q["id"] == _GATE_ID:
+                continue
+            if q["applies_to"] == "battle" and not is_battle:
+                tally[q["id"]]["n/a"] += 1
+                skipped.append(q["id"])
+                continue
             side = "good" if kept[q["id"]]["answer"] == _GOOD else "bad"
             tally[q["id"]][side] += 1
         report["batches"].append({
             "scenario": scen,
+            "screen_kind": "battle" if is_battle else "menu",
+            "not_applicable": skipped,
             "frames": [f["file"] for f in batch],
             "prompt_image_tokens": sum(f["tokens"] for f in batch),
             "questions_asked": [q["id"] for q in asked],
@@ -403,9 +456,10 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         n = t["good"] + t["bad"]
         failed = bool(n) and t["bad"] * 2 >= n
         report["questions"].append({
-            **{k: q[k] for k in ("id", "requirement", "differential", "topic",
-                                 "text")},
+            **{k: q[k] for k in ("id", "requirement", "differential",
+                                 "applies_to", "topic", "text")},
             "good_answers": t["good"], "bad_answers": t["bad"],
+            "scenarios_not_applicable": t["n/a"],
             "scenarios_answered": n, "failed": failed})
         if failed:
             reasons = [b["answers"][q["id"]]["reason"]
@@ -422,9 +476,11 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
     if unchecked:
         return _write(_blind(
             report, "unchecked_questions",
-            f"{', '.join(unchecked)} were never actually asked (no scenario "
-            f"captured two or more frames, so no differential check could "
-            f"run). Those requirements are UNVERIFIED."), out_dir, repo)
+            f"{', '.join(unchecked)} were never actually asked — either no "
+            f"scenario captured two or more frames (no differential check "
+            f"could run), or every scenario was scoped out as a non-battle "
+            f"screen. Either way those requirements are UNVERIFIED, which is "
+            f"not the same as satisfied."), out_dir, repo)
 
     report["passed"] = not report["failures"]
     if report["passed"]:

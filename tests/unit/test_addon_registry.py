@@ -148,3 +148,29 @@ def test_the_readers_of_5_compile_get_the_playtest_verdict(sf_with_addons):
     for node_id, files in seen.items():
         assert "playtest_summary.md" in files, (
             f"{node_id} reads 5_compile but not the play-test verdict: {sorted(files)}")
+
+
+def test_fix_authors_see_the_playtest_summary(sf_with_addons):
+    """The two agents that WRITE a fix must see the failing assertions.
+
+    A goal-loop task card is prose ABOUT the play-test failure; the summary is
+    the failure — expression, observed value, frame. Without it the planner and
+    implementer re-derive runtime behaviour by reading the source, and a wrong
+    guess burns a whole task slot (jinyong-usable 2026-08-23).
+
+    File-scoped on purpose: a whole-step `{step: "5_compile"}` source inlines the
+    step directory, whose ~56MB of frame PNGs push the report past
+    MAX_CONTEXT_LINES and out of the prompt.
+    """
+    sf = sf_with_addons
+    ar.register_addon_combo(sf, MagicMock(), "dpe_default_v2", ["game_harness"],
+                            name="dpe_game")
+    by_id = {n.id: n for n in sf._graphs["dpe_game"].steps}
+    for step_id in ("t_plan", "t_impl"):
+        srcs = [e.get("source", e) for e in (by_id[step_id].context or [])]
+        compile_srcs = [s for s in srcs if s.get("step") == "5_compile"]
+        assert compile_srcs, f"{step_id} cannot see the play-test result at all"
+        assert all(s.get("output") for s in compile_srcs), (
+            f"{step_id} reads 5_compile whole-step — the frame PNGs will "
+            f"truncate the report away: {compile_srcs}")
+        assert "playtest_summary.md" in {s.get("output") for s in compile_srcs}

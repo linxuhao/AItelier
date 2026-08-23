@@ -138,6 +138,27 @@ overlay:
   - add_context: "@pm"
     source: { step: "5_vision" }
 
+  # 3c. And the two agents that actually WRITE the fix. On a goal-loop iteration
+  #     the PM turns the gate output into task cards, but a card is prose ABOUT
+  #     the failure — "scenario X is 6/12" — not the failure. The planner and the
+  #     implementer need the failing assertion itself: the expression, the value
+  #     the harness actually read, the frame it read it at. Without it they can
+  #     only re-derive the runtime behaviour by reading the source, and a wrong
+  #     guess costs a whole task slot.
+  #     Live, jinyong-usable 2026-08-23: the implementer for
+  #     `fix_enemy_turn_execution` wrote its justification as "playtest_report.json
+  #     absent from this workspace — static-code diagnosis is branch (b)…" and
+  #     re-timed three sample frames from the tween budget documented in the
+  #     source, because the report that records what the harness actually saw at
+  #     those frames was not in its context. It happened to reason correctly;
+  #     it had no way to check.
+  #     File-scoped for the same reason as 3a/3b — the step directory carries
+  #     ~56MB of PNGs and a whole-step source truncates the report away.
+  - add_context: "t_plan"
+    source: { step: "5_compile", output: "playtest_summary.md" }
+  - add_context: "t_impl"
+    source: { step: "5_compile", output: "playtest_summary.md" }
+
   # ── PROMPT FRAGMENTS (add_template) ────────────────────────────────────────
   # 4. Godot conventions reach the architect/pm/implementer/verifier prompts ONLY
   #    when this addon is applied — the base templates stay engine-agnostic.

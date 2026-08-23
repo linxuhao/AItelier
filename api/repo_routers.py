@@ -136,8 +136,20 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
 
 
 @router.get("")
-async def list_repos(db: DBManager = Depends(get_db_manager)):
-    """List all repository groups (distinct repo_path values)."""
+def list_repos(db: DBManager = Depends(get_db_manager)):
+    """List all repository groups (distinct repo_path values).
+
+    Deliberately NOT `async`. There is not one await in the whole call: it walks
+    every repo, every project under it, and `enrich_project_status` runs two or
+    three skillflow queries per project — `get_run_by_project`, `list_runs`,
+    `get_steps` — all synchronous SQLite. On the event loop that is not slow, it
+    is fatal: one dashboard poll pinned the loop at 100% CPU for minutes with
+    /health, SSE and every other request answering 000, and the request itself
+    never completed, so it never even reached the access log. Caught in the act
+    with py-spy, the loop was sitting in `get_run_by_project` under
+    `_build_repo_groups`. A plain `def` hands it to the threadpool, which is
+    where `list_projects` next door already runs.
+    """
     return _build_repo_groups(db)
 
 

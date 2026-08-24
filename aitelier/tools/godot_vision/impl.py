@@ -61,6 +61,31 @@ _MODEL = os.environ.get("GODOT_VISION_MODEL", "qwen3")
 _CONTEXT_TOKENS = int(os.environ.get("GODOT_VISION_CONTEXT_TOKENS", "12288"))
 _MAX_TOKENS = int(os.environ.get("GODOT_VISION_MAX_TOKENS", "2048"))
 _TIMEOUT = int(os.environ.get("GODOT_VISION_TIMEOUT", "300"))
+
+# ── Fallback judge ────────────────────────────────────────────────────────────
+# The primary endpoint is a self-hosted vLLM on a GPU box that is also used for
+# other experiments; while it is down the gate has no eyes and the round stalls
+# on `endpoint_unreachable` — a correct verdict about infra, not about the game.
+# DeepSeek serves a vision model behind the SAME provider and key the rest of
+# the system already uses, so the fallback needs no new credential.
+#
+# Verified 2026-08-24 against a real play-test frame (960x704 PNG as a base64
+# data URL, byte-identical payload shape): HTTP 200, question answered. The
+# model id came from GET https://api.deepseek.com/models, not from memory.
+#
+# The token budget deliberately stays the PRIMARY endpoint's. DeepSeek's context
+# is not smaller, so reusing it only makes batches conservative. Sizing batches
+# to whichever judge happened to answer would make the batch layout — and thus
+# which frames get compared against each other — depend on an infra accident.
+_FALLBACK_URL = os.environ.get(
+    "GODOT_VISION_FALLBACK_URL", "https://api.deepseek.com/chat/completions")
+_FALLBACK_MODEL = os.environ.get(
+    "GODOT_VISION_FALLBACK_MODEL", "deepseek-v4-flash-vision-exp")
+_FALLBACK_KEY_NAME = os.environ.get(
+    "GODOT_VISION_FALLBACK_KEY", "DEEPSEEK_API_KEY")
+# "0" forces primary-only — the way to PROVE the GPU box is serving, which a
+# silent fallback would otherwise hide.
+_FALLBACK_ENABLED = os.environ.get("GODOT_VISION_FALLBACK", "1") != "0"
 # The checklist prompt measured 357 tokens at 6 questions; 600 leaves headroom
 # for a longer question set without ever borrowing from the completion reserve.
 _PROMPT_RESERVE = 600
@@ -253,29 +278,75 @@ def _parse_answers(text: str) -> dict:
     return out
 
 
-def _ask(files: list[Path], questions: list[dict]) -> str:
+def _post(url: str, model: str, api_key: str,
+          files: list[Path], questions: list[dict]) -> str:
     """One chat/completions call with the frames inline as base64 data URLs.
-    Raises on transport failure / non-200 / unreadable envelope — the caller
-    turns that into endpoint_unreachable."""
+    Raises on transport failure / non-200 / unreadable envelope."""
     content = [{"type": "text",
                 "text": _build_prompt(questions, len(files))}]
     for f in files:
         b64 = base64.b64encode(f.read_bytes()).decode("ascii")
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    body = json.dumps({"model": _MODEL, "max_tokens": _MAX_TOKENS,
+    body = json.dumps({"model": model, "max_tokens": _MAX_TOKENS,
                        "temperature": 0.0,
                        "messages": [{"role": "user", "content": content}]}
                       ).encode("utf-8")
-    req = urllib.request.Request(
-        _URL, data=body, headers={"Content-Type": "application/json"},
-        method="POST")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         code = getattr(resp, "status", None) or resp.getcode()
         if code != 200:
-            raise urllib.error.HTTPError(_URL, code, "non-200", {}, None)
+            raise urllib.error.HTTPError(url, code, "non-200", {}, None)
         payload = json.loads(resp.read())
     return payload["choices"][0]["message"]["content"] or ""
+
+
+def _fallback_key() -> str:
+    """The DeepSeek key, through the same secret-file precedence the router uses
+    (mounted /run/secrets first, env only as local-dev fallback)."""
+    try:
+        from core.ai_router import _read_secret
+        return _read_secret(_FALLBACK_KEY_NAME) or ""
+    except Exception:                                    # noqa: BLE001
+        return os.getenv(_FALLBACK_KEY_NAME, "")
+
+
+def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
+    """Ask the primary judge; fall back to DeepSeek if it is not SERVING.
+
+    Returns ``(answer_text, backend)`` where backend is "primary" or "fallback".
+    Raises only when BOTH are unusable — the caller turns that into
+    endpoint_unreachable.
+
+    Only transport-level failure falls back: refused / timed out / non-200 /
+    unreadable envelope. A primary that answers 200 with a WRONG answer must NOT
+    fall back — that would silently swap judges to paper over a real regression
+    in the model or the prompt, and the report would carry a verdict nobody
+    could attribute.
+    """
+    try:
+        return _post(_URL, _MODEL, "", files, questions), "primary"
+    except Exception as primary_exc:                     # noqa: BLE001
+        if not _FALLBACK_ENABLED:
+            raise
+        key = _fallback_key()
+        if not key:
+            raise RuntimeError(
+                f"primary vision endpoint {_URL} failed ({primary_exc}) and the "
+                f"fallback has no {_FALLBACK_KEY_NAME} — no judge available"
+            ) from primary_exc
+        try:
+            return _post(_FALLBACK_URL, _FALLBACK_MODEL, key,
+                         files, questions), "fallback"
+        except Exception as fb_exc:                       # noqa: BLE001
+            raise RuntimeError(
+                f"primary {_URL} ({_MODEL}) failed: {primary_exc}; "
+                f"fallback {_FALLBACK_URL} ({_FALLBACK_MODEL}) also failed: "
+                f"{fb_exc}"
+            ) from fb_exc
 
 
 # ── The gate ──────────────────────────────────────────────────────────────────
@@ -304,6 +375,12 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
     repo = Path(project_root or workspace_root or ".").resolve()
     report: dict = {"passed": True, "blind": False, "blind_reason": "",
                     "endpoint": _URL, "model": _MODEL, "from_step": from_step,
+                    # Which judge actually answered. A gate that can silently
+                    # swap models is a gate whose verdict cannot be interpreted:
+                    # "Q3 got worse" means nothing if nobody recorded that a
+                    # different model answered it.
+                    "backend": "", "fallback_used": False,
+                    "fallback_model": _FALLBACK_MODEL,
                     "scenarios": 0, "frames_checked": 0, "calls": 0,
                     "questions": [], "failures": [], "batches": [],
                     "summary": ""}
@@ -404,7 +481,7 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         # asking it separately would double the vision spend per scenario.
         asked = [_GATE] + asked
         try:
-            raw = _ask([f["path"] for f in batch], asked)
+            raw, backend = _ask([f["path"] for f in batch], asked)
         except Exception as e:                          # noqa: BLE001
             return _write(_blind(
                 report, "endpoint_unreachable",
@@ -413,6 +490,13 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
                 f"The frames were NOT judged. Vision gate NOT run."),
                 out_dir, repo)
         report["calls"] += 1
+        # Record the judge per call, not just once: a run that starts on the
+        # primary and finishes on the fallback has TWO judges in one verdict,
+        # and that is exactly the thing a reader needs told.
+        if backend == "fallback":
+            report["fallback_used"] = True
+        prev = report.get("backend") or ""
+        report["backend"] = (backend if not prev or prev == backend else "mixed")
         answers = _parse_answers(raw)
         unanswered = [q["id"] for q in asked if q["id"] not in answers]
         if unanswered:

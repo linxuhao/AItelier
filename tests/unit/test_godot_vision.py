@@ -487,3 +487,96 @@ def test_a_per_frame_question_still_needs_a_majority(tmp_path, monkeypatch):
 
     assert [q["id"] for q in rep["questions"] if q["failed"]] == [victim]
     assert rep["passed"] is False
+
+
+# ── Fallback judge (primary vLLM down → DeepSeek) ────────────────────────────
+# The primary endpoint is a GPU box shared with other experiments, so "the judge
+# is offline" is an expected operating state, not an incident.
+
+class TestVisionFallback:
+    """`_ask` falls back ONLY on transport failure, and says who answered."""
+
+    def _mod(self):
+        import aitelier.tools.godot_vision.impl as m
+        return m
+
+    def test_primary_success_never_touches_the_fallback(self, monkeypatch, tmp_path):
+        m = self._mod()
+        calls = []
+
+        def fake_post(url, model, api_key, files, questions):
+            calls.append(url)
+            return "1: YES - fine"
+
+        monkeypatch.setattr(m, "_post", fake_post)
+        text, backend = m._ask([], [{"id": 1, "text": "q"}])
+        assert backend == "primary"
+        assert calls == [m._URL]
+
+    def test_transport_failure_falls_back_and_reports_it(self, monkeypatch):
+        m = self._mod()
+        seen = []
+
+        def fake_post(url, model, api_key, files, questions):
+            seen.append((url, model, api_key))
+            if url == m._URL:
+                raise OSError("connection refused")
+            return "1: YES - fine"
+
+        monkeypatch.setattr(m, "_post", fake_post)
+        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
+        text, backend = m._ask([], [{"id": 1, "text": "q"}])
+        assert backend == "fallback"
+        assert seen[0][0] == m._URL
+        assert seen[1][0] == m._FALLBACK_URL
+        assert seen[1][1] == m._FALLBACK_MODEL
+        assert seen[1][2] == "k"          # the key is actually sent
+
+    def test_a_wrong_answer_is_not_a_reason_to_switch_judges(self, monkeypatch):
+        """A primary that ANSWERS must never be second-guessed by the fallback.
+
+        Falling back on a bad answer would silently swap judges to paper over a
+        real regression in the model or the prompt, and the report would carry a
+        verdict nobody could attribute. Only "not serving" is a fallback reason.
+        """
+        m = self._mod()
+        urls = []
+
+        def fake_post(url, model, api_key, files, questions):
+            urls.append(url)
+            return "complete nonsense, no answers at all"
+
+        monkeypatch.setattr(m, "_post", fake_post)
+        text, backend = m._ask([], [{"id": 1, "text": "q"}])
+        assert backend == "primary"
+        assert urls == [m._URL]           # fallback never called
+
+    def test_no_key_is_a_loud_failure_not_a_silent_pass(self, monkeypatch):
+        m = self._mod()
+        monkeypatch.setattr(
+            m, "_post",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("refused")))
+        monkeypatch.setattr(m, "_fallback_key", lambda: "")
+        with pytest.raises(Exception) as ei:
+            m._ask([], [{"id": 1, "text": "q"}])
+        assert "no judge available" in str(ei.value)
+
+    def test_both_down_reports_both_endpoints(self, monkeypatch):
+        m = self._mod()
+        monkeypatch.setattr(
+            m, "_post",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
+        with pytest.raises(Exception) as ei:
+            m._ask([], [{"id": 1, "text": "q"}])
+        msg = str(ei.value)
+        assert m._URL in msg and m._FALLBACK_URL in msg
+
+    def test_fallback_can_be_disabled_to_prove_the_gpu_box_is_serving(self, monkeypatch):
+        m = self._mod()
+        monkeypatch.setattr(m, "_FALLBACK_ENABLED", False)
+        monkeypatch.setattr(
+            m, "_post",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("refused")))
+        with pytest.raises(OSError):
+            m._ask([], [{"id": 1, "text": "q"}])

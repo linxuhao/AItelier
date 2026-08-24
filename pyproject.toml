@@ -26,6 +26,15 @@ dependencies = [
     "prompt-toolkit>=3.0",
     "uvicorn>=0.44",
     "pyjwt[crypto]>=2.8",
+    # MCP endpoint (api/mcp_router.py). Declared because the container runs a
+    # plain `pip install -e .` — an undeclared import that happens to sit in
+    # the host venv is not in the image.
+    # Upper bound is load-bearing: mcp 2.x MOVED mcp.server.fastmcp, which
+    # api/mcp_router.py imports. Unbounded, the image resolved 2.1.0 and the
+    # backend crash-looped on ModuleNotFoundError while the host venv (1.28.1)
+    # stayed green — the exact host/image split this dependency was declared
+    # to close.
+    "mcp>=1.28,<2",
 ]
 
 [project.scripts]

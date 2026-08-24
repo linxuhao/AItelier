@@ -23,6 +23,8 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from core import cf_access
 from api import authz
+from starlette.routing import Route as _StarletteRoute
+from api.mcp_router import MCPEndpoint
 from api.routers import router as tasks_router
 from api.project_routers import router as projects_router
 from api.settings_routers import router as settings_router
@@ -50,7 +52,14 @@ async def lifespan(app: FastAPI):
     # isolation in conftest is the primary guard; this makes the skip explicit
     # and keeps test startups fast.
     if getattr(app.state, "_test_mode", False):
-        yield
+        # The MCP session manager still runs: it starts no backend, and a test app
+        # that mounts the endpoint but cannot answer a single call would make the
+        # suite green on an endpoint nobody could use.
+        async with _mcp_endpoint.open().session_manager.run():
+            try:
+                yield
+            finally:
+                _mcp_endpoint.close()
         return
 
     loop = asyncio.get_running_loop()
@@ -203,11 +212,21 @@ async def lifespan(app: FastAPI):
 
     app.state.scheduler = start_scheduler()
     print("DPE APScheduler started. skillflow NotificationBus → SSE bridge active.")
-    yield
+    # The MCP sub-app is MOUNTED, and a mounted app's own lifespan is never run by
+    # the parent — its only job is `session_manager.run()`, so without this every
+    # POST /mcp fails on an uninitialised task group. Mounting alone looks like it
+    # worked (routes resolve, the config is right) right up until the first call.
+    async with _mcp_endpoint.open().session_manager.run():
+        try:
+            yield
+        finally:
+            _mcp_endpoint.close()
     # Shutdown
     if hasattr(app.state, "scheduler") and app.state.scheduler:
         app.state.scheduler.shutdown(wait=True)
 
+
+_mcp_endpoint = MCPEndpoint()
 
 app = FastAPI(
     title="AItelier Engine API",
@@ -261,6 +280,13 @@ async def write_gate(request: Request, call_next):
         return await call_next(request)
     if request.method in _SAFE_METHODS or request.url.path == "/health":
         return await call_next(request)
+    # MCP posts every call — `list_pipelines` and `edit_pipeline` alike — to this
+    # one path, so the METHOD cannot classify it and this middleware has only two
+    # settings, both wrong (gate it and reads break; exempt it and writes open).
+    # The verdict moves to the tool: api/mcp_router._authorize re-applies exactly
+    # this check for every tool declared `write`. Do not remove one half.
+    if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
+        return await call_next(request)
     code = authz.write_denial_reason(request)
     if not code:
         return await call_next(request)
@@ -297,6 +323,24 @@ async def stream_global_events():
         stream_manager.event_generator("__global__"),
         media_type="text/event-stream",
     )
+
+
+# ── MCP endpoint ──
+# Registered BEFORE the SPA (a mount at "/" swallows everything after it) and after
+# the middlewares, so `write_gate` still sees the request — which is exactly the
+# problem: MCP posts every call, read or write, to this one path, so the method
+# tells the gate nothing. The path is exempted from the method gate above and
+# `api/mcp_router._authorize` re-applies the same verdict PER TOOL instead. Those
+# two halves are one decision; changing either alone opens or breaks the endpoint.
+#
+# Route, not mount. `app.mount("/mcp", …)` compiles to a regex that matches
+# "/mcp/…" but NOT the bare "/mcp" — so `POST /mcp`, the URL every client config
+# actually contains, fell through to the SPA's catch-all StaticFiles mount, which
+# allows only GET/HEAD and answered 405. The endpoint looked mounted, `/mcp/`
+# worked, and the documented URL did not. Both spellings are registered so neither
+# depends on a redirect (a 307 on a POST is a coin flip across HTTP clients).
+app.router.routes.append(_StarletteRoute("/mcp", endpoint=_mcp_endpoint))
+app.router.routes.append(_StarletteRoute("/mcp/", endpoint=_mcp_endpoint))
 
 
 # ── Serve compiled SPA ──

@@ -171,6 +171,7 @@ def test_probe_assembles_context_bundle(tmp_path):
 
 def test_continuity_passes_clean_prose(tmp_path):
     _seed(tmp_path)
+    _write_draft(tmp_path, GOOD_PROSE)
     _write_prose(tmp_path, GOOD_PROSE)
     assert continuity_check(workspace_root=str(tmp_path),
                             out_dir=str(tmp_path / "cc")) == {"passed": True}
@@ -178,6 +179,7 @@ def test_continuity_passes_clean_prose(tmp_path):
 
 def test_continuity_fails_on_meta_marker_and_short(tmp_path):
     _seed(tmp_path)
+    _write_draft(tmp_path, "# 第1章\n\n短。\nTODO 补一段")
     _write_prose(tmp_path, "# 第1章\n\n短。\nTODO 补一段")
     r = continuity_check(workspace_root=str(tmp_path), out_dir=str(tmp_path / "cc"))
     assert r["passed"] is False
@@ -186,6 +188,9 @@ def test_continuity_fails_on_meta_marker_and_short(tmp_path):
 
 def test_continuity_fails_on_ai_slop_density(tmp_path):
     _seed(tmp_path)
+    # Draft identical to the prose on purpose: this test is about AI-ism density,
+    # so every fidelity variable stays fixed and only the density rule can fire.
+    _write_draft(tmp_path, GOOD_PROSE + "他不禁一愣，仿佛看到了什么，" * 6)
     _write_prose(tmp_path, GOOD_PROSE + "他不禁一愣，仿佛看到了什么，" * 6)
     r = continuity_check(workspace_root=str(tmp_path))
     assert r["passed"] is False and "套话" in r["error"]
@@ -195,6 +200,7 @@ def test_continuity_no_dead_char_check(tmp_path):
     # Dead-character detection was removed (it's the Red reviewer's semantic job).
     # A dead character named in prose must NOT hard-fail the mechanical gate.
     _seed(tmp_path)
+    _write_draft(tmp_path, GOOD_PROSE + "\n王老的身影浮现在脑海。")
     _write_prose(tmp_path, GOOD_PROSE + "\n王老的身影浮现在脑海。")
     assert continuity_check(workspace_root=str(tmp_path))["passed"] is True
 

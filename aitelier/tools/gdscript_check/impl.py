@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from aitelier.gate_skip_log import log_gate_skip
+
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 
 
@@ -58,6 +60,20 @@ def gdscript_check(files: list[str] | None = None, workspace_root: str = "",
         # A sidecar that is down must not fail every task in the loop — but say
         # so loudly, the way godot_compile does, so a skipped gate never reads
         # as a green one.
+        #
+        # "Loudly" used to mean this print() plus `gate_skipped` in the return
+        # dict, and BOTH are unread on this path: the print goes to the container
+        # log (not mounted, gone on recreation), and StepValidator drops every key
+        # but `all_passed` the moment it is True — see aitelier/gate_skip_log.py.
+        # godot_compile's flag survives because it lands in compile_report.json and
+        # 5_review reads that file; a validation tool has no such file. So the fact
+        # goes to the mounted gate-skip log, where it outlives the run.
+        # (5_compile remains the backstop: it parse-checks the whole repo at the
+        # end, and flags its OWN skip into compile_report.json when the builder is
+        # still down then. This log is what tells you the per-task gate was off.)
+        log_gate_skip("gdscript_check", "godot-builder unreachable",
+                      url=_BUILDER_URL, error=e, unchecked_files=len(paths),
+                      workspace=root)
         print(f"[gdscript_check] GATE SKIPPED: godot-builder unreachable "
               f"({_BUILDER_URL}): {e} — {len(paths)} .gd file(s) NOT parse-checked",
               flush=True)

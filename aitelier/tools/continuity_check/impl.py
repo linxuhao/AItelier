@@ -22,6 +22,10 @@ indirect references and false-flags legitimate mentions, so it stays out.
 Returns {"passed": bool, "error": <summary>} — `passed` drives the graph
 transition (fail → back to humanize, feedback injected); the full report (hard
 violations + advisories) is written for downstream context.
+
+RAISES when it cannot see the draft at all: that is a broken precondition, not a
+bad chapter, and the only `passed:false` edge leads to humanize — which can only
+re-emit prose and would burn the loop budget before dying on "cycle limit".
 """
 
 import json
@@ -83,6 +87,7 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
 
     violations: list[str] = []
     advisories: list[str] = []
+    blind = False          # 闸门够得着但看不见它该看的东西（对照 blind_builder）
 
     prose = prose_path.read_text(encoding="utf-8") if prose_path.is_file() else ""
     if not prose:
@@ -141,7 +146,21 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
         # 这里用机械不变量兜住漂移（语义仍归 Red/人工）。draft 是真相源且完好，
         # 违规 → 回 humanize 重润即可。
         draft = draft_path.read_text(encoding="utf-8") if draft_path.is_file() else ""
-        if draft:
+        if not draft:
+            # 看不见初稿 = 下面三条保真检查（标题/字数漂移/段落结构）全部消失，
+            # 而闸门照样返回 passed:true —— 正文缺失是响的，初稿缺失原来是哑的，
+            # 同一个工具两个文件两种待遇。这就是 godot_compile 的 blind_builder：
+            # 检查器够得着但看不见，那是硬失败，不是跳过。初稿是 draft 步骤的产物，
+            # 正常路径上必然存在；缺了就是布局/promotion 出了问题，不是润色的锅。
+            #
+            # 抛，不是记一条 violation。图上 `passed:false` 只有一条出边——回
+            # humanize（max_loop:2, feedback）——而 humanize 只会重发正文，修不了
+            # 一个缺失的初稿。记成 violation 就等于拿两轮 600s 的 LLM 让它对着自己
+            # 的散文瞎改，然后死在"循环耗尽"上，真正的原因埋在最后一条反馈里。
+            # 这是前置条件坏了，不是产出坏了，跟 state_probe 缺 bible 时抛
+            # ValueError 是同一类：立刻失败、消息直指真凶。报告先落盘，供事后取证。
+            blind = True
+        else:
             d_title, f_title = _title_line(draft), _title_line(prose)
             if d_title and f_title and d_title != f_title:
                 violations.append(
@@ -170,14 +189,21 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
                 "章末最后一段以平稳句号收尾，无疑问/破折/省略号 — 复核是否留有钩子"
                 "（advisory，由评审员判断）")
 
-    passed = not violations
-    report = {"passed": passed, "chapter": n,
+    passed = not violations and not blind
+    report = {"passed": passed, "chapter": n, "blind_gate": blind,
               "violations": violations, "advisories": advisories}
     if out_dir:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         (out / "continuity_report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if blind:
+        raise ValueError(
+            f"continuity_check 无法执行润色保真对照：初稿缺失 {draft_path}。"
+            "标题/字数漂移/段落结构三项检查全部无法进行，本章的润色实质上未被核对。"
+            "这不是散文问题，重润没有用：draft 步骤的产物没有落到预期位置——检查 "
+            "novel_chapter/draft 的 promotion 与 prose_step_dir 布局，修好后重跑本章。")
 
     result = {"passed": passed}
     if not passed:

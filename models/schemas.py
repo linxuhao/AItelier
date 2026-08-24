@@ -45,6 +45,21 @@ class ProjectCreate(BaseModel):
     repo_type: Optional[str] = Field("new", description="Repository type: 'new', 'existing', or 'clone'")
     repo_path: Optional[str] = Field(None, description="Local repo path (required for 'existing')")
     repo_url: Optional[str] = Field(None, description="Remote repo URL (required for 'clone')")
+    config_name: Optional[str] = Field(
+        None,
+        description=(
+            "Pipeline config this project runs (e.g. 'dpe_game'). Set it HERE, at "
+            "creation: the scheduler resolves a project's run by this column, and "
+            "until it is written the poller falls back to 'dpe_default_v2' and "
+            "starts that pipeline on its very next tick — five seconds later. "
+            "Live 2026-08-24: a game project created at 01:36:43 had a "
+            "dpe_default_v2 run auto-created at 01:36:44, six seconds before the "
+            "intended dpe_game run; that config carries no game_harness overlay, "
+            "so the round would have run to completion with no compile, play-test "
+            "or vision gate at all, and reported success. Defaults to "
+            "'dpe_default_v2', which is what the column already defaulted to."
+        ),
+    )
 
 class ProjectResponse(BaseModel):
     project_id: str

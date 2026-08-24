@@ -38,6 +38,33 @@ class TestProjectAPI:
         assert data["project_id"] == "test_proj"
         assert data["name"] == "Test Project"
 
+    def test_create_project_records_its_pipeline_at_creation(self, client: TestClient,
+                                                             db_manager):
+        """A project must know its pipeline the moment the row exists.
+
+        The scheduler resolves a project's run by `config_name`
+        (core/scheduler.py:_get_or_create_skillflow_run), falling back to
+        "dpe_default_v2" while the column is unset — and the poller ticks every
+        five seconds. Live 2026-08-24: a game project created at 01:36:43 had a
+        dpe_default_v2 run auto-created at 01:36:44, six seconds before the
+        intended dpe_game run reached the API. dpe_default_v2 carries no
+        game_harness overlay, so that round had no compile, play-test or vision
+        step at all and would have finished green over an unverified game.
+        """
+        resp = client.post("/api/projects", json={
+            "project_id": "game_proj",
+            "name": "Game Project",
+            "config_name": "dpe_game",
+        })
+        assert resp.status_code == 201, resp.text
+        assert db_manager.get_project("game_proj")["config_name"] == "dpe_game"
+
+    def test_create_project_defaults_to_the_dpe_pipeline(self, client: TestClient,
+                                                         db_manager):
+        """Omitting it keeps the column's existing default — not None."""
+        client.post("/api/projects", json={"project_id": "plain_proj"})
+        assert db_manager.get_project("plain_proj")["config_name"] == "dpe_default_v2"
+
     def test_create_project_duplicate_409(self, client: TestClient):
         client.post("/api/projects", json={
             "project_id": "dup_proj",

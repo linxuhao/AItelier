@@ -85,7 +85,8 @@ def create_project(
     # Create project in DB
     project = db.ensure_project(
         body.project_id, name=body.name, owner_email=owner,
-        repo_type=body.repo_type, repo_path=repo_path, repo_url=body.repo_url
+        repo_type=body.repo_type, repo_path=repo_path, repo_url=body.repo_url,
+        config_name=body.config_name or "dpe_default_v2",
     )
 
     # Setup workspace (creates DPS dirs + project repo)

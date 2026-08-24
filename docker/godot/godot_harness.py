@@ -305,6 +305,27 @@ func _act(action: String, pressed: bool) -> void:
     ev.action = action
     ev.pressed = pressed
     Input.parse_input_event(ev)
+# LIMITATION, MEASURED 2026-08-24 -- read this before writing a mouse scenario.
+#
+# `click:` reliably drives CONTROLS: Godot routes GUI input by the event's own
+# `position`, so a synthesized button event hits the Control under that point.
+# Verified end-to-end against the real menu (click MenuEntry0 -> the state
+# actually becomes CHARACTER_CREATION), and both negative controls fail loudly.
+#
+# It does NOT drive world-space picking that reads `get_global_mouse_position()`.
+# jinyong-assets' player.gd:460 does exactly that, and clicking an enemy Node2D
+# produced NO error and NO effect -- twice, with and without a preceding
+# InputEventMouseMotion. The same timeline with `attack_confirm` works, so the
+# setup was sound; only the click was inert. What is PROVEN is the inertness;
+# what is NOT proven is the mechanism (most likely the viewport's cached pointer
+# is owned by the windowing system and cannot be moved headless, but that was
+# not measured -- do not repeat it as fact).
+#
+# Consequence: a scenario whose handler re-queries the global mouse position
+# CANNOT be tested with `click:` today, and would pass vacuously if someone
+# asserted only "no error". Either make the handler use the event position it
+# was already handed (the more robust shape anyway, and it makes the path
+# testable), or drive that path with its keyboard action instead.
 func _click(node_name: String) -> void:
     # Click a NAMED NODE, not a raw coordinate: resolve it, take the centre of
     # its on-screen rect, and send a real InputEventMouseButton there. That is
@@ -321,21 +342,49 @@ func _click(node_name: String) -> void:
     if n == null:
         push_error("click: node not found: " + node_name)
         return
-    if not (n is Control):
-        push_error("click: node is not a Control (cannot be clicked): " + node_name)
+    var pos: Vector2
+    if n is Control:
+        var c := n as Control
+        if not c.is_visible_in_tree():
+            push_error("click: node is not visible in tree: " + node_name)
+            return
+        if c.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+            push_error("click: node has mouse_filter=IGNORE (cannot be hit): " + node_name)
+            return
+        var r := c.get_global_rect()
+        if r.size.x <= 0.0 or r.size.y <= 0.0:
+            push_error("click: node has a zero-size rect: " + node_name)
+            return
+        pos = r.position + r.size * 0.5
+    elif n is Node2D:
+        # World-space nodes (units on the battle grid) are how the player
+        # actually targets with the mouse -- player.gd's _handle_click_targeting
+        # picks an enemy by where the click landed on the board, and the enemies
+        # are Node2D, not Control. Refusing them would have made the mouse half
+        # of that funnel untestable, which is the half most likely to rot.
+        # get_global_transform_with_canvas() folds in the canvas/camera
+        # transform, so this is the on-SCREEN point, not the world point.
+        var n2 := n as Node2D
+        if not n2.is_visible_in_tree():
+            push_error("click: node is not visible in tree: " + node_name)
+            return
+        pos = n2.get_global_transform_with_canvas().origin
+    else:
+        push_error("click: node is neither a Control nor a Node2D (cannot be clicked): " + node_name)
         return
-    var c := n as Control
-    if not c.is_visible_in_tree():
-        push_error("click: node is not visible in tree: " + node_name)
-        return
-    if c.mouse_filter == Control.MOUSE_FILTER_IGNORE:
-        push_error("click: node has mouse_filter=IGNORE (cannot be hit): " + node_name)
-        return
-    var r := c.get_global_rect()
-    if r.size.x <= 0.0 or r.size.y <= 0.0:
-        push_error("click: node has a zero-size rect: " + node_name)
-        return
-    var pos := r.position + r.size * 0.5
+    # MOVE THE POINTER FIRST. A synthesized button event carries its own
+    # `position`, and Godot's GUI system routes Controls by exactly that -- which
+    # is why clicking a Button worked immediately. World-space picking does NOT:
+    # jinyong-assets' player.gd:460 reads `get_global_mouse_position()`, i.e. the
+    # viewport's CACHED pointer, which a bare button event never updates. The
+    # handler fired and then looked at (0,0). A real mouse is at the point before
+    # it clicks; so is this one now. Measured, not assumed: with only the button
+    # event the enemy took 0 damage and `acted` stayed false, no error raised --
+    # the most dangerous shape, a click that reports success and does nothing.
+    var mm := InputEventMouseMotion.new()
+    mm.position = pos
+    mm.global_position = pos
+    Input.parse_input_event(mm)
     for is_down in [true, false]:
         var ev := InputEventMouseButton.new()
         ev.button_index = MOUSE_BUTTON_LEFT

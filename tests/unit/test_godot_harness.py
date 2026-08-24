@@ -90,6 +90,38 @@ def test_playtest_spec_all_assertions_pass(monkeypatch, tmp_path):
     assert r["behavior"]["all_passed"] is True
 
 
+def test_scenario_may_override_the_boot_scene(monkeypatch, tmp_path):
+    """A scenario naming its own `scene:` boots THAT scene; others keep the
+    spec-level one.
+
+    Every scenario already runs in its own fresh Godot process, and run_godot has
+    always accepted a scene argument -- but only the spec-level scene was ever
+    passed, so all 27 scenarios booted main.tscn and each paid the full boot
+    preamble before it could assert anything about a later screen. This asserts
+    on the value each probe RECEIVES, not merely that the key is readable: the
+    old shape read the override from nowhere and silently used main.tscn, which
+    is indistinguishable from a passing test until you check which scene
+    actually rendered.
+    """
+    seen = []
+
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+        seen.append(scene)
+        return ({"frames": 5, "asserts": [{"name": "a", "passed": True}], "nodes": {}},
+                [], False)
+
+    monkeypatch.setattr(gh, "_run_probe", fake)
+    spec = {"scene": "res://scenes/main.tscn", "scenarios": [
+        {"name": "whole_game", "timeline": [
+            {"at": 5, "assert": [{"node": "N", "expr": "x > 0"}]}]},
+        {"name": "just_creation", "scene": "res://scenes/segments/creation.tscn",
+         "timeline": [{"at": 5, "assert": [{"node": "N", "expr": "x > 0"}]}]},
+    ]}
+    gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    assert seen == ["res://scenes/main.tscn",
+                    "res://scenes/segments/creation.tscn"]
+
+
 def test_playtest_spec_failed_assertion_is_advisory(monkeypatch, tmp_path):
     # Game ran clean but the assertion is false → HARD passed stays True, behaviour
     # False. A wrong/flaky spec must never stall an otherwise-clean build.

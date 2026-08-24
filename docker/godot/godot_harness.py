@@ -729,9 +729,22 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
                     "state sooner, or assert earlier."
                     % (name, ", ".join(str(d) for d in dropped), _MAX_SPEC_FRAMES))
         spec_path.write_text(json.dumps({"frames": sframes, "timeline": timeline}))
+        # Per-scenario scene override. `run_godot` has always been able to boot
+        # a specific scene instead of main; only the SPEC-level scene was ever
+        # wired to it, so all 27 scenarios booted main.tscn and each one paid
+        # the full boot preamble (7x ui_accept to clear the tutorial dialogs)
+        # before it could assert anything about, say, the creation screen.
+        # Since every scenario already gets its OWN fresh Godot process, letting
+        # it name its own scene is what turns this harness into unit-level
+        # testing: boot creation.tscn, inject, assert, done in tens of frames.
+        # It also decouples a scenario from the BOOT FLOW — a scenario that
+        # boots its own scene does not shift when a menu is inserted ahead of
+        # the tutorial, which is otherwise a 27-file rewrite, and this repo has
+        # already lost assertions to one of those.
+        sc_scene = str(sc.get("scene") or scene)
         probe, errs, timed_out = _run_probe(
             dst, state_path, sframes, timeout,
-            {"AITELIER_PROBE_SPEC": str(spec_path)}, scene=scene,
+            {"AITELIER_PROBE_SPEC": str(spec_path)}, scene=sc_scene,
             capture_at=_capture_frames(sframes, timeline))
         ran = bool(probe) or not timed_out
         ran_any = ran_any or ran

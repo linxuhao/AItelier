@@ -149,23 +149,16 @@ task_implementer:
   # instead of ColorRect placeholders — the single biggest lever on how a
   # generated game is perceived. Offered to every run; only the game addon's
   # prompt fragment actually asks for them.
-  # godot_playtest_scenario BELONGS on the game_harness addon's
-  # `add_tools: "@implementer"` channel, so a Godot probe would reach the
-  # implementer only on game runs. It cannot live there yet: as of
-  # skillflow-py 1.5.38, compose's add_tools parks the name in the step's
-  # config.extra_tools and core.py merges it into the TOOL SCHEMAS at claim
-  # time — but SkillFlow._execute_tool_impl builds its execution allowlist
-  # from the agent config, the write-tool schemas and the context read
-  # tools, and never consults extra_tools. The agent would therefore be
-  # SHOWN the tool and then refused when it called it: "Tool
-  # 'godot_playtest_scenario' not allowed." A tool offered and then denied
-  # is worse than one never offered — it burns a turn and reads to the
-  # model as a broken environment. Listing it here costs a non-game
-  # implementer one extra schema, and the tool answers a non-Godot repo
-  # with a plain "not a Godot project". Move it back to add_tools once
-  # skillflow merges extra_tools into the allowlist too.
+  # godot_playtest_scenario is NOT here: it lives on the game_harness addon's
+  # `add_tools: "@implementer"` channel, so the Godot probe reaches the
+  # implementer on game runs only. It was parked here between 2026-08-24 and
+  # skillflow-py 1.5.39 because add_tools was half-wired — the name reached the
+  # claim-time TOOL SCHEMAS but never the execution allowlist, so the agent was
+  # shown the tool and then refused when it called it. 1.5.39 merges
+  # extra_tools into the allowlist (skillflow a3eaff2), so the grant is whole
+  # and the addon owns it again.
   tools: ["list_tree", "test_write", "read_test_written", "delete_file",
-          "gen_image_asset", "gen_audio_asset", "godot_playtest_scenario"]
+          "gen_image_asset", "gen_audio_asset"]
   # Stays at 32768 — deliberately BELOW core.ai_router.OUTPUT_CAP_CEILING (65536)
   # so a starved turn still has one doubling left. Raising it to the ceiling
   # would trade a real safety net for nothing: measured on jinyong-turn's
@@ -178,7 +171,23 @@ task_implementer:
   # "兄弟任务还没落地时，照架构契约写" directive in templates/task_implementer.md,
   # which removes the specific thing those 242k reasoning chars were spent on.
   max_output_tokens: 32768
-  max_tool_turns: 15
+  # 15 → 24. Now that the implementer can MEASURE (godot_playtest_scenario runs
+  # one scenario in ~50s against its own staged edits), a task card is no longer
+  # "read the source, write the fix" — it is write → probe → read observed →
+  # adjust → probe again. Each probe is a turn, and a play-test probe answers
+  # with a page of assertions, so the loop is turn-hungry in a way the old
+  # read-and-write flow never was.
+  #
+  # 15 was not enough for the shape it produces. Live, jinyong-winnable
+  # 2026-08-24, card `repin_dot_timing`: the implementer rewrote the scenario
+  # into a temporary all-placeholder version (`current_round == -1`,
+  # `phase == "NEVER"`) to force the harness to print the values it needed — a
+  # correct technique — then hit turn 15 before it could write the REAL
+  # scenario back. The final-turn nudge ("your very next action MUST be a
+  # write") then made it deliver the scaffolding. Three attempts, the same
+  # ending each time, and repo_apply committed the placeholder scenario into
+  # the game repo three times.
+  max_tool_turns: 24
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:

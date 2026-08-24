@@ -173,6 +173,20 @@ overlay:
     fragment: "game_harness/pm.md"
   - add_template: "@implementer"
     fragment: "game_harness/implementer.md"
+
+  # ── TOOLSET (add_tools) ────────────────────────────────────────────────────
+  # The single-scenario Godot probe, granted to the implementer on GAME runs
+  # only. It answers "is the scenario I was sent to repair green yet?" in ~50s
+  # against the step's own staged edits, instead of ending the step and waiting
+  # ~12 minutes for the full 26-scenario gate at 5_compile.
+  #
+  # This lived on the shared task_implementer role between 2026-08-24 and
+  # skillflow-py 1.5.39, because add_tools was half-wired: compose parked the
+  # name in config.extra_tools, claim time merged it into the tool SCHEMAS, and
+  # the execution allowlist never read it — so the agent was offered the tool
+  # and then refused when it called it. Fixed in skillflow a3eaff2 / 1.5.39.
+  - add_tools: "@implementer"
+    tools: ["godot_playtest_scenario"]
   - add_template: "@verifier_review"
     fragment: "game_harness/verifier.md"
 

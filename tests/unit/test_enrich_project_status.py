@@ -229,6 +229,28 @@ class TestRejectionRoundsCarryBothKeyNames:
             tmp_path, "## 轮 #1 · a\n\nfirst\n\n## 轮 #2 · b\n\nsecond\n")
         assert [r["reason"] for r in rounds] == ["first", "second"]
 
+    def test_the_users_own_markdown_headings_do_not_become_rounds(self, tmp_path):
+        """One rejection stays ONE round even when its feedback is itself
+        structured with `## ` sections.
+
+        The banner says "this step has been revised N time(s)", and N used to be
+        "how many level-2 headings are in the log" -- so a single rejection whose
+        feedback had five `## ` sections reported six rounds (round header + the
+        author's own five). A user who rejects once and is told the step was
+        revised six times cannot tell a real loop from a display artifact, and a
+        history banner that misreports is worse than no banner: it reads as
+        evidence. Rounds are now anchored on skillflow's `#<N> ·` marker, the same
+        literal its writer counts to number them.
+        """
+        log = ("## 反馈轮 #1 · 2026-08-24 10:55 UTC\n\n"
+               "研究做得扎实,三处要改。\n\n"
+               "## 一、场景可以自己指定 boot scene\n\n正文\n\n"
+               "## 二、否决 headless 检测\n\n正文\n\n"
+               "## 三、建议的形状\n\n正文\n")
+        rounds = self._rounds(tmp_path, log)
+        assert len(rounds) == 1
+        assert "## 一、场景可以自己指定 boot scene" in rounds[0]["user_feedback"]
+
     def test_a_log_without_headings_is_still_one_round(self, tmp_path):
         rounds = self._rounds(tmp_path, "just some feedback text\n")
         assert rounds[0]["reason"] == "just some feedback text"

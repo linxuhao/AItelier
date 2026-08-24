@@ -524,11 +524,24 @@ def _read_step_output(project_id: str, step_id: str,
     }
 
 
-# One `## <heading>` per rejection round, written by skillflow's
-# `_append_feedback_log`. Matched loosely on purpose: the host must not depend on
-# the heading's wording (it is localised — "反馈轮 #1 · <ts>"), only on the fact
-# that each round starts a level-2 section.
-_FEEDBACK_ROUND_RE = re.compile(r"^##[ \t]+(.*)$", re.MULTILINE)
+# One round heading per rejection round, written by skillflow's
+# `_append_feedback_log` as:  `## 反馈轮 #<N> · <YYYY-MM-DD HH:MM UTC>`
+#
+# Anchor on the `#<N> ·` run, NOT on "any level-2 heading". The previous pattern
+# matched every `## ` line in the log, so a round count — and the "revised N
+# time(s)" banner built from it — counted the USER'S OWN markdown headings: one
+# rejection whose feedback happened to have five `## ` sections reported six
+# rounds. A user who rejects once and is told the step has been revised six times
+# has no way to tell a loop from a display artifact, which is the same class of
+# defect this reader was written to fix (a banner that misreports the feedback
+# history is worse than no banner: it looks like evidence).
+#
+# Matching skillflow's marker is the RIGHT coupling, not a new one: skillflow
+# numbers the rounds by counting this very literal
+# (`existing.count("## 反馈轮 #")` in core.py), so writer and reader now agree and
+# a wording change breaks both together instead of silently skewing one. The
+# `\S+` keeps the localised word itself out of the pattern.
+_FEEDBACK_ROUND_RE = re.compile(r"^##[ \t]+\S+[ \t]+#\d+[ \t]*·", re.MULTILINE)
 
 
 def _read_rejection_rounds(project_id: str, step_id: str,

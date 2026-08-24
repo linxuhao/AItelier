@@ -149,8 +149,23 @@ task_implementer:
   # instead of ColorRect placeholders — the single biggest lever on how a
   # generated game is perceived. Offered to every run; only the game addon's
   # prompt fragment actually asks for them.
+  # godot_playtest_scenario BELONGS on the game_harness addon's
+  # `add_tools: "@implementer"` channel, so a Godot probe would reach the
+  # implementer only on game runs. It cannot live there yet: as of
+  # skillflow-py 1.5.38, compose's add_tools parks the name in the step's
+  # config.extra_tools and core.py merges it into the TOOL SCHEMAS at claim
+  # time — but SkillFlow._execute_tool_impl builds its execution allowlist
+  # from the agent config, the write-tool schemas and the context read
+  # tools, and never consults extra_tools. The agent would therefore be
+  # SHOWN the tool and then refused when it called it: "Tool
+  # 'godot_playtest_scenario' not allowed." A tool offered and then denied
+  # is worse than one never offered — it burns a turn and reads to the
+  # model as a broken environment. Listing it here costs a non-game
+  # implementer one extra schema, and the tool answers a non-Godot repo
+  # with a plain "not a Godot project". Move it back to add_tools once
+  # skillflow merges extra_tools into the allowlist too.
   tools: ["list_tree", "test_write", "read_test_written", "delete_file",
-          "gen_image_asset", "gen_audio_asset"]
+          "gen_image_asset", "gen_audio_asset", "godot_playtest_scenario"]
   # Stays at 32768 — deliberately BELOW core.ai_router.OUTPUT_CAP_CEILING (65536)
   # so a starved turn still has one doubling left. Raising it to the ceiling
   # would trade a real safety net for nothing: measured on jinyong-turn's

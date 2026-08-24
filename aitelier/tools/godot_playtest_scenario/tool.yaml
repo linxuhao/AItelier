@@ -1,0 +1,34 @@
+name: godot_playtest_scenario
+description: >
+  Play-test ONE scenario from the project's play-test contract and get its
+  per-assertion outcome back immediately — instead of ending your step and
+  waiting ~10 minutes for the full 26-scenario gate at 5_compile. Give it
+  `scenario` (one scenario name, or several comma-separated). For every FAILING
+  assertion it reports the expression AND `observed`, the value the property
+  actually held at that frame — which is the number that tells you what to fix;
+  `actual` on a comparison assert is only `false`. Scenario names come from the
+  repo's `playtest/` directory (one file per scenario) or, on projects that
+  never split, `playtest_spec.yaml`; an unknown name is refused with the list of
+  real ones, never quietly skipped. If your step has files staged but not yet
+  delivered, it play-tests repo + your staged edits (and lists which files it
+  applied), so you are testing YOUR change and not the code you are replacing.
+  This is a PROBE, not a gate: it does not affect any verdict, and it does not
+  replace the full run at 5_compile — that full run is the only thing that
+  catches "fixing X broke Y", so a green single scenario is not a green build.
+parameters:
+  scenario:
+    type: string
+    description: "Scenario name to run, e.g. dot_resolves_at_victim_turn_start. Several: comma-separated."
+    required: true
+  project_root:
+    type: string
+    description: "Path to the project repo (auto-injected by the engine)"
+    required: false
+  use_staged:
+    type: boolean
+    description: "Overlay this step's staged (not yet delivered) files onto the repo before running. Default true."
+    required: false
+
+# Its result carries passed/error, so a graph step running it MUST route the
+# failure branch — read by forge_registry_check (fallible_tools_unrouted).
+x-fallible: true

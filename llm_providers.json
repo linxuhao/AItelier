@@ -6,5 +6,9 @@
   "minimax": {
     "base_url": "https://api.minimax.io/v1",
     "api_key_env": "MINIMAX_API_KEY"
+  },
+  "localqwen": {
+    "base_url": "http://100.68.74.107:8000/v1",
+    "api_key_env": "LOCAL_QWEN_API_KEY"
   }
 }

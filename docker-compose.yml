@@ -67,6 +67,12 @@ services:
       # Same file-secret model as the LLM key: read by git-credential-helper.sh
       # (clone/push) and core/git_ops.py (PR REST call), never placed in env.
       - GITHUB_TOKEN
+      # Self-hosted vLLM (llm_providers.json: localqwen) serves without
+      # --api-key, so this file's CONTENT is irrelevant — but ai_router passes
+      # api_key only `if self.api_key`, and with none passed LiteLLM's OpenAI
+      # client falls back to OPENAI_API_KEY and errors when that is unset too.
+      # A placeholder file is what makes the local endpoint reachable at all.
+      - LOCAL_QWEN_API_KEY
     volumes:
       # Live source: host repo shadows the baked-in copy (no rebuild on edits).
       - .:/app
@@ -148,6 +154,10 @@ secrets:
   #   printf '%s' "$GH_PAT" > ~/.aitelier-secrets/GITHUB_TOKEN && chmod 600 "$_"
   GITHUB_TOKEN:
     file: ${HOME}/.aitelier-secrets/GITHUB_TOKEN
+  # Placeholder only — the local vLLM does no auth. Create it before `up`:
+  #   printf 'local-no-auth' > ~/.aitelier-secrets/LOCAL_QWEN_API_KEY && chmod 600 "$_"
+  LOCAL_QWEN_API_KEY:
+    file: ${HOME}/.aitelier-secrets/LOCAL_QWEN_API_KEY
   # (Godot needs no account or license — the game builder carries no secrets.)
 
 networks:

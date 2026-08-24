@@ -654,7 +654,29 @@ steps:
     agent_config: "task_implementer_reviewer"
     context:
       - source: { from: "repository", mode: "tool" }
-      - source: { step: "2", mode: "interfaces" }
+      # `output:` is what ARMS `mode: interfaces`, not decoration. skillflow's
+      # context resolver applies mode ONLY on the named-single-file branch
+      # (context.py:_resolve_step_output); with no `output:` it takes the
+      # "concatenate every file in the step dir" branch, which never looks at
+      # mode. So `{step: "2", mode: "interfaces"}` was a silent no-op and the
+      # FULL step2_design.md went into every reviewer turn.
+      # Measured over 11 live runs: Step 2 was 40,798 chars median = 40.4% of
+      # this step's whole context, byte-identical to what t_impl got (the tell —
+      # two steps asking for different modes received the same bytes).
+      # Naming the file costs nothing: step 2 emits exactly step2_design.md +
+      # linter_manifest.json (60-115 B), and the reviewer reviews an
+      # implementation against the design, not against the linter map.
+      # Interfaces extraction takes the doc 35-50 KB → 8000 chars (the cap in
+      # skillflow's _extract_interfaces), ~10k tokens off every turn of the
+      # busiest reviewer.
+      # The extract is LOSSY and says so: skillflow >=1.5.40 appends a marker
+      # naming the file, how much was cut, and the read/search tools to fetch
+      # the rest — which this step already has via `from: repository` above and
+      # already uses (read x556, search x385 over 160 live step instances).
+      # Below 1.5.40 the cut is SILENT and this line hands the reviewer a fifth
+      # of the design labelled as the whole of it; don't ship it against an
+      # older skillflow.
+      - source: { step: "2", output: "step2_design.md", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
       - source: { tool: "dir_tree" }

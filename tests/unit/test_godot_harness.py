@@ -210,6 +210,33 @@ def test_normalize_timeline_keeps_the_assert_when_actions_share_the_frame():
     assert any("assert" in e for e in out)
 
 
+def test_normalize_timeline_keeps_a_click_that_shares_a_frame_with_actions():
+    """`click:` survives on an entry that also carries `actions:`.
+
+    The tail of _normalize_timeline only emitted `base` when it carried a
+    press/release/assert, so an entry with BOTH `actions:` and `click:` dropped
+    the click on the floor. That is the same silent-skip this function exists to
+    prevent -- every shipped `actions:` entry once vanished the same way and the
+    scenarios still passed, because an input the spec asked for and the probe
+    never delivered looks exactly like a game that ignored it.
+    """
+    out, errs = gh._normalize_timeline([
+        {"at": 40, "actions": ["move_up"], "click": "MenuEntry0"},
+    ])
+    assert errs == []
+    assert {"at": 40, "press": "move_up"} in out
+    assert any(e.get("click") == "MenuEntry0" for e in out)
+
+
+def test_normalize_timeline_expands_clicks_into_one_entry_each():
+    """`clicks:` is the plural of `click:`, as `actions:` is of `press:`."""
+    out, errs = gh._normalize_timeline([
+        {"at": 12, "clicks": ["AttrPlus0", "ConfirmButton"]},
+    ])
+    assert errs == []
+    assert [e["click"] for e in out if "click" in e] == ["AttrPlus0", "ConfirmButton"]
+
+
 def test_normalize_timeline_rejects_an_unknown_key():
     out, errors = gh._normalize_timeline([{"at": 3, "keys": ["ui_accept"]}])
     assert out == []

@@ -305,7 +305,50 @@ func _act(action: String, pressed: bool) -> void:
     ev.action = action
     ev.pressed = pressed
     Input.parse_input_event(ev)
+func _click(node_name: String) -> void:
+    # Click a NAMED NODE, not a raw coordinate: resolve it, take the centre of
+    # its on-screen rect, and send a real InputEventMouseButton there. That is
+    # what makes this a HIT TEST rather than a handler call -- a button that is
+    # covered by another Control, has mouse_filter IGNORE, is zero-sized or has
+    # drifted off-screen will simply not receive the event, which is exactly the
+    # failure a `debug_click_*` action that calls the handler directly cannot see.
+    #
+    # Every failure here is push_error, never a silent skip: a click the probe
+    # could not deliver means the scenario did not do what it says it does, and
+    # a scenario that quietly skips its own input is how this harness once
+    # graded a game nobody played.
+    var n := _resolve(node_name)
+    if n == null:
+        push_error("click: node not found: " + node_name)
+        return
+    if not (n is Control):
+        push_error("click: node is not a Control (cannot be clicked): " + node_name)
+        return
+    var c := n as Control
+    if not c.is_visible_in_tree():
+        push_error("click: node is not visible in tree: " + node_name)
+        return
+    if c.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+        push_error("click: node has mouse_filter=IGNORE (cannot be hit): " + node_name)
+        return
+    var r := c.get_global_rect()
+    if r.size.x <= 0.0 or r.size.y <= 0.0:
+        push_error("click: node has a zero-size rect: " + node_name)
+        return
+    var pos := r.position + r.size * 0.5
+    for is_down in [true, false]:
+        var ev := InputEventMouseButton.new()
+        ev.button_index = MOUSE_BUTTON_LEFT
+        ev.pressed = is_down
+        ev.position = pos
+        ev.global_position = pos
+        Input.parse_input_event(ev)
+
+
 func _apply_entry(e: Dictionary) -> void:
+    var ck = e.get("click", "")
+    if ck != "":
+        _click(str(ck))
     var pr = e.get("press", "")
     if pr != "":
         _act(pr, true)
@@ -631,7 +674,7 @@ def _normalize_asserts(raw) -> list:
     return out
 
 
-_TIMELINE_KEYS = {"at", "press", "release", "actions", "assert"}
+_TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "clicks"}
 _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
 
 
@@ -664,14 +707,26 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
         acts = e.get("actions") or []
         if isinstance(acts, str):
             acts = [acts]
-        base = {k: v for k, v in e.items() if k != "actions"}
+        clicks = e.get("clicks") or []
+        if isinstance(clicks, str):
+            clicks = [clicks]
+        base = {k: v for k, v in e.items() if k not in ("actions", "clicks")}
         if "assert" in base:
             base["assert"] = _normalize_asserts(base["assert"])
         # The probe fires every entry whose `at` matches the frame, so several
-        # presses on one frame are simply several entries.
+        # presses on one frame are simply several entries. `clicks:` is the
+        # plural of `click:` exactly as `actions:` is the plural of `press:`.
         for a in acts:
             out.append({"at": at, "press": a})
-        if base.get("press") or base.get("release") or base.get("assert") or not acts:
+        for c in clicks:
+            out.append({"at": at, "click": c})
+        # `click` MUST be in this condition. Without it an entry carrying both
+        # `actions:` and `click:` would drop the click on the floor -- the same
+        # silent-skip that made every shipped `actions:` entry vanish before
+        # this function existed. An input the spec asked for and the probe never
+        # delivered is indistinguishable from a game that ignored it.
+        if (base.get("press") or base.get("release") or base.get("click")
+                or base.get("assert") or not (acts or clicks)):
             out.append(base)
     return out, errors
 

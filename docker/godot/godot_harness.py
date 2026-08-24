@@ -347,6 +347,17 @@ func _eval_assert(a: Dictionary) -> void:
         return
     res["actual"] = _jsonable(val)
     res["passed"] = bool(val)
+    # A FAILING comparison reports `false` and nothing else — which says the
+    # assert did not hold, but not what was there instead. Read the asserted
+    # attribute back and record it, so the report can say "turns_taken == 1
+    # failed, it was 3" rather than "failed".
+    # jinyong-usable 2026-08-23: a whole task card was spent re-timing sample
+    # frames, derived from a tween budget read out of the source, because the
+    # report could not say what current_round actually was at the frame it
+    # sampled. The re-timed frames failed too. The probe had the number the
+    # entire time and threw it away.
+    if not res["passed"] and a.has("attr"):
+        res["observed"] = _jsonable(_read_attr(target, str(a["attr"])))
     _results.append(res)
 func _capture_baselines() -> void:
     for w in _watch:
@@ -612,7 +623,11 @@ def _normalize_asserts(raw) -> list:
                 expr = val                       # already a boolean expression
             else:
                 expr = f'{attr} == "{val}"'      # string-literal equality
-            out.append({"node": node, "expr": expr, "name": str(key)})
+            # Carry `attr` on the expression form too (the delta form already
+            # does): the probe needs it to read the value back when the
+            # comparison fails. See _eval_assert.
+            out.append({"node": node, "attr": attr, "expr": expr,
+                        "name": str(key)})
     return out
 
 

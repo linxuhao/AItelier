@@ -134,7 +134,8 @@ def test_normalize_asserts_dict_form():
     assert by["GameManager.paused"]["expr"] == "paused == true"
     assert by["HUD/PausedLabel.visible"]["node"] == "HUD/PausedLabel"
     assert by["HUD/PausedLabel.visible"]["expr"] == "visible == true"
-    assert by["Bird.velocity.y"] == {"node": "Bird", "expr": "velocity.y != 0", "name": "Bird.velocity.y"}
+    assert by["Bird.velocity.y"] == {"node": "Bird", "attr": "velocity.y",
+                                     "expr": "velocity.y != 0", "name": "Bird.velocity.y"}
     assert by["GameManager.state"]["expr"] == "state == 0"
     assert by["GameManager.score"]["expr"] == "score == 0"
 
@@ -157,7 +158,8 @@ def test_normalize_timeline_only_touches_assert_entries():
     out, errors = gh._normalize_timeline(tl)
     assert errors == []
     assert out[0] == {"at": 0, "press": "flap"}
-    assert out[1]["assert"] == [{"node": "Bird", "expr": "velocity.y < 0", "name": "Bird.velocity.y"}]
+    assert out[1]["assert"] == [{"node": "Bird", "attr": "velocity.y",
+                                "expr": "velocity.y < 0", "name": "Bird.velocity.y"}]
 
 
 def test_normalize_timeline_expands_actions_into_presses():
@@ -407,8 +409,18 @@ def test_script_timeout_keeps_the_output_the_run_already_produced(monkeypatch, t
             stderr="SCRIPT ERROR: Invalid access to property 'state_changed'\n"
                    "          at: _run (res://tests/t_fsm.gd:46)\n")
 
-    monkeypatch.setattr(gh, "_copy_project", lambda proj: proj)
+    # run_script ends with `shutil.rmtree(dst.parent)`. Returning `proj` itself
+    # from the _copy_project stub therefore deletes tmp_path.PARENT — the whole
+    # pytest-of-<user>/pytest-N run directory — and every later test in the
+    # session dies with FileNotFoundError on it. (Done exactly that way in
+    # 62a5a27; 558 errors on the next full-suite run.) Hand back a nested dir so
+    # the cleanup stays inside tmp_path, and stub rmtree as well, the same
+    # belt-and-braces the playtest_project tests above use.
+    work = tmp_path / "work" / "proj"
+    work.mkdir(parents=True)
+    monkeypatch.setattr(gh, "_copy_project", lambda proj: work)
     monkeypatch.setattr(gh, "_import_resources", lambda dst, timeout=0: None)
+    monkeypatch.setattr(gh.shutil, "rmtree", lambda *a, **k: None)
     monkeypatch.setattr(gh, "_run", _boom)
 
     r = gh.run_script(str(tmp_path), [], timeout=140)
@@ -418,3 +430,37 @@ def test_script_timeout_keeps_the_output_the_run_already_produced(monkeypatch, t
     assert "PASS test_a" in res["stdout"]                 # the run's own account
     assert "t_fsm.gd:46" in res["stderr"]                 # ...and where it died
     assert "timed out after 140s" in res["stderr"]        # ...without losing why
+
+
+def test_normalize_carries_attr_so_a_failed_assert_can_report_the_value():
+    """Every normalised assert must carry `attr`, not just `expr`.
+
+    The probe uses it to read the value back when a comparison fails. Without
+    it a failing `turns_taken == 1` reports `actual: false` and nothing else —
+    the report says the assert did not hold but not what was there instead, and
+    the next implementer has to re-derive runtime behaviour from the source.
+    jinyong-usable 2026-08-23 spent a task card doing exactly that, and got it
+    wrong.
+    """
+    out = gh._normalize_asserts({
+        "East_Heretic.turns_taken": 1,                        # number form
+        "CombatManager.phase": "IDLE",                        # string form
+        "CombatManager.current_round": "current_round >= 4",  # expression form
+        "HUD/PausedLabel.visible": True,                      # bool + path node
+    })
+    by_name = {a["name"]: a for a in out}
+    assert by_name["East_Heretic.turns_taken"]["attr"] == "turns_taken"
+    assert by_name["CombatManager.phase"]["attr"] == "phase"
+    assert by_name["CombatManager.current_round"]["attr"] == "current_round"
+    assert by_name["HUD/PausedLabel.visible"]["node"] == "HUD/PausedLabel"
+    assert by_name["HUD/PausedLabel.visible"]["attr"] == "visible"
+    # The expression form is still passed through verbatim.
+    assert by_name["CombatManager.current_round"]["expr"] == "current_round >= 4"
+
+
+def test_probe_reads_the_value_back_only_when_the_assert_failed():
+    """The capture is on the failure path only — a passing assert stays small."""
+    src = gh.PROBE_GD if hasattr(gh, "PROBE_GD") else Path(gh.__file__).read_text(
+        encoding="utf-8")
+    assert 'if not res["passed"] and a.has("attr"):' in src
+    assert 'res["observed"] = _jsonable(_read_attr(target, str(a["attr"])))' in src

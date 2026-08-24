@@ -6,14 +6,16 @@
 # which is the same doctrine as `ctx.credentials` — configuration carries
 # references to secrets, never the secrets.
 #
-# AITELIER_MCP_URL   where the AItelier container's MCP endpoint is. Over the
-#                    shared docker network that is the service name. If AItelier
-#                    runs on the host instead, use http://127.0.0.1:4444/mcp and
-#                    make sure the host is in AITELIER_MCP_ALLOWED_HOSTS.
+# AITELIER_MCP_URL   where AItelier's MCP endpoint is. The default is the
+#                    LOOPBACK port, because `dsh` normally runs on the host while
+#                    AItelier runs in a container publishing 127.0.0.1:4444. Only
+#                    use the service name `http://aitelier:4444/mcp` when dsh
+#                    itself is a container on the same docker network — an
+#                    unreachable URL does NOT fail loudly, see below.
 # AITELIER_ADMIN_TOKEN  authorizes the WRITE tools (edit_*, import, run). Reads
-#                    need nothing. Honored only off-tunnel, which a direct
-#                    container-network connection is. Leave it unset for a
-#                    read-only installation — the write tools then answer
+#                    need nothing. Honored only off-tunnel, which both a loopback
+#                    and a direct container-network connection are. Leave it unset
+#                    for a read-only installation — the write tools then answer
 #                    `denied: …` instead of failing obscurely.
 - insert:
     - id: mcp-aitelier
@@ -21,6 +23,21 @@
       config:
         serverName: aitelier
         transport: streamable-http
-        url: !!js process.env.AITELIER_MCP_URL || 'http://aitelier:4444/mcp'
+        url: !!js process.env.AITELIER_MCP_URL || 'http://127.0.0.1:4444/mcp'
         headers:
           X-AItelier-Admin-Token: !!js process.env.AITELIER_ADMIN_TOKEN || ''
+        # An AItelier run is long and pauses for human approval, so `wait_for_run`
+        # blocks. dsh-mcp-client's own default is 60s, and a wait longer than the
+        # CLIENT's timeout does not wait longer — the client hangs up first and the
+        # model sees a transport error instead of "still running", which reads as a
+        # broken tool rather than a long job. 10 minutes lets one wait_for_run
+        # cover a realistic stretch of a run; every other tool answers in
+        # milliseconds, so raising this costs nothing when nothing is wrong.
+        toolCallTimeoutMs: !!js Number(process.env.AITELIER_MCP_TIMEOUT_MS || 600000)
+        # Deliberately left at the default (false): a temporarily-down AItelier
+        # must not make `dsh` itself unbootable. The cost is that the failure is
+        # SILENT — no mcp__aitelier__* tools appear and nothing says why. That is
+        # the first thing the README tells you to check, because an agent facing a
+        # missing toolset cannot diagnose it from the inside (verified: it answers
+        # "NONE FOUND" and can only guess at the cause).
+        # failOnStartupError: false

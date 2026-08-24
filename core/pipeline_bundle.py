@@ -53,6 +53,9 @@ from pathlib import Path
 
 import yaml
 
+from core.tool_guards import (bad_config_name, bad_tool_name,
+                              tool_source_error)
+
 BUNDLE_VERSION = 1
 BUNDLE_KEY = "aitelier_pipeline_bundle"
 
@@ -104,29 +107,10 @@ def _generated_tools_dir() -> Path:
     return datadir.tools_dir()
 
 
-def _tool_name_error(name) -> str:
-    """Non-empty when *name* is not usable as a generated tool's directory name.
-
-    A tool IS its directory name — the loader keys tools by it — so a name carrying
-    a path separator could never be invoked anyway. The reason to check it here
-    rather than shrug is `tdir / name`: a bundle arrives from ANOTHER machine (that
-    is the whole feature), and a key like `../../AItelier/aitelier/tools/web_search`
-    makes the importer write impl.py OUTSIDE the generated-tools directory, on top
-    of a built-in tool this host imports and executes. Importing a shared pipeline
-    is consent to install a tool, not to overwrite arbitrary files. Same rule
-    `edit_tool` already applies to a caller-supplied tool name.
-    """
-    if not isinstance(name, str) or not name:
-        return "a tool name must be a non-empty string"
-    if "/" in name or name.startswith("."):
-        return (f"invalid tool name {name!r}: a generated tool is one plain "
-                f"directory name under the generated-tools directory")
-    return ""
-
 
 def _read_tool(name: str) -> dict[str, str] | None:
     """Read one generated tool's files, or None when it is not a generated tool."""
-    if _tool_name_error(name):
+    if bad_tool_name(name):
         return None                    # a traversing name names no generated tool
     d = _generated_tools_dir() / name
     if not d.is_dir():
@@ -142,6 +126,9 @@ def export_pipeline(config_name: str) -> dict:
     """Collect a generated pipeline's whole closure into one JSON-able document."""
     from core import pipeline_registry as pr
 
+    bad = bad_config_name(config_name)
+    if bad:
+        raise BundleError(bad)
     cdir = pr.generated_configs_dir()
     gpath = cdir / f"{config_name}.yaml"
     if not gpath.is_file():
@@ -294,7 +281,7 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
     to_write: dict[str, dict[str, str]] = {}
     conflicts: list[str] = []
     for tname, files in (bundle.get("tools") or {}).items():
-        err = _tool_name_error(tname)
+        err = bad_tool_name(tname)
         if err:
             raise BundleError(err)
         if not isinstance(files, dict) or not files:
@@ -306,6 +293,19 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
         for fname in files:
             if fname not in _TOOL_FILES:
                 raise BundleError(f"tool '{tname}' carries unexpected file {fname!r}")
+        # Same bar as `edit_tool`. This is the LOOSER-input writer of the two — its
+        # bundle came from another machine — and it used to be the laxer gate too:
+        # a tool carrying only README.md installed a directory with no callable,
+        # and a module that imports but defines the wrong name installed happily.
+        # Either way the failure surfaced a whole pipeline run later, at the step
+        # that invoked it, instead of here where the message can name the file.
+        if "impl.py" not in files or "tool.yaml" not in files:
+            raise BundleError(
+                f"tool '{tname}' needs both impl.py and tool.yaml; it carries "
+                f"{', '.join(sorted(files))}")
+        err = tool_source_error(tname, files["impl.py"])
+        if err:
+            raise BundleError(f"tool '{tname}': {err}")
         existing = _read_tool(tname)
         if existing is None:
             to_write[tname] = files

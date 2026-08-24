@@ -19,6 +19,7 @@ import json
 import pytest
 
 from api import mcp_router
+from core import tool_guards
 from api.mcp_router import ToolDenied, _TOOL_KIND, build_mcp
 
 MCP_HEADERS = {"Content-Type": "application/json",
@@ -475,9 +476,9 @@ def test_a_tool_name_cannot_escape_the_generated_tools_directory():
     reaches a `mkdir` + `write_text` on the import path.
     """
     for bad in ("../../etc", "a/b", ".hidden", "", "x" * 100, None):
-        assert mcp_router._bad_tool_name(bad), f"accepted {bad!r}"
+        assert tool_guards.bad_tool_name(bad), f"accepted {bad!r}"
     for ok in ("fetch_prices", "godot_compile", "t2", "a-b"):
-        assert mcp_router._bad_tool_name(ok) is None, f"rejected {ok!r}"
+        assert tool_guards.bad_tool_name(ok) is None, f"rejected {ok!r}"
 
 
 def test_get_tool_refuses_a_traversing_name_over_the_wire(client, gate_off):
@@ -596,13 +597,13 @@ def test_a_tool_whose_import_hangs_is_rejected_instead_of_hanging_the_server():
     """The probe execs agent-written module-level code. In-process and without a
     timeout, a waiting loop at import time pinned the server with no way to cancel
     and ran its side effects in the live backend."""
-    err = mcp_router._tool_source_error(
+    err = tool_guards.tool_source_error(
         "sleeper", "import time\ntime.sleep(120)\ndef sleeper(**kw):\n    return {}\n")
     assert err and "did not finish importing" in err
 
 
 def test_the_probe_lists_what_the_module_actually_defines():
-    err = mcp_router._tool_source_error(
+    err = tool_guards.tool_source_error(
         "wanted", "def something_else(**kw):\n    return {}\n")
     assert "no callable named 'wanted'" in err
     assert "something_else" in err, "the message must say what IS defined"
@@ -634,3 +635,65 @@ async def test_a_sync_tool_body_does_not_run_on_the_event_loop():
     finally:
         mcp_router._TOOL_KIND.pop("_probe_sync", None)
     assert seen["thread"] != loop_thread, "sync tool ran on the event loop"
+
+
+# ── Ultrareview fixes ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("attack", [
+    "../probe_secret",                 # relative traversal
+    "/etc/passwd",                     # absolute RHS REPLACES the base in pathlib
+    "../../../../etc/hosts",
+    "a/b",
+])
+def test_a_config_name_cannot_read_outside_the_configs_dir(client, attack, tmp_path,
+                                                           monkeypatch):
+    """The credential-free read tools built `<configs>/<config>.yaml` unchecked.
+
+    `get_tool(name)` was guarded and `get_pipeline(config)` was not — same class,
+    one surface hardened and the other not. Reads need no credentials and `/mcp`
+    is exempt from the method gate, so this returned the file's full text to an
+    unauthenticated caller. Reproduced live against the running container before
+    the fix: both the relative form and an absolute `config` leaked a file from
+    outside the configs directory.
+    """
+    monkeypatch.setenv("AITELIER_GENERATED_CONFIGS_DIR", str(tmp_path / "configs"))
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "probe_secret.yaml").write_text("password: s3cret\n", encoding="utf-8")
+
+    _initialized(client)
+    for tool_name, args in (("get_pipeline", {"config": attack}),
+                            ("list_roles", {"config": attack}),
+                            ("get_template", {"config": attack, "role": "r"}),
+                            ("export_pipeline", {"config": attack}),
+                            ("list_tools", {"pipeline": attack})):
+        r = _rpc(client, "tools/call", {"name": tool_name, "arguments": args},
+                 rpc_id=40)
+        payload = json.loads(r.json()["result"]["content"][0]["text"])
+        assert "error" in payload, f"{tool_name} answered for {attack!r}: {payload}"
+        assert "s3cret" not in json.dumps(payload), f"{tool_name} leaked the file"
+
+
+def test_the_two_writers_into_the_shared_tools_dir_use_one_guard():
+    """`import_pipeline` accepted names `edit_tool` then refuses to address.
+
+    A bundle installing a tool called `my tool` succeeded, and every later
+    `edit_tool`/`get_tool` on it answered "invalid tool name" — installed and
+    uneditable, breaking the surface's promise that generated tools are editable.
+    """
+    from core import pipeline_bundle as pb
+    assert pb.bad_tool_name is tool_guards.bad_tool_name
+    for bad in ("my tool", "a/b", "..", "x" * 100, "étude", ""):
+        assert tool_guards.bad_tool_name(bad), f"accepted {bad!r}"
+
+
+@pytest.mark.asyncio
+async def test_an_event_with_no_run_id_wakes_nobody(wait_sf):
+    """`if rid and rid != run_id` short-circuits on a missing rid, so an event
+    nobody could attribute woke EVERY concurrent waiter — each then reporting a
+    settle-shaped answer for a run that had not settled."""
+    import asyncio
+    task = asyncio.create_task(_wait_tool()("r1", timeout_seconds=1))
+    await asyncio.sleep(0)
+    await wait_sf.notifications.emit("run_failed", None)      # unattributable
+    out = await asyncio.wait_for(task, 5)
+    assert out["timed_out"] is True and out["settled_on"] is None

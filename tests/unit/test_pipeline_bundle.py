@@ -392,7 +392,14 @@ def test_a_tool_with_a_bad_filename_leaves_no_partial_tool_dir(home):
         f.unlink()
     (tools / "custom_scorer").rmdir()
     bundle["tools"] = {"custom_scorer": dict(TOOL_FILES),
-                       "second_tool": {**TOOL_FILES, "notes.txt": "not a tool file"}}
+                       "second_tool": {
+                           "tool.yaml": "name: second_tool\n",
+                           # must define its OWN name: import now vets tools as
+                           # strictly as edit_tool, so a copy of custom_scorer's
+                           # impl would be refused for the wrong reason and this
+                           # test would stop testing the filename rule.
+                           "impl.py": "def second_tool(**kw):\n    return {}\n",
+                           "notes.txt": "not a tool file"}}
 
     with pytest.raises(BundleError, match="unexpected file"):
         pb.import_pipeline(_SF(), _Registry(), bundle)
@@ -430,3 +437,27 @@ def test_a_graph_the_engine_rejects_is_reported_as_a_bundle_error(home):
         pb.import_pipeline(_RejectingSF(), _Registry(), bundle)
     assert not (cfg / "gen_zeta.yaml").exists()
     assert not (tools / "custom_scorer").exists()
+
+
+def test_import_vets_a_tool_as_strictly_as_edit_tool(home):
+    """Import is the writer whose input came from ANOTHER machine, and it was the
+    laxer of the two gates: a tool carrying only README.md installed a directory
+    with no callable, and a module defining the wrong name installed happily.
+    Both failed a whole pipeline run later, at the step that invoked them."""
+    _install_alpha(home)
+    good = pb.export_pipeline("gen_alpha")
+
+    no_impl = {**good, "tools": {"custom_scorer": {"README.md": "junk"}}}
+    with pytest.raises(BundleError, match="needs both impl.py and tool.yaml"):
+        pb.import_pipeline(_SF(), _Registry(), no_impl, overwrite_tools=True)
+
+    wrong_name = {**good, "tools": {"custom_scorer": {
+        "tool.yaml": "name: custom_scorer\n",
+        "impl.py": "def something_else(**kw):\n    return {}\n"}}}
+    with pytest.raises(BundleError, match="no callable named 'custom_scorer'"):
+        pb.import_pipeline(_SF(), _Registry(), wrong_name, overwrite_tools=True)
+
+
+def test_exporting_cannot_read_outside_the_configs_dir(home):
+    with pytest.raises(BundleError, match="invalid config name"):
+        pb.export_pipeline("../../../etc/passwd")

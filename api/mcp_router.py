@@ -50,6 +50,8 @@ import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 
 from api import authz
+from core.tool_guards import (bad_config_name, bad_tool_name,
+                              tool_source_error)
 
 # Every tool's authorization class. No default on purpose — see the module
 # docstring. `read` answers questions; `write` changes state on disk, in the
@@ -232,6 +234,9 @@ def _register_read_tools(tool):
           "tools. This is the source of truth for `edit_pipeline`.")
     def get_pipeline(config: str) -> dict:
         from core import pipeline_registry as pr
+        bad = bad_config_name(config)
+        if bad:
+            return {"error": bad}
         path = pr.generated_configs_dir() / f"{config}.yaml"
         if not path.exists():
             builtin = _builtin_config_path(config)
@@ -295,6 +300,8 @@ def _builtin_stem(config: str) -> str | None:
     "no pipeline 'dpe_default_v2' — call list_pipelines" for a name `list_pipelines`
     had just returned — a loop with no exit, on the most important config there is.
     """
+    if bad_config_name(config):
+        return None
     d = _repo_configs_dir()
     if (d / f"{config}.yaml").exists():
         return config
@@ -328,6 +335,9 @@ def _load_roles(config: str) -> dict | None:
     """Roles for a generated pipeline (<slug>.roles.json) or a built-in one."""
     import json
     from core import pipeline_registry as pr
+    bad = bad_config_name(config)
+    if bad:
+        raise ToolError(bad)
     rj = pr.generated_configs_dir() / f"{config}.roles.json"
     if rj.exists():
         try:
@@ -483,6 +493,9 @@ def _register_edit_tools(tool):
         import yaml as _yaml
         from api.dependencies import get_config_registry, get_skillflow
         from core import pipeline_registry as pr
+        bad = bad_config_name(config)
+        if bad:
+            return {"error": bad}
         path = pr.generated_configs_dir() / f"{config}.yaml"
         if not path.is_file():
             return {"error": f"'{config}' is not a generated pipeline — only "
@@ -515,6 +528,9 @@ def _register_edit_tools(tool):
         import json as _json
         from api.dependencies import get_config_registry, get_skillflow
         from core import pipeline_registry as pr
+        bad = bad_config_name(config)
+        if bad:
+            return {"error": bad}
         rj = pr.generated_configs_dir() / f"{config}.roles.json"
         prior = rj.read_text(encoding="utf-8") if rj.exists() else None
         rj.write_text(_json.dumps(roles, ensure_ascii=False, indent=2),
@@ -636,6 +652,9 @@ def _register_edit_tools(tool):
         if pipeline:
             import yaml as _yaml
             from core import pipeline_registry as pr
+            bad = bad_config_name(pipeline)
+            if bad:
+                return {"error": bad}
             gp = pr.generated_configs_dir() / f"{pipeline}.yaml"
             if not gp.is_file():
                 return {"error": f"no generated pipeline '{pipeline}'"}
@@ -649,7 +668,7 @@ def _register_edit_tools(tool):
           "not readable here — they live in the AItelier or skillflow repo.")
     def get_tool(name: str) -> dict:
         from core.pipeline_bundle import _read_tool
-        bad = _bad_tool_name(name)
+        bad = bad_tool_name(name)
         if bad:
             return {"error": bad}
         files = _read_tool(name)
@@ -665,7 +684,7 @@ def _register_edit_tools(tool):
           "written. Creates the tool when it does not exist yet.")
     def edit_tool(name: str, impl_py: str = "", tool_yaml: str = "") -> dict:
         from core.pipeline_bundle import _TOOL_FILES, _generated_tools_dir, _read_tool
-        bad = _bad_tool_name(name)
+        bad = bad_tool_name(name)
         if bad:
             return {"error": bad}
         current = _read_tool(name) or {}
@@ -677,7 +696,7 @@ def _register_edit_tools(tool):
         if "impl.py" not in files or "tool.yaml" not in files:
             return {"error": "a tool needs both impl.py and tool_yaml; this one would "
                              f"have {sorted(files) or 'nothing'}"}
-        err = _tool_source_error(name, files["impl.py"])
+        err = tool_source_error(name, files["impl.py"])
         if err:
             return {"error": f"rejected, nothing written: {err}"}
         d = _generated_tools_dir() / name
@@ -704,77 +723,6 @@ def _resolve_role(config: str, role: str, roles: dict) -> str | None:
         return qualified
     matches = [r for r in roles if r.rsplit(_ROLE_SEP, 1)[-1] == role]
     return matches[0] if len(matches) == 1 else None
-
-
-# A tool name becomes a DIRECTORY name under the generated-tools dir. Anything
-# with a separator or a traversal segment escapes it — and `get_tool` is a
-# credential-free read, so an unvalidated name there is an arbitrary-directory
-# read of any tool.yaml / impl.py / README.md on the box. One guard, used by every
-# surface that turns a caller-supplied name into a path.
-_TOOL_NAME_OK = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-
-
-def _bad_tool_name(name: str) -> str | None:
-    if not isinstance(name, str) or not _TOOL_NAME_OK.match(name or ""):
-        return (f"invalid tool name {name!r} — a tool name is a single directory "
-                f"name: letters, digits, underscore and dash only")
-    return None
-
-
-def _tool_source_error(name: str, source: str) -> str | None:
-    """Import the source IN A SUBPROCESS and check it defines the tool's callable.
-
-    A tool whose module raises on import, or which never defines `name`, registers
-    fine and fails at the step that calls it — one whole run later.
-
-    The probe runs out-of-process with a timeout because the source is written by
-    an agent and executed at module level: an import that blocks (a waiting loop, a
-    network call, a heavy model load) would otherwise hang the server thread with
-    no way to cancel it, and any module-level side effect would land in the LIVE
-    backend process rather than a throwaway one. Listing what the module does
-    define mirrors `register_tool`'s own probe — the two are the only writers into
-    this shared directory and should reject the same sources for the same reasons.
-    """
-    import json
-    import subprocess
-    import sys
-    import tempfile
-    from pathlib import Path
-
-    probe = (
-        "import importlib.util, json, sys\n"
-        "spec = importlib.util.spec_from_file_location('probe', sys.argv[1])\n"
-        "m = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(m)\n"
-        "fn = getattr(m, sys.argv[2], None)\n"
-        "print(json.dumps({'ok': callable(fn), 'names': sorted(\n"
-        "    n for n in dir(m) if not n.startswith('_') and callable(getattr(m, n, None)))}))\n"
-    )
-    with tempfile.TemporaryDirectory() as td:
-        src = Path(td) / f"{name}.py"
-        src.write_text(source, encoding="utf-8")
-        runner = Path(td) / "_probe_runner.py"
-        runner.write_text(probe, encoding="utf-8")
-        try:
-            r = subprocess.run([sys.executable, str(runner), str(src), name],
-                               capture_output=True, text=True, timeout=20, cwd=td)
-        except subprocess.TimeoutExpired:
-            return ("impl.py did not finish importing within 20s — module-level code "
-                    "must not block (no waiting loops, no network at import time); "
-                    "move that work inside the tool function")
-        if r.returncode != 0:
-            tail = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()]
-            return f"impl.py does not import: {tail[-1] if tail else 'no detail'}"
-        try:
-            info = json.loads((r.stdout or "").strip().splitlines()[-1])
-        except Exception:
-            return "impl.py imported but the probe produced no readable result"
-    if not info.get("ok"):
-        have = ", ".join(info.get("names") or []) or "nothing"
-        return (f"impl.py imports but defines no callable named '{name}' — the "
-                f"loader looks up the function by the tool's own name. It defines: "
-                f"{have}")
-    return None
 
 
 def _reload_tools() -> None:
@@ -900,7 +848,13 @@ def _register_wait_tool(tool):
             if notification.event_type not in _WAIT_EVENTS:
                 return
             rid = notification.run_id or (notification.payload or {}).get("run_id")
-            if rid and rid != run_id:
+            # `if rid and rid != run_id` short-circuits when rid is missing, so an
+            # event nobody could attribute woke EVERY concurrent waiter — each then
+            # reports a settle-shaped answer for a run that did not settle. No
+            # current emitter drops the run_id (pipeline_failed has none at all yet),
+            # so this is the guard matching its own stated intent before something
+            # grows one.
+            if not rid or rid != run_id:
                 return
             seen.update({"event": notification.event_type,
                          "payload": notification.payload or {}})

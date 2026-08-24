@@ -97,6 +97,13 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
                     parts = [f"- `{x.get('name')}`",
                              f"expr `{str(x.get('expr'))[:160]}`",
                              f"actual `{str(x.get('actual'))[:120]}`"]
+                    # `actual` on a comparison assert is just `false`. `observed`
+                    # is the value the property ACTUALLY held — the only thing
+                    # here that tells a reader what to fix. It has to reach THIS
+                    # file: the planner and the implementer read the summary,
+                    # not the 100k-line JSON.
+                    if "observed" in x:
+                        parts.append(f"observed `{str(x.get('observed'))[:200]}`")
                     if x.get("error"):
                         parts.append(f"error `{str(x.get('error'))[:160]}`")
                     lines.append(" | ".join(parts))

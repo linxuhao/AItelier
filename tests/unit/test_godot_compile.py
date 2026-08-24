@@ -199,6 +199,51 @@ def test_the_playtest_summary_carries_the_failing_assertions(tmp_path, monkeypat
     assert "Sparring_Partner.health" not in md
 
 
+def test_the_summary_carries_the_observed_value_not_just_false(tmp_path, monkeypatch):
+    """`actual` on a comparison assert is `false` — it says the assert did not
+    hold and nothing about what broke it. `observed` is the value the property
+    actually held, and it has to reach the SUMMARY: t_plan and t_impl read this
+    file, not the 100k-line JSON.
+
+    jinyong-usable 2026-08-24: `turns_taken == 1` failed for five enemies with
+    `actual: false` five times. The value was 2 — the enemies had acted twice,
+    because a round-1 initiative debuff put the player last in round 2. Four
+    rounds of diagnosis missed that; the number settled it in ninety seconds.
+    """
+    _make_godot_project(tmp_path)
+    behaviour = {
+        "all_passed": False,
+        "scenarios": [{
+            "name": "each_unit_acts_once_per_round_initiative_order",
+            "passed": False,
+            "asserts": [{"name": "East_Heretic.turns_taken", "passed": False,
+                         "expr": "turns_taken == 1", "actual": False,
+                         "observed": 2}],
+        }],
+    }
+    calls = {"n": 0}
+
+    def _fake(req, timeout=0):
+        calls["n"] += 1
+        payload = ({"passed": True, "errors": [], "file_count": 1, "summary": "ok"}
+                   if calls["n"] == 1 else
+                   {"passed": True, "spec_used": True, "frames": 180,
+                    "errors": [], "state": {}, "behavior": behaviour,
+                    "summary": "ran clean but 1/1 scenario(s) failed asserts"})
+
+        class _R:
+            def read(self): return json.dumps(payload).encode()
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return _R()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake)
+    out = tmp_path / "out"
+    godot_compile(project_root=str(tmp_path), out_dir=str(out))
+    md = (out / "playtest_summary.md").read_text(encoding="utf-8")
+    assert "observed `2`" in md, md
+
+
 def test_the_summary_exists_even_when_the_playtest_was_skipped(tmp_path, monkeypatch):
     """A reader must never have to distinguish "no summary" from "no run" —
     that ambiguity is the whole defect. The skipped case says so in words."""

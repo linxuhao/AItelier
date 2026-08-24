@@ -1,0 +1,26 @@
+# AItelier as a DSH plugin — a Profile Bundle that mounts one MCP client row.
+#
+# The model then sees AItelier's pipeline surface as native tools under
+# `mcp__aitelier__*` (the server-qualified shape dsh-mcp-client gives every MCP
+# server). Nothing here holds a secret: `!!js` reads a reference at load time,
+# which is the same doctrine as `ctx.credentials` — configuration carries
+# references to secrets, never the secrets.
+#
+# AITELIER_MCP_URL   where the AItelier container's MCP endpoint is. Over the
+#                    shared docker network that is the service name. If AItelier
+#                    runs on the host instead, use http://127.0.0.1:4444/mcp and
+#                    make sure the host is in AITELIER_MCP_ALLOWED_HOSTS.
+# AITELIER_ADMIN_TOKEN  authorizes the WRITE tools (edit_*, import, run). Reads
+#                    need nothing. Honored only off-tunnel, which a direct
+#                    container-network connection is. Leave it unset for a
+#                    read-only installation — the write tools then answer
+#                    `denied: …` instead of failing obscurely.
+- insert:
+    - id: mcp-aitelier
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: aitelier
+        transport: streamable-http
+        url: !!js process.env.AITELIER_MCP_URL || 'http://aitelier:4444/mcp'
+        headers:
+          X-AItelier-Admin-Token: !!js process.env.AITELIER_ADMIN_TOKEN || ''

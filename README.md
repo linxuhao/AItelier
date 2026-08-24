@@ -55,6 +55,7 @@ Honest, current state — so nothing here reads as more finished than it is.
 | Append-only trace + trace API · Git event-sourcing · Rich CLI/TUI | ✅ Available today |
 | Runs on the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine (deterministic DAG execution, tools, checkpoints, durable trace) | ✅ Available today |
 | **Generate a pipeline from a plain-language description** — grounded generator provisions missing tools, wires + gates the graph, registers it to run by name | ✅ Available today |
+| **MCP endpoint + DeepSeek Harness plugin** — drive AItelier from any MCP-speaking agent: list / edit / run / export / import pipelines as native tools | ✅ Available today |
 | Final verifier **runs** the generated app (runtime smoke-test) | 🚧 Roadmap — *today it reviews code statically and can miss runtime bugs* |
 | No-code visual workflow builder · managed multi-tenant SaaS · collaboration & compliance tooling | 🚧 Roadmap |
 | Horizontal expansion beyond software delivery, on the same engine | 🔭 Vision |
@@ -172,6 +173,24 @@ A typical run with the flagship DPE pipeline:
 
 Every generated run gets the same deterministic execution, human checkpoints, and append-only trace as the flagship pipeline. Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. This is the working core of the [no-code workflow platform](#roadmap) — the visual builder on top of it is still to come.
 
+## Use AItelier from another agent (MCP)
+
+AItelier's backend exposes its whole pipeline surface as an **MCP endpoint** (`/mcp`, streamable HTTP) — so any MCP-speaking agent can use AItelier as a subagent: **17 tools** covering the four artefact kinds (pipeline graph, agent roles, prompt templates, custom tools) with list / get / edit on each, plus:
+
+- **`run_pipeline` + `wait_for_run`** — start a run (returns immediately; runs are long and may pause for human approval) and block until it settles at a checkpoint, completion, *or failure* — push-based, no polling.
+- **`export_pipeline` / `import_pipeline`** — carry a generated pipeline between machines as **one self-contained JSON bundle**: its graph, its roles *with* their prompts, and any custom tool it needs. Import validates everything before writing, renames safely, and refuses to silently overwrite a same-named tool that differs.
+
+Authorization is **per tool**, not per route: read tools are open, write tools require the same authorization as the web UI (Cloudflare Access allowlist, or `AITELIER_ADMIN_TOKEN` off-tunnel). Without credentials you get a legitimate read-only installation — write tools answer `denied: …` and change nothing.
+
+For **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) there's a ready plugin bundle in [`integrations/dsh/`](integrations/dsh/) — one command installs it into a profile and registers the tools as `mcp__aitelier__*`:
+
+```bash
+dsh plugin --profile headless add <path-to>/AItelier/integrations/dsh
+echo 'AITELIER_MCP_URL=http://127.0.0.1:4444/mcp' >> ~/.dsh/.env   # where your AItelier runs
+```
+
+Any other MCP host configures the same endpoint URL directly (streamable HTTP transport).
+
 ## Configuration
 
 To change which models or agents the pipeline uses, edit the config files directly:
@@ -195,7 +214,7 @@ AItelier is a **host application** on top of the SkillFlow framework:
 - **Templates** (`templates/`) — per-step LLM system prompts
 - **Tools** (`aitelier/tools/`) — AItelier custom tools + SkillFlow native tools
 - **Core** (`core/`) — agents, scheduler, AI router, DB, workspace
-- **API** (`api/`, `web_api/`) — the CLI backend, plus an early multi-tenant Web backend. Includes admin endpoints (`/api/admin/`) for user tracking with per-user delete, writer-only access via Cloudflare Access.
+- **API** (`api/`, `web_api/`) — the CLI backend, plus an early multi-tenant Web backend. Includes admin endpoints (`/api/admin/`) for user tracking with per-user delete, writer-only access via Cloudflare Access, and the MCP endpoint (`api/mcp_router.py`, served at `/mcp`) that exposes the pipeline surface to external agents.
 - **Web** (`web/`) — Svelte 5 + Vite SPA, compiled to `web/dist/` and served by FastAPI
 - **CLI** (`cli/`) — Rich TUI dashboard
 

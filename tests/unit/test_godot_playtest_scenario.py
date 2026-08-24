@@ -117,6 +117,44 @@ def test_it_playtests_the_staged_edits_not_the_repo(tmp_path, monkeypatch):
     assert "scripts/combat.gd" in out["report"]
 
 
+def test_a_staged_SCENARIO_is_the_one_evaluated_not_the_repo_baseline(tmp_path,
+                                                                      monkeypatch):
+    """Staging a scenario file must change the contract that gets evaluated.
+
+    The probe passes the spec to the sidecar EXPLICITLY, so reading it from the
+    repo while pointing project_dir at the overlaid tree ran the staged code
+    against the BASELINE scenario — and still answered
+    `staged_files_applied: [that scenario file]`. It only bites when the staged
+    file IS a scenario, which is why the sibling test above missed it: that one
+    stages a .gd, and code overlays worked fine.
+
+    Live, jinyong-winnable 2026-08-24, first agent to use the tool in anger:
+    "the sidecar listed the staged file as applied but the evaluated assert
+    expressions were the repo-baseline (OLD) ones". Four of that round's five
+    task cards edit scenario files.
+    """
+    repo = _make_repo(tmp_path / "repo")
+    staging = tmp_path / "stage"
+    (staging / "playtest").mkdir(parents=True)
+    (staging / "playtest" / "alpha.yaml").write_text(yaml.safe_dump(
+        {"name": "alpha",
+         "timeline": [{"at": 99, "assert": {"REWRITTEN": "turns_taken == 2"}}]},
+        sort_keys=False))
+    captured = {}
+    _fake_builder(monkeypatch, captured)
+
+    out = godot_playtest_scenario(scenario="alpha", project_root=str(repo),
+                                  step_tmp_dir=str(staging), step_id="t_impl")
+
+    assert out["staged_files_applied"] == ["playtest/alpha.yaml"]
+    sent = captured["body"]["spec"]["scenarios"]
+    assert len(sent) == 1 and sent[0]["name"] == "alpha"
+    row = sent[0]["timeline"][0]
+    assert row["at"] == 99 and "REWRITTEN" in row["assert"], (
+        "the sidecar was sent the repo-baseline scenario while the report "
+        f"claimed the staged one was applied: {row}")
+
+
 def test_staged_overlay_carries_the_untouched_repo_files_too(tmp_path, monkeypatch):
     repo = _make_repo(tmp_path / "repo")
     (repo / "scripts" / "hud.gd").write_text("# hud\n")

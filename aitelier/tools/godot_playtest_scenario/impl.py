@@ -118,25 +118,10 @@ def godot_playtest_scenario(*, scenario: str = "", project_root: str = "",
     if not (repo / "project.godot").is_file():
         return {"error": f"No project.godot at {repo} — not a Godot project."}
 
-    spec, info = read_spec(repo)
-    if info["errors"]:
-        return {"error": "The play-test contract could not be read whole: "
-                         + " | ".join(info["errors"])}
-    if not spec:
-        return {"error": f"No play-test contract in {repo} (expected a "
-                         f"playtest/ directory or playtest_spec.yaml)."}
-
     names = [n.strip() for n in str(scenario).split(",") if n.strip()]
-    available = sorted(str(s.get("name")) for s in spec["scenarios"])
     if not names:
         return {"error": "scenario is required — name one (or several, comma-"
-                         f"separated) of: {', '.join(available)}"}
-    picked, unknown = select_scenarios(spec, names)
-    if unknown:
-        # Never run the recognised subset and report on it: a typo would then
-        # read as "the scenario I asked about is green".
-        return {"error": f"unknown scenario(s) {unknown}. Available: "
-                         f"{', '.join(available)}"}
+                         "separated) of the contract's scenarios."}
 
     staged = _staged_files(step_tmp_dir) if use_staged else []
     scratch = _scratch_root(step_id, run_id)
@@ -146,6 +131,35 @@ def godot_playtest_scenario(*, scenario: str = "", project_root: str = "",
         if staged:
             target = scratch / "project"
             overlaid = _overlay_tree(repo, staged, Path(step_tmp_dir), target)
+
+        # Read the contract from the OVERLAID tree, never from the repo. The
+        # spec is passed to the sidecar explicitly, so reading it from `repo`
+        # while pointing project_dir at `target` ran the caller's staged CODE
+        # against the BASELINE scenario — and still reported
+        # `staged_files_applied: [that scenario file]`.
+        #
+        # It only bites when the staged file IS a scenario, which is why it
+        # survived its own end-to-end check: that one staged a .gd. Live,
+        # jinyong-winnable 2026-08-24, the first agent to use this tool in
+        # anger: "the sidecar listed the staged file as applied but the
+        # evaluated assert expressions were the repo-baseline (OLD) ones …
+        # i.e. the sidecar ran the scenario against a stale spec copy, not the
+        # staged rewrite." Four of that round's five cards edit scenario files.
+        spec, info = read_spec(target)
+        if info["errors"]:
+            return {"error": "The play-test contract could not be read whole: "
+                             + " | ".join(info["errors"])}
+        if not spec:
+            return {"error": f"No play-test contract in {target} (expected a "
+                             f"playtest/ directory or playtest_spec.yaml)."}
+
+        available = sorted(str(s.get("name")) for s in spec["scenarios"])
+        picked, unknown = select_scenarios(spec, names)
+        if unknown:
+            # Never run the recognised subset and report on it: a typo would
+            # then read as "the scenario I asked about is green".
+            return {"error": f"unknown scenario(s) {unknown}. Available: "
+                             f"{', '.join(available)}"}
 
         report = post_playtest({"project_dir": str(target), "spec": picked},
                                timeout=900)

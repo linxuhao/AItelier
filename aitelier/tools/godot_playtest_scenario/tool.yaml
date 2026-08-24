@@ -3,7 +3,8 @@ description: >
   Play-test ONE scenario from the project's play-test contract and get its
   per-assertion outcome back immediately — instead of ending your step and
   waiting ~10 minutes for the full 26-scenario gate at 5_compile. Give it
-  `scenario` (one scenario name, or several comma-separated). For every FAILING
+  `scenario` (a name from the contract) or `inline_scenario` (scenario YAML
+  that is never written to the repo). For every FAILING
   assertion it reports the expression AND `observed`, the value the property
   actually held at that frame — which is the number that tells you what to fix;
   `actual` on a comparison assert is only `false`. Scenario names come from the
@@ -18,8 +19,22 @@ description: >
 parameters:
   scenario:
     type: string
-    description: "Scenario name to run, e.g. dot_resolves_at_victim_turn_start. Several: comma-separated."
-    required: true
+    description: "Scenario name to run, e.g. dot_resolves_at_victim_turn_start. Several: comma-separated. Give this OR inline_scenario."
+    required: false
+  inline_scenario:
+    type: string
+    description: >
+      A scenario as YAML text, run WITHOUT writing anything to the repo. Use
+      this to force `observed` values out of a running build: write asserts
+      that cannot hold (`current_round == -1`, `phase == "NEVER"`) and read
+      what the report says was actually there. Accepts one scenario mapping
+      (needs `timeline:`) or `{scenarios: [...]}`; `name:` is optional. The
+      shared header (scene / actions / surface) still comes from the project's
+      `playtest/_common.yaml`, so only the scenario list is yours. Prefer this
+      over creating a throwaway `playtest/*.yaml` — an unlisted scenario file
+      is still executed by the loader, so one you forget to delete reddens the
+      whole gate, not just itself.
+    required: false
   project_root:
     type: string
     description: "Path to the project repo (auto-injected by the engine)"

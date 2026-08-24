@@ -266,3 +266,67 @@ def test_an_unreachable_builder_is_an_error_not_a_green_probe(tmp_path, monkeypa
         "aitelier.tools.godot_playtest.impl.urllib.request.urlopen", boom)
     out = godot_playtest_scenario(scenario="alpha", project_root=str(repo))
     assert "unreachable" in out["error"]
+
+
+# The tool used to take a scenario NAME only, so forcing `observed` values out
+# meant writing a throwaway scenario into playtest/ — the deliverable directory
+# — and remembering to delete it. jinyong-endgame 2026-08-24: four of six cards
+# shipped or re-shipped probe scaffolding that way (one across three
+# rejections, one delivering nothing else), and because the loader runs unlisted
+# scenario files, a forgotten probe reddens the WHOLE gate. inline_scenario
+# removes the file from the loop.
+
+def test_inline_scenario_runs_without_touching_the_repo(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path / "repo")
+    before = sorted(p.name for p in (repo / "playtest").iterdir())
+    captured = {}
+    _fake_builder(monkeypatch, captured)
+
+    out = godot_playtest_scenario(
+        project_root=str(repo),
+        inline_scenario="timeline:\n- at: 7\n  assert:\n    Foo.bar: bar == -1\n")
+
+    assert "error" not in out, out
+    sent = captured["body"]["spec"]["scenarios"]
+    assert len(sent) == 1 and sent[0]["timeline"][0]["at"] == 7
+    assert sent[0]["name"] == "inline_probe"          # named for you
+    # The shared header still comes from the project's _common.yaml.
+    assert captured["body"]["spec"]["scene"] == "res://main.tscn"
+    # And nothing was written into the contract directory.
+    assert sorted(p.name for p in (repo / "playtest").iterdir()) == before
+
+
+def test_inline_scenario_accepts_the_scenarios_wrapper(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path / "repo")
+    captured = {}
+    _fake_builder(monkeypatch, captured)
+    out = godot_playtest_scenario(
+        project_root=str(repo),
+        inline_scenario=("scenarios:\n- name: probe_a\n  timeline:\n"
+                         "  - at: 1\n    assert: {A.b: 'b == -1'}\n"))
+    assert "error" not in out, out
+    assert [s["name"] for s in captured["body"]["spec"]["scenarios"]] == ["probe_a"]
+
+
+def test_inline_scenario_without_a_timeline_is_refused(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path / "repo")
+    _fake_builder(monkeypatch, {})
+    out = godot_playtest_scenario(project_root=str(repo),
+                                  inline_scenario="name: nope\n")
+    assert "timeline" in out.get("error", ""), out
+
+
+def test_neither_scenario_nor_inline_is_refused(tmp_path, monkeypatch):
+    repo = _make_repo(tmp_path / "repo")
+    _fake_builder(monkeypatch, {})
+    out = godot_playtest_scenario(project_root=str(repo))
+    assert "inline_scenario" in out.get("error", ""), out
+
+
+def test_both_scenario_and_inline_is_refused(tmp_path, monkeypatch):
+    """Ambiguity here would silently pick one and report on the other."""
+    repo = _make_repo(tmp_path / "repo")
+    _fake_builder(monkeypatch, {})
+    out = godot_playtest_scenario(project_root=str(repo), scenario="alpha",
+                                  inline_scenario="timeline: []\n")
+    assert "not both" in out.get("error", ""), out

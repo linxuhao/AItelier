@@ -105,12 +105,18 @@ def _render(scenarios: list[dict]) -> list[str]:
     return lines
 
 
-def godot_playtest_scenario(*, scenario: str = "", project_root: str = "",
+def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
+                            project_root: str = "",
                             workspace_root: str = "", step_tmp_dir: str = "",
                             step_id: str = "", run_id: str = "",
                             use_staged: bool = True, **kwargs) -> dict:
-    """Play-test the named scenario(s) only. ``scenario`` is one name or a
-    comma-separated list. Returns the per-assertion outcome as text."""
+    """Play-test one scenario and report every failing assertion's ``observed``.
+
+    ``scenario`` names one (or several, comma-separated) from the project's
+    contract. ``inline_scenario`` instead supplies a scenario as YAML text and
+    never touches the repo — that is the way to force values out of a running
+    build without writing a throwaway file into the deliverable.
+    """
     from aitelier.tools.godot_playtest.impl import (post_playtest, read_spec,
                                                     select_scenarios)
 
@@ -119,9 +125,30 @@ def godot_playtest_scenario(*, scenario: str = "", project_root: str = "",
         return {"error": f"No project.godot at {repo} — not a Godot project."}
 
     names = [n.strip() for n in str(scenario).split(",") if n.strip()]
-    if not names:
-        return {"error": "scenario is required — name one (or several, comma-"
-                         "separated) of the contract's scenarios."}
+    inline_doc = None
+    if str(inline_scenario).strip():
+        import yaml as _yaml
+        try:
+            doc = _yaml.safe_load(inline_scenario)
+        except Exception as exc:
+            return {"error": f"inline_scenario is not valid YAML: {exc}"}
+        if isinstance(doc, dict) and isinstance(doc.get("scenarios"), list):
+            inline_doc = doc["scenarios"]
+        elif isinstance(doc, dict) and doc.get("timeline") is not None:
+            inline_doc = [doc]
+        else:
+            return {"error": "inline_scenario must be one scenario mapping "
+                             "(with `timeline:`) or {scenarios: [...]}."}
+        for i, sc in enumerate(inline_doc):
+            if not isinstance(sc, dict) or sc.get("timeline") is None:
+                return {"error": f"inline_scenario[{i}] has no `timeline:`."}
+            sc.setdefault("name", f"inline_probe_{i}" if i else "inline_probe")
+    if not names and inline_doc is None:
+        return {"error": "give either `scenario` (a name from the contract) or "
+                         "`inline_scenario` (scenario YAML, never written to "
+                         "the repo)."}
+    if names and inline_doc is not None:
+        return {"error": "give `scenario` or `inline_scenario`, not both."}
 
     staged = _staged_files(step_tmp_dir) if use_staged else []
     scratch = _scratch_root(step_id, run_id)
@@ -153,13 +180,27 @@ def godot_playtest_scenario(*, scenario: str = "", project_root: str = "",
             return {"error": f"No play-test contract in {target} (expected a "
                              f"playtest/ directory or playtest_spec.yaml)."}
 
-        available = sorted(str(s.get("name")) for s in spec["scenarios"])
-        picked, unknown = select_scenarios(spec, names)
-        if unknown:
-            # Never run the recognised subset and report on it: a typo would
-            # then read as "the scenario I asked about is green".
-            return {"error": f"unknown scenario(s) {unknown}. Available: "
-                             f"{', '.join(available)}"}
+        if inline_doc is not None:
+            # The contract still supplies the shared header (scene / actions /
+            # surface from _common.yaml) — only the scenario list is replaced.
+            # Nothing is written to playtest/, which is the whole point: the
+            # tool used to take a NAME only, so forcing `observed` values out
+            # meant writing a throwaway scenario into the deliverable directory
+            # and remembering to delete it. jinyong-endgame 2026-08-24: four of
+            # six cards shipped or re-shipped probe scaffolding that way, one of
+            # them across three rejections, and the loader runs unlisted
+            # scenario files — so a forgotten probe reddens the WHOLE gate, not
+            # just itself.
+            picked = dict(spec)
+            picked["scenarios"] = inline_doc
+        else:
+            available = sorted(str(s.get("name")) for s in spec["scenarios"])
+            picked, unknown = select_scenarios(spec, names)
+            if unknown:
+                # Never run the recognised subset and report on it: a typo would
+                # then read as "the scenario I asked about is green".
+                return {"error": f"unknown scenario(s) {unknown}. Available: "
+                                 f"{', '.join(available)}"}
 
         report = post_playtest({"project_dir": str(target), "spec": picked},
                                timeout=900)

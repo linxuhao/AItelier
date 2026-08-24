@@ -1349,10 +1349,18 @@ def _sync_project_status_to_db(project_id: str):
         db.set_project_meta_state(project_id, run["status"])
 
         if has_task_loop:
-            # Check for tasks created by PM (step 3_review → tasks/ dir)
-            existing_tasks = db.list_tasks_by_project(project_id)
-            if not existing_tasks:
-                _sync_task_manifest_to_db(project_id)
+            # Re-read the PM's manifest on EVERY tick, not only when the task
+            # table is empty. Step 3 is not written once: a goal loop, a review
+            # reject or a retry promotes a NEW tasks/ set over the old one. The
+            # only other resync hook lives inside the tick's try-block *after*
+            # sf.confirm_step, so a re-plan whose confirm raised never reaches
+            # it (live: jinyong-cultivate 2026-08-23 — step 3 re-ran into 8
+            # `fix_*` tasks, confirm died on "version mismatch" after a reclaim,
+            # and the rows stayed frozen on the superseded 14-task manifest:
+            # the API read 0/14 while the loop was at 6/8). Cheap to call:
+            # _sync_task_manifest_to_db is content-addressed via the
+            # .tasks_synced_hash digest and no-ops when nothing changed.
+            _sync_task_manifest_to_db(project_id)
             # Derive per-task status from the skillflow task-loop progress so the
             # dashboard task badge isn't stuck at "pending" after tasks finish.
             _sync_task_statuses(project_id, run, sf)

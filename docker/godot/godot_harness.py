@@ -326,7 +326,46 @@ func _act(action: String, pressed: bool) -> void:
 # asserted only "no error". Either make the handler use the event position it
 # was already handed (the more robust shape anyway, and it makes the path
 # testable), or drive that path with its keyboard action instead.
-func _click(node_name: String) -> void:
+func _click(spec: String) -> void:
+    # `spec` is "<Node>[ +dx,dy][ left|right|middle]" -- see _click_at.
+    var node_name := spec
+    var offset := Vector2.ZERO
+    var button := MOUSE_BUTTON_LEFT
+    var toks := spec.split(" ", false)
+    if toks.size() > 0:
+        node_name = toks[0]
+        for i in range(1, toks.size()):
+            var t: String = toks[i]
+            if t.begins_with("+") or t.begins_with("-") or ("," in t):
+                var xy := t.split(",", false)
+                if xy.size() != 2 or not xy[0].is_valid_float() or not xy[1].is_valid_float():
+                    push_error("click: malformed offset %s in spec: %s" % [t, spec])
+                    return
+                offset = Vector2(float(xy[0]), float(xy[1]))
+            elif t == "left":
+                button = MOUSE_BUTTON_LEFT
+            elif t == "right":
+                button = MOUSE_BUTTON_RIGHT
+            elif t == "middle":
+                button = MOUSE_BUTTON_MIDDLE
+            else:
+                push_error("click: unknown token %s in spec: %s" % [t, spec])
+                return
+    _click_at(node_name, offset, button, spec)
+
+
+## Click a resolved node's on-screen point, optionally displaced by `offset`
+## screen pixels and with a chosen mouse button.
+##
+## The OFFSET exists because not every clickable thing is a node. The battle
+## grid is painted by _draw() -- an empty tile has no node to name -- so a
+## click-to-move scenario cannot address its destination by name. Absolute
+## screen coordinates would work but rot the moment the camera, the tile size
+## or the layout moves. Anchoring to a live node instead ("Player +64,0" = one
+## 64px tile to the player's right) keeps the scenario expressed in the terms
+## the DESIGN uses, and it stays correct as long as the anchor is where the
+## game says it is -- which the surrounding assertions already check.
+func _click_at(node_name: String, offset: Vector2, button: int, spec: String) -> void:
     # Click a NAMED NODE, not a raw coordinate: resolve it, take the centre of
     # its on-screen rect, and send a real InputEventMouseButton there. That is
     # what makes this a HIT TEST rather than a handler call -- a button that is
@@ -340,7 +379,7 @@ func _click(node_name: String) -> void:
     # graded a game nobody played.
     var n := _resolve(node_name)
     if n == null:
-        push_error("click: node not found: " + node_name)
+        push_error("click: node not found: " + node_name + " (spec: " + spec + ")")
         return
     var pos: Vector2
     if n is Control:
@@ -381,13 +420,21 @@ func _click(node_name: String) -> void:
     # it clicks; so is this one now. Measured, not assumed: with only the button
     # event the enemy took 0 damage and `acted` stayed false, no error raised --
     # the most dangerous shape, a click that reports success and does nothing.
+    pos += offset
+    var vp_rect := get_viewport().get_visible_rect()
+    if not vp_rect.has_point(pos):
+        # An off-screen point is not a click a player could ever make. Silently
+        # sending it would produce a scenario that "clicked" and changed
+        # nothing -- the exact vacuous green this harness refuses to grade.
+        push_error("click: point %s is outside the viewport %s (spec: %s)" % [pos, vp_rect.size, spec])
+        return
     var mm := InputEventMouseMotion.new()
     mm.position = pos
     mm.global_position = pos
     Input.parse_input_event(mm)
     for is_down in [true, false]:
         var ev := InputEventMouseButton.new()
-        ev.button_index = MOUSE_BUTTON_LEFT
+        ev.button_index = button
         ev.pressed = is_down
         ev.position = pos
         ev.global_position = pos

@@ -45,9 +45,12 @@ import inspect
 import os
 from typing import Callable
 
+from typing import Annotated
+
 import anyio.to_thread
 
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import Field
 
 from api import authz
 from core.tool_guards import (bad_config_name, bad_tool_name,
@@ -65,6 +68,31 @@ _MAIN_LOOP = None
 # reference to a bare task, so one dropped here would be garbage-collected
 # mid-run and the pipeline would stop moving for no visible reason.
 _DRIVERS: set = set()
+
+
+# Published parameter descriptions. Not applied wholesale — these three are where
+# guessing wrong costs a round trip: WHICH id a run-taking tool wants, WHICH
+# spelling of a pipeline's name, and WHICH of a graph's step ids. `Annotated` +
+# `Field` is how FastMCP gets a description into the JSON schema; a bare `str`
+# publishes a typed field with nothing in it, which is what all ~40 parameters
+# were.
+RunId = Annotated[str, Field(description=(
+    "A skillflow run_id, or a project_id. A project id resolves to that "
+    "project's NEWEST run and the answer echoes which run it used. list_runs "
+    "returns both."))]
+ConfigName = Annotated[str, Field(description=(
+    "A pipeline name exactly as list_pipelines returns it. That is the graph's "
+    "DECLARED name, which is not always its file name — configs/dpe_default.yaml "
+    "declares 'dpe_default_v2', and dpe_game has no file at all."))]
+ConfigFilter = Annotated[str, Field(description=(
+    "Optional filter: only runs of this pipeline (a name from list_pipelines). "
+    "Empty means every pipeline."))]
+StepId = Annotated[str, Field(description=(
+    "A step id from this run's graph — the `steps` list of get_run_summary or of "
+    "get_pipeline. The graph's id ('t_impl', '5_review'), not a display label."))]
+StepFilter = Annotated[str, Field(description=(
+    "Optional filter: only rows from this step id (see get_run_summary's "
+    "`steps`). Empty means every step."))]
 
 
 class ToolDenied(Exception):
@@ -242,7 +270,7 @@ def _register_read_tools(tool):
     @tool("get_pipeline", "read",
           "Read one pipeline's graph YAML plus the names of its roles, templates and "
           "tools. This is the source of truth for `edit_pipeline`.")
-    def get_pipeline(config: str) -> dict:
+    def get_pipeline(config: ConfigName) -> dict:
         src = _config_source(config)
         if src is None:
             return {"error": f"no pipeline '{config}' — call list_pipelines"}
@@ -276,7 +304,7 @@ def _register_read_tools(tool):
     @tool("list_roles", "read",
           "List the agent roles (model + template + tools) a pipeline's agent steps "
           "use. For a generated pipeline these live in <slug>.roles.json.")
-    def list_roles(config: str) -> dict:
+    def list_roles(config: ConfigName) -> dict:
         roles, err = _roles_or_error(config)
         if err:
             return err
@@ -289,7 +317,7 @@ def _register_read_tools(tool):
 
     @tool("get_role", "read",
           "Read one role's full config, including its system prompt.")
-    def get_role(config: str, role: str) -> dict:
+    def get_role(config: ConfigName, role: str) -> dict:
         roles, err = _roles_or_error(config)
         if err:
             return err
@@ -543,7 +571,7 @@ def _register_bundle_tools(tool):
           "bundle to another AItelier and `import_pipeline` reproduces it there. "
           "Only generated (gen_*) pipelines can be exported — a built-in config "
           "travels with the repo.")
-    def export_pipeline(config: str) -> dict:
+    def export_pipeline(config: ConfigName) -> dict:
         from core.pipeline_bundle import BundleError, export_pipeline as _exp
         # Resolve first, so a registered-but-unexportable config is told what it IS
         # and where to read it — the bundle layer only knows "no <config>.yaml",
@@ -615,7 +643,7 @@ def _register_edit_tools(tool):
           "graph is parsed and validated BEFORE anything is written; on failure "
           "nothing changes and the error explains why. Read it with get_pipeline "
           "first — this replaces the whole file, it does not patch.")
-    def edit_pipeline(config: str, graph_yaml: str) -> dict:
+    def edit_pipeline(config: ConfigName, graph_yaml: str) -> dict:
         import yaml as _yaml
         from api.dependencies import get_config_registry, get_skillflow
         from core import pipeline_registry as pr
@@ -690,7 +718,8 @@ def _register_edit_tools(tool):
           "Change a role's model, tools, temperature or thinking settings. To change "
           "its PROMPT use edit_template — the prompt is the role's template. Only the "
           "fields you pass are changed.")
-    def edit_role(config: str, role: str, model: str = "", tools: list = None,
+    def edit_role(config: ConfigName, role: str, model: str = "",
+                  tools: list = None,
                   temperature: float = None, thinking: dict = None) -> dict:
         roles, err = _roles_or_error(config)
         if err:
@@ -723,7 +752,7 @@ def _register_edit_tools(tool):
           "role (`system_prompt`, how a generated pipeline does it) or in a "
           "templates/*.md file the role names (`template: step1_5_researcher.md`, "
           "how every built-in role does it).")
-    def list_templates(config: str) -> dict:
+    def list_templates(config: ConfigName) -> dict:
         roles, err = _roles_or_error(config)
         if err:
             return err
@@ -737,7 +766,7 @@ def _register_edit_tools(tool):
           "Read one role's prompt template in full, wherever it is kept — inline on "
           "the role, or in the templates/*.md file the role names. `source` says "
           "which, so a caller can tell an empty prompt from one it failed to find.")
-    def get_template(config: str, role: str) -> dict:
+    def get_template(config: ConfigName, role: str) -> dict:
         roles, err = _roles_or_error(config)
         if err:
             return err
@@ -755,7 +784,7 @@ def _register_edit_tools(tool):
           "it with get_template first. Only a GENERATED pipeline can be changed "
           "here: a built-in role's prompt is a repo file (get_template's `source` "
           "names it), so changing it is a repo edit, not an API call.")
-    def edit_template(config: str, role: str, template: str) -> dict:
+    def edit_template(config: ConfigName, role: str, template: str) -> dict:
         if not (template or "").strip():
             return {"error": "template is empty — a role with no prompt falls back "
                              "to a generic one, which is almost never what you want"}
@@ -943,7 +972,7 @@ def _register_run_tools(tool):
           "wait_for_run, then get_run_summary to see what happened. `seed_text` is "
           "the input; list_pipelines' input_hint says what each pipeline expects. "
           "`against_project` runs it against an existing project's repo.")
-    def run_pipeline(config: str, seed_text: str = "", name: str = "",
+    def run_pipeline(config: ConfigName, seed_text: str = "", name: str = "",
                      against_project: str = "", checkpoints: str = "auto") -> dict:
         from api.dependencies import (db_instance, get_config_registry,
                                       get_workspace_manager)
@@ -1009,7 +1038,7 @@ def _register_run_tools(tool):
           " This one MUTATES, so when a project id has several runs the reply also "
           "lists the siblings: a wrong target is visible in the answer rather than "
           "only in what happens next.")
-    def answer_checkpoint(run_id: str, decision: str = "approve",
+    def answer_checkpoint(run_id: RunId, decision: str = "approve",
                           feedback: str = "") -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import resolve_run_ref
@@ -1086,7 +1115,7 @@ def _register_run_tools(tool):
           "name, which names neither what broke nor why. Use it to decide whether to "
           "fix the pipeline (edit_template / edit_pipeline / edit_tool) and run it "
           "again. " + _EITHER)
-    def get_run_summary(run_id: str) -> dict:
+    def get_run_summary(run_id: RunId) -> dict:
         from api.dependencies import (get_config_registry, get_skillflow,
                                       get_workspace_manager)
         from core.run_driver import summarise_run
@@ -1105,7 +1134,7 @@ def _register_run_tools(tool):
           "Current status of a run: running / paused-at-checkpoint / completed / "
           "failed, with the step it is on. A paused run needs answer_checkpoint "
           "before it moves. " + _EITHER)
-    def get_run_status(run_id: str) -> dict:
+    def get_run_status(run_id: RunId) -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import resolve_run_ref
         run, resolved = resolve_run_ref(get_skillflow(), run_id)
@@ -1147,7 +1176,7 @@ def _register_wait_tool(tool):
           "your MCP client's per-call timeout (60s by default) does NOT work — the "
           "client hangs up first. Raise toolCallTimeoutMs before raising this. "
           "timeout_seconds=0 checks and returns without waiting. " + _EITHER)
-    async def wait_for_run(run_id: str, timeout_seconds: int = None) -> dict:
+    async def wait_for_run(run_id: RunId, timeout_seconds: int = None) -> dict:
         import asyncio
         from api.dependencies import get_skillflow
         from core.trace_reader import resolve_run_ref
@@ -1315,7 +1344,8 @@ def _register_trace_tools(tool):
           "Filter by `config`, `status` ('running' / 'paused' / 'completed' / "
           "'failed') or `project_id`. A 'paused' run is waiting for "
           "answer_checkpoint.")
-    def list_runs(config: str = "", status: str = "", project_id: str = "",
+    def list_runs(config: ConfigFilter = "", status: str = "",
+                  project_id: str = "",
                   limit: int = 30) -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import list_runs as _ls
@@ -1327,7 +1357,7 @@ def _register_trace_tools(tool):
           "this is where a failed run's actual reason lives, which get_run_summary "
           "only points at. Use errors_only=true to go straight to what broke, then "
           "trace_read(seq) for the full payload. " + _EITHER)
-    def trace_list(run_id: str, step: str = "", category: str = "",
+    def trace_list(run_id: RunId, step: StepFilter = "", category: str = "",
                    errors_only: bool = False, limit: int = 50,
                    order: str = "desc") -> dict:
         from api.dependencies import get_skillflow
@@ -1340,7 +1370,7 @@ def _register_trace_tools(tool):
           "went wrong but not which step did it (an error message, a file name, a "
           "phrase from a prompt). Returns the same compact lines as trace_list. "
           + _EITHER)
-    def trace_search(run_id: str, query: str, step: str = "",
+    def trace_search(run_id: RunId, query: str, step: StepFilter = "",
                      limit: int = 30) -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import trace_search as _ts
@@ -1351,7 +1381,7 @@ def _register_trace_tools(tool):
           "prompt, the actual model response, the actual tool result. Get the seq "
           "from trace_list or trace_search first; this is deliberately not a way to "
           "dump a whole run. " + _EITHER)
-    def trace_read(run_id: str, seq: int, seq_end: int = None) -> dict:
+    def trace_read(run_id: RunId, seq: int, seq_end: int = None) -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import trace_read as _tr
         return _tr(get_skillflow(), run_id, seq, seq_end)
@@ -1415,7 +1445,7 @@ def _register_lifecycle_tools(tool):
           "left spinning holds the scheduler's one-project-per-tick slot against "
           "every other project. " + _EITHER + " This one MUTATES, so when a project "
           "id has several runs the reply also lists the siblings.")
-    def stop_pipeline(run_id: str, reason: str = "") -> dict:
+    def stop_pipeline(run_id: RunId, reason: str = "") -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import resolve_run_ref
         sf = get_skillflow()
@@ -1438,7 +1468,7 @@ def _register_lifecycle_tools(tool):
           "row keeps it runnable, so an archived-by-hand pipeline comes back as a "
           "zombie. This moves the files aside and records the name so the boot scan "
           "skips it; `purge=true` deletes the graph row too and cannot be undone.")
-    def archive_pipeline(config: str, purge: bool = False) -> dict:
+    def archive_pipeline(config: ConfigName, purge: bool = False) -> dict:
         from api.dependencies import get_config_registry, get_skillflow
         from core.pipeline_registry import archive_generated_pipeline
         bad = bad_config_name(config)
@@ -1459,7 +1489,7 @@ def _register_lifecycle_tools(tool):
           "`file=<a key from the files map>` to read that one file alone at a "
           "200000-char cap — a whole step can be ~100 KB, so the cap stays and the "
           "way past it is per file. " + _EITHER)
-    def get_step_output(run_id: str, step: str, file: str = "") -> dict:
+    def get_step_output(run_id: RunId, step: StepId, file: str = "") -> dict:
         from api.dependencies import get_skillflow, get_workspace_manager
         from core.trace_reader import resolve_run_ref
         sf = get_skillflow()

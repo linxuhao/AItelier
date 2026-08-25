@@ -1228,6 +1228,26 @@ def test_a_truncated_step_file_says_so_in_band_and_in_a_flag(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_the_three_ambiguous_parameters_carry_a_description():
+    """0 of ~40 published parameters carried one. Not all of them need one — these
+    three do, because guessing them wrong costs a round trip: WHICH id a run tool
+    wants, WHICH spelling of a pipeline's name (dpe_default.yaml declares
+    'dpe_default_v2'), and WHICH of a graph's step ids."""
+    mcp = build_mcp()
+    blank, seen = [], set()
+    for t in await mcp.list_tools():
+        props = (t.inputSchema or {}).get("properties") or {}
+        for key in ("run_id", "config", "step"):
+            if key not in props:
+                continue
+            seen.add(key)
+            if not (props[key].get("description") or "").strip():
+                blank.append(f"{t.name}.{key}")
+    assert seen == {"run_id", "config", "step"}, seen
+    assert not blank, f"published with an empty description: {blank}"
+
+
+@pytest.mark.asyncio
 async def test_no_tool_publishes_an_uncallable_schema():
     """A `**kwargs` wrapper publishes ONE required field called `kwargs`.
 

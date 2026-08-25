@@ -36,9 +36,9 @@ trace first buries you.
 | Question | Tool |
 |---|---|
 | Which step broke, and why | `get_run_summary` → `first_failure` |
-| Where exactly, across the whole run | `trace_list(run, errors_only=true)` |
+| Where exactly, across the whole run | `trace_list(run_id, errors_only=true)` |
 | What the agent was actually told / said | `trace_read(seq)` |
-| What a middle step wrote | `get_step_output(run, step)` |
+| What a middle step wrote | `get_step_output(run_id, step)` |
 
 **Quote, do not recount.** Report the tool's own strings — step ids, item names,
 the error text. Observed twice on the same task: the model read a

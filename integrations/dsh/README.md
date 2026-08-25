@@ -71,6 +71,8 @@ Verify the install by asking the agent to call `mcp__aitelier__list_pipelines`; 
 | `get_step_output` | read | The files ONE step produced, in full. |
 | `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
 | `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
+
+Every run-taking tool names its argument `run_id` and accepts either a run id or a project id (the newest run of that project is used, and the reply names which one). Before 2026-08-26 four of them called it `run` and only some accepted a project id — a call written against the old shape fails validation with the key it wanted, so it is a retry, not a wrong answer.
 | `skillflow_docs_list` / `skillflow_docs_search` / `skillflow_docs_read` | read | Skillflow's own spec for the graph YAML `edit_pipeline` accepts. Read it before inventing a field. |
 
 ### Editing needs something to edit
@@ -112,7 +114,7 @@ The whole point of the surface. AItelier's own three structural gates check that
 1. **`generate_pipeline("…")`** → a `run_id`. The generator is scheduler-driven, so AItelier advances it; you do not step it.
 2. **`wait_for_run`** → it pauses at a design review. Read it, then **`answer_checkpoint`** — approve, or reject with feedback and it revises. On completion the pipeline appears in `list_pipelines` as `gen_<slug>`.
 3. **`run_pipeline(gen_<slug>, seed_text=…)`** — a test drive. Checkpoints are answered for you by default (see below).
-4. **`wait_for_run`** → **`get_run_summary`**. A step failed, or the outputs are wrong? **`trace_list(run, errors_only=true)`** finds where, **`trace_read(seq)`** shows the actual prompt and response, **`get_step_output`** shows what a middle step wrote.
+4. **`wait_for_run`** → **`get_run_summary`**. A step failed, or the outputs are wrong? **`trace_list(run_id, errors_only=true)`** finds where, **`trace_read(seq)`** shows the actual prompt and response, **`get_step_output`** shows what a middle step wrote.
    Inside a fan-out, `get_run_summary` names the loop **item** each instance ran for (`{step: t_impl, status: failed, item: health_bar}`) — a loop body runs once per item, plus retries, so without it a failure names a step that ran nine times and you are guessing which task broke.
 5. **Fix and go again.** `edit_template` for a prompt (usually the answer), `edit_pipeline` for the graph — consult `skillflow_docs_search` for the schema rather than guessing — `edit_tool` for a tool's code. Or `generate_pipeline(edit_target=gen_<slug>, description="the change")` for a surgical regeneration. Then back to 3.
 6. **`stop_pipeline`** any drive that is going nowhere, and **`archive_pipeline`** the attempts you abandon.
@@ -127,7 +129,9 @@ It waits at most `timeout_seconds` (default 45) and then returns `status: "waiti
 
 **The ceiling is your client's, not ours.** A wait longer than `toolCallTimeoutMs` does not wait longer: the client hangs up first and the model sees a transport error instead of "still running". This plugin therefore raises `toolCallTimeoutMs` to 10 minutes (override with `AITELIER_MCP_TIMEOUT_MS`), well above `wait_for_run`'s own default, so the two cannot fight. Use `timeout_seconds: 0` for one look with no wait.
 
-A `paused` run is waiting for a person in the AItelier UI — DSH cannot approve it.
+A `paused` run is waiting to be answered — **`answer_checkpoint(run_id, decision, feedback)`**, right here. The UI is the other way in, not the only one. (This line used to say DSH could not approve, while the table above listed `answer_checkpoint`; the tool always worked.)
+
+An approval carries **no** feedback channel: AItelier refuses `decision: "approve"` with non-empty `feedback` rather than accept text it cannot deliver. To make a demand stick, reject with it — that sends the step back to redo the work against it.
 
 ## Authorization
 

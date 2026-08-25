@@ -265,7 +265,7 @@ def test_an_unreachable_builder_is_an_error_not_a_green_probe(tmp_path, monkeypa
     monkeypatch.setattr(
         "aitelier.tools.godot_playtest.impl.urllib.request.urlopen", boom)
     out = godot_playtest_scenario(scenario="alpha", project_root=str(repo))
-    assert "unreachable" in out["error"]
+    assert "GODOT_BUILDER_URL" in out["error"]
 
 
 # The tool used to take a scenario NAME only, so forcing `observed` values out

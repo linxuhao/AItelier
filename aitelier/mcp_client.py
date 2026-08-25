@@ -14,6 +14,8 @@ import re
 import urllib.error
 import urllib.request
 
+from core import external_deps
+
 # NOT `AITELIER_MCP_URL`. That name means the opposite thing on the other side
 # of the product: the published DSH plugin teaches it as "where DeepSeek Harness
 # finds AItelier's OWN MCP endpoint" (127.0.0.1:4444/mcp). One variable with two
@@ -80,7 +82,8 @@ def call_tool(name: str, arguments: dict) -> str:
                 continue
             raise MCPError(f"{name}: HTTP {e.code} from {MCP_URL}") from e
         except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError) as e:
-            raise MCPError(f"{name}: MCP transport failed ({MCP_URL}): {e}") from e
+            raise MCPError(f"{name}: " + external_deps.unreachable(
+            "AITELIER_MEDIA_MCP_URL", MCP_URL, e)) from e
     if not r or "result" not in r:
         raise MCPError(f"{name}: {(r or {}).get('error', 'no result')}")
     text = "\n".join(c.get("text", "") for c in r["result"].get("content") or []

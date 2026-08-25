@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from core import external_deps
+
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 
 SPEC_DIR = "playtest"
@@ -258,8 +260,9 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                         f"suite over the wall means the count grew).")}
         return {"passed": True, "frames": 0, "errors": [], "state": {},
                 "behavior": None, "spec_used": False, "gate_skipped": True,
-                "summary": (f"godot-builder unreachable ({_BUILDER_URL}): {e}. "
-                            "Play-test gate skipped — scene NOT smoke-tested.")}
+                "summary": (
+                    external_deps.unreachable("GODOT_BUILDER_URL", _BUILDER_URL, e)
+                    + " Play-test gate skipped — scene NOT smoke-tested.")}
 
 
 def godot_playtest(*, project_root: str = "", out_dir: str = "",

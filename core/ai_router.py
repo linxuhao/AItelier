@@ -165,6 +165,9 @@ class AIGateway:
         model_name = resolve_agent_model(model_name)
         self.api_base = None
         self.api_key = None
+        # Set to the key's NAME when a provider wants one and it is
+        # absent, so the failure can say what to configure.
+        self.missing_key_env = None
         self.litellm_model = model_name
         self.enable_thinking = enable_thinking
         self.thinking_effort = thinking_effort
@@ -190,6 +193,11 @@ class AIGateway:
                 key_env = cfg.get("api_key_env")
                 if key_env:
                     self.api_key = _read_secret(key_env)
+                    # Remember WHICH key was wanted. Without this, a missing key
+                    # surfaces as the provider's own 401 several layers away —
+                    # a true sentence about authentication that never names the
+                    # secret file the deployment forgot to create.
+                    self.missing_key_env = None if self.api_key else key_env
 
                 # Use LiteLLM's native provider when available (minimax, etc.).
                 try:
@@ -414,7 +422,28 @@ class AIGateway:
             self.last_usage = self._extract_usage(response)
             return response.choices[0].message.content.strip()
         except Exception as e:
-            raise e
+            raise self._explain_auth(e) from e
+
+    def _explain_auth(self, e: Exception) -> Exception:
+        """Prefix a provider AUTH failure with the secret it wanted.
+
+        Only auth failures, and only when this provider's key is genuinely
+        absent. The key being None is NOT itself an error — the self-hosted vLLM
+        serves without one — so the naming rides on the failure that actually
+        happened rather than pre-empting a call that may well succeed.
+        """
+        if not self.missing_key_env:
+            return e
+        auth = (litellm.exceptions.AuthenticationError,
+                getattr(litellm.exceptions, "PermissionDeniedError", ()))
+        if not isinstance(e, auth) and "401" not in str(e):
+            return e
+        from core.external_deps import missing
+        note = missing(self.missing_key_env,
+                       f"Model '{self.litellm_model}' resolves to provider "
+                       f"'{self.provider}', which reads it.")
+        return type(e)(f"{note}\n\nProvider said: {e}") if isinstance(
+            e, RuntimeError) else RuntimeError(f"{note}\n\nProvider said: {e}")
 
     # ── Native tool calling ──────────────────────────────────────────
 
@@ -458,7 +487,7 @@ class AIGateway:
             msg = choice.message
             finish_reason = getattr(choice, "finish_reason", "") or ""
         except Exception as e:
-            raise e
+            raise self._explain_auth(e) from e
 
         tool_calls = []
         if msg.tool_calls:

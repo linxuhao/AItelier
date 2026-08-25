@@ -27,6 +27,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from core import external_deps
+
 from aitelier.gate_skip_log import log_gate_skip
 
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
@@ -74,9 +76,9 @@ def gdscript_check(files: list[str] | None = None, workspace_root: str = "",
         log_gate_skip("gdscript_check", "godot-builder unreachable",
                       url=_BUILDER_URL, error=e, unchecked_files=len(paths),
                       workspace=root)
-        print(f"[gdscript_check] GATE SKIPPED: godot-builder unreachable "
-              f"({_BUILDER_URL}): {e} — {len(paths)} .gd file(s) NOT parse-checked",
-              flush=True)
+        print(f"[gdscript_check] GATE SKIPPED: "
+              + external_deps.unreachable("GODOT_BUILDER_URL", _BUILDER_URL, e)
+              + f" {len(paths)} .gd file(s) NOT parse-checked", flush=True)
         return {"all_passed": True, "results": [], "gate_skipped": True}
 
     # "Sent 21 files, got 0 results back" must never read as a pass. The sidecar

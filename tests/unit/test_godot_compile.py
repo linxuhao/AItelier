@@ -131,7 +131,10 @@ def test_builder_unreachable_degrades_to_pass(tmp_path, monkeypatch):
     r = godot_compile(project_root=str(tmp_path), out_dir=str(out))
     assert r["passed"] is True
     report = _read_report(out)
-    assert "unreachable" in report["summary"]
+    # Names the config key, not just the URL it resolved to: the fix is to
+    # start (or repoint) GODOT_BUILDER_URL, and the summary has to say so.
+    assert "GODOT_BUILDER_URL" in report["summary"]
+    assert "did not answer" in report["summary"]
     assert report["gate_skipped"] is True
 
 

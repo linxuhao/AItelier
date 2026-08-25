@@ -120,10 +120,10 @@ echo 'AITELIER_EDGE_NETWORK=vip-gateway_default' >> .env   # docker network ls �
 ```
 
 Other than that, a clean checkout starts with no pre-existing Docker resources.
-The handful of settings that point at machines outside this repo — the media MCP
-server, the Godot readability gate's vision endpoint, a self-hosted vLLM — are
-all optional and listed under **"Things that are specific to ONE machine"** in
-[`.env.example`](.env.example).
+Every capability that needs something outside this repo — the LLM key, web
+search, media generation, the Godot gates — is optional, refuses with a message
+naming the config it wants, and is listed in
+**[docs/external-dependencies.md](docs/external-dependencies.md)**.
 
 **If a run looks stuck**, read the scheduler tick log rather than the container
 log. The scheduler advances one project per tick, so a project that cannot

@@ -248,7 +248,10 @@ class TestWebTools:
         result = await coding_agent._execute_tool(
             "web_search", {"query": "python asyncio"})
         assert result["total"] == 0
-        assert "not configured" in result["note"]
+        # The note must name the CONFIG, not merely say "not configured" —
+        # a reader who cannot see SEARXNG_URL has nothing to act on.
+        assert "SEARXNG_URL" in result["note"]
+        assert "is not set" in result["note"]
 
     async def test_web_search_delegates(self, coding_agent, monkeypatch):
         from core import web_tools

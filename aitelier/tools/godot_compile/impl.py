@@ -23,6 +23,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from core import external_deps
+
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 
 
@@ -158,8 +160,8 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
             # 5_review surface that instead of reading a bare passed:true as clean.
             report["gate_skipped"] = True
             report["summary"] = (
-                f"godot-builder unreachable ({_BUILDER_URL}): {e}. "
-                "Compile gate skipped — GDScript NOT verified.")
+                external_deps.unreachable("GODOT_BUILDER_URL", _BUILDER_URL, e)
+                + " Compile gate skipped — GDScript NOT verified.")
         # The sidecar says there is no Godot project at a path where THIS
         # process just stat'd project.godot. It is not looking at the same
         # bytes we are — a bind mount whose source directory was replaced keeps

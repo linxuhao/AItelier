@@ -12,6 +12,8 @@ import httpx
 
 # ── Config ──────────────────────────────────────────────────────────────
 
+from core import external_deps
+
 SEARXNG_URL = os.getenv("SEARXNG_URL", "").rstrip("/")
 SEARCH_TIMEOUT = int(os.getenv("SEARXNG_TIMEOUT", "10"))
 FETCH_TIMEOUT = int(os.getenv("WEB_FETCH_TIMEOUT", "15"))
@@ -120,11 +122,8 @@ class WebSearchTool:
                 "query": query,
                 "total": 0,
                 "results": [],
-                "note": (
-                    "web_search is not configured — set SEARXNG_URL to a "
-                    "SearXNG instance (JSON API) to enable it. The pipeline "
-                    "continues without web results."
-                ),
+                "note": external_deps.missing(
+                    "SEARXNG_URL", "The pipeline continues without web results."),
             }
 
         params = {

@@ -92,7 +92,7 @@ def trace_summary(payload: dict, cap: int = 220) -> str:
 def trace_rows(sf, ref: str, where: str, params: list, limit: int,
                order: str = "DESC") -> dict:
     """Shared SELECT against one run's trace. Never accepts caller SQL."""
-    run = resolve_run_row(sf, ref)
+    run, resolved = resolve_run_ref(sf, ref)
     if not run:
         return {"error": f"No run found for '{ref}' (tried run id, then project id)."}
     sql = (f"{_TRACE_COLS} FROM skillflow_trace WHERE run_id = ? " + where +
@@ -101,7 +101,7 @@ def trace_rows(sf, ref: str, where: str, params: list, limit: int,
         rows = sf.trace_query(run["id"], sql, tuple([run["id"], *params, limit]))
     except Exception as e:
         return {"error": f"trace query failed: {e}"}
-    return {"run": run, "rows": [dict(r) for r in rows]}
+    return {"run": run, "resolved": resolved, "rows": [dict(r) for r in rows]}
 
 
 def _payload(row) -> dict:
@@ -147,11 +147,14 @@ def trace_list(sf, ref: str, *, step: str = "", category: str = "",
         if len(out) >= limit:
             break
     run = res["run"]
-    return {"run_id": run["id"], "project_id": run.get("project_id"),
-            "run_status": run.get("status"),
-            "run_error": run.get("error_reason") or run.get("error"),
-            "count": len(out), "entries": out,
-            "hint": "trace_read(run, seq) for a full payload."}
+    listed = {"run_id": run["id"], "project_id": run.get("project_id"),
+              "run_status": run.get("status"),
+              "run_error": run.get("error_reason") or run.get("error"),
+              "count": len(out), "entries": out,
+              "hint": "trace_read(run_id, seq) for a full payload."}
+    if res.get("resolved"):
+        listed["resolved"] = res["resolved"]
+    return listed
 
 
 def trace_search(sf, ref: str, query: str, *, step: str = "",
@@ -170,8 +173,11 @@ def trace_search(sf, ref: str, query: str, *, step: str = "",
     entries = [{"seq": r["seq"], "step": r["step_id"], "category": r["category"],
                 "event": r["event"], "summary": trace_summary(_payload(r))}
                for r in res["rows"]]
-    return {"run_id": res["run"]["id"], "query": query,
-            "count": len(entries), "entries": entries}
+    found = {"run_id": res["run"]["id"], "query": query,
+             "count": len(entries), "entries": entries}
+    if res.get("resolved"):
+        found["resolved"] = res["resolved"]
+    return found
 
 
 def trace_read(sf, ref: str, seq, seq_end=None) -> dict:
@@ -197,7 +203,10 @@ def trace_read(sf, ref: str, seq, seq_end=None) -> dict:
         entries.append({"seq": r["seq"], "step": r["step_id"],
                         "category": r["category"], "event": r["event"],
                         "at": r["created_at"], "payload": payload})
-    return {"run_id": res["run"]["id"], "count": len(entries), "entries": entries}
+    read = {"run_id": res["run"]["id"], "count": len(entries), "entries": entries}
+    if res.get("resolved"):
+        read["resolved"] = res["resolved"]
+    return read
 
 
 def list_runs(sf, *, config: str = "", status: str = "", project_id: str = "",

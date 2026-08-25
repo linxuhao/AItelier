@@ -54,7 +54,7 @@ because the errors are still what you would see if you bypass the CLI.
 
 | Can go wrong | Covered by |
 |---|---|
-| `network vip-gateway_default declared as external, but could not be found` — a compose file that declares an external network refuses to run when it is absent | Moved to the opt-in `docker-compose.edge.yml`; `AITELIER_EDGE_NETWORK` turns it on. Header comment explains why |
+| `network vip-gateway_default declared as external, but could not be found` — a compose file that declares an external network refuses to run when it is absent | The network is in the base file WITHOUT `external:`, named by `${AITELIER_EDGE_NETWORK:-aitelier_edge_unused}`: set it and compose joins the real one, leave it and compose creates a throwaway. The opt-in `-f` overlay this replaced cost an outage — a plain `up -d` dropped the public path silently |
 | `invalid mount config … /.aitelier-secrets/GITHUB_TOKEN` — Docker refuses a missing secret SOURCE; an empty file is the correct content for "I don't use this", which the error never says. Four in a row | `cli/server.py:_ensure_host_dirs` creates them; README gives the one-liner for a hand-run `docker compose` |
 | Docker not running at all | `_require_docker` raises; there is **no host-process fallback** by design, and the README now says so where the user first meets it |
 | **`aitelier server` bypassing that rule.** It ran uvicorn on the host, so the documented invariant held for some entry points and not others; the port then blocked the container's own bind (`address already in use`) | Fixed: it starts the container like everything else, with `--no-docker` as an explicit, warned escape hatch. Found by an agent doing the install from scratch |

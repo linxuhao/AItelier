@@ -88,12 +88,11 @@ services:
       # Shared state at the identical absolute path the code expects.
       - ${HOME}/.AItelier:${HOME}/.AItelier
     networks:
-      # Own private network only. The cloudflared/gateway network lives in the
-      # OPTIONAL overlay docker-compose.edge.yml — an `external: true` network
-      # in this file made `docker compose up` refuse to start for anyone who
-      # did not already have that exact network, before a single container ran
-      # and with an error that named the network but not what it was for.
+      # Own private network, plus the gateway network cloudflared reaches us on.
+      # `edge` is NOT declared external — see the networks: block at the bottom
+      # for why that one missing word is what keeps a clean checkout working.
       - default
+      - edge
     ports:
       # Loopback-only: the host CLI uses localhost:4444; the public path is via
       # cloudflared over the 'edge' network (aitelier:4444). Binding to 0.0.0.0
@@ -144,7 +143,7 @@ services:
 
   # ── Cloudflare ────────────────────────────────────────────────────────────
   # Publishing through an existing cloudflared connector is OPTIONAL and lives
-  # in docker-compose.edge.yml. See that file for the one-line setup.
+  # named by AITELIER_EDGE_NETWORK — see the networks: block below.
 
 secrets:
   # LLM API key, kept out of the environment. Source is outside any path
@@ -169,7 +168,27 @@ secrets:
   # (Godot needs no account or license — the game builder carries no secrets.)
 
 networks:
-  # The backend's own private network. Nothing here is external, so a clean
-  # checkout starts with no pre-existing Docker resources — see
-  # docker-compose.edge.yml to publish through a cloudflared connector.
+  # The backend's own private network.
   default:
+  # The network cloudflared reaches the backend on, selected BY NAME ONLY.
+  #
+  # Name an existing network (AITELIER_EDGE_NETWORK=vip-gateway_default) and
+  # compose attaches to it; leave it unset and compose creates the throwaway
+  # `aitelier_edge_unused` and a clean checkout still starts. `external: true`
+  # is deliberately ABSENT: it makes compose REFUSE TO RUN when the network is
+  # missing, before a single container starts, and that is what forced this out
+  # into an optional `-f` overlay in the first place.
+  #
+  # The overlay is gone because it cost an outage on 2026-08-25: a rebuild run
+  # as a plain `docker compose up -d` (no -f) recreated the container without
+  # the gateway network. The container stayed healthy, 127.0.0.1:4444 kept
+  # answering 200, and the public path was simply gone with nothing saying so.
+  # One name in .env, one file, no -f to forget.
+  #
+  # `compose down` does not remove a network it did not create, so pointing at
+  # a shared network cannot take it away from whoever else is on it. The cost of
+  # dropping `external:` is that a TYPO'd name silently creates a new empty
+  # network instead of failing — check `docker inspect aitelier` if the public
+  # path is dark while localhost answers.
+  edge:
+    name: ${AITELIER_EDGE_NETWORK:-aitelier_edge_unused}

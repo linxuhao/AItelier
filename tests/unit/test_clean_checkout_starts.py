@@ -9,8 +9,16 @@ what it was for or that it was optional:
     invalid mount config for type "bind": bind source path does not exist:
         …/.aitelier-secrets/GITHUB_TOKEN
 
-The first is why the cloudflared network moved to an opt-in overlay; the second
-is why the CLI provisions the secret files itself.
+The first is why the cloudflared network is declared WITHOUT `external:` and
+selected by name; the second is why the CLI provisions the secret files itself.
+
+The first fix was originally an opt-in `-f docker-compose.edge.yml` overlay, and
+that shape caused its own outage on 2026-08-25: a rebuild run as a plain
+`docker compose up -d` recreated the container without the gateway network, the
+container stayed healthy, 127.0.0.1:4444 kept answering 200, and the public path
+was gone with nothing reporting it. A deployment property that a plain
+`docker compose up -d` can silently drop is not a property. Hence the tests
+below: the network is in the BASE file, and the service joins it there.
 """
 import os
 from pathlib import Path
@@ -30,12 +38,18 @@ def _compose(name):
 
 
 def test_the_base_compose_declares_no_external_network():
-    """An external network makes compose refuse to start when it is absent."""
+    """An external network makes compose refuse to start when it is absent.
+
+    `edge` IS in this file — it just must not carry `external: true`. Naming a
+    network compose may create keeps a clean checkout starting; declaring it
+    external is what killed it before any container ran.
+    """
     nets = _compose("docker-compose.yml").get("networks") or {}
     external = [n for n, cfg in nets.items() if (cfg or {}).get("external")]
     assert external == [], (
         f"{external} is external in the base file — a clean checkout cannot "
-        f"`docker compose up`. Put it in docker-compose.edge.yml.")
+        f"`docker compose up`. Select the network by `name:` instead, so an "
+        f"absent one is created rather than fatal.")
 
 
 def test_the_service_joins_only_networks_the_base_file_defines():
@@ -45,29 +59,46 @@ def test_the_service_joins_only_networks_the_base_file_defines():
     assert joined <= defined, f"undefined networks joined: {sorted(joined - defined)}"
 
 
-def test_the_edge_overlay_still_provides_the_tunnel_network():
-    """Moving it out must not delete it — the tunnel deployment still needs it."""
-    c = _compose("docker-compose.edge.yml")
-    assert (c["networks"]["edge"] or {}).get("external") is True
-    assert "edge" in c["services"]["aitelier"]["networks"]
+def test_the_tunnel_network_is_in_the_base_file():
+    """The public path must not depend on remembering an extra `-f`.
+
+    This is the 2026-08-25 outage as a test: the service joins `edge` in the
+    base file, so a plain `docker compose up -d` cannot produce a container
+    that answers on localhost while the tunnel cannot reach it.
+    """
+    c = _compose("docker-compose.yml")
+    assert "edge" in (c["services"]["aitelier"].get("networks") or []), (
+        "the aitelier service does not join `edge` in the base compose file — "
+        "a plain `docker compose up -d` would drop the public path silently")
+    assert "edge" in (c.get("networks") or {})
 
 
-# ── The CLI only opts in to the overlay deliberately ────────────────────────
+def test_the_tunnel_network_is_selected_by_name_with_a_harmless_default():
+    """Set → join the real network. Unset → compose creates a throwaway and a
+    clean checkout still starts. Both branches come from one variable."""
+    raw = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "${AITELIER_EDGE_NETWORK:-" in raw, (
+        "the edge network must be named by ${AITELIER_EDGE_NETWORK:-<fallback>} "
+        "— a bare name would join the wrong network on every other host")
 
-def test_the_overlay_is_absent_by_default(monkeypatch):
-    monkeypatch.delenv("AITELIER_EDGE_NETWORK", raising=False)
-    assert "docker-compose.edge.yml" not in " ".join(srv._compose_files())
 
+# ── One compose file, so the CLI and a hand-run compose cannot disagree ─────
 
-def test_naming_the_network_opts_the_overlay_in(monkeypatch):
+def test_the_cli_passes_only_the_base_file(monkeypatch):
+    """No overlay to opt into means no way for the CLI and a hand-run
+    `docker compose` to be looking at different files."""
     monkeypatch.setenv("AITELIER_EDGE_NETWORK", "vip-gateway_default")
-    assert "docker-compose.edge.yml" in " ".join(srv._compose_files())
+    with_net = srv._compose_files()
+    monkeypatch.delenv("AITELIER_EDGE_NETWORK", raising=False)
+    assert srv._compose_files() == with_net, (
+        "the file list still varies with the environment — that is the split "
+        "that let a plain `up -d` drop the public path")
+    assert with_net.count("-f") == 1
 
 
-def test_a_blank_value_does_not_opt_in(monkeypatch):
-    """`AITELIER_EDGE_NETWORK=` in a .env is "unset", not "use the default"."""
-    monkeypatch.setenv("AITELIER_EDGE_NETWORK", "   ")
-    assert "docker-compose.edge.yml" not in " ".join(srv._compose_files())
+def test_no_compose_overlay_file_remains():
+    """A leftover overlay would be a second, silently-diverging source of truth."""
+    assert not (ROOT / "docker-compose.edge.yml").exists()
 
 
 # ── Secret files ────────────────────────────────────────────────────────────

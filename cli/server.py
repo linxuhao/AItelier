@@ -34,7 +34,6 @@ _DEFAULT_URL = f"http://localhost:{_DEFAULT_PORT}"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _COMPOSE_FILE = _PROJECT_ROOT / "docker-compose.yml"
-_COMPOSE_EDGE_FILE = _PROJECT_ROOT / "docker-compose.edge.yml"
 # Secret FILES the compose service mounts. Docker refuses to start a service
 # whose secret source is missing — "invalid mount config for type bind: bind
 # source path does not exist: …/.aitelier-secrets/GITHUB_TOKEN" — which named
@@ -119,19 +118,17 @@ def _compose_env() -> dict:
 
 
 def _compose_files() -> list[str]:
-    """The -f arguments for every compose call.
+    """The -f arguments for every compose call: the base file, and only it.
 
-    The cloudflared overlay is included only when AITELIER_EDGE_NETWORK names
-    the network to join. It declares an `external: true` network, and a compose
-    file that declares one REFUSES TO RUN when it is absent — so folding it in
-    unconditionally would make the CLI unusable on any machine that does not
-    already have that network. Opting in by naming it is also the only way the
-    CLI and a hand-run `docker compose` can agree on which files are in play.
+    There used to be an opt-in `docker-compose.edge.yml` overlay carrying the
+    cloudflared network, added here whenever AITELIER_EDGE_NETWORK was set. That
+    made the CLI and a hand-run `docker compose` disagree about which files were
+    in play, and on 2026-08-25 a rebuild run as a plain `docker compose up -d`
+    recreated the container without the gateway network: healthy container,
+    localhost still 200, public path gone, nothing said so. The network now
+    lives in the base file, selected by name — one file, nothing to forget.
     """
-    files = ["-f", str(_COMPOSE_FILE)]
-    if os.environ.get("AITELIER_EDGE_NETWORK", "").strip() and _COMPOSE_EDGE_FILE.exists():
-        files += ["-f", str(_COMPOSE_EDGE_FILE)]
-    return files
+    return ["-f", str(_COMPOSE_FILE)]
 
 
 def _mounted_secrets() -> tuple[str, ...]:

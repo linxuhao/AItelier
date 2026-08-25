@@ -47,6 +47,38 @@ DEFAULT_MAX_WATCH_S = 4 * 60 * 60
 
 _TERMINAL = ("completed", "failed")
 
+# How long a RUNNING row may sit unchanged before the summary stops calling it
+# healthy. 15 min is above a slow-but-real LLM step (measured: t_impl up to
+# ~12 min, 5_compile ~15 min on the 44-scenario suite) and well below the
+# 34-minute silent hang observed 2026-08-25, where a provider call blocked
+# before response headers and held the scheduler lock.
+_STALL_HINT_S = 15 * 60
+
+
+def _seconds_since(ts: str | None) -> float | None:
+    """Seconds since `ts` (a skillflow UTC timestamp), or None if unreadable.
+
+    Returns None rather than 0 on a bad parse: "I could not tell" must not
+    render as "it just advanced".
+    """
+    if not ts:
+        return None
+    from datetime import datetime, timezone
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.strptime(str(ts).strip(), fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+    return None
+
+
+def _human(sec: float) -> str:
+    m, s = divmod(int(sec), 60)
+    h, m = divmod(m, 60)
+    return "%dh%02dm" % (h, m) if h else ("%dm%02ds" % (m, s) if m else "%ds" % s)
+
+
 
 async def drive_run(sf, db, ws, run_id: str, *, scheduler_owned: bool,
                     auto_approve: bool, max_steps: int = DEFAULT_MAX_STEPS,
@@ -204,14 +236,37 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         pass          # a missing output dir is a fact about the run, not an error
 
     status = run.get("status") or "running"
-    verdict = ("completed" if status == "completed" else
-               "failed" if status == "failed" else
-               "paused-at-checkpoint" if status == "paused" else
-               "did-not-terminate (likely an unbounded loop or a step failing "
-               "persistently)")
+    # A run that is still RUNNING has not "failed to terminate" — it has not
+    # finished yet, and those are different claims. The old wording said
+    # "did-not-terminate (likely an unbounded loop or a step failing
+    # persistently)" for a run that was advancing normally one step earlier;
+    # read literally it says the run is broken, and a caller who believes it
+    # gives up on a healthy run. What separates the two is not the status, it
+    # is HOW LONG the row has been unchanged — so report that, and let the
+    # caller judge.
+    updated_at = (run.get("updated_at") or "") or None
+    idle_s = _seconds_since(updated_at)
+    if status == "completed":
+        verdict = "completed"
+    elif status == "failed":
+        verdict = "failed"
+    elif status == "paused":
+        verdict = "paused-at-checkpoint"
+    elif idle_s is None:
+        verdict = ("in-progress (no updated_at on the run row — cannot tell "
+                   "advancing from stalled)")
+    elif idle_s < _STALL_HINT_S:
+        verdict = ("in-progress (last advanced %s ago)" % _human(idle_s))
+    else:
+        verdict = ("in-progress but NOT ADVANCING for %s — possibly stalled "
+                   "(a hung provider call, an unbounded loop, or a step "
+                   "failing persistently). Re-read this after a minute: if the "
+                   "idle time keeps growing, it is stuck." % _human(idle_s))
     return {
         "run_id": run_id, "project_id": project_id, "config": config_name,
         "status": status, "verdict": verdict,
+        "updated_at": updated_at,
+        "idle_seconds": idle_s,
         "steps": per_step, "first_failure": first_failure,
         "final_outputs": outputs,
         "run_error": run.get("error_reason") or run.get("error"),

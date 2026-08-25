@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "description": "Use AItelier as a subagent from DeepSeek Harness: generate, edit, run, export and import SkillFlow pipelines",
   "keywords": [
-    "dsh-plugin",
     "aitelier",
-    "skillflow",
-    "mcp"
+    "dsh-plugin",
+    "dsh-skill",
+    "mcp",
+    "skillflow"
   ],
   "license": "MIT",
   "repository": {
@@ -21,7 +22,8 @@
   "type": "module",
   "files": [
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "skills"
   ],
   "dsh": {
     "bundle": {

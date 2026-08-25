@@ -76,6 +76,30 @@ Verify the install by asking the agent to call `mcp__aitelier__list_pipelines`; 
 
 Only **generated** (`gen_*`) pipelines are editable and exportable — a built-in config lives in the AItelier repo and travels with it. **A fresh AItelier has no generated pipelines at all**, so on a new install every `edit_*` and `export_pipeline` call correctly refuses, and `list_pipelines` shows only built-ins. Make one with `generate_pipeline`.
 
+## The skill
+
+The package ships one skill, `aitelier-pipelines`, at
+`skills/aitelier-pipelines/SKILL.md`. It teaches the loop below, which tool
+answers which question when a drive fails, and the failure shapes that pass all
+three of AItelier's structural gates and only show up on a real run. Install it
+into a skill root DSH already scans:
+
+```bash
+mkdir -p .agents/skills
+cp -r node_modules/dsh-plugin-aitelier/skills/aitelier-pipelines .agents/skills/
+```
+
+(or `~/.agents/skills/` for every project, or add the package's `skills/`
+directory to `customSkillDirs`.)
+
+**Why this is a copy and not automatic.** A Cordis patch targets a row by id and
+replaces its *whole* config. Mounting the skill by patching the shared
+`skill-filesystem` row would therefore overwrite whatever skill roots, watch
+settings and custom directories you already had. Inserting an isolated provider
+row instead would need this patch to resolve its own installed directory, and
+this bundle ships no code to do that with. One `cp` you can see beats a config
+edit that silently drops your other skills.
+
 ## The loop: generate → drive → observe → fix
 
 The whole point of the surface. AItelier's own three structural gates check that a generated pipeline is *shaped* right; only running it shows whether it *works*, and that is a judgment loop, not a fixed DAG:

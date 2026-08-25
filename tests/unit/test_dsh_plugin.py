@@ -125,3 +125,42 @@ def test_the_root_readme_tool_count_matches_the_server():
     assert m, "the root README no longer states the MCP tool count"
     assert int(m.group(1)) == len(_TOOL_KIND), (
         f"README says {m.group(1)} tools, server has {len(_TOOL_KIND)}")
+
+
+# ── The shipped skill ────────────────────────────────────────────────────────
+
+def test_the_skill_ships_in_the_package(manifest):
+    """A skill outside `files` is not in the tarball, so the install command in
+    the README would copy a directory that npm never delivered."""
+    assert "skills" in manifest["files"]
+    assert (DSH / "skills" / "aitelier-pipelines" / "SKILL.md").is_file()
+
+
+def test_the_skill_declares_the_frontmatter_dsh_indexes_on():
+    """DSH's catalog renders `name` + `description`; a skill missing either is
+    discovered but unselectable, which reads as "the skill does nothing"."""
+    body = (DSH / "skills" / "aitelier-pipelines" / "SKILL.md").read_text(encoding="utf-8")
+    assert body.startswith("---\n")
+    front = body.split("---", 2)[1]
+    assert "name: aitelier-pipelines" in front
+    desc = next(l for l in front.splitlines() if l.startswith("description:"))
+    # DSH's own skills open with "Use when …" so the model can route on it.
+    assert "Use when" in desc
+
+
+def test_the_skill_only_names_tools_the_server_actually_serves():
+    """The skill tells an agent which tool answers which question. A tool it
+    names that does not exist sends the agent looking for a surface that is not
+    there — the same drift the README table test guards, one layer up."""
+    import re
+    body = (DSH / "skills" / "aitelier-pipelines" / "SKILL.md").read_text(encoding="utf-8")
+    named = set(re.findall(r"`([a-z_]{4,})\(", body)) | set(
+        re.findall(r"`(get_run_summary|list_pipelines|trace_list|trace_read)`", body))
+    unknown = {t for t in named if t not in _TOOL_KIND}
+    assert not unknown, f"the skill names tools the server does not serve: {sorted(unknown)}"
+
+
+def test_the_readme_tells_the_reader_how_to_install_the_skill(readme):
+    """Shipping a skill nobody is told to install is shipping nothing."""
+    assert "aitelier-pipelines" in readme
+    assert "node_modules/dsh-plugin-aitelier/skills" in readme

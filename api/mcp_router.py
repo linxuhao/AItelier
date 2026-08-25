@@ -1322,20 +1322,24 @@ def _register_lifecycle_tools(tool):
           "to read what it actually wrote. `run` accepts a run_id or a project_id.")
     def get_step_output(run: str, step: str) -> dict:
         from api.dependencies import get_skillflow, get_workspace_manager
-        from core.trace_reader import resolve_run_row
-        row = resolve_run_row(get_skillflow(), run)
+        from core.trace_reader import resolve_run_ref
+        sf = get_skillflow()
+        row, resolved = resolve_run_ref(sf, run)
         if not row:
             return {"error": f"no run '{run}'"}
         if bad_config_name(step):
             return {"error": f"invalid step id {step!r}"}
+        # Which run a project id landed on, and what else it could have landed on.
+        head = {"run_id": row["id"], "config": row.get("graph_name"), "step": step}
+        if resolved:
+            head["resolved"] = resolved
         try:
             d = get_workspace_manager().get_final_path(
                 row.get("project_id") or "", step, row.get("graph_name") or "")
         except Exception as e:
-            return {"error": f"could not resolve step '{step}': {e}"}
+            return {**head, "error": f"could not resolve step '{step}': {e}"}
         if not d.exists():
-            return {"error": f"step '{step}' has no promoted output (it may not have "
-                             f"run yet — trace_list(run) shows what did)"}
+            return {**head, "error": _no_step_output_reason(sf, row, step)}
         files = {}
         for item in sorted(d.rglob("*")):
             if item.is_file() and item.name != "_snapshot.json":
@@ -1344,7 +1348,7 @@ def _register_lifecycle_tools(tool):
                         encoding="utf-8", errors="replace")[:20000]
                 except Exception:
                     pass
-        return {"run_id": row["id"], "step": step, "files": files}
+        return {**head, "files": files}
 
     # The skillflow docs tools, with their REAL parameters spelled out. Wrapping
     # them as `**kwargs` published a schema with one required field called
@@ -1377,6 +1381,33 @@ def _register_lifecycle_tools(tool):
         if end_line is not None:
             kw["end_line"] = end_line
         return _native_docs("skillflow_docs_read", **kw)
+
+
+def _no_step_output_reason(sf, row: dict, step: str) -> str:
+    """Why a step directory is missing — three separate facts under one old message.
+
+    "it may not have run yet" was asserted for `git_sync_pre` on a run whose own
+    summary listed that step `completed`: it ran, and it writes no files. The same
+    sentence also covered a step that is not in this config's graph at all. A
+    caller cannot act on any of the three without being told which one it is.
+    """
+    try:
+        steps = {s["step_id"]: s["status"] for s in sf.get_steps(row["id"])}
+    except Exception:
+        steps = {}
+    config = row.get("graph_name") or "?"
+    if steps and step not in steps:
+        return (f"no step '{step}' in config '{config}' (run {row['id']}). "
+                f"Steps: {', '.join(sorted(steps))}")
+    status = steps.get(step)
+    if status in (None, "pending"):
+        return (f"step '{step}' has NOT run — status "
+                f"{status or 'unknown (no step row)'} on run {row['id']}. "
+                f"trace_list(run_id) shows what did.")
+    return (f"step '{step}' RAN (status '{status}') and promoted no files — its "
+            f"step directory does not exist. That is what a step writing nothing "
+            f"into the step dir looks like; it is not missing output to hunt for. "
+            f"trace_list(run_id, step='{step}') has what it did do.")
 
 
 def _native_docs(name: str, **kwargs):

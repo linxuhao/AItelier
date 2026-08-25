@@ -26,15 +26,45 @@ import json
 _TRACE_COLS = "SELECT seq, step_id, category, event, payload_json, created_at"
 
 
-def resolve_run_row(sf, ref: str) -> dict | None:
-    """A run row from either a skillflow run id or a project id."""
+def resolve_run_ref(sf, ref: str) -> tuple[dict | None, dict]:
+    """A run row from either a run id or a project id, AND how it was resolved.
+
+    A project id picks that project's NEWEST run, and the choice used to be
+    silent. `get_step_output("jinyong-ux", "finalize")` answered "step 'finalize'
+    has no promoted output" while the file sat on disk at 3340 bytes: the
+    project's newest run was its dpe_game one, so the workspace path resolved
+    under `dpe_game/` while the meta_conversation step it was asking about lived
+    one directory over. Confidently wrong, and naming nothing the caller could
+    correct — the run actually used was never reported.
+
+    The second element is empty when the ref WAS a run id (nothing to disclose)
+    and names the chosen run, its config, and the siblings otherwise.
+    """
     if not ref:
-        return None
+        return None, {}
     run = sf.get_run(ref)
     if run:
-        return run
-    runs = sf.list_runs(project_id=ref)          # ORDER BY created_at DESC
-    return runs[0] if runs else None
+        return run, {}
+    runs = [dict(r) for r in (sf.list_runs(project_id=ref) or [])]  # created_at DESC
+    if not runs:
+        return None, {}
+    chosen = runs[0]
+    info = {"resolved_by": "project_id", "project_id": ref,
+            "run_id": chosen.get("id"), "config": chosen.get("graph_name")}
+    if len(runs) > 1:
+        info["other_runs"] = [{"run_id": r.get("id"), "config": r.get("graph_name"),
+                               "status": r.get("status")} for r in runs[1:]]
+        info["note"] = (
+            f"'{ref}' is a PROJECT id with {len(runs)} runs. The NEWEST one was "
+            f"used: {chosen.get('id')} (config {chosen.get('graph_name')}). A step "
+            f"of a different run of the same project is NOT reachable this way — "
+            f"pass a run_id from other_runs.")
+    return chosen, info
+
+
+def resolve_run_row(sf, ref: str) -> dict | None:
+    """A run row from either a skillflow run id or a project id."""
+    return resolve_run_ref(sf, ref)[0]
 
 
 def trace_summary(payload: dict, cap: int = 220) -> str:

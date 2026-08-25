@@ -569,6 +569,68 @@ def test_only_an_unregistered_name_is_told_to_call_list_pipelines(monkeypatch):
     assert err and "call list_pipelines" in err["error"]
 
 
+class _FakeSF:
+    """Just enough skillflow for the run-ref and step-status paths."""
+
+    def __init__(self, runs, steps=None):
+        self._runs = runs
+        self._steps = steps or {}
+
+    def get_run(self, ref):
+        return next((r for r in self._runs if r["id"] == ref), None)
+
+    def list_runs(self, project_id=None):
+        return [r for r in self._runs if r["project_id"] == project_id]
+
+    def get_steps(self, run_id):
+        return self._steps.get(run_id, [])
+
+
+def test_a_project_id_with_several_runs_names_the_run_it_picked():
+    """Resolving a project id takes the NEWEST run, silently. get_step_output
+    ("jinyong-ux", "finalize") therefore read the dpe_game workspace and answered
+    "no promoted output" while the meta_conversation run's step1_goals.json sat on
+    disk at 3340 bytes."""
+    from core.trace_reader import resolve_run_ref, resolve_run_row
+    runs = [{"id": "new", "project_id": "p", "graph_name": "dpe_game",
+             "status": "failed"},
+            {"id": "old", "project_id": "p", "graph_name": "meta_conversation",
+             "status": "completed"}]
+    sf = _FakeSF(runs)
+
+    row, info = resolve_run_ref(sf, "p")
+    assert row["id"] == "new"
+    assert info["resolved_by"] == "project_id" and info["config"] == "dpe_game"
+    assert [o["run_id"] for o in info["other_runs"]] == ["old"]
+    assert "NEWEST" in info["note"]
+
+    # A run id resolves exactly, with nothing to disclose.
+    row, info = resolve_run_ref(sf, "old")
+    assert row["id"] == "old" and info == {}
+    # The old single-value entry point still means the same thing.
+    assert resolve_run_row(sf, "p")["id"] == "new"
+
+
+def test_a_step_that_ran_and_wrote_nothing_is_not_reported_as_not_run():
+    """get_run_summary listed git_sync_pre `completed` while get_step_output said
+    it "may not have run yet". Three different facts shared one sentence: not in
+    the graph, not run, ran and wrote nothing."""
+    steps = {"r": [{"step_id": "git_sync_pre", "status": "completed"},
+                   {"step_id": "5_review", "status": "pending"}]}
+    sf = _FakeSF([{"id": "r", "project_id": "p", "graph_name": "dpe_game"}], steps)
+    row = {"id": "r", "graph_name": "dpe_game"}
+
+    ran = mcp_router._no_step_output_reason(sf, row, "git_sync_pre")
+    assert "RAN" in ran and "not run yet" not in ran
+
+    never = mcp_router._no_step_output_reason(sf, row, "5_review")
+    assert "has NOT run" in never and "pending" in never
+
+    absent = mcp_router._no_step_output_reason(sf, row, "finalize")
+    assert "no step 'finalize' in config 'dpe_game'" in absent
+    assert "git_sync_pre" in absent, "it must list the steps this config does have"
+
+
 def test_corrupt_roles_json_reaches_the_model_as_a_message_not_a_traceback(
         tmp_path, monkeypatch):
     """_load_roles used to RETURN {"__error__": "<str>"}; no caller checked it, so

@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-aitelier",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Use AItelier as a subagent from DeepSeek Harness: generate, edit, run, export and import SkillFlow pipelines",
   "keywords": [
     "aitelier",

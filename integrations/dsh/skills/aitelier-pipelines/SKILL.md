@@ -40,6 +40,12 @@ trace first buries you.
 | What the agent was actually told / said | `trace_read(seq)` |
 | What a middle step wrote | `get_step_output(run, step)` |
 
+**Quote, do not recount.** Report the tool's own strings — step ids, item names,
+the error text. Observed twice on the same task: the model read a
+`list_pipelines` result holding 13 entries and reported 14, while the names it
+gave from the same call were exactly right. A count you recompute is a claim
+about the data; a name you copy is the data.
+
 Two things `get_run_summary` alone will not tell you:
 
 - **A step that ROUTED to a failure gate did not "fail".** `first_failure` is

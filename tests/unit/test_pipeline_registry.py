@@ -582,3 +582,28 @@ def test_registration_writes_nothing_when_hint_derivation_fails(sf, registry,
     assert not any(tmp_path.iterdir()), "a failed registration left files behind"
     assert not any(g["name"] == "gen_probe" for g in sf.list_graphs()), \
         "a failed registration left the graph live"
+
+
+def test_the_vision_judge_is_not_swept_into_a_provider_migration():
+    """godot_vision must keep talking to DeepSeek directly.
+
+    It is the one model call that does NOT go through `ai_router` /
+    `llm_providers.json`: it POSTs `api.deepseek.com` with `DEEPSEEK_API_KEY`,
+    because the judge needs IMAGE input. Verified against the Ark coding plan
+    2026-08-25: `deepseek-v4-flash-vision-exp` answers text there (HTTP 200) but
+    refuses an image — `Model do not support image input`. So a global
+    `deepseek/... -> ark/...` sweep that also "tidied up" this tool, or dropped
+    DEEPSEEK_API_KEY from the compose secrets, would leave the readability gate
+    with a judge that 400s on every frame — while a text-only smoke test passed.
+    """
+    from aitelier.tools.godot_vision.impl import (_FALLBACK_KEY_NAME,
+                                                  _FALLBACK_URL)
+    assert "api.deepseek.com" in _FALLBACK_URL, (
+        "the vision fallback was pointed away from DeepSeek — check the target "
+        "actually accepts image input before allowing this")
+    assert _FALLBACK_KEY_NAME == "DEEPSEEK_API_KEY"
+
+    compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml"
+               ).read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY" in compose, (
+        "the vision judge's key was removed from the compose secrets")

@@ -996,9 +996,23 @@ class DBManager:
 
     # ── Project-level scheduling methods ──
 
-    def get_next_active_project(self, owner_email: str = None, fifo: bool = False) -> dict | None:
+    def get_next_active_project(self, owner_email: str = None,
+                                fifo: bool = False) -> dict | None:
+        """The single highest-priority project with work to do (or None)."""
+        rows = self.get_active_projects(owner_email=owner_email, fifo=fifo, limit=1)
+        return rows[0] if rows else None
+
+    def get_active_projects(self, owner_email: str = None, fifo: bool = False,
+                            limit: int = 1) -> list[dict]:
         """
-        Get the highest-priority project that has work to do.
+        The highest-priority projects that have work to do, in priority order.
+
+        A LIST because the scheduler has to be able to SKIP one. A project whose
+        tick is already in flight holds a per-project lock, and picking only the
+        top row meant a long step in ONE project consumed every tick: measured
+        here as 400s of unbroken `outcome=locked` while everything else sat
+        still. Same project stays serial (that is the lock's job); different
+        projects no longer queue behind it.
 
         Pipeline state is owned by skillflow — queries skillflow_runs for
         active runs (running/paused).  Also includes projects whose runs
@@ -1015,7 +1029,7 @@ class DBManager:
         except Exception:
             owned = {"dpe_default_v2"}
         if not owned:
-            return None
+            return []
         owned_ph = ",".join("?" * len(owned))
         owned_clause = f"config_name IN ({owned_ph})"
 
@@ -1040,7 +1054,7 @@ class DBManager:
         STATUSES = ('planning', 'executing', 'verifying', 'running')
         ordering = "created_at ASC" if fifo else "priority DESC, updated_at ASC"
         with self.get_connection() as conn:
-            row = None
+            rows = None
             # Primary path: pick from active skillflow runs (source of truth)
             # A6 fix: also include 'planning' projects that have a non-empty brief
             # (brief-not-empty guard prevents /new-without-/submit projects from
@@ -1073,7 +1087,7 @@ class DBManager:
             if active_ids:
                 placeholders = ",".join("?" * len(active_ids))
                 if owner_email:
-                    row = conn.execute(f"""
+                    rows = conn.execute(f"""
                         SELECT * FROM runs
                         WHERE (project_id IN ({placeholders})
                                OR {task_clause}
@@ -1081,26 +1095,26 @@ class DBManager:
                           AND {owned_clause}
                           AND owner_email = ?
                         ORDER BY {ordering}
-                        LIMIT 1
-                    """, (*active_ids, *terminal_ids, *owned, owner_email)).fetchone()
+                        LIMIT ?
+                    """, (*active_ids, *terminal_ids, *owned, owner_email, limit)).fetchall()
                 else:
-                    row = conn.execute(f"""
+                    rows = conn.execute(f"""
                         SELECT * FROM runs
                         WHERE (project_id IN ({placeholders})
                                OR {task_clause}
                                OR {planning_guard})
                           AND {owned_clause}
                         ORDER BY {ordering}
-                        LIMIT 1
-                    """, (*active_ids, *terminal_ids, *owned)).fetchone()
+                        LIMIT ?
+                    """, (*active_ids, *terminal_ids, *owned, limit)).fetchall()
             # Fallback: no active skillflow runs OR none matched in the local DB
             # (e.g., tests use an isolated DB while skillflow uses production DB).
-            if row is None:
+            if not rows:
                 # Gate: skip projects whose meta conversation hasn't finished
                 # (meta_state='drafting'). Same as in _get_or_create_skillflow_run.
                 drafting_guard = "AND (meta_state IS NULL OR meta_state != 'drafting')"
                 if owner_email:
-                    row = conn.execute(f"""
+                    rows = conn.execute(f"""
                         SELECT * FROM runs
                         WHERE (status IN ({','.join('?'*len(STATUSES))})
                                OR {task_clause})
@@ -1108,19 +1122,19 @@ class DBManager:
                           AND owner_email = ?
                           {drafting_guard}
                         ORDER BY {ordering}
-                        LIMIT 1
-                    """, (*STATUSES, *terminal_ids, *owned, owner_email)).fetchone()
+                        LIMIT ?
+                    """, (*STATUSES, *terminal_ids, *owned, owner_email, limit)).fetchall()
                 else:
-                    row = conn.execute(f"""
+                    rows = conn.execute(f"""
                         SELECT * FROM runs
                         WHERE (status IN ({','.join('?'*len(STATUSES))})
                                OR {task_clause})
                           AND {owned_clause}
                           {drafting_guard}
                         ORDER BY {ordering}
-                        LIMIT 1
-                    """, (*STATUSES, *terminal_ids, *owned)).fetchone()
-            return dict(row) if row else None
+                        LIMIT ?
+                    """, (*STATUSES, *terminal_ids, *owned, limit)).fetchall()
+            return [dict(r) for r in (rows or [])]
 
     def advance_project_step(self, project_id: str) -> str | None:
         """Deprecated: skillflow owns pipeline progression via advance_run()."""

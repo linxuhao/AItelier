@@ -710,6 +710,11 @@ async def _check_hung_claims():
         pass  # Never let hung detection itself break the scheduler
 
 
+def _tick_lock_held(project_id: str) -> bool:
+    """Is a tick for this project already running? Read-only — never acquires."""
+    return _get_tick_lock(project_id).locked()
+
+
 async def _execute_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step.
 
@@ -1485,16 +1490,42 @@ def _sync_task_statuses(project_id: str, run: dict, sf):
 
 # ── Polling ──────────────────────────────────────────────────────────
 
+# How many DIFFERENT projects one tick may advance concurrently. Same project
+# stays strictly serial — that is the per-project lock's job and it is unchanged.
+# The bound exists because each slot can hold an LLM call: unbounded fan-out would
+# turn a queue of projects into a burst of concurrent model requests.
+MAX_CONCURRENT_PROJECTS = int(_os.getenv("AITELIER_MAX_CONCURRENT_PROJECTS", "4"))
+
+
 async def poll_and_execute():
-    """Project-priority-first scheduler using skillflow."""
+    """Advance up to MAX_CONCURRENT_PROJECTS different projects, one step each.
+
+    One project per tick was the old rule, and its cost was not the serialism —
+    it was that a project whose tick is ALREADY IN FLIGHT still consumed the
+    pick. A 400s step therefore produced 80 consecutive `outcome=locked` ticks
+    with every other project frozen behind it, which is how a freshly generated
+    pipeline sat at its begin node for an hour while a game build ran.
+
+    So: ask for several candidates in priority order, skip the ones already
+    running, and start the rest concurrently. The per-project lock still makes
+    the SAME project serial; different projects no longer wait on each other.
+    """
     import asyncio
     loop = asyncio.get_running_loop()
 
-    project = db.get_next_active_project()
-    if not project:
+    projects = db.get_active_projects(limit=MAX_CONCURRENT_PROJECTS)
+    if not projects:
         tick_log("", "idle")
         return
-    await _execute_skillflow_tick(project["project_id"], loop)
+    # Filter here as well as in _execute_skillflow_tick: a busy project should not
+    # consume one of this tick's slots, and skipping it silently is what made the
+    # old starvation invisible — `locked` is still logged, by the tick itself.
+    free = [p for p in projects if not _tick_lock_held(p["project_id"])]
+    if not free:
+        tick_log(projects[0]["project_id"], "locked")
+        return
+    await asyncio.gather(*(_execute_skillflow_tick(p["project_id"], loop)
+                           for p in free))
 
 
 async def poll_and_execute_demo():

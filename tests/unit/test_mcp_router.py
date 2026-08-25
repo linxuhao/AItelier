@@ -506,6 +506,69 @@ def test_a_pipeline_is_reachable_by_the_name_list_pipelines_returned():
     assert mcp_router._load_roles(declared), "built-in roles must resolve too"
 
 
+def test_a_config_composed_at_boot_resolves_the_same_way(monkeypatch):
+    """dpe_game is dpe_default_v2 + configs/addons/game_harness.yaml, composed at
+    boot and never written to a file. Resolving by FILE made get_pipeline /
+    list_roles / list_templates / get_role / get_template / export_pipeline all
+    answer "no pipeline 'dpe_game' — call list_pipelines" for a name
+    list_pipelines had just returned — on 18 of the 30 runs in the DB. Same dead
+    end the test above closed for dpe_default_v2, one config short.
+    """
+    from types import SimpleNamespace
+    from api import dependencies
+    from core import addon_registry
+    # The registry is what list_pipelines answers from; stand in for it so this
+    # stays a unit test, while the composition itself comes from the real files.
+    monkeypatch.setattr(dependencies, "get_config_registry",
+                        lambda: SimpleNamespace(
+                            get=lambda n: object() if n == "dpe_game" else None))
+    monkeypatch.setattr(addon_registry, "describe_config",
+                        lambda n: {"base": "dpe_default_v2",
+                                   "addons": ["game_harness"]})
+
+    src = mcp_router._config_source("dpe_game")
+    assert src is not None, "a registered composed config must resolve"
+    assert src["kind"] == "composed"
+    assert src["role_stems"] == ["dpe_default", "game_harness"]
+    assert "configs/dpe_default.yaml" in src["origin"]
+    assert "configs/addons/game_harness.yaml" in src["origin"]
+
+    # The roles it names really do merge: game_designer exists only in the addon's
+    # agent_configs file, researcher only in the base's. One stem would lose one.
+    roles = mcp_router._load_roles("dpe_game")
+    assert roles and "game_designer" in roles and "researcher" in roles
+
+    # export genuinely cannot serve it — but it must say WHY, naming the sources,
+    # not send the caller back round the loop.
+    _, err = mcp_router._roles_or_error("dpe_game")
+    assert err is None
+    assert mcp_router._config_source("no_such_pipeline_xyz") is None
+
+
+def test_only_an_unregistered_name_is_told_to_call_list_pipelines(monkeypatch):
+    """A config the registry DOES know, whose roles this repo cannot read (one
+    registered from the skillflow package), must be told what it is and where its
+    graph is — "call list_pipelines" there is a loop with no exit."""
+    from types import SimpleNamespace
+    from api import dependencies
+    from core import addon_registry
+    monkeypatch.setattr(dependencies, "get_config_registry",
+                        lambda: SimpleNamespace(
+                            get=lambda n: object() if n == "addon_converter" else None))
+    monkeypatch.setattr(addon_registry, "describe_config",
+                        lambda n: {"base": "addon_converter", "addons": []})
+
+    src = mcp_router._config_source("addon_converter")
+    assert src is not None and src["kind"] == "external"
+    _, err = mcp_router._roles_or_error("addon_converter")
+    assert err and "call list_pipelines" not in err["error"]
+    assert "skillflow package" in err["error"]
+    assert "get_pipeline" in err["error"]
+
+    _, err = mcp_router._roles_or_error("no_such_pipeline_xyz")
+    assert err and "call list_pipelines" in err["error"]
+
+
 def test_corrupt_roles_json_reaches_the_model_as_a_message_not_a_traceback(
         tmp_path, monkeypatch):
     """_load_roles used to RETURN {"__error__": "<str>"}; no caller checked it, so

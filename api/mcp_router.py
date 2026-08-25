@@ -243,24 +243,29 @@ def _register_read_tools(tool):
           "Read one pipeline's graph YAML plus the names of its roles, templates and "
           "tools. This is the source of truth for `edit_pipeline`.")
     def get_pipeline(config: str) -> dict:
-        from core import pipeline_registry as pr
-        bad = bad_config_name(config)
-        if bad:
-            return {"error": bad}
-        path = pr.generated_configs_dir() / f"{config}.yaml"
-        if not path.exists():
-            builtin = _builtin_config_path(config)
-            if builtin is None:
-                return {"error": f"no pipeline '{config}' — call list_pipelines"}
-            path = builtin
+        src = _config_source(config)
+        if src is None:
+            return {"error": f"no pipeline '{config}' — call list_pipelines"}
         import yaml
-        text = path.read_text(encoding="utf-8")
-        data = yaml.safe_load(text) or {}
+        path = src["path"]
+        if path is not None:
+            text = path.read_text(encoding="utf-8")
+            data = yaml.safe_load(text) or {}
+        else:
+            # Nothing on disk declares this graph — it is composed at boot, or it
+            # ships inside skillflow. The LIVE graph is then the only artefact, so
+            # serialise the one that actually runs rather than refusing.
+            data = _live_graph_dict(config)
+            if data is None:
+                return {"error": f"'{config}' is registered but its graph could not "
+                                 f"be read back ({src['origin']})"}
+            text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
         steps = data.get("steps") or []
         return {
             "config": config,
-            "path": str(path),
-            "editable": not _is_builtin(path),
+            "path": str(path) if path is not None else None,
+            "source": src["origin"],
+            "editable": path is not None and not _is_builtin(path),
             "graph_yaml": text,
             "steps": [{"id": s.get("id"), "type": s.get("step_type"),
                        "agent_config": s.get("agent_config"),
@@ -272,9 +277,9 @@ def _register_read_tools(tool):
           "List the agent roles (model + template + tools) a pipeline's agent steps "
           "use. For a generated pipeline these live in <slug>.roles.json.")
     def list_roles(config: str) -> dict:
-        roles = _load_roles(config)
-        if roles is None:
-            return {"error": f"no roles for '{config}' — call list_pipelines"}
+        roles, err = _roles_or_error(config)
+        if err:
+            return err
         return {"config": config,
                 "roles": [{"role": k,
                            "model": (v or {}).get("model"),
@@ -285,9 +290,9 @@ def _register_read_tools(tool):
     @tool("get_role", "read",
           "Read one role's full config, including its system prompt.")
     def get_role(config: str, role: str) -> dict:
-        roles = _load_roles(config)
-        if roles is None:
-            return {"error": f"no roles for '{config}'"}
+        roles, err = _roles_or_error(config)
+        if err:
+            return err
         if role not in roles:
             return {"error": f"no role '{role}' in '{config}'. "
                              f"Have: {', '.join(sorted(roles))}"}
@@ -334,6 +339,94 @@ def _builtin_config_path(config: str):
     return p if p.exists() else None
 
 
+def _agent_configs_dir():
+    return _repo_configs_dir().parent / "agent_configs"
+
+
+def _live_graph_dict(config: str) -> dict | None:
+    """The registered graph, serialised — for a config with no file behind it."""
+    from api.dependencies import get_config_registry
+    mf = get_config_registry().get(config)
+    if mf is None:
+        return None
+    try:
+        return mf.graph_provider().to_dict()
+    except Exception:
+        return None
+
+
+def _config_source(config: str) -> dict | None:
+    """Where a REGISTERED config's graph and roles actually live.
+
+    `list_pipelines` enumerates the LIVE registry, which holds two kinds of config
+    that `configs/*.yaml` does not: one composed at boot (`dpe_game` is
+    `dpe_default_v2` + `configs/addons/game_harness.yaml`, assembled by
+    `core/addon_registry.py` and never written to a file) and one registered from
+    the skillflow package (`addon_converter`). Resolving by file alone made six
+    read tools answer "no pipeline 'dpe_game' — call list_pipelines" for a name
+    list_pipelines had just returned, on 18 of the 30 runs in the DB — the same
+    dead end `_builtin_stem` closed for `dpe_default_v2`, one config short.
+
+    Returns None only when the registry does not know `config` at all. That, and
+    only that, is when "call list_pipelines" is advice rather than a loop.
+    """
+    from core import pipeline_registry as pr
+    if bad_config_name(config):
+        return None
+    gen = pr.generated_configs_dir() / f"{config}.yaml"
+    if gen.exists():
+        return {"kind": "generated", "path": gen, "role_stems": [],
+                "origin": f"generated pipeline, {gen}"}
+    stem = _builtin_stem(config)
+    if stem:
+        return {"kind": "builtin", "path": _repo_configs_dir() / f"{stem}.yaml",
+                "role_stems": [stem], "origin": f"built-in, configs/{stem}.yaml"}
+    from api.dependencies import get_config_registry
+    if get_config_registry().get(config) is None:
+        return None
+    addons: list = []
+    base = config
+    try:
+        from core.addon_registry import describe_config
+        d = describe_config(config) or {}
+        base, addons = d.get("base") or config, list(d.get("addons") or [])
+    except Exception:
+        pass
+    if addons:
+        base_stem = _builtin_stem(base) or base
+        # Addon roles live in `agent_configs/<addon>.yaml` beside the base's own —
+        # role names are flat across those files, so a plain merge is the same
+        # table the runner resolves against.
+        stems = [base_stem] + [a for a in addons
+                               if (_agent_configs_dir() / f"{a}.yaml").exists()]
+        return {"kind": "composed", "path": None, "role_stems": stems,
+                "base": base, "addons": addons,
+                "origin": ("composed at boot from configs/%s.yaml (%s) + %s"
+                           % (base_stem, base,
+                              " + ".join(f"configs/addons/{a}.yaml"
+                                         for a in addons)))}
+    return {"kind": "external", "path": None, "role_stems": [],
+            "origin": "registered from the skillflow package — its graph and roles "
+                      "ship with the engine, not with this repo"}
+
+
+def _roles_or_error(config: str):
+    """(roles, error-dict). Splits "no such pipeline" from "no roles HERE".
+
+    The four role/template tools all answered "no roles for 'X'" for both, which
+    for a composed config meant an unregistered name and a perfectly registered
+    one were indistinguishable.
+    """
+    roles = _load_roles(config)
+    if roles:
+        return roles, None
+    src = _config_source(config)
+    if src is None:
+        return None, {"error": f"no pipeline '{config}' — call list_pipelines"}
+    return None, {"error": f"'{config}' has no roles readable here — {src['origin']}. "
+                           f"get_pipeline('{config}') reads its graph."}
+
+
 def _is_builtin(path) -> bool:
     try:
         return _repo_configs_dir() in path.resolve().parents
@@ -356,14 +449,17 @@ def _load_roles(config: str) -> dict | None:
             raise ToolError(f"{config}.roles.json is not valid JSON: {e}")
     import yaml
     # Built-in roles live beside the graph and share its FILE stem, not its
-    # declared name — see _builtin_stem.
-    stem = _builtin_stem(config)
-    if not stem:
+    # declared name — see _builtin_stem. A COMPOSED config draws on more than one
+    # such file (base + one per addon), so this is a list, not a stem.
+    src = _config_source(config)
+    if src is None:
         return None
-    ac = _repo_configs_dir().parent / "agent_configs" / f"{stem}.yaml"
-    if ac.exists():
-        return yaml.safe_load(ac.read_text(encoding="utf-8")) or {}
-    return None
+    roles: dict = {}
+    for stem in src.get("role_stems") or []:
+        ac = _agent_configs_dir() / f"{stem}.yaml"
+        if ac.exists():
+            roles.update(yaml.safe_load(ac.read_text(encoding="utf-8")) or {})
+    return roles or None
 
 
 def mcp_asgi_app(mcp: FastMCP):
@@ -449,6 +545,17 @@ def _register_bundle_tools(tool):
           "travels with the repo.")
     def export_pipeline(config: str) -> dict:
         from core.pipeline_bundle import BundleError, export_pipeline as _exp
+        # Resolve first, so a registered-but-unexportable config is told what it IS
+        # and where to read it — the bundle layer only knows "no <config>.yaml",
+        # which for dpe_game reads as "unknown pipeline".
+        src = _config_source(config)
+        if src is None:
+            return {"error": f"no pipeline '{config}' — call list_pipelines"}
+        if src["kind"] != "generated":
+            return {"error": f"'{config}' cannot be exported: a bundle is only "
+                             f"self-contained for a gen_* pipeline. This one is "
+                             f"{src['origin']} — it travels with the repo. Read it "
+                             f"with get_pipeline / get_template instead."}
         try:
             bundle = _exp(config)
         except BundleError as e:
@@ -585,9 +692,9 @@ def _register_edit_tools(tool):
           "fields you pass are changed.")
     def edit_role(config: str, role: str, model: str = "", tools: list = None,
                   temperature: float = None, thinking: dict = None) -> dict:
-        roles = _load_roles(config)
-        if roles is None:
-            return {"error": f"no roles for '{config}'"}
+        roles, err = _roles_or_error(config)
+        if err:
+            return err
         # Separate name: assigning back to `role` made the failure message
         # interpolate the RESOLUTION (None) instead of what the caller typed —
         # "no role like 'None'" — destroying the input exactly where it is the
@@ -614,18 +721,18 @@ def _register_edit_tools(tool):
           "List a pipeline's templates. A generated pipeline stores each role's "
           "prompt inline as that role's template — one template per agent role.")
     def list_templates(config: str) -> dict:
-        roles = _load_roles(config)
-        if roles is None:
-            return {"error": f"no roles for '{config}'"}
+        roles, err = _roles_or_error(config)
+        if err:
+            return err
         return {"config": config,
                 "templates": [{"role": r, "chars": len((c or {}).get("system_prompt") or "")}
                               for r, c in sorted(roles.items())]}
 
     @tool("get_template", "read", "Read one role's prompt template in full.")
     def get_template(config: str, role: str) -> dict:
-        roles = _load_roles(config)
-        if roles is None:
-            return {"error": f"no roles for '{config}'"}
+        roles, err = _roles_or_error(config)
+        if err:
+            return err
         resolved = _resolve_role(config, role, roles)
         if resolved is None:
             return {"error": f"no role like '{role}' in '{config}'. "
@@ -641,9 +748,9 @@ def _register_edit_tools(tool):
         if not (template or "").strip():
             return {"error": "template is empty — a role with no prompt falls back "
                              "to a generic one, which is almost never what you want"}
-        roles = _load_roles(config)
-        if roles is None:
-            return {"error": f"no roles for '{config}'"}
+        roles, err = _roles_or_error(config)
+        if err:
+            return err
         resolved = _resolve_role(config, role, roles)
         if resolved is None:
             return {"error": f"no role like '{role}' in '{config}'. "

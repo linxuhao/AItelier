@@ -166,6 +166,18 @@ def test_the_readme_tells_the_reader_how_to_install_the_skill(readme):
     assert "node_modules/dsh-plugin-aitelier/skills" in readme
 
 
+def test_the_install_command_copies_from_the_PROFILE_not_the_project(readme):
+    """`dsh plugin add` installs into $DSH_HOME/profiles/<name>/node_modules —
+    NOT the user's project. The first version of this command read a bare
+    `node_modules/…`, which from a project directory finds nothing at all.
+    Verified against a real `dsh plugin add` into an isolated DSH_HOME."""
+    line = next(l for l in readme.splitlines()
+                if l.startswith("cp -r") and "aitelier-pipelines" in l)
+    assert "profiles/" in line, f"copies from the wrong tree: {line}"
+    assert ".dsh/skills" in line, (
+        f"must land in a root DSH scans for every project: {line}")
+
+
 def test_the_inbound_and_outbound_mcp_urls_do_not_share_a_name():
     """`AITELIER_MCP_URL` is public API now — the published plugin teaches it as
     "where DSH finds AItelier". AItelier's own outbound media client must not

@@ -85,12 +85,16 @@ three of AItelier's structural gates and only show up on a real run. Install it
 into a skill root DSH already scans:
 
 ```bash
-mkdir -p .agents/skills
-cp -r node_modules/dsh-plugin-aitelier/skills/aitelier-pipelines .agents/skills/
+mkdir -p ~/.dsh/skills
+cp -r ~/.dsh/profiles/*/node_modules/dsh-plugin-aitelier/skills/aitelier-pipelines ~/.dsh/skills/
 ```
 
-(or `~/.agents/skills/` for every project, or add the package's `skills/`
-directory to `customSkillDirs`.)
+`~/.dsh/skills` (`$DSH_HOME/skills`) is the `user-dsh` root — scanned for every
+project, no git root required. **The package lives in the PROFILE's
+`node_modules`, not your project's**: `dsh plugin add` installs into
+`$DSH_HOME/profiles/<name>`, so a `cp` run from a project directory finds
+nothing. For one project only, `<projectRoot>/.agents/skills/` works too — the
+project root being the nearest ancestor with a `.git`.
 
 **Why this is a copy and not automatic.** A Cordis patch targets a row by id and
 replaces its *whole* config. Mounting the skill by patching the shared

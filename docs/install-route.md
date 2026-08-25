@@ -106,6 +106,8 @@ because the errors are still what you would see if you bypass the CLI.
 | `wait_for_run` outliving the client's own timeout — the client hangs up first and the model sees a transport error rather than "still running" | The patch raises `toolCallTimeoutMs` to 10 minutes, above `wait_for_run`'s default |
 | Write tools all answer `denied:` | Expected without `AITELIER_ADMIN_TOKEN` — a legitimate read-only install, and the README says so |
 | The skill is not installed | It ships in the package but is **not auto-mounted**: a Cordis patch replaces a whole row, so wiring it would clobber the user's own skill roots. README gives the `cp` |
+| **The `cp` pointing at the wrong tree.** `dsh plugin add` installs into `$DSH_HOME/profiles/<name>/node_modules`, not the project's — the first version of the command read a bare `node_modules/…` and found nothing from a project directory | Fixed and **verified** by installing both plugins into an isolated `DSH_HOME`; a test pins that the command copies from `profiles/` into `~/.dsh/skills` |
+| Two plugins colliding | **Verified**: `dsh-plugin-aitelier` + `dsh-plugin-continuity` compose side by side — distinct row ids (`mcp-aitelier` / `continuity`) and distinct `serverName`s, so the model sees `mcp__aitelier__*` and `mcp__continuity__*` |
 
 ---
 

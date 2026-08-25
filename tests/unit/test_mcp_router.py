@@ -697,3 +697,147 @@ async def test_an_event_with_no_run_id_wakes_nobody(wait_sf):
     await wait_sf.notifications.emit("run_failed", None)      # unattributable
     out = await asyncio.wait_for(task, 5)
     assert out["timed_out"] is True and out["settled_on"] is None
+
+
+# ── The drive loop: scheduler runs, the agent decides ────────────────────────
+
+def test_generated_pipelines_are_scheduler_owned():
+    """A run must advance whoever started it.
+
+    Generated pipelines were `scheduler_owned: False` — "butler-driven so
+    checkpoints relay in-chat" — which makes the STARTER responsible for stepping
+    it. Fine while the butler is the only starter; the moment the MCP endpoint
+    started one it sat at `running` forever (verified live) while wait_for_run
+    truthfully reported "still running".
+    """
+    from core.pipeline_registry import GEN_HINTS
+    assert GEN_HINTS["scheduler_owned"] is True
+
+
+def test_run_pipeline_attaches_a_driver(monkeypatch):
+    """Butler-owned configs have NO poller. Starting one without attaching a driver
+    is starting a run nobody will ever advance."""
+    started = {}
+    monkeypatch.setattr(mcp_router, "_start_driver",
+                        lambda rid, **kw: started.update(run_id=rid, **kw) or True)
+
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            return fn
+        return deco
+    mcp_router._register_run_tools(tool)
+
+    class _M:
+        scheduler_owned = False
+    monkeypatch.setattr("api.dependencies.get_config_registry",
+                        lambda: type("R", (), {"get": lambda s, n: _M(),
+                                               "list": lambda s: []})())
+    monkeypatch.setattr("core.run_launcher.start_config_run",
+                        lambda *a, **k: {"status": "ok", "run_id": "R1"})
+    monkeypatch.setattr("core.run_launcher.generate_run_id", lambda c: "pid1")
+
+    out = captured["run_pipeline"]("code_review", seed_text="x")
+    assert out["run_id"] == "R1"
+    assert started == {"run_id": "R1", "scheduler_owned": False,
+                       "auto_approve": True}, started
+
+
+def test_checkpoints_ask_is_reachable_and_auto_is_the_default(monkeypatch):
+    """The default answers human-approval gates for you. That is what a test-drive
+    wants and a bypass for a production run, so the other mode must exist and the
+    tool description must say so."""
+    started = {}
+    monkeypatch.setattr(mcp_router, "_start_driver",
+                        lambda rid, **kw: started.update(**kw) or True)
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            captured[name + "__desc"] = description
+            return fn
+        return deco
+    mcp_router._register_run_tools(tool)
+    monkeypatch.setattr("api.dependencies.get_config_registry",
+                        lambda: type("R", (), {"get": lambda s, n: type("M", (), {"scheduler_owned": True})(),
+                                               "list": lambda s: []})())
+    monkeypatch.setattr("core.run_launcher.start_config_run",
+                        lambda *a, **k: {"status": "ok", "run_id": "R2"})
+    monkeypatch.setattr("core.run_launcher.generate_run_id", lambda c: "pid2")
+
+    assert captured["run_pipeline"]("dpe_default_v2")["checkpoints"] == "auto"
+    assert started["auto_approve"] is True
+    assert captured["run_pipeline"]("dpe_default_v2", checkpoints="ask")["checkpoints"] == "ask"
+    assert started["auto_approve"] is False
+    assert "invalid" in str(captured["run_pipeline"]("x", checkpoints="maybe"))
+    desc = captured["run_pipeline__desc"]
+    assert "checkpoints='ask'" in desc and "BYPASSES" in desc
+
+
+def test_answer_checkpoint_refuses_a_run_that_is_not_paused(monkeypatch):
+    sf = _WaitSF(); sf.status = "running"
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            return fn
+        return deco
+    mcp_router._register_run_tools(tool)
+    out = captured["answer_checkpoint"]("r1")
+    assert "not paused" in out["error"]
+
+
+def test_a_rejection_without_feedback_is_refused(monkeypatch):
+    """The step it goes back to has nothing to act on otherwise."""
+    sf = _WaitSF(); sf.status = "paused"
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            return fn
+        return deco
+    mcp_router._register_run_tools(tool)
+    assert "needs feedback" in captured["answer_checkpoint"]("r1", "reject")["error"]
+
+
+@pytest.mark.asyncio
+async def test_no_tool_publishes_an_uncallable_schema():
+    """A `**kwargs` wrapper publishes ONE required field called `kwargs`.
+
+    That is what shipped for the skillflow_docs_* tools: the model could see them,
+    and every call failed pydantic validation before reaching the tool. Nothing
+    caught it because every test called the python function directly — the
+    published SCHEMA is a separate artifact and this is the test that reads it.
+    """
+    mcp = build_mcp()
+    for t in await mcp.list_tools():
+        props = set((t.inputSchema or {}).get("properties") or {})
+        assert "kwargs" not in props and "args" not in props, (
+            f"{t.name} publishes a varargs placeholder as a parameter: {sorted(props)}")
+
+
+@pytest.mark.asyncio
+async def test_every_tool_is_callable_with_its_own_required_arguments():
+    """Each tool's declared `required` list must be arguments the function really
+    takes — a schema that asks for something the callable rejects is unusable."""
+    import inspect as _inspect
+    mcp = build_mcp()
+    for t in await mcp.list_tools():
+        schema = t.inputSchema or {}
+        required = schema.get("required") or []
+        fn = mcp._tool_manager.get_tool(t.name).fn
+        params = _inspect.signature(fn).parameters
+        accepts_kw = any(p.kind is _inspect.Parameter.VAR_KEYWORD
+                         for p in params.values())
+        for arg in required:
+            assert arg in params or accepts_kw, (
+                f"{t.name} requires {arg!r} which its function does not accept")

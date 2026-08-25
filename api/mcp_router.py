@@ -58,6 +58,14 @@ from core.tool_guards import (bad_config_name, bad_tool_name,
 # registry, or in the run table.
 _TOOL_KIND: dict[str, str] = {}
 
+# The event loop the endpoint runs on, captured at lifespan open so a tool
+# body executing in a worker thread can still schedule background work.
+_MAIN_LOOP = None
+# Strong refs to in-flight background drivers: asyncio keeps only a weak
+# reference to a bare task, so one dropped here would be garbage-collected
+# mid-run and the pipeline would stop moving for no visible reason.
+_DRIVERS: set = set()
+
 
 class ToolDenied(Exception):
     """The caller may not run this tool. Surfaces to the model as a tool error."""
@@ -204,6 +212,8 @@ def build_mcp() -> FastMCP:
     _register_edit_tools(tool)
     _register_run_tools(tool)
     _register_wait_tool(tool)
+    _register_trace_tools(tool)
+    _register_lifecycle_tools(tool)
     return mcp
 
 
@@ -398,6 +408,15 @@ class MCPEndpoint:
 
     def open(self) -> FastMCP:
         """Build a fresh server + ASGI app. The caller runs its session manager."""
+        # Tool bodies run in a worker thread (see `_wrap`), so a background driver
+        # started from one cannot use `get_running_loop`. Capture the loop here,
+        # where the lifespan IS the loop.
+        import asyncio
+        global _MAIN_LOOP
+        try:
+            _MAIN_LOOP = asyncio.get_running_loop()
+        except RuntimeError:
+            _MAIN_LOOP = None
         self.server = build_mcp()
         self.app = mcp_asgi_app(self.server)
         return self.server
@@ -746,16 +765,27 @@ def _reload_tools() -> None:
 def _register_run_tools(tool):
 
     @tool("run_pipeline", "write",
-          "Start a run of any registered pipeline and return its run_id immediately. "
-          "Runs are LONG and may pause for human approval, so this never blocks — "
-          "poll get_run_status. `seed_text` is the input; list_pipelines' input_hint "
-          "says what each pipeline expects. `against_project` runs it against an "
-          "existing project's repo.")
+          "Start a run and return its run_id immediately. NOTE THE DEFAULT: "
+          "checkpoints='auto' ANSWERS every human-approval gate for you, which is "
+          "what a test-drive wants but BYPASSES review gates a production run is "
+          "meant to stop at (a design review, a chapter sign-off). Pass "
+          "checkpoints='ask' to have the run pause instead and answer each one "
+          "deliberately with answer_checkpoint — that is the mode to use when a "
+          "person is meant to look. Runs are LONG so this never blocks: use "
+          "wait_for_run, then get_run_summary to see what happened. `seed_text` is "
+          "the input; list_pipelines' input_hint says what each pipeline expects. "
+          "`against_project` runs it against an existing project's repo.")
     def run_pipeline(config: str, seed_text: str = "", name: str = "",
-                     against_project: str = "") -> dict:
+                     against_project: str = "", checkpoints: str = "auto") -> dict:
         from api.dependencies import (db_instance, get_config_registry,
                                       get_workspace_manager)
         from core.run_launcher import generate_run_id, start_config_run
+        if checkpoints not in ("auto", "ask"):
+            # Checked before anything starts: validating after start_config_run
+            # left an orphan run behind for a typo.
+            return {"error": f"invalid checkpoints={checkpoints!r} — must be 'auto' "
+                             f"(answer them for you) or 'ask' (pause for "
+                             f"answer_checkpoint)"}
         manifest = get_config_registry().get(config)
         if not manifest:
             avail = ", ".join(sorted(m.config_name
@@ -783,10 +813,80 @@ def _register_run_tools(tool):
                                   repo_path=repo_path)
         if result.get("status") == "error":
             return {"error": result.get("message")}
-        return {"run_id": result.get("run_id"), "project_id": pid, "config": config,
-                "scheduler_owned": bool(getattr(manifest, "scheduler_owned", False)),
-                "note": "Started. Poll get_run_status(run_id); a paused run is "
-                        "waiting for answer_checkpoint."}
+        run_id = result.get("run_id")
+        owned = bool(getattr(manifest, "scheduler_owned", False))
+        # Attach a driver. For a scheduler-owned config the poller advances the run
+        # and this only answers checkpoints; for a butler-owned one (code_review,
+        # coding_task, …) NOTHING else would advance it at all — that is the bug
+        # this fixes: such a run used to sit at `running` forever while
+        # wait_for_run truthfully reported "still running".
+        _start_driver(run_id, scheduler_owned=owned,
+                      auto_approve=(checkpoints == "auto"))
+        return {"run_id": run_id, "project_id": pid, "config": config,
+                "scheduler_owned": owned, "checkpoints": checkpoints,
+                "note": ("Started. wait_for_run(run_id), then get_run_summary(run_id). "
+                         + ("Checkpoints are being answered automatically."
+                            if checkpoints == "auto" else
+                            "It will PAUSE at each checkpoint for answer_checkpoint."))}
+
+    @tool("answer_checkpoint", "write",
+          "Approve or reject a run paused at a checkpoint. Rejecting sends the work "
+          "back with your feedback, which is how a reviewer asks for a change rather "
+          "than stopping the run. Only a run whose status is 'paused' has anything "
+          "to answer — check with wait_for_run or get_run_status first.")
+    def answer_checkpoint(run_id: str, decision: str = "approve",
+                          feedback: str = "") -> dict:
+        from api.dependencies import get_skillflow
+        sf = get_skillflow()
+        run = sf.get_run(run_id)
+        if not run:
+            return {"error": f"no run '{run_id}'"}
+        if run.get("status") != "paused":
+            return {"error": f"run '{run_id}' is {run.get('status')}, not paused — "
+                             f"there is no checkpoint to answer"}
+        decision = (decision or "").strip().lower()
+        if decision not in ("approve", "reject"):
+            return {"error": f"decision must be 'approve' or 'reject', not "
+                             f"{decision!r}"}
+        if decision == "reject" and not (feedback or "").strip():
+            return {"error": "a rejection needs feedback — the step it goes back to "
+                             "has nothing to act on otherwise"}
+        try:
+            if decision == "approve":
+                sf.approve_checkpoint(run_id)
+            else:
+                # `reject_checkpoint` needs the STEP the run is paused at, and
+                # resolving that from a run is exactly what the web/CLI path
+                # already does — reuse its resolver instead of re-deriving it,
+                # so a rejection over MCP and one from the dashboard cannot
+                # disagree about which checkpoint they answered.
+                from api.meta_routers import _get_checkpoint_info
+                step_id, _label, _rid, _graph = _get_checkpoint_info(
+                    run.get("project_id") or "")
+                if not step_id:
+                    return {"error": f"run '{run_id}' is paused but no checkpoint "
+                                     f"step could be resolved for it"}
+                sf.reject_checkpoint(run_id, step_id, feedback)
+        except Exception as e:
+            return {"error": f"{decision} failed: {e}"}
+        # Answering releases the run; whoever was driving it keeps going.
+        after = sf.get_run(run_id) or {}
+        return {"run_id": run_id, "decision": decision,
+                "status": after.get("status"), "current_node": after.get("current_node")}
+
+    @tool("get_run_summary", "read",
+          "What a run actually did, small enough to read: per-step status, the FIRST "
+          "failure with its error, and the final outputs truncated. This is what to "
+          "read after wait_for_run — `get_run_status` gives only a status and a node "
+          "name, which names neither what broke nor why. Use it to decide whether to "
+          "fix the pipeline (edit_template / edit_pipeline / edit_tool) and run it "
+          "again.")
+    def get_run_summary(run_id: str) -> dict:
+        from api.dependencies import (get_config_registry, get_skillflow,
+                                      get_workspace_manager)
+        from core.run_driver import summarise_run
+        return summarise_run(get_skillflow(), get_workspace_manager(),
+                             get_config_registry(), run_id)
 
     @tool("get_run_status", "read",
           "Current status of a run: running / paused-at-checkpoint / completed / "
@@ -913,3 +1013,315 @@ def _wait_result(run_id: str, run: dict, timed_out: bool, event: str | None) -> 
         out["next"] = ("Still running — this is not an error. Call wait_for_run "
                        "again to keep waiting.")
     return out
+
+
+def _start_driver(run_id: str, *, scheduler_owned: bool, auto_approve: bool) -> bool:
+    """Attach a background driver to a run just started over MCP.
+
+    Scheduled onto the endpoint's own loop rather than awaited: `run_pipeline` must
+    return the run_id immediately (a run takes minutes to hours), and the tool body
+    is executing in a worker thread by then, so `get_running_loop` is not available
+    here — `_MAIN_LOOP` is captured at lifespan open for exactly this.
+
+    The task is kept in `_DRIVERS` because asyncio holds only a WEAK reference to a
+    bare task: dropped, it would be collected mid-run and the pipeline would stop
+    advancing with nothing logged and nothing to see.
+    """
+    import asyncio
+
+    from api.dependencies import db_instance, get_skillflow, get_workspace_manager
+    from core.run_driver import drive_run
+
+    if not run_id or _MAIN_LOOP is None:
+        return False
+
+    async def _run():
+        try:
+            await drive_run(get_skillflow(), db_instance, get_workspace_manager(),
+                            run_id, scheduler_owned=scheduler_owned,
+                            auto_approve=auto_approve)
+        except Exception:
+            import logging
+            logging.getLogger("aitelier.mcp").warning(
+                "background driver for run %s died", run_id, exc_info=True)
+        finally:
+            # Whoever drove it, the project row must reflect the outcome or the
+            # dashboard shows a finished run as still starting up.
+            try:
+                from core.scheduler import _sync_project_status_to_db
+                run = get_skillflow().get_run(run_id) or {}
+                if run.get("project_id"):
+                    _sync_project_status_to_db(run["project_id"])
+            except Exception:
+                pass
+
+    fut = asyncio.run_coroutine_threadsafe(_run(), _MAIN_LOOP)
+    _DRIVERS.add(fut)
+    fut.add_done_callback(_DRIVERS.discard)
+    return True
+
+
+# ── Trace: why did it do that ────────────────────────────────────────────────
+
+def _register_trace_tools(tool):
+    """The durable trace, in three shapes plus a way to find a run at all.
+
+    A summary says a step failed; the trace says WHY — it holds every prompt,
+    model response, tool call and review verdict. It is also far too large to
+    return whole (1000+ rows for one DPE run), which is why this is list → search
+    → read rather than one dump: find where to look, then read only that.
+    """
+
+    @tool("list_runs", "read",
+          "Recent runs, newest first — the entry point when you hold no run_id. "
+          "Filter by `config`, `status` ('running' / 'paused' / 'completed' / "
+          "'failed') or `project_id`. A 'paused' run is waiting for "
+          "answer_checkpoint.")
+    def list_runs(config: str = "", status: str = "", project_id: str = "",
+                  limit: int = 30) -> dict:
+        from api.dependencies import get_skillflow
+        from core.trace_reader import list_runs as _ls
+        return _ls(get_skillflow(), config=config, status=status,
+                   project_id=project_id, limit=limit)
+
+    @tool("trace_list", "read",
+          "Compact trace lines for a run (seq, step, category, one-line summary) — "
+          "this is where a failed run's actual reason lives, which get_run_summary "
+          "only points at. Use errors_only=true to go straight to what broke, then "
+          "trace_read(seq) for the full payload. `run` accepts a run_id or a "
+          "project_id.")
+    def trace_list(run: str, step: str = "", category: str = "",
+                   errors_only: bool = False, limit: int = 50,
+                   order: str = "desc") -> dict:
+        from api.dependencies import get_skillflow
+        from core.trace_reader import trace_list as _tl
+        return _tl(get_skillflow(), run, step=step, category=category,
+                   errors_only=errors_only, limit=limit, order=order)
+
+    @tool("trace_search", "read",
+          "Substring search across a run's trace payloads — for when you know what "
+          "went wrong but not which step did it (an error message, a file name, a "
+          "phrase from a prompt). Returns the same compact lines as trace_list.")
+    def trace_search(run: str, query: str, step: str = "", limit: int = 30) -> dict:
+        from api.dependencies import get_skillflow
+        from core.trace_reader import trace_search as _ts
+        return _ts(get_skillflow(), run, query, step=step, limit=limit)
+
+    @tool("trace_read", "read",
+          "Full trace payloads for an explicit seq range (max 20 rows) — the actual "
+          "prompt, the actual model response, the actual tool result. Get the seq "
+          "from trace_list or trace_search first; this is deliberately not a way to "
+          "dump a whole run.")
+    def trace_read(run: str, seq: int, seq_end: int = None) -> dict:
+        from api.dependencies import get_skillflow
+        from core.trace_reader import trace_read as _tr
+        return _tr(get_skillflow(), run, seq, seq_end)
+
+
+# ── The rest of the drive / test / fix loop ──────────────────────────────────
+
+def _register_lifecycle_tools(tool):
+    """What the loop needs beyond run + watch + edit.
+
+    Compared against the chat butler's own toolset, these are the ones that are
+    load-bearing for generate → drive → observe → fix and had no MCP equivalent:
+    a way to WRITE a pipeline in the first place, a way to STOP a bad drive, a way
+    to RETIRE the ones the loop leaves behind, a way to see a middle step's output,
+    and the skillflow spec — because the fix half means editing a graph, and an
+    agent editing a graph without the schema is guessing.
+    """
+
+    @tool("generate_pipeline", "write",
+          "Generate a NEW pipeline from a plain-language description by running "
+          "AItelier's grounded generator (pipeline_forge): it surveys the real tool "
+          "registry, designs the graph, builds any missing tools, and gates the "
+          "result. Returns a run_id immediately — the generator PAUSES at a design "
+          "review, so wait_for_run then answer_checkpoint. On completion the "
+          "pipeline registers itself as `gen_<slug>` and list_pipelines shows it. "
+          "Pass `edit_target=gen_<slug>` to re-generate an existing pipeline with a "
+          "change instead of designing from scratch — that is the surgical path; "
+          "edit_template / edit_pipeline are for small hand fixes.")
+    def generate_pipeline(description: str, name: str = "",
+                          edit_target: str = "") -> dict:
+        from api.dependencies import db_instance, get_workspace_manager
+        from core.run_launcher import generate_run_id, start_config_run
+        description = (description or "").strip()
+        if not description:
+            return {"error": "description is required — what the pipeline should do "
+                             "(or, with edit_target, the change to make)."}
+        seed_inputs = None
+        if edit_target:
+            bad = bad_config_name(edit_target)
+            if bad:
+                return {"error": bad}
+            seed_inputs = _forge_baseline(edit_target)
+            if isinstance(seed_inputs, dict) and seed_inputs.get("error"):
+                return seed_inputs
+        pid = generate_run_id("forge-" + (name or description)[:40])
+        result = start_config_run(db_instance, get_workspace_manager(),
+                                  "pipeline_forge", pid, seed_text=description,
+                                  seed_inputs=seed_inputs or None,
+                                  name=name or f"forge {description[:40]}")
+        if result.get("status") == "error":
+            return {"error": result.get("message")}
+        return {"run_id": result.get("run_id"), "project_id": pid,
+                "config": "pipeline_forge", "edit_target": edit_target or None,
+                "note": "The generator is scheduler-driven. wait_for_run(run_id) → "
+                        "it pauses at the design review → answer_checkpoint → on "
+                        "completion the new gen_<slug> appears in list_pipelines."}
+
+    @tool("stop_pipeline", "write",
+          "Cancel a run that is going nowhere — an unbounded loop, a wrong seed, a "
+          "drive you no longer want. Marks it failed so the poller skips it. A run "
+          "left spinning holds the scheduler's one-project-per-tick slot against "
+          "every other project.")
+    def stop_pipeline(run_id: str, reason: str = "") -> dict:
+        from api.dependencies import get_skillflow
+        from core.trace_reader import resolve_run_row
+        sf = get_skillflow()
+        run = resolve_run_row(sf, run_id)
+        if not run:
+            return {"error": f"no run '{run_id}'"}
+        if run["status"] in ("completed", "failed"):
+            return {"run_id": run["id"], "status": run["status"],
+                    "message": f"already {run['status']}; nothing to stop"}
+        try:
+            sf.fail_run(run["id"], reason or "stopped via the MCP endpoint")
+        except Exception as e:
+            return {"error": f"could not stop it: {e}"}
+        return {"run_id": run["id"], "status": "stopped"}
+
+    @tool("archive_pipeline", "write",
+          "Retire a generated pipeline. A generate → drive → fix loop leaves failed "
+          "attempts behind, and deleting the files alone is NOT enough — the graph "
+          "row keeps it runnable, so an archived-by-hand pipeline comes back as a "
+          "zombie. This moves the files aside and records the name so the boot scan "
+          "skips it; `purge=true` deletes the graph row too and cannot be undone.")
+    def archive_pipeline(config: str, purge: bool = False) -> dict:
+        from api.dependencies import get_config_registry, get_skillflow
+        from core.pipeline_registry import archive_generated_pipeline
+        bad = bad_config_name(config)
+        if bad:
+            return {"error": bad}
+        try:
+            return archive_generated_pipeline(get_skillflow(), get_config_registry(),
+                                              config, purge=bool(purge))
+        except Exception as e:
+            return {"error": f"archive failed: {e}"}
+
+    @tool("get_step_output", "read",
+          "The files ONE step produced, in full. get_run_summary returns only the "
+          "final outputs, truncated — when a middle step is the suspect, this is how "
+          "to read what it actually wrote. `run` accepts a run_id or a project_id.")
+    def get_step_output(run: str, step: str) -> dict:
+        from api.dependencies import get_skillflow, get_workspace_manager
+        from core.trace_reader import resolve_run_row
+        row = resolve_run_row(get_skillflow(), run)
+        if not row:
+            return {"error": f"no run '{run}'"}
+        if bad_config_name(step):
+            return {"error": f"invalid step id {step!r}"}
+        try:
+            d = get_workspace_manager().get_final_path(
+                row.get("project_id") or "", step, row.get("graph_name") or "")
+        except Exception as e:
+            return {"error": f"could not resolve step '{step}': {e}"}
+        if not d.exists():
+            return {"error": f"step '{step}' has no promoted output (it may not have "
+                             f"run yet — trace_list(run) shows what did)"}
+        files = {}
+        for item in sorted(d.rglob("*")):
+            if item.is_file() and item.name != "_snapshot.json":
+                try:
+                    files[str(item.relative_to(d))] = item.read_text(
+                        encoding="utf-8", errors="replace")[:20000]
+                except Exception:
+                    pass
+        return {"run_id": row["id"], "step": step, "files": files}
+
+    # The skillflow docs tools, with their REAL parameters spelled out. Wrapping
+    # them as `**kwargs` published a schema with one required field called
+    # `kwargs`, so every call failed validation before reaching the tool — the
+    # model could see them and could not use them (caught live, not in tests:
+    # nothing asserted the published SCHEMA was callable).
+    _SPEC = "This is the authoritative spec for the graph YAML edit_pipeline " \
+            "accepts — read it before inventing a field."
+
+    @tool("skillflow_docs_list", "read",
+          "List skillflow's own documentation pages and schema sources. " + _SPEC)
+    def skillflow_docs_list() -> dict:
+        return _native_docs("skillflow_docs_list")
+
+    @tool("skillflow_docs_search", "read",
+          "Search skillflow's docs AND its authoritative schema source (graph.py / "
+          "core.py) for a term — the fastest way to settle what a graph field "
+          "actually means. " + _SPEC)
+    def skillflow_docs_search(query: str) -> dict:
+        return _native_docs("skillflow_docs_search", query=query)
+
+    @tool("skillflow_docs_read", "read",
+          "Read one skillflow doc or schema source, line-numbered, optionally a "
+          "line range. Pair it with skillflow_docs_search's hits. " + _SPEC)
+    def skillflow_docs_read(topic: str, start_line: int = None,
+                            end_line: int = None) -> dict:
+        kw = {"topic": topic}
+        if start_line is not None:
+            kw["start_line"] = start_line
+        if end_line is not None:
+            kw["end_line"] = end_line
+        return _native_docs("skillflow_docs_read", **kw)
+
+
+def _native_docs(name: str, **kwargs):
+    """Call skillflow's OWN docs tool through the live loader.
+
+    Not reimplemented: these read the engine's docs and schema source, so a copy
+    would describe a skillflow other than the one actually running.
+    """
+    from api.dependencies import get_skillflow
+    try:
+        fn = get_skillflow()._tool_loader.load_fn(name)
+    except Exception as e:
+        return {"error": f"{name} is unavailable in this skillflow build: {e}"}
+    try:
+        return fn(**kwargs)
+    except Exception as e:
+        return {"error": f"{name} failed: {e}"}
+
+
+def _forge_baseline(edit_target: str):
+    """Seed the generator with an existing pipeline so it edits instead of designs.
+
+    De-namespaces the role names first: the host re-applies the `<config>__` prefix
+    exactly once at registration, so feeding namespaced names back in makes the
+    emitter echo them and registration double-prefixes — `gen_x__gen_x__role` —
+    which no longer matches the graph, and every step then silently falls back to
+    a generic prompt. Same defence as the butler's own edit mode.
+    """
+    import json as _json
+
+    import yaml as _yaml
+
+    from core.pipeline_registry import _ROLE_SEP, generated_configs_dir
+    gy = generated_configs_dir() / f"{edit_target}.yaml"
+    if not gy.exists():
+        return {"error": f"edit_target '{edit_target}' not found (no "
+                         f"{edit_target}.yaml). Call list_pipelines."}
+    prefix = edit_target + _ROLE_SEP
+    graph = _yaml.safe_load(gy.read_text(encoding="utf-8")) or {}
+    for step in graph.get("steps", []) if isinstance(graph, dict) else []:
+        if isinstance(step, dict) and isinstance(step.get("agent_config"), str):
+            if step["agent_config"].startswith(prefix):
+                step["agent_config"] = step["agent_config"][len(prefix):]
+    seeds = {"baseline_graph.yaml": _yaml.safe_dump(graph, sort_keys=False,
+                                                    allow_unicode=True)}
+    rj = gy.with_suffix(".roles.json")
+    if rj.exists():
+        try:
+            roles = _json.loads(rj.read_text(encoding="utf-8")) or {}
+            seeds["baseline_roles.json"] = _json.dumps(
+                {(r[len(prefix):] if r.startswith(prefix) else r): v
+                 for r, v in roles.items()}, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return seeds

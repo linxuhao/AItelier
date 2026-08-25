@@ -59,15 +59,35 @@ Verify the install by asking the agent to call `mcp__aitelier__list_pipelines`; 
 | `edit_tool` | write | Write a generated tool. The source must import and define its own name. |
 | `export_pipeline` | read | The whole closure — graph, roles with prompts, custom tools — as one JSON bundle. |
 | `import_pipeline` | write | Install a bundle, optionally under a new name. |
+| `generate_pipeline` | write | Write a NEW pipeline from a description (runs AItelier's grounded generator). `edit_target=` re-generates an existing one with a change. |
+| `archive_pipeline` | write | Retire a generated pipeline. Deleting its files alone leaves a runnable zombie. |
 | `run_pipeline` | write | Start a run; returns a `run_id` immediately. |
 | `wait_for_run` | read | Block until the run pauses at a checkpoint or finishes. Use this, not a poll loop. |
+| `answer_checkpoint` | write | Approve or reject a paused run. Rejecting sends work back with feedback. |
+| `stop_pipeline` | write | Cancel a run that is going nowhere. |
 | `get_run_status` | read | A single non-blocking look. |
+| `get_run_summary` | read | What the run did: per-step status, the FIRST failure with its error, final outputs. |
+| `get_step_output` | read | The files ONE step produced, in full. |
+| `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
+| `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
+| `skillflow_docs_list` / `skillflow_docs_search` / `skillflow_docs_read` | read | Skillflow's own spec for the graph YAML `edit_pipeline` accepts. Read it before inventing a field. |
 
 ### Editing needs something to edit
 
-Only **generated** (`gen_*`) pipelines are editable and exportable — a built-in config lives in the AItelier repo and travels with it. **A fresh AItelier has no generated pipelines at all**, so on a new install every `edit_*` and `export_pipeline` call correctly refuses, and `list_pipelines` shows only built-ins.
+Only **generated** (`gen_*`) pipelines are editable and exportable — a built-in config lives in the AItelier repo and travels with it. **A fresh AItelier has no generated pipelines at all**, so on a new install every `edit_*` and `export_pipeline` call correctly refuses, and `list_pipelines` shows only built-ins. Make one with `generate_pipeline`.
 
-Make one first. Pipeline generation is not on this MCP surface: it runs through AItelier's own chat butler in coding mode (`generate_pipeline`), because a generated pipeline needs the test-drive-and-fix loop that lives there. Open AItelier's UI at `http://localhost:4444/#/chat`, switch the session to coding mode, and describe the pipeline you want. Once it exists as `gen_<slug>`, this plugin's edit / export / import tools operate on it.
+## The loop: generate → drive → observe → fix
+
+The whole point of the surface. AItelier's own three structural gates check that a generated pipeline is *shaped* right; only running it shows whether it *works*, and that is a judgment loop, not a fixed DAG:
+
+1. **`generate_pipeline("…")`** → a `run_id`. The generator is scheduler-driven, so AItelier advances it; you do not step it.
+2. **`wait_for_run`** → it pauses at a design review. Read it, then **`answer_checkpoint`** — approve, or reject with feedback and it revises. On completion the pipeline appears in `list_pipelines` as `gen_<slug>`.
+3. **`run_pipeline(gen_<slug>, seed_text=…)`** — a test drive. Checkpoints are answered for you by default (see below).
+4. **`wait_for_run`** → **`get_run_summary`**. A step failed, or the outputs are wrong? **`trace_list(run, errors_only=true)`** finds where, **`trace_read(seq)`** shows the actual prompt and response, **`get_step_output`** shows what a middle step wrote.
+5. **Fix and go again.** `edit_template` for a prompt (usually the answer), `edit_pipeline` for the graph — consult `skillflow_docs_search` for the schema rather than guessing — `edit_tool` for a tool's code. Or `generate_pipeline(edit_target=gen_<slug>, description="the change")` for a surgical regeneration. Then back to 3.
+6. **`stop_pipeline`** any drive that is going nowhere, and **`archive_pipeline`** the attempts you abandon.
+
+Nothing in that loop steps the pipeline by hand: AItelier's scheduler runs it, and the agent decides at checkpoints and between runs.
 
 ## Runs do not block, but waiting does
 

@@ -35,10 +35,23 @@ GEN_PREFIX = "gen_"
 _ROLE_SEP = "__"
 SEED_FILE = "seed_input.md"
 # Host hints applied to every generated pipeline (keeps config_registry generic —
-# it knows nothing about `gen_`): butler-driven so checkpoints relay in-chat, and a
-# seed file so `start_config_run(seed_text=...)` reaches the first step.
+# it knows nothing about `gen_`): SCHEDULER-driven, and a seed file so
+# `start_config_run(seed_text=...)` reaches the first step.
+#
+# This was `False` — "butler-driven so checkpoints relay in-chat" — which made the
+# STARTER responsible for advancing the run. That is fine while the only starter is
+# the chat butler, and broken the moment anything else starts one: a generated
+# pipeline launched over the MCP endpoint had nobody advancing it and sat at
+# `running` forever, truthfully and uselessly reported as "still running".
+# Scheduler-owned makes a generated pipeline advance exactly like a DPE run
+# whoever started it, and its checkpoints surface the way DPE's already do (SSE +
+# the dashboard) instead of only inside one chat session.
+#
+# Anything that drives such a run itself must stop: the poller and an inline
+# driver race for the same claim, and the inline one loses silently — see
+# `core/meta_agent.py:_tool_drive_pipeline`, which now watches instead.
 GEN_HINTS = {
-    "scheduler_owned": False,
+    "scheduler_owned": True,
     "seed_file": SEED_FILE,
     # A generic input contract so a generated pipeline self-describes in the
     # butler's pipeline catalog (generated pipelines are layer-3 offload targets).

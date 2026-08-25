@@ -73,11 +73,12 @@ def test_register_text_adds_host_agents_graph_and_manifest(sf, registry):
     assert "summarizer" in sf.agent_registry
     # graph is live under the forced namespaced name
     assert any(g["name"] == "gen_demo" for g in sf.list_graphs())
-    # manifest present + carries generated-pipeline hints: butler-driven (so
-    # checkpoints relay in-chat) with a seed file (so seed_text reaches step 1).
+    # manifest present + carries generated-pipeline hints: SCHEDULER-driven (so a
+    # run advances whoever started it — the butler is not the only starter any
+    # more) with a seed file (so seed_text reaches step 1).
     m = registry.get("gen_demo")
     assert m is not None
-    assert m.scheduler_owned is False
+    assert m.scheduler_owned is True
     assert m.seed_file == "seed_input.md"
     assert "process" in m.steps
     # a converted skill self-describes in the butler's pipeline catalog
@@ -85,7 +86,9 @@ def test_register_text_adds_host_agents_graph_and_manifest(sf, registry):
     # so the butler knows how to feed it.
     assert "seed_text" in m.input_hint
     cat = {e["config_name"]: e for e in registry.catalog(full=True)}["gen_demo"]
-    assert cat["drive"] == "inline" and cat["input_hint"] == m.input_hint
+    # `drive` follows scheduler_owned: the catalog tells the butler who advances
+    # this pipeline, and a generated one is now the poller's, not the starter's.
+    assert cat["drive"] == "background" and cat["input_hint"] == m.input_hint
 
 
 def test_generated_roles_namespaced_and_dont_clobber_globals(sf, registry, gdir,
@@ -162,7 +165,7 @@ def test_gen_config_seeds_first_step_and_is_butler_driven(sf, registry, gdir,
     res = pr.register_generated_pipeline(sf, registry, "s1", "Seedy")
     cn = res["config_name"]
     m = registry.get(cn)
-    assert m.scheduler_owned is False
+    assert m.scheduler_owned is True
     assert m.seed_file == "seed_input.md"
     # begin step now reads the seed (so start_config_run's seed_text reaches it)
     data = yaml.safe_load((gdir / f"{cn}.yaml").read_text())

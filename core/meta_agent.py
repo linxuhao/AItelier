@@ -3562,152 +3562,46 @@ class MetaAgent:
 
     @staticmethod
     def _resolve_run_row(ref: str) -> dict | None:
-        """A run row from either a skillflow run id or a project id.
-
-        The butler mostly holds project ids (that is what start_config_run and
-        drive_pipeline hand back), so every run-keyed tool accepts both — mirrors
-        api.run_routers._resolve_run.
-        """
         from api.dependencies import get_skillflow
-        sf = get_skillflow()
-        run = sf.get_run(ref)
-        if run:
-            return run
-        runs = sf.list_runs(project_id=ref)      # ORDER BY created_at DESC
-        return runs[0] if runs else None
+        from core.trace_reader import resolve_run_row
+        return resolve_run_row(get_skillflow(), ref)
 
     @staticmethod
     def _trace_summary(payload: dict, cap: int = 220) -> str:
-        """The one line of a trace payload worth reading in a list view."""
-        bits: list[str] = []
-        if payload.get("passed") is False:
-            bits.append("passed=false")
-        for key in ("error", "feedback", "preview", "text", "summary", "detail"):
-            val = payload.get(key)
-            if isinstance(val, str) and val.strip():
-                bits.append(val.strip().replace("\n", " "))
-                break
-        if not bits:
-            params = payload.get("params")
-            if isinstance(params, dict):
-                bits.append("params: " + ", ".join(sorted(params)[:8]))
-            elif payload.get("files"):
-                bits.append(f"files: {payload['files']}")
-            elif payload.get("tool"):
-                bits.append(f"tool: {payload['tool']}")
-        text = " | ".join(bits) or json.dumps(payload, ensure_ascii=False)[:cap]
-        return text[:cap] + ("…" if len(text) > cap else "")
+        from core.trace_reader import trace_summary
+        return trace_summary(payload, cap)
 
     def _trace_rows(self, ref: str, where: str, params: list, limit: int,
                     order: str = "DESC") -> dict:
-        """Shared SELECT against a run's trace. Never accepts caller SQL."""
         from api.dependencies import get_skillflow
-        run = self._resolve_run_row(ref)
-        if not run:
-            return {"error": f"No run found for '{ref}' (tried run id, then project id)."}
-        sf = get_skillflow()
-        sql = ("SELECT seq, step_id, category, event, payload_json, created_at "
-               "FROM skillflow_trace WHERE run_id = ? " + where +
-               f" ORDER BY seq {order} LIMIT ?")
-        try:
-            rows = sf.trace_query(run["id"], sql, tuple([run["id"], *params, limit]))
-        except Exception as e:
-            return {"error": f"trace query failed: {e}"}
-        return {"run": run, "rows": [dict(r) for r in rows]}
+        from core.trace_reader import trace_rows
+        return trace_rows(get_skillflow(), ref, where, params, limit, order)
 
     def _tool_trace_list(self, args: dict) -> dict:
         """Compact trace entries — where a failed run's actual reason lives."""
-        where, params = "", []
-        if (step := (args.get("step") or "").strip()):
-            where += " AND step_id = ?"
-            params.append(step)
-        if (cat := (args.get("category") or "").strip()):
-            where += " AND category = ?"
-            params.append(cat)
-        errors_only = bool(args.get("errors_only"))
-        limit = max(1, min(int(args.get("limit") or 50), 200))
-        if errors_only:
-            # Widen in SQL, then drop the false hits (error: "") in Python — an
-            # empty error field is how the passing gates record success.
-            where += " AND (payload_json LIKE '%error%' OR payload_json LIKE '%false%')"
-        order = "ASC" if (args.get("order") or "desc").lower() == "asc" else "DESC"
-        res = self._trace_rows(args.get("run") or "", where, params,
-                               limit * (4 if errors_only else 1), order)
-        if "error" in res:
-            return res
-        out = []
-        for r in res["rows"]:
-            try:
-                payload = json.loads(r["payload_json"])
-            except (ValueError, TypeError):
-                payload = {}
-            if errors_only:
-                err = payload.get("error")
-                failed = payload.get("passed") is False or payload.get("status") == "failed"
-                if not ((isinstance(err, str) and err.strip()) or failed):
-                    continue
-            out.append({"seq": r["seq"], "step": r["step_id"], "category": r["category"],
-                        "event": r["event"], "at": r["created_at"],
-                        "summary": self._trace_summary(payload)})
-            if len(out) >= limit:
-                break
-        run = res["run"]
-        return {"run_id": run["id"], "project_id": run.get("project_id"),
-                "run_status": run.get("status"),
-                "run_error": run.get("error_reason") or run.get("error"),
-                "count": len(out), "entries": out,
-                "hint": "trace_read(run, seq) for a full payload."}
+        from api.dependencies import get_skillflow
+        from core.trace_reader import trace_list
+        return trace_list(get_skillflow(), args.get("run") or "",
+                          step=args.get("step") or "",
+                          category=args.get("category") or "",
+                          errors_only=bool(args.get("errors_only")),
+                          limit=args.get("limit") or 50,
+                          order=args.get("order") or "desc")
 
     def _tool_trace_search(self, args: dict) -> dict:
         """Substring search across a run's trace payloads."""
-        query = (args.get("query") or "").strip()
-        if not query:
-            return {"error": "query is required."}
-        where, params = " AND payload_json LIKE ?", [f"%{query}%"]
-        if (step := (args.get("step") or "").strip()):
-            where += " AND step_id = ?"
-            params.append(step)
-        limit = max(1, min(int(args.get("limit") or 30), 100))
-        res = self._trace_rows(args.get("run") or "", where, params, limit)
-        if "error" in res:
-            return res
-        entries = []
-        for r in res["rows"]:
-            try:
-                payload = json.loads(r["payload_json"])
-            except (ValueError, TypeError):
-                payload = {}
-            entries.append({"seq": r["seq"], "step": r["step_id"],
-                            "category": r["category"], "event": r["event"],
-                            "summary": self._trace_summary(payload)})
-        return {"run_id": res["run"]["id"], "query": query,
-                "count": len(entries), "entries": entries}
+        from api.dependencies import get_skillflow
+        from core.trace_reader import trace_search
+        return trace_search(get_skillflow(), args.get("run") or "",
+                            args.get("query") or "", step=args.get("step") or "",
+                            limit=args.get("limit") or 30)
 
     def _tool_trace_read(self, args: dict) -> dict:
         """Full payloads for an explicit, small seq range."""
-        try:
-            start = int(args.get("seq"))
-        except (TypeError, ValueError):
-            return {"error": "seq is required (an integer from trace_list)."}
-        end = args.get("seq_end")
-        end = int(end) if end is not None else start
-        if end < start:
-            start, end = end, start
-        end = min(end, start + 19)                      # hard cap: 20 rows
-        res = self._trace_rows(args.get("run") or "", " AND seq >= ? AND seq <= ?",
-                               [start, end], 20, order="ASC")
-        if "error" in res:
-            return res
-        entries = []
-        for r in res["rows"]:
-            try:
-                payload = json.loads(r["payload_json"])
-            except (ValueError, TypeError):
-                payload = r["payload_json"]
-            entries.append({"seq": r["seq"], "step": r["step_id"],
-                            "category": r["category"], "event": r["event"],
-                            "at": r["created_at"], "payload": payload})
-        return {"run_id": res["run"]["id"], "count": len(entries), "entries": entries}
+        from api.dependencies import get_skillflow
+        from core.trace_reader import trace_read
+        return trace_read(get_skillflow(), args.get("run") or "",
+                          args.get("seq"), args.get("seq_end"))
 
     # The registry readers resolve through the live ToolLoader, so they cover every
     # registered root (skillflow native, aitelier/tools, generated) automatically —
@@ -4266,7 +4160,6 @@ class MetaAgent:
                                       register_pipeline_from_run)  # noqa: F401
         from core.pipeline_registry import reload_generated_pipeline
         from core.run_launcher import start_config_run
-        from aitelier.runner import AgentStepRunner
 
         config_name = (args.get("config_name") or "").strip()
         test_seed = (args.get("test_seed") or "").strip()
@@ -4290,35 +4183,17 @@ class MetaAgent:
             return {"error": launch.get("message")}
         rid = launch["run_id"]
 
-        runner = AgentStepRunner(db_manager=self.db, workspace_manager=self.ws)
-        attempts: dict[str, int] = {}
-        for _ in range(max_steps):
-            run = sf.get_run(rid) or {}
-            if run.get("status") in ("completed", "failed"):
-                break
-            nxt = sf.advance_run(rid)
-            if (sf.get_run(rid) or {}).get("status") in ("paused", "completed", "failed"):
-                if (sf.get_run(rid) or {}).get("status") == "paused":
-                    sf.approve_checkpoint(rid); continue
-                break
-            if nxt is None:
-                continue
-            try:
-                if sf._get_resolver_for_run(rid).is_tool(nxt):
-                    continue
-            except Exception:
-                pass
-            claimed = sf.claim_next_step(rid)
-            if claimed is None:
-                continue
-            attempts[claimed.step_id] = attempts.get(claimed.step_id, 0) + 1
-            try:
-                res = await runner.execute(claimed)
-                sf.confirm_step(claimed.token, res)
-            except Exception as e:
-                # Surface a persistent step failure fast (don't loop forever).
-                retryable = attempts[claimed.step_id] < 2
-                sf.fail_step(claimed.token, str(e)[:300], retryable=retryable)
+        # WATCH, do not drive. Generated pipelines are scheduler-owned now (see
+        # pipeline_registry.GEN_HINTS), so the poller advances this run. The old
+        # inline loop here would race it for the same claim and LOSE silently:
+        # `claim_next_step` returns None to whoever is second, so this loop would
+        # spin through its whole step budget in milliseconds and hand back a
+        # summary of a barely-started run labelled "did-not-terminate".
+        # Auto-approving checkpoints stays — a test-drive must not stop on a human
+        # gate — and that is now the only thing this loop contributes.
+        from core.run_driver import drive_run
+        await drive_run(sf, self.db, self.ws, rid, scheduler_owned=True,
+                        auto_approve=True, max_watch_s=max_steps * 30)
 
         # A drive run is driven HERE, not by the scheduler (generated pipelines are
         # `scheduler_owned: false`), so no poller tick ever reaches it — without this

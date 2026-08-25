@@ -1160,8 +1160,15 @@ def _wait_result(run_id: str, run: dict, timed_out: bool, event: str | None) -> 
         "settled_on": event,
     }
     if status == "paused":
-        out["next"] = ("Paused at a checkpoint. A person approves it in the "
-                       "AItelier UI — this endpoint cannot.")
+        # It CAN: `answer_checkpoint` is registered on this same endpoint, and
+        # run_pipeline's own note already tells the caller a run pauses "for
+        # answer_checkpoint". Sending them to the UI instead denied a capability
+        # they were holding — measured against a live checkpoint approved through
+        # this endpoint minutes after the message claimed it was impossible.
+        out["next"] = ("Paused at a checkpoint. Answer it here: "
+                       "answer_checkpoint(run_id, decision='approve'|'reject', "
+                       "feedback=…). The AItelier UI is the other way in, not the "
+                       "only one.")
     elif status == "failed":
         out["error_reason"] = run.get("error_reason") or ""
     elif timed_out:

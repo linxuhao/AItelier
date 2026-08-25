@@ -15,6 +15,7 @@ Two classes of test, and the split is the point.
 """
 
 import json
+import pathlib
 
 import pytest
 
@@ -361,7 +362,11 @@ async def test_wait_returns_the_moment_a_checkpoint_fires(wait_sf):
     out = await asyncio.wait_for(task, 5)
     assert out["status"] == "paused"
     assert out["settled_on"] == "checkpoint_paused"
-    assert "person approves" in out["next"]
+    # It used to say "A person approves it in the AItelier UI — this endpoint
+    # cannot", while answer_checkpoint is registered on this very endpoint and
+    # run_pipeline's own note already points at it.
+    assert "answer_checkpoint" in out["next"]
+    assert "cannot" not in out["next"]
 
 
 @pytest.mark.asyncio
@@ -660,6 +665,60 @@ def test_a_built_in_roles_prompt_is_read_from_the_file_the_role_names():
     # A role with neither says so rather than looking like an empty prompt.
     _, src = mcp_router._role_prompt({})
     assert "neither" in src
+
+
+class _SummarySF(_FakeSF):
+    """_FakeSF plus the trace probe summarise_run uses for liveness."""
+
+    def trace_query(self, run_id, sql, params):
+        return []
+
+
+def _summarise(run, steps):
+    from types import SimpleNamespace
+    from core.run_driver import summarise_run
+    sf = _SummarySF([run], {run["id"]: steps})
+    ws = SimpleNamespace(get_final_path=lambda *a, **k: pathlib.Path("/nonexistent"))
+    registry = SimpleNamespace(get=lambda name: None)
+    return summarise_run(sf, ws, registry, run["id"])
+
+
+def test_a_claim_time_failure_reaches_first_failure():
+    """`claim_next_step` rejecting at the node never marks a step row, so the only
+    record is the RUN row's error. first_failure — promised by this function's
+    docstring and by the get_run_summary tool description — came back null on run
+    32ee04de while status, verdict and run_error all said failed."""
+    run = {"id": "r", "project_id": "p", "graph_name": "dpe_game",
+           "status": "failed", "current_node": "1",
+           "error_reason": "Required context source resolved to no content: finalize"}
+    out = _summarise(run, [{"step_id": "git_sync_pre", "status": "completed"},
+                           {"step_id": "1", "status": "pending"}])
+    ff = out["first_failure"]
+    assert ff, "a failed run must not report first_failure: null"
+    assert ff["step"] == "1", "the node it stopped at"
+    assert "no content: finalize" in ff["error"]
+    assert ff["from"] == "run_error"
+    assert "no step row is marked failed" in ff["note"]
+
+
+def test_a_step_row_failure_still_wins_over_the_run_level_error():
+    """The fallback must not paper over the precise answer when there is one."""
+    run = {"id": "r", "project_id": "p", "graph_name": "dpe_game",
+           "status": "failed", "current_node": "5",
+           "error_reason": "run-level blurb"}
+    out = _summarise(run, [{"step_id": "1", "status": "completed"},
+                           {"step_id": "2", "status": "failed",
+                            "error": "the architect blew up"}])
+    ff = out["first_failure"]
+    assert ff["step"] == "2" and ff["error"] == "the architect blew up"
+    assert "from" not in ff, "a real step failure needs no provenance caveat"
+
+
+def test_a_completed_run_has_no_first_failure():
+    run = {"id": "r", "project_id": "p", "graph_name": "dpe_game",
+           "status": "completed", "current_node": "done", "error_reason": ""}
+    assert _summarise(run, [{"step_id": "done", "status": "completed"}])[
+        "first_failure"] is None
 
 
 def test_corrupt_roles_json_reaches_the_model_as_a_message_not_a_traceback(

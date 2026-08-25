@@ -60,6 +60,16 @@ _MODEL = os.environ.get("GODOT_VISION_MODEL", "qwen3")
 # Read off the vLLM startup log / GET /v1/models (max_model_len), not a flag.
 _CONTEXT_TOKENS = int(os.environ.get("GODOT_VISION_CONTEXT_TOKENS", "12288"))
 _MAX_TOKENS = int(os.environ.get("GODOT_VISION_MAX_TOKENS", "2048"))
+# The fallback judge needs its OWN, much larger budget. 2048 is right for the
+# primary (qwen3 on vLLM), and structurally too small for DeepSeek's reasoning
+# model: measured 2026-08-25, three runs at 2048 all came back
+# finish_reason="length" with reasoning_tokens=2048 (the WHOLE budget) and an
+# EMPTY content — the model spends everything thinking and never writes the
+# answers. At 6144 it finishes: reasoning 3146 / 3537, content 341 / 288 chars.
+# 8192 leaves headroom above the observed worst case. A shared budget sized for
+# one backend silently blinds the other, and it does so as "unparseable".
+_MAX_TOKENS_FALLBACK = int(
+    os.environ.get("GODOT_VISION_FALLBACK_MAX_TOKENS", "8192"))
 _TIMEOUT = int(os.environ.get("GODOT_VISION_TIMEOUT", "300"))
 
 # ── Fallback judge ────────────────────────────────────────────────────────────
@@ -278,17 +288,26 @@ def _parse_answers(text: str) -> dict:
     return out
 
 
+class ReasoningStarved(RuntimeError):
+    """The judge answered 200, spent its whole token budget on reasoning, and
+    returned NO answer text. Not a transport failure and not an unparseable
+    reply — a budget failure, and it names itself so the report points at the
+    budget instead of at the parser."""
+
+
 def _post(url: str, model: str, api_key: str,
-          files: list[Path], questions: list[dict]) -> str:
+          files: list[Path], questions: list[dict],
+          max_tokens: int = 0) -> str:
     """One chat/completions call with the frames inline as base64 data URLs.
-    Raises on transport failure / non-200 / unreadable envelope."""
+    Raises on transport failure / non-200 / unreadable envelope, and raises
+    ReasoningStarved when the model burned its budget thinking."""
     content = [{"type": "text",
                 "text": _build_prompt(questions, len(files))}]
     for f in files:
         b64 = base64.b64encode(f.read_bytes()).decode("ascii")
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    body = json.dumps({"model": model, "max_tokens": _MAX_TOKENS,
+    body = json.dumps({"model": model, "max_tokens": max_tokens or _MAX_TOKENS,
                        "temperature": 0.0,
                        "messages": [{"role": "user", "content": content}]}
                       ).encode("utf-8")
@@ -301,7 +320,20 @@ def _post(url: str, model: str, api_key: str,
         if code != 200:
             raise urllib.error.HTTPError(url, code, "non-200", {}, None)
         payload = json.loads(resp.read())
-    return payload["choices"][0]["message"]["content"] or ""
+    choice = (payload.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    text = message.get("content") or ""
+    if not text.strip():
+        usage = payload.get("usage") or {}
+        detail = usage.get("completion_tokens_details") or {}
+        raise ReasoningStarved(
+            "%s answered 200 but wrote no answer text "
+            "(finish_reason=%s, completion_tokens=%s, reasoning_tokens=%s, "
+            "budget=%s). Raise the budget for this backend."
+            % (model, choice.get("finish_reason"),
+               usage.get("completion_tokens"), detail.get("reasoning_tokens"),
+               max_tokens or _MAX_TOKENS))
+    return text
 
 
 def _fallback_key() -> str:
@@ -339,8 +371,22 @@ def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
                 f"fallback has no {_FALLBACK_KEY_NAME} — no judge available"
             ) from primary_exc
         try:
-            return _post(_FALLBACK_URL, _FALLBACK_MODEL, key,
-                         files, questions), "fallback"
+            try:
+                return _post(_FALLBACK_URL, _FALLBACK_MODEL, key, files,
+                             questions,
+                             max_tokens=_MAX_TOKENS_FALLBACK), "fallback"
+            except ReasoningStarved as starved:
+                # Guessing a budget that fits every scenario does not work: how
+                # long this model thinks scales with the frames it is shown, and
+                # a fixed number is either wasteful or blinding. Escalate ONCE
+                # and actually retry — an escalation that only logs is how the
+                # planner starved nine times in a row while announcing a retry
+                # it could never take (a3846df).
+                bigger = _MAX_TOKENS_FALLBACK * 2
+                print(f"[godot_vision] fallback starved ({starved}); "
+                      f"retrying once at max_tokens={bigger}", flush=True)
+                return _post(_FALLBACK_URL, _FALLBACK_MODEL, key, files,
+                             questions, max_tokens=bigger), "fallback"
         except Exception as fb_exc:                       # noqa: BLE001
             raise RuntimeError(
                 f"primary {_URL} ({_MODEL}) failed: {primary_exc}; "

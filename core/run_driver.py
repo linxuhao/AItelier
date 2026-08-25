@@ -170,10 +170,22 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         per_step.append({"step": "?", "status": f"unreadable: {e}"})
     for s in steps:
         entry = {"step": s["step_id"], "status": s["status"]}
+        # WHICH loop item this instance ran for (skillflow >=1.5.41), omitted
+        # outside a loop. Without it a fan-out reads as repeated identical rows —
+        # `t_impl completed` / `t_impl pending` and no way to say which task —
+        # which is precisely the question the fix half of the loop is asking.
+        # `.get` because the container installs skillflow from PyPI and can be a
+        # release behind: a KeyError here would take down the whole summary, the
+        # one tool a driving agent has for "what broke".
+        item = s.get("loop_item")
+        if item:
+            entry["item"] = item
         if s["status"] == "failed" and first_failure is None:
             err = (s.get("error") or "")[:300]
             entry["error"] = err
             first_failure = {"step": s["step_id"], "error": err}
+            if item:
+                first_failure["item"] = item
         per_step.append(entry)
 
     outputs: dict[str, str] = {}

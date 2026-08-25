@@ -2,10 +2,27 @@
   "name": "dsh-plugin-aitelier",
   "version": "0.1.0",
   "description": "Use AItelier as a subagent from DeepSeek Harness: generate, edit, run, export and import SkillFlow pipelines",
-  "keywords": ["dsh-plugin", "aitelier", "skillflow", "mcp"],
+  "keywords": [
+    "dsh-plugin",
+    "aitelier",
+    "skillflow",
+    "mcp"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/linxuhao/AItelier.git",
+    "directory": "integrations/dsh"
+  },
+  "homepage": "https://github.com/linxuhao/AItelier/tree/main/integrations/dsh#readme",
+  "bugs": {
+    "url": "https://github.com/linxuhao/AItelier/issues"
+  },
   "type": "module",
-  "files": ["cordis.patch.yml", "README.md"],
+  "files": [
+    "cordis.patch.yml",
+    "README.md"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

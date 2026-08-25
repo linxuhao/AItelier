@@ -66,7 +66,7 @@ Verify the install by asking the agent to call `mcp__aitelier__list_pipelines`; 
 | `answer_checkpoint` | write | Approve or reject a paused run. Rejecting sends work back with feedback. |
 | `stop_pipeline` | write | Cancel a run that is going nowhere. |
 | `get_run_status` | read | A single non-blocking look. |
-| `get_run_summary` | read | What the run did: per-step status, the FIRST failure with its error, final outputs. |
+| `get_run_summary` | read | What the run did: per-step status, the FIRST failure with its error, final outputs. Inside a loop each entry names the **item** it ran for. |
 | `get_step_output` | read | The files ONE step produced, in full. |
 | `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
 | `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
@@ -84,6 +84,7 @@ The whole point of the surface. AItelier's own three structural gates check that
 2. **`wait_for_run`** → it pauses at a design review. Read it, then **`answer_checkpoint`** — approve, or reject with feedback and it revises. On completion the pipeline appears in `list_pipelines` as `gen_<slug>`.
 3. **`run_pipeline(gen_<slug>, seed_text=…)`** — a test drive. Checkpoints are answered for you by default (see below).
 4. **`wait_for_run`** → **`get_run_summary`**. A step failed, or the outputs are wrong? **`trace_list(run, errors_only=true)`** finds where, **`trace_read(seq)`** shows the actual prompt and response, **`get_step_output`** shows what a middle step wrote.
+   Inside a fan-out, `get_run_summary` names the loop **item** each instance ran for (`{step: t_impl, status: failed, item: health_bar}`) — a loop body runs once per item, plus retries, so without it a failure names a step that ran nine times and you are guessing which task broke.
 5. **Fix and go again.** `edit_template` for a prompt (usually the answer), `edit_pipeline` for the graph — consult `skillflow_docs_search` for the schema rather than guessing — `edit_tool` for a tool's code. Or `generate_pipeline(edit_target=gen_<slug>, description="the change")` for a surgical regeneration. Then back to 3.
 6. **`stop_pipeline`** any drive that is going nowhere, and **`archive_pipeline`** the attempts you abandon.
 

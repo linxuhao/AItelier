@@ -262,6 +262,26 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         pass          # a missing output dir is a fact about the run, not an error
 
     status = run.get("status") or "running"
+    # A run can fail BEFORE any step row is marked failed: `claim_next_step`
+    # rejecting at the node leaves every step `pending` and writes the reason to
+    # the RUN row only. `first_failure` — which this function's docstring and the
+    # get_run_summary tool description both promise holds "the FIRST failure with
+    # its error" — was then null on a run whose status, verdict and run_error all
+    # said failed (run 32ee04de: "Required context source resolved to no content:
+    # finalize", every step pending). A promised field left empty reads as "no
+    # failure found", which is the opposite of what happened.
+    if first_failure is None and status == "failed":
+        err = (run.get("error_reason") or run.get("error") or "")[:300]
+        if err:
+            first_failure = {
+                "step": run.get("current_node") or "?",
+                "error": err,
+                "from": "run_error",
+                "note": ("no step row is marked failed — the run stopped at this "
+                         "node without a step failing (a claim-time rejection, or "
+                         "an external stop), so the reason is the run-level error."),
+            }
+
     # A run that is still RUNNING has not "failed to terminate" — it has not
     # finished yet, and those are different claims. The old wording said
     # "did-not-terminate (likely an unbounded loop or a step failing

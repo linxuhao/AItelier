@@ -107,7 +107,9 @@ because the errors are still what you would see if you bypass the CLI.
 | Write tools all answer `denied:` | Expected without `AITELIER_ADMIN_TOKEN` — a legitimate read-only install, and the README says so |
 | The skill is not installed | It ships in the package but is **not auto-mounted**: a Cordis patch replaces a whole row, so wiring it would clobber the user's own skill roots. README gives the `cp` |
 | **The `cp` pointing at the wrong tree.** `dsh plugin add` installs into `$DSH_HOME/profiles/<name>/node_modules`, not the project's — the first version of the command read a bare `node_modules/…` and found nothing from a project directory | Fixed and **verified** by installing both plugins into an isolated `DSH_HOME`; a test pins that the command copies from `profiles/` into `~/.dsh/skills` |
-| Two plugins colliding | **Verified**: `dsh-plugin-aitelier` + `dsh-plugin-continuity` compose side by side — distinct row ids (`mcp-aitelier` / `continuity`) and distinct `serverName`s, so the model sees `mcp__aitelier__*` and `mcp__continuity__*` |
+| Two plugins colliding | **Verified end to end on a wiped machine**: `dsh` bootstrapped its own home, installed both plugins itself, and one task called `mcp__aitelier__list_pipelines` and `mcp__continuity__list_subjects` (21 continuity tools on the surface) through the Ark route |
+| **`dsh plugin add` needing pnpm.** On a machine with only node+npm it refuses — the message is clear, but the install command in this README assumes it | Install pnpm first (`corepack enable pnpm`) |
+| **An MCP server the plugin cannot reach because its port is not published.** The continuity stack listens on the docker bridge only, so `127.0.0.1:9030` answers nothing and the tools silently never appear | The plugin README's four-step checklist is exactly for this; a container IP works but is not stable across restarts |
 
 ---
 
@@ -130,8 +132,15 @@ which any amount of reading would have surfaced. What is still open:
   skill's outside-in path (`list_runs` → `get_run_summary` → `trace_list`),
   quoting the tool's own error out of the trace, and calling
   `Node 'input_failed' reached` **"a symptom, not the cause"**, which is the one
-  trap the skill exists to teach. What remains unrun is a pipeline EXECUTION
+  trap the skill exists to teach. A wiped second machine then repeated the whole
+  path — clone, cold build, `dsh` installing both plugins itself — and answered
+  a two-plugin question in one task. What remains unrun is a pipeline EXECUTION
   driven from DSH end to end.
+- **A correct tool call is not a correct answer.** In that two-plugin run the
+  model read a result carrying exactly 13 configs and reported 14; the
+  continuity count it gave was right. The plumbing being verified says nothing
+  about the arithmetic on top of it, which is why the skill tells the agent to
+  QUOTE the tool's own output rather than summarise it.
 - **Nothing verifies the docs against a run.** The tests pin the README against
   the *configs* (which key, which default model), not against a completed
   install. A doc can be self-consistent and still describe a path nobody can

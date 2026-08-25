@@ -30,6 +30,7 @@ The LLM key stays on the AItelier side and never travels through this plugin —
 ## Install
 
 ```bash
+corepack enable pnpm     # `dsh plugin` drives pnpm; on a node-only box it refuses
 dsh plugin --profile headless add dsh-plugin-aitelier
 ```
 

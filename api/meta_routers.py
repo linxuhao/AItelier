@@ -737,6 +737,27 @@ def approve_checkpoint(
         raise HTTPException(404, "Project not found")
     check_write_owner(user, project)
 
+    # skillflow's approve_checkpoint(run_id) has NO feedback parameter; only
+    # reject_checkpoint(run_id, step_id, feedback) does. This handler accepted
+    # the field and never read it, and the dashboard put a Feedback box directly
+    # above the Approve button — so a person typed binding amendments into a
+    # visible textarea, watched the run resume, and had no way to learn the text
+    # went nowhere: it reaches neither the run, the trace, nor the next step's
+    # context. Refuse BEFORE resolving the checkpoint, so the call is rejected
+    # for this reason and cannot half-approve on its way out. Same refusal the
+    # MCP answer_checkpoint tool gives (api/mcp_router.py).
+    _fb = request.feedback.strip()
+    if _fb:
+        raise HTTPException(400, (
+            f"An approval carries NO feedback channel — skillflow's "
+            f"approve_checkpoint(run_id) takes no feedback, so these {len(_fb)} "
+            f"characters would be dropped and the next step would never see "
+            f"them. What actually delivers them: POST the same text to "
+            f"/api/meta/{project_id}/checkpoint/reject to send the step back to "
+            f"redo the work against it; or put the requirement in the run's seed "
+            f"before launching. Re-send as a rejection, or drop `feedback` if "
+            f"you really do mean 'approve as-is'."))
+
     _step_id, _label, run_id, _graph = _get_checkpoint_info(project_id)
     if not run_id:
         raise HTTPException(400, "Project is not waiting for approval")

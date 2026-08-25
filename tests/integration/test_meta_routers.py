@@ -226,3 +226,68 @@ def test_task_meta_multi_turn(mock_gw_cls, client: TestClient):
     next_data = resp.json()
     assert next_data["status"] == "complete"
     assert next_data["interaction"]["phase"] == "task_meta"
+
+
+# ── Checkpoint approval: an approval carries no feedback ──────────────────
+
+def test_approve_refuses_feedback_instead_of_dropping_it(client: TestClient, monkeypatch):
+    """skillflow's approve_checkpoint(run_id) has no feedback parameter, so an
+    approval has nowhere to put text. The handler used to accept `feedback` and
+    never read it while the dashboard kept a Feedback box above the Approve
+    button — the words vanished with a 200 OK. Refuse, and refuse BEFORE the
+    checkpoint is resolved, so nothing half-approves on the way out."""
+    import api.meta_routers as mr
+
+    _ensure_project(client, "cp-fb-proj")
+    sf = MagicMock()
+    monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
+    monkeypatch.setattr(mr, "_get_checkpoint_info",
+                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation"))
+
+    resp = client.post("/api/meta/cp-fb-proj/checkpoint/approve",
+                       json={"checkpoint": "gather", "feedback": "MUST use PostgreSQL."})
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "no feedback channel" in detail.lower()
+    assert "reject" in detail.lower()          # names what actually delivers the text
+    sf.approve_checkpoint.assert_not_called()  # and the run stays paused
+
+
+def test_approve_without_feedback_still_approves(client: TestClient, monkeypatch):
+    """The refusal is about the field, not the endpoint — the ordinary approval
+    must still reach skillflow untouched."""
+    import api.meta_routers as mr
+
+    _ensure_project(client, "cp-nofb-proj")
+    sf = MagicMock()
+    sf.get_run.return_value = {"status": "paused"}
+    monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
+    monkeypatch.setattr(mr, "_get_checkpoint_info",
+                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation"))
+
+    resp = client.post("/api/meta/cp-nofb-proj/checkpoint/approve",
+                       json={"checkpoint": "gather", "feedback": ""})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "approved"
+    sf.approve_checkpoint.assert_called_once_with("run-1")
+
+
+def test_approve_refuses_whitespace_only_feedback_as_empty(client: TestClient, monkeypatch):
+    """A textarea the user tabbed through holds whitespace, not an instruction —
+    that is an ordinary approval, not a request to deliver something."""
+    import api.meta_routers as mr
+
+    _ensure_project(client, "cp-wsfb-proj")
+    sf = MagicMock()
+    sf.get_run.return_value = {"status": "paused"}
+    monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
+    monkeypatch.setattr(mr, "_get_checkpoint_info",
+                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation"))
+
+    resp = client.post("/api/meta/cp-wsfb-proj/checkpoint/approve",
+                       json={"checkpoint": "gather", "feedback": "   \n  "})
+
+    assert resp.status_code == 200, resp.text
+    sf.approve_checkpoint.assert_called_once_with("run-1")

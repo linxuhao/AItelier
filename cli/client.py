@@ -278,11 +278,16 @@ class APIClient:
             return None
         return data
 
-    def approve_checkpoint(self, project_id: str, checkpoint: str, feedback: str = "") -> dict:
-        """Approve a checkpoint and resume the pipeline."""
+    def approve_checkpoint(self, project_id: str, checkpoint: str) -> dict:
+        """Approve a checkpoint and resume the pipeline.
+
+        Carries no feedback: skillflow's approve_checkpoint(run_id) has no
+        feedback parameter, so the endpoint refuses an approval that sends one.
+        Use reject_checkpoint to get text to the step.
+        """
         resp = self._client.post(
             f"/api/meta/{project_id}/checkpoint/approve",
-            json={"project_id": project_id, "checkpoint": checkpoint, "feedback": feedback},
+            json={"project_id": project_id, "checkpoint": checkpoint},
             timeout=30.0,
         )
         resp.raise_for_status()

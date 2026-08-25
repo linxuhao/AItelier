@@ -42,6 +42,14 @@
   let checkpointFeedback = $state('');
   // The feedback box is rejection-only — see startCheckpointReject.
   let checkpointRejectMode = $state(false);
+  // Which checkpoint the open reject box belongs to. refreshData() replaces
+  // `checkpoint` every 3s, and reject mode used to survive that: approve A from
+  // the CLI while a rejection for A was half-typed here, and checkpoint B
+  // rendered straight into reject mode, pre-filled with A's text and with the
+  // Approve button not drawn at all (it lives in the {:else} branch). One click
+  // then rejected B with A's words. The key includes rejection_count so the
+  // SAME step coming back after a rejection also counts as a new checkpoint.
+  let checkpointRejectKey = $state('');
   let runs = $state<Record<string, unknown>[]>([]);
   let tasks = $state<Record<string, unknown>[]>([]);
   let runDetail = $state<Record<string, unknown> | null>(null);
@@ -133,6 +141,13 @@
       // blank "pending checkpoint" card on finished projects.
       checkpoint = (cpData && (cpData as Record<string, unknown>).checkpoint)
         ? cpData : null;
+      // A different checkpoint (or none) invalidates an open reject box: its
+      // text was written about the one that just went away.
+      if (checkpointRejectMode && checkpointKeyOf(checkpoint) !== checkpointRejectKey) {
+        checkpointRejectMode = false;
+        checkpointFeedback = '';
+        checkpointRejectKey = '';
+      }
       error = null;
     } catch (err: unknown) {
       if (params.id !== pid) return;
@@ -248,8 +263,14 @@
   // parameter, so anything typed there and approved was dropped in silence.
   // Approve is hidden while the box is open, so the two can never be on screen
   // together and an approval provably carries nothing.
+  function checkpointKeyOf(cp: Record<string, unknown> | null): string {
+    if (!cp) return '';
+    return [cp.checkpoint, cp.step, cp.rejection_count].join('\u0000');
+  }
+
   function startCheckpointReject(): void {
     checkpointRejectMode = true;
+    checkpointRejectKey = checkpointKeyOf(checkpoint as Record<string, unknown> | null);
     error = null;
     requestAnimationFrame(() => {
       document.getElementById('cp-feedback')?.focus();
@@ -259,6 +280,7 @@
   function cancelCheckpointReject(): void {
     checkpointRejectMode = false;
     checkpointFeedback = '';
+    checkpointRejectKey = '';
     error = null;
   }
 
@@ -277,6 +299,7 @@
       checkpoint = null;
       checkpointRejectMode = false;
       checkpointFeedback = '';
+      checkpointRejectKey = '';
     } catch (err: unknown) {
       error = err instanceof Error ? err.message : 'Failed to reject checkpoint';
     } finally {

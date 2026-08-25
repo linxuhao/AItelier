@@ -172,9 +172,12 @@ networks:
   default:
   # The network cloudflared reaches the backend on, selected BY NAME ONLY.
   #
-  # Name an existing network (AITELIER_EDGE_NETWORK=vip-gateway_default) and
-  # compose attaches to it; leave it unset and compose creates the throwaway
-  # `aitelier_edge_unused` and a clean checkout still starts. `external: true`
+  # Name an existing network (AITELIER_EDGE_NETWORK=cloudflare_edge on this
+  # deployment — confirm with `docker network ls`, and confirm it is the one the
+  # connector is on, because a name that matches nothing is CREATED, not
+  # refused) and compose attaches to it; leave it unset and compose creates the
+  # throwaway `aitelier_edge_unused` and a clean checkout still starts.
+  # `external: true`
   # is deliberately ABSENT: it makes compose REFUSE TO RUN when the network is
   # missing, before a single container starts, and that is what forced this out
   # into an optional `-f` overlay in the first place.

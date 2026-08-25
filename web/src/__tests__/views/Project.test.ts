@@ -391,6 +391,72 @@ describe('Project.svelte', () => {
     expect(container.querySelector('#checkpoint-card')).not.toBeNull();
   });
 
+  // A rejection in progress belongs to ONE checkpoint. refreshData() replaces
+  // `checkpoint` every 3s, and reject mode used to survive that replacement:
+  // approve A elsewhere while a rejection for A is half-typed here, and B
+  // rendered straight into reject mode carrying A's text, with Approve not
+  // drawn at all (it lives in the {:else} branch). One click rejected B with
+  // A's words.
+  it('drops a half-written rejection when the checkpoint changes underneath it',
+     async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockApi.getCheckpoint.mockResolvedValue({ ...MOCK_CHECKPOINT });
+      const { container, findByText, findByRole } = render(
+        await import('../../views/Project.svelte'),
+        { props: { params: { id: 'test-project' } } },
+      );
+      await findByText(/Checkpoint pending/);
+
+      await fireEvent.click(await findByRole('button', { name: 'Reject' }));
+      const box = container.querySelector('#cp-feedback') as HTMLTextAreaElement;
+      expect(box).not.toBeNull();
+      await fireEvent.input(box, { target: { value: 'redo the schema' } });
+
+      // The run moves on to a DIFFERENT checkpoint while the box is open.
+      mockApi.getCheckpoint.mockResolvedValue({
+        ...MOCK_CHECKPOINT, checkpoint: '5_review', step: '5_review',
+        label: 'Final Review',
+      });
+      await vi.advanceTimersByTimeAsync(3200);
+
+      // The box is gone with its text, and Approve is available again for the
+      // checkpoint now on screen.
+      expect(container.querySelector('#cp-feedback')).toBeNull();
+      expect(await findByRole('button', { name: 'Approve' })).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The SAME step coming back after a rejection is a new checkpoint too —
+  // rejection_count is what tells them apart.
+  it('drops it when the same step returns with a higher rejection_count',
+     async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockApi.getCheckpoint.mockResolvedValue(
+        { ...MOCK_CHECKPOINT, rejection_count: 0 });
+      const { container, findByText, findByRole } = render(
+        await import('../../views/Project.svelte'),
+        { props: { params: { id: 'test-project' } } },
+      );
+      await findByText(/Checkpoint pending/);
+      await fireEvent.click(await findByRole('button', { name: 'Reject' }));
+      await fireEvent.input(
+        container.querySelector('#cp-feedback') as HTMLTextAreaElement,
+        { target: { value: 'stale' } });
+
+      mockApi.getCheckpoint.mockResolvedValue(
+        { ...MOCK_CHECKPOINT, rejection_count: 1 });
+      await vi.advanceTimersByTimeAsync(3200);
+
+      expect(container.querySelector('#cp-feedback')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ── Navigation to Trace ──
 
   it('navigates to trace view on View Trace button click', async () => {

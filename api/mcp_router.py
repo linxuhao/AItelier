@@ -1502,6 +1502,22 @@ def _register_lifecycle_tools(tool):
         head = {"run_id": row["id"], "config": row.get("graph_name"), "step": step}
         if resolved:
             head["resolved"] = resolved
+        # `run_id` above names the run ASKED FOR, but the files come from
+        # get_final_path(project_id, step, graph_name) — a path with no run in it.
+        # Two runs of the same config on one project therefore promote into the
+        # same directory, the later overwriting the earlier, and asking for the
+        # older run's id would hand back the newer run's files under the older
+        # id. Say so instead of letting the label pass for provenance.
+        share = _runs_sharing_step_dir(sf, row)
+        if share:
+            head["shared_step_dir"] = {
+                "runs_of_this_config": [r["id"] for r in share],
+                "note": ("this step directory is keyed by project+config, not by "
+                         "run, so these runs share it and the files below are the "
+                         "LAST promotion into it — not necessarily run "
+                         f"{row['id']}'s. Check the run order before attributing "
+                         "them."),
+            }
         try:
             d = get_workspace_manager().get_final_path(
                 row.get("project_id") or "", step, row.get("graph_name") or "")
@@ -1584,6 +1600,23 @@ def _register_lifecycle_tools(tool):
 _STEP_FILE_CAP = 20000
 # One named file, at ten times the cap. A step is many files; a file is one.
 _ONE_FILE_CAP = 200000
+
+
+def _runs_sharing_step_dir(sf, row: dict) -> list[dict]:
+    """Other runs whose promoted output lands in the same directory as this one.
+
+    Empty in the ordinary case (one run per project+config), which is why this
+    stays a disclosure rather than a refusal.
+    """
+    pid, cfg = row.get("project_id"), row.get("graph_name")
+    if not pid or not cfg:
+        return []
+    try:
+        runs = [dict(r) for r in (sf.list_runs(project_id=pid) or [])]
+    except Exception:
+        return []
+    same = [r for r in runs if r.get("graph_name") == cfg]
+    return same if len(same) > 1 else []
 
 
 def _no_step_output_reason(sf, row: dict, step: str) -> str:

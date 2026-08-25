@@ -1279,3 +1279,55 @@ async def test_every_tool_is_callable_with_its_own_required_arguments():
         for arg in required:
             assert arg in params or accepts_kw, (
                 f"{t.name} requires {arg!r} which its function does not accept")
+
+
+# ── get_step_output: the run_id label is not provenance ─────────────────────
+
+def test_two_runs_of_one_config_are_told_they_share_the_step_dir():
+    """The files come from a path keyed by project+config, with no run in it.
+
+    Two runs of the same config on one project promote into the SAME directory,
+    the later overwriting the earlier. Asking for the older run's id then returns
+    the newer run's files, and the reply used to stamp `run_id: <older>` over
+    them with nothing indicating the collision.
+    """
+    from api import mcp_router
+
+    row = {"id": "run-old", "project_id": "p1", "graph_name": "dpe_game"}
+
+    class _SF:
+        def list_runs(self, project_id=None, **kw):
+            assert project_id == "p1"
+            return [{"id": "run-new", "graph_name": "dpe_game"},
+                    {"id": "run-old", "graph_name": "dpe_game"},
+                    {"id": "other", "graph_name": "meta_conversation"}]
+
+    share = mcp_router._runs_sharing_step_dir(_SF(), row)
+    assert [r["id"] for r in share] == ["run-new", "run-old"], (
+        "both runs of dpe_game share the directory; the meta_conversation run "
+        "does not and must not be listed")
+
+
+def test_one_run_per_config_says_nothing():
+    """The ordinary case must stay silent — a disclosure on every call is noise."""
+    from api import mcp_router
+
+    class _SF:
+        def list_runs(self, project_id=None, **kw):
+            return [{"id": "run-1", "graph_name": "dpe_game"},
+                    {"id": "run-2", "graph_name": "meta_conversation"}]
+
+    assert mcp_router._runs_sharing_step_dir(
+        _SF(), {"id": "run-1", "project_id": "p1", "graph_name": "dpe_game"}) == []
+
+
+def test_a_broken_run_listing_does_not_break_the_read():
+    """Provenance is a nicety; failing to compute it must not lose the files."""
+    from api import mcp_router
+
+    class _SF:
+        def list_runs(self, project_id=None, **kw):
+            raise RuntimeError("db gone")
+
+    assert mcp_router._runs_sharing_step_dir(
+        _SF(), {"id": "r", "project_id": "p", "graph_name": "c"}) == []

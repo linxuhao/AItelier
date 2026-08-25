@@ -151,6 +151,31 @@ RULES: tuple[Rule, ...] = (
          "branch produced the answer and had nowhere to go. Give the give-up path its "
          "own terminal gate with its own end condition (`result: failed` is fine — "
          "the deliverable still lands)."),
+    Rule("validation_is_a_spec_list",
+         "`validation:` IS A LIST OF SPECS KEYED BY `tool:`, NOT A MAPPING. "
+         "skillflow iterates what you give it and calls `.get()` on each element, "
+         "so a mapping yields its string KEYS and the step dies with \"'str' object "
+         "has no attribute 'get'\" — after the agent has already produced its "
+         "output, so every retry re-runs the whole step. The key is `tool`, not "
+         "`type`. Shape: `validation:` / `  - files: [\"verdict.json\"]` / "
+         "`    tool: file_exists`. `gen_dsh_code_review` shipped the mapping form "
+         "on four steps through all three gates and burned two full LLM reviews "
+         "before failing on it."),
+    Rule("the_seed_actually_reaches_the_first_step", enforced=False, teaches=(
+         "A PIPELINE THAT TAKES RUNTIME INPUT MUST WIRE ITS OWN SEED, AND SAY SO. "
+         "The host writes `seed_text` to `$CONFIG_DIR/_seed/<seed_file>` — that "
+         "literal path is the whole contract, and nothing hands it to a step for "
+         "you. An agent step reads it with a context source "
+         "`{config: <this pipeline name>, output: <seed_file>}`; a TOOL step takes "
+         "it as a tool_param, e.g. `diff_path: $CONFIG_DIR/_seed/seed_input.md`. "
+         "Also declare it: `x-aitelier: {seed_file: <name>, input_hint: <what to "
+         "send>}` — without `input_hint` a caller has to guess what seed_text is, "
+         "and `list_pipelines` shows the pipeline with nothing to say about its "
+         "input. `gen_dsh_code_review` shipped all three gates green and failed on "
+         "its FIRST drive: its capture step got only `project_root`, so it ran "
+         "`git diff HEAD` on an empty throwaway repo and routed to `input_failed` "
+         "while the caller's diff sat unread in `_seed/`. Structure was fine; the "
+         "input was never connected.")),
     Rule("tools_do_not_read_meaning_from_framework_paths", enforced=False, teaches=(
          "A TOOL MUST NOT DERIVE MEANING FROM A PATH THE FRAMEWORK CHOSE. A step's "
          "staging/output directory is named after the STEP ID (`$STEP_DIR`, "
@@ -516,6 +541,56 @@ def _write_steps_without_validation(steps: list) -> list[str]:
             f"declares no `validation`, so a run in which it writes NOTHING still "
             f"completes successfully and hands an empty result downstream.{why}\n"
             f"{remedy}")
+    return out
+
+
+def _validation_is_a_spec_list(steps: list) -> list[str]:
+    """`validation:` is a LIST of specs keyed by `tool:`, never a mapping.
+
+    skillflow's ``StepValidator.validate(specs)`` iterates what it is given and
+    calls ``spec.get(...)`` on each element. Hand it a mapping and iteration
+    yields its string KEYS, so the step dies with
+    ``'str' object has no attribute 'get'`` — AFTER the agent has produced its
+    output, so the whole review re-runs on every retry until they are exhausted.
+
+    All three forge gates passed `gen_dsh_code_review` with
+    `validation: {type: file_exists, files: [...]}` on four steps, and the run
+    burned two full LLM reviews before dying on it. `_write_steps_without_validation`
+    could not catch it either: a mapping is truthy, so the step looked validated.
+    The `type:`/`tool:` mix-up rides along — the key is `tool`.
+    """
+    out = []
+    for s in steps:
+        if not isinstance(s, dict):
+            continue
+        v = s.get("validation")
+        if v is None or isinstance(v, list):
+            if isinstance(v, list):
+                for spec in v:
+                    if not isinstance(spec, dict):
+                        out.append(
+                            f"step '{s.get('id')}': `validation` entry {spec!r} is not "
+                            f"a mapping. Each entry is `- files: [...]` + `tool: <name>`.")
+                    elif not spec.get("tool"):
+                        named = spec.get("type")
+                        out.append(
+                            f"step '{s.get('id')}': `validation` entry names no `tool`"
+                            + (f" (it says `type: {named}` — the key is `tool`)."
+                               if named else ".")
+                            + "\n      validation:\n"
+                            f"        - files: {spec.get('files', [])}\n"
+                            f"          tool: {named or 'file_exists'}")
+            continue
+        files = v.get("files", []) if isinstance(v, dict) else []
+        tool = (v.get("tool") or v.get("type") or "file_exists") if isinstance(v, dict) else "file_exists"
+        out.append(
+            f"step '{s.get('id')}': `validation` is a mapping. skillflow iterates it "
+            f"and calls .get() on each element, so a mapping yields its string keys "
+            f"and the step dies with \"'str' object has no attribute 'get'\" — after "
+            f"the agent already ran. It is a LIST of specs:\n"
+            f"      validation:\n"
+            f"        - files: {files}\n"
+            f"          tool: {tool}")
     return out
 
 
@@ -945,6 +1020,7 @@ def forge_registry_check(graph_path: str = "", role_table: str = "",
 
     violations.extend(_role_tools_unknown(rt, live_tools))
     violations.extend(_template_names_absent_tools(rt, steps, role_table, live_tools))
+    violations.extend(_validation_is_a_spec_list(steps))
     violations.extend(_write_steps_without_validation(steps))
     violations.extend(_routing_file_unguaranteed(steps))
     fallible = _fallible_names(live_tools)

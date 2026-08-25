@@ -234,4 +234,6 @@ internal/
 *.sqlite
 *.sqlite3
 .env
-.claude/
+# .claude/ 里除 skills/ 外都是本地会话产物；技能是仓库的一部分，跟着仓库走。
+.claude/*
+!.claude/skills/

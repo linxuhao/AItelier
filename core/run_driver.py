@@ -47,12 +47,38 @@ DEFAULT_MAX_WATCH_S = 4 * 60 * 60
 
 _TERMINAL = ("completed", "failed")
 
-# How long a RUNNING row may sit unchanged before the summary stops calling it
-# healthy. 15 min is above a slow-but-real LLM step (measured: t_impl up to
-# ~12 min, 5_compile ~15 min on the 44-scenario suite) and well below the
-# 34-minute silent hang observed 2026-08-25, where a provider call blocked
-# before response headers and held the scheduler lock.
-_STALL_HINT_S = 15 * 60
+# How long the finest-grained liveness signal may sit unchanged before the
+# summary stops calling the run healthy.
+#
+# This is a TURN budget, not a step budget, because that is what the trace
+# measures. Observed on jinyong-affordance step 5 (2026-08-25): a healthy step
+# wrote trace rows every 2-3 minutes for 34 minutes. 10 min leaves a wide
+# margin over that while still catching a genuinely wedged turn.
+#
+# The earlier value here was 15 min against the RUN ROW, which was wrong twice
+# over: the run row does not move between steps at all, so a normal 34-minute
+# step would have been reported "possibly stalled" — and that is exactly the
+# mistake I made by hand before writing this.
+_STALL_HINT_S = 10 * 60
+
+
+def _last_trace_at(sf, run_id: str) -> str | None:
+    """Newest trace row timestamp for this run, or None if the trace is empty
+    or unreadable. None means "no finer signal available", never "idle 0"."""
+    try:
+        rows = sf.trace_query(
+            run_id,
+            "SELECT created_at FROM skillflow_trace WHERE run_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (run_id, 1))
+    except Exception:
+        return None
+    for r in rows or []:
+        try:
+            return r["created_at"]
+        except (KeyError, TypeError, IndexError):
+            return None
+    return None
 
 
 def _seconds_since(ts: str | None) -> float | None:
@@ -244,7 +270,16 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
     # gives up on a healthy run. What separates the two is not the status, it
     # is HOW LONG the row has been unchanged — so report that, and let the
     # caller judge.
-    updated_at = (run.get("updated_at") or "") or None
+    # Liveness comes from the TRACE, not the run row. `skillflow_runs.updated_at`
+    # only moves when a STEP completes, so a step that legitimately takes 34
+    # minutes (measured: step 5 on jinyong-affordance, 2026-08-25) looks frozen
+    # on that row while its trace is writing a turn every 2-3 minutes. I read the
+    # run row, called it stalled, and restarted a healthy step. The trace is
+    # per-TURN, which is the granularity a liveness claim needs.
+    row_ts = (run.get("updated_at") or "") or None
+    trace_ts = _last_trace_at(sf, run_id)
+    updated_at = trace_ts or row_ts
+    liveness_from = "trace" if trace_ts else ("run_row" if row_ts else "none")
     idle_s = _seconds_since(updated_at)
     if status == "completed":
         verdict = "completed"
@@ -256,17 +291,22 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         verdict = ("in-progress (no updated_at on the run row — cannot tell "
                    "advancing from stalled)")
     elif idle_s < _STALL_HINT_S:
-        verdict = ("in-progress (last advanced %s ago)" % _human(idle_s))
+        verdict = ("in-progress (last advanced %s ago, liveness from %s)"
+                   % (_human(idle_s), liveness_from))
     else:
-        verdict = ("in-progress but NOT ADVANCING for %s — possibly stalled "
-                   "(a hung provider call, an unbounded loop, or a step "
-                   "failing persistently). Re-read this after a minute: if the "
-                   "idle time keeps growing, it is stuck." % _human(idle_s))
+        verdict = ("in-progress but NOT ADVANCING for %s (liveness from %s) — "
+                   "possibly stalled: a wedged provider call, an unbounded "
+                   "loop, or a step failing persistently. Re-read after a "
+                   "minute: if idle_seconds keeps growing it is stuck; if it "
+                   "resets, the step was merely slow."
+                   % (_human(idle_s), liveness_from))
     return {
         "run_id": run_id, "project_id": project_id, "config": config_name,
         "status": status, "verdict": verdict,
         "updated_at": updated_at,
         "idle_seconds": idle_s,
+        "liveness_from": liveness_from,
+        "run_row_updated_at": row_ts,
         "steps": per_step, "first_failure": first_failure,
         "final_outputs": outputs,
         "run_error": run.get("error_reason") or run.get("error"),

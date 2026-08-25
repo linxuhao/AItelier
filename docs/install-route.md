@@ -4,8 +4,10 @@ The path a new user walks from an empty machine to a finished pipeline, with the
 failure modes actually reproduced at each step and the doc or skill that covers
 them. Anything marked **GAP** is not covered anywhere yet.
 
-Reproduced on 2026-08-25 against a clean copy of `docker-compose.yml` in an empty
-directory, not reasoned about.
+Reproduced on 2026-08-25, not reasoned about: first against a clean copy of
+`docker-compose.yml` in an empty directory, then **end-to-end on a second machine**
+(`linxuhao-ai`) — public clone, fresh venv, `docker build --no-cache`, virgin
+`HOME`, container up and answering. Numbers from that run are inline below.
 
 ```
   1. clone + pip install -e .
@@ -32,6 +34,8 @@ directory, not reasoned about.
 |---|---|
 | Python < 3.12 (macOS system `python3` is usually older) | README **Install** states 3.12+ and the check |
 | `pip install -e .` pulls `skillflow-py` from PyPI — it is a hard dependency, not vendored | README says so |
+| The clone itself needing credentials | **Verified**: anonymous `git clone` of the public repo works with `GIT_TERMINAL_PROMPT=0` and no helper |
+| PyPI serving a stale skillflow | **Verified**: a fresh venv resolved `skillflow-py 1.5.42` |
 
 ## 2. Get a model key
 
@@ -40,6 +44,7 @@ directory, not reasoned about.
 | **Getting the wrong provider's key.** AItelier is provider-agnostic; the key you need is whatever the shipped `agent_configs` reference. This went stale once — the configs moved to `ark/` while the README still said DeepSeek, which would fail every step of a new user's first run | README **Quick Start** names the right key and shows the `grep` to confirm; `test_the_readme_names_a_key_the_shipped_configs_actually_use` fails if they diverge again |
 | **Putting the key in `.env`.** Keys are secret FILES; `.env` is for endpoints. The two docs used to contradict each other on this exact step | README + `.env.example` now agree; a test pins that the README does not say `.env` |
 | Key missing at run time | The failure names the provider, the key, and the file to create — `core/external_deps.py` |
+| **The CLI naming a different key than the README.** `_LLM_SECRET` hard-coded `DEEPSEEK_API_KEY`, so a cold install was told to create one key by the docs and another by the tool | Fixed: derived from the shipped configs via `required_llm_keys()`; a test asserts the two agree |
 
 ## 3. `aitelier` (Docker starts)
 
@@ -50,9 +55,11 @@ because the errors are still what you would see if you bypass the CLI.
 | Can go wrong | Covered by |
 |---|---|
 | `network vip-gateway_default declared as external, but could not be found` — a compose file that declares an external network refuses to run when it is absent | Moved to the opt-in `docker-compose.edge.yml`; `AITELIER_EDGE_NETWORK` turns it on. Header comment explains why |
-| `invalid mount config … /.aitelier-secrets/GITHUB_TOKEN` — Docker refuses a missing secret SOURCE; an empty file is the correct content for "I don't use this", which the error never says. Four in a row | `cli/server.py:_ensure_secret_files` creates them; README gives the one-liner for a hand-run `docker compose` |
+| `invalid mount config … /.aitelier-secrets/GITHUB_TOKEN` — Docker refuses a missing secret SOURCE; an empty file is the correct content for "I don't use this", which the error never says. Four in a row | `cli/server.py:_ensure_host_dirs` creates them; README gives the one-liner for a hand-run `docker compose` |
 | Docker not running at all | `_require_docker` raises; there is **no host-process fallback** by design, and the README now says so where the user first meets it |
 | Port 4444 already taken by a stale non-Docker server | The CLI kills it before starting |
+| **The container starting and then crash-looping on `sqlite3.OperationalError: unable to open database file`.** Docker creates a missing bind-mount source ITSELF, as root; the container runs as the host uid and cannot write it. Hits every machine where `~/.AItelier` does not already exist — i.e. every new one, which is why no developer sees it | Fixed: `_ensure_host_dirs` creates the state root first; a test reads the `${HOME}` mounts out of compose so a new one cannot be forgotten |
+| First `docker build` being slow or broken | **Verified**: `--no-cache` build succeeded in **52s**, 1.19GB |
 
 ## 4. Describe what to build
 
@@ -104,12 +111,18 @@ because the errors are still what you would see if you bypass the CLI.
 
 ## What this map is missing
 
-Two honest gaps, neither closed:
+The cold-machine rehearsal is **done** — and it paid for itself twice, finding
+the root-owned state directory and the CLI/README key disagreement, neither of
+which any amount of reading would have surfaced. What is still open:
 
-- **No end-to-end rehearsal on a truly foreign machine.** Everything above was
-  reproduced on the author's host with Docker already working and one image
-  already built. A first `docker compose build` on a cold machine is untested
-  here.
+- **The second machine was not a stranger.** `linxuhao-ai` is the author's other
+  box: Docker was installed and working, Python 3.12 was present, and the whole
+  run used an overridden `HOME` rather than a fresh account. A machine without
+  Docker, or on macOS, or behind a proxy, is still untested.
+- **Nothing past a healthy container was exercised.** The cold install answered
+  `/health` and registered 13 pipelines; it never ran a step, because that needs
+  a real key. The path from "it starts" to "it produced something" is verified
+  only on the author's own host.
 - **Nothing verifies the docs against a run.** The tests pin the README against
   the *configs* (which key, which default model), not against a completed
   install. A doc can be self-consistent and still describe a path nobody can

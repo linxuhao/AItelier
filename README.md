@@ -4,7 +4,7 @@
 
 **The trusted, auditable layer for AI agents — run _any_ multi-agent workflow deterministically, with a complete audit trace and human checkpoints.**
 
-![License](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB)
 [![Engine: SkillFlow](https://img.shields.io/badge/engine-SkillFlow%20(MIT)-F59E0B)](https://github.com/linxuhao/SkillFlow)
 
@@ -40,7 +40,7 @@ AItelier is meant to be used two ways:
 
 **Why software-delivery is the wedge _and_ the keystone.** We lead with autonomous software-building because it's the hardest possible proof the engine works — and because **an AI workflow *is* software** (a pipeline is a graph plus tools plus templates). The same deterministic factory that builds software is what will let you *trust a workflow you build on AItelier* — building a new auditable workflow is itself a software-engineering task. A trusted software pipeline builds trusted workflows.
 
-**Open-core.** [SkillFlow](https://github.com/linxuhao/SkillFlow) (MIT) is the engine and is embeddable in *any* agent system; the AItelier CLI is source-available (free to use, see [License](#license)); a managed multi-tenant platform is on the [roadmap](#roadmap).
+**Open source.** [SkillFlow](https://github.com/linxuhao/SkillFlow) is the engine and is embeddable in *any* agent system; AItelier is the host application around it. Both are MIT (see [License](#license)); a managed multi-tenant platform is on the [roadmap](#roadmap).
 
 ## Project status
 
@@ -273,8 +273,4 @@ The persistent language store (`web/src/stores/i18n.ts`) syncs the user's select
 
 ## License
 
-AItelier is **source-available** under the [Functional Source License (FSL-1.1-MIT)](LICENSE).
-
-You may **use, modify, and self-host AItelier freely** — for internal use, education, research, and professional services. The only restriction is a **Competing Use**: you may not offer AItelier (or a substantially similar substitute) to others as a commercial product or service. Two years after each release, that version automatically converts to the **MIT license**.
-
-The underlying pipeline engine, [SkillFlow](https://github.com/linxuhao/SkillFlow), is fully open source under the MIT license.
+AItelier is open source under the [MIT license](LICENSE), as is the pipeline engine it runs on, [SkillFlow](https://github.com/linxuhao/SkillFlow).

@@ -173,3 +173,43 @@ def test_everything_compose_bind_mounts_is_provisioned(tmp_path, monkeypatch):
         assert name == ".AItelier", (
             f"{src} is bind-mounted but nothing creates it — Docker will, as "
             f"root, and the container (host uid) will not be able to write it.")
+
+
+# ── The image can be older than the dependencies it must satisfy ────────────
+
+def test_a_fresh_image_is_not_called_stale(monkeypatch, tmp_path):
+    """Rebuilding on every start would cost ~50s each time for nothing."""
+    monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "2999-01-01T00:00:00.000000000Z"})())
+    assert srv._image_deps_are_stale() is False
+
+
+def test_an_image_older_than_pyproject_is_stale(monkeypatch):
+    """The repo is bind-mounted, so the container runs current SOURCE against
+    the image's packages. `docker compose up -d` reuses an existing
+    `aitelier:latest`, so an image predating a new dependency gives
+
+        ModuleNotFoundError: No module named 'mcp'
+
+    Reproduced on a clean machine whose image predated `mcp` by five days.
+    Invisible to anyone who habitually runs `up -d --build` — i.e. every
+    developer, and no new user."""
+    monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "2000-01-01T00:00:00.000000000Z"})())
+    assert srv._image_deps_are_stale() is True
+
+
+def test_docker_nanosecond_precision_parses(monkeypatch):
+    """Docker stamps 9 fractional digits; fromisoformat takes 6. A crash here
+    would be swallowed and read as "fresh", which is the failing direction."""
+    monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "2000-01-01T00:00:00.123456789Z"})())
+    assert srv._image_deps_are_stale() is True
+
+
+def test_a_docker_failure_never_blocks_the_start(monkeypatch):
+    """A freshness heuristic must not be able to stop the server starting."""
+    def boom(*a, **k):
+        raise OSError("docker gone")
+    monkeypatch.setattr(srv.subprocess, "run", boom)
+    assert srv._image_deps_are_stale() is False

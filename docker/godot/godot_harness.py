@@ -137,6 +137,75 @@ def _copy_project(proj: Path) -> Path:
     return dst
 
 
+# A THIRD pass, because the first two do not parse every script. `--import`
+# parses what it can REACH from resources: scenes, autoloads, their preload
+# chains as resources. A .gd that is only ever `preload()`ed by another script
+# is enumerated by rglob but never compiled — so the summary said
+# "GDScript parse OK (68 scripts)" while one of those 68 could not parse at all.
+#
+# Measured 2026-08-25 on jinyong-assets, same type error injected into two
+# scripts: `health_bar.gd` (attached via health_bar.tscn) was caught; the
+# identical error in `visibility_probe.gd` (preload-only) was NOT reported.
+# That gap cost a real diagnosis: the runtime said "Nonexistent function
+# first_fail_layer in base GDScript", the gate said 0 errors, and the correct
+# hypothesis (the class does not compile) was ruled out because the gate was
+# believed. A gate that vouches for what it never looked at is worse than one
+# that stays silent.
+_PARSE_ALL_GD = """extends SceneTree
+func _walk(dir_path: String, out: Array) -> void:
+	var d := DirAccess.open(dir_path)
+	if d == null:
+		return
+	d.list_dir_begin()
+	var n := d.get_next()
+	while n != "":
+		if d.current_is_dir():
+			if not n.begins_with("."):
+				_walk(dir_path.path_join(n), out)
+		elif n.ends_with(".gd"):
+			out.append(dir_path.path_join(n))
+		n = d.get_next()
+	d.list_dir_end()
+
+func _init() -> void:
+	var files: Array = []
+	_walk("res://", files)
+	var loaded := 0
+	for f in files:
+		if f.ends_with("__parse_all.gd"):
+			continue
+		var r = ResourceLoader.load(f)
+		if r == null:
+			push_error("Failed to load script \\"%s\\"" % f)
+		else:
+			loaded += 1
+	print("PARSE_ALL_LOADED=%d/%d" % [loaded, files.size() - 1])
+	quit()
+"""
+
+
+def _parse_every_script(dst: Path, timeout: int) -> tuple[str, int]:
+    """Load every .gd explicitly. Returns (stderr, scripts_loaded_ok).
+
+    Errors are pushed, never raised, and quit() is the last statement on the
+    only path — an `extends SceneTree` entry point that can miss quit() spins
+    the tree until the wall (recorded lesson, design/90_decisions.md)."""
+    probe = dst / "__parse_all.gd"
+    try:
+        probe.write_text(_PARSE_ALL_GD, encoding="utf-8")
+        cp = _run(["--path", str(dst), "--script", "res://__parse_all.gd"],
+                  timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return ("", -1)
+    finally:
+        probe.unlink(missing_ok=True)
+    n = -1
+    for line in (cp.stdout or "").splitlines():
+        if line.startswith("PARSE_ALL_LOADED="):
+            n = int(line.split("=", 1)[1].split("/")[0])
+    return (cp.stderr or "", n)
+
+
 def compile_project(project_dir: str, timeout: int = 120) -> dict:
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
@@ -166,12 +235,46 @@ def compile_project(project_dir: str, timeout: int = 120) -> dict:
                 "errors": [{"kind": "timeout", "msg": f"Import timed out after {timeout}s",
                             "file": None, "line": None}],
                 "warning_count": 0, "summary": "Godot import timed out."}
-    finally:
-        shutil.rmtree(dst.parent, ignore_errors=True)
+    all_stderr, loaded_ok = _parse_every_script(dst, timeout)
+    # The explicit pass contributes CAUSES only. Its `load` failures are not
+    # trustworthy: `--script` runs a bare SceneTree with NO autoloads, so every
+    # script that names GameManager / CombatManager / GridManager fails to
+    # resolve them and "fails to load" while being perfectly fine in the game.
+    # Measured on a clean tree: 0 parse errors and 37 such load failures. A
+    # parse error, by contrast, is a fault in the file itself and holds either
+    # way — that is the half that caught the preload-only `Canvas` error the
+    # import pass never looked at.
     errs = [e for e in _parse_errors(cp.stderr) if e["kind"] in ("parse", "load")]
+    errs += [e for e in _parse_errors(all_stderr) if e["kind"] == "parse"]
+    seen, deduped = set(), []
+    for e in errs:
+        key = (e.get("kind"), e.get("file"), e.get("line"), e.get("msg"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(e)
+    errs = deduped
     passed = not errs
-    summary = ("GDScript parse OK (%d scripts)." % len(gd_files) if passed
-               else "GDScript parse FAILED — %d error(s)." % len(errs))
+    # Report what was PARSED, not what was found on disk. The old summary took
+    # its count from rglob and its verdict from --import — two different sets.
+    # Say what was actually looked at. The old summary took its COUNT from
+    # rglob and its VERDICT from --import — two different sets, and the gap
+    # between them is exactly where the missed error lived.
+    parsed_note = ("%d of %d scripts explicitly re-parsed" % (loaded_ok, len(gd_files))
+                   if loaded_ok >= 0
+                   else "explicit re-parse TIMED OUT — coverage unverified")
+    # Parse errors are CAUSES; the load failures of everything that preloads a
+    # broken script are consequences. One injected error produced 3 parse lines
+    # and 40 dependent load lines — burying the cause under its own fallout is
+    # how a report stops being actionable. Causes first, and the summary says
+    # which is which.
+    n_parse = sum(1 for e in errs if e["kind"] == "parse")
+    errs.sort(key=lambda e: (e["kind"] != "parse", str(e.get("file") or "")))
+    summary = ("GDScript parse OK (%s)." % parsed_note
+               if passed
+               else "GDScript parse FAILED — %d parse error(s), %d dependent "
+                    "load failure(s). Fix the parse errors; the load failures "
+                    "are their fallout." % (n_parse, len(errs) - n_parse))
+    shutil.rmtree(dst.parent, ignore_errors=True)
     return {"passed": passed, "returncode": cp.returncode, "file_count": len(gd_files),
             "errors": errs, "warning_count": 0, "summary": summary}
 

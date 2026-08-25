@@ -8,6 +8,7 @@
 # developer's ~/.gitconfig identity instead of the image's AItelier identity.
 
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -234,13 +235,52 @@ def _image_exists() -> bool:
         return False
 
 
+def _image_deps_are_stale() -> bool:
+    """True when the image was built BEFORE the current dependency list.
+
+    The repo is bind-mounted at /app, so the container always runs the current
+    SOURCE — but its site-packages come from the image. `docker compose up -d`
+    happily reuses an existing `aitelier:latest`, so new code meets old
+    dependencies and the app dies at import:
+
+        ModuleNotFoundError: No module named 'mcp'
+
+    Observed on a machine whose image predated the `mcp` dependency by five
+    days. It is invisible to anyone who habitually runs `up -d --build` — which
+    is every developer, and no new user.
+
+    Compares the image's creation time against `pyproject.toml`'s mtime. A git
+    checkout stamps mtime at checkout, so pulling a change that touches
+    dependencies makes this true; editing anything else does not.
+    """
+    try:
+        res = subprocess.run(
+            ["docker", "image", "inspect", "-f", "{{.Created}}", _IMAGE_NAME],
+            capture_output=True, text=True, timeout=10)
+        if res.returncode != 0:
+            return False
+        import datetime as _dt
+        raw = res.stdout.strip()
+        # Docker emits more precision than fromisoformat accepts pre-3.11-ish.
+        raw = re.sub(r"(\.\d{6})\d+", r"\1", raw).replace("Z", "+00:00")
+        built = _dt.datetime.fromisoformat(raw).timestamp()
+        return (_PROJECT_ROOT / "pyproject.toml").stat().st_mtime > built
+    except Exception:
+        return False          # never block a start on a freshness heuristic
+
+
 def _compose_up():
     """Start (building on first run) the backend container."""
     _ensure_host_dirs()
+    rebuild = []
     if not _image_exists():
         print("Building AItelier image (first run — this may take a few minutes)...")
+    elif _image_deps_are_stale():
+        print("Dependencies changed since the image was built — rebuilding "
+              "(the source is mounted, but its packages are not).")
+        rebuild = ["--build"]
     # Inherit stdout/stderr so build + startup progress is visible.
-    res = _compose("up", "-d", _COMPOSE_SERVICE)
+    res = _compose("up", "-d", *rebuild, _COMPOSE_SERVICE)
     if res.returncode != 0:
         raise RuntimeError(
             f"`docker compose up -d {_COMPOSE_SERVICE}` failed (see output above)"

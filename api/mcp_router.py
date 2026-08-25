@@ -998,10 +998,14 @@ def _register_run_tools(tool):
                             "It will PAUSE at each checkpoint for answer_checkpoint."))}
 
     @tool("answer_checkpoint", "write",
-          "Approve or reject a run paused at a checkpoint. Rejecting sends the work "
-          "back with your feedback, which is how a reviewer asks for a change rather "
-          "than stopping the run. Only a run whose status is 'paused' has anything "
-          "to answer — check with wait_for_run or get_run_status first. " + _EITHER +
+          "Approve or reject a run paused at a checkpoint. `feedback` belongs to "
+          "REJECT and only to reject: it is what the step redoes the work against. "
+          "An APPROVAL carries no feedback channel at all — skillflow's "
+          "approve_checkpoint(run_id) takes none — so approve+feedback is REFUSED "
+          "here rather than accepted and dropped. To attach binding instructions to "
+          "work already done, reject with them; the step comes back changed. Only a "
+          "run whose status is 'paused' has anything to answer — check with "
+          "wait_for_run or get_run_status first. " + _EITHER +
           " This one MUTATES, so when a project id has several runs the reply also "
           "lists the siblings: a wrong target is visible in the answer rather than "
           "only in what happens next.")
@@ -1015,17 +1019,43 @@ def _register_run_tools(tool):
             return {"error": f"no run '{run_id}'"}
         echo = {"resolved": resolved} if resolved else {}
         run_id = run["id"]
+        # The ARGUMENTS are checked before the run's state: a call that could not
+        # be honoured on any run must be told so, not shadowed by "not paused".
+        decision = (decision or "").strip().lower()
+        if decision not in ("approve", "reject"):
+            return {**echo, "error": f"decision must be 'approve' or 'reject', not "
+                                     f"{decision!r}"}
+        if decision == "reject" and not (feedback or "").strip():
+            return {**echo,
+                    "error": "a rejection needs feedback — the step it goes back "
+                             "to has nothing to act on otherwise"}
+        # skillflow's approve_checkpoint(run_id) has NO feedback parameter;
+        # reject_checkpoint(run_id, step_id, feedback) does. So an approval has
+        # nowhere to put this text, and accepting it was a promise the endpoint
+        # could not keep: an architecture checkpoint on run c6dce51c was approved
+        # with three binding amendments in `feedback`, the call returned a normal
+        # success payload, and the next agent copied the architecture verbatim with
+        # none of the three. The run's trace shows why — the checkpoint_approved
+        # payload is `{"step_id": "2", "next_node": "2_review"}` and the feedback
+        # text is not recorded anywhere, let alone delivered. Cost: a full re-run of
+        # that step to get the instructions in through a rejection. Refusing is the
+        # only honest answer; logging-and-continuing would keep the same lie.
+        if decision == "approve" and (feedback or "").strip():
+            return {**echo,
+                    "error": (
+                        f"an approval carries NO feedback channel — skillflow's "
+                        f"approve_checkpoint(run_id) takes no feedback, so these "
+                        f"{len(feedback.strip())} characters would be dropped and "
+                        f"the next step would never see them. What actually "
+                        f"delivers them: decision='reject' with the same text sends "
+                        f"the step back to redo the work against it; or put the "
+                        f"requirement in the run's seed before launching. Re-send "
+                        f"as a rejection, or drop `feedback` if you really do mean "
+                        f"'approve as-is'.")}
         if run.get("status") != "paused":
             return {**echo,
                     "error": f"run '{run_id}' is {run.get('status')}, not paused — "
                              f"there is no checkpoint to answer"}
-        decision = (decision or "").strip().lower()
-        if decision not in ("approve", "reject"):
-            return {"error": f"decision must be 'approve' or 'reject', not "
-                             f"{decision!r}"}
-        if decision == "reject" and not (feedback or "").strip():
-            return {"error": "a rejection needs feedback — the step it goes back to "
-                             "has nothing to act on otherwise"}
         try:
             if decision == "approve":
                 sf.approve_checkpoint(run_id)

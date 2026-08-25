@@ -1014,6 +1014,62 @@ def test_answer_checkpoint_refuses_a_run_that_is_not_paused(monkeypatch):
     assert "not paused" in out["error"]
 
 
+class _ApproveSpy(_WaitSF):
+    """_WaitSF that records whether the approval actually reached skillflow."""
+
+    def __init__(self, status="paused"):
+        super().__init__(status)
+        self.approved = []
+
+    def approve_checkpoint(self, run_id):
+        self.approved.append(run_id)
+        return "next_node"
+
+
+def _run_tools(sf, monkeypatch):
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name + "__desc"] = description
+            captured[name] = fn
+            return fn
+        return deco
+    mcp_router._register_run_tools(tool)
+    return captured
+
+
+def test_feedback_on_an_approval_is_refused_not_silently_dropped(monkeypatch):
+    """skillflow's approve_checkpoint(run_id) has no feedback parameter — only
+    reject_checkpoint(run_id, step_id, feedback) does. Accepting `feedback` on an
+    approve was a promise the endpoint could not keep: run c6dce51c was approved
+    with three binding amendments, the call returned success, and the next agent
+    copied the architecture verbatim with none of them. The checkpoint_approved
+    trace payload is {"step_id": "2", "next_node": "2_review"} — the text is not
+    even recorded."""
+    sf = _ApproveSpy()
+    captured = _run_tools(sf, monkeypatch)
+
+    out = captured["answer_checkpoint"]("r1", "approve", "please also do X, Y, Z")
+    assert "error" in out, out
+    assert "no feedback channel" in out["error"].lower() or \
+           "NO feedback channel" in out["error"]
+    assert "reject" in out["error"], "it must name what actually delivers the text"
+    assert sf.approved == [], "the approval must NOT have gone through"
+
+    # Whitespace is not feedback; an approval with nothing attached still works.
+    assert captured["answer_checkpoint"]("r1", "approve", "   ")["decision"] == \
+        "approve"
+    assert captured["answer_checkpoint"]("r1")["decision"] == "approve"
+    assert sf.approved == ["r1", "r1"]
+
+    # And the description warns before the call rather than after.
+    desc = captured["answer_checkpoint__desc"]
+    assert "no feedback channel" in desc.lower()
+
+
 def test_a_rejection_without_feedback_is_refused(monkeypatch):
     """The step it goes back to has nothing to act on otherwise."""
     sf = _WaitSF(); sf.status = "paused"

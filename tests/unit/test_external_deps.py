@@ -173,3 +173,68 @@ class TestTheCallersUseIt:
         assert "DEEPSEEK_API_KEY" in ed.missing(
             gw.missing_key_env, f"Model '{gw.litellm_model}' resolves to "
                                 f"provider '{gw.provider}', which reads it.")
+
+
+class TestTheReadmeMatchesTheShippedConfigs:
+    """The install page's first instruction is "get this key". Naming the wrong
+    one costs a new user their entire first run — every step fails at a provider
+    they were never told to sign up with. It went stale exactly that way: the
+    agent configs moved to `ark/`, the README kept saying DeepSeek."""
+
+    def _shipped_providers(self):
+        import re
+        provs = set()
+        for f in (ROOT / "agent_configs").glob("*.yaml"):
+            for m in re.finditer(r'^\s+model:\s*"?([a-z0-9_]+)/',
+                                 f.read_text(encoding="utf-8"), re.M):
+                provs.add(m.group(1))
+        return provs
+
+    def test_the_readme_names_a_key_the_shipped_configs_actually_use(self):
+        import json
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        quick = readme[readme.index("## Quick Start"):readme.index("## Architecture")]
+        providers = json.loads(
+            (ROOT / "llm_providers.json").read_text(encoding="utf-8"))
+        wanted = {providers[p]["api_key_env"] for p in self._shipped_providers()
+                  if p in providers}
+        assert wanted, "no provider prefix found in agent_configs"
+        # BOTH directions. `any(...)` alone was satisfied by a second mention
+        # further down the section, so renaming the headline key stayed green —
+        # the same or-across-sources hole this file's own guards had.
+        assert any(k in quick for k in wanted), (
+            f"Quick Start names none of {sorted(wanted)} — the keys the shipped "
+            f"agent_configs actually need.")
+        # Only the lines that say "write your real key here" — `touch A B C`
+        # legitimately names every secret FILE compose mounts, whichever
+        # provider you picked, and flagging those would be noise.
+        # Per LINE, not through the printf arguments: the placeholder is
+        # literally `<your-key>`, so a regex that treats `>` as the redirect
+        # stops inside it and matches nothing — this guard passed vacuously
+        # until a mutation that should have killed it did not.
+        told_to_obtain = {m.group(1)
+                          for line in quick.splitlines() if "printf" in line
+                          for m in [re.search(
+                              r"aitelier-secrets/([A-Z][A-Z0-9_]*_API_KEY)", line)]
+                          if m}
+        stale = told_to_obtain - wanted
+        assert not stale, (
+            f"Quick Start tells a new user to get {sorted(stale)}, which no "
+            f"shipped agent_config uses. Their first run fails at a provider "
+            f"they were never told to sign up with. Needed: {sorted(wanted)}.")
+
+    def test_the_host_model_default_is_documented_correctly(self):
+        from core.agents import HOST_AGENT_MODEL
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        line = next(l for l in readme.splitlines()
+                    if "AITELIER_HOST_AGENT_MODEL" in l and "default" in l)
+        assert HOST_AGENT_MODEL in line, f"README says: {line.strip()[:120]}"
+
+    def test_the_readme_does_not_tell_you_to_put_a_key_in_env(self):
+        """.env.example says "DOCKER: do NOT put this key here"; the README used
+        to say the opposite two paragraphs earlier. Contradicting docs on step
+        one are worse than one silent doc."""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        quick = readme[readme.index("## Quick Start"):readme.index("## Architecture")]
+        assert "add DEEPSEEK_API_KEY to .env" not in quick
+        assert "aitelier-secrets" in quick

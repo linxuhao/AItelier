@@ -799,7 +799,26 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
                           % (i, e.get("at", "?"), ", ".join(unknown),
                              ", ".join(sorted(_TIMELINE_KEYS))))
             continue
-        at = e.get("at", 0)
+        # `at` must be an int the whole pipeline can do arithmetic on. It was
+        # not checked here, so a shorthand copied out of a notes table --
+        # `at: 3..15`, `at: 20/25/30` -- reached int() deep inside the run and
+        # raised an unhandled ValueError, which the HTTP layer turned into a
+        # bare 500. On 2026-08-25 that cost a round its measurement: nine 500s
+        # in a row (including a trivial connectivity probe that reused the same
+        # broken prologue) read as "the builder service is down", so the probe
+        # was recorded as BLOCKED and the defect it existed to measure went
+        # unmeasured. A malformed scenario must say it is malformed.
+        at_raw = e.get("at", 0)
+        if isinstance(at_raw, bool) or not isinstance(at_raw, (int, float)):
+            errors.append(
+                "timeline entry %d has a non-numeric `at`: %r. Frames are single "
+                "integers -- a range or a list is not supported, write one entry "
+                "per frame (`- {at: 3, ...}` … `- {at: 15, ...}`)." % (i, at_raw))
+            continue
+        at = int(at_raw)
+        if at < 0:
+            errors.append("timeline entry %d has a negative `at`: %r" % (i, at_raw))
+            continue
         acts = e.get("actions") or []
         if isinstance(acts, str):
             acts = [acts]

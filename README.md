@@ -74,16 +74,24 @@ pip install -e .
 
 ## Quick Start
 
-First, set up your API key. The default pipeline runs on **DeepSeek** (`deepseek-v4-flash` / `deepseek-v4-pro`), so all you need is a `DEEPSEEK_API_KEY`:
+First, a model key. AItelier is provider-agnostic — [`llm_providers.json`](llm_providers.json) maps a provider to a base URL and the NAME of the key it reads, and each `agent_config`'s `model` field selects one. **The shipped configs use `ark/…`, so out of the box the key you need is `ARK_API_KEY`.** Check what yours actually reference:
 
 ```bash
-# Copy the template (it documents every variable)
-cp .env.example .env
-# Local run: add DEEPSEEK_API_KEY to .env, then load it
-source .env
+grep -h 'model:' agent_configs/*.yaml | sort -u   # → the provider prefix each step uses
 ```
 
-To use a different provider, point the agent configs at it (see [Configuration](#configuration)).
+Keys are **secret FILES, not environment variables** — so the test and build subprocesses a pipeline runs cannot inherit them:
+
+```bash
+mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
+printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
+chmod 600 ~/.aitelier-secrets/ARK_API_KEY
+cp .env.example .env        # endpoints and options; NOT the keys
+```
+
+To use a different provider, add it to `llm_providers.json` and point the agent configs at it — see [docs/external-dependencies.md](docs/external-dependencies.md). A missing key fails naming the provider, the key and the file to create.
+
+> **The backend runs in Docker**, always — there is no host-process fallback, because a host process would make the pipeline's git commits carry your own `~/.gitconfig` identity. `aitelier` starts the container for you (and creates the secret files it mounts).
 
 ```bash
 aitelier                          # Interactive CLI dashboard
@@ -107,7 +115,7 @@ service whose secret source is missing. The CLI creates them for you; if you run
 ```bash
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
 cd ~/.aitelier-secrets && touch DEEPSEEK_API_KEY ARK_API_KEY GITHUB_TOKEN LOCAL_QWEN_API_KEY && chmod 600 *
-printf '%s' "sk-your-deepseek-key" > ~/.aitelier-secrets/DEEPSEEK_API_KEY
+printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
 ```
 
 Publishing through an existing **cloudflared** connector is opt-in, because an
@@ -123,7 +131,7 @@ Other than that, a clean checkout starts with no pre-existing Docker resources.
 Every capability that needs something outside this repo — the LLM key, web
 search, media generation, the Godot gates — is optional, refuses with a message
 naming the config it wants, and is listed in
-**[docs/external-dependencies.md](docs/external-dependencies.md)**.
+**[docs/external-dependencies.md](docs/external-dependencies.md)**. For the whole path from an empty machine to a finished pipeline — every step, what can go wrong at it, and what covers it — see **[docs/install-route.md](docs/install-route.md)**.
 
 **If a run looks stuck**, read the scheduler tick log rather than the container
 log. The scheduler advances one project per tick, so a project that cannot
@@ -143,8 +151,8 @@ In Docker the **API key is a secret file, not an env var** (so the pipeline's te
 
 ```bash
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-printf '%s' "sk-your-deepseek-key" > ~/.aitelier-secrets/DEEPSEEK_API_KEY
-chmod 600 ~/.aitelier-secrets/DEEPSEEK_API_KEY      # do NOT put this key in .env
+printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
+chmod 600 ~/.aitelier-secrets/ARK_API_KEY           # keys are FILES, never .env
 ```
 
 State lives in host `~/.AItelier` (bind-mounted). The port is published on loopback only; expose it publicly via a **Cloudflare tunnel**. With Cloudflare Access in front, **reads are open to any logged-in user and writes are restricted to an allowlist** — set `AITELIER_CF_TEAM_DOMAIN`, `AITELIER_CF_AUD`, and `AITELIER_WRITERS` in `.env` (all documented in `.env.example`). The CLI authenticates to its own container with `AITELIER_ADMIN_TOKEN`.
@@ -224,7 +232,7 @@ To change which models or agents the pipeline uses, edit the config files direct
 - **`llm_providers.json`** — LLM providers (base URLs, API-key env var names). Register a provider here before pointing an agent at it.
 - **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the **chat butler / meta agent** lives in `meta_conversation.yaml` (`meta_agent.model`) — so the conversational front-end is configurable exactly like the pipeline roles.
 - **`templates/`** — the LLM prompt templates each step uses
-- **`AITELIER_HOST_AGENT_MODEL`** (env, default `deepseek/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. A **generated** pipeline ships its agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)).
+- **`AITELIER_HOST_AGENT_MODEL`** (env, default `ark/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. A **generated** pipeline ships its agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)).
 
 ## How it works
 

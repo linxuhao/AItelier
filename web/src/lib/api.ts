@@ -456,9 +456,26 @@ export function listAllRuns(status?: string): Promise<{ runs: Record<string, unk
   return _get(path);
 }
 
-/** Catalog of generated pipelines (gen_*): each manifest + its durable-state file list. */
+/** Catalog of runnable pipelines (built-in and generated): origin, addons, durable state. */
 export function listPipelines(): Promise<{ pipelines: Record<string, unknown>[] }> {
   return _get('/api/pipelines');
+}
+
+/**
+ * One pipeline's COMPOSED graph — steps, edges, and the ids an addon spliced in.
+ * Composed, not the source YAML: a base+addon combo has no file of its own.
+ */
+export function pipelineGraph(config: string): Promise<{
+  config_name: string;
+  label: string;
+  origin: string;
+  base: string;
+  addons: string[];
+  addon_steps: string[];
+  begin: string;
+  steps: Record<string, unknown>[];
+}> {
+  return _get('/api/pipelines/' + encodeURIComponent(config) + '/graph');
 }
 
 /** Read one durable-state file of a generated pipeline (pipeline_state/<config>/<name>). */

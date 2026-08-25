@@ -25,6 +25,7 @@
   import { t } from '../lib/i18n.svelte';
   import RepoPanel from './RepoPanel.svelte';
   import WorkspaceBrowser from './WorkspaceBrowser.svelte';
+  import PipelineGraph from './PipelineGraph.svelte';
 
   // ── State ──
 
@@ -38,9 +39,13 @@
   // work that produces artifacts yet touches no code repo (e.g. gen_cac40).
   // Their own section, distinct from the generation runs that created them.
   let pipelineRuns = $state<Record<string, unknown>[]>([]);
-  // Catalog of generated pipelines (gen_*) with the durable state each carries
-  // across runs; state file bodies are lazy-loaded into stateFiles on expand.
+  // Catalog of every RUNNABLE pipeline -- built-in and generated -- with the
+  // addon each carries and the durable state it keeps across runs; state file
+  // bodies are lazy-loaded into stateFiles on expand.
   let pipelines = $state<Record<string, unknown>[]>([]);
+  // Which catalog rows have their graph open. The graph is fetched by the
+  // PipelineGraph component on mount, so an unopened row costs nothing.
+  let openGraphs = $state<Set<string>>(new Set());
   let stateFiles = $state<Record<string, string>>({});
   // Load failures live here, NOT in stateFiles — a cached error would satisfy
   // the fetch guard and make the failure permanent for the page's lifetime.
@@ -377,8 +382,19 @@
     return list.filter(
       p =>
         ((p.config_name as string) || '').toLowerCase().includes(q) ||
-        ((p.label as string) || '').toLowerCase().includes(q),
+        ((p.label as string) || '').toLowerCase().includes(q) ||
+        // Searching "game" should find dpe_game via its addon, which is the
+        // only thing distinguishing it from the base it inherits its label from.
+        (((p.addons as string[]) || []).some(a => a.toLowerCase().includes(q))),
     );
+  }
+
+  /** Open/close one catalog row's graph. Fetching is the component's job. */
+  function toggleGraph(config: string) {
+    const next = new Set(openGraphs);
+    if (next.has(config)) next.delete(config);
+    else next.add(config);
+    openGraphs = next;
   }
 
   // ── Durable-state viewer: lazy-load a pipeline_state/<config>/<file> body ──
@@ -839,9 +855,14 @@
                   <tr class="project-row">
                     <td>{idx + 1}</td>
                     <td>
+                      <!-- The run PAGE, not its trace. A repo-less run has the
+                           same steps, checkpoints and outputs as any other; the
+                           trace is one tab inside that, and jumping a reader
+                           straight into raw trace rows skipped the level they
+                           were asking for. The trace stays one click away. -->
                       <a
-                        href="#/projects/{encodeURIComponent(run.project_id)}/trace"
-                        onclick={(e) => { e.preventDefault(); navigateToTrace(run.project_id); }}
+                        href="#/projects/{encodeURIComponent(run.project_id)}"
+                        onclick={(e) => { e.preventDefault(); navigateToProject(run.project_id); }}
                       >{run.name || run.project_id}</a>
                     </td>
                     <td><span class="repo-type-badge">{run.config_label || run.config_name}</span></td>
@@ -878,7 +899,8 @@
     <!-- Repo-less pipeline RUNS (gen_* executions like cac40, novels). -->
     {@render runSection(matchedPipelineRuns, 'dashboard.pipelineRuns', 'dashboard.pipelineRunsHint')}
 
-    <!-- Catalog: the generated pipelines you can run + the durable state each carries. -->
+    <!-- Catalog: every pipeline you can run — built-in and generated — with the
+         addon each carries and the durable state it keeps between runs. -->
     {#if matchedPipelines.length > 0}
       <details class="repo-section authoring-section">
         <summary class="repo-summary">
@@ -893,13 +915,38 @@
             <thead>
               <tr>
                 <th>{t('dashboard.colProject')}</th>
+                <th>{t('dashboard.colOrigin')}</th>
+                <th>{t('dashboard.colAddons')}</th>
                 <th>{t('dashboard.colState')}</th>
               </tr>
             </thead>
             <tbody>
               {#each matchedPipelines as p}
                 <tr class="project-row">
-                  <td><span class="repo-type-badge">{p.label || p.config_name}</span></td>
+                  <td>
+                    <button class="graph-toggle" onclick={() => toggleGraph(p.config_name as string)}
+                            title={t('dashboard.viewGraphTitle')}>
+                      {openGraphs.has(p.config_name as string) ? '▾' : '▸'}
+                      <span class="repo-type-badge">{p.label || p.config_name}</span>
+                    </button>
+                    <small class="muted config-name">{p.config_name}</small>
+                  </td>
+                  <td>
+                    <span class="origin-badge {p.origin}">{t('dashboard.origin.' + p.origin)}</span>
+                    <small class="muted">{t('dashboard.stepCount').replace('{n}', String(p.step_count ?? 0))}</small>
+                  </td>
+                  <td>
+                    {#if (p.addons as string[] | undefined)?.length}
+                      {#each p.addons as a}
+                        <span class="addon-badge">{a}</span>
+                      {/each}
+                      <!-- The composed name inherits the BASE's label, so without
+                           this the combo is indistinguishable from its base. -->
+                      <small class="muted">{t('dashboard.onBase').replace('{base}', String(p.base))}</small>
+                    {:else}
+                      <span class="muted">—</span>
+                    {/if}
+                  </td>
                   <td>
                     {#if p.state_files?.length}
                       {#each p.state_files as sfile}
@@ -923,6 +970,13 @@
                     {/if}
                   </td>
                 </tr>
+                {#if openGraphs.has(p.config_name as string)}
+                  <tr class="graph-row">
+                    <td colspan="4">
+                      <PipelineGraph config={p.config_name as string} />
+                    </td>
+                  </tr>
+                {/if}
               {/each}
             </tbody>
           </table>
@@ -1214,4 +1268,29 @@
   }
   .state-error { color: var(--pico-del-color, #b3261e); }
   .muted { color: var(--pico-muted-color, #8a8a8a); font-size: 0.85rem; }
+
+  /* ── Pipeline catalog: origin / addon / graph ── */
+  .graph-toggle {
+    background: none; border: none; padding: 0; margin: 0;
+    width: auto; font: inherit; cursor: pointer; text-align: left;
+    color: inherit;
+  }
+  .config-name { display: block; font-size: 0.72rem; }
+  .origin-badge {
+    display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px;
+    font-size: 0.72rem; white-space: nowrap;
+    background: var(--pico-code-background-color, #f4f4f4);
+    color: var(--pico-muted-color, #8a8a8a);
+  }
+  .origin-badge.generated {
+    background: var(--pico-color-green-100, #d7f5df);
+    color: var(--pico-color-green-700, #256a3a);
+  }
+  .addon-badge {
+    display: inline-block; padding: 0.05rem 0.4rem; margin-right: 0.2rem;
+    border-radius: 4px; font-size: 0.72rem;
+    background: var(--pico-color-yellow-100, #fdf3d0);
+    color: var(--pico-color-yellow-700, #7a5c00);
+  }
+  .graph-row td { padding-top: 0; }
 </style>

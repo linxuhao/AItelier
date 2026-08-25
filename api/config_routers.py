@@ -54,17 +54,23 @@ def _generated_state_dir(config_name: str, registry):
 @router.get("/pipelines")
 def list_pipelines(registry=Depends(get_config_registry),
                    user: CurrentUser | None = Depends(get_optional_user)):
-    """The catalog of GENERATED pipelines (``gen_*``): each manifest plus the
-    durable cross-run state it has accumulated in ``pipeline_state/<config>/``.
+    """The catalog of RUNNABLE pipelines — built-in and generated alike — each
+    with where it came from, which addon (if any) it carries, and the durable
+    cross-run state it has accumulated in ``pipeline_state/<config>/``.
 
     Distinct from run *history* (``/api/runs``) — this is the list of pipelines
     you can run, with the state they carry between runs (positions, memos, …).
+
+    Built-ins are listed too: a catalog that showed only ``gen_*`` answered
+    "what did I generate", not "what can I run", and left the composed
+    base+addon configs (``dpe_game``) invisible even though they are the ones
+    most in need of explaining — their label is inherited from the base, so
+    without ``addons`` they are indistinguishable from it.
     """
+    from core import addon_registry as ar
     sf = get_skillflow()
     out = []
     for m in registry.list():
-        if not m.config_name.startswith(GEN_PREFIX):
-            continue
         files: list[dict] = []
         d = sf._workspace.state_dir(m.config_name, create=False)
         if d.is_dir():
@@ -75,9 +81,48 @@ def list_pipelines(registry=Depends(get_config_registry),
                     ({"name": e.name, "size": e.stat().st_size}
                      for e in it if e.is_file()),
                     key=lambda x: x["name"])
+        try:
+            decomp = ar.describe_config(m.config_name)
+        except Exception:          # an un-decomposable name is still runnable
+            decomp = {}
+        base = decomp.get("base") or m.config_name
         out.append({"config_name": m.config_name, "label": m.label,
+                    "origin": ("generated" if m.config_name.startswith(GEN_PREFIX)
+                               else "native"),
+                    "base": base, "addons": decomp.get("addons") or [],
+                    "step_count": len(m.steps or []),
                     "state_files": files})
     return {"pipelines": out}
+
+
+@router.get("/pipelines/{config_name}/graph")
+def pipeline_graph(config_name: str, registry=Depends(get_config_registry),
+                   user: CurrentUser | None = Depends(get_optional_user)):
+    """One pipeline's COMPOSED graph: steps, edges and their match conditions.
+
+    Composed, not the source YAML — a base+addon combo has no file of its own,
+    and it is the composed product that actually runs. ``addon_steps`` marks the
+    steps the overlay spliced in, which is what makes "show me the pipeline plus
+    its addon" a single picture rather than two.
+    """
+    from core import addon_registry as ar
+    if not registry.get(config_name):
+        raise HTTPException(status_code=404,
+                            detail=f"Config '{config_name}' not found")
+    view = ar.graph_view(config_name)
+    if view is None:
+        # Registered as a manifest but absent from the graph table — the zombie
+        # shape archive_generated_pipeline exists to prevent. Say so; a 404 here
+        # would read as "no such pipeline" and send the caller looking elsewhere.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Config '{config_name}' has a manifest but no registered graph")
+    manifest = registry.get(config_name)
+    view["label"] = manifest.label
+    view["origin"] = ("generated" if config_name.startswith(GEN_PREFIX)
+                      else "native")
+    view["checkpoints"] = manifest.to_dict().get("checkpoints") or {}
+    return view
 
 
 @router.get("/pipelines/{config_name}/state/file")

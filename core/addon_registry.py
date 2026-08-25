@@ -263,3 +263,55 @@ def load_addon_aliases(sf, registry) -> list[str]:
         except Exception as e:
             log.warning("addon alias '%s' not registered: %s", alias, e)
     return registered
+
+
+def graph_view(config_name: str) -> dict | None:
+    """The COMPOSED graph of a runnable config, projected for display.
+
+    Reads ``sf._graphs`` rather than the YAML on disk because a base+addon combo
+    (``dpe_game``) has no file of its own — it exists only as the composed
+    product, and that product is exactly what a run executes. Rendering the base
+    YAML instead would show a graph the user can never observe.
+
+    ``addon_steps`` are the ids present here but NOT in the base graph, i.e. the
+    steps the overlay SPLICED IN. It is deliberately not a full diff: an overlay
+    can also rewire a base step's transitions, and that rewiring is already
+    visible in the composed edges — it is only the *attribution* of a shared step
+    that this cannot show. Returns None when the config is not registered.
+    """
+    from api.dependencies import get_skillflow
+    sf = get_skillflow()
+    graph = getattr(sf, "_graphs", {}).get(config_name)
+    if graph is None:
+        return None
+    d = graph.to_dict()
+    decomp = describe_config(config_name)
+    base = decomp.get("base") or config_name
+    addon_steps: list[str] = []
+    if base != config_name:
+        base_graph = getattr(sf, "_graphs", {}).get(base)
+        if base_graph is not None:
+            base_ids = {s.get("id") for s in base_graph.to_dict().get("steps") or []}
+            addon_steps = [s.get("id") for s in d.get("steps") or []
+                           if s.get("id") not in base_ids]
+    steps = []
+    for s in d.get("steps") or []:
+        steps.append({
+            "id": s.get("id"),
+            "type": s.get("step_type"),
+            "checkpoint": bool(s.get("checkpoint")),
+            "tool_name": s.get("tool_name"),
+            "agent_config": s.get("agent_config"),
+            "loop_over": s.get("loop_over"),
+            "from_addon": s.get("id") in addon_steps,
+            # Only what an edge needs to be drawn and read: where it goes, why it
+            # is taken, and whether it is a bounded retry loop.
+            "transitions": [{"to": t.get("to"),
+                             "match": t.get("match") or {},
+                             "max_loop": t.get("max_loop")}
+                            for t in (s.get("transitions") or [])],
+        })
+    return {"config_name": config_name, "base": base,
+            "addons": decomp.get("addons") or [], "addon_steps": addon_steps,
+            "begin": d.get("begin"), "description": d.get("description"),
+            "end_conditions": d.get("end_conditions") or {}, "steps": steps}

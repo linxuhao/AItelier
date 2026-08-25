@@ -71,14 +71,72 @@ def _register_gen(name: str):
     pr._register_text(get_skillflow(), get_config_registry(), name, graph)
 
 
-def test_catalog_lists_generated_pipelines_only(client):
+def test_catalog_lists_built_ins_and_generated_alike(client):
+    """The catalog answers "what can I run", not "what did I generate".
+
+    It listed only ``gen_*`` before, which hid every built-in AND every composed
+    base+addon config — and those are the ones most in need of explaining, since
+    a combo inherits its base's label and is otherwise indistinguishable from it.
+    """
     _register_gen("gen_catalog_probe")
     body = client.get("/api/pipelines").json()["pipelines"]
-    names = {p["config_name"] for p in body}
-    assert "gen_catalog_probe" in names
-    assert not any(n == "dpe_default_v2" for n in names), "built-ins must not be listed"
+    by_name = {p["config_name"]: p for p in body}
+    assert "gen_catalog_probe" in by_name
+    assert "dpe_default_v2" in by_name
+    assert by_name["gen_catalog_probe"]["origin"] == "generated"
+    assert by_name["dpe_default_v2"]["origin"] == "native"
     # slim projection — the full manifest has its own endpoint
-    assert set(body[0]) == {"config_name", "label", "state_files"}
+    assert set(body[0]) == {"config_name", "label", "origin", "base", "addons",
+                            "step_count", "state_files"}
+
+
+def test_catalog_names_the_addon_a_composed_config_carries(client):
+    """dpe_game is dpe_default_v2 + game_harness and INHERITS the base's label,
+    so without the decomposition the two rows read identically."""
+    body = client.get("/api/pipelines").json()["pipelines"]
+    game = next((p for p in body if p["config_name"] == "dpe_game"), None)
+    if game is None:
+        pytest.skip("game_harness addon not registered in this fixture")
+    assert game["base"] == "dpe_default_v2"
+    assert game["addons"] == ["game_harness"]
+    assert game["step_count"] > next(p["step_count"] for p in body
+                                     if p["config_name"] == "dpe_default_v2")
+
+
+# ── Composed graph view (/api/pipelines/{name}/graph) ───────────────────────
+
+def test_graph_returns_steps_and_edges(client):
+    _register_gen("gen_graph_probe")
+    g = client.get("/api/pipelines/gen_graph_probe/graph").json()
+    assert g["begin"] == "work"
+    ids = [s["id"] for s in g["steps"]]
+    assert ids == ["work", "done"]
+    work = g["steps"][0]
+    assert work["type"] == "agent"
+    assert work["transitions"] == [{"to": "done", "match": {}, "max_loop": None}]
+    assert g["origin"] == "generated"
+    assert g["addon_steps"] == []
+
+
+def test_graph_marks_the_steps_an_addon_spliced_in(client):
+    """The point of the view: base + addon as ONE picture, with the overlay's
+    contribution attributable. A composed graph has no YAML of its own, so this
+    can only come from the composed product."""
+    g = client.get("/api/pipelines/dpe_game/graph")
+    if g.status_code == 404:
+        pytest.skip("game_harness addon not registered in this fixture")
+    g = g.json()
+    assert g["base"] == "dpe_default_v2"
+    assert g["addons"] == ["game_harness"]
+    assert g["addon_steps"], "the overlay adds steps; none were attributed"
+    spliced = {s["id"] for s in g["steps"] if s["from_addon"]}
+    assert spliced == set(g["addon_steps"])
+    base = client.get("/api/pipelines/dpe_default_v2/graph").json()
+    assert spliced.isdisjoint({s["id"] for s in base["steps"]})
+
+
+def test_graph_404s_on_an_unknown_config(client):
+    assert client.get("/api/pipelines/does_not_exist/graph").status_code == 404
 
 
 def test_listing_does_not_provision_state_dirs(client):

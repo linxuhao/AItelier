@@ -504,7 +504,7 @@ class TestVisionFallback:
         m = self._mod()
         calls = []
 
-        def fake_post(url, model, api_key, files, questions):
+        def fake_post(url, model, api_key, files, questions, max_tokens=0):
             calls.append(url)
             return "1: YES - fine"
 
@@ -517,8 +517,8 @@ class TestVisionFallback:
         m = self._mod()
         seen = []
 
-        def fake_post(url, model, api_key, files, questions):
-            seen.append((url, model, api_key))
+        def fake_post(url, model, api_key, files, questions, max_tokens=0):
+            seen.append((url, model, api_key, max_tokens))
             if url == m._URL:
                 raise OSError("connection refused")
             return "1: YES - fine"
@@ -531,6 +531,58 @@ class TestVisionFallback:
         assert seen[1][0] == m._FALLBACK_URL
         assert seen[1][1] == m._FALLBACK_MODEL
         assert seen[1][2] == "k"          # the key is actually sent
+        # The fallback must get its OWN budget, not the primary's. 2048 fits the
+        # primary (qwen3) and starves DeepSeek's reasoning model, which spends
+        # the WHOLE budget thinking and returns empty content — measured 3/3 at
+        # 2048. A shared budget sized for one backend silently blinds the other.
+        assert seen[0][3] == 0                          # primary: caller default
+        assert seen[1][3] == m._MAX_TOKENS_FALLBACK     # fallback: its own
+        assert m._MAX_TOKENS_FALLBACK > m._MAX_TOKENS
+
+    def test_a_starved_fallback_escalates_and_actually_retries(self, monkeypatch):
+        """Starving on reasoning must escalate the budget AND take the retry.
+
+        An escalation that only logs is how the planner starved nine times in a
+        row while announcing a retry it could never take (a3846df). Here the
+        first fallback call starves; the second must arrive with a bigger budget
+        and its answer must be the one returned.
+        """
+        m = self._mod()
+        budgets = []
+
+        def fake_post(url, model, api_key, files, questions, max_tokens=0):
+            if url == m._URL:
+                raise OSError("connection refused")
+            budgets.append(max_tokens)
+            if len(budgets) == 1:
+                raise m.ReasoningStarved("spent it all thinking")
+            return "1: YES - fine"
+
+        monkeypatch.setattr(m, "_post", fake_post)
+        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
+        text, backend = m._ask([], [{"id": 1, "text": "q"}])
+        assert backend == "fallback"
+        assert text == "1: YES - fine"           # the RETRY's answer, not a raise
+        assert len(budgets) == 2                 # it really retried
+        assert budgets[1] > budgets[0]           # and with a bigger budget
+
+    def test_a_starved_fallback_that_stays_starved_is_a_loud_failure(self, monkeypatch):
+        """Two starves in a row must raise, never return an empty verdict.
+
+        A judge that answered nothing is not a judge that answered NO.
+        """
+        m = self._mod()
+
+        def fake_post(url, model, api_key, files, questions, max_tokens=0):
+            if url == m._URL:
+                raise OSError("connection refused")
+            raise m.ReasoningStarved("spent it all thinking")
+
+        monkeypatch.setattr(m, "_post", fake_post)
+        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
+        with pytest.raises(RuntimeError) as exc:
+            m._ask([], [{"id": 1, "text": "q"}])
+        assert "spent it all thinking" in str(exc.value)
 
     def test_a_wrong_answer_is_not_a_reason_to_switch_judges(self, monkeypatch):
         """A primary that ANSWERS must never be second-guessed by the fallback.
@@ -542,7 +594,7 @@ class TestVisionFallback:
         m = self._mod()
         urls = []
 
-        def fake_post(url, model, api_key, files, questions):
+        def fake_post(url, model, api_key, files, questions, max_tokens=0):
             urls.append(url)
             return "complete nonsense, no answers at all"
 

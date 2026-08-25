@@ -9,6 +9,7 @@ import { connectionStore } from '../../stores/connection';
 import tracePage from '../fixtures/trace_page.json';
 
 const mockApi = vi.hoisted(() => ({
+  pipelineGraph: vi.fn(),
   getProject: vi.fn(),
   getTasks: vi.fn(),
   listRuns: vi.fn(),
@@ -47,10 +48,29 @@ const REAL_RUN_DETAIL = {
     '1': { cache_hit_tokens: 90, cache_miss_tokens: 40, hit_ratio: 0.7,
            total_tokens: 130 },
   },
+  config_name: 'dpe_default_v2',
+  manifest: { labels: { git_sync_pre: 'Git Sync', '1': 'Researcher' } },
 };
 
-describe('run detail step timeline (real payload)', () => {
-  it('renders step labels, durations, and per-step cache stats', async () => {
+// The graph the run page now folds the run onto.
+const GRAPH = {
+  config_name: 'dpe_default_v2', label: 'DPE Pipeline', origin: 'native',
+  base: 'dpe_default_v2', addons: [], addon_steps: [], begin: 'git_sync_pre',
+  loops: {},
+  steps: [
+    { id: 'git_sync_pre', type: 'tool', transitions: [{ to: '1' }] },
+    { id: '1', type: 'agent', transitions: [] },
+  ],
+};
+
+describe('run graph (real payload)', () => {
+  it('keeps the step names, real durations and cache stats the flat list showed',
+     async () => {
+    // The graph REPLACED that list, so the three facts it guarded have to be
+    // re-asserted here or they quietly stop being shown: the manifest label
+    // (not a blank name), the step's own claimed->completed window (not
+    // elapsed-since-run-start, and never NaN on a zone-less SQLite datetime),
+    // and the per-step token/cache figures.
     authStore.set({ canWrite: true, email: 'x@y', permissionResolved: true });
     connectionStore.set({ connectionOk: true, reconnectAttempt: 0 });
     mockApi.getProject.mockResolvedValue({ project_id: 'p1', name: 'P One',
@@ -62,6 +82,7 @@ describe('run detail step timeline (real payload)', () => {
     mockApi.getCheckpoint.mockResolvedValue({ checkpoint: null });
     mockApi.getTasks.mockResolvedValue([]);
     mockApi.getRunDetail.mockResolvedValue(REAL_RUN_DETAIL);
+    mockApi.pipelineGraph.mockResolvedValue(GRAPH);
 
     const { container, findByText } = render(
       await import('../../views/Project.svelte'),
@@ -70,24 +91,29 @@ describe('run detail step timeline (real payload)', () => {
 
     await fireEvent.click(container.querySelector('.run-row')!);
     await waitFor(() => {
-      expect(container.querySelector('.step-timeline')).not.toBeNull();
+      expect(container.querySelector('.step-graph svg')).not.toBeNull();
     });
 
-    const labels = Array.from(container.querySelectorAll('.step-label'))
+    const names = Array.from(container.querySelectorAll('text.node-id'))
       .map((el) => el.textContent?.trim());
-    expect(labels).toEqual(['Git Sync', 'Researcher']);
+    expect(names).toEqual(['Git Sync', 'Researcher']);
 
-    // Durations must not be NaN with SQLite timestamps, and must measure the
-    // step's own claimed→completed window — not elapsed-since-run-start.
-    const durations = Array.from(container.querySelectorAll('.step-duration'))
-      .map((el) => el.textContent);
-    for (const d of durations) expect(d).not.toContain('NaN');
-    expect(durations).toEqual(['2s', '3m 21s']);
-
-    // Per-step cache badge from cache_stats_by_step
-    const badges = Array.from(container.querySelectorAll('.step-timeline .cache-inline-badge'))
-      .map((el) => el.textContent?.trim());
-    expect(badges.some((b) => b?.includes('70% cache'))).toBe(true);
+    // Open the researcher node: its instance ran 23:26:00 -> 23:29:21.
+    const node = Array.from(container.querySelectorAll('g.node'))
+      .find((g) => g.querySelector('text.node-id')?.textContent === 'Researcher');
+    await fireEvent.click(node as Element);
+    const detail = await waitFor(() => {
+      const el = container.querySelector('.node-detail');
+      expect(el).not.toBeNull();
+      return el as Element;
+    });
+    expect(detail.textContent).not.toContain('NaN');
+    expect(detail.textContent).toContain('3m 21s');
+    // per-step cache figures survive the move off the flat list
+    expect(detail.querySelector('.cache-inline-badge')?.textContent)
+      .toContain('70% cache');
+    // the real step id stays visible next to the label
+    expect(detail.querySelector('.node-real-id')?.textContent).toBe('1');
   });
 });
 

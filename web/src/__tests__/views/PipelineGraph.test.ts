@@ -4,7 +4,7 @@
  * identically to its base is exactly the confusion this view exists to remove.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, waitFor } from '@testing-library/svelte';
+import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 const mockApi = vi.hoisted(() => ({ pipelineGraph: vi.fn() }));
 vi.mock('../../lib/api', () => mockApi);
@@ -86,5 +86,117 @@ describe('PipelineGraph', () => {
     await waitFor(() => expect(container.querySelectorAll('g.node').length).toBe(22));
     expect(container.querySelectorAll('g.node.addon')).toHaveLength(
       realGraph.addon_steps.length);
+  });
+});
+
+describe('PipelineGraph with a run folded on', () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  // A loop graph in miniature: `body` runs once per item inside `task_loop`.
+  const loopGraph = {
+    config_name: 'dpe_default_v2', label: 'DPE', origin: 'native',
+    base: 'dpe_default_v2', addons: [], addon_steps: [], begin: 'setup',
+    loops: { task_loop: ['body'] },
+    steps: [
+      { id: 'setup', type: 'tool', transitions: [{ to: 'task_loop' }] },
+      { id: 'task_loop', type: 'loop', is_loop: true,
+        transitions: [{ to: 'body', max_loop: 100 }, { to: 'wrap' }] },
+      { id: 'body', type: 'agent', loop_id: 'task_loop',
+        transitions: [{ to: 'task_loop' }] },
+      { id: 'wrap', type: 'agent', transitions: [] },
+    ],
+  };
+
+  const rows = [
+    { id: 1, step_id: 'setup', status: 'completed', loop_item: null },
+    { id: 2, step_id: 'body', status: 'completed', loop_item: 'alpha',
+      claimed_at: '2026-08-25T10:00:00Z', completed_at: '2026-08-25T10:00:20Z' },
+    { id: 3, step_id: 'body', status: 'failed', loop_item: 'beta', error: 'nope' },
+    { id: 4, step_id: 'wrap', status: 'pending', loop_item: null },
+  ];
+
+  it('draws the loop body inside its own box', async () => {
+    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    const { container } = render(PipelineGraph,
+      { props: { config: 'dpe_default_v2', runSteps: rows } });
+    await waitFor(() => expect(container.querySelector('g.loop-box')).toBeTruthy());
+    expect(container.querySelector('g.loop-box text')?.textContent?.trim())
+      .toContain('task_loop');
+  });
+
+  it('offers every loop item this run actually claimed', async () => {
+    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    const { container, findByText } = render(PipelineGraph,
+      { props: { config: 'dpe_default_v2', runSteps: rows } });
+    expect(await findByText('alpha')).toBeTruthy();
+    expect(await findByText('beta')).toBeTruthy();
+    expect(container.querySelectorAll('.item-chip').length).toBe(3);  // all + 2
+  });
+
+  it('reports the SELECTED item state, not the aggregate', async () => {
+    // Unfiltered the body is failed (beta blew up). Picking alpha must show
+    // alpha's own outcome -- that is the entire point of the picker.
+    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    const { container, findByText } = render(PipelineGraph,
+      { props: { config: 'dpe_default_v2', runSteps: rows } });
+    await waitFor(() => expect(container.querySelector('g.node.failed')).toBeTruthy());
+    await fireEvent.click(await findByText('alpha'));
+    await waitFor(() => expect(container.querySelector('g.node.failed')).toBeNull());
+    expect(container.querySelector('g.node.completed')).toBeTruthy();
+  });
+
+  it('colours a node by run status and leaves an unrun one dashed', async () => {
+    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    const { container } = render(PipelineGraph,
+      { props: { config: 'dpe_default_v2', runSteps: rows } });
+    await waitFor(() => expect(container.querySelectorAll('g.node.completed').length)
+      .toBeGreaterThan(0));
+    expect(container.querySelectorAll('g.node.pending').length).toBeGreaterThan(0);
+  });
+
+  it('opens a node to the instances behind it, with their items', async () => {
+    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    const { container, findByText } = render(PipelineGraph,
+      { props: { config: 'dpe_default_v2', runSteps: rows } });
+    await waitFor(() => expect(container.querySelectorAll('g.node').length).toBe(4));
+    const body = [...container.querySelectorAll('g.node')]
+      .find((g) => g.querySelector('text.node-id')?.textContent === 'body');
+    await fireEvent.click(body as Element);
+    const table = await waitFor(() => {
+      const el = container.querySelector('.exec-table');
+      expect(el).toBeTruthy();
+      return el as Element;
+    });
+    expect(table.textContent).toContain('alpha');
+    expect(table.textContent).toContain('beta');
+    expect(container.querySelector('.exec-error')?.textContent).toBe('nope');
+  });
+
+  it('says items were not recorded rather than inventing one', async () => {
+    // A run from before skillflow stamped loop_item: body rows exist, none has
+    // an item. Showing a single nameless chip would claim a one-item fan-out.
+    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    const { container, findByText } = render(PipelineGraph, {
+      props: {
+        config: 'dpe_default_v2',
+        runSteps: [
+          { id: 1, step_id: 'body', status: 'completed', loop_item: null },
+          { id: 2, step_id: 'body', status: 'completed', loop_item: null },
+        ],
+      },
+    });
+    await waitFor(() => expect(container.querySelector('.item-note')).toBeTruthy());
+    expect(container.querySelectorAll('.item-chip')).toHaveLength(0);
+    // and the graph still renders -- an old run's page must not go blank
+    expect(container.querySelectorAll('g.node').length).toBe(4);
+    expect(await findByText('body')).toBeTruthy();
+  });
+
+  it('stays a plain config view when no run is passed', async () => {
+    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    const { container } = render(PipelineGraph, { props: { config: 'dpe_default_v2' } });
+    await waitFor(() => expect(container.querySelectorAll('g.node').length).toBe(4));
+    expect(container.querySelector('.item-strip')).toBeNull();
+    expect(container.querySelector('g.node.clickable')).toBeNull();
   });
 });

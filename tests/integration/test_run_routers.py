@@ -97,3 +97,56 @@ def test_list_all_runs_includes_cache_stats(client):
         assert "cache_miss_tokens" in our_run["cache_stats"]
         assert "hit_ratio" in our_run["cache_stats"]
         assert "total_tokens" in our_run["cache_stats"]
+
+
+# ── loop_item is additive: an old run and an old skillflow must both render ──
+
+def _start_dpe(client, project_id):
+    """Start a real dpe_default_v2 run (seeding the cross-config input it
+    requires), so there are step rows to project."""
+    client.post("/api/projects", json={"project_id": project_id, "name": project_id})
+    from api.dependencies import get_skillflow
+    finalize = (get_skillflow()._workspace.get_project_path(project_id)
+                / "meta_conversation" / "finalize")
+    finalize.mkdir(parents=True, exist_ok=True)
+    (finalize / "step1_goals.json").write_text('{"goals": ["x"]}', encoding="utf-8")
+    r = client.post("/api/runs", json={"config_name": "dpe_default_v2",
+                                       "project_id": project_id})
+    assert r.status_code == 201, r.text
+
+
+def test_run_detail_reports_loop_item_as_none_when_nothing_ran(client):
+    """A run whose loop never executed carries no items, and every step says so
+    explicitly rather than omitting the key — a client that reads it must not
+    have to distinguish "absent" from "not in a loop"."""
+    _start_dpe(client, "loopitem_fresh")
+    steps = client.get("/api/runs/loopitem_fresh").json()["steps"]
+    assert steps, "expected seeded step rows"
+    assert all("loop_item" in s for s in steps)
+    assert all(s["loop_item"] is None for s in steps)
+
+
+def test_run_detail_survives_a_skillflow_without_the_column(client, monkeypatch):
+    """PURELY additive: the run page must still render against a skillflow that
+    predates `loop_item`.
+
+    This is not hypothetical. The container installs skillflow from PyPI, and a
+    dev-loop wheel override is reverted by any `docker compose up -d` that
+    recreates it — so the app can find itself one release behind at any time. A
+    `s["loop_item"]` here would raise KeyError inside the projection and 500 the
+    whole run detail, taking every historical run's page down with it.
+    """
+    from api.dependencies import get_skillflow
+    _start_dpe(client, "loopitem_oldsf")
+    sf = get_skillflow()
+    real = sf.get_steps
+
+    def without_the_column(run_id, **kw):
+        return [{k: v for k, v in s.items() if k != "loop_item"}
+                for s in real(run_id, **kw)]
+
+    monkeypatch.setattr(sf, "get_steps", without_the_column)
+    resp = client.get("/api/runs/loopitem_oldsf")
+    assert resp.status_code == 200, resp.text
+    steps = resp.json()["steps"]
+    assert steps and all(s["loop_item"] is None for s in steps)

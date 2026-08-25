@@ -6,6 +6,7 @@
   import { projectStore, setCurrentProject } from '../stores/project';
   import { showCheckpoint } from '../stores/checkpoint';
   import WorkspaceBrowser from './WorkspaceBrowser.svelte';
+  import PipelineGraph from './PipelineGraph.svelte';
   import {
     getProject,
     getTasks,
@@ -706,62 +707,27 @@
                 <button class="outline small" onclick={() => navigateToTraceForRun((runDetail.id as string) || (runDetail.run_id as string))}>Trace</button>
               </nav>
 
-              <!-- Step timeline -->
-              <div class="step-timeline">
-                <h5>Steps</h5>
-                {#if runDetail.steps}
-                  {#each runDetail.steps as step, stepIdx ((step.id as number) ?? stepIdx)}
-                    {@const scs = (runDetail.cache_stats_by_step as Record<string, Record<string, number>>)?.[step.step_id as string]}
-                    <div class="step-item" class:step-expanded={isStepExpanded(step.step_id as string)}>
-                      <div
-                        class="step-header"
-                        onclick={() => toggleStepExpanded(step.step_id as string)}
-                        role="button"
-                        tabindex="0"
-                        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleStepExpanded(step.step_id as string); } }}
-                      >
-                        <span class="step-toggle">{isStepExpanded(step.step_id as string) ? '▼' : '▶'}</span>
-                        <span class="step-label">{stepLabel(step.step_id as string) || (step.step_id as string)}</span>
-                        <span class="status-badge {statusClass(step.status as string)}">
-                          {statusIcon(step.status as string)} {stepStatusLabel(step)}
-                        </span>
-                        <span class="step-duration">{stepDuration(step)}</span>
-                        {#if scs && scs.total_tokens != null}
-                          <span class="cache-inline-badge {cacheBadgeClass(scs.hit_ratio)}" title="Tokens (cache hit ratio), aggregated per step id">
-                            {formatTokens(scs.total_tokens)}{scs.hit_ratio != null ? ' · ' + Math.round(scs.hit_ratio * 100) + '% cache' : ''}
-                          </span>
-                        {/if}
-                        {#if (step.attempt as number) > 1}
-                          <span class="retry-badge" title="Retry count">↻ {(step.attempt as number) - 1}</span>
-                        {/if}
-                      </div>
-                      {#if isStepExpanded(step.step_id as string)}
-                        <div class="step-detail">
-                          {#if step.error}
-                            <div class="step-error">
-                              <strong>Error:</strong>
-                              <pre>{escapeHtml(step.error as string)}</pre>
-                            </div>
-                          {/if}
-                          {#if scs}
-                            <div class="step-cache">
-                              <span class="text-muted">Tokens: {formatTokens(scs.cache_hit_tokens)} hit / {formatTokens(scs.cache_miss_tokens)} miss</span>
-                            </div>
-                          {/if}
-                          <div class="step-meta text-small text-muted">
-                            {#if step.created_at}
-                              Started: {formatTime(step.created_at as number)}
-                            {/if}
-                            {#if step.retry_count != null}
-                              · Retries: {step.retry_count as number}
-                            {/if}
-                          </div>
-                        </div>
-                      {/if}
-                    </div>
-                  {/each}
+              <!-- The run's graph, with this run folded onto it. It replaces a
+                   flat list of every step instance, which was unreadable exactly
+                   where a run is most interesting: a fan-out over six tasks put
+                   nine `t_impl` entries in one column with nothing to tell them
+                   apart. Here the loop body has its own box and an item picker,
+                   and clicking any node still gives the per-instance detail the
+                   list used to show. -->
+              <div class="step-graph">
+                <h5>{t('project.stepGraph')}</h5>
+                {#if runDetail.config_name}
+                  {#key (runDetail.id as string) || (runDetail.run_id as string)}
+                    <PipelineGraph
+                      config={runDetail.config_name as string}
+                      runSteps={(runDetail.steps ?? []) as never[]}
+                      labels={((runDetail.manifest as Record<string, unknown>)
+                        ?.labels ?? {}) as Record<string, string>}
+                      cacheByStep={(runDetail.cache_stats_by_step ?? {}) as
+                        Record<string, Record<string, number>>} />
+                  {/key}
                 {:else}
-                  <p class="text-muted">No step data available.</p>
+                  <p class="text-muted">{t('project.noStepData')}</p>
                 {/if}
               </div>
             </section>
@@ -1097,81 +1063,13 @@
     margin: 0.75rem 0;
   }
 
-  /* ── Step timeline ── */
-  .step-timeline {
+  /* ── Run graph ── */
+  .step-graph {
     margin-top: 0.5rem;
   }
-  .step-timeline h5 {
+  .step-graph h5 {
     margin: 0 0 0.5rem 0;
     font-size: 0.95rem;
-  }
-  .step-item {
-    border: 1px solid var(--pico-muted-border-color, #eee);
-    border-radius: var(--pico-border-radius, 4px);
-    margin-bottom: 0.3rem;
-    overflow: hidden;
-  }
-  .step-header {
-    /* PicoCSS styles [role="button"] as a primary button (white text) —
-       on our light row that made every step label invisible. */
-    color: inherit;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.4rem 0.5rem;
-    cursor: pointer;
-    font-size: 0.85rem;
-    background: var(--pico-surface, #fafafa);
-    transition: background 0.15s;
-  }
-  .step-header:hover {
-    background: var(--pico-table-row-hover-background, rgba(128, 128, 128, 0.05));
-  }
-  .step-toggle {
-    font-size: 0.7rem;
-    width: 1rem;
-    text-align: center;
-    color: var(--pico-muted-color, #888);
-  }
-  .step-label {
-    font-weight: 600;
-    flex: 1;
-  }
-  .step-duration {
-    font-size: 0.8rem;
-    color: var(--pico-muted-color, #888);
-    white-space: nowrap;
-  }
-  .retry-badge {
-    font-size: 0.75rem;
-    background: var(--pico-color-yellow-100, #ffe);
-    color: var(--pico-color-yellow-700, #960);
-    padding: 0.1rem 0.3rem;
-    border-radius: 3px;
-  }
-  .step-detail {
-    padding: 0.5rem;
-    border-top: 1px solid var(--pico-muted-border-color, #eee);
-    font-size: 0.85rem;
-  }
-  .step-error {
-    margin-bottom: 0.5rem;
-  }
-  .step-error pre {
-    font-size: 0.8rem;
-    background: var(--pico-color-red-50, #fee);
-    padding: 0.5rem;
-    border-radius: var(--pico-border-radius, 4px);
-    max-height: 150px;
-    overflow: auto;
-    white-space: pre-wrap;
-    word-break: break-all;
-  }
-  .step-cache {
-    margin: 0.25rem 0;
-  }
-  .step-meta {
-    margin-top: 0.25rem;
   }
 
   /* ── Config section ── */

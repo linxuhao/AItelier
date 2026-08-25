@@ -285,6 +285,18 @@ def graph_view(config_name: str) -> dict | None:
     if graph is None:
         return None
     d = graph.to_dict()
+    # Loop membership, from skillflow's own reach-back computation rather than a
+    # second guess at it here. Without it a fan-out renders as four ordinary
+    # boxes and the picture claims each ran once, when the body actually runs
+    # per item (see `loop_item` on the step rows).
+    loop_of: dict[str, str] = {}
+    try:
+        resolver = sf._get_resolver(config_name)
+        for loop_id, body in resolver.loop_bodies().items():
+            for node_id in body:
+                loop_of.setdefault(node_id, loop_id)
+    except Exception:            # a graph with no loops, or an unloadable one
+        loop_of = {}
     decomp = describe_config(config_name)
     base = decomp.get("base") or config_name
     addon_steps: list[str] = []
@@ -303,6 +315,8 @@ def graph_view(config_name: str) -> dict | None:
             "tool_name": s.get("tool_name"),
             "agent_config": s.get("agent_config"),
             "loop_over": s.get("loop_over"),
+            "loop_id": loop_of.get(s.get("id")) or None,
+            "is_loop": s.get("step_type") == "loop",
             "from_addon": s.get("id") in addon_steps,
             # Only what an edge needs to be drawn and read: where it goes, why it
             # is taken, and whether it is a bounded retry loop.
@@ -314,4 +328,6 @@ def graph_view(config_name: str) -> dict | None:
     return {"config_name": config_name, "base": base,
             "addons": decomp.get("addons") or [], "addon_steps": addon_steps,
             "begin": d.get("begin"), "description": d.get("description"),
-            "end_conditions": d.get("end_conditions") or {}, "steps": steps}
+            "end_conditions": d.get("end_conditions") or {}, "steps": steps,
+            "loops": {lid: sorted(n for n, l in loop_of.items() if l == lid)
+                      for lid in sorted(set(loop_of.values()))}}

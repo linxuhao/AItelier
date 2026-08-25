@@ -233,6 +233,13 @@ def get_run_detail(
             "id": s["id"],
             "step_id": s["step_id"],
             "status": s["status"],
+            # WHICH loop item this instance ran for (skillflow >=1.5.41), or
+            # None outside a loop. step_id alone cannot say: a fan-out over six
+            # tasks produces six t_impl rows, more once retries and review
+            # loop-backs are counted, and nothing else distinguishes them.
+            # NULL on rows written before the column existed — a run graph must
+            # show that as "not recorded", never as "one un-attributed item".
+            "loop_item": s.get("loop_item") or None,
             # skillflow_steps has no "attempt" column; retries live in
             # retry_count (+ validation_retry_count). Expose them so the UI can
             # show how many times a step was retried (attempt = retry_count + 1).

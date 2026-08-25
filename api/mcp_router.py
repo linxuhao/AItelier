@@ -274,6 +274,8 @@ def _register_read_tools(tool):
         src = _config_source(config)
         if src is None:
             return {"error": f"no pipeline '{config}' — call list_pipelines"}
+        if src["kind"] == "misnamed":
+            return {"error": src["origin"] + "."}
         import yaml
         path = src["path"]
         if path is not None:
@@ -405,12 +407,31 @@ def _config_source(config: str) -> dict | None:
     if gen.exists():
         return {"kind": "generated", "path": gen, "role_stems": [],
                 "origin": f"generated pipeline, {gen}"}
+    from api.dependencies import get_config_registry
+    registered = get_config_registry().get(config) is not None
     stem = _builtin_stem(config)
-    if stem:
+    if stem and registered:
         return {"kind": "builtin", "path": _repo_configs_dir() / f"{stem}.yaml",
                 "role_stems": [stem], "origin": f"built-in, configs/{stem}.yaml"}
-    from api.dependencies import get_config_registry
-    if get_config_registry().get(config) is None:
+    if stem and not registered:
+        # A FILE stem that is not a registered name. `configs/dpe_default.yaml`
+        # declares `name: "dpe_default_v2"`, so `get_pipeline("dpe_default")`
+        # used to answer with a full happy payload for a name `list_pipelines`
+        # never returns and `run_pipeline` rejects — confirming a guess instead
+        # of correcting it. Resolve the file, then say what it is actually called.
+        import yaml as _y
+        try:
+            declared = ((_y.safe_load(
+                (_repo_configs_dir() / f"{stem}.yaml").read_text(encoding="utf-8"))
+                or {}).get("name") or "")
+        except Exception:
+            declared = ""
+        return {"kind": "misnamed", "path": None, "role_stems": [],
+                "declared": declared,
+                "origin": (f"'{config}' is a FILE name, not a pipeline name: "
+                           f"configs/{stem}.yaml declares "
+                           f"'{declared or 'a different name'}'. Use that")}
+    if not registered:
         return None
     addons: list = []
     base = config
@@ -1082,9 +1103,21 @@ def _register_run_tools(tool):
                         f"as a rejection, or drop `feedback` if you really do mean "
                         f"'approve as-is'.")}
         if run.get("status") != "paused":
+            # A project id takes the NEWEST run, which is not always the one with
+            # the checkpoint: a project can acquire a meta_conversation run AFTER
+            # its build (jinyong-turn has exactly that shape), and then the newest
+            # is terminal while an older sibling waits at a checkpoint. Say so
+            # instead of reporting "no checkpoint to answer" for a project that
+            # has one.
+            paused = [r for r in (resolved.get("other_runs") or [])
+                      if r.get("status") == "paused"]
+            extra = ("" if not paused else
+                     " — but this PROJECT has a paused run: "
+                     + ", ".join(f"{r['run_id']} ({r['config']})" for r in paused)
+                     + ". Pass that run_id.")
             return {**echo,
                     "error": f"run '{run_id}' is {run.get('status')}, not paused — "
-                             f"there is no checkpoint to answer"}
+                             f"there is no checkpoint to answer{extra}"}
         try:
             if decision == "approve":
                 sf.approve_checkpoint(run_id)
@@ -1095,14 +1128,15 @@ def _register_run_tools(tool):
                 # so a rejection over MCP and one from the dashboard cannot
                 # disagree about which checkpoint they answered.
                 from api.meta_routers import _get_checkpoint_info
-                step_id, _label, _rid, _graph = _get_checkpoint_info(
+                step_id, _label, _rid, _graph, _inst = _get_checkpoint_info(
                     run.get("project_id") or "")
                 if not step_id:
-                    return {"error": f"run '{run_id}' is paused but no checkpoint "
+                    return {**echo,
+                            "error": f"run '{run_id}' is paused but no checkpoint "
                                      f"step could be resolved for it"}
                 sf.reject_checkpoint(run_id, step_id, feedback)
         except Exception as e:
-            return {"error": f"{decision} failed: {e}"}
+            return {**echo, "error": f"{decision} failed: {e}"}
         # Answering releases the run; whoever was driving it keeps going.
         after = sf.get_run(run_id) or {}
         return {**echo, "run_id": run_id, "decision": decision,
@@ -1453,6 +1487,27 @@ def _register_lifecycle_tools(tool):
         if not run:
             return {"error": f"no run '{run_id}'"}
         echo = {"resolved": resolved} if resolved else {}
+        # A read tool can afford to guess which run a project id meant; fail_run
+        # cannot. `jinyong-winnable` holds two runs created 6 SECONDS apart, and
+        # the one an operator would want to kill is the OLDER of them (the newer
+        # one is the intended build; the older says "superseded: poller
+        # auto-created this dpe_default_v2 run 6s before the intended dpe_game
+        # run"). Newest-wins would fail the build and leave the run that is
+        # actually holding the scheduler slot alive — the exact opposite of what
+        # this tool is for, reported as {"status": "stopped"}. The disclosure in
+        # `resolved` arrives after the mutation, which is too late to help.
+        if resolved.get("other_runs"):
+            return {**echo,
+                    "error": (f"'{run_id}' is a project id with "
+                              f"{len(resolved['other_runs']) + 1} runs, and this "
+                              f"tool FAILS a run — it will not choose for you. "
+                              f"Pass the run_id you mean. Candidates: "
+                              + ", ".join(
+                                  f"{r['run_id']} ({r['config']}, {r['status']})"
+                                  for r in [{"run_id": resolved["run_id"],
+                                             "config": resolved.get("config"),
+                                             "status": run.get("status")}]
+                                  + resolved["other_runs"]))}
         if run["status"] in ("completed", "failed"):
             return {**echo, "run_id": run["id"], "status": run["status"],
                     "message": f"already {run['status']}; nothing to stop"}

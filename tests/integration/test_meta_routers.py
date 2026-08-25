@@ -242,7 +242,7 @@ def test_approve_refuses_feedback_instead_of_dropping_it(client: TestClient, mon
     sf = MagicMock()
     monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
     monkeypatch.setattr(mr, "_get_checkpoint_info",
-                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation"))
+                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation", 7))
 
     resp = client.post("/api/meta/cp-fb-proj/checkpoint/approve",
                        json={"checkpoint": "gather", "feedback": "MUST use PostgreSQL."})
@@ -264,7 +264,7 @@ def test_approve_without_feedback_still_approves(client: TestClient, monkeypatch
     sf.get_run.return_value = {"status": "paused"}
     monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
     monkeypatch.setattr(mr, "_get_checkpoint_info",
-                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation"))
+                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation", 7))
 
     resp = client.post("/api/meta/cp-nofb-proj/checkpoint/approve",
                        json={"checkpoint": "gather", "feedback": ""})
@@ -284,7 +284,7 @@ def test_approve_refuses_whitespace_only_feedback_as_empty(client: TestClient, m
     sf.get_run.return_value = {"status": "paused"}
     monkeypatch.setattr(mr, "get_skillflow", lambda: sf)
     monkeypatch.setattr(mr, "_get_checkpoint_info",
-                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation"))
+                        lambda pid: ("gather", "Project conversation", "run-1", "meta_conversation", 7))
 
     resp = client.post("/api/meta/cp-wsfb-proj/checkpoint/approve",
                        json={"checkpoint": "gather", "feedback": "   \n  "})

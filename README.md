@@ -118,14 +118,20 @@ cd ~/.aitelier-secrets && touch DEEPSEEK_API_KEY ARK_API_KEY GITHUB_TOKEN LOCAL_
 printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
 ```
 
-Publishing through an existing **cloudflared** connector is opt-in, because an
-`external: true` network makes compose refuse to start when that network is not
-already there. Name yours and the overlay applies to both `docker compose` and
-the CLI:
+Publishing through an existing **cloudflared** connector is one line. The network
+lives in `docker-compose.yml` itself and is selected BY NAME, with no
+`external:` and no `-f` overlay — there used to be one, and forgetting it on a
+rebuild took the public path down while every container stayed healthy.
 
 ```bash
-echo 'AITELIER_EDGE_NETWORK=vip-gateway_default' >> .env   # docker network ls → your name
+echo 'AITELIER_EDGE_NETWORK=cloudflare_edge' >> .env   # docker network ls → your connector's
 ```
+
+Confirm the name against `docker network ls` and against the network your
+connector is actually on. A name that matches nothing is **created**, not
+refused: the container comes up healthy, `127.0.0.1:4444` answers 200, and the
+tunnel is dark with nothing logging an error. Leave the variable unset and
+AItelier stays on loopback.
 
 Other than that, a clean checkout starts with no pre-existing Docker resources.
 Every capability that needs something outside this repo — the LLM key, web

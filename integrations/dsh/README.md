@@ -68,12 +68,14 @@ Verify the install by asking the agent to call `mcp__aitelier__list_pipelines`; 
 | `stop_pipeline` | write | Cancel a run that is going nowhere. |
 | `get_run_status` | read | A single non-blocking look. |
 | `get_run_summary` | read | What the run did: per-step status, the FIRST failure with its error, final outputs. Inside a loop each entry names the **item** it ran for. |
-| `get_step_output` | read | The files ONE step produced, in full. |
+| `get_step_output` | read | The files ONE step produced. Each is capped at 20000 chars; a file that was cut says so in the text and in a `truncated` map, and `file=<name>` reads one file at a 200000-char cap. |
 | `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
 | `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
 
-Every run-taking tool names its argument `run_id` and accepts either a run id or a project id (the newest run of that project is used, and the reply names which one). Before 2026-08-26 four of them called it `run` and only some accepted a project id — a call written against the old shape fails validation with the key it wanted, so it is a retry, not a wrong answer.
 | `skillflow_docs_list` / `skillflow_docs_search` / `skillflow_docs_read` | read | Skillflow's own spec for the graph YAML `edit_pipeline` accepts. Read it before inventing a field. |
+
+Every run-taking tool names its argument `run_id` and accepts either a run id or a project id (the newest run of that project is used, and the reply names which one). Before 2026-08-26 four of them called it `run` and only some accepted a project id — a call written against the old shape fails validation with the key it wanted, so it is a retry, not a wrong answer.
+
 
 ### Editing needs something to edit
 

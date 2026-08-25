@@ -265,7 +265,14 @@
   // together and an approval provably carries nothing.
   function checkpointKeyOf(cp: Record<string, unknown> | null): string {
     if (!cp) return '';
-    return [cp.checkpoint, cp.step, cp.rejection_count].join('\u0000');
+    // checkpoint and step are the SAME value (meta_routers sets both to the
+    // step id), so the discriminating fields are rejection_count and
+    // checkpoint_instance. The instance is what covers a goal loop re-entering
+    // the same step without a rejection — 5_review -> 3 pauses step 3's
+    // checkpoint again with rejection_count unchanged, and without the instance
+    // the key would be identical and a half-written rejection would carry over.
+    return [cp.checkpoint, cp.step, cp.rejection_count,
+            cp.checkpoint_instance].join('\u0000');
   }
 
   function startCheckpointReject(): void {

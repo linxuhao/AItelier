@@ -190,8 +190,28 @@ task_implementer:
   max_tool_turns: 24
   native_tool_calling: true
   fallback_to_json_mode: true
+  # effort "low", 2026-08-25. With no effort set the server defaults to ~high,
+  # and this role is the single biggest line on the bill: 47.8% of all tokens
+  # across the trace history, 79.7% of its own output being reasoning (5.44M
+  # reasoning tokens). DeepSeek exposes only low/high/max — `medium` and
+  # `xhigh` are silently MAPPED to high (api-docs.deepseek.com/guides/
+  # thinking_mode), so there is no middle setting to hedge with.
+  #
+  # Measured by replaying this step's real prompt (row 1431,
+  # `scenario_contract_wiring`) against a git worktree pinned to the commit
+  # BEFORE the task landed, writes captured in a sandbox: 3 runs at low and 1
+  # at high all delivered the SAME three files as the real commit
+  # (create playtest/event_travel_effects.yaml, edit playtest/_common.yaml,
+  # extend tests/test_playtest_contract_smoke.py), same turn counts, no
+  # truncation — while low spent 712-1,885 reasoning tokens against high's
+  # 5,647. Small n, and the Godot probe was stubbed in the replay, so this is
+  # a bet, not a proof: compare the next live runs' traces before trusting it.
+  # 4c7d8aa pinned this to low once before and e71036b removed it, but that
+  # revert's stated reasoning is entirely about max_output_tokens — the effort
+  # pin was never independently disproven.
   thinking:
     enable: true
+    effort: "low"
 
 task_implementer_reviewer:
   model: "ark/deepseek-v4-flash"

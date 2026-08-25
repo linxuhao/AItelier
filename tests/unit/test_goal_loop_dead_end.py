@@ -126,25 +126,25 @@ def checkpoint_info(monkeypatch):
 
 def test_routing_dead_end_offers_no_checkpoint(checkpoint_info):
     """No phantom checkpoint → nothing to approve → no resurrection."""
-    assert checkpoint_info("failed", LIVE_REASON) == ("", "", "", "")
+    assert checkpoint_info("failed", LIVE_REASON) == ("", "", "", "", 0)
 
 
 def test_unmatched_transition_is_a_dead_end_too(checkpoint_info):
     """The other routing terminal skillflow writes (advance_run's dead end)."""
     assert checkpoint_info(
-        "failed", "No matching transition from '5_review' with flags {}") == ("", "", "", "")
+        "failed", "No matching transition from '5_review' with flags {}") == ("", "", "", "", 0)
 
 
 def test_other_failures_keep_the_rescue_checkpoint(checkpoint_info):
     """A3 is preserved: a crash IS worth re-running, so it still offers step 3."""
-    step_id, _label, run_id, _graph = checkpoint_info(
+    step_id, _label, run_id, _graph, _inst = checkpoint_info(
         "failed", "Step '5_review' timed out after 300s")
     assert (step_id, run_id) == ("3", "run1")
 
 
 def test_paused_checkpoint_is_unaffected(checkpoint_info):
     """The normal path — a paused run has no error_reason at all."""
-    step_id, _label, run_id, _graph = checkpoint_info("paused")
+    step_id, _label, run_id, _graph, _inst = checkpoint_info("paused")
     assert (step_id, run_id) == ("3", "run1")
 
 

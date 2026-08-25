@@ -477,6 +477,10 @@ class CheckpointResponse(BaseModel):
     checkpoint: Optional[str] = None
     label: Optional[str] = None
     step: Optional[str] = None
+    # Identifies THIS pause, not just the step that paused — see
+    # _get_checkpoint_info. A client with an in-progress rejection uses it to
+    # notice the checkpoint was replaced by a new instance of the same step.
+    checkpoint_instance: int = 0
     project_id: Optional[str] = None
     timeout_at: Optional[float] = None
     rejection_count: int = 0
@@ -631,10 +635,11 @@ def _failed_on_routing(run: dict | None) -> bool:
     return any(m in reason for m in _ROUTING_DEAD_END_MARKERS)
 
 
-def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:
+def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str, int]:
     """Get checkpoint state from skillflow (source of truth).
 
-    Returns (step_id, label, run_id, graph_name) or empty strings if not at checkpoint.
+    Returns (step_id, label, run_id, graph_name, checkpoint_instance), or
+    empty strings / 0 if not at a checkpoint.
 
     A3 fix: now also returns info for runs in 'failed' state IF the last
     completed step is a checkpoint. This allows the user to approve a
@@ -646,13 +651,21 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:
     sf = get_skillflow()
     run = sf.get_run_by_project(project_id)
     if not run or run["status"] not in ("paused", "failed"):
-        return "", "", "", ""
+        return "", "", "", "", 0
     if _failed_on_routing(run):
-        return "", "", "", ""
+        return "", "", "", "", 0
 
     run_id = run["id"]
     graph_name = run["graph_name"]
     step_id = run.get("current_node", "")
+    # The checkpoint STEP-INSTANCE row id. A goal loop can re-present the SAME
+    # step id with the SAME rejection_count (5_review -> 3 sends the run back to
+    # step 3, which pauses at its checkpoint again without anyone having
+    # rejected), and a client holding a half-written rejection has no other way
+    # to tell the new pause from the old one. skillflow appends a new step row
+    # per instance, so this id changes and (step_id, rejection_count, instance)
+    # does not collide.
+    instance = 0
 
     label = "Checkpoint"
     if step_id:
@@ -676,15 +689,15 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str]:
             targets = [t.to for t in node.transitions
                        if t.match and t.match.get("from") == "checkpoint"]
             if matched is None:
-                matched = (s["step_id"], node.checkpoint_label)  # heuristic fallback
+                matched = (s["step_id"], node.checkpoint_label, s.get("id") or 0)
             if next_node in targets:
-                matched = (s["step_id"], node.checkpoint_label)
+                matched = (s["step_id"], node.checkpoint_label, s.get("id") or 0)
                 break
         if matched:
-            step_id, _lbl = matched
+            step_id, _lbl, instance = matched
             label = _lbl or label
 
-    return step_id, label, run_id, graph_name
+    return step_id, label, run_id, graph_name, instance
 
 
 @router.get("/{project_id}/checkpoint", response_model=CheckpointResponse)
@@ -700,7 +713,7 @@ def get_pending_checkpoint(
         raise HTTPException(404, "Project not found")
     check_read_owner(user, request, project)
 
-    step_id, label, _run_id, _graph = _get_checkpoint_info(project_id)
+    step_id, label, _run_id, _graph, _instance = _get_checkpoint_info(project_id)
     if not step_id:
         return CheckpointResponse()
 
@@ -710,6 +723,7 @@ def get_pending_checkpoint(
         checkpoint=step_id,
         label=label,
         step=step_id,
+        checkpoint_instance=_instance,
         project_id=project_id,
         step_output=step_output,
         # The real count, not a hardcoded 0. A user who rejects has no other way
@@ -758,7 +772,7 @@ def approve_checkpoint(
             f"before launching. Re-send as a rejection, or drop `feedback` if "
             f"you really do mean 'approve as-is'."))
 
-    _step_id, _label, run_id, _graph = _get_checkpoint_info(project_id)
+    _step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
     if not run_id:
         raise HTTPException(400, "Project is not waiting for approval")
 
@@ -858,7 +872,7 @@ def reject_checkpoint(
         raise HTTPException(404, "Project not found")
     check_write_owner(user, project)
 
-    step_id, _label, run_id, _graph = _get_checkpoint_info(project_id)
+    step_id, _label, run_id, _graph, _inst = _get_checkpoint_info(project_id)
     if not run_id or not step_id:
         raise HTTPException(400, "Project is not waiting for approval")
 

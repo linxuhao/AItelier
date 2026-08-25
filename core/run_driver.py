@@ -273,14 +273,37 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
     if first_failure is None and status == "failed":
         err = (run.get("error_reason") or run.get("error") or "")[:300]
         if err:
-            first_failure = {
-                "step": run.get("current_node") or "?",
-                "error": err,
-                "from": "run_error",
-                "note": ("no step row is marked failed — the run stopped at this "
-                         "node without a step failing (a claim-time rejection, or "
-                         "an external stop), so the reason is the run-level error."),
-            }
+            # `current_node` is the last node CLAIMED, not where the run stopped,
+            # so it is only an honest attribution when that step did not finish.
+            # Measured on two live runs (75209504, 3cf2042e): both reported
+            # first_failure.step = a step whose own status is `completed`, with a
+            # note asserting "the run stopped at this node" — naming a step that
+            # succeeded, which is worse than naming none. An operator `fail_run`
+            # or a terminal-node stop leaves exactly that shape.
+            node = run.get("current_node") or ""
+            node_status = next((s["status"] for s in per_step
+                                if s["step"] == node), None) if node else None
+            if node and node_status in (None, "pending", "running", "claimed"):
+                first_failure = {
+                    "step": node,
+                    "error": err,
+                    "from": "run_error",
+                    "note": ("no step row is marked failed — the run stopped at "
+                             "this node without a step failing (a claim-time "
+                             "rejection), so the reason is the run-level error."),
+                }
+            else:
+                first_failure = {
+                    "step": None,
+                    "error": err,
+                    "from": "run_error",
+                    "note": ("no step row is marked failed and the run's last "
+                             "claimed node ('%s', status %s) finished — so no step "
+                             "is the culprit. The run was stopped from outside, or "
+                             "ended at a terminal node. `step` is null on purpose: "
+                             "naming a step that succeeded would be worse than "
+                             "naming none." % (node or "?", node_status or "?")),
+                }
 
     # A run that is still RUNNING has not "failed to terminate" — it has not
     # finished yet, and those are different claims. The old wording said

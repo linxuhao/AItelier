@@ -40,6 +40,8 @@
 
   let project = $state<Record<string, unknown> | null>(null);
   let checkpointFeedback = $state('');
+  // The feedback box is rejection-only — see startCheckpointReject.
+  let checkpointRejectMode = $state(false);
   let runs = $state<Record<string, unknown>[]>([]);
   let tasks = $state<Record<string, unknown>[]>([]);
   let runDetail = $state<Record<string, unknown> | null>(null);
@@ -229,7 +231,7 @@
     if (!pid || !cp || actionLoading['cpApprove']) return;
     actionLoading = { ...actionLoading, cpApprove: true };
     try {
-      await approveCheckpoint(pid, checkpointFeedback || undefined);
+      await approveCheckpoint(pid);
       checkpoint = null;
     } catch (err: unknown) {
       error = err instanceof Error ? err.message : 'Failed to approve checkpoint';
@@ -237,6 +239,27 @@
       actionLoading = { ...actionLoading, cpApprove: false };
       await refreshData();
     }
+  }
+
+  // First click opens the feedback box, second click sends the rejection —
+  // the same two-stage shape CheckpointModal already uses. The box used to be
+  // permanently visible directly above Approve, which read as "notes for either
+  // button"; but skillflow's approve_checkpoint(run_id) has no feedback
+  // parameter, so anything typed there and approved was dropped in silence.
+  // Approve is hidden while the box is open, so the two can never be on screen
+  // together and an approval provably carries nothing.
+  function startCheckpointReject(): void {
+    checkpointRejectMode = true;
+    error = null;
+    requestAnimationFrame(() => {
+      document.getElementById('cp-feedback')?.focus();
+    });
+  }
+
+  function cancelCheckpointReject(): void {
+    checkpointRejectMode = false;
+    checkpointFeedback = '';
+    error = null;
   }
 
   async function handleCheckpointReject(): Promise<void> {
@@ -252,6 +275,8 @@
     try {
       await rejectCheckpoint(pid, feedback);
       checkpoint = null;
+      checkpointRejectMode = false;
+      checkpointFeedback = '';
     } catch (err: unknown) {
       error = err instanceof Error ? err.message : 'Failed to reject checkpoint';
     } finally {
@@ -494,32 +519,51 @@
               {t('project.viewCheckpointFiles')}
             </button>
           {/if}
-          <label for="cp-feedback">
-            {t('project.feedbackLabel')}
-            <textarea
-              id="cp-feedback"
-              bind:value={checkpointFeedback}
-              rows="3"
-              placeholder={t('project.feedbackPlaceholder')}
-            ></textarea>
-          </label>
+          {#if checkpointRejectMode}
+            <label for="cp-feedback">
+              {t('project.feedbackLabel')}
+              <textarea
+                id="cp-feedback"
+                bind:value={checkpointFeedback}
+                rows="3"
+                placeholder={t('project.feedbackPlaceholder')}
+              ></textarea>
+            </label>
+          {/if}
         </div>
         {#if canWrite}
           <footer class="action-bar">
-            <button
-              class="primary"
-              onclick={handleCheckpointApprove}
-              disabled={actionLoading['cpApprove']}
-            >
-              {actionLoading['cpApprove'] ? t('project.approving') : t('project.approve')}
-            </button>
-            <button
-              class="contrast"
-              onclick={handleCheckpointReject}
-              disabled={actionLoading['cpReject']}
-            >
-              {actionLoading['cpReject'] ? t('project.rejecting') : t('project.reject')}
-            </button>
+            {#if checkpointRejectMode}
+              <button
+                class="outline"
+                onclick={cancelCheckpointReject}
+                disabled={actionLoading['cpReject']}
+              >
+                {t('project.cancel')}
+              </button>
+              <button
+                class="contrast"
+                onclick={handleCheckpointReject}
+                disabled={actionLoading['cpReject']}
+              >
+                {actionLoading['cpReject'] ? t('project.rejecting') : t('project.reject')}
+              </button>
+            {:else}
+              <button
+                class="primary"
+                onclick={handleCheckpointApprove}
+                disabled={actionLoading['cpApprove']}
+              >
+                {actionLoading['cpApprove'] ? t('project.approving') : t('project.approve')}
+              </button>
+              <button
+                class="contrast"
+                onclick={startCheckpointReject}
+                disabled={actionLoading['cpReject']}
+              >
+                {t('project.reject')}
+              </button>
+            {/if}
           </footer>
         {/if}
       </article>

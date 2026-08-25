@@ -272,7 +272,7 @@
     submitting = true;
     errorMsg = '';
     try {
-      const data = await approveCheckpoint(projectId, feedback || undefined) as any;
+      const data = await approveCheckpoint(projectId) as any;
       if (data && data.status === 'already_advanced') {
         stopStalePolling();
         hideCheckpoint();

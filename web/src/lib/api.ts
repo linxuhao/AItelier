@@ -495,15 +495,14 @@ export function pipelineStateFile(
 //  Checkpoints
 // ═════════════════════════════════════════════════════════════════════
 
-export function approveCheckpoint(projectId: string, feedback?: string): Promise<void> {
-  const body: Record<string, unknown> = { checkpoint: '', project_id: projectId };
-  if (feedback) {
-    body.feedback = feedback;
-  }
-  return _post(
-    '/api/meta/' + encodeURIComponent(projectId) + '/checkpoint/approve',
-    body,
-  );
+/** Approve a checkpoint. Takes NO feedback: skillflow's approve_checkpoint(run_id)
+ *  has no feedback parameter, so the server refuses an approval that carries one
+ *  (api/meta_routers.py) rather than dropping it. Rejection is the channel. */
+export function approveCheckpoint(projectId: string): Promise<void> {
+  return _post('/api/meta/' + encodeURIComponent(projectId) + '/checkpoint/approve', {
+    checkpoint: '',
+    project_id: projectId,
+  });
 }
 
 export function rejectCheckpoint(projectId: string, feedback: string): Promise<void> {

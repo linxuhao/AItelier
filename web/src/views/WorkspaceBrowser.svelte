@@ -3,7 +3,7 @@
   // or "code" (the generated project repository). Ported from the vanilla
   // workspace <details> sections; lazy-loads on first expand and opens file
   // contents in a dialog.
-  import { workspaceTree, workspaceFile } from '../lib/api';
+  import { workspaceTree, workspaceFile, workspaceRawUrl } from '../lib/api';
   import { renderMarkdown } from '../lib/markdown';
   import { t } from '../lib/i18n.svelte';
 
@@ -32,6 +32,7 @@
   let fileTotal = $state(0);
   let isMarkdown = $state(false);
   let isBinary = $state(false);
+  let imageUrl = $state<string | null>(null);
 
   async function loadTree(): Promise<void> {
     if (loaded || loading || !projectId) return;
@@ -52,13 +53,24 @@
     if ((e.target as HTMLDetailsElement).open) loadTree();
   }
 
+  // Extensions the backend's /workspace/raw endpoint serves as images. Kept in
+  // step with _WORKSPACE_IMAGE_TYPES in api/project_routers.py.
+  const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|avif|svg)$/i;
+
   async function openFile(path: string): Promise<void> {
     filePath = path;
     fileContent = '';
     fileTruncated = false;
     isMarkdown = false;
     isBinary = false;
+    imageUrl = null;
     dialogOpen = true;
+    if (IMAGE_EXT.test(path)) {
+      // Reading an image through /workspace/file yields mojibake — point an
+      // <img> at the raw bytes instead and let the browser fetch it.
+      imageUrl = workspaceRawUrl(projectId, path, root);
+      return;
+    }
     try {
       const data = await workspaceFile(projectId, path, root);
       const raw = (data.content as string) ?? null;
@@ -178,7 +190,11 @@
         <code>{filePath}</code>
         <button class="ws-close" onclick={() => (dialogOpen = false)} aria-label={t('wsbrowser.close')}>&times;</button>
       </header>
-      {#if isBinary}
+      {#if imageUrl}
+        <div class="ws-file-content ws-image-content">
+          <img src={imageUrl} alt={filePath} />
+        </div>
+      {:else if isBinary}
         <p class="ws-muted">{t('wsbrowser.binary')}</p>
       {:else if isMarkdown}
         <div class="ws-file-content ws-md-content">{@html renderMarkdown(fileContent)}</div>
@@ -292,6 +308,16 @@
     font-size: 0.78rem;
     white-space: pre-wrap;
     word-break: break-word;
+  }
+  .ws-image-content {
+    display: flex;
+    justify-content: center;
+    background: var(--pico-muted-border-color, #f0f0f0);
+  }
+  .ws-image-content img {
+    max-width: 100%;
+    max-height: 60vh;
+    object-fit: contain;
   }
   .ws-md-content {
     line-height: 1.6;

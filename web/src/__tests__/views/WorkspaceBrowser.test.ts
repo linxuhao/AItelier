@@ -8,6 +8,8 @@ import { render, waitFor, fireEvent } from '@testing-library/svelte';
 const mockApi = vi.hoisted(() => ({
   workspaceTree: vi.fn(),
   workspaceFile: vi.fn(),
+  workspaceRawUrl: vi.fn((pid: string, path: string, root: string) =>
+    `/api/projects/${pid}/workspace/raw?path=${path}&root=${root}`),
 }));
 vi.mock('../../lib/api', () => mockApi);
 
@@ -53,5 +55,30 @@ describe('WorkspaceBrowser folder tree', () => {
       expect(container.querySelector('.ws-file-dialog')).not.toBeNull();
     });
     expect(mockApi.workspaceFile).toHaveBeenCalledWith('p1', 'README.md', 'code');
+  });
+});
+
+describe('WorkspaceBrowser image preview', () => {
+  it('renders an <img> for an image file instead of reading it as text', async () => {
+    mockApi.workspaceTree.mockResolvedValue({ tree: ['assets/logo.png'] });
+    mockApi.workspaceFile.mockClear();  // shared vi.fn across tests in this file
+
+    const { container, getByText } = render(
+      await import('../../views/WorkspaceBrowser.svelte'),
+      { props: { projectId: 'p1', root: 'code', title: 'Repo', startOpen: true } });
+
+    await waitFor(() => expect(getByText('assets')).toBeTruthy());
+    await fireEvent.click(getByText('assets'));
+    await fireEvent.click(getByText('logo.png'));
+
+    const img = await waitFor(() => {
+      const el = container.querySelector('.ws-file-dialog img') as HTMLImageElement | null;
+      expect(el).not.toBeNull();
+      return el as HTMLImageElement;
+    });
+    expect(img.getAttribute('src')).toBe(
+      '/api/projects/p1/workspace/raw?path=assets/logo.png&root=code');
+    // The text reader would only produce mojibake here — it must not be used.
+    expect(mockApi.workspaceFile).not.toHaveBeenCalled();
   });
 });

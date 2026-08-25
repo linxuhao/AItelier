@@ -3,7 +3,7 @@
 
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 # ── helpers ────────────────────────────────────────────────────────
 
@@ -34,6 +34,48 @@ router = APIRouter(prefix="/api/projects", tags=["Projects"])
 # Default line window for workspace_file when no range is given — replaces the
 # old silent 50000-char truncation with line paging + a `truncated` signal.
 _WORKSPACE_FILE_MAX_LINES = 2000
+
+# Extensions the raw-bytes endpoint serves inline, so the file browser can show
+# a picture instead of mojibake. An allowlist, not a general blob server: an
+# arbitrary same-origin file served inline is an XSS surface, and even an image
+# type can be a document (SVG carries script), which is why the response also
+# ships a no-script CSP.
+_WORKSPACE_IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+    ".avif": "image/avif",
+    ".svg": "image/svg+xml",
+}
+
+
+def _resolve_workspace_target(project_id: str, path: str, root: str,
+                              user, db: DBManager, ws: WorkspaceManager) -> Path:
+    """Owner-checked, traversal-safe resolution of a workspace-relative path.
+
+    ``root`` selects "dps" (pipeline staging) or "code" (project code repo).
+    """
+    project = db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    check_read_owner(user, None, project)
+
+    base = ws.get_code_path(project_id) if root == "code" else ws._get_secure_path(project_id)
+    base_resolved = base.resolve()
+    target = (base_resolved / path).resolve()
+    # Proper path-component containment. str.startswith would allow a sibling
+    # dir whose name shares the prefix, e.g. ".../proj" vs ".../proj-evil".
+    if not target.is_relative_to(base_resolved):
+        raise HTTPException(status_code=403, detail="Path traversal denied")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    return target
 
 
 @router.get("", response_model=list[ProjectWithStats])
@@ -210,22 +252,7 @@ def workspace_file(
     inclusive) to read a range; the response reports ``total_lines`` and a
     ``truncated`` flag so callers can page rather than be silently cut off.
     """
-    project = db.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    check_read_owner(user, None, project)
-
-    base = ws.get_code_path(project_id) if root == "code" else ws._get_secure_path(project_id)
-    base_resolved = base.resolve()
-    target = (base_resolved / path).resolve()
-    # Proper path-component containment. str.startswith would allow a sibling
-    # dir whose name shares the prefix, e.g. ".../proj" vs ".../proj-evil".
-    if not target.is_relative_to(base_resolved):
-        raise HTTPException(status_code=403, detail="Path traversal denied")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-    if not target.is_file():
-        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
+    target = _resolve_workspace_target(project_id, path, root, user, db, ws)
 
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     total = len(lines)
@@ -243,6 +270,41 @@ def workspace_file(
         "total_lines": total,
         "truncated": end_idx < total,
     }
+
+
+@router.get("/{project_id}/workspace/raw")
+def workspace_raw(
+    project_id: str,
+    path: str,
+    root: str = "dps",
+    user: CurrentUser | None = Depends(get_optional_user),
+    db: DBManager = Depends(get_db_manager),
+    ws: WorkspaceManager = Depends(get_workspace_manager),
+):
+    """Serve an image file from the workspace as raw bytes, for the file browser.
+
+    ``workspace_file`` decodes as UTF-8 with ``errors="replace"``, so an image
+    read through it is mojibake, never a picture. Only the allowlisted image
+    types in ``_WORKSPACE_IMAGE_TYPES`` are served here; anything else is a 415
+    so this stays a picture endpoint and not a same-origin blob server.
+    """
+    media_type = _WORKSPACE_IMAGE_TYPES.get(Path(path).suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=415, detail=f"Not a displayable image: {path}")
+
+    target = _resolve_workspace_target(project_id, path, root, user, db, ws)
+    return FileResponse(
+        target,
+        media_type=media_type,
+        headers={
+            # The bytes are LLM/agent-produced. Pin the type we chose from the
+            # extension and forbid the file from running anything of its own —
+            # an SVG opened directly would otherwise be same-origin script.
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+            "Content-Disposition": "inline",
+        },
+    )
 
 
 @router.get("/{project_id}/repo/status")

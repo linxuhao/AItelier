@@ -197,3 +197,49 @@ class TestWorkspaceFilePaging:
         assert data["start_line"] == 10 and data["end_line"] == 12
         assert data["content"] == "line10\nline11\nline12"
         assert data["truncated"] is True
+
+
+class TestWorkspaceRawImage:
+    """workspace/raw serves image bytes — workspace/file only ever yields text."""
+
+    # Smallest valid PNG (1x1, transparent).
+    _PNG = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+        "890000000a49444154789c6360000002000100055c5b0e0000000049454e44ae426082"
+    )
+
+    def _make(self, client, tmp_path, pid, name, blob: bytes):
+        client.post("/api/projects", json={"project_id": pid, "name": pid})
+        fp = tmp_path / "ws" / pid / name
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_bytes(blob)
+        return fp
+
+    def test_png_served_with_image_content_type(self, client: TestClient, tmp_path):
+        self._make(client, tmp_path, "raw_png", "shot.png", self._PNG)
+        resp = client.get("/api/projects/raw_png/workspace/raw",
+                          params={"path": "shot.png"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/png"
+        assert resp.content == self._PNG
+        # Agent-produced bytes: pinned type, and nothing of their own may run.
+        assert resp.headers["x-content-type-options"] == "nosniff"
+        assert "default-src 'none'" in resp.headers["content-security-policy"]
+
+    def test_non_image_rejected_415(self, client: TestClient, tmp_path):
+        self._make(client, tmp_path, "raw_txt", "a.txt", b"hello")
+        resp = client.get("/api/projects/raw_txt/workspace/raw",
+                          params={"path": "a.txt"})
+        assert resp.status_code == 415
+
+    def test_path_traversal_denied(self, client: TestClient, tmp_path):
+        self._make(client, tmp_path, "raw_trav", "shot.png", self._PNG)
+        resp = client.get("/api/projects/raw_trav/workspace/raw",
+                          params={"path": "../raw_trav_evil/x.png"})
+        assert resp.status_code in (403, 404)
+
+    def test_missing_image_404(self, client: TestClient, tmp_path):
+        self._make(client, tmp_path, "raw_missing", "shot.png", self._PNG)
+        resp = client.get("/api/projects/raw_missing/workspace/raw",
+                          params={"path": "nope.png"})
+        assert resp.status_code == 404

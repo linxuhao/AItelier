@@ -297,6 +297,16 @@ export function workspaceFile(
     '&root=' + encodeURIComponent(root));
 }
 
+// Direct URL for the raw bytes of an image in the workspace — fed to <img src>,
+// so it is a URL and not a fetch (the browser does the request itself).
+export function workspaceRawUrl(
+  projectId: string, path: string, root: 'dps' | 'code' = 'dps',
+): string {
+  return '/api/projects/' + encodeURIComponent(projectId) +
+    '/workspace/raw?path=' + encodeURIComponent(path) +
+    '&root=' + encodeURIComponent(root);
+}
+
 // ═════════════════════════════════════════════════════════════════════
 //  Repository (project code repo git panel)
 // ═════════════════════════════════════════════════════════════════════

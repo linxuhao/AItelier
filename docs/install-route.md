@@ -121,10 +121,17 @@ which any amount of reading would have surfaced. What is still open:
   box: Docker was installed and working, Python 3.12 was present, and the whole
   run used an overridden `HOME` rather than a fresh account. A machine without
   Docker, or on macOS, or behind a proxy, is still untested.
-- **Nothing past a healthy container was exercised.** The cold install answered
-  `/health` and registered 13 pipelines; it never ran a step, because that needs
-  a real key. The path from "it starts" to "it produced something" is verified
-  only on the author's own host.
+- **Nothing past a healthy container was exercised ON THE COLD MACHINE.** That
+  install answered `/health` and registered 13 pipelines but never ran a step,
+  because a step needs a real key. On the author's host the DSH end is now
+  verified for real: `dsh --profile headless` on a hand-declared Ark route
+  (`provider: ark`, `deepseek-v4-flash`) called `mcp__aitelier__list_pipelines`
+  and answered correctly, then diagnosed a genuinely failed run — following the
+  skill's outside-in path (`list_runs` → `get_run_summary` → `trace_list`),
+  quoting the tool's own error out of the trace, and calling
+  `Node 'input_failed' reached` **"a symptom, not the cause"**, which is the one
+  trap the skill exists to teach. What remains unrun is a pipeline EXECUTION
+  driven from DSH end to end.
 - **Nothing verifies the docs against a run.** The tests pin the README against
   the *configs* (which key, which default model), not against a completed
   install. A doc can be self-consistent and still describe a path nobody can

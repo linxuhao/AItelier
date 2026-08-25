@@ -96,6 +96,36 @@ DEPS: tuple[Dep, ...] = (
 BY_KEY = {d.key: d for d in DEPS}
 
 
+def required_llm_keys() -> list[str]:
+    """The provider key(s) the SHIPPED agent_configs actually need.
+
+    Derived, never hard-coded. A constant here would be a vendor name in a
+    provider-agnostic system, and it would go stale the moment the configs move
+    — which is exactly how the CLI came to tell a new user to create
+    DEEPSEEK_API_KEY on the same install where the README (correctly) said
+    ARK_API_KEY. Empty when nothing can be determined; callers must cope.
+    """
+    import json
+    import re
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    try:
+        providers = json.loads(
+            (root / "llm_providers.json").read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return []
+    used: set[str] = set()
+    try:
+        for f in sorted((root / "agent_configs").glob("*.yaml")):
+            for m in re.finditer(r'^\s+model:\s*"?([a-z0-9_]+)/',
+                                 f.read_text(encoding="utf-8"), re.M):
+                used.add(m.group(1))
+    except OSError:
+        return []
+    return sorted({providers[p]["api_key_env"] for p in used
+                   if p in providers and providers[p].get("api_key_env")})
+
+
 def _provider_dep(key: str) -> Dep | None:
     """A Dep for an LLM key that `llm_providers.json` declares.
 

@@ -41,8 +41,12 @@ _COMPOSE_EDGE_FILE = _PROJECT_ROOT / "docker-compose.edge.yml"
 # this". A clean checkout hit that four times in a row before anything ran.
 # Only the LLM key carries meaning; the rest are opt-in integrations whose
 # readers already treat empty as "not configured".
-_LLM_SECRET = "DEEPSEEK_API_KEY"
-_OPTIONAL_SECRETS = ("ARK_API_KEY", "GITHUB_TOKEN", "LOCAL_QWEN_API_KEY")
+# Which key actually matters is DERIVED from the shipped agent_configs (see
+# core.external_deps.required_llm_keys) — naming one here would pin a vendor
+# into a provider-agnostic system, and it went stale exactly that way once: the
+# CLI told a new user to create DEEPSEEK_API_KEY on the same install where the
+# README correctly said ARK_API_KEY.
+_OPTIONAL_SECRETS = ("GITHUB_TOKEN",)
 
 _COMPOSE_SERVICE = "aitelier"
 _IMAGE_NAME = "aitelier:latest"
@@ -129,10 +133,31 @@ def _compose_files() -> list[str]:
     return files
 
 
-def _ensure_secret_files() -> None:
-    """Create the secret files compose mounts, so a missing one is not a crash.
+def _mounted_secrets() -> tuple[str, ...]:
+    """The secret names docker-compose.yml mounts. Read from the file, so a
+    secret added there cannot be silently left unprovisioned here."""
+    try:
+        import yaml
+        data = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8")) or {}
+        return tuple(data.get("secrets") or ())
+    except Exception:
+        return ("DEEPSEEK_API_KEY", "ARK_API_KEY", "GITHUB_TOKEN",
+                "LOCAL_QWEN_API_KEY")
 
-    Creates the DIRECTORY and an EMPTY file for each optional secret; every
+
+def _ensure_host_dirs() -> None:
+    """Create what compose BIND-MOUNTS, before Docker does it for us.
+
+    Docker creates a missing bind-mount source itself — as **root**. The
+    container runs as the host uid, so an auto-created `~/.AItelier` is
+    `root:root` and the very first thing the app does dies with
+    `sqlite3.OperationalError: unable to open database file`, then crash-loops.
+    Nothing in that message mentions permissions, bind mounts, or the directory.
+    It hits every install where `~/.AItelier` does not already exist — i.e. every
+    NEW one, which is why it never showed up on a machine that has had it for
+    months. Found by actually starting a cold container on a second host.
+
+    Also creates the DIRECTORY and an EMPTY file for each optional secret; every
     reader of these treats empty as "not configured" (the git credential helper
     says so explicitly). The LLM key is not invented: an empty one would turn a
     setup mistake into an authentication error on the first model call, so it is
@@ -142,6 +167,12 @@ def _ensure_secret_files() -> None:
     their secrets some other way — Docker will report that in its own terms.
     """
     try:
+        # The state root, owned by US. Must exist before compose runs.
+        (Path(os.environ.get("AITELIER_STATE_DIR")
+              or (Path.home() / ".AItelier"))).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass          # let Docker report it in its own terms
+    try:
         d = Path(os.environ.get("AITELIER_SECRETS_DIR")
                  or (Path.home() / ".aitelier-secrets"))
         d.mkdir(parents=True, exist_ok=True)
@@ -149,7 +180,11 @@ def _ensure_secret_files() -> None:
             d.chmod(0o700)
         except OSError:
             pass
-        for name in _OPTIONAL_SECRETS:
+        from core.external_deps import required_llm_keys
+        needed = set(required_llm_keys())
+        # Create EVERY secret compose mounts, needed or not: Docker refuses a
+        # missing secret source, so an unused one still has to exist.
+        for name in sorted(set(_mounted_secrets()) | needed):
             f = d / name
             if not f.exists():
                 f.write_text("", encoding="utf-8")
@@ -157,16 +192,13 @@ def _ensure_secret_files() -> None:
                     f.chmod(0o600)
                 except OSError:
                     pass
-        key = d / _LLM_SECRET
-        if not key.exists():
-            key.write_text("", encoding="utf-8")
-            try:
-                key.chmod(0o600)
-            except OSError:
-                pass
-            print(f"No LLM key yet. AItelier will start, but every model call "
-                  f"will fail until you write one:\n"
-                  f"  printf '%s' \"sk-your-key\" > {key} && chmod 600 {key}")
+        blank = sorted(k for k in needed if not (d / k).read_text().strip())
+        if blank:
+            print("No LLM key yet. AItelier will start, but every model call "
+                  "will fail until you write one:")
+            for k in blank:
+                print(f"  printf '%s' \"<your-key>\" > {d / k} "
+                      f"&& chmod 600 {d / k}")
     except OSError:
         pass          # let Docker report it in its own terms
 
@@ -204,7 +236,7 @@ def _image_exists() -> bool:
 
 def _compose_up():
     """Start (building on first run) the backend container."""
-    _ensure_secret_files()
+    _ensure_host_dirs()
     if not _image_exists():
         print("Building AItelier image (first run — this may take a few minutes)...")
     # Inherit stdout/stderr so build + startup progress is visible.

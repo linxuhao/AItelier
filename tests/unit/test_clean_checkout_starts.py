@@ -77,7 +77,7 @@ def test_every_mounted_secret_is_provisioned(tmp_path, monkeypatch, capsys):
     bind mount. Read the names from the compose file so a NEW secret cannot be
     added there and silently left unprovisioned."""
     monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
-    srv._ensure_secret_files()
+    srv._ensure_host_dirs()
     declared = set(_compose("docker-compose.yml").get("secrets") or {})
     created = {p.name for p in (tmp_path / "s").iterdir()}
     assert declared <= created, f"never created: {sorted(declared - created)}"
@@ -87,7 +87,7 @@ def test_an_optional_secret_is_created_empty(tmp_path, monkeypatch):
     """Empty is the correct content for "I do not use this" — the git credential
     helper documents exactly that reading."""
     monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
-    srv._ensure_secret_files()
+    srv._ensure_host_dirs()
     assert (tmp_path / "s" / "GITHUB_TOKEN").read_text() == ""
 
 
@@ -95,19 +95,42 @@ def test_a_missing_llm_key_is_reported_with_the_fix(tmp_path, monkeypatch, capsy
     """It is still created (so the container starts) but the user is told once,
     with the command — an empty key would otherwise surface as an auth error on
     the first model call, far from the cause."""
+    from core.external_deps import required_llm_keys
     monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
-    srv._ensure_secret_files()
+    srv._ensure_host_dirs()
     out = capsys.readouterr().out
-    assert "DEEPSEEK_API_KEY" in out and "printf" in out
+    assert "printf" in out
+    for key in required_llm_keys():
+        assert key in out
+
+
+def test_the_key_it_names_is_the_one_the_configs_need(tmp_path, monkeypatch,
+                                                      capsys):
+    """Caught on a cold install: the CLI said "write DEEPSEEK_API_KEY" on the
+    same machine where the README (correctly) said ARK_API_KEY, because this
+    hard-coded a vendor into a provider-agnostic system. Derive it, or it goes
+    stale the moment the agent_configs move."""
+    from core.external_deps import required_llm_keys
+    monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
+    srv._ensure_host_dirs()
+    out = capsys.readouterr().out
+    needed = set(required_llm_keys())
+    assert needed, "could not derive what the shipped configs need"
+    told = {line.rsplit("/", 1)[-1].split()[0]
+            for line in out.splitlines() if "printf" in line}
+    assert told == needed, f"CLI says {sorted(told)}, configs need {sorted(needed)}"
 
 
 def test_an_existing_key_is_never_overwritten(tmp_path, monkeypatch, capsys):
+    from core.external_deps import required_llm_keys
     d = tmp_path / "s"
     d.mkdir()
-    (d / "DEEPSEEK_API_KEY").write_text("sk-real")
+    for key in required_llm_keys():
+        (d / key).write_text("sk-real")
     monkeypatch.setenv("AITELIER_SECRETS_DIR", str(d))
-    srv._ensure_secret_files()
-    assert (d / "DEEPSEEK_API_KEY").read_text() == "sk-real"
+    srv._ensure_host_dirs()
+    for key in required_llm_keys():
+        assert (d / key).read_text() == "sk-real"
     assert "printf" not in capsys.readouterr().out
 
 
@@ -116,4 +139,37 @@ def test_an_unwritable_home_does_not_stop_the_start(tmp_path, monkeypatch):
     blocked = tmp_path / "file-not-a-dir"
     blocked.write_text("x")
     monkeypatch.setenv("AITELIER_SECRETS_DIR", str(blocked / "s"))
-    srv._ensure_secret_files()          # must not raise
+    srv._ensure_host_dirs()          # must not raise
+
+
+def test_the_state_root_is_created_by_us_not_by_docker(tmp_path, monkeypatch):
+    """Docker creates a missing bind-mount source as ROOT. The container runs as
+    the host uid, so an auto-created `~/.AItelier` is unwritable and the app dies
+    on `sqlite3.OperationalError: unable to open database file` and crash-loops —
+    a message that names neither permissions nor the directory.
+
+    Reproduced on a second machine with a virgin HOME; invisible on any host that
+    has had `~/.AItelier` for months, which is every developer's."""
+    state = tmp_path / "state" / ".AItelier"
+    monkeypatch.setenv("AITELIER_STATE_DIR", str(state))
+    monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
+    assert not state.exists()
+    srv._ensure_host_dirs()
+    assert state.is_dir(), "compose would bind-mount a path Docker creates as root"
+
+
+def test_everything_compose_bind_mounts_is_provisioned(tmp_path, monkeypatch):
+    """Read the mount targets from compose itself: a new bind mount added there
+    must not be left for Docker to create as root."""
+    import re
+    compose = _compose("docker-compose.yml")
+    vols = compose["services"]["aitelier"].get("volumes") or []
+    homed = [v for v in vols if isinstance(v, str) and v.startswith("${HOME}")]
+    assert homed, "expected at least one ${HOME}-rooted bind mount"
+    # Every one of them must be a path the CLI creates. Today that is .AItelier.
+    for v in homed:
+        src = v.split(":")[0]
+        name = re.sub(r"^\$\{HOME\}/", "", src)
+        assert name == ".AItelier", (
+            f"{src} is bind-mounted but nothing creates it — Docker will, as "
+            f"root, and the container (host uid) will not be able to write it.")

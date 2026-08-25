@@ -189,7 +189,17 @@ def _parse_every_script(dst: Path, timeout: int) -> tuple[str, int]:
 
     Errors are pushed, never raised, and quit() is the last statement on the
     only path — an `extends SceneTree` entry point that can miss quit() spins
-    the tree until the wall (recorded lesson, design/90_decisions.md)."""
+    the tree until the wall (recorded lesson, design/90_decisions.md).
+
+    LIMITATION, measured 2026-08-25, stated because a gate must not imply more
+    than it checked: this pass is not exhaustive when SEVERAL scripts are
+    broken. With one error in an attached script and another in a preload-only
+    script, only the attached one was reported — the first failure can mask a
+    later one. With the error in the preload-only script ALONE it is reported
+    exactly (file + line), which is the case the import pass could never see.
+    So: fix what it reports, then RUN IT AGAIN. "0 errors" means "nothing left
+    that this pass can reach", and after a clean run that is the whole tree —
+    68 of 68 explicitly re-parsed on jinyong-assets."""
     probe = dst / "__parse_all.gd"
     try:
         probe.write_text(_PARSE_ALL_GD, encoding="utf-8")

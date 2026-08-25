@@ -213,3 +213,40 @@ def test_a_docker_failure_never_blocks_the_start(monkeypatch):
         raise OSError("docker gone")
     monkeypatch.setattr(srv.subprocess, "run", boom)
     assert srv._image_deps_are_stale() is False
+
+
+# ── One entry point must not bypass what the others enforce ────────────────
+
+def test_aitelier_server_starts_the_container_not_a_host_process(monkeypatch):
+    """`ensure_server_running` refuses a host process on purpose: a pipeline's
+    git commits would carry the host developer's identity instead of the
+    image's. `aitelier server` ran uvicorn directly and bypassed that — one
+    entry point enforcing an invariant while another ignores it is the
+    invariant not existing.
+
+    Found by an agent installing from scratch: `aitelier server` bound :4444 on
+    the host, and its `docker compose up` then died with "address already in
+    use"."""
+    import cli.app as app
+    called = {}
+    monkeypatch.setattr("cli.server.ensure_server_running",
+                        lambda *a, **k: called.setdefault("docker", True))
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn",
+                        type("M", (), {"run": lambda *a, **k: called.setdefault("host", True)}))
+    app.server(host="0.0.0.0", port=4444, no_docker=False)
+    assert called == {"docker": True}, "server must start the container"
+
+
+def test_no_docker_is_available_but_says_what_it_costs(monkeypatch, capsys):
+    """The escape hatch stays — debugging outside a container is legitimate —
+    but silently changing commit authorship is not."""
+    import cli.app as app
+    ran = {}
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn",
+                        type("M", (), {"run": lambda *a, **k: ran.setdefault("host", True)}))
+    monkeypatch.setattr("cli.server.ensure_server_running",
+                        lambda *a, **k: ran.setdefault("docker", True))
+    app.server(host="127.0.0.1", port=4444, no_docker=True)
+    assert ran == {"host": True}
+    out = capsys.readouterr().out
+    assert "git identity" in out or "git commits" in out

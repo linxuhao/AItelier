@@ -2841,10 +2841,37 @@ def rollback(
 
 @app.command()
 def server(
-    host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
-    port: int = typer.Option(_DEFAULT_PORT, "--port", "-p", help="Bind port"),
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind host (--no-docker only)"),
+    port: int = typer.Option(_DEFAULT_PORT, "--port", "-p", help="Bind port (--no-docker only)"),
+    no_docker: bool = typer.Option(
+        False, "--no-docker",
+        help="Run uvicorn in THIS process instead of the container. See the warning."),
 ):
-    """Start the backend server."""
+    """Start the backend (the Docker container, like every other entry point).
+
+    This used to run uvicorn on the host unconditionally, which quietly broke the
+    rule the rest of the CLI enforces: `ensure_server_running` refuses to start a
+    host process because a pipeline's git commits would then carry the host
+    developer's `~/.gitconfig` identity instead of the image's. One entry point
+    enforcing an invariant while another bypasses it is the invariant not
+    existing. (Found by an agent installing from scratch: `aitelier server` bound
+    :4444 on the host, and the subsequent `docker compose up` died with
+    "address already in use".)
+
+    `--no-docker` keeps the old behaviour for the cases that genuinely need it —
+    debugging the app outside a container, or a deployment that supplies its own
+    git identity — and says what it costs.
+    """
+    if not no_docker:
+        from cli.server import ensure_server_running
+        ensure_server_running(_DEFAULT_URL)
+        console.print(f"[green]Backend running[/green] at {_DEFAULT_URL} "
+                      f"(container). Logs: docker compose logs -f")
+        return
+    console.print(
+        "[yellow]--no-docker:[/yellow] running uvicorn in this process. Pipeline "
+        "git commits will be authored with THIS shell's git identity, not the "
+        "image's. Set user.name/user.email deliberately if that matters.")
     import uvicorn
     uvicorn.run("api.main:app", host=host, port=port, reload=False)
 

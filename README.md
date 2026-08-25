@@ -96,7 +96,7 @@ To use a different provider, add it to `llm_providers.json` and point the agent 
 ```bash
 aitelier                          # Interactive CLI dashboard
 aitelier "build me a todo app"    # One-shot pipeline
-aitelier server                   # Backend server
+aitelier server                   # Backend container (start/reuse); --no-docker to run in-process
 ```
 
 ### Run with Docker (+ Cloudflare)

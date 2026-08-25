@@ -5,7 +5,7 @@
 # parameters live here.
 
 research_designer:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/deepseek-v4-pro"
   temperature: 0.2
   template: "forge_survey.md"
   tools: ["read_file", "list_tree", "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read"]
@@ -15,7 +15,7 @@ research_designer:
   thinking: { enable: true, effort: "max" }
 
 graph_architect:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/glm-5.3"
   temperature: 0.2
   template: "forge_architect.md"
   tools: ["read_file", "list_tree", "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read"]
@@ -25,7 +25,7 @@ graph_architect:
   thinking: { enable: true, effort: "max" }
 
 tool_planner:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.2
   template: "forge_tool_plan.md"
   tools: ["read_file"]
@@ -35,7 +35,7 @@ tool_planner:
   thinking: { enable: true }
 
 tool_implementer:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/glm-5.3"
   temperature: 0.2
   template: "forge_tool_impl.md"
   tools: ["read_file"]
@@ -45,7 +45,7 @@ tool_implementer:
   thinking: { enable: true }
 
 graph_emitter:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/glm-5.3"
   temperature: 0.2
   template: "forge_emit.md"
   tools: ["read_file", "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read"]
@@ -60,7 +60,7 @@ graph_emitter:
 # reasoning inside max_output_tokens, so an unbounded default-effort chain of
 # thought at 4096 silently ate the verdict tool call. effort "low" + 8192 headroom.
 reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1
   template: "forge_review_red.md"
   tools: ["read_file"]
@@ -70,7 +70,7 @@ reviewer:
   thinking: { enable: true, effort: "low" }
 
 design_explainer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.3
   template: "forge_explain.md"
   tools: ["read_file"]

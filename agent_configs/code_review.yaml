@@ -7,7 +7,7 @@
 # reasoning inside max_output_tokens, so an unbounded default-effort chain of
 # thought at 4096 silently ate the verdict tool call. effort "low" + 8192 headroom.
 diff_reviewer:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/glm-5.3"
   temperature: 0.1
   template: "code_review_diff.md"
   tools: []

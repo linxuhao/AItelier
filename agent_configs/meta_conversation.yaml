@@ -9,7 +9,7 @@
 # NOT to these agents, so they don't block native mode.
 
 intent_detector:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   template: "meta_intent_detection.md"
   tools: []
   native_tool_calling: true
@@ -18,7 +18,7 @@ intent_detector:
     enable: true
 
 meta_conversation_agent:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/deepseek-v4-pro"
   template: "meta_conversation.md"
   # Output write-tools (write_gather_state, …) are auto-injected from the
   # graph's output.fixed; no extra tools needed.
@@ -33,7 +33,7 @@ meta_conversation_agent:
 # defined in core/meta_agent.py (TOOL_DEFINITIONS); this `tools` field is unused
 # by MetaAgent and kept empty to avoid confusion.
 meta_agent:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/deepseek-v4-pro"
   template: "meta_conversation.md"
   tools: []
   max_tool_turns: 20
@@ -53,6 +53,6 @@ meta_agent:
 # the summary replaces the oldest turns and is persisted so a resumed session
 # doesn't re-summarize the same rows.
 compacter:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   template: "compaction.md"
   tools: []

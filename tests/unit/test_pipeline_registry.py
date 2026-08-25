@@ -525,3 +525,60 @@ def test_output_step_prefers_a_shorthand_writer_over_a_reviewer():
         {"id": "done_gate", "step_type": "gate", "transitions": [{"to": None}]},
     ])
     assert pr.derive_output_step(g) == "write_up"
+
+
+def test_a_validation_block_written_as_a_mapping_does_not_crash_derivation():
+    """A generated graph is written by a MODEL, and one emitted `validation:` as a
+    single mapping instead of a list of them.
+
+    Iterating a dict yields its KEYS — bare strings — so `spec.get("tool")` raised
+    `'str' object has no attribute 'get'`. Live, forge run 74833837: the graph was
+    already registered by the time that raised, so the host ended up with a
+    runnable config, no files on disk, and no roles.json — every step silently on
+    the generic host prompt instead of its real one.
+
+    The mapping is read as ONE spec, not skipped: derive_repo_mode is deliberately
+    asymmetric (a wrong "none" is a hard runtime failure), so a lost repo signal is
+    the expensive direction.
+    """
+    class _Step:
+        id = "s"
+        tool_name = ""
+        agent_config = ""
+        validation = {"tool": "repo_apply", "files": ["x.py"]}   # mapping, not list
+        context = []
+
+    class _Graph:
+        steps = [_Step()]
+
+    assert pr.derive_repo_mode(_Graph()) == "code"
+
+
+def test_derivation_survives_junk_entries_without_losing_a_real_signal():
+    class _Step:
+        id = "s"
+        tool_name = ""
+        agent_config = ""
+        validation = ["garbage", None, {"tool": "repo_apply"}]
+        context = ["nonsense"]
+
+    class _Graph:
+        steps = [_Step()]
+
+    assert pr.derive_repo_mode(_Graph()) == "code"
+
+
+def test_registration_writes_nothing_when_hint_derivation_fails(sf, registry,
+                                                                monkeypatch, tmp_path):
+    """The order used to be roles → graph → register → hints. A hint failure then
+    left the graph LIVE with no files ever written — a config that runs and has
+    lost every real prompt. Deriving before mutating makes that failure clean."""
+    monkeypatch.setenv("AITELIER_GENERATED_CONFIGS_DIR", str(tmp_path))
+    monkeypatch.setattr(pr, "_gen_hints",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="boom"):
+        pr._register_text(sf, registry, "gen_probe", GEN_YAML, {})
+    assert not any(tmp_path.iterdir()), "a failed registration left files behind"
+    assert not any(g["name"] == "gen_probe" for g in sf.list_graphs()), \
+        "a failed registration left the graph live"

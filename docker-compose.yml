@@ -63,6 +63,11 @@ services:
       # it. ai_router._read_secret() reads it. Source lives outside any mounted
       # path so it isn't visible in the workspace tree.
       - DEEPSEEK_API_KEY
+      # Volcengine Ark (token plan) — the same file-secret model. Its
+      # OpenAI-compatible endpoint serves deepseek, glm, doubao, kimi and
+      # minimax behind ONE key, so llm_providers.json's `ark` entry is the
+      # only place a model needs registering.
+      - ARK_API_KEY
       # GitHub token (fine-grained PAT) for private clone + push + PR creation.
       # Same file-secret model as the LLM key: read by git-credential-helper.sh
       # (clone/push) and core/git_ops.py (PR REST call), never placed in env.
@@ -148,6 +153,9 @@ secrets:
   #   printf '%s' "$DEEPSEEK_KEY" > ~/.aitelier-secrets/DEEPSEEK_API_KEY && chmod 600 "$_"
   DEEPSEEK_API_KEY:
     file: ${HOME}/.aitelier-secrets/DEEPSEEK_API_KEY
+  #   printf '%s' "$ARK_KEY" > ~/.aitelier-secrets/ARK_API_KEY && chmod 600 "$_"
+  ARK_API_KEY:
+    file: ${HOME}/.aitelier-secrets/ARK_API_KEY
   # GitHub fine-grained PAT — scope to the repos you push to (Contents: R/W,
   # Pull requests: R/W). Create the file before `up` (may be empty to start;
   # the helper treats an empty file as "no credentials"):

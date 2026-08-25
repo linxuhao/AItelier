@@ -4,7 +4,7 @@
 # context.
 
 subagent_worker:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.2
   template: "subagent_work.md"
   # create/edit derived from output.mode: write.
@@ -20,7 +20,7 @@ subagent_worker:
 # reasoning inside max_output_tokens, so an unbounded default-effort chain of
 # thought at 4096 silently ate the verdict tool call. effort "low" + 8192 headroom.
 subagent_reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1               # cold — a reviewer, not a brainstormer
   template: "subagent_review.md"
   tools: ["list_tree"]

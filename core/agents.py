@@ -16,7 +16,7 @@ from core.ai_router import AIGateway, NativeTurn
 # It only decides what the sentinel MEANS — to pin every agent (explicit
 # per-role models included) to one model for a benchmark, see
 # core/ai_router.py:resolve_agent_model.
-HOST_AGENT_MODEL = os.getenv("AITELIER_HOST_AGENT_MODEL", "deepseek/deepseek-v4-flash")
+HOST_AGENT_MODEL = os.getenv("AITELIER_HOST_AGENT_MODEL", "ark/deepseek-v4-flash")
 
 
 class DPEAgent:

@@ -20,7 +20,7 @@
 # traces reaches ~18k chars (~6k tokens) at p99, which does not fit under 4096.
 
 researcher:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.2
   template: "step1_5_researcher.md"
   tools: ["web_search", "web_fetch", "list_tree"]
@@ -32,7 +32,7 @@ researcher:
     effort: "max"
 
 researcher_reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1
   template: "step1_5_researcher_red.md"
   tools: ["list_tree"]
@@ -44,7 +44,7 @@ researcher_reviewer:
     effort: "low"
 
 architect:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/glm-5.3"
   temperature: 0.2
   template: "step2_architect.md"
   tools: ["web_search", "web_fetch", "list_tree"]
@@ -56,7 +56,7 @@ architect:
     effort: "max"
 
 architect_reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1
   template: "step2_architect_red.md"
   tools: ["list_tree"]
@@ -68,7 +68,7 @@ architect_reviewer:
     effort: "low"
 
 pm:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/deepseek-v4-pro"
   temperature: 0.2
   template: "step3_pm.md"
   tools: ["web_search", "web_fetch", "list_tree"]
@@ -79,7 +79,7 @@ pm:
     enable: true
 
 pm_reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1
   template: "step3_pm_red.md"
   tools: ["list_tree"]
@@ -91,7 +91,7 @@ pm_reviewer:
     effort: "low"
 
 task_planner:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.2
   template: "task_plan.md"
   tools: ["web_search", "web_fetch", "list_tree"]
@@ -128,7 +128,7 @@ task_planner:
     enable: true
 
 task_planner_reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1
   template: "task_plan_red.md"
   tools: ["list_tree"]
@@ -140,7 +140,7 @@ task_planner_reviewer:
     effort: "low"
 
 task_implementer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.2
   template: "task_implementer.md"
   # No "write": create/edit are derived from the step's output.mode (write).
@@ -194,7 +194,7 @@ task_implementer:
     enable: true
 
 task_implementer_reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1
   template: "task_implementer_red.md"
   tools: ["list_tree"]
@@ -207,7 +207,7 @@ task_implementer_reviewer:
 
 
 final_verifier:
-  model: "deepseek/deepseek-v4-pro"
+  model: "ark/glm-5.3"
   temperature: 0.2
   template: "step5_verifier.md"
   # README.md is a declared content-mode output (see node "5" in dpe_default.yaml):
@@ -225,7 +225,7 @@ final_verifier:
     enable: true
 
 final_verifier_reviewer:
-  model: "deepseek/deepseek-v4-flash"
+  model: "ark/deepseek-v4-flash"
   temperature: 0.1
   template: "step5_verifier_red.md"
   tools: ["list_tree"]

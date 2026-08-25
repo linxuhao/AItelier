@@ -135,6 +135,27 @@ def declared_output_files(step) -> tuple[list[str], bool]:
     return files, True
 
 
+def _specs(value) -> list[dict]:
+    """The dict entries of a `validation:` / `context:` block, whatever its shape.
+
+    These are LISTS of mappings in a hand-written config, but a generated graph is
+    written by a model and one emitted `validation:` as a single MAPPING. Iterating
+    that yields its KEYS — bare strings — and `spec.get("tool")` then raised
+    `'str' object has no attribute 'get'`, which `register_forge_pipeline` caught
+    as "emitted pipeline failed validation" AFTER it had already registered the
+    graph. Live, run 74833837 (a forge-generated code-review pipeline): the graph
+    row landed in skillflow, no files were written, and the result was a runnable
+    config with no roles.json — every step silently on the generic host prompt.
+
+    A single mapping is read as ONE spec rather than skipped, because dropping it
+    would lose a repo signal, and this function is deliberately asymmetric: a
+    wrong "none" is a hard runtime failure, a wrong "code" costs an unused repo.
+    """
+    if isinstance(value, dict):
+        return [value]
+    return [v for v in (value or []) if isinstance(v, dict)]
+
+
 def derive_repo_mode(graph, roles: dict | None = None) -> str:
     """Does this generated graph need a code repo? ``"code"`` or ``"none"``.
 
@@ -148,11 +169,11 @@ def derive_repo_mode(graph, roles: dict | None = None) -> str:
     for step in getattr(graph, "steps", []) or []:
         if (getattr(step, "tool_name", "") or "") in _REPO_TOOLS:
             return "code"
-        for spec in getattr(step, "validation", []) or []:
-            if (spec or {}).get("tool") in _REPO_TOOLS:
+        for spec in _specs(getattr(step, "validation", None)):
+            if spec.get("tool") in _REPO_TOOLS:
                 return "code"
-        for spec in getattr(step, "context", []) or []:
-            if (spec or {}).get("from") == "repository":
+        for spec in _specs(getattr(step, "context", None)):
+            if spec.get("from") == "repository":
                 return "code"
         # An agent step reaches the repo through its role's tool list. Look the role
         # up BOTH ways: register_forge_pipeline builds `roles` with namespaced keys
@@ -416,10 +437,15 @@ def _register_text(sf, registry, config_name: str, yaml_text: str,
         raise ValueError("generated pipeline YAML is not a mapping")
     data["name"] = config_name
     graph = PipelineGraph._from_dict(data)
+    # Derive the hints BEFORE registering. `_gen_hints` reads the graph's shape and
+    # can raise on a malformed one (a generated `validation:` written as a mapping
+    # did exactly that); deriving afterwards left the graph live with the caller
+    # believing registration had failed — a config that runs, with no files and no
+    # roles behind it. Nothing here mutates until everything that can fail has run.
+    hints = _gen_hints(graph, roles, config_name)
     ensure_host_agents(sf, graph)
     sf.register_graph(graph)            # validates graph + agent_config refs
-    registry.register_one(sf, config_name,
-                          hint_overrides=_gen_hints(graph, roles, config_name))
+    registry.register_one(sf, config_name, hint_overrides=hints)
     return graph
 
 
@@ -546,15 +572,23 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
     except Exception as e:
         return {"error": f"emitted pipeline is invalid: {e}"}
 
+    # Parse and derive EVERYTHING that can fail before touching live state. The
+    # order used to be roles → graph → register → hints, and a hint derivation that
+    # raised (see `_specs`) left the graph registered with no files ever written:
+    # a config that runs, has no `.roles.json`, and therefore drops every real
+    # prompt for the generic host fallback. Deriving first makes the failure clean.
     try:
-        _register_forge_roles(sf, config_name, roles)
         graph = PipelineGraph._from_dict(yaml.safe_load(yaml_text))
-        ensure_host_agents(sf, graph)   # any role not in role_table → generic fallback
-        sf.register_graph(graph)
-        registry.register_one(sf, config_name,
-                              hint_overrides=_gen_hints(graph, roles, config_name))
+        hints = _gen_hints(graph, roles, config_name)
     except Exception as e:
         return {"error": f"emitted pipeline failed validation: {e}"}
+    try:
+        _register_forge_roles(sf, config_name, roles)
+        ensure_host_agents(sf, graph)   # any role not in role_table → generic fallback
+        sf.register_graph(graph)
+        registry.register_one(sf, config_name, hint_overrides=hints)
+    except Exception as e:
+        return {"error": f"emitted pipeline failed registration: {e}"}
 
     dest = generated_configs_dir() / f"{config_name}.yaml"
     dest.write_text(yaml_text, encoding="utf-8")

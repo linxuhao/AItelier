@@ -297,7 +297,15 @@ def graph_view(config_name: str) -> dict | None:
                 loop_of.setdefault(node_id, loop_id)
     except Exception:            # a graph with no loops, or an unloadable one
         loop_of = {}
-    decomp = describe_config(config_name)
+    # Guarded for the same reason list_pipelines guards it: an un-decomposable
+    # name is still a perfectly renderable graph, and letting the decomposition
+    # raise here would 500 the whole endpoint over the addon BADGE. The two
+    # callers disagreeing about that was the inconsistency — found, aptly, by
+    # gen_dsh_code_review reviewing this very commit.
+    try:
+        decomp = describe_config(config_name)
+    except Exception:
+        decomp = {}
     base = decomp.get("base") or config_name
     addon_steps: list[str] = []
     if base != config_name:

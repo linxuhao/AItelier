@@ -201,3 +201,22 @@ def test_cap_is_bytes_and_returns_the_tail(client):
     assert "NEWEST" in r["content"], "must return the tail (newest entries)"
     assert not r["content"].startswith("�"), "partial codepoint not trimmed"
     assert r["total_bytes"] > _STATE_FILE_CAP
+
+
+def test_graph_still_renders_when_decomposition_fails(client, monkeypatch):
+    """An un-decomposable name is still a renderable graph.
+
+    `list_pipelines` already guarded `describe_config`; `graph_view` did not, so
+    the same call 500'd one endpoint and not the other over nothing more than
+    the addon badge. Found by gen_dsh_code_review reviewing the commit that
+    introduced it — the first real finding that pipeline produced.
+    """
+    from core import addon_registry as ar
+    _register_gen("gen_decomp_boom")
+    monkeypatch.setattr(ar, "describe_config",
+                        lambda name: (_ for _ in ()).throw(RuntimeError("boom")))
+    r = client.get("/api/pipelines/gen_decomp_boom/graph")
+    assert r.status_code == 200, r.text
+    g = r.json()
+    assert [s["id"] for s in g["steps"]] == ["work", "done"]
+    assert g["base"] == "gen_decomp_boom" and g["addons"] == []

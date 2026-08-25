@@ -718,17 +718,25 @@ def _register_edit_tools(tool):
         return err or {"config": config, "role": role, "value": cfg}
 
     @tool("list_templates", "read",
-          "List a pipeline's templates. A generated pipeline stores each role's "
-          "prompt inline as that role's template — one template per agent role.")
+          "List a pipeline's templates with the real size of each. A prompt is "
+          "stored one of two ways and `source` says which per role: INLINE on the "
+          "role (`system_prompt`, how a generated pipeline does it) or in a "
+          "templates/*.md file the role names (`template: step1_5_researcher.md`, "
+          "how every built-in role does it).")
     def list_templates(config: str) -> dict:
         roles, err = _roles_or_error(config)
         if err:
             return err
-        return {"config": config,
-                "templates": [{"role": r, "chars": len((c or {}).get("system_prompt") or "")}
-                              for r, c in sorted(roles.items())]}
+        out = []
+        for r, c in sorted(roles.items()):
+            text, source = _role_prompt(c)
+            out.append({"role": r, "chars": len(text), "source": source})
+        return {"config": config, "templates": out}
 
-    @tool("get_template", "read", "Read one role's prompt template in full.")
+    @tool("get_template", "read",
+          "Read one role's prompt template in full, wherever it is kept — inline on "
+          "the role, or in the templates/*.md file the role names. `source` says "
+          "which, so a caller can tell an empty prompt from one it failed to find.")
     def get_template(config: str, role: str) -> dict:
         roles, err = _roles_or_error(config)
         if err:
@@ -737,13 +745,16 @@ def _register_edit_tools(tool):
         if resolved is None:
             return {"error": f"no role like '{role}' in '{config}'. "
                              f"Have: {', '.join(sorted(roles))}"}
-        return {"config": config, "role": resolved,
-                "template": (roles[resolved] or {}).get("system_prompt") or ""}
+        text, source = _role_prompt(roles[resolved])
+        return {"config": config, "role": resolved, "template": text,
+                "chars": len(text), "source": source}
 
     @tool("edit_template", "write",
           "Replace one role's prompt template. This is the main way to change what a "
           "generated pipeline's agent actually does. Replaces the whole prompt — read "
-          "it with get_template first.")
+          "it with get_template first. Only a GENERATED pipeline can be changed "
+          "here: a built-in role's prompt is a repo file (get_template's `source` "
+          "names it), so changing it is a repo edit, not an API call.")
     def edit_template(config: str, role: str, template: str) -> dict:
         if not (template or "").strip():
             return {"error": "template is empty — a role with no prompt falls back "
@@ -832,6 +843,43 @@ def _register_edit_tools(tool):
                 (d / fname).write_text(text, encoding="utf-8")
         _reload_tools()
         return {"tool": name, "created": not current, "path": str(d)}
+
+
+def _templates_dir():
+    return _repo_configs_dir().parent / "templates"
+
+
+def _role_prompt(cfg: dict) -> tuple[str, str]:
+    """One role's actual prompt, and where it came from.
+
+    There are two shapes and the read path only ever knew one. A GENERATED
+    pipeline keeps the prompt inline as `system_prompt`; a BUILT-IN role NAMES a
+    file — `researcher` carries `template: step1_5_researcher.md` and the prompt
+    lives in `templates/`. Reading `system_prompt` alone reported a 0-char prompt,
+    with no error, for every role of 10 of the 12 built-in configs; only
+    coding_task looked right, and only because its prompts really are inline. The
+    write path already knew built-ins were a different animal (see _write_roles);
+    the read path did not.
+
+    Returns ("", "<why>") rather than raising: one unreadable role must not take
+    down a list_templates over the other twelve.
+    """
+    cfg = cfg or {}
+    inline = cfg.get("system_prompt") or ""
+    if inline:
+        return inline, "inline (system_prompt)"
+    name = (cfg.get("template") or "").strip()
+    if not name:
+        return "", "none — this role declares neither system_prompt nor template"
+    # The name comes from repo YAML, not from the caller, but it is joined onto a
+    # path: refuse anything that is not a plain file name.
+    p = _templates_dir() / name
+    if "/" in name or "\\" in name or not p.is_file():
+        return "", f"templates/{name} (NOT FOUND)"
+    try:
+        return p.read_text(encoding="utf-8"), f"templates/{name}"
+    except OSError as e:
+        return "", f"templates/{name} (unreadable: {e})"
 
 
 def _resolve_role(config: str, role: str, roles: dict) -> str | None:

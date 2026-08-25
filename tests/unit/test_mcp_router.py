@@ -631,6 +631,37 @@ def test_a_step_that_ran_and_wrote_nothing_is_not_reported_as_not_run():
     assert "git_sync_pre" in absent, "it must list the steps this config does have"
 
 
+def test_a_built_in_roles_prompt_is_read_from_the_file_the_role_names():
+    """Built-in roles carry `template: step1_5_researcher.md` and keep the prompt
+    in templates/; only a GENERATED pipeline stores it inline as `system_prompt`.
+    Reading system_prompt alone answered {"template": ""} with no error for every
+    role of 10 of the 12 built-in configs."""
+    roles = mcp_router._load_roles("dpe_default_v2")
+    assert roles and "researcher" in roles
+    assert not (roles["researcher"] or {}).get("system_prompt"), (
+        "fixture assumption gone: this test needs a role whose prompt is a FILE")
+
+    text, source = mcp_router._role_prompt(roles["researcher"])
+    assert source == "templates/step1_5_researcher.md"
+    assert len(text) > 500, "the real prompt, not an empty string"
+
+    # Every role of the flagship config must report a real size — the measured
+    # symptom was 0 chars across the board.
+    for name, cfg in roles.items():
+        body, src = mcp_router._role_prompt(cfg)
+        assert body, f"{name} reported an empty prompt ({src})"
+
+    # An inline prompt still wins, and still says so.
+    assert mcp_router._role_prompt({"system_prompt": "hi"}) == (
+        "hi", "inline (system_prompt)")
+    # A named file that is not there is reported, not silently blank.
+    _, src = mcp_router._role_prompt({"template": "no_such_template.md"})
+    assert "NOT FOUND" in src
+    # A role with neither says so rather than looking like an empty prompt.
+    _, src = mcp_router._role_prompt({})
+    assert "neither" in src
+
+
 def test_corrupt_roles_json_reaches_the_model_as_a_message_not_a_traceback(
         tmp_path, monkeypatch):
     """_load_roles used to RETURN {"__error__": "<str>"}; no caller checked it, so

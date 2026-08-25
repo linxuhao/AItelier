@@ -318,10 +318,16 @@ class _WaitSF:
 
     def get_run(self, run_id):
         self.reads += 1
-        if run_id == "missing":
-            return None
-        return {"status": self.status, "graph_name": "gen_x",
+        if run_id in ("missing", "p1"):
+            return None          # "p1" is a PROJECT id — it resolves via list_runs
+        return {"id": run_id, "status": self.status, "graph_name": "gen_x",
                 "project_id": "p1", "current_node": "step2"}
+
+    def list_runs(self, project_id=None):
+        if project_id != "p1":
+            return []
+        return [{"id": "r1", "status": self.status, "graph_name": "gen_x",
+                 "project_id": "p1", "current_node": "step2"}]
 
 
 def _wait_tool():
@@ -1022,6 +1028,147 @@ def test_a_rejection_without_feedback_is_refused(monkeypatch):
         return deco
     mcp_router._register_run_tools(tool)
     assert "needs feedback" in captured["answer_checkpoint"]("r1", "reject")["error"]
+
+
+# ── One name, one resolver, for every tool that takes a run ─────────────────
+
+_RUN_TAKING_TOOLS = ["answer_checkpoint", "get_run_summary", "get_run_status",
+                     "wait_for_run", "stop_pipeline", "trace_list", "trace_search",
+                     "trace_read", "get_step_output"]
+
+
+@pytest.mark.asyncio
+async def test_every_run_taking_tool_publishes_the_same_parameter_name():
+    """The endpoint shipped two spellings — `run_id` on five tools, `run` on four.
+    A model that learned one had to relearn the other mid-investigation."""
+    mcp = build_mcp()
+    schemas = {t.name: (t.inputSchema or {}) for t in await mcp.list_tools()}
+    for name in _RUN_TAKING_TOOLS:
+        props = set((schemas[name].get("properties") or {}))
+        assert "run_id" in props, f"{name} publishes {sorted(props)}"
+        assert "run" not in props, f"{name} still publishes the old spelling"
+
+
+@pytest.mark.asyncio
+async def test_every_run_taking_tool_says_it_accepts_a_project_id():
+    """Worse than the two spellings was the two BEHAVIOURS behind them: the
+    `run`-named tools resolved a run id OR a project id, the `run_id`-named ones
+    only a run id (verified live: get_run_summary("jinyong-jianghu") →
+    "no run 'jinyong-jianghu'"), except stop_pipeline, which was named `run_id`
+    and resolved permissively anyway. Renaming alone would have made the strict
+    tools merely LOOK like they take a project id."""
+    mcp = build_mcp()
+    for t in await mcp.list_tools():
+        if t.name in _RUN_TAKING_TOOLS:
+            assert "project_id" in (t.description or ""), (
+                f"{t.name} does not tell the caller a project id works")
+
+
+def test_every_run_taking_tool_actually_resolves_a_project_id(monkeypatch):
+    """Not just the description: the resolver behind each one."""
+    import asyncio
+    import api.dependencies as deps
+    from core import trace_reader
+
+    sf = _WaitSF(); sf.status = "paused"
+    monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+    monkeypatch.setattr(deps, "get_workspace_manager",
+                        lambda: _NoWorkspace(), raising=False)
+    monkeypatch.setattr(trace_reader, "trace_rows",
+                        lambda *a, **k: {"run": {"id": "r1", "project_id": "p1"},
+                                         "resolved": {"resolved_by": "project_id"},
+                                         "rows": []})
+    # get_run_summary is the one measured live: it answered "no run
+    # 'jinyong-jianghu'" for a project id trace_list accepted.
+    from core import run_driver
+    monkeypatch.setattr(deps, "get_config_registry", lambda: None, raising=False)
+    monkeypatch.setattr(run_driver, "summarise_run",
+                        lambda sf_, ws_, reg_, rid: {"run_id": rid})
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            return fn
+        return deco
+    mcp_router._register_run_tools(tool)
+    mcp_router._register_wait_tool(tool)
+    mcp_router._register_trace_tools(tool)
+    mcp_router._register_lifecycle_tools(tool)
+
+    calls = {
+        "get_run_status": lambda f: f("p1"),
+        "get_run_summary": lambda f: f("p1"),
+        "wait_for_run": lambda f: asyncio.run(f("p1", timeout_seconds=0)),
+        "trace_list": lambda f: f("p1"),
+        "trace_search": lambda f: f("p1", "x"),
+        "trace_read": lambda f: f("p1", 1),
+        "get_step_output": lambda f: f("p1", "some_step"),
+    }
+    for name, call in calls.items():
+        out = call(captured[name])
+        assert "no run 'p1'" not in str(out.get("error", "")), (
+            f"{name} still refuses a project id: {out}")
+        assert out.get("run_id") == "r1" or out.get("entries") is not None, (
+            f"{name} must answer for the run it landed on: {out}")
+
+    # The two MUTATING ones resolve permissively too, but every guard they had
+    # still applies to the run they landed on, and the reply names it.
+    out = captured["answer_checkpoint"]("p1", "reject")
+    assert "needs feedback" in out["error"], out
+    sf.status = "running"
+    out = captured["answer_checkpoint"]("p1")
+    assert "not paused" in out["error"] and "r1" in out["error"]
+
+
+class _NoWorkspace:
+    def get_final_path(self, *a, **k):
+        return pathlib.Path("/nonexistent/step")
+
+
+def test_a_truncated_step_file_says_so_in_band_and_in_a_flag(tmp_path, monkeypatch):
+    """The description said "in full"; the code cut every file at 20000 chars with
+    no marker. Measured on t_impl of ac25585e: 10 files, 95518 chars, 3 of them
+    sliced mid-sentence and nothing saying so."""
+    import api.dependencies as deps
+    from types import SimpleNamespace
+
+    d = tmp_path / "step"
+    d.mkdir()
+    big = "x" * (mcp_router._STEP_FILE_CAP + 500)
+    (d / "big.md").write_text(big, encoding="utf-8")
+    (d / "small.md").write_text("short", encoding="utf-8")
+
+    sf = _WaitSF()
+    monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+    monkeypatch.setattr(deps, "get_workspace_manager",
+                        lambda: SimpleNamespace(get_final_path=lambda *a, **k: d))
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            return fn
+        return deco
+    mcp_router._register_lifecycle_tools(tool)
+    get_step_output = captured["get_step_output"]
+
+    out = get_step_output("r1", "s")
+    assert out["truncated"] == {"big.md": {
+        "total_chars": len(big),
+        "returned_chars": mcp_router._STEP_FILE_CAP}}
+    assert "TRUNCATED" in out["files"]["big.md"]
+    assert str(len(big)) in out["files"]["big.md"], "the real size, in band"
+    assert "small.md" not in out["truncated"]
+    assert out["files"]["small.md"] == "short"
+
+    # …and the documented way past the cap returns that one file whole.
+    one = get_step_output("r1", "s", file="big.md")
+    assert set(one["files"]) == {"big.md"}
+    assert one["files"]["big.md"] == big and "truncated" not in one
+
+    # A path that climbs out of the step directory is not a file of this step.
+    assert "no file" in get_step_output("r1", "s", file="../../etc/passwd")["error"]
 
 
 @pytest.mark.asyncio

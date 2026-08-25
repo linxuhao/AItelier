@@ -917,6 +917,19 @@ def _reload_tools() -> None:
 
 # ── Run ──────────────────────────────────────────────────────────────────────
 
+# Every run-taking tool says this, because every run-taking tool now DOES this.
+# The endpoint used to publish two spellings — `run_id` on five tools, `run` on
+# four — and, worse, two behaviours behind them: the `run`-named tools resolved a
+# run id OR a project id, the `run_id`-named ones only a run id (except
+# stop_pipeline, which was named `run_id` and resolved permissively anyway). A
+# caller who learned that `trace_list(run="jinyong-jianghu")` works then got
+# "no run 'jinyong-jianghu'" from get_run_summary on the same string. Renaming
+# alone would have been worse than the split: the strict tools would merely LOOK
+# like they take a project id.
+_EITHER = ("Accepts a run_id OR a project_id; a project id takes that project's "
+           "NEWEST run and the answer echoes which one it used.")
+
+
 def _register_run_tools(tool):
 
     @tool("run_pipeline", "write",
@@ -988,16 +1001,23 @@ def _register_run_tools(tool):
           "Approve or reject a run paused at a checkpoint. Rejecting sends the work "
           "back with your feedback, which is how a reviewer asks for a change rather "
           "than stopping the run. Only a run whose status is 'paused' has anything "
-          "to answer — check with wait_for_run or get_run_status first.")
+          "to answer — check with wait_for_run or get_run_status first. " + _EITHER +
+          " This one MUTATES, so when a project id has several runs the reply also "
+          "lists the siblings: a wrong target is visible in the answer rather than "
+          "only in what happens next.")
     def answer_checkpoint(run_id: str, decision: str = "approve",
                           feedback: str = "") -> dict:
         from api.dependencies import get_skillflow
+        from core.trace_reader import resolve_run_ref
         sf = get_skillflow()
-        run = sf.get_run(run_id)
+        run, resolved = resolve_run_ref(sf, run_id)
         if not run:
             return {"error": f"no run '{run_id}'"}
+        echo = {"resolved": resolved} if resolved else {}
+        run_id = run["id"]
         if run.get("status") != "paused":
-            return {"error": f"run '{run_id}' is {run.get('status')}, not paused — "
+            return {**echo,
+                    "error": f"run '{run_id}' is {run.get('status')}, not paused — "
                              f"there is no checkpoint to answer"}
         decision = (decision or "").strip().lower()
         if decision not in ("approve", "reject"):
@@ -1026,7 +1046,7 @@ def _register_run_tools(tool):
             return {"error": f"{decision} failed: {e}"}
         # Answering releases the run; whoever was driving it keeps going.
         after = sf.get_run(run_id) or {}
-        return {"run_id": run_id, "decision": decision,
+        return {**echo, "run_id": run_id, "decision": decision,
                 "status": after.get("status"), "current_node": after.get("current_node")}
 
     @tool("get_run_summary", "read",
@@ -1035,27 +1055,39 @@ def _register_run_tools(tool):
           "read after wait_for_run — `get_run_status` gives only a status and a node "
           "name, which names neither what broke nor why. Use it to decide whether to "
           "fix the pipeline (edit_template / edit_pipeline / edit_tool) and run it "
-          "again.")
+          "again. " + _EITHER)
     def get_run_summary(run_id: str) -> dict:
         from api.dependencies import (get_config_registry, get_skillflow,
                                       get_workspace_manager)
         from core.run_driver import summarise_run
-        return summarise_run(get_skillflow(), get_workspace_manager(),
-                             get_config_registry(), run_id)
+        from core.trace_reader import resolve_run_ref
+        sf = get_skillflow()
+        row, resolved = resolve_run_ref(sf, run_id)
+        if not row:
+            return {"error": f"no run '{run_id}'"}
+        out = summarise_run(sf, get_workspace_manager(), get_config_registry(),
+                            row["id"])
+        if resolved:
+            out["resolved"] = resolved
+        return out
 
     @tool("get_run_status", "read",
           "Current status of a run: running / paused-at-checkpoint / completed / "
           "failed, with the step it is on. A paused run needs answer_checkpoint "
-          "before it moves.")
+          "before it moves. " + _EITHER)
     def get_run_status(run_id: str) -> dict:
         from api.dependencies import get_skillflow
-        run = get_skillflow().get_run(run_id)
+        from core.trace_reader import resolve_run_ref
+        run, resolved = resolve_run_ref(get_skillflow(), run_id)
         if not run:
             return {"error": f"no run '{run_id}'"}
-        return {"run_id": run_id, "status": run.get("status"),
-                "config": run.get("graph_name"), "project_id": run.get("project_id"),
-                "current_node": run.get("current_node"),
-                "paused": run.get("status") == "paused"}
+        out = {"run_id": run["id"], "status": run.get("status"),
+               "config": run.get("graph_name"), "project_id": run.get("project_id"),
+               "current_node": run.get("current_node"),
+               "paused": run.get("status") == "paused"}
+        if resolved:
+            out["resolved"] = resolved
+        return out
 
 
 # Terminal + paused are both "stop waiting": a caller that watches only for the
@@ -1084,12 +1116,22 @@ def _register_wait_tool(tool):
           "timed_out=true; that is not a failure, call it again. Waiting longer than "
           "your MCP client's per-call timeout (60s by default) does NOT work — the "
           "client hangs up first. Raise toolCallTimeoutMs before raising this. "
-          "timeout_seconds=0 checks and returns without waiting.")
+          "timeout_seconds=0 checks and returns without waiting. " + _EITHER)
     async def wait_for_run(run_id: str, timeout_seconds: int = None) -> dict:
         import asyncio
         from api.dependencies import get_skillflow
+        from core.trace_reader import resolve_run_ref
 
         sf = get_skillflow()
+        # Resolve BEFORE subscribing, because the event carries the real run id and
+        # a project id would match none of them — every event would be discarded as
+        # "someone else's" and the wait would time out on a run that had settled.
+        # The status re-read below still happens after the subscribe, so the hole
+        # that ordering closes stays closed.
+        row, resolved = resolve_run_ref(sf, run_id)
+        if not row:
+            return {"error": f"no run '{run_id}'"}
+        run_id = row["id"]
         # `or` would make 0 mean "the default", i.e. a caller asking for one look
         # and no wait would block for 45 seconds. 0 is a real request — check now,
         # return now — so only an ABSENT value means default.
@@ -1125,7 +1167,8 @@ def _register_wait_tool(tool):
             if not run:
                 return {"error": f"no run '{run_id}'"}
             if run.get("status") in _SETTLED_STATUSES:
-                return _wait_result(run_id, run, timed_out=False, event=None)
+                return _wait_result(run_id, run, timed_out=False, event=None,
+                                    resolved=resolved)
             if timeout == 0:
                 timed_out = True          # asked for a look, not a wait
             else:
@@ -1143,10 +1186,11 @@ def _register_wait_tool(tool):
         # Re-read rather than trusting the event payload: the DB is what every
         # other reader will see, and an event describes one moment.
         return _wait_result(run_id, sf.get_run(run_id) or {}, timed_out,
-                            seen.get("event"))
+                            seen.get("event"), resolved)
 
 
-def _wait_result(run_id: str, run: dict, timed_out: bool, event: str | None) -> dict:
+def _wait_result(run_id: str, run: dict, timed_out: bool, event: str | None,
+                 resolved: dict | None = None) -> dict:
     status = run.get("status")
     out = {
         "run_id": run_id,
@@ -1159,6 +1203,8 @@ def _wait_result(run_id: str, run: dict, timed_out: bool, event: str | None) -> 
         "timed_out": bool(timed_out),
         "settled_on": event,
     }
+    if resolved:
+        out["resolved"] = resolved
     if status == "paused":
         # It CAN: `answer_checkpoint` is registered on this same endpoint, and
         # run_pipeline's own note already tells the caller a run pauses "for
@@ -1250,34 +1296,35 @@ def _register_trace_tools(tool):
           "Compact trace lines for a run (seq, step, category, one-line summary) — "
           "this is where a failed run's actual reason lives, which get_run_summary "
           "only points at. Use errors_only=true to go straight to what broke, then "
-          "trace_read(seq) for the full payload. `run` accepts a run_id or a "
-          "project_id.")
-    def trace_list(run: str, step: str = "", category: str = "",
+          "trace_read(seq) for the full payload. " + _EITHER)
+    def trace_list(run_id: str, step: str = "", category: str = "",
                    errors_only: bool = False, limit: int = 50,
                    order: str = "desc") -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import trace_list as _tl
-        return _tl(get_skillflow(), run, step=step, category=category,
+        return _tl(get_skillflow(), run_id, step=step, category=category,
                    errors_only=errors_only, limit=limit, order=order)
 
     @tool("trace_search", "read",
           "Substring search across a run's trace payloads — for when you know what "
           "went wrong but not which step did it (an error message, a file name, a "
-          "phrase from a prompt). Returns the same compact lines as trace_list.")
-    def trace_search(run: str, query: str, step: str = "", limit: int = 30) -> dict:
+          "phrase from a prompt). Returns the same compact lines as trace_list. "
+          + _EITHER)
+    def trace_search(run_id: str, query: str, step: str = "",
+                     limit: int = 30) -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import trace_search as _ts
-        return _ts(get_skillflow(), run, query, step=step, limit=limit)
+        return _ts(get_skillflow(), run_id, query, step=step, limit=limit)
 
     @tool("trace_read", "read",
           "Full trace payloads for an explicit seq range (max 20 rows) — the actual "
           "prompt, the actual model response, the actual tool result. Get the seq "
           "from trace_list or trace_search first; this is deliberately not a way to "
-          "dump a whole run.")
-    def trace_read(run: str, seq: int, seq_end: int = None) -> dict:
+          "dump a whole run. " + _EITHER)
+    def trace_read(run_id: str, seq: int, seq_end: int = None) -> dict:
         from api.dependencies import get_skillflow
         from core.trace_reader import trace_read as _tr
-        return _tr(get_skillflow(), run, seq, seq_end)
+        return _tr(get_skillflow(), run_id, seq, seq_end)
 
 
 # ── The rest of the drive / test / fix loop ──────────────────────────────────
@@ -1336,22 +1383,24 @@ def _register_lifecycle_tools(tool):
           "Cancel a run that is going nowhere — an unbounded loop, a wrong seed, a "
           "drive you no longer want. Marks it failed so the poller skips it. A run "
           "left spinning holds the scheduler's one-project-per-tick slot against "
-          "every other project.")
+          "every other project. " + _EITHER + " This one MUTATES, so when a project "
+          "id has several runs the reply also lists the siblings.")
     def stop_pipeline(run_id: str, reason: str = "") -> dict:
         from api.dependencies import get_skillflow
-        from core.trace_reader import resolve_run_row
+        from core.trace_reader import resolve_run_ref
         sf = get_skillflow()
-        run = resolve_run_row(sf, run_id)
+        run, resolved = resolve_run_ref(sf, run_id)
         if not run:
             return {"error": f"no run '{run_id}'"}
+        echo = {"resolved": resolved} if resolved else {}
         if run["status"] in ("completed", "failed"):
-            return {"run_id": run["id"], "status": run["status"],
+            return {**echo, "run_id": run["id"], "status": run["status"],
                     "message": f"already {run['status']}; nothing to stop"}
         try:
             sf.fail_run(run["id"], reason or "stopped via the MCP endpoint")
         except Exception as e:
-            return {"error": f"could not stop it: {e}"}
-        return {"run_id": run["id"], "status": "stopped"}
+            return {**echo, "error": f"could not stop it: {e}"}
+        return {**echo, "run_id": run["id"], "status": "stopped"}
 
     @tool("archive_pipeline", "write",
           "Retire a generated pipeline. A generate → drive → fix loop leaves failed "
@@ -1372,16 +1421,21 @@ def _register_lifecycle_tools(tool):
             return {"error": f"archive failed: {e}"}
 
     @tool("get_step_output", "read",
-          "The files ONE step produced, in full. get_run_summary returns only the "
-          "final outputs, truncated — when a middle step is the suspect, this is how "
-          "to read what it actually wrote. `run` accepts a run_id or a project_id.")
-    def get_step_output(run: str, step: str) -> dict:
+          "The files ONE step produced. get_run_summary returns only the final "
+          "outputs, truncated — when a middle step is the suspect, this is how to "
+          "read what it actually wrote. Each file is capped at 20000 chars; a file "
+          "that was cut says so IN the text and appears in the `truncated` map with "
+          "its real size, so a cut is never mistaken for the end of the file. Pass "
+          "`file=<a key from the files map>` to read that one file alone at a "
+          "200000-char cap — a whole step can be ~100 KB, so the cap stays and the "
+          "way past it is per file. " + _EITHER)
+    def get_step_output(run_id: str, step: str, file: str = "") -> dict:
         from api.dependencies import get_skillflow, get_workspace_manager
         from core.trace_reader import resolve_run_ref
         sf = get_skillflow()
-        row, resolved = resolve_run_ref(sf, run)
+        row, resolved = resolve_run_ref(sf, run_id)
         if not row:
-            return {"error": f"no run '{run}'"}
+            return {"error": f"no run '{run_id}'"}
         if bad_config_name(step):
             return {"error": f"invalid step id {step!r}"}
         # Which run a project id landed on, and what else it could have landed on.
@@ -1395,15 +1449,39 @@ def _register_lifecycle_tools(tool):
             return {**head, "error": f"could not resolve step '{step}': {e}"}
         if not d.exists():
             return {**head, "error": _no_step_output_reason(sf, row, step)}
-        files = {}
-        for item in sorted(d.rglob("*")):
-            if item.is_file() and item.name != "_snapshot.json":
-                try:
-                    files[str(item.relative_to(d))] = item.read_text(
-                        encoding="utf-8", errors="replace")[:20000]
-                except Exception:
-                    pass
-        return {**head, "files": files}
+        wanted = (file or "").strip()
+        if wanted:
+            target = (d / wanted).resolve()
+            if not str(target).startswith(str(d.resolve()) + "/") \
+                    or not target.is_file():
+                return {**head, "error": f"no file '{wanted}' in step '{step}'. "
+                                         f"Call it without `file` for the list."}
+            paths, cap = [target], _ONE_FILE_CAP
+        else:
+            paths = [i for i in sorted(d.rglob("*"))
+                     if i.is_file() and i.name != "_snapshot.json"]
+            cap = _STEP_FILE_CAP
+        files, truncated = {}, {}
+        for item in paths:
+            rel = str(item.relative_to(d))
+            try:
+                text = item.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            total = len(text)
+            if total > cap:
+                truncated[rel] = {"total_chars": total, "returned_chars": cap}
+                more = "" if wanted else (
+                    f" Read this file alone at the higher cap with "
+                    f"get_step_output(run_id, step, file='{rel}').")
+                text = text[:cap] + (
+                    f"\n\n[TRUNCATED by get_step_output: {total} chars total, "
+                    f"first {cap} returned.{more}]")
+            files[rel] = text
+        out = {**head, "files": files}
+        if truncated:
+            out["truncated"] = truncated
+        return out
 
     # The skillflow docs tools, with their REAL parameters spelled out. Wrapping
     # them as `**kwargs` published a schema with one required field called
@@ -1436,6 +1514,16 @@ def _register_lifecycle_tools(tool):
         if end_line is not None:
             kw["end_line"] = end_line
         return _native_docs("skillflow_docs_read", **kw)
+
+
+# get_step_output hands back a whole step directory, so the per-file cap is what
+# keeps one call bounded — t_impl on a finished dpe_game run is 10 files and
+# ~95 KB with the cap ALREADY applied. Raising it blindly is not the fix; the
+# defect was that the cut was invisible. Three files there were sliced
+# mid-sentence with nothing saying so, under a description promising "in full".
+_STEP_FILE_CAP = 20000
+# One named file, at ten times the cap. A step is many files; a file is one.
+_ONE_FILE_CAP = 200000
 
 
 def _no_step_output_reason(sf, row: dict, step: str) -> str:

@@ -33,6 +33,17 @@ _DEFAULT_URL = f"http://localhost:{_DEFAULT_PORT}"
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _COMPOSE_FILE = _PROJECT_ROOT / "docker-compose.yml"
+_COMPOSE_EDGE_FILE = _PROJECT_ROOT / "docker-compose.edge.yml"
+# Secret FILES the compose service mounts. Docker refuses to start a service
+# whose secret source is missing — "invalid mount config for type bind: bind
+# source path does not exist: …/.aitelier-secrets/GITHUB_TOKEN" — which named
+# a path but not that an EMPTY file is the correct content for "I do not use
+# this". A clean checkout hit that four times in a row before anything ran.
+# Only the LLM key carries meaning; the rest are opt-in integrations whose
+# readers already treat empty as "not configured".
+_LLM_SECRET = "DEEPSEEK_API_KEY"
+_OPTIONAL_SECRETS = ("ARK_API_KEY", "GITHUB_TOKEN", "LOCAL_QWEN_API_KEY")
+
 _COMPOSE_SERVICE = "aitelier"
 _IMAGE_NAME = "aitelier:latest"
 
@@ -102,10 +113,68 @@ def _compose_env() -> dict:
     return env
 
 
+def _compose_files() -> list[str]:
+    """The -f arguments for every compose call.
+
+    The cloudflared overlay is included only when AITELIER_EDGE_NETWORK names
+    the network to join. It declares an `external: true` network, and a compose
+    file that declares one REFUSES TO RUN when it is absent — so folding it in
+    unconditionally would make the CLI unusable on any machine that does not
+    already have that network. Opting in by naming it is also the only way the
+    CLI and a hand-run `docker compose` can agree on which files are in play.
+    """
+    files = ["-f", str(_COMPOSE_FILE)]
+    if os.environ.get("AITELIER_EDGE_NETWORK", "").strip() and _COMPOSE_EDGE_FILE.exists():
+        files += ["-f", str(_COMPOSE_EDGE_FILE)]
+    return files
+
+
+def _ensure_secret_files() -> None:
+    """Create the secret files compose mounts, so a missing one is not a crash.
+
+    Creates the DIRECTORY and an EMPTY file for each optional secret; every
+    reader of these treats empty as "not configured" (the git credential helper
+    says so explicitly). The LLM key is not invented: an empty one would turn a
+    setup mistake into an authentication error on the first model call, so it is
+    reported here instead, once, with the command that fixes it.
+
+    Never raises: a read-only or unusual HOME must not stop a user who mounts
+    their secrets some other way — Docker will report that in its own terms.
+    """
+    try:
+        d = Path(os.environ.get("AITELIER_SECRETS_DIR")
+                 or (Path.home() / ".aitelier-secrets"))
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            d.chmod(0o700)
+        except OSError:
+            pass
+        for name in _OPTIONAL_SECRETS:
+            f = d / name
+            if not f.exists():
+                f.write_text("", encoding="utf-8")
+                try:
+                    f.chmod(0o600)
+                except OSError:
+                    pass
+        key = d / _LLM_SECRET
+        if not key.exists():
+            key.write_text("", encoding="utf-8")
+            try:
+                key.chmod(0o600)
+            except OSError:
+                pass
+            print(f"No LLM key yet. AItelier will start, but every model call "
+                  f"will fail until you write one:\n"
+                  f"  printf '%s' \"sk-your-key\" > {key} && chmod 600 {key}")
+    except OSError:
+        pass          # let Docker report it in its own terms
+
+
 def _compose(*args: str, **kwargs) -> subprocess.CompletedProcess:
-    """Run `docker compose -f <file> <args>`."""
+    """Run `docker compose -f <file> [-f <overlay>] <args>`."""
     return subprocess.run(
-        ["docker", "compose", "-f", str(_COMPOSE_FILE), *args],
+        ["docker", "compose", *_compose_files(), *args],
         env=_compose_env(),
         **kwargs,
     )
@@ -135,6 +204,7 @@ def _image_exists() -> bool:
 
 def _compose_up():
     """Start (building on first run) the backend container."""
+    _ensure_secret_files()
     if not _image_exists():
         print("Building AItelier image (first run — this may take a few minutes)...")
     # Inherit stdout/stderr so build + startup progress is visible.

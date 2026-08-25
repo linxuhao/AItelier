@@ -88,10 +88,12 @@ services:
       # Shared state at the identical absolute path the code expects.
       - ${HOME}/.AItelier:${HOME}/.AItelier
     networks:
-      # Own network (default) + the gateway/cloudflared network so a single
-      # cloudflared connector resolves http://aitelier:4444 by service name.
+      # Own private network only. The cloudflared/gateway network lives in the
+      # OPTIONAL overlay docker-compose.edge.yml — an `external: true` network
+      # in this file made `docker compose up` refuse to start for anyone who
+      # did not already have that exact network, before a single container ran
+      # and with an error that named the network but not what it was for.
       - default
-      - edge
     ports:
       # Loopback-only: the host CLI uses localhost:4444; the public path is via
       # cloudflared over the 'edge' network (aitelier:4444). Binding to 0.0.0.0
@@ -141,10 +143,8 @@ services:
       start_period: 10s
 
   # ── Cloudflare ────────────────────────────────────────────────────────────
-  # An existing cloudflared connector (on the 'edge' network below) reaches this
-  # backend by service name. In the Cloudflare Zero Trust dashboard add a public
-  # hostname (a dedicated subdomain — NOT a path, the SPA uses absolute /web and
-  # /api paths) pointing at:  http://aitelier:4444
+  # Publishing through an existing cloudflared connector is OPTIONAL and lives
+  # in docker-compose.edge.yml. See that file for the one-line setup.
 
 secrets:
   # LLM API key, kept out of the environment. Source is outside any path
@@ -169,11 +169,7 @@ secrets:
   # (Godot needs no account or license — the game builder carries no secrets.)
 
 networks:
-  # The backend's own private network.
+  # The backend's own private network. Nothing here is external, so a clean
+  # checkout starts with no pre-existing Docker resources — see
+  # docker-compose.edge.yml to publish through a cloudflared connector.
   default:
-  # Pre-existing network shared with the cloudflared connector + api gateway,
-  # so a single connector can route to this service. Create/rename as needed:
-  #   docker network ls   → confirm the name
-  edge:
-    external: true
-    name: vip-gateway_default

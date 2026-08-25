@@ -100,6 +100,31 @@ docker compose up -d              # multi-stage build (Node.js → Svelte bundle
 docker compose logs -f
 ```
 
+Compose mounts its API keys as **secret files**, and Docker refuses to start a
+service whose secret source is missing. The CLI creates them for you; if you run
+`docker compose` by hand, create them first (empty means "I don't use this"):
+
+```bash
+mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
+cd ~/.aitelier-secrets && touch DEEPSEEK_API_KEY ARK_API_KEY GITHUB_TOKEN LOCAL_QWEN_API_KEY && chmod 600 *
+printf '%s' "sk-your-deepseek-key" > ~/.aitelier-secrets/DEEPSEEK_API_KEY
+```
+
+Publishing through an existing **cloudflared** connector is opt-in, because an
+`external: true` network makes compose refuse to start when that network is not
+already there. Name yours and the overlay applies to both `docker compose` and
+the CLI:
+
+```bash
+echo 'AITELIER_EDGE_NETWORK=vip-gateway_default' >> .env   # docker network ls → your name
+```
+
+Other than that, a clean checkout starts with no pre-existing Docker resources.
+The handful of settings that point at machines outside this repo — the media MCP
+server, the Godot readability gate's vision endpoint, a self-hosted vLLM — are
+all optional and listed under **"Things that are specific to ONE machine"** in
+[`.env.example`](.env.example).
+
 **If a run looks stuck**, read the scheduler tick log rather than the container
 log. The scheduler advances one project per tick, so a project that cannot
 advance blocks the others — and the tick log is where it says why:

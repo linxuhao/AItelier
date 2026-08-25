@@ -164,3 +164,15 @@ def test_the_readme_tells_the_reader_how_to_install_the_skill(readme):
     """Shipping a skill nobody is told to install is shipping nothing."""
     assert "aitelier-pipelines" in readme
     assert "node_modules/dsh-plugin-aitelier/skills" in readme
+
+
+def test_the_inbound_and_outbound_mcp_urls_do_not_share_a_name():
+    """`AITELIER_MCP_URL` is public API now — the published plugin teaches it as
+    "where DSH finds AItelier". AItelier's own outbound media client must not
+    read the same name, or setting it for the plugin points the media tools at
+    AItelier itself, where none of those tools exist."""
+    src = (DSH.parents[1] / "aitelier" / "mcp_client.py").read_text(encoding="utf-8")
+    import re
+    read = set(re.findall(r'os\.environ\.get\("([A-Z_]+)"', src))
+    assert "AITELIER_MCP_URL" not in read
+    assert "AITELIER_MEDIA_MCP_URL" in read

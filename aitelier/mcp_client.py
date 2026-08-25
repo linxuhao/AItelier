@@ -14,8 +14,14 @@ import re
 import urllib.error
 import urllib.request
 
-MCP_URL = os.environ.get("AITELIER_MCP_URL", "http://mcp_server:9003/mcp")
-_TIMEOUT = float(os.environ.get("AITELIER_MCP_TIMEOUT", "600"))
+# NOT `AITELIER_MCP_URL`. That name means the opposite thing on the other side
+# of the product: the published DSH plugin teaches it as "where DeepSeek Harness
+# finds AItelier's OWN MCP endpoint" (127.0.0.1:4444/mcp). One variable with two
+# opposite meanings is a trap — set it for the plugin, put it in AItelier's .env,
+# and the media tools quietly start calling AItelier itself, where none of these
+# tools exist. The outbound one is the private one, so it is the one that moved.
+MCP_URL = os.environ.get("AITELIER_MEDIA_MCP_URL", "http://mcp_server:9003/mcp")
+_TIMEOUT = float(os.environ.get("AITELIER_MEDIA_MCP_TIMEOUT", "600"))
 _HDR = {"Content-Type": "application/json",
         "Accept": "application/json, text/event-stream"}
 

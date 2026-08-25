@@ -1,0 +1,50 @@
+# docker-compose.edge.yml — OPTIONAL overlay: publish AItelier through an
+# existing cloudflared connector.
+#
+# This is separate from docker-compose.yml on purpose. The network below is
+# `external: true`, which means Docker will not create it — and a compose file
+# that declares an external network REFUSES TO START AT ALL when that network is
+# absent:
+#
+#   network vip-gateway_default declared as external, but could not be found
+#
+# That fired before any container ran, on a clean checkout, naming a network but
+# not saying what it was for or that it was optional. Keeping it out of the base
+# file is what makes `docker compose up -d` work on a machine that has never
+# heard of this deployment.
+#
+# ── Use it ──────────────────────────────────────────────────────────────────
+#
+#   docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d
+#
+# To make that the default for every plain `docker compose` AND for the CLI
+# (which starts the backend for you), set the network name in `.env`:
+#
+#   AITELIER_EDGE_NETWORK=vip-gateway_default
+#
+# `cli/server.py` adds this overlay whenever that variable is set, so the CLI and
+# a hand-run compose agree about which files are in play.
+#
+# ── Then, in Cloudflare Zero Trust ──────────────────────────────────────────
+#
+# Add a public hostname pointing at `http://aitelier:4444`. Use a dedicated
+# SUBDOMAIN, not a path — the SPA fetches absolute `/web` and `/api` URLs, so a
+# path-prefixed route serves the shell and then 404s every asset.
+#
+# Requests then arrive from the bridge, never 127.0.0.1, which is why the base
+# file sets AITELIER_ALLOW_EXTERNAL=1. Put Cloudflare Access in front of the
+# hostname and set AITELIER_CF_AUD / AITELIER_CF_TEAM_DOMAIN / AITELIER_WRITERS,
+# or the write gate stays inactive and the deployment is open to whoever reaches
+# the tunnel.
+
+services:
+  aitelier:
+    networks:
+      - default
+      - edge
+
+networks:
+  edge:
+    external: true
+    # `docker network ls` → confirm the name on your host.
+    name: ${AITELIER_EDGE_NETWORK:-vip-gateway_default}

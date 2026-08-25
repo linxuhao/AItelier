@@ -68,7 +68,6 @@ PROJECT_COMMANDS = [
     ("/add-task",    "Add a new task via meta conversation"),
     ("/resume-task", "Resume interrupted task meta conversation"),
     ("/output",      "View step output files (/output <task_id> [step_id])"),
-    ("/refresh",     "Re-run Researcher + Architect planning steps"),
     ("/retry",       "Retry a failed task"),
     ("/rollback",    "Rollback task to a git commit"),
     ("/cancel-task", "Cancel a running or pending task"),

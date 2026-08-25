@@ -490,37 +490,6 @@ def delete_project(
     return {"success": True}
 
 
-@router.post("/{project_id}/refresh-planning")
-def refresh_planning(
-    project_id: str,
-    user: CurrentUser | None = Depends(get_optional_user),
-    db: DBManager = Depends(get_db_manager)
-):
-    """
-    Manually trigger a refresh of project-level planning (P1.5 + P2).
-    Re-queues P1.5 and P2 for re-execution. Project transitions to 'planning'
-    status, runs the refresh, then returns to 'executing'.
-    """
-    project = db.get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    check_write_owner(user, project)
-
-    completed = project.get("completed_project_steps", "[]")
-    if isinstance(completed, str):
-        import json
-        completed = json.loads(completed)
-
-    # Remove P1.5 and P2 from completed so they re-run
-    for step in ("1", "2"):
-        if step in completed:
-            completed.remove(step)
-
-    db.set_completed_project_steps(project_id, completed)
-
-    return {"status": "refreshing", "project_id": project_id, "steps_to_rerun": ["1", "2"]}
-
-
 @router.post("/{project_id}/retry")
 def retry_project(
     project_id: str,

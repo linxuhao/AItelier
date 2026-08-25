@@ -210,8 +210,8 @@ completed meta_conversation run AND a live build run; passing the wrong id makes
 approve/wait no-op on the finished run. approve_checkpoint / reject_checkpoint / \
 wait_until_next_checkpoint_or_completion all accept project_id — prefer it.
 - A build paused at a checkpoint RESUMES only via approve_checkpoint / \
-reject_checkpoint. NEVER call start_config_run or refresh_planning to "restart" \
-a paused build — start_config_run spawns a whole new duplicate project.
+reject_checkpoint. NEVER call start_config_run to "restart" a paused build — \
+start_config_run spawns a whole new duplicate project.
 
 ## Critical rules
 - NEVER write code or offer code snippets. The pipeline implements; you relay.
@@ -440,20 +440,6 @@ TOOL_DEFINITIONS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "refresh_planning",
-            "description": "Re-run the Researcher and Architect planning steps.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "project_id": {"type": "string"},
-                },
-                "required": ["project_id"],
-            },
-        },
-    },
     # ── Task CRUD ──
     {
         "type": "function",
@@ -641,8 +627,8 @@ TOOL_DEFINITIONS = [
                            "Only call when the user has indicated approval. Pass "
                            "project_id (preferred — a project has one active build "
                            "run, so this is unambiguous across turns); run_id also "
-                           "works. Do NOT use start_config_run or refresh_planning "
-                           "to resume a paused build — that spawns a duplicate.",
+                           "works. Do NOT use start_config_run to resume a "
+                           "paused build — that spawns a duplicate.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2726,20 +2712,6 @@ class MetaAgent:
             return {"status": "retried", "project_id": pid, "_wake": True}
         return {"error": "Project not found or not in failed state"}
 
-    def _tool_refresh_planning(self, args: dict) -> dict:
-        import json as _json
-        pid = args["project_id"]
-        project = self.db.get_project(pid)
-        if not project:
-            return {"error": f"Project '{pid}' not found"}
-        raw = project.get("completed_project_steps", "[]")
-        completed = _json.loads(raw) if isinstance(raw, str) else raw
-        for step in ("1", "2"):
-            if step in completed:
-                completed.remove(step)
-        self.db.set_completed_project_steps(pid, completed)
-        return {"status": "refreshing", "project_id": pid, "steps_to_rerun": ["1", "2"], "_wake": True}
-
     def _tool_list_tasks(self, args: dict) -> dict:
         tasks = self.db.list_tasks_by_project(args["project_id"])
         return {"tasks": tasks}
@@ -4663,7 +4635,6 @@ _TOOL_HANDLERS = {
     "answer_project_conversation": MetaAgent._tool_answer_project_conversation,
     "approve_project_brief": MetaAgent._tool_approve_project_brief,
     "retry_project": MetaAgent._tool_retry_project,
-    "refresh_planning": MetaAgent._tool_refresh_planning,
     "list_tasks": MetaAgent._tool_list_tasks,
     "list_code_tree": MetaAgent._tool_list_code_tree,
     "read_code_file": MetaAgent._tool_read_code_file,

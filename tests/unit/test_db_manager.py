@@ -698,8 +698,8 @@ def test_projects_to_runs_migration_parity(tmp_path):
 
 
 def test_dpe_run_state_roundtrip_on_fresh_db(db_manager):
-    """brief / completed steps / tasks-since counters round-trip through
-    dpe_run_state on a fresh run."""
+    """brief / completed steps round-trip through dpe_run_state on a fresh
+    run."""
     db_manager.ensure_project("p_new", config_name="dpe_default_v2")
     db_manager.set_project_brief("p_new", "hello brief")
     db_manager.update_project("p_new", completed_project_steps='["1"]', status="executing")
@@ -709,12 +709,6 @@ def test_dpe_run_state_roundtrip_on_fresh_db(db_manager):
     assert proj["completed_project_steps"] == '["1"]'
     assert proj["status"] == "executing"
     assert proj["config_name"] == "dpe_default_v2"
-
-    db_manager.increment_tasks_since_update("p_new")
-    db_manager.increment_tasks_since_update("p_new")
-    assert db_manager.should_refresh_planning("p_new", threshold=2) is True
-    db_manager.reset_tasks_since_update("p_new")
-    assert db_manager.should_refresh_planning("p_new", threshold=2) is False
 
 
 def test_ensure_project_records_config_name(db_manager):

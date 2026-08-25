@@ -19,7 +19,6 @@ const mockApi = vi.hoisted(() => ({
   listRuns: vi.fn(),
   getRunDetail: vi.fn(),
   retryProject: vi.fn(),
-  refreshPlanning: vi.fn(),
   patchProject: vi.fn(),
   getCheckpoint: vi.fn(),
   approveCheckpoint: vi.fn(),

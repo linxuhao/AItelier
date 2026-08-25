@@ -171,12 +171,6 @@ class APIClient:
         resp.raise_for_status()
         return resp.json()
 
-    def refresh_planning(self, project_id: str) -> dict:
-        """Re-queue P1.5 (Researcher) and P2 (Architect) for re-execution."""
-        resp = self._client.post(f"/api/projects/{project_id}/refresh-planning")
-        resp.raise_for_status()
-        return resp.json()
-
     def update_project(self, project_id: str, **kwargs) -> dict:
         """Partially update a project (name, brief, priority, status)."""
         resp = self._client.patch(f"/api/projects/{project_id}", params=kwargs)

@@ -14,7 +14,6 @@ def mock_db():
     db.list_tasks_by_project.return_value = []
     db.get_project.return_value = {"project_id": "test", "brief": "Test brief"}
     db.get_project_meta_state.return_value = None
-    db.should_refresh_planning.return_value = False
     db.has_only_failed_tasks.return_value = False
     return db
 

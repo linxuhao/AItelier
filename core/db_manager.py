@@ -1573,9 +1573,6 @@ class DBManager:
             ).fetchone()
             return row[0] if row else None
 
-    def set_completed_project_steps(self, project_id: str, steps: list[str]):
-        """Deprecated: skillflow tracks this in skillflow_steps."""
-
     def increment_tasks_since_update(self, project_id: str):
         """Increment the counter of tasks completed since last arch update."""
         with self.get_connection() as conn:
@@ -1613,17 +1610,6 @@ class DBManager:
                 (project_id,)
             )
             conn.commit()
-
-    def should_refresh_planning(self, project_id: str, threshold: int = 5) -> bool:
-        """Check if run-level planning needs refresh based on task count."""
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT tasks_since_arch_update FROM dpe_run_state WHERE run_key = ?",
-                (project_id,)
-            ).fetchone()
-            if not row:
-                return False
-            return (row["tasks_since_arch_update"] or 0) >= threshold
 
     # ── Chat history persistence ─────────────────────────────────────
 

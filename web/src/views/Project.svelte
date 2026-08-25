@@ -13,7 +13,6 @@
     listRuns,
     getRunDetail,
     retryProject,
-    refreshPlanning,
     patchProject,
     getCheckpoint,
     approveCheckpoint,
@@ -183,20 +182,6 @@
       error = err instanceof Error ? err.message : 'Failed to retry project';
     } finally {
       actionLoading = { ...actionLoading, retry: false };
-      await refreshData();
-    }
-  }
-
-  async function handleRefreshPlanning(): Promise<void> {
-    const pid = params.id;
-    if (!pid || actionLoading['refresh']) return;
-    actionLoading = { ...actionLoading, refresh: true };
-    try {
-      await refreshPlanning(pid);
-    } catch (err: unknown) {
-      error = err instanceof Error ? err.message : 'Failed to refresh planning';
-    } finally {
-      actionLoading = { ...actionLoading, refresh: false };
       await refreshData();
     }
   }
@@ -469,14 +454,6 @@
             title={t('project.retryTitle')}
           >
             {actionLoading['retry'] ? t('project.retrying') : t('project.retry')}
-          </button>
-          <button
-            class="outline"
-            onclick={handleRefreshPlanning}
-            disabled={actionLoading['refresh']}
-            title={t('project.refreshPlanTitle')}
-          >
-            {actionLoading['refresh'] ? t('project.refreshing') : t('project.refreshPlanning')}
           </button>
           <button
             class="outline"

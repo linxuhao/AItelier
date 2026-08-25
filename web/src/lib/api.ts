@@ -571,14 +571,6 @@ export function retryProject(projectId: string): Promise<Record<string, unknown>
 }
 
 /**
- * Re-run Researcher + Architect planning steps.
- * POST /api/projects/{projectId}/refresh-planning
- */
-export function refreshPlanning(projectId: string): Promise<Record<string, unknown>> {
-  return _post('/api/projects/' + encodeURIComponent(projectId) + '/refresh-planning');
-}
-
-/**
  * Update project fields (name, brief, priority, status).
  * PATCH /api/projects/{projectId}
  */

@@ -38,9 +38,9 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        # 33 orchestration tools + 8 diagnosis tools (trace/registry/config readers);
+        # 32 orchestration tools + 8 diagnosis tools (trace/registry/config readers);
         # generate_pipeline and config_edit are coding-mode only.
-        assert len(TOOL_DEFINITIONS) == 41
+        assert len(TOOL_DEFINITIONS) == 40
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:
@@ -61,7 +61,7 @@ class TestToolDefinitions:
             "start_new_project", "start_from_aitelier_project",
             "start_existing_project", "start_from_git_url",
             "answer_project_conversation", "approve_project_brief",
-            "retry_project", "refresh_planning",
+            "retry_project",
             "list_tasks", "get_task", "retry_task", "get_step_output",
             "list_code_tree", "read_code_file", "search_code",
             "list_workspace_tree", "read_workspace_file",

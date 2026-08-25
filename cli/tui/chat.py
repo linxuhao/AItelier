@@ -48,7 +48,6 @@ _SLASH_COMMANDS = [
     ("/edit", "Edit project (name, brief, priority, status)", True, True),
     ("/pause", "Pause the current project", False, True),
     ("/resume", "Resume the paused project", False, True),
-    ("/refresh", "Re-run Researcher + Architect planning steps", False, True),
     ("/retry", "Retry a failed task or project", True, True),
     ("/rollback", "Rollback task to a git commit (/rollback <id> <hash>)", True, True),
     ("/cancel-task", "Cancel a running or pending task", True, True),
@@ -105,8 +104,6 @@ def _format_tool_result(name: str, result: dict) -> str:
         return f"Task #{tid} retried" if status == "retried" else f"Retry failed"
     elif name == "retry_project":
         return f"Project \"{pid}\" retried" if status == "retried" else f"Retry failed"
-    elif name == "refresh_planning":
-        return f"Planning refreshed for \"{pid}\""
     elif name == "get_step_output":
         n = len(result.get("files", {}))
         return f"Step output: {n} file(s)"
@@ -1165,9 +1162,6 @@ class ChatZone(Container):
         elif cmd == "/resume":
             self._handle_resume_cmd()
             return True
-        elif cmd == "/refresh":
-            self._handle_refresh_cmd()
-            return True
         elif cmd == "/retry":
             self._handle_retry_cmd(rest.strip())
             return True
@@ -1679,23 +1673,6 @@ class ChatZone(Container):
             self.app.query_one("#dashboard-zone")._fetch_projects()
         except Exception as e:
             self._add_error(f"Failed to resume: {e}")
-
-    @work(exclusive=True)
-    async def _handle_refresh_cmd(self):
-        """Handle /refresh — re-run planning steps."""
-        if not self.current_project:
-            self._add_error("No project selected.")
-            return
-        try:
-            resp = await self.app.http.post(
-                f"/api/projects/{self.current_project}/refresh-planning",
-                timeout=5.0,
-            )
-            resp.raise_for_status()
-            self._add_system(f"Planning refresh triggered for '{self.current_project}'.")
-            self.app.query_one("#dashboard-zone")._fetch_projects()
-        except Exception as e:
-            self._add_error(f"Failed to refresh planning: {e}")
 
     @work(exclusive=True)
     async def _handle_retry_cmd(self, arg: str):

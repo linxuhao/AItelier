@@ -1575,9 +1575,6 @@ def _task_dashboard(project_id: str):
             elif cmd == "/resume-task":
                 _handle_resume_task_cmd(_get_client())
                 continue
-            elif cmd == "/refresh":
-                _handle_refresh_cmd(_get_client())
-                continue
             elif cmd == "/retry":
                 _handle_retry_task_cmd(rest, _get_client())
                 continue
@@ -2030,28 +2027,6 @@ def _handle_resume_cmd(client):
     try:
         client.update_project(_state["project_id"], status="executing")
         console.print("[green]Project resumed.[/green]")
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-
-
-def _handle_refresh_cmd(client):
-    """Handle /refresh command. Re-runs Researcher + Architect planning steps."""
-    import httpx
-    project_id = _state["project_id"]
-    try:
-        with console.status("[bold cyan]Refreshing planning..."):
-            result = client.refresh_planning(project_id)
-        steps = result.get("steps_to_rerun", [])
-        if steps:
-            console.print(f"[green]Planning refreshed. Steps {', '.join(steps)} will re-run.[/green]")
-        else:
-            console.print("[green]Planning refreshed.[/green]")
-        console.print("[dim]  Monitor with /tasks or wait for pipeline to progress.[/dim]")
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            console.print(f"[red]Project '{project_id}' not found.[/red]")
-        else:
-            console.print(f"[red]Refresh failed: {e.response.status_code}[/red]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
 
@@ -2699,7 +2674,6 @@ def _print_repl_help():
         "  [cyan]/errors[/cyan]           View last pipeline error\n"
         "  [cyan]/tree [subdir][/cyan]     Browse workspace directory tree\n"
         "  [cyan]/cat <path>[/cyan]        Read a workspace file\n"
-        "  [cyan]/refresh[/cyan]          Re-run Researcher + Architect planning steps\n"
         "  [cyan]/retry [task_id][/cyan]   Retry a failed task\n"
         "  [cyan]/rollback <id> <hash>[/cyan] Rollback task to a git commit\n"
         "  [cyan]/cancel-task [id][/cyan]  Cancel a running or pending task\n"

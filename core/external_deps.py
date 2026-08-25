@@ -38,22 +38,15 @@ class Dep:
 
 
 DEPS: tuple[Dep, ...] = (
-    Dep("DEEPSEEK_API_KEY",
-        capability="every agent step — this is the pipeline's model",
-        resource="an LLM provider account (api.deepseek.com)",
-        how=("a Docker SECRET FILE, deliberately not an env var, so test and "
-             "build subprocesses that inherit os.environ never receive it:\n"
-             "  mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets\n"
-             "  printf '%s' \"sk-…\" > ~/.aitelier-secrets/DEEPSEEK_API_KEY\n"
-             "  chmod 600 ~/.aitelier-secrets/DEEPSEEK_API_KEY"),
-        without="every model call fails at the provider, on the first step"),
-    Dep("ARK_API_KEY",
-        capability="the Ark-hosted models (the default host agent)",
-        resource="a Volcengine Ark token plan",
-        how="same secret-file rule as DEEPSEEK_API_KEY, at "
-            "~/.aitelier-secrets/ARK_API_KEY. One key serves deepseek, glm, "
-            "doubao, kimi and minimax through one OpenAI-compatible endpoint",
-        without="models whose provider is `ark` in llm_providers.json cannot run"),
+    Dep("llm_providers.json",
+        capability="every agent step — an agent with no model cannot run",
+        resource="an account with SOME LLM provider",
+        how="AItelier is provider-agnostic: `llm_providers.json` maps a "
+            "provider name to a base_url and the NAME of the key it reads, and "
+            "an agent_config's `model` field selects one. Adding a provider is "
+            "one entry there plus a secret file of that name — no code names a "
+            "vendor. The shipped entries are examples, not requirements",
+        without="agent steps fail at whichever provider their model resolves to"),
     Dep("GITHUB_TOKEN",
         capability="cloning a private repo, pushing, and opening a PR",
         resource="a fine-grained GitHub PAT (Contents R/W, Pull requests R/W)",
@@ -68,12 +61,17 @@ DEPS: tuple[Dep, ...] = (
                 "on any URL"),
     Dep("AITELIER_MEDIA_MCP_URL",
         capability="the `gen_image_asset` / `gen_audio_asset` tools",
-        resource="an MCP media server holding the image/audio models and the GPU",
+        resource="an MCP media server. It holds the models and the GPU — and "
+                 "the CAST: the roster that keeps a character looking like "
+                 "itself and sounding like itself across runs",
         default="http://mcp_server:9003/mcp",
         how="export AITELIER_MEDIA_MCP_URL=\"http://<host>:9003/mcp\". NOT "
             "`AITELIER_MCP_URL` — that is the DSH plugin's variable for the "
             "opposite direction (where Harness finds AItelier)",
-        without="asset generation refuses; nothing else is affected"),
+        without="asset generation refuses; nothing else is affected. Note "
+                "the roster is DURABLE STATE on that server — repoint this at a "
+                "different one mid-project and every cast character is recast, "
+                "so it comes back with a new face and a new voice"),
     Dep("GODOT_BUILDER_URL",
         capability="the Godot parse gate and head-less play-test "
                    "(`godot_compile`, `godot_playtest`, `gdscript_check`)",
@@ -98,6 +96,45 @@ DEPS: tuple[Dep, ...] = (
 BY_KEY = {d.key: d for d in DEPS}
 
 
+def _provider_dep(key: str) -> Dep | None:
+    """A Dep for an LLM key that `llm_providers.json` declares.
+
+    The provider keys are not constants here on purpose — that would make this
+    module name vendors, which is the one thing the provider-agnostic design
+    avoids. A provider someone adds tomorrow gets exactly the same message as
+    the shipped ones, because both are read from the same file.
+    """
+    import json
+    from pathlib import Path
+    try:
+        path = Path(__file__).resolve().parent.parent / "llm_providers.json"
+        providers = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for name, cfg in (providers or {}).items():
+        if (cfg or {}).get("api_key_env") != key:
+            continue
+        return Dep(
+            key,
+            capability=f"models served by the `{name}` provider",
+            resource=f"an account with `{name}` ({(cfg or {}).get('base_url')})",
+            how=(f"a Docker SECRET FILE, deliberately not an env var, so test "
+                 f"and build subprocesses that inherit os.environ never receive "
+                 f"it:\n"
+                 f"  mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets\n"
+                 f"  printf '%s' \"<key>\" > ~/.aitelier-secrets/{key}\n"
+                 f"  chmod 600 ~/.aitelier-secrets/{key}\n"
+                 f"Or select a different provider: `{name}` is one entry in "
+                 f"llm_providers.json, and an agent_config's `model` picks it"),
+            without=f"any agent whose model resolves to `{name}` fails there")
+    return None
+
+
+def resolve(key: str) -> Dep | None:
+    """The registered Dep, or one synthesized from the provider registry."""
+    return BY_KEY.get(key) or _provider_dep(key)
+
+
 def _lines(dep: Dep, headline: str, detail: str) -> str:
     """One scannable block. A single run-on paragraph carrying a shell snippet
     is skimmed past; the reader needs to find the fix, not read prose."""
@@ -115,7 +152,7 @@ def _lines(dep: Dep, headline: str, detail: str) -> str:
 
 def missing(key: str, detail: str = "") -> str:
     """"You asked for X and its config is not set" — naming the config."""
-    dep = BY_KEY.get(key)
+    dep = resolve(key)
     if dep is None:                      # an unregistered key is still a fact
         return f"{key} is not configured.{(' ' + detail) if detail else ''}"
     return _lines(dep, f"{dep.capability} is unavailable: {dep.key} is not set.",
@@ -124,7 +161,7 @@ def missing(key: str, detail: str = "") -> str:
 
 def unreachable(key: str, url: str, error: object = "") -> str:
     """"X is configured but did not answer" — a different fix from `missing`."""
-    dep = BY_KEY.get(key)
+    dep = resolve(key)
     err = f" ({error})" if error else ""
     if dep is None:
         return f"{key} ({url}) could not be reached{err}."
@@ -143,4 +180,26 @@ def render_markdown() -> str:
         default = f"<br>default `{d.default}`" if d.default else ""
         out.append(f"| {d.capability} | `{d.key}`{default} | {d.resource} "
                    f"| {d.without or '—'} |")
+    return "\n".join(out)
+
+
+def render_providers() -> str:
+    """The provider registry AS IT STANDS, rendered from the file itself.
+
+    Listed separately from DEPS because these rows are examples of a pattern,
+    not a fixed set of requirements — hard-coding "DeepSeek and Ark" into the
+    dependency table said the opposite of what the design does.
+    """
+    import json
+    from pathlib import Path
+    try:
+        providers = json.loads(
+            (Path(__file__).resolve().parent.parent / "llm_providers.json")
+            .read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return "_(llm_providers.json unreadable)_"
+    out = ["| Provider | Base URL | Key it reads |", "|---|---|---|"]
+    for name, cfg in providers.items():
+        out.append(f"| `{name}` | `{(cfg or {}).get('base_url', '')}` "
+                   f"| `{(cfg or {}).get('api_key_env', '—')}` |")
     return "\n".join(out)

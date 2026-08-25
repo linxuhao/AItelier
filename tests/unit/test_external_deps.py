@@ -75,9 +75,75 @@ class TestTheDocAndTheCodeCannotDrift:
         """A doc line for a variable nothing reads is worse than no line: the
         reader sets it and nothing changes."""
         body = DOC.read_text(encoding="utf-8")
-        table = body[body.index("| Capability"):body.index("## What you actually")]
+        table = body[body.index("| Capability"):body.index("## Which LLM provider")]
         cited = set(re.findall(r"`([A-Z][A-Z0-9_]{4,})`", table))
         assert cited <= set(ed.BY_KEY), sorted(cited - set(ed.BY_KEY))
+
+
+class TestProviderAgnostic:
+    """AItelier does not depend on DeepSeek, or on Ark. It depends on SOME
+    provider, named in llm_providers.json — which is data, not code. Baking two
+    vendors into the dependency table stated the opposite of the design."""
+
+    def test_no_vendor_key_is_hard_coded_in_the_table(self):
+        hard = [d.key for d in ed.DEPS if d.key.endswith("_API_KEY")]
+        assert hard == [], (
+            f"{hard} are provider keys pinned into DEPS. They belong to "
+            f"llm_providers.json entries, which anyone may replace.")
+
+    def test_every_registered_provider_key_resolves(self):
+        import json
+        providers = json.loads(
+            (ROOT / "llm_providers.json").read_text(encoding="utf-8"))
+        for name, cfg in providers.items():
+            key = cfg["api_key_env"]
+            dep = ed.resolve(key)
+            assert dep is not None, f"{name}: {key} produces no message"
+            assert name in ed.missing(key) and key in ed.missing(key)
+
+    def test_a_provider_added_later_gets_the_same_message(self, tmp_path,
+                                                          monkeypatch):
+        """The whole point: nothing here enumerates vendors, so a provider
+        someone adds tomorrow is described exactly like the shipped ones."""
+        import json
+        reg = ROOT / "llm_providers.json"
+        original = reg.read_text(encoding="utf-8")
+        data = json.loads(original)
+        data["acme"] = {"base_url": "https://api.acme.test/v1",
+                        "api_key_env": "ACME_API_KEY"}
+        try:
+            reg.write_text(json.dumps(data), encoding="utf-8")
+            out = ed.missing("ACME_API_KEY")
+        finally:
+            reg.write_text(original, encoding="utf-8")
+        assert "ACME_API_KEY" in out and "acme" in out
+        assert "https://api.acme.test/v1" in out
+
+    def test_the_doc_explains_the_registry_rather_than_two_vendors(self):
+        body = DOC.read_text(encoding="utf-8")
+        assert "provider-agnostic" in body
+        assert "llm_providers.json" in body
+
+
+class TestTheMediaServerHoldsState:
+    """It is not just models and a GPU — it holds the CAST, and the cast is what
+    keeps a character looking and sounding like itself between runs. Swapping
+    servers mid-project silently recasts everyone."""
+
+    def test_what_the_server_holds_says_cast(self):
+        """Asserted on `resource` ALONE: an `or` across two fields lets one of
+        them carry the test, and then removing the other passes."""
+        assert "cast" in ed.BY_KEY["AITELIER_MEDIA_MCP_URL"].resource.lower()
+
+    def test_the_consequence_of_repointing_it_is_stated(self):
+        """"asset generation refuses" is the small half. The expensive half is
+        that a project already half-drawn comes back with different faces."""
+        without = ed.BY_KEY["AITELIER_MEDIA_MCP_URL"].without.lower()
+        assert "recast" in without
+
+    def test_the_doc_carries_that_warning_too(self):
+        body = DOC.read_text(encoding="utf-8")
+        assert "recast" in body
 
 
 class TestTheCallersUseIt:

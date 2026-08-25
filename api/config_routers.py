@@ -104,6 +104,18 @@ def pipeline_graph(config_name: str, registry=Depends(get_config_registry),
     and it is the composed product that actually runs. ``addon_steps`` marks the
     steps the overlay spliced in, which is what makes "show me the pipeline plus
     its addon" a single picture rather than two.
+
+    READABLE WITHOUT CREDENTIALS, deliberately — the same rule as every other GET
+    here (``/api/configs`` has returned step lists and checkpoints on the same
+    terms since long before this endpoint existed). It was raised as a finding
+    and decided: the shape of a pipeline is not a secret.
+
+    What makes that safe is the PROJECTION, not the route. This returns names and
+    structure — step ids, types, role NAMES, routing conditions — and never a
+    value: no ``tool_params``, no role config, no prompt, no key. Widening it to
+    include any of those would quietly turn a decision about publishing structure
+    into publishing content, so ``test_the_graph_projection_publishes_names_only``
+    pins the field list rather than trusting a future reader to remember.
     """
     from core import addon_registry as ar
     if not registry.get(config_name):

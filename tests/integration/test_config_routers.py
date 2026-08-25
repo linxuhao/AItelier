@@ -220,3 +220,36 @@ def test_graph_still_renders_when_decomposition_fails(client, monkeypatch):
     g = r.json()
     assert [s["id"] for s in g["steps"]] == ["work", "done"]
     assert g["base"] == "gen_decomp_boom" and g["addons"] == []
+
+
+def test_the_graph_projection_publishes_names_only(client):
+    """The graph endpoint is readable with no credentials, by decision — the
+    shape of a pipeline is not a secret, and `/api/configs` has published step
+    lists and checkpoints on the same terms all along.
+
+    That decision covers STRUCTURE. It does not cover values, and the projection
+    is the only thing keeping the two apart: adding `tool_params`, a role's
+    config, or a prompt here would publish content under a decision that was
+    made about names. Pinned as an allowlist so widening it is a deliberate act
+    with a red test, not an oversight.
+    """
+    import json
+    g = client.get("/api/pipelines/dpe_default_v2/graph")
+    assert g.status_code == 200, g.text
+    body = g.json()
+
+    assert set(body) == {"config_name", "label", "origin", "base", "addons",
+                         "addon_steps", "begin", "description", "end_conditions",
+                         "steps", "loops", "checkpoints"}
+    for step in body["steps"]:
+        assert set(step) == {"id", "type", "checkpoint", "tool_name",
+                             "agent_config", "loop_over", "loop_id", "is_loop",
+                             "from_addon", "transitions"}, step.get("id")
+
+    # agent_config is a role NAME, never the role (model / prompt / tools).
+    for step in body["steps"]:
+        assert not isinstance(step["agent_config"], dict)
+
+    raw = json.dumps(body)
+    assert "tool_params" not in raw and "system_prompt" not in raw
+    assert "api_key" not in raw and "sk-" not in raw

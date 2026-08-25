@@ -198,16 +198,43 @@ def _unpack_frames(report: dict, target_dir: Path) -> None:
         cap["file"] = f"frames/{name}"
 
 
-def post_playtest(payload: dict, timeout: int = 1200) -> dict:
-    """POST one /playtest request to the sidecar and return its report, or a
-    LOUD gate_skipped report if the sidecar cannot be reached.
+def _is_timeout(exc: BaseException) -> bool:
+    """True if `exc` is our own read deadline expiring, not the service missing.
 
-    1200s, not 420. The play-test scales with the project and this gate does not
-    degrade gracefully: on timeout the caller records gate_skipped + passed:true,
-    so as a project grows the gate does not get slower, it DISAPPEARS — and it
-    disappears as a pass. jinyong-spine, 2026-08-23: 24 scripts/11 scenarios ->
-    55/20, and the builder log shows the exception on wfile.write(body) while
-    sending the 200 — the run had FINISHED and the answer had nowhere to go.
+    urlopen surfaces a read timeout two ways depending on where it fires: bare
+    (socket.timeout, which IS TimeoutError on 3.10+) or wrapped in URLError with
+    the timeout as `.reason`. Both are the same event and must be classified the
+    same, so check the wrapper's reason too.
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    reason = getattr(exc, "reason", None)
+    return isinstance(reason, TimeoutError)
+
+
+def post_playtest(payload: dict, timeout: int = 3600) -> dict:
+    """POST one /playtest request to the sidecar and return its report.
+
+    Two failure shapes, and they are NOT the same outcome:
+
+    * The sidecar cannot be reached (connection refused, DNS, no container).
+      An environment fact, nothing to grade -> LOUD gate_skipped, passed:true.
+    * Our own read deadline expired. The play-test was RUNNING; we hung up on
+      an answer that was on its way -> gate_timeout, passed:FALSE.
+
+    The second used to be folded into the first, which made the gate vanish AS
+    A PASS the moment a project outgrew the budget. That is not hypothetical:
+    on 2026-08-25 the 38-scenario suite took 1171s against a 1200s deadline —
+    29 seconds of headroom, with new scenarios landing that same round. Raising
+    the number alone only moves the cliff; a deadline of ours must never read
+    as a verdict of the game's.
+
+    3600s, not 1200. Per-scenario work is capped sidecar-side (120s each), so
+    this bounds the SUITE, and at ~31s/scenario measured it fits ~115 scenarios.
+    jinyong-spine, 2026-08-23 (24 scripts/11 scenarios -> 55/20): the builder
+    log shows the exception on wfile.write(body) while sending the 200 — the run
+    had FINISHED and the answer had nowhere to go. That is the shape this now
+    reports as a failure instead of a pass.
     """
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -218,6 +245,17 @@ def post_playtest(payload: dict, timeout: int = 1200) -> dict:
             return json.loads(resp.read())
     except (urllib.error.URLError, OSError, json.JSONDecodeError,
             TimeoutError) as e:
+        if _is_timeout(e):
+            return {"passed": False, "frames": 0, "errors": [], "state": {},
+                    "behavior": None, "spec_used": False, "gate_timeout": True,
+                    "summary": (
+                        f"Play-test gate TIMED OUT after {timeout}s waiting on "
+                        f"{_BUILDER_URL}. The suite was still running — this is "
+                        f"our deadline expiring, not the game failing, and NOT a "
+                        f"pass: nothing in this build was verified. Either the "
+                        f"suite outgrew the budget (raise it) or a scenario "
+                        f"hangs (the sidecar caps each one at 120s, so a whole "
+                        f"suite over the wall means the count grew).")}
         return {"passed": True, "frames": 0, "errors": [], "state": {},
                 "behavior": None, "spec_used": False, "gate_skipped": True,
                 "summary": (f"godot-builder unreachable ({_BUILDER_URL}): {e}. "

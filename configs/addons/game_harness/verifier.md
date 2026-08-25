@@ -27,6 +27,7 @@
   - `error` 非空（`node not found` / `parse error` / `execute failed`）→ 说明 spec 与实现的**契约对不上**（节点名/脚本变量名/动作名不一致，或该量不是脚本变量）→ 明确指出这一不一致（既可能是实现漏了、也可能是 spec 写错，据实判断）。
 - **`spec_used: false`**：工程根没有 `playtest_spec.yaml`，回退到旧版按 `ui_accept` 的冒烟——没有行为断言，只有 `state` 快照可查；据 `state` 静态核查即可（全新项目建议提示补 `playtest_spec.yaml` 以获得客观行为门槛）。
 - **`gate_skipped: true`**（真实 Godot 项目但 godot-builder 不可达）→ 不翻转 passed，但在 `suggestions` 加醒目告警（"⚠️ 运行时冒烟门槛未运行"），回退到静态核查。
+- **`gate_timeout: true`**（闸门等超时了）→ **必须判 passed: false**，而且不要把它当成 `gate_skipped` 的同类。区别是实的：`gate_skipped` 是**服务不在**（环境事实，没东西可判）；`gate_timeout` 是**跑着呢，我们自己把电话挂了**——这一版代码一条都没被验证过，而原因在我们这边。把它读成通过，就是让闸门以「通过」的形式消失。feedback 里写明:要么场景数涨过了预算（调 `post_playtest` 的 timeout），要么有场景挂住（边车对每条场景另有 120 秒上限，所以整套越界通常意味着条数长了）。
 
 ### README 交付
 - 检查是否有 `README.md` 说明"装 Godot / F5 开玩 / 怎么换美术"。缺失或与实际严重不符可作为质量问题指出（但格式偏好不阻塞）。

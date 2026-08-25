@@ -48,7 +48,15 @@ overlay:
       - id: "5_compile"
         step_type: "tool"
         tool_name: "godot_compile"
-        timeout_seconds: 300
+        # 3900, not 300. The 300 was fiction: measured claim->complete for this
+        # step is 515-1171s (jinyong-menu/oneaction/buttons, 2026-08-24/25), so
+        # every single run blew through it and nothing was killed. A declared
+        # limit that nothing enforces reads like a guard and guards nothing —
+        # worse, it invites "the gate is slow, tighten the timeout" when the
+        # real budget lives in post_playtest (3600s) plus the sidecar's 120s
+        # per scenario. Keep this just above that so the outer number can never
+        # be the one that fires first.
+        timeout_seconds: 3900
         tool_params:
           out_dir: "$STEP_DIR"
         # No transitions: a step LIST wires sequentially, so this falls through

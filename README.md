@@ -252,10 +252,11 @@ Every generated run gets the same deterministic execution, human checkpoints, an
 
 ## Use AItelier from another agent (MCP)
 
-AItelier's backend exposes its whole pipeline surface as an **MCP endpoint** (`/mcp`, streamable HTTP) — so any MCP-speaking agent can use AItelier as a subagent: **30 tools** covering the four artefact kinds (pipeline graph, agent roles, prompt templates, custom tools) with list / get / edit on each, plus:
+AItelier's backend exposes its whole pipeline surface as an **MCP endpoint** (`/mcp`, streamable HTTP) — so any MCP-speaking agent can use AItelier as a subagent: **39 tools** covering the four artefact kinds (pipeline graph, agent roles, prompt templates, custom tools) with list / get / edit on each, plus:
 
 - **`run_pipeline` + `wait_for_run`** — start a run (returns immediately; runs are long and may pause for human approval) and block until it settles at a checkpoint, completion, *or failure* — push-based, no polling.
 - **the full generate → drive → observe → fix loop** — `generate_pipeline` writes a new pipeline, `run_pipeline` + `wait_for_run` + `answer_checkpoint` drive it, `get_run_summary` and the `trace_*` tools say what broke, and the `edit_*` tools fix it. AItelier's scheduler runs the pipeline; the external agent only decides at checkpoints and between runs.
+- **the model routing tables** — `get_available_models` says which internal model names this deployment serves and whether each endpoint behind them can actually answer; `add_provider` / `map_model` / `unmap_model` / `delete_*` edit them. Which vendors you use is deployment config, so this is how an agent configures a machine it did not set up.
 - **`export_pipeline` / `import_pipeline`** — carry a generated pipeline between machines as **one self-contained JSON bundle**: its graph, its roles *with* their prompts, and any custom tool it needs. Import validates everything before writing, renames safely, and refuses to silently overwrite a same-named tool that differs.
 
 Authorization is **per tool**, not per route: read tools are open, write tools require the same authorization as the web UI (Cloudflare Access allowlist, or `AITELIER_ADMIN_TOKEN` off-tunnel). Without credentials you get a legitimate read-only installation — write tools answer `denied: …` and change nothing.

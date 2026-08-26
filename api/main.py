@@ -34,6 +34,7 @@ from api.run_routers import router as run_router
 from api.config_routers import router as config_router
 from api.admin_routers import router as admin_router
 from api.repo_routers import router as repo_router
+from api.model_routers import router as model_router
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
 
@@ -245,6 +246,7 @@ app.include_router(run_router)
 app.include_router(config_router)
 app.include_router(admin_router)
 app.include_router(repo_router)
+app.include_router(model_router)
 
 # When running in Docker (and fronted by Cloudflare Access), requests arrive
 # from the Docker bridge gateway / the tunnel — never 127.0.0.1 — so the

@@ -242,7 +242,92 @@ def build_mcp() -> FastMCP:
     _register_wait_tool(tool)
     _register_trace_tools(tool)
     _register_lifecycle_tools(tool)
+    _register_model_tools(tool)
     return mcp
+
+
+# ── Model routing tools ──────────────────────────────────────────────────────
+# The same operations api/model_routers.py exposes over REST, because a rule
+# only one surface enforces is not a rule: both call core/model_registry, which
+# is where the refusals live.
+
+def _register_model_tools(tool):
+    from core import model_registry as reg
+
+    def _guard(fn, *args, **kwargs):
+        # Refusals come back as `error` text rather than raising: the registry's
+        # messages say what to do instead ("unmap it from those models first"),
+        # and that sentence is the part a model can act on.
+        try:
+            return fn(*args, **kwargs)
+        except reg.RegistryError as e:
+            return {"error": str(e)}
+
+    @tool("get_available_models", "read",
+          "Every INTERNAL model name this deployment serves, its ordered "
+          "endpoint candidates, and whether each one can actually serve right "
+          "now (provider registered / key present / usage window parked). "
+          "agent_configs and tools reference these names, never a "
+          "provider/model string — start here before editing a role's model.")
+    def get_available_models() -> dict:
+        return reg.list_models()
+
+    @tool("list_providers", "read",
+          "The registered endpoints: name, base URL, the NAME of the secret "
+          "each reads, and which models it currently serves.")
+    def list_providers() -> dict:
+        return reg.list_providers()
+
+    @tool("add_provider", "write",
+          "Register an endpoint. `api_key_env` is the NAME of a secret file, "
+          "not the key — keys are never set through this API. Adding a "
+          "provider does not route anything to it; follow with map_model.")
+    def add_provider(name: str, base_url: str, api_key_env: str = "") -> dict:
+        return _guard(reg.add_provider, name, base_url, api_key_env)
+
+    @tool("update_provider", "write",
+          "Change a registered endpoint's base URL or the name of the secret "
+          "it reads. Omitted fields are left alone.")
+    def update_provider(name: str, base_url: str = "",
+                        api_key_env: str | None = None) -> dict:
+        return _guard(reg.update_provider, name, base_url, api_key_env)
+
+    @tool("delete_provider", "write",
+          "Remove an endpoint. Refused while any model still names it — an "
+          "unregistered provider reaches litellm as a bare provider/model it "
+          "cannot place, and that error does NOT fail over.")
+    def delete_provider(name: str) -> dict:
+        return _guard(reg.delete_provider, name)
+
+    @tool("add_model", "write",
+          "Create an INTERNAL model name with its ordered candidates. ORDER IS "
+          "POLICY: calls bind to the first, the rest are tried only when an "
+          "endpoint fails, so put a pay-as-you-go endpoint LAST — it is what "
+          "makes a spent token plan a slowdown rather than a stop.")
+    def add_model(name: str, candidates: list[str]) -> dict:
+        return _guard(reg.add_model, name, candidates)
+
+    @tool("map_model", "write",
+          "Point an existing internal model at one more provider/model. "
+          "`position` inserts rather than appends; leave it out to append. "
+          "The provider must already be registered.")
+    def map_model(model: str, candidate: str,
+                  position: int | None = None) -> dict:
+        return _guard(reg.map_model, model, candidate, position)
+
+    @tool("unmap_model", "write",
+          "Remove one candidate from an internal model. Refused when it is the "
+          "last one — a model that resolves to nothing fails at its first call.")
+    def unmap_model(model: str, candidate: str) -> dict:
+        return _guard(reg.unmap_model, model, candidate)
+
+    @tool("delete_model", "write",
+          "Remove an internal model entirely. Refused while any agent_config "
+          "or tool still references it, because that breakage would surface at "
+          "the first LLM call with an error pointing at the route table rather "
+          "than at the config that still names it.")
+    def delete_model(name: str) -> dict:
+        return _guard(reg.delete_model, name)
 
 
 # ── Read tools ───────────────────────────────────────────────────────────────

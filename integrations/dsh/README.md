@@ -72,6 +72,11 @@ Verify the install by asking the agent to call `mcp__aitelier__list_pipelines`; 
 | `list_runs` | read | Recent runs, newest first — the entry point when you hold no id. |
 | `trace_list` / `trace_search` / `trace_read` | read | The durable trace: find where it broke, then read the actual prompt / response / tool result. |
 
+| `get_available_models` | read | The INTERNAL model names this deployment serves (`flash`, `pro`, …), their ordered endpoint candidates, and whether each can serve right now. Roles reference these names, never a `provider/model` string — start here before `edit_role`. |
+| `list_providers` | read | Registered endpoints: base URL, the NAME of the secret each reads, and which models it serves. |
+| `add_provider` / `update_provider` / `delete_provider` | write | Manage endpoints. `api_key_env` is the NAME of a secret file, never the key. Deleting one a model still uses is refused. |
+| `add_model` / `delete_model` | write | Create or remove an internal model name. **Order is policy**: calls bind to the first candidate and the rest are failover, so put a pay-as-you-go endpoint LAST. Deleting one something references is refused. |
+| `map_model` / `unmap_model` | write | Point an internal model at one more endpoint, or take one away. Removing the last candidate is refused — a model resolving to nothing fails at its first call. |
 | `skillflow_docs_list` / `skillflow_docs_search` / `skillflow_docs_read` | read | Skillflow's own spec for the graph YAML `edit_pipeline` accepts. Read it before inventing a field. |
 
 Every run-taking tool names its argument `run_id` and accepts either a run id or a project id (the newest run of that project is used, and the reply names which one). Before 2026-08-26 four of them called it `run` and only some accepted a project id — a call written against the old shape fails validation with the key it wanted, so it is a retry, not a wrong answer.

@@ -154,12 +154,19 @@ def list_repos(db: DBManager = Depends(get_db_manager)):
 
 
 @router.get("/{repo_path:path}")
-async def get_repo(repo_path: str, db: DBManager = Depends(get_db_manager)):
+def get_repo(repo_path: str, db: DBManager = Depends(get_db_manager)):
     """Get a single repository group by its filesystem path.
 
     The ``{repo_path:path}`` converter captures slashes in the URL,
     so a repo path like ``/home/user/projects/my-repo`` can be passed
     as a single route parameter.
+
+    Deliberately NOT `async`, for the reason `list_repos` above spells out —
+    it calls the same `_build_repo_groups`. That fix was applied to one of the
+    two routes and this one kept the `async`, so the incident the docstring
+    above describes stayed reachable through this URL. Measured after the
+    hostname was opened to the public: one concurrent call to this route took
+    `/health` from 1.5 ms to 576 ms, process-wide, SSE included.
     """
     groups = _build_repo_groups(db, repo_path)
     if not groups:

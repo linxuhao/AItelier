@@ -20,8 +20,28 @@ from core.workspace_manager import WorkspaceManager
 from core.scheduler import wake_scheduler
 from api.dependencies import get_db_manager, get_workspace_manager
 from api.auth import CurrentUser, get_optional_user, creator_email
+from api.authz import require_writer
 
-router = APIRouter(prefix="/api/agent", tags=["Meta Agent"])
+# WRITERS ONLY — the whole router, reads included.
+#
+# The method-based `write_gate` lets every GET through, and these GETs return
+# the butler's transcript verbatim: `message_json` is the raw OpenAI-format
+# history, so it carries tool RESULTS — `bash` stdout/stderr, `read_file`
+# output, `edit_file` diffs. The bash env scrub (core/meta_agent.py) is a
+# denylist on variable NAMES and cannot stop `cat /run/secrets/*`, and the
+# container runs as the uid that owns those secrets. So "read the chat history"
+# is not a weaker permission than "use the agent" — it is the same permission,
+# after the fact.
+#
+# Declared on the ROUTER rather than per-route on purpose: the defect being
+# fixed is that `/chat/history` and `/sessions` were added without a check
+# anybody noticed was missing. A router-level dependency covers the next route
+# somebody adds here, which a per-route decorator would not.
+router = APIRouter(
+    prefix="/api/agent",
+    tags=["Meta Agent"],
+    dependencies=[Depends(require_writer)],
+)
 
 # Seconds of complete silence from an agent turn before the stream is closed with an
 # error. Generous: a slow provider call or a long tool run must never trip it.

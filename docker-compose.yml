@@ -116,6 +116,29 @@ services:
       # would let any LAN client reach the backend directly, bypassing Cloudflare.
       - "127.0.0.1:4444:4444"
     restart: unless-stopped
+    # Both of these exist because this backend is reachable from the public
+    # internet, where the callers are strangers and the cost of a request is
+    # not something they have any reason to keep down.
+    #
+    # A memory ceiling. `repo/archive` deflates the whole working tree into an
+    # in-memory BytesIO before it streams a byte, so one anonymous GET holds
+    # ~12MB for as long as the client is slow to read it. With no limit set the
+    # host simply runs out (14GB total, ~8GB free) and the kernel's OOM killer
+    # picks the largest process — which is this one, mid-pipeline-run, and the
+    # tokens already spent on the in-flight step die with it. A limit converts
+    # that into a container restart on our own terms.
+    mem_limit: 4g
+    # A log ceiling. `json-file` with no options NEVER rotates, and every
+    # anonymous request appends an access-log line. Docker keeps those under
+    # /var/lib/docker on the ROOT filesystem — 91% full — while the roomy
+    # volume is /home. Filling / takes down Docker and the host, not just this
+    # container, which makes an unrotated log a worse outage than the traffic
+    # that caused it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4444/health"]
       interval: 15s

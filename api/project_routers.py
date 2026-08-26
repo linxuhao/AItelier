@@ -71,6 +71,18 @@ def _resolve_workspace_target(project_id: str, path: str, root: str,
     # dir whose name shares the prefix, e.g. ".../proj" vs ".../proj-evil".
     if not target.is_relative_to(base_resolved):
         raise HTTPException(status_code=403, detail="Path traversal denied")
+    # `.git` is excluded HERE, not only in the tree listing. workspace_tree and
+    # repo_archive both skip it and this reader did not, so the endpoint that
+    # repo_archive's own docstring calls "already exposes every file" in fact
+    # exposed MORE than the archive: `.git/config` carries the remote URL (and
+    # the credential, for a token-in-URL remote), and `.git/logs/HEAD` carries
+    # every committer identity that ever touched the repo — on the public
+    # deployment that published the operator's real email address in 51 reflog
+    # lines while `owner_email` in the DB projection read `cli@local`.
+    # 404, not 403: the tree makes these files invisible, so confirming they
+    # exist would be a smaller leak of the same kind.
+    if ".git" in target.relative_to(base_resolved).parts:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.is_file():

@@ -230,9 +230,20 @@ def palette(sf, config_name: str = "") -> dict:
 
 
 def _row(name: str, cap: dict) -> dict:
+    """One palette row: what it is called, what it grants, one line of purpose.
+
+    NOT the briefing. The palette is read by a planner on every run, and a
+    200-char slice of a capability's discipline is both useless out of context
+    (it is written for the step that HOLDS the capability) and a standing cost
+    on a pipeline that may declare nothing — the exact thing this mechanism
+    exists to remove. The first non-empty line is enough to choose by; the
+    discipline arrives with the grant.
+    """
+    first = next((ln.strip() for ln in (cap.get("briefing") or "").splitlines()
+                  if ln.strip() and not ln.startswith("#")), "")
     return {
         "name": name,
         "tools": list(cap.get("tools") or ()),
         "owner": cap.get("owner", "host"),
-        "briefing": (cap.get("briefing") or "")[:200],
+        "purpose": first[:120],
     }

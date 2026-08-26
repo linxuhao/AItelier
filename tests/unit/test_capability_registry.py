@@ -50,11 +50,11 @@ class _FakeSF:
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
+    """Isolate the data root. NO importlib.reload: datadir resolves
+    `$AITELIER_HOME` at call time precisely so an override needs none, and
+    reloading it here left the module object swapped for the rest of the
+    session — two unrelated tests failed only when the full suite ran."""
     monkeypatch.setenv("AITELIER_HOME", str(tmp_path))
-    import importlib
-    from core import datadir
-    importlib.reload(datadir)
-    importlib.reload(caps)
     return tmp_path
 
 
@@ -261,3 +261,42 @@ def test_the_briefing_has_no_dangling_cross_document_reference():
     brief = (ROOT / "configs" / "addons" / "game_harness"
              / "game_assets_briefing.md").read_text()
     assert "受上面的块顺序约束" not in brief
+
+
+def test_the_palette_carries_a_purpose_line_not_the_briefing(home):
+    """A planner reads this every run; the discipline belongs with the grant."""
+    sf = _FakeSF(known_tools=["a"], graphs={"p": _FakeGraph(["x"])})
+    caps.define(sf, "x", tools=["a"], owner="host",
+                briefing="# title\nmakes real art instead of placeholders\n"
+                         + "detail " * 200)
+    row = caps.palette(sf, "p")["capabilities"][0]
+    assert row["purpose"] == "makes real art instead of placeholders"
+    assert "briefing" not in row
+
+
+def test_the_installed_skillflow_accepts_the_contract_this_host_calls():
+    """Guard the cross-repo skew, not just our own logic.
+
+    Every other test here runs on a fake SkillFlow, so they pass identically
+    against a skillflow that has none of this — which is precisely the shape of
+    the recorded skew incident: the consumer shipped before the producer, the
+    dev box was green because it runs an editable checkout, and only the
+    container (which installs from PyPI) could fail. This asserts against the
+    INSTALLED package.
+    """
+    import inspect
+    from skillflow.core import SkillFlow
+    from skillflow.graph import PipelineGraph, StepNode
+
+    params = inspect.signature(SkillFlow.register_capability).parameters
+    assert "briefing" in params and "owner" in params, (
+        "installed skillflow predates the briefing/owner contract — the host "
+        "calls it at boot; see the pin in pyproject.toml")
+    assert "capabilities" in {f.name for f in
+                              __import__("dataclasses").fields(PipelineGraph)}, (
+        "installed skillflow has no graph-level capability offer list")
+    node = StepNode(id="x", step_type="agent",
+                    capability={"from_item": "capabilities", "card": "3/c.json"})
+    assert SkillFlow._declared_capability_names(
+        node, {"capabilities": ["game_assets"]}) == ["game_assets"], (
+        "installed skillflow does not resolve a card-declared capability")

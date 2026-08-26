@@ -57,6 +57,12 @@ RULES: tuple[Rule, ...] = (
          "keyed by the exact role name the step uses. Do not nest the table under "
          "an `entries:` key — it is accepted but you will be told about it, and the "
          "wrong shape ships in the artifact for the next reader."),
+    Rule("role_model_known",
+         "A role's `model:` must be an INTERNAL name from the palette's Models "
+         "section (`flash`, `pro`, …) or `host` — never a `provider/model` "
+         "string. Which vendor serves each name is the deployment's config, so "
+         "a concrete endpoint written here is one you guessed at, and an "
+         "unknown name fails at the first LLM call rather than at emit."),
     Rule("counter_smell",
          "No hand-rolled counter tools (`increment_*`/`check_*_counter`, or any "
          "name containing 'counter'). Bound cycles with `max_loop` on an edge."),
@@ -393,6 +399,39 @@ def _unreachable_terminals(steps: list, ends: list) -> list[str]:
 # do, all of which work. So this set is EXEMPT from the unknown-tool rule rather than a
 # violation of its own: flagging the working convention would fail correct graphs.
 _INJECTED_WRITE_TOOLS = {"create", "edit", "write", "finish_step"}
+
+
+def _role_model_known(rt) -> list[str]:
+    """A role's `model:` must be a name this deployment can actually serve.
+
+    Before internal names the emitter had one safe answer (`host`) and any
+    attempt to be more specific meant inventing a `provider/model` for an
+    endpoint nobody has. Now the palette hands it a short, live list, so being
+    specific is safe — and this is what keeps it honest: a name outside the
+    table resolves to nothing and the generated pipeline dies at its first LLM
+    call, long after the emit step that could have caught it.
+    """
+    out = []
+    if not isinstance(rt, dict):
+        return out
+    try:
+        from core.model_routes import ModelRoutes, config_or_example
+        known = set(ModelRoutes(config_or_example("model_routes.json")).names())
+    except Exception:                                    # noqa: BLE001
+        return out          # no table to check against; not the emitter's fault
+    allowed = known | {"host", "default"}
+    for role, cfg in rt.items():
+        if not isinstance(cfg, dict):
+            continue
+        model = cfg.get("model")
+        if not isinstance(model, str) or not model or model in allowed:
+            continue
+        hint = ("write an internal name, not a provider endpoint"
+                if "/" in model else "not a configured model")
+        out.append(
+            f"role_model_known: role '{role}' declares model '{model}' — {hint}. "
+            f"Available: {sorted(known)} (or 'host').")
+    return out
 
 
 def _role_tools_unknown(rt, live_tools: set) -> list[str]:
@@ -1019,6 +1058,7 @@ def forge_registry_check(graph_path: str = "", role_table: str = "",
                     violations.extend(_deliverable_before(term, steps, by_id))
 
     violations.extend(_role_tools_unknown(rt, live_tools))
+    violations.extend(_role_model_known(rt))
     violations.extend(_template_names_absent_tools(rt, steps, role_table, live_tools))
     violations.extend(_validation_is_a_spec_list(steps))
     violations.extend(_write_steps_without_validation(steps))

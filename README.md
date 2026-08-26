@@ -83,7 +83,33 @@ cp model_routes.example.json  model_routes.json    # which of them serves each i
 
 The **internal model names are the contract** — `agent_configs/*.yaml` and the vision gate reference `flash` / `pro` / `glm` / `smart` / `vision`, so those keys must exist in `model_routes.json`. **Which endpoints sit behind them is entirely yours to choose**; the examples are one operator's answer, not a requirement. Nothing in the code names a vendor.
 
-Both files fall back to their `.example` if you skip this, so a fresh clone runs — but then you are running on someone else's provider list, and it is worth ten seconds to say which vendors are actually yours. **Out of the box the key you need is `ARK_API_KEY`.** Ask the code rather than trusting this sentence:
+Both files fall back to their `.example` if you skip this, so a fresh clone runs — but then you are running on someone else's provider list, and it is worth ten seconds to say which vendors are actually yours.
+
+### The internal models, and what each is for
+
+`model_routes.json` must define these names. What sits behind them is your choice; what they are FOR is fixed, because the pipelines and tools pick by job:
+
+| name | used by | what it has to be |
+|---|---|---|
+| `flash` | most maker and reviewer roles — the bulk of every run | cheap and fast. This is where the token budget goes, so a costly model here is felt everywhere |
+| `pro` | the PM, and roles whose output the rest of the run is built on | a stronger generalist |
+| `glm` | the architect, the final verifier, long-form authored documents | an alternative strong generalist |
+| `smart` | offered to generated pipelines for judges and architects | strong at one-shot reasoning; **not** for long agentic tool loops |
+| `vision` | the Godot readability gate (`godot_vision`) | **must accept image input** — verify with a real frame, not a model card |
+
+Two rules the code enforces rather than trusts:
+
+- **Every route should end with a pay-as-you-go endpoint.** Token plans run out; the last candidate is what turns "everything stops until the window resets" into "the next call goes elsewhere". A spent plan is parked until the provider's own reset time, so the list is consumed in order.
+- **Failover is sticky per step, never per call.** Provider prefix caches are per-provider, and this workload measures 26:1 prefill:decode at an 89.4% hit rate — alternating endpoints mid-step converts cached input into full-price input and costs more than a second plan saves.
+
+Check what your table implies before running:
+
+```bash
+python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \
+           print('required:', required_llm_keys()); print('failover:', failover_llm_keys())"
+```
+
+`required` is the first candidate of each route — the endpoints a run actually binds to. `failover` is everything behind them: not needed to start, needed for an outage to be a slowdown instead of a stop. **Out of the box the key you need is `ARK_API_KEY`.** Ask the code rather than trusting this sentence:
 
 ```bash
 python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \

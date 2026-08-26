@@ -731,10 +731,24 @@ class AIGateway:
                 getattr(litellm.exceptions, "PermissionDeniedError", ()))
         if not isinstance(e, auth) and "401" not in str(e):
             return e
+        # Name the CONFIG LINE the operator would edit, not just the endpoint
+        # that happened to answer. After routing, "provider 'localqwen'" leaves
+        # them hunting: nothing in agent_configs says `localqwen` — it says
+        # `vision`, and the candidate list in model_routes.json is what put
+        # them there. An error that names the resolved endpoint but not the
+        # entry that chose it is the exact shape this repo keeps fixing.
         from core.external_deps import missing
-        note = missing(self.missing_key_env,
-                       f"Model '{self.litellm_model}' resolves to provider "
-                       f"'{self.provider}', which reads it.")
+        where = (f"Model '{self.litellm_model}' resolves to provider "
+                 f"'{self.provider}', which reads it.")
+        if self.internal_model != self.active_model:
+            others = [c for c in self._candidates if c != self.active_model]
+            where += (f"\n\nIt got here from model_routes.json: the internal "
+                      f"model '{self.internal_model}' lists "
+                      f"{self._candidates}, and candidate "
+                      f"{self._candidate_ix + 1} of {len(self._candidates)} "
+                      f"('{self.active_model}') is the one being tried"
+                      + (f". Remaining: {others}." if others else "."))
+        note = missing(self.missing_key_env, where)
         return type(e)(f"{note}\n\nProvider said: {e}") if isinstance(
             e, RuntimeError) else RuntimeError(f"{note}\n\nProvider said: {e}")
 

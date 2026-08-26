@@ -514,3 +514,27 @@ def test_the_route_table_is_found_from_any_working_directory(tmp_path, monkeypat
         assert g._candidates and "/" in g._candidates[0]
     finally:
         model_routes.reset_cache()
+
+
+def test_an_auth_failure_names_the_route_that_chose_the_endpoint(wiring):
+    """"provider 'localqwen'" leaves the operator hunting: nothing in
+    agent_configs says `localqwen` — it says `vision`, and the candidate list
+    is what put them there. The error has to name the line they would edit."""
+    g = gw(wiring, "model_a")
+    g.missing_key_env = "ALPHA_KEY"
+    err = g._explain_auth(litellm.exceptions.AuthenticationError(
+        "bad key", llm_provider="alpha", model="m-1"))
+    msg = str(err)
+    assert "ALPHA_KEY" in msg                       # the secret to create
+    assert "model_a" in msg                         # the internal name
+    assert "alpha/m-1" in msg and "beta/m-1" in msg  # the candidate list
+    assert "1 of 2" in msg                          # where in the list it is
+
+
+def test_a_concrete_model_gets_no_routing_noise(wiring):
+    """Nothing was routed, so there is no route to name."""
+    g = gw(wiring, "alpha/m-1")
+    g.missing_key_env = "ALPHA_KEY"
+    msg = str(g._explain_auth(litellm.exceptions.AuthenticationError(
+        "bad key", llm_provider="alpha", model="m-1")))
+    assert "model_routes.json" not in msg

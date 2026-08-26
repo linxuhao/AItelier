@@ -140,6 +140,51 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+# One line per internal model, for a maker choosing a role's brain. Keyed on the
+# route NAME, so a deployment that renames or adds one still gets its own list —
+# what is described here is the JOB each name is for, which is host knowledge,
+# not something the route table can carry.
+_MODEL_GUIDANCE = {
+    "flash": "the default. Cheap and fast; every maker/reviewer role unless "
+             "you can say why not.",
+    "pro":   "a stronger generalist. For a role whose output the rest of the "
+             "run is built on — a plan, a task breakdown.",
+    "glm":   "an alternative strong generalist. Long-form authored documents.",
+    "smart": "strongest at one-shot reasoning and algorithmic code, and WEAK "
+             "at long agentic tool loops. Good for a judge or an architect; "
+             "bad for a 20-turn implementer.",
+    "vision": "image input. Only for a step that looks at rendered frames.",
+}
+
+
+def _models_section() -> str:
+    """The internal model names this deployment can actually serve.
+
+    Before the routing layer every generated role got `model: "host"` — one
+    model for the whole pipeline, because a maker that invented a concrete
+    `provider/model` string would hallucinate an endpoint nobody has. Internal
+    names removed that: the set is small, stable, and every entry is guaranteed
+    to resolve here, so a maker can pick per role from a list rather than
+    accepting one size for everything.
+    """
+    try:
+        from core.model_routes import ModelRoutes, config_or_example
+        names = ModelRoutes(config_or_example("model_routes.json")).names()
+    except Exception as e:                               # noqa: BLE001
+        return (f"## Models\n\n> WARNING: could not read the model routes "
+                f"({e}). Use `model: \"host\"` for every role.\n")
+    if not names:
+        return ('## Models\n\nNo routes configured — use `model: "host"`.\n')
+    out = ["## Models — a role's `model:` must be ONE of these names\n",
+           "These are INTERNAL names. Never write a `provider/model` string: "
+           "which vendor serves each name is this deployment's config, and a "
+           "name you invent will not resolve.\n"]
+    for n in names:
+        out.append(f"- `{n}` — {_MODEL_GUIDANCE.get(n, 'configured on this host.')}")
+    out.append("\n`host` also still works and means the host default.\n")
+    return "\n".join(out)
+
+
 def forge_palette(include_signatures: bool = True, **kwargs) -> dict:
     """Return the live palette as a single markdown blob for prompt injection."""
     lines: list[str] = ["# pipeline_forge palette (grounding)\n"]
@@ -169,6 +214,9 @@ def forge_palette(include_signatures: bool = True, **kwargs) -> dict:
                 sig = ""
         lines.append(f"- `{name}`{sig}")
     lines.append("")
+
+    # ── Models the deployment actually has ────────────────────────────────
+    lines.append(_models_section())
 
     # ── Exemplars ─────────────────────────────────────────────────────────
     root = _repo_root()

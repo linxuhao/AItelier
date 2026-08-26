@@ -96,7 +96,62 @@ overlay:
         tool_params:
           from_step: "5_compile"
           out_dir: "$STEP_DIR"
-        # no transitions → auto-wired to 5_test's original target (5_knowledge)
+        # ── BLIND IS NOT FAILED ────────────────────────────────────────────
+        # The gate has two ways to say `passed: false` and they call for
+        # opposite responses:
+        #     blind=false   the game IS unreadable   → go back and fix it
+        #     blind=true    NOBODY LOOKED            → find someone who can
+        # Both used to fall through to 5_review, which routes a readability
+        # failure back to the PM. That is right for the first and a trap for
+        # the second: no amount of re-planning makes an unreachable judge
+        # answer, so the loop just burns until `Cycle limit exceeded`.
+        #
+        # Live, 2026-08-26: the judge dropped mid-run after 4 of 47 scenarios
+        # (all at full HP). The PM was handed that as the readability verdict
+        # and planned a health-bar rewrite on it — citing an injured-frame
+        # answer no model had ever produced — and the round died on the cycle
+        # limit hours later, having never once looked at an injured frame.
+        #
+        # So blind now ends at a checkpoint. A person (or an agent that can
+        # actually see images) looks at the frames and decides. Approval is the
+        # verdict: skillflow's approve carries no payload while reject carries
+        # feedback, which maps exactly onto what a gate says —
+        #     approve  "I looked. All six questions are fine."
+        #     reject   "I looked. Here is what is wrong."  → back to the PM
+        # There is deliberately no "proceed without looking": a gate that can
+        # be waved through is the precise defect this gate exists to catch.
+        transitions:
+          - to: "5_vision_human"
+            match: { from_file: "vision_report.json", field: "blind", value: true }
+          - to: "5_knowledge"
+
+      # The checkpoint modal surfaces the CHECKPOINT step's OWN dir, so restage
+      # the gate's report into it — otherwise the reviewer is asked to judge a
+      # gate whose output they cannot see. The frames themselves stay where they
+      # are (188 PNGs, ~169 MB); the report names them, and the file browser
+      # reaches them.
+      - id: "5_vision_human"
+        step_type: "tool"
+        tool_name: "restage"
+        tool_params:
+          from_steps: ["5_vision"]
+        checkpoint: true
+        checkpoint_label: "可读性闸门没能看 —— 请看帧,按六问裁决"
+        checkpoint_reject_to: "3"
+        transitions:
+          - to: "5_vision_judged"
+            match: { from: "checkpoint", value: "approved" }
+
+      # Runs only after approval — a tool cannot write its own checkpoint's
+      # outcome, because a step's tool runs BEFORE that step pauses.
+      - id: "5_vision_judged"
+        step_type: "tool"
+        tool_name: "vision_human_pass"
+        tool_params:
+          vision_step: "5_vision"
+          out_dir: "$STEP_DIR"
+        transitions:
+          - to: "5_knowledge"
 
   # ── CONTEXT ────────────────────────────────────────────────────────────────
   # 3. Let the final verifier read the gate's reports.

@@ -1,0 +1,29 @@
+name: vision_human_pass
+description: >
+  Record that a PERSON judged the frames the vision model could not. Runs only
+  on the readability gate's blind branch, after the checkpoint was approved —
+  approval is the verdict, because skillflow's approve carries no payload
+  (reject carries feedback; approve does not). Amends the gate's own
+  vision_report.json IN PLACE so every downstream reader sees one verdict,
+  and amends rather than rewrites: `blind` and `blind_reason` are KEPT, so the
+  record still says the automated judge could not see and now also says who
+  could. A gate that quietly turns green would be the exact defect the gate
+  exists to catch.
+parameters:
+  vision_step:
+    type: string
+    description: "Step id whose promoted vision_report.json is amended (default 5_vision)."
+    required: false
+  workspace_root:
+    type: string
+    description: "Skillflow workspace root (auto-injected)."
+    required: false
+  config_name:
+    type: string
+    description: "Graph name (auto-injected)."
+    required: false
+  out_dir:
+    type: string
+    description: "This step's directory; a copy of the amended verdict lands here too (set to $STEP_DIR)."
+    required: false
+x-fallible: true

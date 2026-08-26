@@ -179,6 +179,29 @@ def _llm_keys() -> tuple[list[str], list[str]]:
     except OSError:
         return [], []
 
+    # Every route in the table, whether or not an agent_config names it.
+    #
+    # The scan above only sees models referenced from agent_configs, and that is
+    # a blind spot rather than a missing feature: an AGENT's model is config
+    # (readable), but a TOOL's is a Python constant — `godot_vision` holds
+    # `_ROUTE = "vision"` in impl.py. So the one route whose first candidate is
+    # a self-hosted endpoint was the one route this function could not see, and
+    # LOCAL_QWEN_API_KEY was never named to the operator even though
+    # docker-compose mounts it. The gate would then quietly fall through to a
+    # paid judge, or go blind, with nothing having asked for that key up front.
+    #
+    # Asking the TABLE instead of its consumers closes the whole class: a route
+    # added tomorrow for a tool nobody has written yet is covered. The cost is
+    # over-reporting — a route defined but unused still contributes — and it is
+    # cheap, because everything it can add lands in the FAILOVER list, which is
+    # advice rather than a startup requirement. The first candidate of a route
+    # no agent_config names is not "required": nothing is currently obliged to
+    # call it.
+    if routes is not None:
+        for route in routes.names():
+            for candidate in routes.resolve(route):
+                spare.add(candidate.split("/", 1)[0])
+
     def keys(names):
         return sorted({providers[p]["api_key_env"] for p in names
                        if p in providers and providers[p].get("api_key_env")})

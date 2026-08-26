@@ -258,3 +258,48 @@ def test_a_commented_provider_registry_is_still_readable():
     finally:
         reg.write_text(original, encoding="utf-8")
     assert "SOME_FUTURE_KEY" in out
+
+
+def test_a_route_no_agent_config_names_is_still_reported():
+    """The scan reads agent_configs, but a TOOL's model reference is not there.
+
+    `godot_vision` holds `_ROUTE = "vision"` as a Python constant, so the one
+    route whose first candidate is a self-hosted endpoint was invisible to key
+    derivation: LOCAL_QWEN_API_KEY was never named to the operator even though
+    docker-compose mounts it, and the gate would quietly fall through to a paid
+    judge with nothing having asked for that key up front.
+
+    Asking the TABLE rather than its consumers closes the class — including
+    routes for tools nobody has written yet.
+    """
+    import json
+
+    from core.external_deps import failover_llm_keys, required_llm_keys
+    from core.model_routes import ModelRoutes, config_or_example
+
+    providers = json.loads(
+        Path(config_or_example("llm_providers.json")).read_text(encoding="utf-8"))
+    table = ModelRoutes(config_or_example("model_routes.json"))
+
+    referenced = set()
+    for route in table.names():
+        for candidate in table.resolve(route):
+            prov = candidate.split("/", 1)[0]
+            cfg = providers.get(prov) or {}
+            if isinstance(cfg, dict) and cfg.get("api_key_env"):
+                referenced.add(cfg["api_key_env"])
+
+    told = set(required_llm_keys()) | set(failover_llm_keys())
+    assert referenced <= told, (
+        f"{sorted(referenced - told)} appear in model_routes.json but are named "
+        f"to nobody — the operator is never asked to create them")
+
+
+def test_a_route_only_a_tool_uses_lands_in_failover_not_required():
+    """Over-reporting is the price of asking the table, and it must stay in the
+    advisory list: nothing is currently obliged to call an unreferenced route,
+    so demanding its key would be the false alarm this module exists to stop."""
+    from core.external_deps import failover_llm_keys, required_llm_keys
+
+    assert "LOCAL_QWEN_API_KEY" in failover_llm_keys()
+    assert "LOCAL_QWEN_API_KEY" not in required_llm_keys()

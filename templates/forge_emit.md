@@ -312,8 +312,17 @@ maker's job to what's achievable, then the reviewer to that same bar).
 ## Output — write these files (into your step output dir)
 1. **`pipeline.yaml`** — the generated graph, following the schema above exactly.
 2. **`role_table.yaml`** — one entry per `agent_config` in `pipeline.yaml`:
-   `model: "host"`, `temperature: 0.2`, `template: "templates/<role>.md"`,
+   `model: <one of the names in the palette's "Models" section>`,
+   `temperature: 0.2`, `template: "templates/<role>.md"`,
    `tools: [<real tool names or omit>]`, `thinking: {enable: true}`.
+   - **`model:` is an INTERNAL name from the palette** (`flash`, `pro`, …), not a
+     `provider/model` string. Which vendor serves each name is the deployment's
+     config, so a concrete endpoint you write here is one you are guessing at.
+     Default to `flash` and spend a stronger one only where you can say what it
+     buys: a judge whose verdict gates the run, or an architect whose document
+     everything downstream is built on. `smart` in particular is strong at
+     one-shot reasoning and WEAK at long agentic tool loops — do not put a
+     many-turn implementer on it. An unknown name is rejected by the gate.
    - **`tools:` lists REGISTRY tools only** (`web_search`, `run_tests`, `read_file`, a
      tool you just built…). Every name must exist in the palette — a name that does not
      resolve is DROPPED SILENTLY and the step runs without it.

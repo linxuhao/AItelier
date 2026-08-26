@@ -267,6 +267,19 @@ export function connect(): void {
     const CONNECTING = 0;
     const CLOSED = 2;
     if (es.readyState === CLOSED || es.readyState === CONNECTING) {
+      // CLOSE it before dropping the reference. `readyState === CONNECTING`
+      // means the browser is ALREADY retrying this EventSource on its own;
+      // nulling the field without closing orphans a live, self-retrying stream
+      // that `connect()`'s `if (_eventSource !== null) close()` guard can no
+      // longer see. Every error while CONNECTING therefore added one more
+      // permanent connection from a single tab, and `_isFresh` de-duplicated
+      // the doubled events client-side so the symptom was invisible here and
+      // the entire cost landed on a single-core server.
+      //
+      // It matters more now than when it was written: the project page stopped
+      // polling and depends on this connection, so a leak here multiplies the
+      // one thing the new design rests on.
+      es.close();
       _eventSource = null;
       _scheduleReconnect();
     }

@@ -954,3 +954,76 @@ def test_the_cache_ttl_matches_the_polling_interval_it_serves():
         f"TTL {DEFAULT_TTL}s and the {poll_ms/1000}s poll have drifted apart. "
         f"Below the poll, every poll is a miss and the fixed cost is paid twice "
         f"or more per poll; above it, staleness (TTL + poll) grows for nothing.")
+
+
+class TestSseConnectionsAreCapped:
+    """Everything about an SSE connection was bounded except how many there are.
+
+    The per-connection queue is capped and the replay buffer is capped; the
+    NUMBER of connections was not — and on a public hostname that is the one
+    dimension an anonymous caller picks. Each one is a task, a queue and a
+    socket held open for as long as the client likes, and it is the cheapest
+    thing in the system to open in bulk, because the server does the holding.
+    """
+
+    def _drain_first(self, gen):
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(gen.__anext__())
+
+    def test_the_cap_is_a_real_number(self):
+        """Pinned separately from the behaviour, and this is why.
+
+        The behaviour test fills the manager TO the cap, so it read the shipped
+        constant to size the fill — which meant the obvious mutation (raise the
+        cap out of reach) made the test try to allocate a billion queues and
+        HANG instead of failing. A test whose cost scales with the value it is
+        checking cannot be the test that catches a bad value.
+        """
+        import api.sse_manager as sm
+        assert 0 < sm._MAX_CONNECTIONS <= 10000
+
+    def test_beyond_the_cap_the_connection_is_refused(self, monkeypatch):
+        import asyncio
+        import api.sse_manager as sm
+        monkeypatch.setattr(sm, "_MAX_CONNECTIONS", 3)
+
+        async def go():
+            m = sm.StreamManager()
+            m._queues["c"] = {asyncio.Queue() for _ in range(3)}
+            gen = m.event_generator("c")
+            try:
+                # Bounded: without a cap this generator parks on queue.get()
+                # for its 15s heartbeat instead of returning, and a hang in a
+                # suite reads as an infrastructure problem rather than as the
+                # assertion it actually is.
+                first = await asyncio.wait_for(gen.__anext__(), timeout=2)
+            finally:
+                await gen.aclose()
+            # Refused without taking a slot: the point is not to answer
+            # politely, it is not to hold a socket.
+            return first, len(m._queues["c"])
+
+        first, n = asyncio.run(go())
+        assert "capacity" in first
+        assert n == 3, "a refused connection still took a slot"
+
+    def test_under_the_cap_a_connection_is_served(self):
+        """A cap that refuses the first caller is an outage, not a backstop."""
+        import asyncio
+        import api.sse_manager as sm
+
+        async def go():
+            m = sm.StreamManager()
+            await m.push_log("c", "hello")     # buffered, no consumer yet
+            gen = m.event_generator("c")
+            return await gen.__anext__()
+
+        assert "hello" in asyncio.run(go())
+
+    def test_the_cap_counts_every_channel(self):
+        import api.sse_manager as sm
+        import asyncio
+        m = sm.StreamManager()
+        m._queues["a"] = {asyncio.Queue(), asyncio.Queue()}
+        m._queues["b"] = {asyncio.Queue()}
+        assert m._connection_count() == 3

@@ -2,15 +2,32 @@
 
 import asyncio
 import json
+import logging
 from typing import Dict, AsyncGenerator, Set
 
 
 # Per-connection backlog before a consumer is considered gone and dropped.
+_log = logging.getLogger("aitelier.sse")
+
 _QUEUE_MAX = 1000
 # Events retained for a channel with no consumer at all.
 _BUFFER_MAX = 500
 # Channels retained at all. Nothing subscribes to most of them.
 _BUFFER_CHANNEL_MAX = 64
+
+# Concurrent SSE connections, across all channels.
+#
+# There was no cap at all. Each connection is an asyncio task, a queue and a
+# socket, held open for as long as the client likes, on a public hostname where
+# the clients are strangers — and it is the cheapest thing to open in bulk,
+# because the server does the holding. The per-connection queue is bounded and
+# the replay buffer is bounded; the NUMBER of them was not, which is the one
+# dimension an anonymous caller picks.
+#
+# Sized for the real workload: one connection per open tab, and the measured
+# event rate is ~0.4/s, so fan-out at this ceiling is a few hundred put_nowait
+# per second — nothing. It is a backstop against bulk-opening, not a quota.
+_MAX_CONNECTIONS = 512
 
 
 class StreamManager:
@@ -83,6 +100,9 @@ class StreamManager:
             except asyncio.QueueFull:   # pragma: no cover
                 pass
 
+    def _connection_count(self) -> int:
+        return sum(len(q) for q in self._queues.values())
+
     async def event_generator(self, task_id: str) -> AsyncGenerator[str, None]:
         """Subscribe to the broadcast channel with a private queue.
 
@@ -96,6 +116,16 @@ class StreamManager:
         # memory lever anyone can pull by opening a stream and not reading it.
         # The cap is generous: a live client drains continuously, so reaching it
         # means the consumer is gone, which is exactly when we want it dropped.
+        if self._connection_count() >= _MAX_CONNECTIONS:
+            # Refuse by ENDING the stream rather than by hanging or erroring:
+            # the client sees a normal close, EventSource retries with its own
+            # backoff, and a transient crowd resolves itself. A comment line
+            # first so the response is a well-formed SSE body either way.
+            _log.warning("SSE connection refused: %d already open (cap %d)",
+                         self._connection_count(), _MAX_CONNECTIONS)
+            yield ": at capacity\n\n"
+            return
+
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
         queues = self._get_queues(task_id)
         queues.add(queue)

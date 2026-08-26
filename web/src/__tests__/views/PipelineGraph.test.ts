@@ -6,7 +6,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
-const mockApi = vi.hoisted(() => ({ pipelineGraph: vi.fn() }));
+// getTrace: opening a node now also opens its trace pane. It returns an empty
+// page here — this file is about the drawing, not the trace.
+const mockApi = vi.hoisted(() => ({ pipelineGraph: vi.fn(), getTrace: vi.fn() }));
 vi.mock('../../lib/api', () => mockApi);
 
 import PipelineGraph from '../../views/PipelineGraph.svelte';
@@ -156,20 +158,27 @@ describe('PipelineGraph with a run folded on', () => {
 
   it('opens a node to the instances behind it, with their items', async () => {
     mockApi.pipelineGraph.mockResolvedValue(loopGraph);
-    const { container, findByText } = render(PipelineGraph,
-      { props: { config: 'dpe_default_v2', runSteps: rows } });
+    mockApi.getTrace.mockResolvedValue({ traces: [], has_more: false });
+    const { container } = render(PipelineGraph,
+      { props: { config: 'dpe_default_v2', runSteps: rows, runId: 'r1' } });
     await waitFor(() => expect(container.querySelectorAll('g.node').length).toBe(4));
     const body = [...container.querySelectorAll('g.node')]
       .find((g) => g.querySelector('text.node-id')?.textContent === 'body');
     await fireEvent.click(body as Element);
-    const table = await waitFor(() => {
-      const el = container.querySelector('.exec-table');
+    const pane = await waitFor(() => {
+      const el = container.querySelector('.trace-pane');
       expect(el).toBeTruthy();
       return el as Element;
     });
-    expect(table.textContent).toContain('alpha');
-    expect(table.textContent).toContain('beta');
-    expect(container.querySelector('.exec-error')?.textContent).toBe('nope');
+    // Both instances are offered by item, and the pane reads ONE of them --
+    // the latest, whose failure is the thing worth surfacing.
+    const chips = [...pane.querySelectorAll('.tp-instances .item-chip')]
+      .map((c) => c.textContent?.trim());
+    expect(chips.some((c) => c?.includes('alpha'))).toBe(true);
+    expect(chips.some((c) => c?.includes('beta'))).toBe(true);
+    expect(pane.querySelector('.exec-error')?.textContent).toBe('nope');
+    // ...and the trace it read is that instance's, not the step's in general.
+    expect(mockApi.getTrace.mock.calls.at(-1)?.[1].stepInstanceId).toBe(3);
   });
 
   it('says items were not recorded rather than inventing one', async () => {

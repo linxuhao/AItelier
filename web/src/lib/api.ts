@@ -433,6 +433,9 @@ export interface TraceQueryOptions {
   afterSeq?: number;
   order?: 'asc' | 'desc';
   limit?: number;
+  /** One step INSTANCE (skillflow_steps.id), not a step_id: a looped step has
+   *  one instance per item, and they interleave in the run-wide trace. */
+  stepInstanceId?: number;
 }
 
 export function getTrace(
@@ -448,6 +451,7 @@ export function getTrace(
   let path = '/api/runs/' + encodeURIComponent(runId) + '/trace';
   const params: string[] = [];
   if (opts?.category) params.push('category=' + encodeURIComponent(opts.category));
+  if (opts?.stepInstanceId != null) params.push('step_instance_id=' + opts.stepInstanceId);
   if (opts?.afterSeq != null) params.push('after_seq=' + opts.afterSeq);
   if (opts?.order) params.push('order=' + opts.order);
   if (opts?.limit != null) params.push('limit=' + opts.limit);

@@ -3,6 +3,7 @@
   import { push } from 'svelte-spa-router';
   import { getTrace } from '../lib/api';
   import { stepLabel } from '../lib/format';
+  import { extractPayloadText, shortTime } from '../lib/traceFormat';
   import { t } from '../lib/i18n.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────
@@ -37,46 +38,6 @@
 
   // Derived
   let empty = $derived(!loading && !error && traces.length === 0);
-
-  // ── Helpers ────────────────────────────────────────────────────────
-
-  function extractPayloadText(payload: any): string {
-    if (payload == null) return '';
-    if (typeof payload === 'string') return payload;
-    if (typeof payload === 'object') {
-      const hasToolCalls = Array.isArray(payload.tool_calls) && payload.tool_calls.length;
-      if (hasToolCalls || payload.reasoning_content) {
-        const parts: string[] = [];
-        if (payload.text) parts.push(payload.text);
-        if (payload.reasoning_content) parts.push('[reasoning]\n' + payload.reasoning_content);
-        if (hasToolCalls) {
-          payload.tool_calls.forEach((tc: any, i: number) => {
-            let name: string, args: string;
-            if (typeof tc === 'string') {
-              name = tc;
-              args = (Array.isArray(payload.tool_args) && payload.tool_args[i]) || '';
-            } else {
-              name = tc.name;
-              args = tc.arguments || '';
-            }
-            parts.push('→ ' + name + '(' + args + ')');
-          });
-        }
-        return parts.join('\n\n');
-      }
-      const direct = payload.content || payload.text || payload.message ||
-        payload.response || payload.prompt || payload.error;
-      if (typeof direct === 'string' && direct) return direct;
-      try { return JSON.stringify(payload, null, 2); } catch { return String(payload); }
-    }
-    return String(payload);
-  }
-
-  function shortTime(ts: string | undefined | null): string {
-    if (!ts) return '';
-    const m = String(ts).match(/(\d{2}:\d{2}:\d{2})/);
-    return m ? m[1] : String(ts);
-  }
 
   // ── Data fetching ──────────────────────────────────────────────────
 

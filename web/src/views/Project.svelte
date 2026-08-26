@@ -141,6 +141,12 @@
       // blank "pending checkpoint" card on finished projects.
       checkpoint = (cpData && (cpData as Record<string, unknown>).checkpoint)
         ? cpData : null;
+      // Keep the open run's detail moving. It used to be fetched ONCE, on the
+      // click that opened it, so the graph a reader watched during a live run
+      // never advanced: the node highlighted as running had often finished
+      // minutes earlier. A finished run is static, so only an active one is
+      // re-fetched.
+      await refreshRunDetail();
       // A different checkpoint (or none) invalidates an open reject box: its
       // text was written about the one that just went away.
       if (checkpointRejectMode && checkpointKeyOf(checkpoint) !== checkpointRejectKey) {
@@ -184,6 +190,23 @@
       if (selectedRunId === runId) {
         error = err instanceof Error ? err.message : 'Failed to load run detail';
       }
+    }
+  }
+
+  /** Re-read the open run while it is still moving (see refreshData). */
+  async function refreshRunDetail(): Promise<void> {
+    const runId = selectedRunId;
+    if (!runId || !runDetail) return;
+    const st = String(runDetail.status ?? '');
+    if (st === 'completed' || st === 'failed' || st === 'cancelled') return;
+    try {
+      const detail = await getRunDetail(runId);
+      // Selection may have moved while the request was in flight.
+      if (selectedRunId === runId) runDetail = detail;
+    } catch {
+      // Keep the last good detail: refreshData already surfaces a backend that
+      // is genuinely down, and blanking the graph on one dropped poll would
+      // throw away the reader's open node.
     }
   }
 
@@ -775,7 +798,8 @@
                       labels={((runDetail.manifest as Record<string, unknown>)
                         ?.labels ?? {}) as Record<string, string>}
                       cacheByStep={(runDetail.cache_stats_by_step ?? {}) as
-                        Record<string, Record<string, number>>} />
+                        Record<string, Record<string, number>>}
+                      runId={(runDetail.id as string) || (runDetail.run_id as string)} />
                   {/key}
                 {:else}
                   <p class="text-muted">{t('project.noStepData')}</p>

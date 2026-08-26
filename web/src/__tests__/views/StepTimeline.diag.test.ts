@@ -102,7 +102,9 @@ describe('run graph (real payload)', () => {
       .find((g) => g.querySelector('text.node-id')?.textContent === 'Researcher');
     await fireEvent.click(node as Element);
     const detail = await waitFor(() => {
-      const el = container.querySelector('.node-detail');
+      // The per-node detail moved into the trace pane beside the graph; the
+      // three facts below are what it has to keep showing wherever it lives.
+      const el = container.querySelector('.trace-pane');
       expect(el).not.toBeNull();
       return el as Element;
     });

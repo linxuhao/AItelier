@@ -26,6 +26,7 @@
   } from '../lib/runGraphState';
   import { formatTokens } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
+  import NodeTrace from './NodeTrace.svelte';
 
   interface Props {
     config: string;
@@ -35,8 +36,10 @@
     labels?: Record<string, string>;
     /** step_id -> token / cache-hit stats, as /api/runs returns them. */
     cacheByStep?: Record<string, Record<string, number>>;
+    /** Run (or project) id — required to read a node's trace. */
+    runId?: string;
   }
-  const { config, runSteps, labels, cacheByStep }: Props = $props();
+  const { config, runSteps, labels, cacheByStep, runId }: Props = $props();
 
   const nodeLabel = (id: string): string => labels?.[id] || id;
 
@@ -45,6 +48,11 @@
   let layout = $state<Layout | null>(null);
   let selectedItem = $state<string | null>(null);
   let openNode = $state<string | null>(null);
+  // Auto-follow the running node until the reader picks one themselves.
+  // Following forever would yank the pane away mid-read on every advance.
+  let userPicked = $state(false);
+  let pickedInstance = $state<number | null>(null);
+  let scrollEl = $state<HTMLDivElement | null>(null);
 
   // Geometry. Vertical: pipelines are long chains, so rank == row keeps the
   // drawing readable at panel width instead of scrolling sideways for 20 steps.
@@ -132,6 +140,71 @@
 
   const statusOf = (id: string): string => runState?.byNode[id]?.status ?? '';
 
+  /**
+   * The node the run is ON right now.
+   *
+   * Before this, "which box is live" was a slightly thicker yellow border among
+   * several yellow boxes -- on a 25-node graph scrolled to the top, the live
+   * step was often not even on screen.
+   */
+  let currentNode = $derived(
+    runState
+      ? ((layout?.nodes ?? []).find(
+          (n) => runState.byNode[n.id]?.status === 'running')?.id ?? null)
+      : null,
+  );
+
+  /** Instances of the open node, and which ONE the trace pane is reading. */
+  let activeRows = $derived<RunStepRow[]>(
+    openNode && runState ? (runState.byNode[openNode]?.rows ?? []) : [],
+  );
+  let activeInstance = $derived<number | null>(
+    pickedInstance != null && activeRows.some((r) => r.id === pickedInstance)
+      ? pickedInstance
+      // Default to the instance worth watching: the one still running, else the
+      // most recent. A retried step's first attempt is not what you opened for.
+      : (activeRows.find((r) => r.status === 'running' || r.status === 'claimed')?.id
+         ?? activeRows[activeRows.length - 1]?.id ?? null),
+  );
+  let activeRow = $derived(activeRows.find((r) => r.id === activeInstance) ?? null);
+  let activeLive = $derived(
+    !!activeRow && (activeRow.status === 'running' || activeRow.status === 'claimed'),
+  );
+
+  // Follow the run until the reader takes over.
+  $effect(() => {
+    if (!userPicked && currentNode && openNode !== currentNode) {
+      openNode = currentNode;
+      pickedInstance = null;
+    }
+  });
+
+  // ...and keep the followed node on screen. Only while following: scrolling a
+  // reader's view away from the node they chose is the same rudeness as
+  // switching the pane under them.
+  $effect(() => {
+    const id = currentNode;
+    const el = scrollEl;
+    if (!id || userPicked || !el) return;
+    const p = positions.get(id);
+    if (!p) return;
+    const top = Math.max(0, p.y - el.clientHeight / 2 + NODE_H / 2);
+    // Not every environment has the options form (jsdom has no scrollTo at
+    // all), and failing to scroll must never take the graph down with it.
+    if (typeof el.scrollTo === 'function') el.scrollTo({ top, behavior: 'smooth' });
+    else el.scrollTop = top;
+  });
+
+  function selectNode(id: string): void {
+    userPicked = true;
+    if (openNode === id) {
+      openNode = null;
+    } else {
+      openNode = id;
+      pickedInstance = null;
+    }
+  }
+
   function pickItem(item: string | null) {
     selectedItem = selectedItem === item ? null : item;
   }
@@ -189,7 +262,8 @@
     {/if}
   {/if}
 
-  <div class="graph-scroll">
+  <div class="pg-body">
+  <div class="graph-scroll" bind:this={scrollEl}>
     <svg {width} {height} viewBox="0 0 {width} {height}" role="img"
          aria-label={t('pipeline.graphAria').replace('{name}', config)}>
       <defs>
@@ -237,16 +311,26 @@
                always absent together. -->
           <g class="node {n.type} {n.from_addon ? 'addon' : ''} {statusOf(n.id)}"
              class:is-open={openNode === n.id}
+             class:is-current={currentNode === n.id}
              class:clickable={!!runState}
              role={runState ? 'button' : undefined}
              tabindex={runState ? 0 : undefined}
-             onclick={() => { if (runState) openNode = openNode === n.id ? null : n.id; }}
+             onclick={() => { if (runState) selectNode(n.id); }}
              onkeydown={(ev) => {
                if (runState && (ev.key === 'Enter' || ev.key === ' ')) {
                  ev.preventDefault();
-                 openNode = openNode === n.id ? null : n.id;
+                 selectNode(n.id);
                }
              }}>
+            {#if currentNode === n.id}
+              <!-- Both drawn as their own rects, and BEFORE the node box, so
+                   the motion happens around the step instead of over its
+                   label. -->
+              <rect class="current-pulse" x={p.x - 5} y={p.y - 5}
+                    width={NODE_W + 10} height={NODE_H + 10} rx="10" />
+              <rect class="current-ring" x={p.x - 4} y={p.y - 4}
+                    width={NODE_W + 8} height={NODE_H + 8} rx="9" />
+            {/if}
             <rect x={p.x} y={p.y} width={NODE_W} height={NODE_H} rx="6" />
             <text x={p.x + 9} y={p.y + NODE_H / 2 + 4} class="node-id">{nodeLabel(n.id)}</text>
             {#if st && st.runs > 1}
@@ -267,54 +351,72 @@
     </svg>
   </div>
 
-  {#if runState && openNode}
-    {@const st = runState.byNode[openNode]}
-    <div class="node-detail">
-      <header>
-        <strong>{nodeLabel(openNode)}</strong>
-        {#if nodeLabel(openNode) !== openNode}<code class="node-real-id">{openNode}</code>{/if}
-        <span class="status-pill {st.status}">{t('pipeline.status.' + st.status)}</span>
-        {#if cacheByStep?.[openNode]?.total_tokens != null}
-          {@const cs = cacheByStep[openNode]}
-          <span class="cache-inline-badge">
-            {formatTokens(cs.total_tokens)}{cs.hit_ratio != null
-              ? ' · ' + Math.round(cs.hit_ratio * 100) + '% cache' : ''}
-          </span>
-        {/if}
-        {#if selectedItem && loopOf[openNode]}<span class="item-chip is-active">{selectedItem}</span>{/if}
-        <button class="close" onclick={() => (openNode = null)}>✕</button>
-      </header>
-      {#if st.rows.length === 0}
-        <p class="muted">{t('pipeline.noInstances')}</p>
-      {:else}
-        <table class="exec-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>{t('pipeline.colItem')}</th>
-              <th>{t('pipeline.colStatus')}</th>
-              <th>{t('pipeline.colDuration')}</th>
-              <th>{t('pipeline.colRetries')}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each st.rows as r, i (r.id)}
-              <tr>
-                <td>{i + 1}</td>
-                <td>{r.loop_item ?? '—'}</td>
-                <td><span class="status-pill {r.status}">{r.status}</span></td>
-                <td>{fmtDuration(rowDuration(r))}</td>
-                <td>{r.retry_count || 0}</td>
-              </tr>
-              {#if r.error}
-                <tr><td colspan="5"><pre class="exec-error">{r.error}</pre></td></tr>
+  <!-- The trace pane. The drawing is ~430px wide inside a full-width panel,
+       so the space to its right was empty; a run's most useful reading -- what
+       the live step is actually doing -- was two clicks away on another page. -->
+  {#if runState}
+    <aside class="trace-pane">
+      {#if openNode}
+        {@const st = runState.byNode[openNode]}
+        <header class="tp-head">
+          <strong>{nodeLabel(openNode)}</strong>
+          {#if nodeLabel(openNode) !== openNode}<code class="node-real-id">{openNode}</code>{/if}
+          <span class="status-pill {st.status}">{t('pipeline.status.' + st.status)}</span>
+          {#if cacheByStep?.[openNode]?.total_tokens != null}
+            {@const cs = cacheByStep[openNode]}
+            <span class="cache-inline-badge">
+              {formatTokens(cs.total_tokens)}{cs.hit_ratio != null
+                ? ' · ' + Math.round(cs.hit_ratio * 100) + '% cache' : ''}
+            </span>
+          {/if}
+          {#if userPicked && currentNode && openNode !== currentNode}
+            <button class="tp-follow" onclick={() => { userPicked = false; }}
+                    title={t('pipeline.traceFollowHint')}>{t('pipeline.traceFollow')}</button>
+          {/if}
+          <button class="close" onclick={() => { userPicked = true; openNode = null; }}
+                  aria-label={t('wsbrowser.close')}>✕</button>
+        </header>
+
+        {#if st.rows.length === 0}
+          <p class="muted">{t('pipeline.noInstances')}</p>
+        {:else}
+          {#if st.rows.length > 1}
+            <!-- One chip per instance: a looped step ran once per item, a
+                 retried step more than once, and their records do not mix. -->
+            <div class="tp-instances">
+              {#each st.rows as r, i (r.id)}
+                <button class="item-chip" class:is-active={r.id === activeInstance}
+                        onclick={() => (pickedInstance = r.id)}>
+                  #{i + 1}{r.loop_item ? ' · ' + r.loop_item : ''}
+                </button>
+              {/each}
+            </div>
+          {/if}
+          {#if activeRow}
+            <div class="tp-meta">
+              <span class="status-pill {activeRow.status}">{activeRow.status}</span>
+              <span>{fmtDuration(rowDuration(activeRow))}</span>
+              {#if activeRow.retry_count}
+                <span>{t('pipeline.colRetries')} {activeRow.retry_count}</span>
               {/if}
-            {/each}
-          </tbody>
-        </table>
+              {#if activeRow.loop_item}<span class="tp-item">{activeRow.loop_item}</span>{/if}
+            </div>
+            {#if activeRow.error}
+              <pre class="exec-error">{activeRow.error}</pre>
+            {/if}
+          {/if}
+          {#if runId}
+            <NodeTrace {runId} stepInstanceId={activeInstance} live={activeLive} />
+          {:else}
+            <p class="muted">{t('pipeline.traceNoRun')}</p>
+          {/if}
+        {/if}
+      {:else}
+        <p class="muted">{t('pipeline.tracePickNode')}</p>
       {/if}
-    </div>
+    </aside>
   {/if}
+  </div>
 {/if}
 </div>
 
@@ -443,6 +545,45 @@
     stroke-dasharray: 3 3;
   }
   .node.is-open rect { stroke: var(--g-accent); stroke-width: 2; }
+  /* The live step. Deliberately the loudest thing on the graph: it is the one
+     box the reader came to find, and a fading outline was too easy to miss
+     among several yellow ones. Two moving parts, because motion is what the
+     eye catches: a marching dashed ring (a marquee never reads as static) and
+     a halo that expands out of the box and fades, like a ping. */
+  .node.is-current rect.current-ring {
+    fill: none;
+    stroke: var(--g-accent);
+    stroke-width: 2.5;
+    stroke-dasharray: 9 6;
+    animation: pg-march 0.9s linear infinite;
+  }
+  .node.is-current rect.current-pulse {
+    fill: var(--g-accent);
+    stroke: none;
+    /* scale about the rect's own centre, not the SVG origin */
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: pg-ping 1.7s ease-out infinite;
+  }
+  .node.is-current rect:not(.current-ring):not(.current-pulse) {
+    stroke: var(--g-accent);
+    stroke-width: 2;
+  }
+  @keyframes pg-march {
+    to { stroke-dashoffset: -30; }
+  }
+  @keyframes pg-ping {
+    0%   { transform: scale(0.94); opacity: 0.3; }
+    70%  { transform: scale(1.14); opacity: 0; }
+    100% { transform: scale(1.14); opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    /* Still unmistakable standing still: a solid accent ring, no motion. */
+    .node.is-current rect.current-ring {
+      animation: none; stroke-dasharray: none; opacity: 1;
+    }
+    .node.is-current rect.current-pulse { animation: none; opacity: 0.16; }
+  }
   .node-id {
     font-size: 11px;
     font-family: var(--pico-font-family-monospace, monospace);
@@ -451,19 +592,58 @@
   .run-count { font-size: 9px; fill: var(--g-muted); }
   .cp-dot { fill: var(--g-accent); }
 
-  /* Per-node execution detail */
-  .node-detail {
-    margin-top: 0.5rem; padding: 0.5rem 0.6rem;
-    border: 1px solid var(--pico-muted-border-color);
-    border-radius: var(--pico-border-radius);
+  /* Graph left, trace right. The drawing has a fixed intrinsic width, so the
+     pane takes whatever the panel has left; below ~900px they stack instead of
+     squeezing the trace into a column too narrow to read. */
+  .pg-body {
+    display: flex;
+    align-items: stretch;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .pg-body > .graph-scroll { flex: 0 1 auto; }
+  .trace-pane {
+    flex: 1 1 340px;
+    min-width: 0;
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    /* Belt and braces: the trace list inside is the intended scroller, and
+       when it works this never fires. If that flex chain is ever broken again,
+       the records overflow the PANE and it scrolls -- rather than silently
+       squashing them, which is a failure mode that looks like a design. */
+    overflow-y: auto;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--g-line);
+    border-radius: var(--pico-border-radius, 4px);
     background: var(--g-surface);
   }
-  .node-detail header {
+  .tp-head {
     display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.35rem;
+    flex-wrap: wrap;
+    flex: 0 0 auto;
   }
-  .node-detail header .close {
+  .tp-head .close {
     margin-left: auto; background: none; border: none; width: auto;
     padding: 0 0.2rem; cursor: pointer; color: var(--g-muted);
+  }
+  .tp-follow {
+    background: none; border: 1px solid var(--g-accent); color: var(--g-accent);
+    border-radius: 999px; padding: 0 0.45rem; width: auto; margin: 0;
+    font-size: 0.68rem; cursor: pointer;
+  }
+  .tp-instances {
+    display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 0.3rem;
+    flex: 0 0 auto;
+  }
+  .tp-meta {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem;
+    font-size: 0.72rem; color: var(--g-muted); margin-bottom: 0.35rem;
+    flex: 0 0 auto;
+  }
+  .tp-item {
+    font-family: var(--pico-font-family-monospace, monospace);
+    color: var(--g-accent);
   }
   .node-real-id { font-size: 0.7rem; color: var(--g-muted); }
   .cache-inline-badge {
@@ -488,8 +668,6 @@
     background: var(--g-yellow-bg);
     color: var(--g-yellow-line);
   }
-  .exec-table { font-size: 0.78rem; margin: 0; }
-  .exec-table th, .exec-table td { padding: 0.15rem 0.4rem; }
   .exec-error {
     margin: 0.1rem 0 0.3rem; padding: 0.35rem; font-size: 0.72rem;
     white-space: pre-wrap; word-break: break-word;

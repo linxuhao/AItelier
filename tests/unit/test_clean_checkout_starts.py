@@ -281,3 +281,51 @@ def test_no_docker_is_available_but_says_what_it_costs(monkeypatch, capsys):
     assert ran == {"host": True}
     out = capsys.readouterr().out
     assert "git identity" in out or "git commits" in out
+
+
+# ── The by-name edge network trades a loud failure for a silent one ────────
+
+def test_an_unset_edge_network_says_nothing(monkeypatch, capsys):
+    """Unset is the normal case — compose makes a throwaway and that is fine."""
+    monkeypatch.delenv("AITELIER_EDGE_NETWORK", raising=False)
+    srv._warn_if_edge_network_is_alone()
+    assert capsys.readouterr().out == ""
+
+
+def test_a_network_with_the_connector_on_it_says_nothing(monkeypatch, capsys):
+    monkeypatch.setenv("AITELIER_EDGE_NETWORK", "cloudflare_edge")
+    monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "aitelier cloudflared "})())
+    srv._warn_if_edge_network_is_alone()
+    assert capsys.readouterr().out == ""
+
+
+def test_being_alone_on_the_named_network_is_reported(monkeypatch, capsys):
+    """The typo signature. `external: true` used to refuse outright; dropping it
+    is what lets a clean checkout start, but it also means a name matching
+    nothing is CREATED — healthy container, localhost 200, public path dark,
+    nothing said. For the tunnel to reach us the connector must be on that
+    network, so being alone on it is checkable."""
+    monkeypatch.setenv("AITELIER_EDGE_NETWORK", "clouflare_edge")   # typo
+    monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": "aitelier "})())
+    srv._warn_if_edge_network_is_alone()
+    out = capsys.readouterr().out
+    assert "clouflare_edge" in out and "docker network ls" in out
+
+
+def test_a_missing_network_is_not_reported(monkeypatch, capsys):
+    """Before the first `up` it does not exist yet; compose is about to make it."""
+    monkeypatch.setenv("AITELIER_EDGE_NETWORK", "cloudflare_edge")
+    monkeypatch.setattr(srv.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 1, "stdout": ""})())
+    srv._warn_if_edge_network_is_alone()
+    assert capsys.readouterr().out == ""
+
+
+def test_a_docker_failure_never_breaks_the_start(monkeypatch, capsys):
+    def boom(*a, **k):
+        raise OSError("docker gone")
+    monkeypatch.setenv("AITELIER_EDGE_NETWORK", "cloudflare_edge")
+    monkeypatch.setattr(srv.subprocess, "run", boom)
+    srv._warn_if_edge_network_is_alone()          # must not raise

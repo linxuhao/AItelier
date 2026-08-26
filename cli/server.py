@@ -266,6 +266,42 @@ def _image_deps_are_stale() -> bool:
         return False          # never block a start on a freshness heuristic
 
 
+
+def _warn_if_edge_network_is_alone() -> None:
+    """The one silent failure the by-name design knowingly accepts.
+
+    Dropping `external: true` is what lets a clean checkout start, but it also
+    means a TYPO'd AITELIER_EDGE_NETWORK is not refused — compose creates a new
+    empty network of that name and everything looks fine: container healthy,
+    127.0.0.1:4444 answering 200, public path dark. That is the exact shape of
+    the 2026-08-25 outage, only reached by a different route.
+
+    The symptom is checkable: for the tunnel to reach us, the connector has to
+    be ON that network. If we are the only container on it, there is nothing to
+    route from. Warn — never fail — because a connector restarting is a
+    legitimate way to be briefly alone, and a start must not hinge on it.
+    """
+    name = os.environ.get("AITELIER_EDGE_NETWORK", "").strip()
+    if not name:
+        return                      # unset: the throwaway network is expected
+    try:
+        res = subprocess.run(
+            ["docker", "network", "inspect", name, "-f",
+             "{{range $k, $v := .Containers}}{{$v.Name}} {{end}}"],
+            capture_output=True, text=True, timeout=10)
+        if res.returncode != 0:
+            return                  # not there yet; compose will make it
+        others = [c for c in res.stdout.split() if c != _COMPOSE_SERVICE]
+        if others:
+            return
+        print(f"Warning: AITELIER_EDGE_NETWORK={name} has no OTHER container "
+              f"on it. If the public URL is dark while localhost answers, "
+              f"that name matched nothing and compose created an empty network — "
+              f"check `docker network ls` for the connector's real name.")
+    except Exception:
+        pass                        # a diagnostic must never break the start
+
+
 def _compose_up():
     """Start (building on first run) the backend container."""
     _ensure_host_dirs()
@@ -282,6 +318,7 @@ def _compose_up():
         raise RuntimeError(
             f"`docker compose up -d {_COMPOSE_SERVICE}` failed (see output above)"
         )
+    _warn_if_edge_network_is_alone()
 
 
 def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:

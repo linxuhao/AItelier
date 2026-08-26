@@ -1453,9 +1453,49 @@ def _load_agent_role_config(role: str,
 
 
 def _resolve_provider(model_name: str, config_path: str = "llm_providers.json"):
-    """Resolve custom provider prefix to api_base + api_key (same as ai_router.py)."""
+    """Resolve an agent_config `model` to (litellm_model, api_base, api_key).
+
+    Accepts an INTERNAL model name (model_routes.json) as well as a concrete
+    `provider/model`. The butler and the condenser are the only LLM call sites
+    in the repo that do NOT go through `AIGateway` — they stream, so they build
+    their own litellm kwargs — which means the routing layer has to be applied
+    here too or it simply is not applied to them at all.
+
+    Missing that is what broke this path: agent_configs/meta_conversation.yaml
+    was swept to internal names (`flash`, `pro`) while this resolver still only
+    understood a `provider/` prefix, so it returned ("pro", None, None) and
+    every butler turn went out as `litellm.acompletion(model="pro")` with no
+    base URL and no key — `BadRequestError: LLM Provider NOT provided`. The
+    condenser failed the same way but silently, because `_summarize_chunk`
+    swallows its exception: a long coding session would simply stop compacting
+    and drift into context overflow.
+
+    No failover here, deliberately: this is a single streamed call, not the
+    multi-turn step `AIGateway` is built around. It takes the first candidate
+    that is not in a spent-quota cooldown, so a dead plan is at least skipped.
+    """
     api_base = None
     api_key = None
+
+    # Internal name -> concrete candidate. Unknown bare names still raise from
+    # `resolve`, which names the route table; that is far better than handing
+    # litellm a model it cannot place.
+    try:
+        from core.ai_router import _endpoint_available
+        from core.model_routes import get_routes
+        root = Path(__file__).resolve().parent.parent
+        candidates = get_routes(str(root / "model_routes.json")).resolve(model_name)
+        model_name = next((c for c in candidates if _endpoint_available(c)),
+                          candidates[0])
+    except Exception:                                    # noqa: BLE001
+        # Includes "not a route and not provider/model": this resolver's
+        # contract has always been to pass an unrecognised name straight to
+        # litellm, which knows plenty of bare model ids of its own. Typos in
+        # the shipped configs are caught by
+        # test_every_llm_entry_point_understands_internal_names, which requires
+        # every declared `model:` to resolve to a real endpoint here.
+        pass
+
     litellm_model = model_name
 
     if os.path.exists(config_path) and "/" in model_name:
@@ -2028,14 +2068,20 @@ class MetaAgent:
             kwargs["api_key"] = self.api_key
         if self.enable_thinking:
             kwargs.pop("temperature", None)
-            if self.thinking_effort:
-                kwargs["reasoning_effort"] = self.thinking_effort
-            provider = self.litellm_model.split("/", 1)[-1] if "/" in self.litellm_model else ""
             extra_body = {}
             if "minimax" in (getattr(self, "_raw_model", "") or ""):
                 extra_body["reasoning_split"] = True
             else:
                 extra_body["thinking"] = {"type": "enabled"}
+            if self.thinking_effort:
+                # extra_body, never top-level — see core/ai_router.py
+                # `_build_kwargs` for the measurements. litellm drops the LEVEL
+                # for DeepSeek and raises UnsupportedParamsError for any model
+                # behind the openai/ shim that it does not recognise. Here
+                # `drop_params = True` turns that raise into a SILENT drop,
+                # which is the worse of the two outcomes: the effort simply
+                # stops applying and nothing says so.
+                extra_body["reasoning_effort"] = self.thinking_effort
             kwargs["extra_body"] = extra_body
 
         # Retry only the handshake: transient provider errors (rate-limit,

@@ -452,3 +452,65 @@ def test_usage_of_a_concrete_model_carries_no_route_noise(wiring, monkeypatch):
     assert g.last_usage["served_by"] == "alpha/m-1"
     assert "model_route" not in g.last_usage
     assert "failed_over_from" not in g.last_usage
+
+
+def test_every_llm_entry_point_understands_internal_names():
+    """Both resolvers, not just the one everybody remembers.
+
+    `AIGateway` is the obvious LLM entry point, but `core/meta_agent.py` has a
+    SECOND one: the butler and the condenser stream, so they build their own
+    litellm kwargs through `_resolve_provider` and never touch the gateway.
+    When agent_configs were swept to internal names that resolver still only
+    understood a `provider/` prefix, so it returned ("pro", None, None) and
+    every butler turn went out as `litellm.acompletion(model="pro")` with no
+    base URL and no key. The condenser failed identically but silently, because
+    `_summarize_chunk` swallows its exception — a long coding session would
+    just stop compacting.
+
+    Shipped to main and caught in review, not by this suite. So: every `model:`
+    the repo declares must resolve through EVERY entry point.
+    """
+    import pathlib
+
+    import yaml
+
+    from core.meta_agent import _resolve_provider
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    model_routes.reset_cache()
+    sentinels = {"host", "default", ""}
+    checked = 0
+    for f in sorted((root / "agent_configs").glob("*.yaml")):
+        for role, rc in (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).items():
+            if not isinstance(rc, dict) or rc.get("model") in sentinels:
+                continue
+            name = rc.get("model")
+            if name is None:
+                continue
+            checked += 1
+            litellm_model, api_base, api_key = _resolve_provider(
+                name, config_path=str(root / "llm_providers.json"))
+            assert "/" in litellm_model, (
+                f"{f.name}:{role} model={name!r} -> {litellm_model!r}: the "
+                f"butler would send this to litellm unqualified")
+            assert api_base, (
+                f"{f.name}:{role} model={name!r} resolved with no api_base — "
+                f"the butler would call it with no endpoint")
+    assert checked > 30, "expected the real role files, not an empty scan"
+    model_routes.reset_cache()
+
+
+def test_the_route_table_is_found_from_any_working_directory(tmp_path, monkeypatch):
+    """CWD-relative was survivable while models were concrete `provider/model`
+    strings — a missing table degraded to a passthrough. With internal names a
+    miss raises and every agent dies, so the path must not depend on where the
+    process was launched."""
+    from core.ai_router import AIGateway
+
+    monkeypatch.chdir(tmp_path)          # nowhere near the repo root
+    model_routes.reset_cache()
+    try:
+        g = AIGateway("flash")
+        assert g._candidates and "/" in g._candidates[0]
+    finally:
+        model_routes.reset_cache()

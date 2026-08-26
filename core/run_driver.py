@@ -75,29 +75,53 @@ def restore_retry_budget(sf, run_id: str) -> dict | None:
     Live on 2026-08-26: 5_review sat failed at retry_count 3/3 after DeepSeek's
     5-hour quota ran out. The quota reopened; the run could not.
 
+    Resets BOTH counters, because skillflow spends one budget across the two
+    (core.py: ``total_retries = retry_count + validation_retry_count``). Zeroing
+    only ``retry_count`` reproduces the very bug this exists to fix for the
+    commonest way a step reaches 'failed': validation exhaustion leaves
+    retry_count=0 / validation_retry_count=max, so the "restored" step still has
+    total_retries == max_allowed and dies on its first validation failure.
+
+    Clears the newest failed instance of EACH failed step_id. Not one row
+    overall (a fan-out can strand several distinct steps, and restoring one of
+    them leaves the run blocked on the others) and not every failed row either
+    (a loop re-opens a step as a NEW instance, so an older failed row for the
+    same step_id is history — resurrecting it would put a stale attempt back in
+    the queue). And drops ``_validation_error`` from the inputs, or the resumed
+    attempt is re-prompted with the stale complaint that failed it.
+
     Called AFTER reactivate_run so it wins on current_node.
     """
-    row = sf._conn.execute(
-        "SELECT id, step_id, retry_count, max_retries FROM skillflow_steps "
-        "WHERE run_id = ? AND status = 'failed' ORDER BY id DESC LIMIT 1",
-        (run_id,),
-    ).fetchone()
-    if not row:
+    rows = sf._conn.execute(
+        "SELECT id, step_id, retry_count, validation_retry_count, max_retries "
+        "FROM skillflow_steps WHERE run_id = ? AND status = 'failed' "
+        "AND id IN (SELECT MAX(id) FROM skillflow_steps WHERE run_id = ? "
+        "AND status = 'failed' GROUP BY step_id) ORDER BY id DESC",
+        (run_id, run_id),
+    ).fetchall()
+    if not rows:
         return None
     with sf._conn:
-        sf._conn.execute(
-            "UPDATE skillflow_steps SET status = 'pending', retry_count = 0, "
-            "version = version + 1, claimed_at = NULL, claimed_by = NULL, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (row["id"],),
-        )
+        for r in rows:
+            sf._conn.execute(
+                "UPDATE skillflow_steps SET status = 'pending', retry_count = 0, "
+                "validation_retry_count = 0, version = version + 1, "
+                "claimed_at = NULL, claimed_by = NULL, "
+                "inputs_json = json_remove(COALESCE(inputs_json, '{}'), "
+                "'$._validation_error'), "
+                "updated_at = datetime('now') WHERE id = ?",
+                (r["id"],),
+            )
         sf._conn.execute(
             "UPDATE skillflow_runs SET current_node = ?, "
             "updated_at = datetime('now') WHERE id = ?",
-            (row["step_id"], run_id),
+            (rows[0]["step_id"], run_id),
         )
+    row = rows[0]
     return {"step": row["step_id"], "instance": row["id"],
             "was_retry_count": row["retry_count"],
+            "was_validation_retry_count": row["validation_retry_count"],
+            "also_restored": [r["step_id"] for r in rows[1:]],
             "max_retries": row["max_retries"]}
 
 

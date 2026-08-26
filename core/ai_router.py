@@ -114,6 +114,9 @@ def _retry_llm_error(exc: BaseException) -> bool:
 _ENDPOINT_COOLDOWN: dict[str, float] = {}
 _COOLDOWN_MAX_S = 6 * 3600      # never trust one report further than this
 _COOLDOWN_FALLBACK_S = 300      # provider named no reset instant
+# In-place retries of a burst 429 before it is allowed to cost us the preferred
+# endpoint. tenacity gives 3 attempts, so 2 leaves one for the failover itself.
+_BURST_TOLERANCE = 2
 
 
 def endpoint_cooldowns() -> dict[str, float]:
@@ -276,6 +279,7 @@ class AIGateway:
         self.internal_model = model_name
         self._candidates = get_routes(routes_path).resolve(model_name)
         self._failovers: list[tuple[str, str]] = []   # (from_model, why)
+        self._burst_hits = 0
         # Start at the first candidate whose usage window is not already known
         # to be spent, so a fresh gateway does not re-discover the same
         # exhausted plan once per step.
@@ -304,9 +308,29 @@ class AIGateway:
         provider is the authority on its own quota — let it answer.
         """
         for i in range(start, len(self._candidates)):
-            if _endpoint_available(self._candidates[i]):
+            if (_endpoint_available(self._candidates[i])
+                    and self._registered(self._candidates[i])):
                 return i
         return start
+
+    def _registered(self, candidate: str) -> bool:
+        """Is this candidate's provider actually in llm_providers.json?
+
+        An unregistered one is handed to litellm as a bare `provider/model` it
+        cannot place, which raises BadRequestError — deliberately NOT a failover
+        error, so the gateway dies on it with healthy candidates still queued
+        behind. `godot_vision._judges` already skips these with a warning on the
+        reasoning that a gate blinded by a typo in a FALLBACK entry is worse
+        than one that says so; the same holds here. Route tables are
+        user-editable and ModelRoutes validates only the `provider/model` shape,
+        never that the provider exists.
+        """
+        provider = candidate.split("/", 1)[0]
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                return provider in json.load(f)
+        except (OSError, ValueError):
+            return True     # no registry to check against — let it try
 
     def _bind(self, concrete_model: str) -> None:
         """Point this gateway at ONE concrete provider/model.
@@ -543,6 +567,21 @@ class AIGateway:
         5-hour window will reject every call until the clock says otherwise.
         """
         failed = self.active_model
+
+        # A BURST 429 clears in seconds; a spent window does not. Both arrive as
+        # RateLimitError and only the prose separates them. Failing over on a
+        # burst is expensive twice: the binding is sticky for the whole step, so
+        # every remaining turn abandons the per-provider prefix cache (26:1
+        # prefill:decode at an 89.4% hit rate), and on the glm / smart / vision
+        # routes the next candidate is a DIFFERENT MODEL — a transient blip
+        # would silently downgrade the step's judge. So retry in place first and
+        # only fail over if the throttle persists; tenacity owns the backoff
+        # (`_retry_llm_error` deliberately keeps burst 429s retryable).
+        if (isinstance(exc, litellm.exceptions.RateLimitError)
+                and not is_quota_exhausted(exc)):
+            self._burst_hits += 1
+            if self._burst_hits < _BURST_TOLERANCE:
+                raise exc
         held = ""
         if is_quota_exhausted(exc):
             import time as _t

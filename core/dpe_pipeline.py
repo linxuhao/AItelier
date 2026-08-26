@@ -1956,6 +1956,24 @@ class PipelineEngine:
                         tool_choice=tool_choice,
                     )
                 except Exception as e:
+                    # A SPENT QUOTA is not feedback for the agent — it is an
+                    # infrastructure condition, and the only correct response is
+                    # to stop asking. Swallowing it here is what defeated the
+                    # scheduler's quota hold: every DPE role is
+                    # native_tool_calling, so every LLM call arrives at this
+                    # handler, the RateLimitError became prose, `feedback` was
+                    # overwritten three lines later by the "No output produced"
+                    # message, and the loop re-called the spent endpoint once
+                    # per attempt until MaxRetriesExceeded — which the scheduler
+                    # catches BEFORE its quota check, and which carries none of
+                    # the provider's reset-time prose. A byte-for-byte replay of
+                    # the 2026-08-26 outage the hold was written to stop.
+                    #
+                    # With routing in place this only fires once EVERY candidate
+                    # for the model is spent, so it is genuinely the last resort.
+                    from core.llm_quota import is_quota_exhausted
+                    if is_quota_exhausted(e):
+                        raise
                     self._emit("native_error", {"error": str(e)[:200]})
                     feedback = f"Native tool calling error: {e}. Response truncated."
                     break

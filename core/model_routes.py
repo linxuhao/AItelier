@@ -24,7 +24,13 @@ import json
 import os
 from pathlib import Path
 
-DEFAULT_ROUTES_FILE = "model_routes.json"
+# Absolute, not CWD-relative. A miss used to degrade silently (a concrete
+# `provider/model` still worked); now that agent_configs carry INTERNAL names, a
+# miss makes `resolve("flash")` raise and every agent dies — including the
+# `host`/`default` sentinel, whose target defaults to the bare "flash". Docker
+# (WORKDIR /app) and root-run pytest both happen to be fine; anything launched
+# from another directory was not.
+DEFAULT_ROUTES_FILE = str(Path(__file__).resolve().parent.parent / "model_routes.json")
 
 
 class ModelRoutes:

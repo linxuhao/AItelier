@@ -193,3 +193,72 @@ def test_coalescing_never_swallows_a_real_outcome(monkeypatch):
         sched.tick_log("p", outcome)
         sched.tick_log("p", outcome)
     assert len(written) == 8
+
+
+class TestQuotaEscapesTheAgentLoop:
+    """The hold is only reachable if the error actually leaves the pipeline.
+
+    Every DPE role is `native_tool_calling: true`, so every LLM call lands in
+    `_run_native_step`'s exception handler. That handler turned any exception
+    into agent feedback and broke the turn loop, so the RateLimitError never
+    reached the scheduler; `feedback` was then overwritten by the "No output
+    produced" message and the loop re-called the spent endpoint once per
+    attempt until MaxRetriesExceeded — which the scheduler catches BEFORE its
+    quota check and which carries no reset-time prose. The hold existed and
+    could not fire on the one path that mattered.
+    """
+
+    def test_a_spent_quota_is_not_swallowed_as_agent_feedback(self):
+        import inspect
+
+        from core import dpe_pipeline
+
+        src = inspect.getsource(dpe_pipeline.PipelineEngine._run_native_step)
+        handler = src[src.index("except Exception as e:"):]
+        raise_pos = handler.index("raise")
+        feedback_pos = handler.index("Native tool calling error")
+        assert raise_pos < feedback_pos, (
+            "the quota re-raise must come BEFORE the generic feedback path, or "
+            "the error is converted to prose and the hold can never fire")
+        assert "is_quota_exhausted" in handler
+
+    def test_the_predicate_agrees_on_a_real_provider_message(self):
+        from core.llm_quota import is_quota_exhausted
+
+        spent = Exception(
+            "litellm.RateLimitError: RateLimitError: OpenAIException - You have "
+            "exceeded the 5-hour usage quota. It will reset at "
+            "2026-08-26 09:18:28 +0800 CST.")
+        burst = Exception("RateLimitError: Too many requests, slow down")
+        assert is_quota_exhausted(spent)
+        assert not is_quota_exhausted(burst), (
+            "a burst 429 clears in seconds and must stay ordinary feedback")
+
+
+def test_the_hold_ends_when_the_FIRST_plan_reopens(monkeypatch):
+    """The error that escapes is the LAST candidate's, so its reset is the
+    latest one. Parking on it idles past the moment the first plan came back.
+
+    flash = ark -> qwen -> deepseek, spent at 03:00 / 05:00 / 09:00. Only
+    deepseek's message propagates; holding on it wastes six hours during which
+    ark was already serving.
+    """
+    from core import ai_router
+
+    now = 1_000_000.0
+    monkeypatch.setattr(sched._time, "time", lambda: now)
+    monkeypatch.setattr(sched, "_QUOTA_HOLD_UNTIL", 0.0)
+    ai_router.reset_endpoint_cooldowns()
+    try:
+        monkeypatch.setattr(ai_router, "_ENDPOINT_COOLDOWN", {
+            "ark/deepseek-v4-flash": now + 3600,        # first to reopen
+            "qwen/deepseek-v4-flash-0731": now + 7200,
+            "deepseek/deepseek-v4-flash": now + 21600,  # the one that escaped
+        })
+        sched._note_quota_exhausted("usage quota exceeded, no time given")
+        held = sched._quota_hold_remaining()
+    finally:
+        ai_router.reset_endpoint_cooldowns()
+    assert 0 < held <= 3600 + 1, (
+        f"held {held:.0f}s — must end when the earliest endpoint reopens, not "
+        f"when the last one does")

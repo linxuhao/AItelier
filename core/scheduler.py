@@ -67,6 +67,21 @@ def _note_quota_exhausted(err) -> float:
     # Clamp: a past instant means the window already reopened (nothing to hold),
     # a wild future one is not trusted further than the cap.
     until = min(until, _time.time() + _QUOTA_HOLD_MAX)
+
+    # The escaping error is the LAST candidate's — the pay-as-you-go tail of the
+    # route — so its reset instant is the latest of the bunch. Parking on it
+    # idles past the moment the FIRST plan reopens, which is the whole failure
+    # this feature exists to avoid, merely postponed. The gateway already tracks
+    # every spent endpoint's reopening (`endpoint_cooldowns`), so the correct
+    # hold is the earliest of them: the instant work becomes possible again.
+    try:
+        from core.ai_router import endpoint_cooldowns
+        cooling = endpoint_cooldowns()
+        if cooling:
+            until = min(until, min(cooling.values()))
+    except Exception:                                    # noqa: BLE001
+        pass    # no gateway state to consult: the error's own instant stands
+
     if until <= _time.time():
         return 0.0
     _QUOTA_HOLD_UNTIL = max(_QUOTA_HOLD_UNTIL, until)

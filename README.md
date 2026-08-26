@@ -35,7 +35,7 @@ AItelier is meant to be used three ways — the first is the center of gravity:
 
 1. **Give your agent a workflow engine (MCP)** — ✅ *works today.* Point any MCP-speaking agent at the `/mcp` endpoint and it gets the whole surface as native tools: the full **generate → run → observe → fix** loop, checkpoint answering, the trace, model routing, and pipeline export/import. Your agent delegates the bulk work to deterministic pipelines on cheap models and only decides at the checkpoints (see [Use AItelier from another agent](#use-aitelier-from-another-agent-mcp)).
 2. **Build your own auditable workflow — just describe it** — ✅ *works today.* Pipelines aren't limited to software. **Describe a workflow in chat** (or over MCP) and AItelier's grounded generator turns it into a real SkillFlow pipeline — provisioning any missing tools, wiring and gating the graph, and registering it to run by name (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)). You can still hand-author YAML directly; a no-code *visual* builder and managed workspaces are on the [roadmap](#roadmap).
-3. **Run the flagship software pipeline (DPE) standalone** — ✅ *works today.* Describe a project; it researches, architects, plans, implements, and verifies it end-to-end, with human checkpoints and a complete trace. (That's the demos below — and the proof that the engine holds up under the hardest workload.)
+3. **Run the flagship software pipeline (DPE) standalone** — ✅ *works today.* Describe a project; it researches, architects, plans, implements, and verifies it end-to-end, with human checkpoints and a complete trace. (That's [See it in action](#see-it-in-action) below — and the proof that the engine holds up under the hardest workload.)
 
 **Why software-delivery is the wedge _and_ the keystone.** We lead with autonomous software-building because it's the hardest possible proof the engine works — and because **an AI workflow *is* software** (a pipeline is a graph plus tools plus templates). The same deterministic factory that builds software is what will let you *trust a workflow you build on AItelier* — building a new auditable workflow is itself a software-engineering task. A trusted software pipeline builds trusted workflows.
 
@@ -61,11 +61,22 @@ Honest, current state — so nothing here reads as more finished than it is.
 
 **Where the company is:** the engine and the flagship pipeline are built and tested; there are **no users, revenue, or managed platform yet.** This is a working foundation, not a finished product.
 
-## Demos
+## See it in action
 
-> These are recordings; a **live, browsable deployment** is linked in [See it in action](#see-it-in-action) below.
+**Browse a live deployment right now: [aitelier.linxuhao.app](https://aitelier.linxuhao.app)** (public read access). Open any run and watch the pipeline graph with the **current step highlighted and its trace streaming live beside it** — for example, [a real game-feature run](https://aitelier.linxuhao.app/#/projects/jinyong-hud). Reads are open to anyone; writes require the Cloudflare Access allowlist ([how that split works](#run-with-docker--cloudflare)).
 
-The flagship DPE pipeline planning, building, and reviewing a real e-commerce app — a customer storefront **and** an admin panel — end to end: **66 pipeline steps, 0 failures, entirely on cheap non-frontier models** (DeepSeek — no GPT/Claude/Gemini in the loop). The trace demo below is from this run. *Separately*, when a bug report was later fed back in, AItelier diagnosed and fixed its own code (see below).
+A typical run with the flagship DPE pipeline:
+
+1. **Describe what you want.** Tell the butler your goal. It picks one of two paths automatically:
+   - **Path A — Pipeline Offload** (fast): for small bug fixes or features (~5 files) on existing projects, offloads directly to a subagent/fix_tests/investigate pipeline — no requirements conversation needed.
+   - **Path B — DPE** (safe default): for new projects and non-trivial changes, asks scoping questions, drafts a project brief, and — once you approve — starts the full research → architect → plan → build pipeline.
+2. **Watch it work, with checkpoints.** Research → Architect → PM → per-task Plan/Implement/Review → Final Verification. It **pauses at review checkpoints** so you can **approve** or **reject with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
+3. **Inspect the trace.** Every prompt, response, and tool call is in an append-only audit log — answer "why did it do that?" for any step, after the fact.
+4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.
+
+### Recorded demo: the e-commerce run
+
+The flagship DPE pipeline planning, building, and reviewing a real e-commerce app — a customer storefront **and** an admin panel — end to end: **66 pipeline steps, 0 failures, entirely on cheap non-frontier models** (DeepSeek — no GPT/Claude/Gemini in the loop). *Separately*, when a bug report was later fed back in, AItelier diagnosed and fixed its own code (see below).
 
 **The generated app — customer storefront & admin panel** (from a single goal, pure Python standard library)
 
@@ -89,19 +100,6 @@ The flagship DPE pipeline planning, building, and reviewing a real e-commerce ap
 - The intelligence is in the **orchestration**, not the model bill — the whole pipeline runs on DeepSeek `v4-flash` / `v4-pro`.
 
 > Honest caveat: the cart bug above slipped past the pipeline's verifier because it reviews code *statically* and doesn't yet run the app — see [Project status](#project-status) and [Roadmap](#roadmap). Finding it required running the app by hand; AItelier then fixed it.
-
-## See it in action
-
-**Skip the recordings — browse a live deployment: [aitelier.linxuhao.app](https://aitelier.linxuhao.app)** (public read access). Open any run and you get what the GIFs can't show: the pipeline graph with the **current step highlighted and its trace streaming live beside it** — for example, [a real game-feature run](https://aitelier.linxuhao.app/#/projects/jinyong-hud). Reads are open to anyone; writes require the Cloudflare Access allowlist ([how that split works](#run-with-docker--cloudflare)).
-
-A typical run with the flagship DPE pipeline:
-
-1. **Describe what you want.** Tell the butler your goal. It picks one of two paths automatically:
-   - **Path A — Pipeline Offload** (fast): for small bug fixes or features (~5 files) on existing projects, offloads directly to a subagent/fix_tests/investigate pipeline — no requirements conversation needed.
-   - **Path B — DPE** (safe default): for new projects and non-trivial changes, asks scoping questions, drafts a project brief, and — once you approve — starts the full research → architect → plan → build pipeline.
-2. **Watch it work, with checkpoints.** Research → Architect → PM → per-task Plan/Implement/Review → Final Verification. It **pauses at review checkpoints** so you can **approve** or **reject with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
-3. **Inspect the trace.** Every prompt, response, and tool call is in an append-only audit log — answer "why did it do that?" for any step, after the fact.
-4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.
 
 ## Install
 

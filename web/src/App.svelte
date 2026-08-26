@@ -60,12 +60,16 @@
         canWrite: user.can_write,
         email: user.email,
         permissionResolved: true,
+        signinUrl: user.signin_url || '',
+        authError: user.auth_error || null,
       });
     } catch {
       authStore.set({
         canWrite: false,
         email: null,
         permissionResolved: true,
+        signinUrl: '',
+        authError: null,
       });
     }
 

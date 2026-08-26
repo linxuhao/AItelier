@@ -5,6 +5,14 @@ export interface AuthState {
   email: string | null;
   permissionResolved: boolean;
   lang: string | null;
+  /** Where to sign in, as the DEPLOYMENT declares it. Empty string when this
+   *  deployment has no sign-in route — the UI must then offer none, rather
+   *  than a link to an Access application that may not exist. */
+  signinUrl: string;
+  /** Set when a credential was presented and refused, which is a different
+   *  state from having none: the reader did everything right and is still a
+   *  reader, and only the server can tell them so. */
+  authError: string | null;
 }
 
 /** Default: fail-closed (canWrite=false) until /api/me resolves. */
@@ -13,6 +21,8 @@ export const authStore = writable<AuthState>({
   email: null,
   permissionResolved: false,
   lang: null,
+  signinUrl: '',
+  authError: null,
 });
 
 /**

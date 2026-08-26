@@ -45,6 +45,20 @@
       {/if}
     </ul>
     <ul>
+      {#if $authStore.permissionResolved && !$authStore.canWrite && $authStore.signinUrl}
+        <!-- Sign-in is offered ONLY when the deployment declares where to go.
+             Cloudflare Access issues a credential for an application that
+             exists; with none, a sign-in button is a button to nowhere, and a
+             reader clicking it learns nothing. A full page load, not a router
+             push: the destination is Cloudflare, not a route in this app. -->
+        <li>
+          <a class="signin-link" href={$authStore.signinUrl}>
+            {$authStore.authError ? t('appbar.signinAgain') : t('appbar.signin')}
+          </a>
+        </li>
+      {:else if $authStore.email}
+        <li><span class="signed-in" title={$authStore.email}>{$authStore.email}</span></li>
+      {/if}
       <li>
         <!-- The mark is inlined rather than fetched: the page must stay
              self-contained, and a remote icon is one more thing that can fail
@@ -129,6 +143,24 @@
     border-radius: 1rem;
     min-width: 1rem;
     text-align: center;
+  }
+  .signin-link {
+    font-size: 0.875rem;
+    padding: 0.15rem 0.6rem;
+    border: 1px solid var(--pico-primary, #0669c1);
+    border-radius: 0.3rem;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .signed-in {
+    font-size: 0.8rem;
+    color: var(--pico-muted-color, #888);
+    max-width: 14ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-block;
+    vertical-align: middle;
   }
   .gh-link {
     display: inline-flex;

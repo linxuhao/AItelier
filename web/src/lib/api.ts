@@ -535,17 +535,22 @@ export function whoami(): Promise<{
   email: string;
   can_write: boolean;
   gate_enabled: boolean;
+  /** Where this deployment sends a reader to sign in. Empty = nowhere to go. */
+  signin_url?: string;
+  /** 'credential_rejected' when a credential was presented and refused. */
+  auth_error?: string | null;
 }> {
   return _get('/api/me');
 }
 
-/** Client-side write permission toggle (no network call). */
+/** Client-side write permission toggle (no network call).
+ *
+ *  `update`, not `set`: a whole-object set has to restate every field, and the
+ *  ones it forgot were silently wiped — `lang` already, and a forgotten
+ *  `signinUrl` would make the sign-in button disappear the first time write
+ *  permission was toggled. */
 export function setCanWrite(value: boolean): void {
-  authStore.set({
-    canWrite: value,
-    email: get(authStore).email,
-    permissionResolved: true,
-  });
+  authStore.update((prev) => ({ ...prev, canWrite: value, permissionResolved: true }));
 }
 
 // ═════════════════════════════════════════════════════════════════════

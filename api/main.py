@@ -19,7 +19,7 @@ if _env_file.exists():
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from core import cf_access
 from api import _read_cache
@@ -332,7 +332,17 @@ def health_check():
 
 @app.get("/api/me")
 def whoami(request: Request):
-    """Current identity + write permission (for the web UI to reflect state)."""
+    """Current identity + write permission (for the web UI to reflect state).
+
+    Also reports where to sign in and whether a credential was REJECTED, because
+    the two failures a reader hits look identical from the UI otherwise: "I have
+    no credential" and "I have one the origin refuses" both render as a
+    read-only session. The second is the one that actually happens — an Access
+    application re-created with a fresh AUD while ``AITELIER_CF_AUD`` still names
+    the old one authenticates the browser and is then rejected here, silently.
+    """
+    token = (request.headers.get("Cf-Access-Jwt-Assertion")
+             or request.cookies.get("CF_Authorization", ""))
     email = cf_access.email_from_request_headers(request.headers, request.cookies)
     if email:
         from api.dependencies import db_instance
@@ -341,7 +351,41 @@ def whoami(request: Request):
         "email": email,
         "can_write": authz.request_can_write(request),
         "gate_enabled": authz.gate_enabled(),
+        # Empty unless the deployment declares one — a sign-in button pointing at
+        # an Access application that does not exist is a button to nowhere.
+        "signin_url": _os.getenv("AITELIER_SIGNIN_URL", "").strip(),
+        # Carried a credential, got nobody: bad audience, wrong issuer, expired,
+        # or an org that no longer signs it. Never says which — that is for the
+        # operator's logs, not for an unauthenticated caller.
+        "auth_error": "credential_rejected" if (token and not email) else None,
     }
+
+
+@app.get("/signin")
+def signin(request: Request):
+    """Where the Cloudflare Access round trip lands, and bounces home from.
+
+    The public site has no Access application in front of it — reads are open
+    to anyone. Sign-in works by protecting THIS path alone with its own
+    application: Cloudflare authenticates the visitor here, sets its
+    `CF_Authorization` cookie for the host, and forwards the request to us.
+    Everything else on the origin stays public.
+
+    So this endpoint does almost nothing on purpose. It records the identity
+    (the same upsert `/api/me` does) and sends the browser to the app, which
+    re-reads `/api/me` on boot and renders as a writer. It redirects even when
+    verification FAILS — landing on a read-only UI that says "Sign in again"
+    beats a bare error page, and `/api/me` reports the refusal.
+
+    Unprotected, this is a plain redirect to `/` and grants nothing: authority
+    comes from the verified JWT, never from having reached this path.
+    """
+    email = cf_access.email_from_request_headers(request.headers, request.cookies)
+    if email:
+        from api.dependencies import db_instance
+        db_instance.upsert_user(email)
+    # 303: the browser must GET the destination, whatever method got here.
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/api/events/stream")

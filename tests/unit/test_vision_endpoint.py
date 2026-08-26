@@ -29,8 +29,6 @@ ROOT = Path(__file__).resolve().parents[2]
     http.client.IncompleteRead(b"x"),
     http.client.RemoteDisconnected("closed"),
     ConnectionResetError("reset by peer"),
-    TimeoutError("read timed out"),
-    socket.timeout("timed out"),
     urllib.error.HTTPError("u", 503, "unavailable", {}, None),
     urllib.error.HTTPError("u", 500, "server error", {}, None),
     urllib.error.URLError(ConnectionResetError("reset")),
@@ -43,6 +41,13 @@ def test_mid_flight_breaks_are_retryable(exc):
     urllib.error.HTTPError("u", 404, "no such model", {}, None),
     urllib.error.HTTPError("u", 401, "bad key", {}, None),
     urllib.error.URLError(ConnectionRefusedError("refused")),
+    # A timeout is temporary UNAVAILABILITY, the same class as refused — and
+    # retrying it costs a full 300s per attempt against a judge that is not
+    # answering, ~15 min per batch, re-paid for every scenario. Fall through to
+    # the next judge instead; that is what the route is for.
+    urllib.error.URLError(TimeoutError("timed out")),
+    TimeoutError("read timed out"),
+    socket.timeout("timed out"),
     ValueError("unparseable"),
 ])
 def test_deterministic_failures_are_not_retryable(exc):

@@ -116,3 +116,35 @@ def test_a_step_entry_carries_its_source_so_read_can_find_it():
     """A step-source file lives in the PROMOTED dir, which a bare read() misses."""
     out = clip("Step 5 — verdict.md", _file("verdict.md", MAX_CONTEXT_LINES + 10))
     assert "source='step:5'" in out
+
+
+def test_extensionless_bundle_members_are_visible_to_the_manifest():
+    """Dockerfile / LICENSE / README are exactly what a repository bundle holds.
+
+    Requiring an extension folded their content into the PRECEDING file's span
+    — inflating its reported length and its whole/cut verdict — and left the
+    file itself out of the manifest entirely, reproducing the "a file the agent
+    never heard of" failure the manifest exists to prevent.
+    """
+    from core.prompt_assembler import _FILE_HEADER_RE
+
+    for header in ("### Dockerfile", "### LICENSE", "### README",
+                   "### .gitignore", "### Makefile",
+                   "### design/40_ux_backlog.md", "### scripts/autoload/gm.gd"):
+        assert _FILE_HEADER_RE.match(header), header
+
+
+def test_prose_headings_are_not_read_as_file_boundaries():
+    """A false boundary splits a real file's span and invents a manifest row.
+
+    Single-token rules out English prose ("### API design"); ASCII-only rules
+    out the Chinese section headings these very design docs use.
+    """
+    from core.prompt_assembler import _FILE_HEADER_RE
+
+    for header in ("### API design", "### 记录", "### 队列", "### a b c",
+                   "### Why six layers",
+                   # a dotted token whose last segment is numeric is a version,
+                   # not a filename — the one thing the original pattern got right
+                   "### v1.2", "### 1.5.42"):
+        assert not _FILE_HEADER_RE.match(header), header

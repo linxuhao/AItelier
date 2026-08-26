@@ -1452,7 +1452,7 @@ def _load_agent_role_config(role: str,
     return {}
 
 
-def _resolve_provider(model_name: str, config_path: str = "llm_providers.json"):
+def _resolve_provider(model_name: str, config_path: str | None = None):
     """Resolve an agent_config `model` to (litellm_model, api_base, api_key).
 
     Accepts an INTERNAL model name (model_routes.json) as well as a concrete
@@ -1476,15 +1476,20 @@ def _resolve_provider(model_name: str, config_path: str = "llm_providers.json"):
     """
     api_base = None
     api_key = None
+    if config_path is None:
+        try:
+            from core.model_routes import config_or_example
+            config_path = config_or_example("llm_providers.json")
+        except Exception:                                # noqa: BLE001
+            config_path = "llm_providers.json"
 
     # Internal name -> concrete candidate. Unknown bare names still raise from
     # `resolve`, which names the route table; that is far better than handing
     # litellm a model it cannot place.
     try:
         from core.ai_router import _endpoint_available
-        from core.model_routes import get_routes
-        root = Path(__file__).resolve().parent.parent
-        candidates = get_routes(str(root / "model_routes.json")).resolve(model_name)
+        from core.model_routes import config_or_example, get_routes
+        candidates = get_routes(config_or_example("model_routes.json")).resolve(model_name)
         model_name = next((c for c in candidates if _endpoint_available(c)),
                           candidates[0])
     except Exception:                                    # noqa: BLE001

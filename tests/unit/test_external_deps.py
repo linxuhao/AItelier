@@ -12,6 +12,8 @@ import pytest
 
 from core import external_deps as ed
 
+from core.model_routes import config_or_example as _cfg
+
 ROOT = Path(__file__).resolve().parents[2]
 DOC = ROOT / "docs" / "external-dependencies.md"
 
@@ -94,8 +96,10 @@ class TestProviderAgnostic:
     def test_every_registered_provider_key_resolves(self):
         import json
         providers = json.loads(
-            (ROOT / "llm_providers.json").read_text(encoding="utf-8"))
+            Path(_cfg("llm_providers.json")).read_text(encoding="utf-8"))
         for name, cfg in providers.items():
+            if name.startswith("_"):
+                continue        # comment block, not a provider
             key = cfg["api_key_env"]
             dep = ed.resolve(key)
             assert dep is not None, f"{name}: {key} produces no message"
@@ -106,7 +110,7 @@ class TestProviderAgnostic:
         """The whole point: nothing here enumerates vendors, so a provider
         someone adds tomorrow is described exactly like the shipped ones."""
         import json
-        reg = ROOT / "llm_providers.json"
+        reg = Path(_cfg("llm_providers.json"))
         original = reg.read_text(encoding="utf-8")
         data = json.loads(original)
         data["acme"] = {"base_url": "https://api.acme.test/v1",
@@ -233,3 +237,24 @@ class TestTheReadmeMatchesTheShippedConfigs:
         quick = readme[readme.index("## Quick Start"):readme.index("## Architecture")]
         assert "add DEEPSEEK_API_KEY to .env" not in quick
         assert "aitelier-secrets" in quick
+
+
+def test_a_commented_provider_registry_is_still_readable():
+    """llm_providers.json is hand-edited deployment config and the shipped
+    example leads with a `_comment` block. Iterating that as a provider raised
+    `AttributeError: 'list' object has no attribute 'get'` — visible only on a
+    checkout with no real registry, i.e. exactly a fresh clone."""
+    import json
+
+    from core import external_deps as ed
+
+    reg = Path(_cfg("llm_providers.json"))
+    original = reg.read_text(encoding="utf-8")
+    data = json.loads(original)
+    data["_comment"] = ["a comment", "spanning lines"]
+    try:
+        reg.write_text(json.dumps(data), encoding="utf-8")
+        out = ed.missing("SOME_FUTURE_KEY")          # iterates the registry
+    finally:
+        reg.write_text(original, encoding="utf-8")
+    assert "SOME_FUTURE_KEY" in out

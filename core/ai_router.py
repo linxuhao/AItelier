@@ -258,7 +258,7 @@ class AIGateway:
     拦截本地 JSON 配置中的自定义 Provider，并自动降级为 OpenAI 兼容协议发起请求。
     """
 
-    def __init__(self, model_name: str, config_path: str = "llm_providers.json",
+    def __init__(self, model_name: str, config_path: str | None = None,
                  enable_thinking: bool = False, thinking_effort: str | None = None,
                  temperature: float = 0.2, max_output_tokens: int = 8192,
                  routes_path: str | None = None):
@@ -269,7 +269,8 @@ class AIGateway:
         self.max_output_tokens = max_output_tokens
         # Phase 0 cache telemetry: usage of the most recent completion.
         self.last_usage: dict = {}
-        self._config_path = config_path
+        from core.model_routes import config_or_example
+        self._config_path = config_path or config_or_example("llm_providers.json")
 
         # An agent_config may name an INTERNAL model ("flash"); resolve it to
         # the ordered list of concrete provider/model endpoints that can serve

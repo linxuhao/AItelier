@@ -18,12 +18,6 @@ from core.workspace_manager import WorkspaceManager, DPE_GRAPH_NAME
 from core.prompt_assembler import (PromptAssembler, build_language_instruction,
                                    is_mutation_tool)
 
-# F2 (default ON): the stable design docs move into the shared system preamble
-# (cached cross-step) and the growing-code-repo dump is dropped from the user
-# message (agents read code on demand). Validated via a full DPE run (86.9%
-# cache-hit ratio, quality preserved). Disable with AITELIER_HOIST_DESIGN=0.
-HOIST_DESIGN = os.getenv("AITELIER_HOIST_DESIGN", "1") == "1"
-
 
 def _repair_json_content(raw: str) -> str | None:
     """Attempt to repair common LLM JSON malformations."""
@@ -1787,15 +1781,26 @@ class PipelineEngine:
         # step at DEFAULT_MAX_TOOL_TURNS regardless of its configured budget.
         max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(agent_config_name)
 
-        # Config-driven shared preamble (F1/F2). A config opts in via
+        # Config-driven shared preamble. A config opts in via
         # x-aitelier.preamble_steps; only then is project-global stable content
-        # hoisted into a byte-identical system preamble. Empirically the design
-        # docs are what make the preamble large enough to cross the provider's
-        # cache-activation threshold, so the whole optimization is gated on
-        # HOIST_DESIGN. Non-opted-in / disabled → original behavior, unchanged.
+        # hoisted into a byte-identical system preamble that caches across every
+        # step of the run. That declaration IS the opt-in — the old
+        # AITELIER_HOIST_DESIGN kill switch is gone. It was a rollout hatch from
+        # when this shipped, was never set anywhere, and by 2026-08-26 its only
+        # live effect was to make the configs lie: `{step: "2", mode:
+        # "interfaces"}` reads like a size control, but the entry is DROPPED
+        # wholesale while the preamble carries it (drop_preamble_steps), so the
+        # mode never arms. Flipping the switch off silently swapped that for the
+        # FULL design doc in every t_plan / t_impl / t_impl_review user message.
+        # A hatch nobody pulls, which changes behaviour in a way the config does
+        # not describe, is a trap rather than an option.
+        #
+        # Measured 2026-08-26, and the reason it stays on: the first reviewer of
+        # a run gets 0% cache hit on its opening turn; a LATER reviewer's first
+        # turn gets 34.2% — that difference is the preamble.
         graph_name = self._draft_graph_name()
         preamble_steps = self._preamble_steps(graph_name)
-        use_preamble = HOIST_DESIGN and bool(preamble_steps)
+        use_preamble = bool(preamble_steps)
 
         # When the preamble carries the design docs of preamble_steps, drop their
         # resolved_context copies so design isn't duplicated in the prompt.

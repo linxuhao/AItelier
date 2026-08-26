@@ -235,3 +235,9 @@ internal/
 *.sqlite3
 .env
 .claude/
+
+# Deployment config: which vendors you hold accounts with and which of them
+# serve each internal model. Ships as llm_providers.example.json /
+# model_routes.example.json; the real ones are yours, like .env.
+llm_providers.json
+model_routes.json

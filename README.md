@@ -74,7 +74,16 @@ pip install -e .
 
 ## Quick Start
 
-First, a model key. AItelier is provider-agnostic in two layers: [`llm_providers.json`](llm_providers.json) maps a provider to a base URL and the NAME of the key it reads, and [`model_routes.json`](model_routes.json) maps the INTERNAL model name an `agent_config` uses (`flash`, `pro`, `glm`) to an ordered list of real endpoints. **Out of the box the key you need is `ARK_API_KEY`.** Ask the code rather than trusting this sentence:
+First, pick your providers. AItelier is provider-agnostic in two layers, and **both are deployment config, not repo content** — they are gitignored like `.env`, and what ships is an example:
+
+```bash
+cp llm_providers.example.json llm_providers.json   # which vendors, which endpoints, which key names
+cp model_routes.example.json  model_routes.json    # which of them serves each internal model
+```
+
+The **internal model names are the contract** — `agent_configs/*.yaml` and the vision gate reference `flash` / `pro` / `glm` / `smart` / `vision`, so those keys must exist in `model_routes.json`. **Which endpoints sit behind them is entirely yours to choose**; the examples are one operator's answer, not a requirement. Nothing in the code names a vendor.
+
+Both files fall back to their `.example` if you skip this, so a fresh clone runs — but then you are running on someone else's provider list, and it is worth ten seconds to say which vendors are actually yours. **Out of the box the key you need is `ARK_API_KEY`.** Ask the code rather than trusting this sentence:
 
 ```bash
 python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \

@@ -268,7 +268,7 @@ def test_every_shipped_agent_config_model_resolves():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     model_routes.reset_cache()
-    table = model_routes.ModelRoutes(root / "model_routes.json")
+    table = model_routes.ModelRoutes(model_routes.config_or_example("model_routes.json"))
     sentinels = {"host", "default", ""}
     checked = 0
     for f in sorted((root / "agent_configs").glob("*.yaml")):
@@ -292,7 +292,7 @@ def test_host_sentinel_default_is_resolvable():
 
     root = pathlib.Path(__file__).resolve().parents[2]
     model_routes.reset_cache()
-    table = model_routes.ModelRoutes(root / "model_routes.json")
+    table = model_routes.ModelRoutes(model_routes.config_or_example("model_routes.json"))
     assert table.resolve(HOST_AGENT_MODEL)
     model_routes.reset_cache()
 
@@ -489,7 +489,7 @@ def test_every_llm_entry_point_understands_internal_names():
                 continue
             checked += 1
             litellm_model, api_base, api_key = _resolve_provider(
-                name, config_path=str(root / "llm_providers.json"))
+                name, config_path=model_routes.config_or_example("llm_providers.json"))
             assert "/" in litellm_model, (
                 f"{f.name}:{role} model={name!r} -> {litellm_model!r}: the "
                 f"butler would send this to litellm unqualified")

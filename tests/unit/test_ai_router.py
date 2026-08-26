@@ -372,7 +372,9 @@ class TestEffortDelivery:
         import yaml
 
         root = Path(__file__).resolve().parents[2]
-        routes = json.loads((root / "model_routes.json").read_text(encoding="utf-8"))
+        from core.model_routes import config_or_example
+        routes = json.loads(
+            Path(config_or_example("model_routes.json")).read_text(encoding="utf-8"))
         narrow = {n for n, c in routes.items()
                   if not n.startswith("_") and "qwen/qwen3.8-max" in c}
         assert narrow, "expected at least one route to reach qwen3.8-max"

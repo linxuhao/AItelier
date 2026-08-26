@@ -423,7 +423,13 @@ steps:
       - source: { step: "3", file: "tasks/$current_task.json" }
       # Bare on purpose — `output:` would relabel this past
       # drop_preamble_steps and duplicate the preamble. See t_impl_review.
+      # `mode:` is INERT here while preamble_steps carries this step —
+      # the whole entry is dropped, so nothing is left to slice. Kept as
+      # the declared intent if the preamble ever stops carrying it.
       - source: { step: "1", mode: "summary" }
+      # `mode:` is INERT here while preamble_steps carries this step —
+      # the whole entry is dropped, so nothing is left to slice. Kept as
+      # the declared intent if the preamble ever stops carrying it.
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan_review" }
       # Self prior (empty on the first pass). t_plan already sees the reviewer's
@@ -542,6 +548,9 @@ steps:
       - source: { step: "3", file: "tasks/$current_task.json" }
       # Bare on purpose — `output:` would relabel this past
       # drop_preamble_steps and duplicate the preamble. See t_impl_review.
+      # `mode:` is INERT here while preamble_steps carries this step —
+      # the whole entry is dropped, so nothing is left to slice. Kept as
+      # the declared intent if the preamble ever stops carrying it.
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
@@ -668,7 +677,7 @@ steps:
       #    file in the step dir" branch, which never looks at mode. True, and
       #    irrelevant here, because of (2).
       # 2. This config sets `x-aitelier.preamble_steps: ["1", "2"]` (line 31),
-      #    so with AITELIER_HOIST_DESIGN=1 (the default) step 1 + step 2 are
+      #    so step 1 + step 2 are
       #    hoisted into the byte-identical shared SYSTEM preamble, and
       #    `PromptAssembler.drop_preamble_steps` removes their resolved_context
       #    copies from the user message. That drop matches the exact label
@@ -690,6 +699,9 @@ steps:
       # PRE-drop resolved context — not what reaches the model. Measure the
       # traced prompt, not the inputs, before touching a context source in a
       # config that declares preamble_steps.
+      # `mode:` is INERT here while preamble_steps carries this step —
+      # the whole entry is dropped, so nothing is left to slice. Kept as
+      # the declared intent if the preamble ever stops carrying it.
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }

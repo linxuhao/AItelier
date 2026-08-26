@@ -24,13 +24,38 @@ import json
 import os
 from pathlib import Path
 
-# Absolute, not CWD-relative. A miss used to degrade silently (a concrete
-# `provider/model` still worked); now that agent_configs carry INTERNAL names, a
-# miss makes `resolve("flash")` raise and every agent dies — including the
-# `host`/`default` sentinel, whose target defaults to the bare "flash". Docker
-# (WORKDIR /app) and root-run pytest both happen to be fine; anything launched
-# from another directory was not.
-DEFAULT_ROUTES_FILE = str(Path(__file__).resolve().parent.parent / "model_routes.json")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def config_or_example(name: str) -> str:
+    """`<name>` if the deployment has one, else the committed `<name>.example`.
+
+    The provider half of this system is DEPLOYMENT config, not repo content:
+    which vendors you hold accounts with, what their endpoints are, and which
+    of them can serve each internal model. Committing one operator's answer
+    makes the repo look like it only runs on those vendors, and quietly rots
+    when they change. So `llm_providers.json` and `model_routes.json` are
+    gitignored like `.env`, and what ships is `<name>.example.json`.
+
+    The example is a working fallback rather than a template you must copy,
+    because "a clean checkout must be able to start" is a tested contract
+    (tests/unit/test_clean_checkout_starts.py) and breaking it to make a point
+    about configurability would be a bad trade. It names public vendor
+    endpoints only — no self-hosted address of anyone's — so a fresh checkout
+    runs as soon as it has a key, and an operator who wants different providers
+    copies the example and edits it.
+
+    Absolute, not CWD-relative: agent_configs carry INTERNAL model names now, so
+    a table the process cannot find is not a silent degradation any more — it
+    is every agent failing at once.
+    """
+    real = _REPO_ROOT / name
+    if real.is_file():
+        return str(real)
+    return str(_REPO_ROOT / f"{Path(name).stem}.example{Path(name).suffix}")
+
+
+DEFAULT_ROUTES_FILE = config_or_example("model_routes.json")
 
 
 class ModelRoutes:

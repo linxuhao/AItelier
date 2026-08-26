@@ -144,13 +144,14 @@ def _llm_keys() -> tuple[list[str], list[str]]:
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
     try:
+        from core.model_routes import config_or_example
         providers = json.loads(
-            (root / "llm_providers.json").read_text(encoding="utf-8")) or {}
+            Path(config_or_example("llm_providers.json")).read_text(encoding="utf-8")) or {}
     except (OSError, ValueError):
         return [], []
     try:
-        from core.model_routes import ModelRoutes
-        routes = ModelRoutes(root / "model_routes.json")
+        from core.model_routes import ModelRoutes, config_or_example
+        routes = ModelRoutes(config_or_example("model_routes.json"))
     except Exception:
         routes = None
     primary: set[str] = set()
@@ -197,11 +198,19 @@ def _provider_dep(key: str) -> Dep | None:
     import json
     from pathlib import Path
     try:
-        path = Path(__file__).resolve().parent.parent / "llm_providers.json"
+        from core.model_routes import config_or_example
+        path = Path(config_or_example("llm_providers.json"))
         providers = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     for name, cfg in (providers or {}).items():
+        # `_`-prefixed keys are comments, not providers — llm_providers.json is
+        # hand-edited deployment config and the shipped example leads with a
+        # "_comment" block. Iterating one as a provider raised
+        # AttributeError: 'list' object has no attribute 'get'. model_routes
+        # already skips them; this is the same rule on the same kind of file.
+        if name.startswith("_"):
+            continue
         if (cfg or {}).get("api_key_env") != key:
             continue
         return Dep(
@@ -284,12 +293,14 @@ def render_providers() -> str:
     from pathlib import Path
     try:
         providers = json.loads(
-            (Path(__file__).resolve().parent.parent / "llm_providers.json")
+            Path(__import__("core.model_routes", fromlist=["x"]).config_or_example("llm_providers.json"))
             .read_text(encoding="utf-8")) or {}
     except (OSError, ValueError):
         return "_(llm_providers.json unreadable)_"
     out = ["| Provider | Base URL | Key it reads |", "|---|---|---|"]
     for name, cfg in providers.items():
+        if name.startswith("_"):
+            continue
         out.append(f"| `{name}` | `{(cfg or {}).get('base_url', '')}` "
                    f"| `{(cfg or {}).get('api_key_env', '—')}` |")
     return "\n".join(out)

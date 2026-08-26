@@ -604,8 +604,9 @@ def test_the_vision_judge_is_not_swept_into_a_provider_migration():
     import json
 
     root = Path(__file__).resolve().parents[2]
+    from core.model_routes import config_or_example
     route = json.loads(
-        (root / "model_routes.json").read_text(encoding="utf-8"))["vision"]
+        Path(config_or_example("model_routes.json")).read_text(encoding="utf-8"))["vision"]
     providers = {c.split("/", 1)[0] for c in route}
 
     assert not any(c.startswith("ark/") for c in route), (
@@ -618,7 +619,8 @@ def test_the_vision_judge_is_not_swept_into_a_provider_migration():
 
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     from core.model_routes import ModelRoutes  # noqa: F401  (import guard)
-    llm = json.loads((root / "llm_providers.json").read_text(encoding="utf-8"))
+    llm = json.loads(
+        Path(config_or_example("llm_providers.json")).read_text(encoding="utf-8"))
     for prov in providers:
         assert prov in llm, f"vision route names unknown provider '{prov}'"
         key = llm[prov].get("api_key_env")

@@ -31,7 +31,30 @@ MAX_CONTEXT_LINES = 1500
 
 # A skillflow file-boundary header inside a multi-file context entry:
 # "### <relpath>" where relpath is a path, not prose.
-_FILE_HEADER_RE = re.compile(r"^###\s+(\S+\.[A-Za-z][A-Za-z0-9]{0,7})\s*$")
+#
+# Requiring an extension missed exactly the files a `{from: repository}` bundle
+# is most likely to hold — Dockerfile, Makefile, LICENSE, README, .gitignore.
+# Their content folded into the PRECEDING file's span (inflating its reported
+# length and its whole/cut verdict) and the file itself never reached the
+# manifest, reproducing the "a file the agent never heard of" failure the
+# manifest exists to prevent. In a two-member bundle where one member had no
+# extension the manifest was skipped altogether (`len(heads) > 1` was False).
+#
+# So: a single ASCII path-shaped token, extension optional. Two guards against
+# reading a prose heading as a boundary: single-token (rules out "### API
+# design") and ASCII-only (rules out "### 记录", which these very design docs
+# use as a section heading). A one-word ASCII heading like "### Overview" stays
+# ambiguous, and that is the trade taken deliberately — skillflow emits real
+# relpaths here, and a false boundary costs one spurious manifest row where a
+# missed one costs a whole file's visibility.
+# Two shapes, because "has an extension" and "is a file" are not the same test:
+#   * with a dot — the LAST segment must start with a LETTER. That is what keeps
+#     "### v1.2" (a version-numbered prose section) from being read as a file,
+#     and it is the one thing the original pattern got right.
+#   * with no dot at all — Dockerfile, LICENSE, README, Makefile.
+_FILE_HEADER_RE = re.compile(
+    r"^###\s+((?:[A-Za-z0-9._/+-]*\.[A-Za-z][A-Za-z0-9]{0,15})"
+    r"|(?:[A-Za-z0-9_][A-Za-z0-9_/+-]*))\s*$")
 
 
 # Tool definitions are handled by skillflow — injected via _tool_schemas and

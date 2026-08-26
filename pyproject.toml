@@ -21,6 +21,14 @@ dependencies = [
     "pydantic>=2.13",
     "apscheduler>=3.11",
     "tenacity>=9.1",
+    # godot_vision ships every captured frame inline as base64 in the request
+    # body. A 960x704 game frame is a ~900 KB PNG (the ink-wash background has
+    # 62,937 distinct colours, so lossless re-compression buys 1.15x and nothing
+    # more), and 4 frames per request is ~4.7 MB on the wire. Measured
+    # 2026-08-26: 14 KB/s to the hosted judge = 5.5 minutes of upload PER
+    # REQUEST, ~4.3 hours for a 47-scenario run, which is longer than the
+    # interval between container recreates — so the gate could never finish.
+    "pillow>=11.0",
     "rich>=15.0",
     "textual>=8.2",
     "prompt-toolkit>=3.0",

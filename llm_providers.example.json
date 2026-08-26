@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "EXAMPLE. Copy to llm_providers.json and edit — the real file is gitignored,",
+    "exactly like .env. Nothing in the code names a vendor; this file is the only",
+    "place one appears, which is why it is yours to choose rather than ours to ship.",
+    "",
+    "One entry = one ENDPOINT: a base_url plus the NAME of the key it reads. The",
+    "key itself never lives here — it is a Docker secret file at",
+    "~/.aitelier-secrets/<NAME> (see docker-compose.yml). Registering the same",
+    "vendor twice under different names with different api_key_env is how you pool",
+    "several token plans; the entries below happen to be public vendor endpoints,",
+    "and a self-hosted one is just another entry.",
+    "",
+    "Whatever you register here has to be reachable by the names model_routes.json",
+    "uses, and its key has to be mounted in docker-compose.yml's `secrets:` block."
+  ],
+  "deepseek": {
+    "base_url": "https://api.deepseek.com/",
+    "api_key_env": "DEEPSEEK_API_KEY"
+  },
+  "ark": {
+    "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+    "api_key_env": "ARK_API_KEY"
+  },
+  "qwen": {
+    "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "api_key_env": "QWEN_API_KEY"
+  }
+}

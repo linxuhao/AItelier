@@ -118,18 +118,18 @@ def _judges() -> list["_Judge"]:
     blind over a typo in a fallback entry is worse than one that says so.
     """
     from core.ai_router import _read_secret
-    from core.model_routes import get_routes
+    from core.model_routes import config_or_example, get_routes
 
     root = Path(__file__).resolve().parents[3]
     try:
         providers = json.loads(
-            (root / "llm_providers.json").read_text(encoding="utf-8")) or {}
+            Path(config_or_example("llm_providers.json")).read_text(encoding="utf-8")) or {}
     except (OSError, ValueError) as e:                   # noqa: BLE001
         raise RuntimeError(f"vision judge: llm_providers.json unreadable: {e}") from e
 
     out: list[_Judge] = []
     for position, candidate in enumerate(
-            get_routes(str(root / "model_routes.json")).resolve(_ROUTE)):
+            get_routes(config_or_example("model_routes.json")).resolve(_ROUTE)):
         provider, _, model = candidate.partition("/")
         cfg = providers.get(provider)
         if not cfg:
@@ -372,9 +372,22 @@ class ReasoningStarved(RuntimeError):
 # blinded the whole verdict: 2026-08-26 died on `IncompleteRead(1 bytes read)`
 # at scenario 5 of 47, throwing away 4 batches that had already been judged and
 # never looking at the other 43.
+# A break in a connection that was ESTABLISHED and then failed mid-body: the
+# judge was there, so asking again is worth it.
+#
+# A TIMEOUT is NOT here, and that is the point. It reads as "temporarily
+# unavailable" — the same class as connection-refused, which this predicate has
+# always treated as deterministic — and retrying it is uniquely expensive
+# because each attempt costs the FULL _TIMEOUT (300s) before it gives up. The
+# first `vision` candidate is a Tailscale address on a shared GPU box, so on any
+# host that cannot reach it every batch burned 3 x 300s + backoff ~= 15 minutes
+# before falling through to the next judge, and `_judges()` is rebuilt per call
+# with no memory of a judge that never answered — so the gate re-paid that for
+# each of ~47 scenarios. Falling through immediately costs one timeout and hands
+# the work to a judge that is actually up.
 _TRANSIENT_TRANSPORT = (http.client.IncompleteRead,
                         http.client.RemoteDisconnected,
-                        ConnectionResetError, TimeoutError, socket.timeout)
+                        ConnectionResetError)
 _POST_ATTEMPTS = 3
 _POST_BACKOFF_S = 2.0
 
@@ -406,6 +419,45 @@ def _post(url: str, model: str, api_key: str,
     raise last                                            # unreachable
 
 
+# Palette-reduce a frame for the wire. NOT resized, NOT re-encoded lossily:
+# every question this gate asks is about an EDGE — the tile grid lines, the
+# 14px empty cap on a health bar, a dimmed button against a bright one — and
+# both of the other levers damage exactly that. Downscaling drops the thin
+# lines; JPEG rings around them (measured: worst-pixel error 10/255 at q95,
+# concentrated on high-contrast edges). Palette reduction leaves every edge
+# byte-exact and spends its error on the ink-wash background gradient instead,
+# which no question is about.
+#
+# Measured on the game's own frames: 900,172 -> 259,468 bytes, 3.5x, and the
+# quantised frame is indistinguishable at judging scale (rendered and compared
+# by eye, not by a byte count). That turns 5.5 minutes of upload per request
+# into ~1.6, and a 4.3-hour gate run into ~1.2 hours.
+#
+# Failure is not fatal: a frame that will not open, or a Pillow that is not
+# installed, ships the original bytes. A slower gate beats a blind one.
+_WIRE_COLORS = int(os.environ.get("GODOT_VISION_WIRE_COLORS", "256"))
+
+
+def _wire_bytes(f: Path) -> bytes:
+    """The frame as it goes on the wire — palette-reduced when that is possible."""
+    raw = f.read_bytes()
+    if _WIRE_COLORS <= 0:
+        return raw
+    try:
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(raw)).convert("RGB")
+        buf = io.BytesIO()
+        im.quantize(colors=_WIRE_COLORS, method=Image.MEDIANCUT,
+                    dither=Image.NONE).save(buf, "PNG", optimize=True)
+        small = buf.getvalue()
+        return small if len(small) < len(raw) else raw
+    except Exception as e:                                # noqa: BLE001
+        print(f"[godot_vision] could not shrink {f.name} ({e}) — "
+              f"sending it whole", flush=True)
+        return raw
+
+
 def _post_once(url: str, model: str, api_key: str,
           files: list[Path], questions: list[dict],
           max_tokens: int = 0) -> str:
@@ -415,7 +467,7 @@ def _post_once(url: str, model: str, api_key: str,
     content = [{"type": "text",
                 "text": _build_prompt(questions, len(files))}]
     for f in files:
-        b64 = base64.b64encode(f.read_bytes()).decode("ascii")
+        b64 = base64.b64encode(_wire_bytes(f)).decode("ascii")
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{b64}"}})
     body = json.dumps({"model": model, "max_tokens": max_tokens or _MAX_TOKENS,

@@ -538,3 +538,104 @@ def test_a_concrete_model_gets_no_routing_noise(wiring):
     msg = str(g._explain_auth(litellm.exceptions.AuthenticationError(
         "bad key", llm_provider="alpha", model="m-1")))
     assert "model_routes.json" not in msg
+
+
+def test_a_write_that_creates_the_real_table_is_visible_without_a_restart(
+        tmp_path, monkeypatch):
+    """The route path must be resolved per call, never captured at import.
+
+    It was a module constant, so on a checkout holding only the example the
+    first API write created the real file, `reset_cache()` dropped the cache,
+    and `get_routes(None)` still keyed on the EXAMPLE path — re-read the
+    example, and the new model did not exist. `add_model` returned success and
+    `AIGateway("brandnew")` raised "is neither a 'provider/model' nor a route"
+    until the container was recreated. A write that reports success and changes
+    nothing is the worst of the three outcomes.
+    """
+    import json
+
+    from core import model_registry as reg
+
+    (tmp_path / "model_routes.example.json").write_text(
+        json.dumps({"seed": ["alpha/m-1"]}), encoding="utf-8")
+    (tmp_path / "llm_providers.json").write_text(
+        json.dumps({"alpha": {"base_url": "https://a.test/v1"}}), encoding="utf-8")
+    monkeypatch.setattr(model_routes, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(reg, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(reg, "config_or_example",
+                        lambda n: model_routes.config_or_example(n))
+    model_routes.reset_cache()
+    try:
+        assert model_routes.default_routes_file().endswith("example.json")
+        reg.add_model("brandnew", ["alpha/m-2"])
+        assert (tmp_path / "model_routes.json").is_file()
+        assert "brandnew" in model_routes.get_routes().names(), (
+            "the write landed on disk but the running process still reads the "
+            "example — the API said success and nothing changed")
+    finally:
+        model_routes.reset_cache()
+
+
+def test_a_burst_tolerance_that_never_resets_is_a_lifetime_counter(
+        wiring, monkeypatch):
+    """Two unrelated blips must each get their in-place retry.
+
+    `_burst_hits` was set once in __init__ and only incremented, so the second
+    momentary 429 in a 24-turn step failed over with zero retries — abandoning
+    the prefix cache, and on glm/smart/vision silently switching model, for a
+    throttle that clears in seconds.
+    """
+    g = gw(wiring, "model_a")
+    seen = []
+
+    def fake(**kwargs):
+        seen.append(kwargs.get("api_key"))
+        # Blip on the 1st and 4th calls; everything else answers.
+        if len(seen) in (1, 4):
+            raise litellm.exceptions.RateLimitError(
+                "Too many requests, slow down", llm_provider="alpha", model="m-1")
+        return _Resp()
+
+    monkeypatch.setattr(litellm, "completion", fake)
+    for _ in range(4):
+        g.generate_native([{"role": "user", "content": "hi"}])
+
+    assert g.active_model == "alpha/m-1", (
+        "both blips were separated by a success, so neither should have cost "
+        "the preferred endpoint")
+    assert all(k == "alpha-secret" for k in seen)
+
+
+def test_consecutive_bursts_still_fail_over(wiring, monkeypatch):
+    """…while a throttle that actually persists must still move on."""
+    g = gw(wiring, "model_a")
+    n = {"i": 0}
+
+    def fake(**kwargs):
+        n["i"] += 1
+        if kwargs.get("api_key") == "alpha-secret":
+            raise litellm.exceptions.RateLimitError(
+                "Too many requests, slow down", llm_provider="alpha", model="m-1")
+        return _Resp()
+
+    monkeypatch.setattr(litellm, "completion", fake)
+    g.generate_native([{"role": "user", "content": "hi"}])
+    assert g.active_model == "beta/m-1"
+
+
+def test_an_exhausted_model_names_its_own_endpoints_on_the_error(
+        wiring, monkeypatch):
+    """The scheduler cannot know which endpoints have to reopen from an
+    exception alone, and taking the minimum over every parked endpoint in the
+    process let an unrelated model's short window cut a long hold."""
+    g = gw(wiring, "solo")
+
+    def fake(**kwargs):
+        raise litellm.exceptions.RateLimitError(
+            "quota exceeded. It will reset at 2099-01-01 00:00:00 +0000.",
+            llm_provider="alpha", model="m-1")
+
+    monkeypatch.setattr(litellm, "completion", fake)
+    with pytest.raises(Exception) as ei:
+        g.generate_native([{"role": "user", "content": "hi"}])
+    assert getattr(ei.value, "_aitelier_candidates", None) == ["alpha/m-1"]

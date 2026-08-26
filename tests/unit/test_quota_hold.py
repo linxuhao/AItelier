@@ -235,6 +235,42 @@ class TestQuotaEscapesTheAgentLoop:
             "a burst 429 clears in seconds and must stay ordinary feedback")
 
 
+def test_an_unrelated_models_short_window_cannot_cut_a_long_hold(monkeypatch):
+    """The cooldown map is process-wide; the hold must not be.
+
+    A 5-minute window on the vision judge sat in the same map as flash's three
+    5-hour windows, so `min()` over all of it ended the hold in 5 minutes. The
+    scheduler then woke, claimed a flash step, failed on a still-spent plan and
+    spent a retry — once per window until max_retries killed the run, which is
+    the outage this feature exists to prevent.
+    """
+    from core import ai_router
+
+    from datetime import datetime, timezone
+    reset = datetime(2026, 8, 26, 9, 18, 28, tzinfo=timezone.utc).timestamp()
+    now = reset - 5 * 3600                       # five hours before it reopens
+    monkeypatch.setattr(sched._time, "time", lambda: now)
+    monkeypatch.setattr(sched, "_QUOTA_HOLD_UNTIL", 0.0)
+    ai_router.reset_endpoint_cooldowns()
+    # A real 5-hour window, so the base hold is long and the only thing that
+    # could shorten it is the cooldown map.
+    err = Exception("usage quota exceeded. It will reset at "
+                    "2026-08-26 09:18:28 +0000.")
+    err._aitelier_candidates = ["ark/flash", "qwen/flash"]
+    try:
+        monkeypatch.setattr(ai_router, "_ENDPOINT_COOLDOWN", {
+            "localqwen/vision": now + 300,      # a different model, reopens soon
+            "ark/flash": now + 5 * 3600,
+            "qwen/flash": now + 5 * 3600,
+        })
+        sched._note_quota_exhausted(err)
+        held = sched._quota_hold_remaining()
+    finally:
+        ai_router.reset_endpoint_cooldowns()
+    assert held > 300, (
+        f"held {held:.0f}s — a model this project never calls shortened the hold")
+
+
 def test_the_hold_ends_when_the_FIRST_plan_reopens(monkeypatch):
     """The error that escapes is the LAST candidate's, so its reset is the
     latest one. Parking on it idles past the moment the first plan came back.
@@ -249,13 +285,17 @@ def test_the_hold_ends_when_the_FIRST_plan_reopens(monkeypatch):
     monkeypatch.setattr(sched._time, "time", lambda: now)
     monkeypatch.setattr(sched, "_QUOTA_HOLD_UNTIL", 0.0)
     ai_router.reset_endpoint_cooldowns()
+    err = Exception("usage quota exceeded, no time given")
+    err._aitelier_candidates = ["ark/deepseek-v4-flash",
+                               "qwen/deepseek-v4-flash-0731",
+                               "deepseek/deepseek-v4-flash"]
     try:
         monkeypatch.setattr(ai_router, "_ENDPOINT_COOLDOWN", {
             "ark/deepseek-v4-flash": now + 3600,        # first to reopen
             "qwen/deepseek-v4-flash-0731": now + 7200,
             "deepseek/deepseek-v4-flash": now + 21600,  # the one that escaped
         })
-        sched._note_quota_exhausted("usage quota exceeded, no time given")
+        sched._note_quota_exhausted(err)
         held = sched._quota_hold_remaining()
     finally:
         ai_router.reset_endpoint_cooldowns()

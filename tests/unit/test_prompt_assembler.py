@@ -454,7 +454,7 @@ class TestTruncationResumeHintIsCallable:
 
     def _clip(self, label):
         from core.prompt_assembler import PromptAssembler, MAX_CONTEXT_LINES
-        huge = "### task_plan.md\n" + "\n".join(
+        huge = "### FILE: task_plan.md\n" + "\n".join(
             f"line {i}" for i in range(MAX_CONTEXT_LINES + 200))
         return PromptAssembler._clip_context_entry(label, huge, "t_impl")
 

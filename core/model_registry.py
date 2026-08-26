@@ -143,11 +143,22 @@ def model_consumers(model: str) -> list[str]:
     for rel, const in (("aitelier/tools/godot_vision/impl.py", "_ROUTE"),):
         p = _REPO_ROOT / rel
         try:
-            if re.search(rf'{const}\s*=\s*os\.environ\.get\([^,]+,\s*"{re.escape(model)}"',
-                         p.read_text(encoding="utf-8")):
-                out.append(rel)
+            src = p.read_text(encoding="utf-8")
         except OSError:
             continue
+        # EXTRACT the default and compare, rather than embedding `model` in the
+        # pattern. Embedding it made a miss indistinguishable from "no such
+        # dependency": reformat the assignment — wrap it for line length, switch
+        # quote style — and the guard silently reports no consumers, so
+        # `delete_model("vision")` succeeds and the readability gate loses the
+        # model it resolves. Quote-agnostic and newline-tolerant here, and
+        # `test_the_tool_dependency_guard_still_matches_the_real_source` fails
+        # loudly if the shape drifts far enough to break even this.
+        m = re.search(
+            rf'{const}\s*=\s*os\.environ\.get\(\s*[^,]+,\s*["\']([^"\']+)["\']',
+            src)
+        if m and m.group(1) == model:
+            out.append(rel)
     return out
 
 

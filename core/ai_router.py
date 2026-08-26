@@ -342,6 +342,7 @@ class AIGateway:
         together and `_build_kwargs` needs no failover awareness.
         """
         self.active_model = concrete_model
+        self._burst_hits = 0        # a new endpoint starts with a clean count
         self.api_base = None
         self.api_key = None
         # Set to the key's NAME when a provider wants one and it is
@@ -534,7 +535,22 @@ class AIGateway:
                 response = litellm.completion(**kwargs)
             except FAILOVER_EXCEPTIONS as e:
                 if not self._failover(e):
-                    raise self._explain_auth(e) from e
+                    # Name the endpoints that would have to reopen. The escaping
+                    # error is the LAST candidate's, and the scheduler parks on
+                    # it — but "when can this model work again" is the EARLIEST
+                    # of the whole list, and the scheduler cannot know the list
+                    # from an exception alone. Without this it took the minimum
+                    # over every parked endpoint in the process, including ones
+                    # belonging to models this project never calls: a 5-minute
+                    # window on the vision judge would cut a 5-hour hold on
+                    # flash, and the run would burn its retries waking into a
+                    # still-spent plan.
+                    # Stamped on the object actually RAISED: _explain_auth
+                    # may wrap into a new exception, and an attribute set on the
+                    # original would not survive that.
+                    exc = self._explain_auth(e)
+                    exc._aitelier_candidates = list(self._candidates)
+                    raise exc from e
                 self._apply_binding(kwargs)
                 continue
             except Exception as e:
@@ -556,6 +572,12 @@ class AIGateway:
                 if self._failovers:
                     usage["failed_over_from"] = [f for f, _ in self._failovers]
             self.last_usage = usage
+            # A burst tolerance that never resets is a lifetime counter, not a
+            # "did it persist" one: two unrelated blips seventeen turns apart in
+            # one step would have spent it, and the second failed over with no
+            # in-place retry at all. Success is what makes the previous throttle
+            # historical.
+            self._burst_hits = 0
             return response
 
     def _failover(self, exc: Exception) -> bool:

@@ -29,32 +29,20 @@ logger = logging.getLogger(__name__)
 # still bounding genuinely runaway content.
 MAX_CONTEXT_LINES = 1500
 
-# A skillflow file-boundary header inside a multi-file context entry:
-# "### <relpath>" where relpath is a path, not prose.
+# The file-boundary marker inside a multi-file context entry, emitted by
+# skillflow (`context._FILE_MARKER`) and by this module.
 #
-# Requiring an extension missed exactly the files a `{from: repository}` bundle
-# is most likely to hold — Dockerfile, Makefile, LICENSE, README, .gitignore.
-# Their content folded into the PRECEDING file's span (inflating its reported
-# length and its whole/cut verdict) and the file itself never reached the
-# manifest, reproducing the "a file the agent never heard of" failure the
-# manifest exists to prevent. In a two-member bundle where one member had no
-# extension the manifest was skipped altogether (`len(heads) > 1` was False).
-#
-# So: a single ASCII path-shaped token, extension optional. Two guards against
-# reading a prose heading as a boundary: single-token (rules out "### API
-# design") and ASCII-only (rules out "### 记录", which these very design docs
-# use as a section heading). A one-word ASCII heading like "### Overview" stays
-# ambiguous, and that is the trade taken deliberately — skillflow emits real
-# relpaths here, and a false boundary costs one spurious manifest row where a
-# missed one costs a whole file's visibility.
-# Two shapes, because "has an extension" and "is a file" are not the same test:
-#   * with a dot — the LAST segment must start with a LETTER. That is what keeps
-#     "### v1.2" (a version-numbered prose section) from being read as a file,
-#     and it is the one thing the original pattern got right.
-#   * with no dot at all — Dockerfile, LICENSE, README, Makefile.
-_FILE_HEADER_RE = re.compile(
-    r"^###\s+((?:[A-Za-z0-9._/+-]*\.[A-Za-z][A-Za-z0-9]{0,15})"
-    r"|(?:[A-Za-z0-9_][A-Za-z0-9_/+-]*))\s*$")
+# EXPLICIT, not inferred. A bare `### <relpath>` is valid markdown, so it cannot
+# be told apart from a section heading in the CONTENT of the files being
+# concatenated, and every rule for guessing picks one failure mode over the
+# other. Both were live here: requiring an extension made `### Dockerfile`
+# invisible — its content folded into the previous file, which was then reported
+# at the wrong length and possibly mislabelled whole — while accepting any bare
+# word made `### Notes` invent a file that does not exist and split a real one.
+# The token removes the question instead of answering it; `### v1.2`,
+# `### 记录`, `### Overview` and `### Dockerfile` all land correctly with no
+# rule about extensions, character sets or known filenames.
+_FILE_HEADER_RE = re.compile(r"^###\s+FILE:\s+(\S.*?)\s*$")
 
 
 # Tool definitions are handled by skillflow — injected via _tool_schemas and
@@ -540,7 +528,8 @@ class PromptAssembler:
                         or f.name.startswith("instruction"):
                     continue
                 try:
-                    docs.append(f"### {f.name}\n{f.read_text(encoding='utf-8')}")
+                    docs.append(
+                        f"### FILE: {f.name}\n{f.read_text(encoding='utf-8')}")
                 except Exception:
                     pass
         return "\n\n".join(docs)
@@ -931,13 +920,17 @@ class PromptAssembler:
                       if target else "见上方清单")
             shown_total, total = budget, len(lines)
         else:
-            head = lines[0].strip()
-            target = head[4:].strip() if head.startswith("### ") else ""
+            # Same marker as the multi-file branch — parsed, not string-sliced.
+            # A hand-rolled `head[4:]` here produced `design/FILE: one.md` the
+            # moment the marker gained its token, i.e. a resume hint pointing at
+            # a path that does not exist.
+            m0 = _FILE_HEADER_RE.match(lines[0]) if lines else None
+            target = m0.group(1) if m0 else ""
             dropped = []
             body = "\n".join(lines[:MAX_CONTEXT_LINES])
             resume = (f"read(path='{_full(target)}'{src}, start_line={MAX_CONTEXT_LINES})"
                       if target
-                      else f"read(path=<上面 ### 标出的文件>{src}, start_line={MAX_CONTEXT_LINES})")
+                      else f"read(path=<上面 ### FILE: 标出的文件>{src}, start_line={MAX_CONTEXT_LINES})")
             shown_total, total = MAX_CONTEXT_LINES, len(lines)
 
         logger.warning(

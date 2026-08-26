@@ -1,7 +1,7 @@
 """A truncated multi-file context entry must say what it dropped, and how to get it.
 
 `{from: repository, path: "design/"}` concatenates a whole directory into ONE
-context entry, each file behind a "### <relpath>" header, in ALPHABETICAL order
+context entry, each file behind a "### FILE: <relpath>" marker, in ALPHABETICAL order
 — so which files survive the line budget is decided by their names.
 
 Live, 2026-08-26: the game's design/ bundle ran 1871 lines against a 1500
@@ -23,7 +23,7 @@ REPO = "Repository — design/"
 
 
 def _file(name, n_lines, tag="x"):
-    return f"### {name}\n" + "\n".join(f"{tag}{i}" for i in range(n_lines))
+    return f"### FILE: {name}\n" + "\n".join(f"{tag}{i}" for i in range(n_lines))
 
 
 def _bundle(*specs):
@@ -33,7 +33,7 @@ def _bundle(*specs):
 # ── the untouched path ───────────────────────────────────────────────────────
 
 def test_content_under_budget_is_untouched():
-    body = "### a.md\n" + "\n".join(str(i) for i in range(10))
+    body = "### FILE: a.md\n" + "\n".join(str(i) for i in range(10))
     assert clip(REPO, body) == body
 
 
@@ -94,7 +94,7 @@ def test_the_manifest_is_charged_against_the_budget():
 def test_markdown_headings_are_not_mistaken_for_files():
     """The design docs are full of '### 7.1 属性 20 是捏人上限'. Treating those as
     file boundaries points the agent at read(path='7.1 属性 20 …')."""
-    doc = ("### real.md\n"
+    doc = ("### FILE: real.md\n"
            + "\n".join(["### 7.1 属性 20 是捏人上限", "prose"] * 800))
     out = clip(REPO, doc)
     assert "7.1" not in out.split("用 read 工具接着读：")[1]
@@ -102,7 +102,7 @@ def test_markdown_headings_are_not_mistaken_for_files():
 
 
 def test_a_section_numbered_like_a_version_is_not_a_file():
-    doc = "### real.md\n" + "\n".join(["### v1.2", "prose"] * 800)
+    doc = "### FILE: real.md\n" + "\n".join(["### v1.2", "prose"] * 800)
     out = clip(REPO, doc)
     assert "read(path='design/v1.2'" not in out
 
@@ -118,33 +118,45 @@ def test_a_step_entry_carries_its_source_so_read_can_find_it():
     assert "source='step:5'" in out
 
 
-def test_extensionless_bundle_members_are_visible_to_the_manifest():
-    """Dockerfile / LICENSE / README are exactly what a repository bundle holds.
-
-    Requiring an extension folded their content into the PRECEDING file's span
-    — inflating its reported length and its whole/cut verdict — and left the
-    file itself out of the manifest entirely, reproducing the "a file the agent
-    never heard of" failure the manifest exists to prevent.
-    """
+def test_the_file_marker_is_explicit_so_nothing_has_to_be_guessed():
+    """A bare `### <name>` cannot be told apart from a section heading in the
+    CONTENT being concatenated, and every rule for guessing trades one failure
+    for the other: require an extension and `### Dockerfile` goes invisible,
+    accept any bare word and `### Notes` invents a file and splits a real one.
+    Both were live here. The explicit token removes the question."""
     from core.prompt_assembler import _FILE_HEADER_RE
 
-    for header in ("### Dockerfile", "### LICENSE", "### README",
-                   "### .gitignore", "### Makefile",
-                   "### design/40_ux_backlog.md", "### scripts/autoload/gm.gd"):
-        assert _FILE_HEADER_RE.match(header), header
+    for header, want in (
+            ("### FILE: Dockerfile", "Dockerfile"),
+            ("### FILE: LICENSE", "LICENSE"),
+            ("### FILE: .gitignore", ".gitignore"),
+            ("### FILE: design/40_ux_backlog.md", "design/40_ux_backlog.md"),
+            ("### FILE: scripts/autoload/gm.gd", "scripts/autoload/gm.gd"),
+            ("### FILE: a file with spaces.md", "a file with spaces.md")):
+        m = _FILE_HEADER_RE.match(header)
+        assert m and m.group(1) == want, header
 
-
-def test_prose_headings_are_not_read_as_file_boundaries():
-    """A false boundary splits a real file's span and invents a manifest row.
-
-    Single-token rules out English prose ("### API design"); ASCII-only rules
-    out the Chinese section headings these very design docs use.
-    """
-    from core.prompt_assembler import _FILE_HEADER_RE
-
-    for header in ("### API design", "### 记录", "### 队列", "### a b c",
-                   "### Why six layers",
-                   # a dotted token whose last segment is numeric is a version,
-                   # not a filename — the one thing the original pattern got right
-                   "### v1.2", "### 1.5.42"):
+    # Every one of these used to sit on one side or the other of the guess.
+    for header in ("### Dockerfile", "### Notes", "### Overview", "### v1.2",
+                   "### 记录", "### API design", "### design/40_ux.md",
+                   "FILE: not-a-heading"):
         assert not _FILE_HEADER_RE.match(header), header
+
+
+def test_the_emitters_on_both_sides_use_the_same_marker():
+    """The marker is a contract between skillflow (which concatenates the files)
+    and this module (which clips the result). A parser aligned to one emitter
+    and not the other reads every bundle as a single unnamed blob."""
+    import inspect
+    from pathlib import Path
+
+    from core import prompt_assembler
+
+    ours = inspect.getsource(prompt_assembler)
+    assert '"### FILE: ' in ours or "### FILE: " in ours
+
+    sf = Path(inspect.getfile(__import__(
+        "skillflow.context", fromlist=["x"]))).read_text(encoding="utf-8")
+    assert '_FILE_MARKER = "### FILE: "' in sf, (
+        "skillflow emits a different marker than this module parses")
+    assert 'f"### {rel}' not in sf, "a bare-marker emitter survived in skillflow"

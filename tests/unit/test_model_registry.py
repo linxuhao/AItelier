@@ -207,3 +207,16 @@ def test_every_mutating_mcp_tool_is_declared_write():
         assert _TOOL_KIND[name] == "write", name
     for name in ("get_available_models", "list_providers"):
         assert _TOOL_KIND[name] == "read", name
+
+
+def test_the_tool_dependency_guard_still_matches_the_real_source():
+    """`delete_model` is only safe if `model_consumers` actually sees the tool.
+
+    Both delete tests monkeypatch `model_consumers`, so nothing else exercises
+    the detection against the shipped file. If `godot_vision`'s `_ROUTE`
+    assignment drifts far enough that the pattern misses, this fails loudly
+    instead of silently permitting the deletion of a model the gate resolves.
+    """
+    assert reg.model_consumers("vision") == [
+        "aitelier/tools/godot_vision/impl.py"]
+    assert reg.model_consumers("definitely-not-a-route") == []

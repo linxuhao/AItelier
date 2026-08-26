@@ -55,14 +55,26 @@ def config_or_example(name: str) -> str:
     return str(_REPO_ROOT / f"{Path(name).stem}.example{Path(name).suffix}")
 
 
-DEFAULT_ROUTES_FILE = config_or_example("model_routes.json")
+def default_routes_file() -> str:
+    """Resolved on every call, never captured at import.
+
+    It was a module constant, and that froze the answer at import time: on a
+    checkout holding only the example, the first API write correctly created the
+    real `model_routes.json` and `reset_cache()` correctly dropped the cache —
+    but `get_routes(None)` still keyed on the example path, re-read the example,
+    and the newly added model did not exist. `add_model` returned success and
+    `AIGateway("newmodel")` raised "is neither a 'provider/model' nor a route"
+    until the container was recreated. A write that reports success and changes
+    nothing is the worst of the three possible outcomes.
+    """
+    return config_or_example("model_routes.json")
 
 
 class ModelRoutes:
     """Loads `model_routes.json`; resolves an internal name to candidates."""
 
     def __init__(self, path: str | os.PathLike | None = None):
-        self._path = Path(path or DEFAULT_ROUTES_FILE)
+        self._path = Path(path or default_routes_file())
         self._routes: dict[str, list[str]] = {}
         self._load()
 
@@ -127,7 +139,7 @@ _CACHE: dict[str, ModelRoutes] = {}
 
 def get_routes(path: str | os.PathLike | None = None) -> ModelRoutes:
     """Process-wide cached table (re-read only when the path differs)."""
-    key = str(path or DEFAULT_ROUTES_FILE)
+    key = str(path or default_routes_file())
     if key not in _CACHE:
         _CACHE[key] = ModelRoutes(key)
     return _CACHE[key]

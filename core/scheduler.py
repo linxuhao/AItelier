@@ -71,14 +71,23 @@ def _note_quota_exhausted(err) -> float:
     # The escaping error is the LAST candidate's — the pay-as-you-go tail of the
     # route — so its reset instant is the latest of the bunch. Parking on it
     # idles past the moment the FIRST plan reopens, which is the whole failure
-    # this feature exists to avoid, merely postponed. The gateway already tracks
-    # every spent endpoint's reopening (`endpoint_cooldowns`), so the correct
-    # hold is the earliest of them: the instant work becomes possible again.
+    # this feature exists to avoid, merely postponed. So shorten it to the
+    # earliest reopening among the endpoints that could serve THIS model.
+    #
+    # Scoped to that model's own candidates, which the gateway stamps on the
+    # exception, because the process-wide cooldown map spans every model: taking
+    # the minimum over all of it let a 5-minute window on the vision judge cut a
+    # 5-hour hold on flash, and the run then woke into a still-spent plan once
+    # per window until max_retries killed it — exactly the outage this exists to
+    # prevent. No stamp (an error from somewhere else) means no shortening.
     try:
         from core.ai_router import endpoint_cooldowns
-        cooling = endpoint_cooldowns()
-        if cooling:
-            until = min(until, min(cooling.values()))
+        candidates = getattr(err, "_aitelier_candidates", None)
+        if candidates:
+            cooling = endpoint_cooldowns()
+            mine = [v for k, v in cooling.items() if k in candidates]
+            if mine:
+                until = min(until, min(mine))
     except Exception:                                    # noqa: BLE001
         pass    # no gateway state to consult: the error's own instant stands
 

@@ -57,6 +57,30 @@ describe('AppBar sign-in', () => {
     expect(getByText('writer@example.com')).toBeTruthy();
   });
 
+  it('stops offering sign-in to a READER who is already signed in', async () => {
+    // The case keying off canWrite got wrong: identity known, write permission
+    // absent. Signing in again cannot grant write access — only the allowlist
+    // can — so the button was one that did nothing for the person seeing it.
+    authStore.set({ ...base, canWrite: false, email: 'reader@example.com',
+                    signinUrl: 'https://team.example/signin' });
+    const { container, getByText } = await mount();
+    expect(container.querySelector('a.signin-link')).toBeNull();
+    expect(getByText('reader@example.com')).toBeTruthy();
+    // ...and says WHY they cannot write, rather than leaving them guessing.
+    const who = container.querySelector('.signed-in') as HTMLElement;
+    expect(who.getAttribute('title')).toContain('read-only');
+    expect(who.classList.contains('is-reader')).toBe(true);
+  });
+
+  it('still offers sign-in to an anonymous visitor', async () => {
+    // A visitor with no identity may well BE a writer; the server cannot know
+    // until they authenticate, so the offer has to stand.
+    authStore.set({ ...base, canWrite: false, email: null,
+                    signinUrl: 'https://team.example/signin' });
+    const { container } = await mount();
+    expect(container.querySelector('a.signin-link')).not.toBeNull();
+  });
+
   it('stays quiet until permission has actually resolved', async () => {
     // The store fails closed (canWrite:false) before /api/me answers; flashing
     // "Sign in" at a writer mid-boot would be a lie that then vanishes.

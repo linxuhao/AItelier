@@ -45,19 +45,34 @@
       {/if}
     </ul>
     <ul>
-      {#if $authStore.permissionResolved && !$authStore.canWrite && $authStore.signinUrl}
-        <!-- Sign-in is offered ONLY when the deployment declares where to go.
-             Cloudflare Access issues a credential for an application that
-             exists; with none, a sign-in button is a button to nowhere, and a
-             reader clicking it learns nothing. A full page load, not a router
-             push: the destination is Cloudflare, not a route in this app. -->
-        <li>
-          <a class="signin-link" href={$authStore.signinUrl}>
-            {$authStore.authError ? t('appbar.signinAgain') : t('appbar.signin')}
-          </a>
-        </li>
-      {:else if $authStore.email}
-        <li><span class="signed-in" title={$authStore.email}>{$authStore.email}</span></li>
+      {#if $authStore.permissionResolved}
+        {#if $authStore.email}
+          <!-- IDENTITY decides this, not write permission. Keying off
+               `canWrite` kept offering "Sign in" to someone already signed in
+               who simply is not on the writer allowlist — a button that, for
+               them, does nothing at all. Signing in again cannot grant write
+               access; only the allowlist can, so say who they are and say the
+               session is read-only. -->
+          <li>
+            <span
+              class="signed-in"
+              class:is-reader={!$authStore.canWrite}
+              title={$authStore.canWrite
+                ? $authStore.email
+                : $authStore.email + ' · ' + t('error.notAWriter')}
+            >{$authStore.email}</span>
+          </li>
+        {:else if $authStore.signinUrl}
+          <!-- Offered ONLY when the deployment declares where to go: Cloudflare
+               Access issues a credential for an application that exists, and
+               with none this is a button to nowhere. A full page load, not a
+               router push — the destination is Cloudflare, not a route here. -->
+          <li>
+            <a class="signin-link" href={$authStore.signinUrl}>
+              {$authStore.authError ? t('appbar.signinAgain') : t('appbar.signin')}
+            </a>
+          </li>
+        {/if}
       {/if}
       <li>
         <!-- The mark is inlined rather than fetched: the page must stay
@@ -155,12 +170,19 @@
   .signed-in {
     font-size: 0.8rem;
     color: var(--pico-muted-color, #888);
+    cursor: default;
     max-width: 14ch;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     display: inline-block;
     vertical-align: middle;
+  }
+  .signed-in.is-reader {
+    /* Dotted underline: the tooltip says why writes are unavailable, and
+       something has to invite the hover. */
+    text-decoration: underline dotted;
+    text-underline-offset: 0.2rem;
   }
   .gh-link {
     display: inline-flex;

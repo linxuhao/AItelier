@@ -188,3 +188,30 @@ def test_the_inbound_and_outbound_mcp_urls_do_not_share_a_name():
     read = set(re.findall(r'os\.environ\.get\("([A-Z_]+)"', src))
     assert "AITELIER_MCP_URL" not in read
     assert "AITELIER_MEDIA_MCP_URL" in read
+
+
+def test_the_peer_range_admits_a_prerelease_of_the_client(manifest):
+    """`"*"` on a peer that only ever ships prereleases matches NOTHING.
+
+    node-semver lets a prerelease version satisfy a range only when some
+    comparator in that range carries a prerelease tag AND shares the version's
+    exact major.minor.patch tuple. `*` desugars to `>=0.0.0`, which carries no
+    prerelease tag — so it admits no prerelease at all, and every one of the 11
+    published `@deepseek-ai/dsh-mcp-client` versions is a prerelease. The range
+    that reads as "any version is fine" is the one that accepts none of them,
+    and the user meets it as an `ERESOLVE` they have to work around by hand.
+
+    The fix, and the shape this pins, is one `||` branch per tuple, each with a
+    prerelease tag (`^0.1.0-rc.2 || ^0.1.1-rc.1`) — the same form `dshmarket`
+    uses for `@deepseek-ai/dsh-settings`.
+    """
+    for name, spec in manifest["peerDependencies"].items():
+        if not name.startswith("@deepseek-ai/"):
+            continue
+        branches = [b.strip() for b in spec.split("||")]
+        assert branches and all(branches), f"{name}: empty branch in {spec!r}"
+        for branch in branches:
+            assert "-" in branch, (
+                f"{name}: branch {branch!r} carries no prerelease tag, so it "
+                f"admits no prerelease build of a package that ships only "
+                f"prereleases (range was {spec!r})")

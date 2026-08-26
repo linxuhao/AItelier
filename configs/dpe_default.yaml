@@ -186,6 +186,11 @@ steps:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "1" }
       - source: { step: "2_review" }
+      # 1_review 的建议只有走这一条才到得了架构师。拒绝时它作为 feedback 注入
+      # step 1 自己的重跑;**通过**时(实测 15/15 全通过)它就写在 review_verdict.json
+      # 里没有任何读者 —— 一个从不拒绝的评审于是等于一个零产出的步骤。
+      # 不在 preamble_steps 里,所以这条标签("Step 1_review")不会被 drop。
+      - source: { step: "1_review" }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"
@@ -268,6 +273,9 @@ steps:
       - source: { step: "1" }
       - source: { step: "2" }
       - source: { step: "3_review" }
+      # 同 step 2 那条:2_review 通过时(实测 15/15)它的建议没有任何读者。架构评审
+      # 对 PM 说的话只有走这一条才到得了 PM。
+      - source: { step: "2_review" }
       # Goal-loop inputs (empty on the first pass; present when 5_review loops
       # back here): PM's own prior manifest, the final verifier output, the
       # review verdict (the actual pass/fail feedback the PM must address), and
@@ -575,6 +583,12 @@ steps:
       # the declared intent if the preamble ever stops carrying it.
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
+      # 计划评审通过时说的话,以前到不了执行者。t_plan_review 是全流程判决最多的
+      # 评审(177 次判决 / 162 次通过 / 平均 2.6 条建议),而 t_impl 的 context 里
+      # 没有它 —— 实测 317 份 t_impl prompt 里 "Step t_plan_review" 出现 0 次,
+      # 同期 "Step t_plan" 出现 295 次,所以这不是标签写法问题,是真的没接。
+      # "计划可以,但注意 X" 里的 X 于是从未到达写代码的那个 agent。
+      - source: { step: "t_plan_review" }
       - source: { step: "t_impl" }
       - source: { step: "t_impl_review" }
       - source: { tool: "dir_tree" }

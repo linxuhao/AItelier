@@ -5,6 +5,7 @@
 #        目录树自动注入确保 Agent 知道确切的文件名，避免浪费工具轮次猜测。
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 from core.workspace_manager import DPE_GRAPH_NAME, TASK_STEP_SEQUENCE, PROJECT_STEP_SEQUENCE, STEP_SEQUENCE
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 # pre-assembled bundle is that the agent does NOT have to go fetch it), while
 # still bounding genuinely runaway content.
 MAX_CONTEXT_LINES = 1500
+
+# A skillflow file-boundary header inside a multi-file context entry:
+# "### <relpath>" where relpath is a path, not prose.
+_FILE_HEADER_RE = re.compile(r"^###\s+(\S+\.[A-Za-z][A-Za-z0-9]{0,7})\s*$")
 
 
 # Tool definitions are handled by skillflow — injected via _tool_schemas and
@@ -823,14 +828,28 @@ class PromptAssembler:
         agent must resume from, and say how: skillflow's `read` pages by 0-based
         start_line/end_line. A silent mid-file cut is what let an outliner miss
         the world rules entirely and invent contradicting lore.
+
+        ONE entry is not always ONE file. `{from: repository, path: "design/"}`
+        concatenates a whole directory into a single entry, each file behind its
+        own "### <relpath>" header, in ALPHABETICAL order — so which files
+        survive a cut is decided by their names. Live, 2026-08-26: the game's
+        design/ bundle ran 1862 lines against a 1500 budget and the tail —
+        40_ux_backlog.md, 90_decisions.md, 99_changelog.md, README.md — was
+        dropped whole. The architect and the PM had never once seen the
+        design-decisions record, and nothing in the prompt said a file was
+        missing: the marker named lines[0], i.e. the FIRST file, the one file
+        guaranteed to be intact.
+
+        So a truncated multi-file entry leads with a MANIFEST: every file, its
+        length, and whether it is whole / cut / absent. An agent can fail to
+        page a file it was told about; it cannot even want a file it has never
+        heard of. The manifest is charged against the same budget, so the entry
+        stays bounded.
         """
         lines = content.splitlines()
         if len(lines) <= MAX_CONTEXT_LINES:
             return content
-        # skillflow emits step entries as "### <relpath>\n<content>" — name that
-        # path so the resume hint is copy-pasteable.
-        head = lines[0].strip()
-        target = head[4:].strip() if head.startswith("### ") else ""
+
         # `source=` is NOT optional in the hint: a clipped entry is a step-source
         # file living in that step's PROMOTED dir, which a bare read() never
         # searches (it sees only staging + repo) — it answered "File not found"
@@ -842,14 +861,69 @@ class PromptAssembler:
             src_id = label[5:].split(" — ")[0].strip()
             if src_id:
                 src = f", source='step:{src_id}'"
-        resume = (f"read(path='{target}'{src}, start_line={MAX_CONTEXT_LINES})" if target
-                  else f"read(path=<上面 ### 标出的文件>{src}, start_line={MAX_CONTEXT_LINES})")
+
+        # Bundle headers are relative to the bundle ROOT ("### 90_decisions.md"),
+        # while `read` resolves against the REPO root — measured: every read the
+        # architect and PM issue is repo-relative (scripts/…, playtest/…). Emit
+        # the joined path or the hint is a second dead end.
+        prefix = ""
+        if label.startswith("Repository — "):
+            prefix = label[len("Repository — "):].strip()
+            if prefix and not prefix.endswith("/"):
+                prefix += "/"
+
+        def _full(name: str) -> str:
+            return f"{prefix}{name}"
+
+        heads = [(i, m.group(1)) for i, ln in enumerate(lines)
+                 if (m := _FILE_HEADER_RE.match(ln))]
+
+        if len(heads) > 1:
+            # Reserve the manifest's own lines, then re-cut so the total holds.
+            budget = max(1, MAX_CONTEXT_LINES - (len(heads) + 4))
+            spans = [(i, name, (heads[k + 1][0] - 1 if k + 1 < len(heads)
+                                else len(lines)))
+                     for k, (i, name) in enumerate(heads)]
+            manifest = [f"[本条上下文共 {len(heads)} 个文件 / {len(lines)} 行，"
+                        f"预算 {MAX_CONTEXT_LINES} 行。清单在前，内容在后：]"]
+            target, resume_line, dropped = "", budget, []
+            for i, name, stop in spans:
+                n = stop - i - 1
+                if stop <= budget:
+                    manifest.append(f"  ✓ {_full(name)}  {n} 行  完整")
+                elif i < budget:
+                    shown = budget - i - 1
+                    target, resume_line = name, shown
+                    manifest.append(
+                        f"  ✂ {_full(name)}  {n} 行  仅前 {shown} 行 —— "
+                        f"续读 read(path='{_full(name)}'{src}, start_line={shown})")
+                else:
+                    dropped.append(name)
+                    manifest.append(
+                        f"  ✗ {_full(name)}  {n} 行  **未包含** —— "
+                        f"read(path='{_full(name)}'{src})")
+            manifest.append("")
+            body = "\n".join(manifest + lines[:budget])
+            resume = (f"read(path='{_full(target)}'{src}, start_line={resume_line})"
+                      if target else "见上方清单")
+            shown_total, total = budget, len(lines)
+        else:
+            head = lines[0].strip()
+            target = head[4:].strip() if head.startswith("### ") else ""
+            dropped = []
+            body = "\n".join(lines[:MAX_CONTEXT_LINES])
+            resume = (f"read(path='{_full(target)}'{src}, start_line={MAX_CONTEXT_LINES})"
+                      if target
+                      else f"read(path=<上面 ### 标出的文件>{src}, start_line={MAX_CONTEXT_LINES})")
+            shown_total, total = MAX_CONTEXT_LINES, len(lines)
+
         logger.warning(
             "prompt context %r truncated at line %d/%d (step=%s) — the agent must "
-            "page the remainder via read()", label, MAX_CONTEXT_LINES, len(lines),
-            step_id or "?")
-        return "\n".join(lines[:MAX_CONTEXT_LINES]) + (
-            f"\n\n... [上下文截断：已显示前 {MAX_CONTEXT_LINES} 行 / 共 {len(lines)} 行。"
+            "page the remainder via read()%s", label, shown_total, total,
+            step_id or "?",
+            f"; DROPPED WHOLE: {', '.join(dropped)}" if dropped else "")
+        return body + (
+            f"\n\n... [上下文截断：已显示前 {shown_total} 行 / 共 {total} 行。"
             f"**剩余部分依然存在，可能含关键规则/角色卡/剧情前沿**——不要臆测、不要当它不存在，"
             f"用 read 工具接着读：{resume}（start_line/end_line 为 0-based）]")
 

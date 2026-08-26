@@ -811,7 +811,9 @@ def approve_checkpoint(
         _sync_project_status_to_db(project_id)
     elif run and run["status"] == "failed":
         sf.reactivate_run(run_id)
-        sf.resume_run(run_id)
+        from core.run_driver import restore_retry_budget
+        restore_retry_budget(sf, run_id)   # see the docstring: reactivate alone
+        sf.resume_run(run_id)              # leaves the blocker at max_retries
 
     # Clear the drafting gate: the user approved the brief, so the scheduler
     # is now allowed to pick up this project. Without this, projects created

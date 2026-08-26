@@ -614,6 +614,11 @@ def retry_project(
         run = sf.get_run_by_project(project_id)
         if run and run.get("status") == "failed":
             sf.reactivate_run(run["id"])
+            # …and hand the failed step its retries back, which reactivate_run
+            # does not: it resets the last COMPLETED step, while a failed run is
+            # blocked by a FAILED one sitting at retry_count == max_retries.
+            from core.run_driver import restore_retry_budget
+            restore_retry_budget(sf, run["id"])
             # Guard against the silent-deadlock case: if the run was pointed at a
             # step that no longer exists in the (possibly edited) graph — e.g. a
             # node removed since the run started — advance_run() returns None

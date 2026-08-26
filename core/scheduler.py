@@ -29,6 +29,60 @@ _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
 # max_retries (3); anything far above that is a resumed terminal state.
 _MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
 
+# ── Provider quota hold ──────────────────────────────────────────────────────
+# A spent usage window is the one provider failure that is BOTH certain to clear
+# and certain not to clear soon, and the scheduler had no way to express that.
+# Every tick re-claimed, every claim burned a step retry against an API that
+# could not answer, and after max_retries the run was `failed` — permanently,
+# for a condition with a published expiry. Live on 2026-08-26: the jinyong-jianghu
+# run died at 00:59 on a quota that reopened at 03:18.
+#
+# So: park. One process-wide instant (the quota belongs to the API key, not to a
+# project), consulted before any project is advanced. The hold is capped so a
+# mis-parsed or hostile timestamp can idle the scheduler for hours at most, not
+# forever, and every held tick says so in the tick log — "nothing is moving" must
+# stay answerable from that one file.
+# Deliberately in-process, not persisted: a restart during an outage costs one
+# claim, one retry and a re-established hold — self-healing and bounded, which
+# is cheaper than a durable hold that can outlive the condition it describes.
+_QUOTA_HOLD_UNTIL = 0.0          # epoch seconds; 0 = not held
+_QUOTA_HOLD_REASON = ""
+_QUOTA_HOLD_MAX = 6 * 3600       # never park longer than this on one report
+_QUOTA_HOLD_FALLBACK = 300       # provider named no reset time
+_QUOTA_HOLD_GRACE = 30           # don't fire on the exact tick of the reset
+
+
+def _note_quota_exhausted(err) -> float:
+    """Park the scheduler until the provider's window reopens. Returns the hold."""
+    global _QUOTA_HOLD_UNTIL, _QUOTA_HOLD_REASON
+    import logging
+    from datetime import timezone
+    from core.llm_quota import quota_reset_at
+
+    reset = quota_reset_at(err)
+    if reset is not None:
+        until = reset.timestamp() + _QUOTA_HOLD_GRACE
+    else:
+        until = _time.time() + _QUOTA_HOLD_FALLBACK
+    # Clamp: a past instant means the window already reopened (nothing to hold),
+    # a wild future one is not trusted further than the cap.
+    until = min(until, _time.time() + _QUOTA_HOLD_MAX)
+    if until <= _time.time():
+        return 0.0
+    _QUOTA_HOLD_UNTIL = max(_QUOTA_HOLD_UNTIL, until)
+    _QUOTA_HOLD_REASON = str(err)[:200]
+    logging.getLogger("aitelier.scheduler").warning(
+        "provider quota exhausted — holding all ticks for %.0fs (until %s UTC): %s",
+        _QUOTA_HOLD_UNTIL - _time.time(),
+        datetime.fromtimestamp(_QUOTA_HOLD_UNTIL, timezone.utc).strftime("%H:%M:%S"),
+        _QUOTA_HOLD_REASON)
+    return _QUOTA_HOLD_UNTIL
+
+
+def _quota_hold_remaining() -> float:
+    """Seconds left on the hold; 0 when the scheduler may run."""
+    return max(0.0, _QUOTA_HOLD_UNTIL - _time.time())
+
 # Hung-step detection: warn when a claimed step has run longer than
 # timeout_seconds * this multiplier.  Detection runs on a separate periodic
 # job so it fires even when the main scheduler tick is blocked by a hung call.
@@ -736,6 +790,14 @@ async def _execute_skillflow_tick(project_id: str, loop):
 
 async def _run_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step."""
+    held = _quota_hold_remaining()
+    if held > 0:
+        # Before the run is even resolved: claiming a step we cannot execute is
+        # what spends the retry budget, so the cheapest correct move is not to
+        # claim. The project stays active and is re-picked normally afterwards.
+        tick_log(project_id, "quota_hold", remaining=f"{held:.0f}s",
+                 reason=_QUOTA_HOLD_REASON[:120])
+        return
     sf = get_skillflow()
     try:
         run_id = _get_or_create_skillflow_run(project_id)
@@ -951,6 +1013,15 @@ async def _run_skillflow_tick(project_id: str, loop):
               + "".join(_tb.format_stack()))
         raise
     except Exception as e:
+        from core.llm_quota import is_quota_exhausted
+        if is_quota_exhausted(e):
+            # Park first, THEN release the claim. This still spends one retry —
+            # the claim has to go back to 'pending' somehow and skillflow has no
+            # unclaim — but exactly one, instead of max_retries in 15 minutes.
+            _note_quota_exhausted(e)
+            tick_log(project_id, "quota_exhausted", run=run_id[:8],
+                     step=claimed.step_id,
+                     hold=f"{_quota_hold_remaining():.0f}s")
         sf.fail_step(claimed.token, str(e), retryable=True)
 
     # Sync project status to DB after each tick
@@ -1096,8 +1167,13 @@ def _advance_recording_crashes(sf, run_id: str, project_id: str = ""):
 _TICK_LOG_MAX_BYTES = 5 * 1024 * 1024
 _TICK_LOG_BACKUPS = 3
 _TICK_IDLE_HEARTBEAT_S = 60
+# A quota hold is the same shape of noise for the same reason: it repeats at tick
+# cadence and says nothing new each time. A 5-hour window at 5s is ~3600 lines —
+# enough on its own to evict the lines that explain what happened before it.
+_TICK_HOLD_HEARTBEAT_S = 60
 _tick_logger = None
 _tick_last_idle = 0.0
+_tick_last_hold = 0.0
 
 
 def _get_tick_logger():
@@ -1131,15 +1207,25 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
     """One line per tick: which project, what the tick decided, why.
 
     `outcome` is a short stable token so the log greps cleanly — `idle`,
-    `locked`, `advanced`, `claim_failed`, `no_claim`, `executed`, `terminal`.
+    `locked`, `advanced`, `claim_failed`, `no_claim`, `executed`, `terminal`,
+    `quota_exhausted`, `quota_hold`.
+
+    `idle` and `quota_hold` are coalesced to one heartbeat a minute: both repeat
+    at tick cadence and carry no new information, and at 5s either one alone
+    fills the rotation window with lines nobody needs.
     """
-    global _tick_last_idle
+    global _tick_last_idle, _tick_last_hold
     try:
         if outcome == "idle":
             now = _time.time()
             if now - _tick_last_idle < _TICK_IDLE_HEARTBEAT_S:
                 return
             _tick_last_idle = now
+        elif outcome == "quota_hold":
+            now = _time.time()
+            if now - _tick_last_hold < _TICK_HOLD_HEARTBEAT_S:
+                return
+            _tick_last_hold = now
         bits = " ".join(f"{k}={v}" for k, v in detail.items() if v not in (None, ""))
         _get_tick_logger().info(
             "project=%s outcome=%s%s", project_id or "-", outcome,

@@ -62,6 +62,45 @@ _TERMINAL = ("completed", "failed")
 _STALL_HINT_S = 10 * 60
 
 
+def restore_retry_budget(sf, run_id: str) -> dict | None:
+    """Give a resumed run's failed step its retries back. Returns what it reset.
+
+    skillflow's ``reactivate_run`` resets the last **completed** step — but a
+    failed run's blocker is a **failed** one, and a step only ever reaches
+    'failed' by exhausting max_retries. So the row the resume has to clear is
+    precisely the row it does not touch: retry_count stays at the cap, and the
+    very first attempt after the resume takes the "retries exhausted" branch and
+    kills the run again. Retry, from the user's side, silently did nothing.
+
+    Live on 2026-08-26: 5_review sat failed at retry_count 3/3 after DeepSeek's
+    5-hour quota ran out. The quota reopened; the run could not.
+
+    Called AFTER reactivate_run so it wins on current_node.
+    """
+    row = sf._conn.execute(
+        "SELECT id, step_id, retry_count, max_retries FROM skillflow_steps "
+        "WHERE run_id = ? AND status = 'failed' ORDER BY id DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    if not row:
+        return None
+    with sf._conn:
+        sf._conn.execute(
+            "UPDATE skillflow_steps SET status = 'pending', retry_count = 0, "
+            "version = version + 1, claimed_at = NULL, claimed_by = NULL, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (row["id"],),
+        )
+        sf._conn.execute(
+            "UPDATE skillflow_runs SET current_node = ?, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (row["step_id"], run_id),
+        )
+    return {"step": row["step_id"], "instance": row["id"],
+            "was_retry_count": row["retry_count"],
+            "max_retries": row["max_retries"]}
+
+
 def _last_trace_at(sf, run_id: str) -> str | None:
     """Newest trace row timestamp for this run, or None if the trace is empty
     or unreadable. None means "no finer signal available", never "idle 0"."""

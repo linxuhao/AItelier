@@ -1,0 +1,20 @@
+name: capability_declarations_known
+description: >
+  Validation tool for the planning step. Every `capabilities` entry on a task
+  card must be one this pipeline OFFERS. A name that is not offered is refused
+  when the implementing step is claimed, and the task silently runs without the
+  tools it was supposed to get — so it is caught here, at the card, where the
+  message can name what to fix.
+parameters:
+  files:
+    type: array
+    description: "File patterns to check (the engine passes the card glob)"
+    required: false
+  workspace_root:
+    type: string
+    description: "Validation directory (auto-injected by the engine)"
+    required: false
+  config_name:
+    type: string
+    description: "Pipeline name (auto-injected by the engine)"
+    required: false

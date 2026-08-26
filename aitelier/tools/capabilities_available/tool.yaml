@@ -1,0 +1,12 @@
+name: capabilities_available
+description: >
+  What extra capabilities THIS pipeline could have granted this task, and which
+  ones the current task card actually declared. Call it when a task needs
+  something you were not given — generating a real image or sound, say — so you
+  can say which capability is missing instead of silently substituting a
+  placeholder. It grants nothing; it only tells you what is declarable.
+parameters:
+  config_name:
+    type: string
+    description: "Pipeline name (auto-injected by the engine)"
+    required: false

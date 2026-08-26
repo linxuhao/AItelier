@@ -1,0 +1,11 @@
+name: capability_palette
+description: >
+  The capabilities this pipeline offers, with the tools each one grants. Declare
+  a capability on a task card ONLY if it appears here — anything else is refused
+  by the engine when the implementing step is claimed, and the task silently
+  gets nothing.
+parameters:
+  config_name:
+    type: string
+    description: "Pipeline name (auto-injected by the engine)"
+    required: false

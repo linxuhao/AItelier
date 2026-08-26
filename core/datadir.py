@@ -49,6 +49,12 @@ def tools_dir() -> Path:
     return aitelier_home() / "tools"
 
 
+def capabilities_dir() -> Path:
+    """Generated capability definitions (persisted, boot-scanned). Third
+    instance of the same pattern as tools_dir/configs_dir."""
+    return aitelier_home() / "capabilities"
+
+
 def meta_dir() -> Path:
     return aitelier_home() / "meta"
 

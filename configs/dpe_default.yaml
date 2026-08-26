@@ -285,6 +285,11 @@ steps:
       - source: { step: "5" }
       - source: { step: "5_review" }
       - source: { step: "5_test" }
+      # What this pipeline can grant a task. Without it the PM either declares
+      # nothing (and the implementer is under-granted) or invents a name (which
+      # the validation below rejects) — the same failure `forge_palette` exists
+      # to prevent for tools and models.
+      - source: { tool: "capability_palette" }
       - source: { tool: "dir_tree" }
     output:
       mode: "content"
@@ -299,7 +304,7 @@ steps:
       carry_forward: true
       fixed:
         tasks_manifest: { file: "tasks_manifest.json", format: '{"execution_order": [[str, ...], ...]}' }
-        task_card: { file: "tasks/*.json", format: '{"id": str, "description": "ONE-LINE summary (max 80 chars)", "detailed_requirements": str, "artifact_requirement": str, "dependencies": [str, ...], "task_type": str, "interface_contract": str}' }
+        task_card: { file: "tasks/*.json", format: '{"id": str, "description": "ONE-LINE summary (max 80 chars)", "detailed_requirements": str, "artifact_requirement": str, "dependencies": [str, ...], "task_type": str, "interface_contract": str, "capabilities": "[str, ...] — OPTIONAL; extra tools this task needs, chosen ONLY from capability_palette. Omit when the task needs none."}' }
     validation:
       - files: ["tasks_manifest.json"]
         tool: "file_exists"
@@ -315,6 +320,13 @@ steps:
       # card — by then the cards were gone from the step dir.
       - files: ["tasks_manifest.json"]
         tool: "tasks_manifest_complete"
+      # A capability name the pipeline does not offer is refused when t_impl is
+      # claimed — silently, since a missing grant looks to the agent like a world
+      # where that work is impossible. Caught here instead, at the card, on the
+      # planner's own retry budget. Same rule shape as forge_registry_check's
+      # role_model_known, one namespace over.
+      - files: ["tasks/*.json"]
+        tool: "capability_declarations_known"
     # SF-4: removed json_schema validation — LLM-generated JSON format varies;
     # strict schema causes infinite retry loops when validation fails on each
     # attempt. The two checks above are shape-free: one file must exist, and the
@@ -570,6 +582,12 @@ steps:
   - id: "t_impl"
     step_type: "agent"
     agent_config: "task_implementer"
+    # Per-TASK toolset. The PM writes `capabilities: [...]` on a task card; the
+    # framework grants those tools and injects each capability's briefing, and
+    # nothing else carries them. Measured before this existed: the two asset
+    # tools rode every implementer turn of every DPE run and were called zero
+    # times in 6,996 tool calls.
+    capability: { from_item: "capabilities", card: "3/tasks/$current_task.json" }
     # Bound a stuck/conflicting loop-body claim so it times out cleanly instead
     # of churning (defense-in-depth for the loop-progression fix).
     timeout_seconds: 300

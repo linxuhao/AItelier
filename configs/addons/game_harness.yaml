@@ -27,6 +27,13 @@ alias: "dpe_game"
 description: "Godot compile + headless play-test gate for game projects."
 whenToUse: "Building a Godot game — adds the parse gate + runtime play-test that captures errors and live scene state."
 
+# Capabilities this addon OFFERS to the composed graph (unioned with the base's
+# list at compose time, never replacing it). A PM may declare only what its
+# pipeline offers, and the engine refuses anything else at claim time — so this
+# line is what makes `capabilities: ["game_assets"]` legal on a task card of a
+# game run, and illegal everywhere else.
+capabilities: ["game_assets"]
+
 overlay:
   # ── STEPS + TOOLS ──────────────────────────────────────────────────────────
   # 1. Mechanical (tool) channel: scaffold a Godot .gitignore into the repo right
@@ -135,6 +142,11 @@ overlay:
         tool_name: "restage"
         tool_params:
           from_steps: ["5_vision"]
+          # restage refuses to guess: without this it raises "out_dir not
+          # resolved (expected $STEP_DIR)" and the step crashes. Every tool node
+          # in this addon passes it; this one was written without it and took
+          # the whole run down the first time the blind branch was ever reached.
+          out_dir: "$STEP_DIR"
         checkpoint: true
         checkpoint_label: "可读性闸门没能看 —— 请看帧,按六问裁决"
         checkpoint_reject_to: "3"
@@ -272,10 +284,34 @@ overlay:
   - add_context: "@pm"
     source: { from: "repository", path: "design/", mode: "inline" }
 
-  # 6. The design keeper. Spliced onto 5_review's PASS edge — NOT at
-  #    @post_verify_tests — because the record must describe what SHIPPED. At
-  #    @post_verify_tests it would also run on goal-loop iterations that then
-  #    fail and get thrown away, recording a design that never existed.
+  # 6. The design keeper. Runs AFTER the gates and BEFORE the final review.
+  #
+  #    It used to sit on 5_review's PASS edge, so the record described only what
+  #    SHIPPED — sound, but it had two costs that only showed up once the record
+  #    grew teeth:
+  #
+  #    (a) NOBODY EVER READ IT. 5_design wrote design/ and went straight to
+  #        `done`, downstream of the last reviewer. The one artifact that
+  #        outlives every run was the one artifact no gate ever checked.
+  #    (b) CLOSING A BACKLOG ROW WAS IMPOSSIBLE. design/40_ux_backlog.md rule 2
+  #        wants a GATE RESULT before a row may be marked CLOSED, and the gate
+  #        results (5_test / 5_compile / 5_vision) only exist after the task
+  #        loop. Live 2026-08-26: an in-loop `backlog_closure` task hunted for
+  #        `playtest_summary.md` at a repo-relative path, found instead a
+  #        `final/verify_report.json` left over from the PREVIOUS round, and
+  #        correctly refused to close on it — three rounds of work with no way
+  #        to reach the one state the round was asked for.
+  #
+  #    Moving it here fixes both with no new step and no new context: 5_design
+  #    already receives compile_report / playtest_summary / 5_vision / step 5,
+  #    and consumes nothing 5_review produces, so it moves freely. The reviewer
+  #    now sees the finished round — including every CLOSED row — and can judge
+  #    whether the cited evidence actually bears on the row it closes. That is a
+  #    judgement no regex over a hand-written markdown table can make.
+  #
+  #    The cost this trades away: the record is now written before the verdict,
+  #    so a goal-loop iteration rewrites it. `mode: write` makes that harmless —
+  #    the same surgical edits land again; nothing accumulates or is lost.
   #
   #    `output.mode: write` (same discipline as t_impl and novel_init's `design`)
   #    is the whole point: with `{from: repository}` as the baseline, the agent
@@ -288,8 +324,7 @@ overlay:
   #    Both transitions go to `done`, including the error branch: a failed design
   #    update must never sink an otherwise-green run. The cost is a stale record
   #    — visible in the run's step log, and recoverable, because it is in git.
-  - insert_after: "@verifier_review"
-    after_match: { from_file: "review_verdict.json", field: "passed", value: true }
+  - insert_after: "5_knowledge"
     steps:
       - id: "5_design"
         step_type: "agent"
@@ -318,7 +353,11 @@ overlay:
               params:
                 source_dir: "$STEP_DIR"
               on_failure: "skip"
+        # Both edges go to the REVIEWER now, not to `done`. The error branch
+        # included: a failed design update must never sink an otherwise-green
+        # run, and it must not skip the review either — a round whose record
+        # could not be written is exactly the round a reviewer should see.
         transitions:
-          - to: "done"
+          - to: "5_review"
             match: { _error: true }
-          - to: "done"
+          - to: "5_review"

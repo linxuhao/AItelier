@@ -212,11 +212,27 @@ def get_skillflow():
         # MOUNTED state_dir (survives across runs AND container recreation) — it
         # replaces a generated tool hardcoding an un-mounted ~/.aitelier path.
         # `tool_creation` grants a tool-building step the register/test toolset.
-        sf.register_capability(
-            "stateful",
-            context_provider=lambda cfg: {"state_dir": str(sf._workspace.state_dir(cfg))})
-        sf.register_capability(
-            "tool_creation", tools=["write", "run_tests", "pytest", "register_tool"])
+        # Every definition goes through core.capability_registry, which holds the
+        # invariants (a grant's tools must resolve; a name is owned; an offered
+        # capability cannot be archived) — the same reason core/model_registry.py
+        # is the only writer of the routing tables.
+        from core import capability_registry as _caps
+        project_root_for_caps = Path(__file__).resolve().parent.parent
+        _caps.define(sf, "stateful", owner="host",
+                     context_provider=lambda cfg: {
+                         "state_dir": str(sf._workspace.state_dir(cfg))})
+        _caps.define(sf, "tool_creation", owner="host",
+                     tools=["write", "run_tests", "pytest", "register_tool"])
+        # game_assets: the tools AND the discipline that keeps their output
+        # usable. Both used to ride on every DPE implementer — measured across
+        # 22 workspaces, 6,996 tool calls, ZERO uses, 55% of that step's tool
+        # schema budget, re-sent every turn. Now they reach only the task cards
+        # that declare it.
+        _ga = (project_root_for_caps / "configs" / "addons" / "game_harness"
+               / "game_assets_briefing.md")
+        _caps.define(sf, "game_assets", owner="addon:game_harness",
+                     tools=["gen_image_asset", "gen_audio_asset"],
+                     briefing=_ga.read_text(encoding="utf-8") if _ga.is_file() else "")
 
         # Custom lint backends are consulted BEFORE built-ins, so this replaces
         # skillflow's `ruff` — the name t_impl's importability gate dispatches to
@@ -291,6 +307,16 @@ def get_skillflow():
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning("addon aliases not loaded: %s", e)
+
+        # Register previously-generated capability definitions
+        # (~/.AItelier/capabilities/*.json), so a capability the forge authored
+        # survives restart exactly like a generated tool or pipeline. Non-fatal.
+        try:
+            _caps.load_generated(sf)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "generated capabilities not loaded: %s", e)
 
         # Register previously-generated pipelines (gen_*.yaml in ~/.AItelier/configs)
         # so they survive restart and are runnable by name. Non-fatal.

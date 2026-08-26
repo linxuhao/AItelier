@@ -1,9 +1,43 @@
 ---
 name: aitelier-pipelines
-description: Use when building, test-driving or repairing an AItelier pipeline through the mcp__aitelier__* tools — covers the generate → drive → observe → fix loop, what the structural gates do and do not prove, and the failure shapes that only a real run exposes
+description: Use when building, test-driving or repairing an AItelier pipeline through the mcp__aitelier__* tools, OR when those tools are expected but absent — covers the generate → drive → observe → fix loop, what the structural gates do and do not prove, the failure shapes that only a real run exposes, and why a missing toolset cannot be diagnosed from the inside
 ---
 
 # Driving an AItelier pipeline
+
+## No `mcp__aitelier__*` tools? Start here.
+
+You cannot diagnose this from the inside — an absent toolset looks identical to
+a toolset you were never granted, so the honest failure is to report "no such
+tools" and guess at why. Do not guess; the cause is one of four things, and the
+connection fails **silently** by design (`failOnStartupError: false`, so an
+unreachable backend never stops `dsh` booting).
+
+This plugin is a *client*. It does not install or start AItelier — that runs
+separately, as a container, and must already be up:
+
+```bash
+git clone https://github.com/linxuhao/AItelier && cd AItelier
+mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
+printf '%s' "sk-your-deepseek-key" > ~/.aitelier-secrets/DEEPSEEK_API_KEY
+chmod 600 ~/.aitelier-secrets/DEEPSEEK_API_KEY
+docker compose up -d          # serves the API + MCP endpoint on 127.0.0.1:4444
+```
+
+Then check, in order:
+
+1. **Is it running?** `curl -s localhost:4444/health` → `{"status":"ok",…}`.
+2. **Is the URL right for where `dsh` runs?** Default `http://127.0.0.1:4444/mcp`
+   (host). Use `http://aitelier:4444/mcp` **only** if `dsh` is itself a
+   container on the same docker network.
+3. **Does the endpoint answer?** A `421` means the Host header is not in
+   AItelier's allow-list — set `AITELIER_MCP_ALLOWED_HOSTS` on that side.
+4. **Is the row mounted?** `dsh --profile <name> --dump-config | grep -A3 mcp-aitelier`.
+
+Writes (`generate_pipeline`, `edit_*`, `run_pipeline`) additionally need
+`AITELIER_ADMIN_TOKEN`; without it they answer `denied: …` rather than
+disappearing. Reads need nothing.
+
 
 AItelier turns a description into a runnable SkillFlow graph: steps, agent roles,
 prompts and tools. You do not step it. Its scheduler runs the steps; your job is

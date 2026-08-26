@@ -116,15 +116,20 @@ pip install -e .
 ```bash
 cp llm_providers.example.json llm_providers.json   # providers: URL + key NAME
 cp model_routes.example.json  model_routes.json    # models: which endpoints serve each
+cp .env.example .env                               # endpoints and options; NOT the keys
+
+# Which key files do YOUR tables need? The key name is the provider table's, not this page's:
+python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \
+           print('required:', required_llm_keys()); print('failover:', failover_llm_keys())"
+
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY && chmod 600 ~/.aitelier-secrets/ARK_API_KEY
-cp .env.example .env        # endpoints and options; NOT the keys
+printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME> && chmod 600 ~/.aitelier-secrets/<KEY_NAME>
 ```
 
 Three things worth knowing before you customize — the full routing story (provider/endpoint/model levels, the failover policy, what each model must be) is in **[docs/models-and-providers.md](docs/models-and-providers.md)**:
 
 - The **model names are the contract**: `agent_configs/*.yaml` reference `flash` / `pro` / `glm` / `smart` / `vision`; what sits behind each is yours to choose. Skip the `cp` entirely and the examples serve as fallback, so a fresh clone still runs.
-- Keys are **secret FILES, not environment variables** — so the test/build subprocesses a pipeline runs cannot inherit them. Ask the code which ones you need: `python -c "from core.external_deps import required_llm_keys, failover_llm_keys; print(required_llm_keys(), failover_llm_keys())"`. Out of the box: `ARK_API_KEY` required, DeepSeek and Qwen as failover.
+- Keys are **secret FILES, not environment variables** — so the test/build subprocesses a pipeline runs cannot inherit them. Which files exist is *derived from your provider tables* (that's the probe above); with the shipped examples it prints `ARK_API_KEY` required, DeepSeek and Qwen as failover.
 - A missing key fails **loudly**, naming the provider, the key, the file to create, and the model that sent it there.
 
 > **The backend runs in Docker** — a host process would make the pipeline's git commits carry your own `~/.gitconfig` identity, so the CLI never silently falls back to one. `aitelier` starts the container for you (and creates the secret files it mounts). The one escape hatch is explicit: `aitelier server --no-docker` runs uvicorn in-process, for debugging outside a container or a deployment that supplies its own git identity.
@@ -151,8 +156,10 @@ service whose secret source is missing. The CLI creates them for you; if you run
 ```bash
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
 cd ~/.aitelier-secrets && touch DEEPSEEK_API_KEY ARK_API_KEY GITHUB_TOKEN LOCAL_QWEN_API_KEY && chmod 600 *
-printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
+printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME>   # the probe in Quick Start names it
 ```
+
+Those four names are the secrets `docker-compose.yml` enumerates — the secrets dir is deliberately **not** bind-mounted (so keys never appear in any workspace-visible path), which means a provider you add with a **new** key name also needs its own `secrets:` entry in the compose file.
 
 Publishing through an existing **cloudflared** connector is one line. The network
 lives in `docker-compose.yml` itself and is selected BY NAME, with no

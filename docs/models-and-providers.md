@@ -67,15 +67,22 @@ python -c "from core.external_deps import required_llm_keys, failover_llm_keys; 
 
 `required` is the **first** endpoint of each model — what runs actually bind
 to. `failover` is everything behind them: not needed to start, needed for an
-outage to be a slowdown instead of a stop. Out of the box that is
-`ARK_API_KEY` required, DeepSeek and Qwen as failover.
+outage to be a slowdown instead of a stop. The names are *derived from your
+provider tables*, never fixed by documentation; with the shipped example
+tables the probe prints `ARK_API_KEY` required, DeepSeek and Qwen as failover.
 
 ```bash
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
-chmod 600 ~/.aitelier-secrets/ARK_API_KEY
+printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME>   # whatever the probe printed
+chmod 600 ~/.aitelier-secrets/<KEY_NAME>
 cp .env.example .env        # endpoints and options; NOT the keys
 ```
 
 A missing key fails naming the provider, the key, the file to create, **and
 the model whose endpoint list sent it there**.
+
+One Docker-specific constraint: the container mounts **only the secret names
+enumerated in `docker-compose.yml`** — the secrets dir itself is deliberately
+not bind-mounted, so keys never appear in any workspace-visible path. Register
+a provider whose key name isn't in that list and the file will sit unread on
+the host until you add a matching `secrets:` entry to the compose file.

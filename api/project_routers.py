@@ -1,6 +1,7 @@
 # api/project_routers.py
 # REST endpoints for project CRUD, listing, and submission.
 
+import os
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -27,6 +28,7 @@ from models.schemas import ProjectCreate, ProjectResponse, ProjectWithStats
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner, enrich_project_status
+from api import _read_cache
 from api.auth import CurrentUser, get_optional_user, creator_email
 from api.authz import require_writer
 
@@ -37,7 +39,16 @@ router = APIRouter(prefix="/api/projects", tags=["Projects"])
 _WORKSPACE_FILE_MAX_LINES = 2000
 
 # Hard ceiling on a single workspace read, checked before the file is opened.
-_WORKSPACE_FILE_MAX_BYTES = 8 * 1024 * 1024
+_WORKSPACE_FILE_MAX_BYTES = 4 * 1024 * 1024
+
+# Ceilings for the tree listing: entries returned, and entries examined. The
+# second one is the one that matters — the walk stops, rather than walking
+# everything and then truncating.
+# Infrastructure files the workspace readers never serve: engine
+# bookkeeping, not anything the pipeline produced.
+_WORKSPACE_HIDDEN_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm"}
+_WORKSPACE_TREE_MAX = 200
+_WORKSPACE_TREE_SCAN_MAX = 20000
 
 # Extensions the raw-bytes endpoint serves inline, so the file browser can show
 # a picture instead of mojibake. An allowlist, not a general blob server: an
@@ -85,7 +96,16 @@ def _resolve_workspace_target(project_id: str, path: str, root: str,
     # lines while `owner_email` in the DB projection read `cli@local`.
     # 404, not 403: the tree makes these files invisible, so confirming they
     # exist would be a smaller leak of the same kind.
-    if ".git" in target.relative_to(base_resolved).parts:
+    rel_parts = target.relative_to(base_resolved).parts
+    if ".git" in rel_parts:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    # Same reasoning, different infrastructure file. `trace.db` sits in the DPS
+    # root and is the workspace's own bookkeeping: system prompts, tool calls,
+    # tool results. That is exactly the content the /api/agent lock was added to
+    # protect, reachable through a second door, as a 8MB binary decoded with
+    # errors="replace" (90% of it comes out printable). It is not project
+    # content and this reader has no business serving it.
+    if target.suffix.lower() in _WORKSPACE_HIDDEN_SUFFIXES:
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
@@ -100,10 +120,25 @@ def list_projects(
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager)
 ):
-    """List all projects with aggregated task stats."""
-    projects = db.list_projects_with_stats(owner_email=owner_filter(user, request))
-    projects = [enrich_project_status(p) or p for p in projects]
-    return _add_task_summaries(projects)
+    """List all projects with aggregated task stats.
+
+    Cached like `/api/runs` and `/api/repos`, and for a sharper reason: it runs
+    the SAME expensive core as `_list_all_runs_uncached` — `list_projects_with_stats`
+    plus `enrich_project_status` per project — and the first pass cached the two
+    endpoints the SPA polls and left this one, which no SPA route calls, doing
+    529ms of CPU per request. Not being on a page is what hid it; it is still a
+    public anonymous URL with no rate limit, so one client looping it consumed
+    ~92% of the single core and the saturation point for the whole deployment
+    was two callers.
+
+    It also fixes the cold start: 12s against a cold page cache is over the
+    SPA's own 10s client timeout, and the shared build collapses N waiting tabs
+    onto one wait instead of N.
+    """
+    owner = owner_filter(user, request)
+    return _read_cache.cached(("projects", owner), lambda: _add_task_summaries(
+        [enrich_project_status(p) or p
+         for p in db.list_projects_with_stats(owner_email=owner)]))
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
@@ -234,20 +269,47 @@ def workspace_tree(
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, None, project)
 
-    base = ws.get_code_path(project_id) if root == "code" else ws._get_secure_path(project_id)
-    if subdir:
-        base = base / subdir
+    root_dir = (ws.get_code_path(project_id) if root == "code"
+                else ws._get_secure_path(project_id)).resolve()
+    # `subdir` was concatenated raw — no resolve, no containment check — while
+    # both neighbours in this file are jailed. Confirmed against the PUBLIC host:
+    # `?subdir=../../../../../run/secrets` listed the mounted secret FILENAMES,
+    # and the same lever walks /app, site-packages and the host data dir. Names
+    # only (workspace_file resolves and contains correctly, so no content
+    # escaped) but it publishes the deployment's shape, and see the walk below
+    # for the other half.
+    base = (root_dir / subdir).resolve() if subdir else root_dir
+    if not base.is_relative_to(root_dir):
+        raise HTTPException(status_code=403, detail="Path traversal denied")
     if not base.exists():
         raise HTTPException(status_code=404, detail="Workspace not found")
 
+    # Bounded walk. This was `sorted(base.rglob("*"))`, which materialises and
+    # sorts the ENTIRE recursive listing before `[:200]` throws almost all of it
+    # away — so the cap bounded the response and not the work. Pointed at a
+    # large tree that is a few hundred thousand stat() calls held in one list,
+    # in the single process that is also driving live pipeline runs.
+    # `truncated` is reported rather than silently applied: a cut-off listing
+    # that says nothing reads as "that is the whole tree".
     tree = []
-    for item in sorted(base.rglob("*")):
-        # Skip .git internals
-        if ".git" in item.parts:
-            continue
-        if item.is_file():
-            tree.append(str(item.relative_to(base)))
-    return {"project_id": project_id, "root": root, "tree": tree[:200]}
+    scanned = 0
+    truncated = False
+    for dirpath, dirnames, filenames in os.walk(base):
+        # Prune, don't filter: descending into .git and discarding the results
+        # is the expensive half of the work this is meant to avoid.
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        rel_dir = Path(dirpath).relative_to(base)
+        for name in filenames:
+            scanned += 1
+            tree.append(str(rel_dir / name) if rel_dir.parts else name)
+            if len(tree) >= _WORKSPACE_TREE_MAX or scanned >= _WORKSPACE_TREE_SCAN_MAX:
+                truncated = True
+                break
+        if truncated:
+            break
+    tree.sort()
+    return {"project_id": project_id, "root": root, "tree": tree,
+            "truncated": truncated}
 
 
 @router.get("/{project_id}/workspace/file")
@@ -270,27 +332,40 @@ def workspace_file(
     """
     target = _resolve_workspace_target(project_id, path, root, user, db, ws)
 
-    # Size-check BEFORE reading. The paging below is by line, but the read was
-    # whole-file first, so "page 1 of a big file" still allocated the file plus
-    # its line list. Anonymous and public, that is a memory lever; the largest
-    # file reachable in the live workspace today is an 8.3MB font.
+    # Size cap FIRST — but note what it does and does not bound. It was chosen
+    # against file bytes while the cost is the decoded string plus the line
+    # list: 8MB of 0xff decodes to 8.4M U+FFFD (16.8MB of str), and 8MB of
+    # "ab\n" becomes 2.8M list entries — measured at 153-178MB peak for a file
+    # the cap called acceptable, times the 40-thread pool these sync handlers
+    # run in. So the cap alone was ~20x off.
     size = target.stat().st_size
     if size > _WORKSPACE_FILE_MAX_BYTES:
         raise HTTPException(
             status_code=413,
             detail=(f"File is {size} bytes, over the "
                     f"{_WORKSPACE_FILE_MAX_BYTES}-byte read limit"))
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    total = len(lines)
+
+    # The real fix is not a smaller number, it is not holding the file. Stream
+    # it and keep only the requested window, so memory is bounded by the PAGE
+    # (2000 lines) no matter how the bytes decode. The cap above now bounds
+    # time rather than memory, which is what a size check can honestly do.
     start_idx = (start_line - 1) if start_line and start_line > 0 else 0
-    start_idx = min(start_idx, total)
     if end_line and end_line > 0:
-        end_idx = min(end_line, total)
+        stop_idx = max(end_line, start_idx)
     else:
-        end_idx = min(start_idx + _WORKSPACE_FILE_MAX_LINES, total)
+        stop_idx = start_idx + _WORKSPACE_FILE_MAX_LINES
+    window: list[str] = []
+    total = 0
+    with target.open("r", encoding="utf-8", errors="replace") as fh:
+        for i, raw in enumerate(fh):
+            total = i + 1
+            if start_idx <= i < stop_idx:
+                window.append(raw.rstrip("\n").rstrip("\r"))
+    start_idx = min(start_idx, total)
+    end_idx = min(stop_idx, total)
     return {
         "path": path,
-        "content": "\n".join(lines[start_idx:end_idx]),
+        "content": "\n".join(window),
         "start_line": start_idx + 1,
         "end_line": end_idx,
         "total_lines": total,

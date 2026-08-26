@@ -43,6 +43,14 @@ from typing import Any, Callable, Hashable
 # at most half a poll stale and usually less.
 DEFAULT_TTL = 5.0
 
+# Both dicts are keyed on values an ANONYMOUS caller picks: `/api/runs` takes
+# free-form `config_name` and `status` query params, so `?config_name=zzz1`
+# mints a fresh entry in each. `_store` at least turns over by TTL; `_locks` had
+# no eviction at all and `clear()` never touched it, so ~180 bytes per distinct
+# key accumulated forever on a hostname whose stated problem is that the callers
+# are strangers. A cap is the honest fix: the keys are not ours to bound.
+_MAX_KEYS = 512
+
 _store: dict[Hashable, tuple[float, Any]] = {}
 _locks: dict[Hashable, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -52,6 +60,12 @@ def _lock_for(key: Hashable) -> threading.Lock:
     with _locks_guard:
         lock = _locks.get(key)
         if lock is None:
+            if len(_locks) >= _MAX_KEYS:
+                # Drop everything rather than pretend to be an LRU. These are
+                # 5-second entries; losing them costs one recomputation, and a
+                # wrong eviction policy here would be more code than the cache.
+                _locks.clear()
+                _store.clear()
             lock = _locks[key] = threading.Lock()
         return lock
 
@@ -84,3 +98,7 @@ def cached(key: Hashable, build: Callable[[], Any], ttl: float = DEFAULT_TTL) ->
 def clear() -> None:
     """Drop everything. For tests, and for a caller that knows it just wrote."""
     _store.clear()
+    # `_locks` too: it used to be left behind, which made "clear" not clear and
+    # let the lock table grow without any bound at all.
+    with _locks_guard:
+        _locks.clear()

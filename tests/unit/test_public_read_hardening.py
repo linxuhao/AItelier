@@ -436,3 +436,212 @@ def test_the_code_path_jail_uses_component_containment():
                      if not l.lstrip().startswith("#"))
     assert "is_relative_to" in code
     assert "startswith" not in code
+
+
+# ── 5. Third pass: what the second round of reviewers found ───────────────────
+
+class TestTheTreeListingIsJailedAndBounded:
+    """`workspace_tree` was the endpoint the FIRST round used as the reference
+    implementation — `workspace_file` was faulted for missing the `.git` filter
+    that this one had. It turned out to have no path jail at all. Confirmed on
+    the public host: `?subdir=../../../../../run/secrets` returned the mounted
+    secret FILENAMES."""
+
+    def _tree(self, repo, subdir=None):
+        import api.project_routers as pr
+        return pr.workspace_tree("p1", subdir, "code", None, _Db(), _Ws(repo))
+
+    @pytest.mark.parametrize("subdir", ["../..", "../../../../../run/secrets", "/etc"])
+    def test_escaping_the_workspace_is_refused(self, repo, subdir):
+        with pytest.raises(HTTPException) as e:
+            self._tree(repo, subdir)
+        assert e.value.status_code == 403
+
+    def test_a_real_subdir_still_lists(self, repo):
+        assert self._tree(repo, "src")["tree"] == ["main.gd"]
+
+    def test_git_is_still_pruned(self, repo):
+        assert not any(".git" in p for p in self._tree(repo)["tree"])
+
+    def test_the_walk_stops_instead_of_truncating_afterwards(self, repo, monkeypatch):
+        """`sorted(base.rglob("*"))` materialised and sorted the ENTIRE
+        recursive listing before `[:200]` discarded almost all of it — so the
+        cap bounded the response and not the work, and one anonymous GET
+        pointed at a large tree was a few hundred thousand stat() calls."""
+        import api.project_routers as pr
+        monkeypatch.setattr(pr, "_WORKSPACE_TREE_MAX", 3)
+        for i in range(20):
+            (repo / f"f{i}.txt").write_text("x")
+        out = self._tree(repo)
+        assert len(out["tree"]) == 3
+        assert out["truncated"] is True, "a cut-off listing must say so"
+
+    def test_a_short_listing_is_not_marked_truncated(self, repo):
+        assert self._tree(repo)["truncated"] is False
+
+
+class TestTheWorkspaceReadIsBoundedByTheWindowNotTheFile:
+    def test_it_does_not_read_the_whole_file(self):
+        """The cap was chosen against FILE BYTES while the cost is the decoded
+        string plus the line list: 8MB of 0xff decodes to 16.8MB of str, and
+        8MB of "ab\\n" becomes 2.8M list entries — measured at 153-178MB peak
+        for a file the cap called acceptable, times a 40-thread pool. A smaller
+        number would not have fixed the shape."""
+        import api.project_routers as pr
+        src = inspect.getsource(pr.workspace_file)
+        assert "read_text" not in src, "still materialising the whole file"
+        assert "target.open(" in src
+
+    def test_the_window_is_what_comes_back(self, repo):
+        import api.project_routers as pr
+        (repo / "many.txt").write_text("\n".join(str(i) for i in range(5000)))
+        out = pr.workspace_file("p1", "many.txt", "code", 10, 12,
+                                None, _Db(), _Ws(repo))
+        assert out["content"] == "9\n10\n11"
+        assert out["total_lines"] == 5000
+        assert out["truncated"] is True
+
+    def test_the_cap_is_still_a_real_ceiling(self):
+        from api.project_routers import _WORKSPACE_FILE_MAX_BYTES
+        assert 0 < _WORKSPACE_FILE_MAX_BYTES <= 8 * 1024 * 1024
+
+    @pytest.mark.parametrize("name", ["trace.db", "x.sqlite3", "y.db-wal"])
+    def test_engine_bookkeeping_is_not_project_content(self, repo, name):
+        """`trace.db` sits in the DPS root and holds system prompts, tool calls
+        and tool results — the same content the /api/agent lock was added to
+        protect, reachable through a second door as a binary decoded with
+        errors="replace" (most of it comes out printable)."""
+        (repo / name).write_bytes(b"SQLite format 3\x00You are a helpful agent")
+        with pytest.raises(HTTPException) as e:
+            _resolve(repo, name)
+        assert e.value.status_code == 404
+
+
+class TestAnUnknownJwtKidCostsNoNetworkCall:
+    """`write_gate` verifies the JWT BEFORE returning 403, so the denial is not
+    the protection it looks like. PyJWT's cache does not help: an unknown `kid`
+    falls through to `get_signing_keys(refresh=True)`, which bypasses it — so a
+    token with a random kid forces a live HTTPS round-trip per request, on the
+    event loop, at PyJWT's 30-SECOND default timeout."""
+
+    def test_the_fetch_timeout_is_short(self):
+        from core import cf_access
+        assert 0 < cf_access._FETCH_TIMEOUT <= 5
+
+    def test_a_rejected_kid_is_remembered(self):
+        import jwt as _jwt
+        from core import cf_access
+        cf_access._bad_kids.clear()
+        tok = _jwt.encode({"email": "a@b.c"}, "k", algorithm="HS256",
+                          headers={"kid": "made-up-kid"})
+        assert cf_access.verify(tok) is None
+        assert "made-up-kid" in cf_access._bad_kids
+
+        # The second call must not TOUCH the client. Asserting `verify(...) is
+        # None` proves nothing: `verify` swallows every exception, so a broken
+        # client and a short-circuit are indistinguishable from the outside —
+        # the first version of this test passed with the short-circuit deleted.
+        # Record the call instead.
+        touched = []
+
+        def _spy():
+            touched.append(1)
+            raise AssertionError("should not be reached")
+
+        monkeypatched = cf_access._client
+        cf_access._client = _spy
+        try:
+            assert cf_access.verify(tok) is None
+        finally:
+            cf_access._client = monkeypatched
+        assert touched == [], "an unknown kid still reached the JWKS client"
+
+    def test_the_bad_kid_table_is_bounded(self):
+        """The attacker picks the keys, so the table must not be theirs to grow."""
+        import jwt as _jwt
+        from core import cf_access
+        cf_access._bad_kids.clear()
+        for i in range(cf_access._BAD_KID_MAX + 50):
+            cf_access._remember_bad_kid(_jwt.encode(
+                {}, "k", algorithm="HS256", headers={"kid": f"k{i}"}))
+        assert len(cf_access._bad_kids) <= cf_access._BAD_KID_MAX
+
+
+class TestSseEvictionIsNotSilent:
+    def test_an_evicted_client_is_told(self):
+        """Bounding the queue made this eviction path live for the first time.
+        Dropping the queue alone left `event_generator` awaiting a queue nobody
+        feeds while still emitting its 15s `: ping` — the socket stays open,
+        EventSource never fires onerror, and web/src/lib/sse.ts only reconnects
+        from onerror. The cap would have turned "slow client" into "permanently
+        dead client with no symptom"."""
+        import asyncio
+        import api.sse_manager as sm
+
+        async def go():
+            m = sm.StreamManager()
+            q = asyncio.Queue(maxsize=2)
+            m._get_queues("c").add(q)
+            for _ in range(5):
+                await m.push_log("c", "x")
+            drained = []
+            while not q.empty():
+                drained.append(q.get_nowait())
+            return drained
+
+        assert "__END__" in asyncio.run(go())
+
+    def test_the_channel_count_is_bounded(self):
+        import api.sse_manager as sm
+        assert sm._BUFFER_CHANNEL_MAX > 0
+        assert "_BUFFER_CHANNEL_MAX" in inspect.getsource(sm.StreamManager.push_log)
+
+
+class TestTheCacheTablesAreBounded:
+    def test_clear_clears_the_locks_too(self):
+        from api import _read_cache as rc
+        rc.clear()
+        rc.cached(("a",), lambda: 1)
+        assert rc._locks
+        rc.clear()
+        assert not rc._locks, "clear() left the lock table behind"
+
+    def test_attacker_chosen_keys_cannot_grow_it_without_bound(self):
+        """`/api/runs` takes free-form `config_name` / `status`, so every
+        `?config_name=zzz<n>` minted a permanent lock entry."""
+        from api import _read_cache as rc
+        rc.clear()
+        for i in range(rc._MAX_KEYS * 3):
+            rc.cached(("runs", f"cfg{i}", None, None), lambda: i)
+        assert len(rc._locks) <= rc._MAX_KEYS
+        assert len(rc._store) <= rc._MAX_KEYS
+
+
+def test_every_git_env_puts_its_overrides_after_the_spread():
+    """Two modules define `_GIT_ENV`; the first pass fixed one of them. The one
+    left behind is the copy whose comment says it exists for the user-visible
+    'Make PR' result messages."""
+    import core.git_ops as go
+    import core.workspace_manager as wm
+    for mod in (go, wm):
+        line = next(l for l in inspect.getsource(mod).splitlines()
+                    if l.startswith("_GIT_ENV = "))
+        assert line.index("**os.environ") < line.index('"LC_ALL"'), (
+            f"{mod.__name__}: os.environ wins over the override — {line}")
+
+
+def test_the_third_endpoint_with_the_same_core_is_cached_too():
+    """`/api/projects` runs the SAME `list_projects_with_stats` +
+    `enrich_project_status` core as `/api/runs`, and the first caching pass
+    covered the two endpoints the SPA polls and missed this one — because not
+    being on a page is what hid it, not that it was cheap. Measured at 529ms of
+    CPU per anonymous call, which put the deployment's saturation point at two
+    callers against anything that loops a URL.
+
+    Same one-of-N shape as `get_repo` and as `_GIT_ENV`: the fix was applied to
+    the instances someone was looking at.
+    """
+    import api.project_routers as pr
+    src = inspect.getsource(pr.list_projects)
+    assert "_read_cache.cached" in src
+    assert '("projects", owner)' in src, "the key must carry the owner filter"

@@ -16,7 +16,12 @@ from core.ai_router import _read_secret
 
 # Force English locale for all git subprocess calls — prevents French
 # locale leakage in dashboard "Make PR" action result messages.
-_GIT_ENV = {"LC_ALL": "C", **os.environ}
+# Override AFTER the spread. Written the other way round, `**os.environ`
+# wins and the forcing does nothing whenever LC_ALL is actually set —
+# and this is the copy whose comment says it exists for the "Make PR"
+# result messages, i.e. the user-visible one. workspace_manager had the
+# identical line and only that one was fixed first time round.
+_GIT_ENV = {**os.environ, "LC_ALL": "C"}
 
 
 def redact_url_credentials(url: str | None) -> str | None:

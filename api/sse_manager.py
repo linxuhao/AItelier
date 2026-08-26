@@ -9,6 +9,8 @@ from typing import Dict, AsyncGenerator, Set
 _QUEUE_MAX = 1000
 # Events retained for a channel with no consumer at all.
 _BUFFER_MAX = 500
+# Channels retained at all. Nothing subscribes to most of them.
+_BUFFER_CHANNEL_MAX = 64
 
 
 class StreamManager:
@@ -42,6 +44,13 @@ class StreamManager:
             # and the first visitor then had the whole backlog replayed into
             # their queue in one go. Keep the newest; a replay is a courtesy,
             # not a delivery guarantee.
+            # Bounded in key COUNT too. api/meta_routers pushes to a
+            # per-project channel that nothing subscribes to, so every project
+            # accumulated its own permanent buffer — capping each one at 500
+            # only made the leak per-key instead of unbounded.
+            if (task_id not in self._buffers
+                    and len(self._buffers) >= _BUFFER_CHANNEL_MAX):
+                return
             buf = self._buffers.setdefault(task_id, [])
             buf.append(message)
             if len(buf) > _BUFFER_MAX:
@@ -56,6 +65,23 @@ class StreamManager:
                 dead.append(q)
         for q in dead:
             queues.discard(q)
+            # Tell the generator it is over. Bounding the queue made this
+            # eviction path live for the first time, and dropping the queue
+            # alone leaves `event_generator` awaiting a queue nobody will ever
+            # feed — while still yielding its 15s `: ping`. The socket stays
+            # open, the client's EventSource never fires `onerror`, and
+            # web/src/lib/sse.ts only reconnects from onerror: the tab looks
+            # connected and silently receives nothing, forever. A cap that
+            # converts "slow client" into "permanently dead client with no
+            # symptom" is worse than the leak it replaced.
+            try:
+                q.get_nowait()          # make room; the queue is full by definition
+            except asyncio.QueueEmpty:  # pragma: no cover - full implies non-empty
+                pass
+            try:
+                q.put_nowait("__END__")
+            except asyncio.QueueFull:   # pragma: no cover
+                pass
 
     async def event_generator(self, task_id: str) -> AsyncGenerator[str, None]:
         """Subscribe to the broadcast channel with a private queue.

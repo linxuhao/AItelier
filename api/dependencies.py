@@ -218,10 +218,23 @@ def get_skillflow():
         # is the only writer of the routing tables.
         from core import capability_registry as _caps
         project_root_for_caps = Path(__file__).resolve().parent.parent
-        _caps.define(sf, "stateful", owner="host",
+        def _must_define(**kw):
+            # define() reports rather than raises, so an ignored return value is
+            # a capability that quietly does not exist — every step declaring it
+            # then runs with nothing, which is precisely the failure the registry
+            # was built to make impossible.
+            r = _caps.define(sf, **kw)
+            if not r.get("ok"):
+                import logging
+                logging.getLogger(__name__).error(
+                    "capability %s NOT registered: %s", kw.get("name"),
+                    r.get("error"))
+            return r
+
+        _must_define(name="stateful", owner="host",
                      context_provider=lambda cfg: {
                          "state_dir": str(sf._workspace.state_dir(cfg))})
-        _caps.define(sf, "tool_creation", owner="host",
+        _must_define(name="tool_creation", owner="host",
                      tools=["write", "run_tests", "pytest", "register_tool"])
         # game_assets: the tools AND the discipline that keeps their output
         # usable. Both used to ride on every DPE implementer — measured across
@@ -230,7 +243,12 @@ def get_skillflow():
         # that declare it.
         _ga = (project_root_for_caps / "configs" / "addons" / "game_harness"
                / "game_assets_briefing.md")
-        _caps.define(sf, "game_assets", owner="addon:game_harness",
+        if not _ga.is_file():
+            import logging
+            logging.getLogger(__name__).error(
+                "game_assets briefing missing at %s — the tools would be granted "
+                "with none of the discipline that keeps their output usable", _ga)
+        _must_define(name="game_assets", owner="addon:game_harness",
                      tools=["gen_image_asset", "gen_audio_asset"],
                      briefing=_ga.read_text(encoding="utf-8") if _ga.is_file() else "")
 

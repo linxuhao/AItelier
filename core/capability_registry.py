@@ -60,7 +60,7 @@ def archived_names() -> set[str]:
 
 
 def _write_atomic(path: Path, payload: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                    encoding="utf-8")
     os.replace(tmp, path)
@@ -80,7 +80,7 @@ def _unresolved(sf, tools: list[str]) -> list[str]:
     return missing
 
 
-def define(sf, name: str, *, tools=(), briefing: str = "", owner: str = "host",
+def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "host",
            context_provider=None, persist: bool = False) -> dict:
     """Register (or edit) a capability. Returns `{ok}` or `{error}`.
 
@@ -101,12 +101,30 @@ def define(sf, name: str, *, tools=(), briefing: str = "", owner: str = "host",
     try:
         sf.register_capability(name, tools=tools, briefing=briefing, owner=owner,
                                context_provider=context_provider)
+    except TypeError as e:
+        # A skillflow older than the contract this host calls (briefing=/owner=
+        # arrived in 1.5.45). The dev box runs an editable checkout and the
+        # container installs from PyPI, so this is the one failure a test here
+        # can never see — it must be a legible error, not a TypeError out of
+        # get_skillflow() that 500s every request.
+        return {"error": f"capability {name!r} not registered: this skillflow "
+                         f"does not accept the briefing/owner contract "
+                         f"(need >=1.5.45) — {e}"}
     except ValueError as e:
         return {"error": str(e)}
     if persist:
         _write_atomic(capabilities_dir() / f"{name}.json", {
             "name": name, "tools": tools, "briefing": briefing, "owner": owner,
         })
+        # Re-defining lifts the tombstone. Without this the definition is on
+        # disk and live in this process, and the next boot skips it — the
+        # capability silently disappears on restart, which is the archived-name
+        # trap already recorded for generated pipelines.
+        stale = archived_names()
+        if name in stale:
+            _write_atomic(_archive_dir() / ARCHIVE_INDEX,
+                          sorted(stale - {name}))
+            (_archive_dir() / f"{name}.json").unlink(missing_ok=True)
     return {"ok": True, "name": name, "tools": tools, "owner": owner}
 
 
@@ -132,18 +150,37 @@ def archive(sf, name: str, *, purge: bool = False) -> dict:
         return {"error": f"capability {name!r} is still offered by {offers}. "
                          "Remove it from those pipelines first."}
     caps = getattr(sf, "_capabilities", {})
-    if name not in caps and not (capabilities_dir() / f"{name}.json").is_file():
+    # An already-archived name still exists as a tombstone plus a file under
+    # _archived/. `purge` has to be able to reach those, or a name can be
+    # archived and then never fully removed.
+    known = (name in caps
+             or (capabilities_dir() / f"{name}.json").is_file()
+             or (purge and ((_archive_dir() / f"{name}.json").is_file()
+                            or name in archived_names())))
+    if not known:
         return {"error": f"no capability {name!r}"}
-    caps.pop(name, None)
+    # Disk first, live second. If the move fails, the capability is still
+    # registered AND still on disk — consistent. The other order drops it live
+    # while the file survives, and the next boot brings it back.
     src = capabilities_dir() / f"{name}.json"
     if src.is_file():
         if purge:
             src.unlink()
         else:
             os.replace(src, _archive_dir() / f"{name}.json")
+    elif purge:
+        # Already archived once: purge must reach into _archived/, or the
+        # tombstone outlives the thing it marks.
+        stale = _archive_dir() / f"{name}.json"
+        if stale.is_file():
+            stale.unlink()
     if not purge:
         names = archived_names() | {name}
         _write_atomic(_archive_dir() / ARCHIVE_INDEX, sorted(names))
+    else:
+        _write_atomic(_archive_dir() / ARCHIVE_INDEX,
+                      sorted(archived_names() - {name}))
+    caps.pop(name, None)
     return {"ok": True, "name": name, "purged": purge}
 
 

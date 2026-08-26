@@ -10,6 +10,6 @@
   - **⚠️ 统一风格句里绝不能点名游戏对象**：风格句只写**画风**（媒介 / 用色方式 / 视角 / 线条），例如 "pixel art, flat colors, 16-bit retro, side view"。**不要**把物件清单写进去（像 "palette: sky blue background, green pipes, sandy ground, yellow bird" 这种）——生图模型会把清单里的每样东西都画进**每一张**图，结果就是 `ground.png` 里是一只鸟、`bird.png` 旁边杵着一根水管。每张图的主体只出现在它自己的 `prompt` 里。
   - **给 `gen_image_asset` 传 `subject`**（如 `subject="the scrolling ground strip"`）。工具会用视觉模型核对这张图画的**是不是**要的东西，不符就写进 `warning`。返回的 `warning` 非空时**必须重新生成**（换措辞、加 "only"/"nothing else"、或换 seed），不要把画错主体的资源接进场景。
   - **每个资源都传 `seed`**，重跑才能复现同一套美术。
-  - `.tscn` 引用贴图：`[ext_resource type="Texture2D" path="res://assets/bird.png" id="2"]` + 节点上 `texture = ExtResource("2")`；音频用 `AudioStreamPlayer` + `[ext_resource type="AudioStream" path="res://assets/sfx/flap.wav" id="3"]` + `stream = ExtResource("3")`。**这些 ext_resource 块同样受上面的块顺序约束。**
+  - `.tscn` 引用贴图：`[ext_resource type="Texture2D" path="res://assets/bird.png" id="2"]` + 节点上 `texture = ExtResource("2")`；音频用 `AudioStreamPlayer` + `[ext_resource type="AudioStream" path="res://assets/sfx/flap.wav" id="3"]` + `stream = ExtResource("3")`。**这些 ext_resource 块同样受实现约定里的 `.tscn` 块顺序约束**（`[gd_scene]` → 全部 `[ext_resource]` → 全部 `[sub_resource]` → 全部 `[node]`）。
   - 2D 渲染顺序用节点树顺序或 `z_index`。
   - **只有**当工具返回 `error`、或返回的 `warning` 提示抠图可能有问题时，才退回 `Polygon2D`/`ColorRect` 占位，并在 README 里写明哪一个是占位。

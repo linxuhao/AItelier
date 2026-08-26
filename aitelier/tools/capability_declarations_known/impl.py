@@ -28,12 +28,25 @@ def capability_declarations_known(*, files=None, workspace_root: str = "",
     except Exception as e:      # no host wired (unit context) → nothing to check
         return {"all_passed": True,
                 "results": [{"passed": True, "error": f"registry unavailable: {e}"}]}
+    if not config_name:
+        # Without the pipeline name there is no offer list to check against, and
+        # checking against an empty one would reject every CORRECT declaration —
+        # the gate inverted. Pass, and say why.
+        return {"all_passed": True,
+                "results": [{"passed": True,
+                             "error": "config_name not provided; capability "
+                                      "declarations were not checked"}]}
 
     problems = []
-    for card in sorted(base.glob("tasks/*.json")):
+    # Read the patterns the SPEC named. Hardcoding `tasks/*.json` here meant the
+    # config could be changed to point somewhere else and this would silently go
+    # on checking the old place — passing because it found nothing.
+    patterns = [p for p in (files or ["tasks/*.json"]) if p]
+    cards = sorted({c for pat in patterns for c in base.glob(pat)})
+    for card in cards:
         try:
             d = json.loads(card.read_text(encoding="utf-8"))
-        except Exception as e:
+        except Exception:
             continue            # card shape is another rule's job
         declared = d.get("capabilities") or []
         if isinstance(declared, str):

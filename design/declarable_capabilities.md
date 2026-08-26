@@ -75,18 +75,19 @@ A purely global registry has the hole this design must close: a PM would see cap
 pipeline cannot run. So the graph declares what it **offers**:
 
 ```yaml
-# configs/dpe_default.yaml
-x-aitelier:
-  capabilities: ["game_assets"]        # what this pipeline offers
+# configs/dpe_default.yaml — TOP LEVEL, beside `steps:`, not under x-aitelier
+capabilities: ["game_assets"]          # what this pipeline offers
 
 # configs/addons/game_harness.yaml — composes the same way its steps do
 capabilities: ["game_assets"]
 ```
 
-`capabilities` joins `_HINT_KEYS` in `core/addon_registry.py`, but merges as a **union**, not an
-override: base offers X, addon adds Y, the composed config offers X ∪ Y. (Every existing hint key
-is a scalar override; this is the first set-valued one, and getting it wrong means an addon
-silently revokes the base's offers.)
+**A first-class graph field, not `x-aitelier` host metadata.** The `x-` namespace is what
+skillflow ignores, and the offer list has to be enforced at claim time *inside* skillflow (see
+consumer 3 below) — a host-only hint cannot gate the engine's own provisioning. Composition
+merges it as a **union**: base offers X, addon adds Y, the composed graph offers X ∪ Y. (Union
+rather than override on purpose: every scalar hint key overrides, and an addon that silently
+revoked the base's offers would be very hard to see.)
 
 The offer list is consulted in three places, and each one's failure message improves because of it:
 
@@ -272,9 +273,31 @@ Four tools:
 | tool | used by | does |
 |---|---|---|
 | `capability_palette` | PM (context source), forge maker | offer list ∩ registry, plus a visible "declared but not registered on this machine" difference |
-| `register_capability` | forge tool_loop, host | define/update, owner-checked |
-| `archive_capability` | host / operator | retire, offer-checked, reversible unless `purge` |
+| `register_capability` | forge tool_loop, host | define/update a capability, owner-checked |
+| `archive_capability` | host / operator | retire a capability, offer-checked, reversible unless `purge` |
 | `capabilities_available()` | every implementer (~200 B) | the escape hatch of §3.6 |
+
+### 5.1 Managing a pipeline's offer list
+
+The four tools above manage *definitions*. A second, separate question is which pipeline offers
+what — and there is nothing for it today: `list_pipelines` / `describe_pipeline` report
+`input_hint`, seed shape and drive mode, and neither they nor any other tool can add or remove
+anything from a pipeline.
+
+- **`describe_pipeline` gains `capabilities`** — a pipeline's offer list is part of its contract,
+  the same way `input_hint` is, and a PM palette that disagrees with `describe_pipeline` would be
+  a bug nobody could see.
+- **`pipeline_capability_add` / `pipeline_capability_remove`** write to *where the pipeline
+  lives*, which is not the same place for the two kinds:
+  - **generated** (`gen_*` in `~/.AItelier/configs/`): edit the persisted YAML and
+    `reload_generated_pipeline` — the path that already exists for editing a generated pipeline.
+  - **built-in** (in the repo, e.g. `dpe_default`): **refused**, naming the file to edit. A
+    runtime mutation of a repo config is drift that no checkout can see; the supported way to add
+    a capability to a built-in base is the mechanism that already exists for adding *anything*
+    to a built-in base — compose it with an addon that offers it.
+- **`remove` is offer-list-only.** It never touches a definition; `archive_capability` is the
+  other operation, and keeping them separate is what makes invariant 3 ("a capability a config
+  still offers cannot be deleted") enforceable rather than circular.
 
 ## 6. Migration for the two asset tools
 
@@ -303,7 +326,7 @@ never use it — which, in the measured window, was all of them.
 Batch 2 has nothing to generate until batch 1 exists; batch 1 without batch 2 serves only
 hand-written pipelines.
 
-## 9. Still open
+## 9. Deferred (not in scope for either batch)
 
 - **Does a capability ever need to grant *context sources* as well as tools?** A robot-arm
   capability plausibly wants a calibration file in context, which is neither a tool nor a

@@ -194,3 +194,70 @@ def test_the_card_gate_rejects_a_capability_the_pipeline_does_not_offer(tmp_path
     assert r["all_passed"] is False
     errs = " ".join(x["error"] for x in r["results"])
     assert "robot_arm" in errs and "game_assets" not in errs.split("robot_arm")[0]
+
+
+# ── review-round regressions ─────────────────────────────────────────────
+def test_a_stale_skillflow_is_a_legible_error_not_a_boot_crash(home):
+    """The dev box runs an editable checkout; the container installs from PyPI.
+    A host calling a contract the pinned version lacks therefore fails ONLY in
+    the container — as a TypeError out of get_skillflow(), 500ing every request.
+    It has to come back as a message instead."""
+    class _Old:
+        _tool_loader = _FakeLoader(["a"])
+        _capabilities = {}
+        _graphs = {}
+
+        def register_capability(self, name, *, tools=(), context_provider=None):
+            raise TypeError("unexpected keyword argument 'briefing'")
+
+    r = caps.define(_Old(), "x", tools=["a"], owner="host")
+    assert "error" in r and "1.5.45" in r["error"]
+
+
+def test_redefining_an_archived_capability_lifts_the_tombstone(home):
+    """Otherwise it is live now, on disk now, and gone after the next restart."""
+    sf = _FakeSF(known_tools=["a"])
+    caps.define(sf, "x", tools=["a"], owner="gen:s", persist=True)
+    caps.archive(sf, "x")
+    caps.define(sf, "x", tools=["a"], owner="gen:s", persist=True)
+    fresh = _FakeSF(known_tools=["a"])
+    assert caps.load_generated(fresh) == ["x"]
+
+
+def test_purge_after_archive_removes_the_tombstone_too(home):
+    sf = _FakeSF(known_tools=["a"])
+    caps.define(sf, "x", tools=["a"], owner="gen:s", persist=True)
+    caps.archive(sf, "x")
+    assert caps.archive(sf, "x", purge=True)["ok"]
+    assert "x" not in caps.archived_names()
+    assert not (caps.capabilities_dir() / "_archived" / "x.json").is_file()
+
+
+def test_the_card_gate_passes_when_it_has_no_pipeline_to_check_against(tmp_path,
+                                                                      monkeypatch):
+    """It used to check against an empty offer list and reject every CORRECT
+    declaration — a gate that passes only when the planner declares nothing."""
+    from aitelier.tools.capability_declarations_known.impl import (
+        capability_declarations_known as check)
+    cards = tmp_path / "tasks"
+    cards.mkdir()
+    (cards / "a.json").write_text(json.dumps({"id": "a",
+                                              "capabilities": ["game_assets"]}))
+    sf = _FakeSF(known_tools=["gen_image_asset"],
+                 graphs={"dpe_game": _FakeGraph(["game_assets"])})
+    monkeypatch.setitem(__import__("sys").modules, "api.dependencies",
+                        type("M", (), {"get_skillflow": staticmethod(lambda: sf)}))
+    r = check(files=["tasks/*.json"], workspace_root=str(tmp_path))
+    assert r["all_passed"] is True
+
+
+def test_the_planner_is_told_when_to_declare_the_capability():
+    """Enforcement without teaching costs a rework round per run, forever."""
+    pm = (ROOT / "configs" / "addons" / "game_harness" / "pm.md").read_text()
+    assert "game_assets" in pm and "capability_palette" in pm
+
+
+def test_the_briefing_has_no_dangling_cross_document_reference():
+    brief = (ROOT / "configs" / "addons" / "game_harness"
+             / "game_assets_briefing.md").read_text()
+    assert "受上面的块顺序约束" not in brief

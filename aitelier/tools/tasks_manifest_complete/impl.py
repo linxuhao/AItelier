@@ -36,9 +36,17 @@ import json
 from pathlib import Path
 
 
-def tasks_manifest_complete(step_dir: str = "", out_dir: str = "",
-                            **_ignored) -> dict:
-    root = Path(step_dir or out_dir or ".")
+def tasks_manifest_complete(files: list[str] | None = None, *,
+                            workspace_root: str = "", step_dir: str = "",
+                            out_dir: str = "", **_ignored) -> dict:
+    # A VALIDATION tool is handed `workspace_root` — StepValidator sets it to
+    # this step's staging dir (see skillflow file_exists, the same contract).
+    # Written first against `step_dir`, which nothing passes, so the tool looked
+    # in "." and failed every run with "tasks_manifest.json not found at
+    # tasks_manifest.json" — a validation that blocks the step it was added to
+    # protect. The other two names are kept so the same function also works when
+    # called as an ordinary tool step.
+    root = Path(workspace_root or step_dir or out_dir or ".")
     manifest_path = root / "tasks_manifest.json"
     if not manifest_path.is_file():
         return {"passed": False,

@@ -613,9 +613,30 @@ def test_the_vision_judge_is_not_swept_into_a_provider_migration():
         "an ark/ endpoint was added to the vision route — Ark's plan serves "
         "deepseek-v4-flash-vision-exp for TEXT and refuses image input, so this "
         "would 400 on every frame while text checks stayed green")
-    assert any(c.startswith("deepseek/") for c in route), (
-        "the vision route lost its DeepSeek judge — it is the pay-as-you-go one "
-        "that cannot run out of plan quota, which is why it is last")
+    # The hosted judges were REMOVED 2026-08-26 (user decision), and the guard
+    # now pins their absence instead of their presence. Measured: neither ever
+    # finished a run — two attempts, both blind (4 of 47 scenarios, then 12) —
+    # because a batch is ~4.7 MB of base64 and this host uploads to them at
+    # 14 KB/s: 5.5 min per request, ~4.3 h per round, longer than the gap
+    # between container rebuilds during development, so every attempt was killed
+    # and restarted from scenario 1. They also spend the same 5-hour provider
+    # quota the pipeline needs (which killed a run outright at 00:44 that day).
+    # The local vLLM does all 47 scenarios in ~10 min over the LAN.
+    #
+    # Losing the "pay-as-you-go judge that cannot run out of quota" is the point,
+    # not an oversight: when the local judge is not serving, the call is refused
+    # in milliseconds, the gate goes `blind`, and the graph routes to the
+    # 5_vision_human checkpoint where a person answers the six questions in
+    # minutes. Waiting four hours to arrive at that same checkpoint is strictly
+    # worse. Re-adding a hosted candidate means measuring its upload throughput
+    # from THIS host first — not reasoning about its quota model.
+    assert len(route) == 1, (
+        f"the vision route is meant to name exactly one judge, got {route} — "
+        f"see the comment above before adding a hosted fallback back")
+    assert not any(c.startswith(("deepseek/", "qwen/")) for c in route), (
+        f"a hosted judge is back in the vision route ({route}); at this host's "
+        f"14 KB/s upload a 4.7 MB batch takes 5.5 min and a round ~4.3 h, which "
+        f"is why the blind-branch checkpoint replaced it")
 
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     from core.model_routes import ModelRoutes  # noqa: F401  (import guard)

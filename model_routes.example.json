@@ -97,23 +97,20 @@
     "deepseek/deepseek-v4-pro"
   ],
   "_vision_note": [
-    "The judge for the Godot readability gate (aitelier/tools/godot_vision).",
-    "Put a self-hosted vision endpoint FIRST if you have one — it is free and the",
-    "gate is the heaviest consumer of frames. Register it in llm_providers.json",
-    "and prepend it here; the example lists public endpoints only.",
-    "",
-    "Every candidate must accept IMAGE input, and that is the one capability a",
-    "text smoke test cannot see: verified 2026-08-25, Ark's plan serves",
-    "deepseek-v4-flash-vision-exp for TEXT and refuses images. POST a real frame",
-    "before adding a candidate; do not read a model card.",
-    "",
-    "The frame-batching budget does NOT follow the candidate — it stays",
-    "GODOT_VISION_CONTEXT_TOKENS. Sizing batches to whichever judge happened to",
-    "answer would make the batch layout, and thus which frames are compared",
-    "against each other, depend on an infra accident."
+    "ONE judge. The hosted candidates were removed 2026-08-26, measured:",
+    "neither ever finished a run — two attempts, both blind (4 of 47 scenarios,",
+    "then 12) — because a batch is ~4.7 MB of base64 and this host uploads to",
+    "them at 14 KB/s: 5.5 min per request, ~4.3 hours for a round. That is",
+    "longer than the gap between container rebuilds during development, so the",
+    "run was killed and restarted from scenario 1 every time, and it spent the",
+    "same 5-hour provider quota the pipeline needs (which killed a run outright",
+    "at 00:44 that day). The local vLLM does all 47 scenarios in ~10 min.",
+    "When it is not serving, the call is refused in milliseconds, the gate goes",
+    "`blind`, and the graph routes to the 5_vision_human checkpoint where a",
+    "person answers the six questions in minutes. Waiting four hours to reach",
+    "that same checkpoint is strictly worse."
   ],
   "vision": [
-    "qwen/qwen3.8-max",
-    "deepseek/deepseek-v4-flash-vision-exp"
+    "localqwen/qwen3"
   ]
 }

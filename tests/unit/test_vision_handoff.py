@@ -121,3 +121,25 @@ def test_downstream_readers_see_one_verdict(tmp_path):
                       out_dir=str(out))
     assert json.loads(rp.read_text())["passed"] is True
     assert json.loads((out / "vision_report.json").read_text())["passed"] is True
+# appended to tests/unit/test_vision_handoff.py
+
+def test_every_writing_tool_node_declares_where_to_write():
+    """Routing that reaches a step which cannot RUN is not routing.
+
+    Live, 2026-08-26: the blind branch was reached for the first time and
+    5_vision_human crashed on `restage: out_dir not resolved (expected
+    $STEP_DIR)` — the node had been written with `from_steps` and no `out_dir`.
+    The run failed. The routing tests above all passed, because they only
+    checked which node comes next, never that the node could execute.
+    """
+    for sid, s in _steps().items():
+        if s.get("step_type") != "tool":
+            continue
+        params = s.get("tool_params") or {}
+        # A tool that writes into the step's own directory must be told where
+        # that is; skillflow substitutes $STEP_DIR at call time.
+        if s["tool_name"] in ("restage", "godot_vision", "godot_compile",
+                              "vision_human_pass", "run_tests"):
+            assert params.get("out_dir") == "$STEP_DIR", (
+                f"{sid} runs {s['tool_name']} without out_dir: $STEP_DIR — "
+                f"it will crash the first time this branch is reached")

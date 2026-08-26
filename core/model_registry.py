@@ -2,20 +2,31 @@
 """Read/write access to the two deployment tables, with the rules that keep them
 runnable.
 
-`llm_providers.json` (endpoint + key NAME) and `model_routes.json` (internal
-model → ordered candidates) are hand-editable files, and everything else treats
+Three levels, and the names matter because two of them used to share a word —
+see README "The three levels":
+
+    provider   a registered host           `ark`                   base URL + key NAME
+    endpoint   one concrete place to call  `ark/deepseek-v4-flash`
+    model      an ordered list of them     `flash`                 what agent_configs name
+
+"candidate" is kept for an endpoint's ROLE inside one model's list, which is a
+different thing from what it is: a model's candidates are endpoints, in
+preference order.
+
+`llm_providers.json` (provider → base URL + key NAME) and `model_routes.json`
+(model → ordered endpoints) are hand-editable files, and everything else treats
 them as read-only truth. This module is the one place that CHANGES them, so the
 invariants live here rather than in each caller — the HTTP API and the MCP
 endpoint both come through these functions.
 
 Three rules, all of them about not breaking a running deployment:
 
-  * A route may only name a REGISTERED provider. An unregistered one reaches
-    litellm as a bare `provider/model` it cannot place, which is a client-side
-    BadRequestError — deliberately not a failover error, so the gateway dies on
-    it with healthy candidates still queued behind.
-  * An internal model that something REFERENCES cannot be deleted, and a
-    provider that a route still names cannot be deleted. Both would fail at the
+  * A model may only name endpoints whose provider is REGISTERED. An
+    unregistered one reaches litellm as a bare `provider/model-id` it cannot place, which is a
+    client-side BadRequestError — deliberately not a failover error, so the
+    gateway dies on it with healthy endpoints still queued behind.
+  * A model that something REFERENCES cannot be deleted, and neither can a
+    provider that some model's endpoints still name. Both would fail at the
     first LLM call, far from the edit that caused it.
   * The whole table is validated by constructing `ModelRoutes` BEFORE anything
     is written. A file that parses but does not load would take every agent
@@ -111,7 +122,7 @@ def _validate_or_raise(routes_doc: dict) -> None:
 # ── who is using what ────────────────────────────────────────────────────────
 
 def model_consumers(model: str) -> list[str]:
-    """Everything that would break if this internal model disappeared.
+    """Everything that would break if this model disappeared.
 
     Two populations, and the second is why this is not a one-line grep of the
     agent configs: an AGENT's model is config, but a TOOL's is a Python constant
@@ -141,7 +152,7 @@ def model_consumers(model: str) -> list[str]:
 
 
 def provider_consumers(provider: str) -> list[str]:
-    """Routes that still name this provider."""
+    """Models with an endpoint served by this provider."""
     return sorted(name for name, cands in _routes().items()
                   if any(c.split("/", 1)[0] == provider for c in cands))
 
@@ -149,11 +160,11 @@ def provider_consumers(provider: str) -> list[str]:
 # ── read ─────────────────────────────────────────────────────────────────────
 
 def list_models() -> dict:
-    """Every internal model, its candidates, and whether each one can serve.
+    """Every model, its endpoints, and whether each one can serve.
 
-    `usable` is the operationally interesting column: a candidate can be listed
-    and still be unusable right now because its provider is unregistered, its
-    key file is empty, or its usage window is spent and parked.
+    An endpoint can be listed and still be unusable right now: its provider is
+    unregistered, its key file is empty, or its usage window is spent and
+    parked. Those three are reported separately because the fix differs.
     """
     from core.ai_router import _read_secret, endpoint_cooldowns
 
@@ -169,7 +180,7 @@ def list_models() -> dict:
             cfg = provs.get(prov)
             key_env = (cfg or {}).get("api_key_env")
             entries.append({
-                "candidate": c,
+                "endpoint": c,
                 "provider": prov,
                 "provider_registered": cfg is not None,
                 "api_key_env": key_env,
@@ -177,7 +188,7 @@ def list_models() -> dict:
                 "cooldown_seconds": (round(cooling[c] - now)
                                      if c in cooling else 0),
             })
-        models.append({"model": name, "candidates": entries,
+        models.append({"model": name, "endpoints": entries,
                        "used_by": model_consumers(name)})
     return {"models": models,
             "providers": sorted(provs),
@@ -261,41 +272,43 @@ def _key_hint(api_key_env: str) -> dict:
 
 # ── route write ──────────────────────────────────────────────────────────────
 
-def _check_candidate(candidate: str, provs: dict) -> None:
-    if "/" not in (candidate or ""):
+def _check_endpoint(endpoint: str, provs: dict) -> None:
+    if "/" not in (endpoint or ""):
         raise RegistryError(
-            f"candidate {candidate!r} must be 'provider/model'")
-    prov = candidate.split("/", 1)[0]
+            f"endpoint {endpoint!r} must be 'provider/model-id', e.g. "
+            f"'ark/deepseek-v4-flash'")
+    prov = endpoint.split("/", 1)[0]
     if prov not in provs:
         raise RegistryError(
             f"provider '{prov}' is not registered — add it first. Known: "
             f"{sorted(provs)}")
 
 
-def add_model(name: str, candidates: list[str] | None = None) -> dict:
+def add_model(name: str, endpoints: list[str] | None = None) -> dict:
     if not _NAME_RE.match(name or "") or "/" in name:
         raise RegistryError(
-            f"internal model name {name!r} must be a bare name like 'flash' — "
-            f"a '/' would make it look like a concrete provider/model")
+            f"model name {name!r} must be a bare name like 'flash' — a '/' "
+            f"would make it read as an endpoint")
     doc = _routes_raw()
     if name in doc:
         raise RegistryError(f"model '{name}' already exists — use map/unmap")
     provs = _providers()
-    for c in (candidates or []):
-        _check_candidate(c, provs)
-    doc[name] = list(candidates or [])
+    for c in (endpoints or []):
+        _check_endpoint(c, provs)
+    doc[name] = list(endpoints or [])
     if not doc[name]:
         raise RegistryError(
-            "a model with no candidates resolves to nothing and fails at its "
-            "first call — pass at least one candidate")
+            "a model with no endpoints resolves to nothing and fails at its "
+            "first call — pass at least one endpoint")
     _validate_or_raise(doc)
-    return {"added": name, "candidates": doc[name], "file": _write(ROUTES_FILE, doc)}
+    return {"added": name, "endpoints": doc[name],
+            "file": _write(ROUTES_FILE, doc)}
 
 
-def map_model(model: str, candidate: str, position: int | None = None) -> dict:
-    """Point an internal model at one more concrete endpoint.
+def map_model(model: str, endpoint: str, position: int | None = None) -> dict:
+    """Point a model at one more endpoint.
 
-    ORDER IS THE POLICY: the first candidate is what every call binds to, and
+    ORDER IS THE POLICY: the first endpoint is what every call binds to, and
     the rest are tried only when an endpoint fails. So `position` is not
     cosmetic — putting a pay-as-you-go endpoint first spends money that a token
     plan already covers, and putting it last is what makes a spent plan a
@@ -303,35 +316,35 @@ def map_model(model: str, candidate: str, position: int | None = None) -> dict:
     """
     doc = _routes_raw()
     if model not in doc or not isinstance(doc[model], list):
-        raise RegistryError(f"no internal model '{model}' — add it first")
-    _check_candidate(candidate, _providers())
-    if candidate in doc[model]:
-        raise RegistryError(f"'{candidate}' is already a candidate for '{model}'")
+        raise RegistryError(f"no model '{model}' — add it first")
+    _check_endpoint(endpoint, _providers())
+    if endpoint in doc[model]:
+        raise RegistryError(f"'{endpoint}' is already an endpoint of '{model}'")
     if position is None or position >= len(doc[model]):
-        doc[model].append(candidate)
+        doc[model].append(endpoint)
     else:
-        doc[model].insert(max(position, 0), candidate)
+        doc[model].insert(max(position, 0), endpoint)
     _validate_or_raise(doc)
-    return {"model": model, "candidates": doc[model],
+    return {"model": model, "endpoints": doc[model],
             "file": _write(ROUTES_FILE, doc)}
 
 
-def unmap_model(model: str, candidate: str) -> dict:
+def unmap_model(model: str, endpoint: str) -> dict:
     doc = _routes_raw()
     if model not in doc or not isinstance(doc[model], list):
-        raise RegistryError(f"no internal model '{model}'")
-    if candidate not in doc[model]:
+        raise RegistryError(f"no model '{model}'")
+    if endpoint not in doc[model]:
         raise RegistryError(
-            f"'{candidate}' is not a candidate for '{model}' — it has "
+            f"'{endpoint}' is not an endpoint of '{model}' — it has "
             f"{doc[model]}")
     if len(doc[model]) == 1:
         raise RegistryError(
-            f"'{candidate}' is the only candidate for '{model}'; removing it "
+            f"'{endpoint}' is the only endpoint of '{model}'; removing it "
             f"leaves a model that resolves to nothing. Map a replacement first, "
             f"or delete the model")
-    doc[model].remove(candidate)
+    doc[model].remove(endpoint)
     _validate_or_raise(doc)
-    return {"model": model, "candidates": doc[model],
+    return {"model": model, "endpoints": doc[model],
             "file": _write(ROUTES_FILE, doc)}
 
 
@@ -339,13 +352,13 @@ def delete_model(name: str) -> dict:
     users = model_consumers(name)
     if users:
         raise RegistryError(
-            f"internal model '{name}' is referenced by {users} — repoint those "
+            f"model '{name}' is referenced by {users} — repoint those "
             f"first. Deleting it makes every one of them fail at its first LLM "
             f"call, with an error pointing at the route table rather than at "
             f"the config that still names it")
     doc = _routes_raw()
     if name not in doc:
-        raise RegistryError(f"no internal model '{name}'")
+        raise RegistryError(f"no model '{name}'")
     doc.pop(name)
     _validate_or_raise(doc)
     return {"deleted": name, "file": _write(ROUTES_FILE, doc)}

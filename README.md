@@ -74,51 +74,52 @@ pip install -e .
 
 ## Quick Start
 
-First, pick your providers. AItelier is provider-agnostic in two layers, and **both are deployment config, not repo content** — they are gitignored like `.env`, and what ships is an example:
+### The three levels
 
-```bash
-cp llm_providers.example.json llm_providers.json   # which vendors, which endpoints, which key names
-cp model_routes.example.json  model_routes.json    # which of them serves each internal model
-```
+Two of these used to share the word "model", which is why they now do not:
 
-The **internal model names are the contract** — `agent_configs/*.yaml` and the vision gate reference `flash` / `pro` / `glm` / `smart` / `vision`, so those keys must exist in `model_routes.json`. **Which endpoints sit behind them is entirely yours to choose**; the examples are one operator's answer, not a requirement. Nothing in the code names a vendor.
-
-Both files fall back to their `.example` if you skip this, so a fresh clone runs — but then you are running on someone else's provider list, and it is worth ten seconds to say which vendors are actually yours.
-
-### The internal models, and what each is for
-
-`model_routes.json` must define these names. What sits behind them is your choice; what they are FOR is fixed, because the pipelines and tools pick by job:
-
-| name | used by | what it has to be |
+| | example | what it is |
 |---|---|---|
-| `flash` | most maker and reviewer roles — the bulk of every run | cheap and fast. This is where the token budget goes, so a costly model here is felt everywhere |
-| `pro` | the PM, and roles whose output the rest of the run is built on | a stronger generalist |
-| `glm` | the architect, the final verifier, long-form authored documents | an alternative strong generalist |
+| **provider** | `ark` | a host — a base URL plus the NAME of the secret it reads |
+| **endpoint** | `ark/deepseek-v4-flash` | one concrete place to send a call |
+| **model** | `flash` | an ordered list of endpoints. **This is what `agent_configs` name** |
+| **agent** | `task_implementer` | a model + tools + a prompt template |
+
+Order inside a model is policy, not preference: calls bind to the **first** endpoint and the rest are tried only when one fails. So the last one should be **pay-as-you-go** — a token plan runs out, and that final entry is what turns "everything stops until the window resets" into "the next call goes elsewhere". A spent plan is parked until the provider's own reset time. Failover is sticky per pipeline step, never per call: provider prefix caches are per-provider, and this workload measures 26:1 prefill:decode at an 89.4% hit rate, so alternating endpoints mid-step converts cached input into full-price input.
+
+### Pick your providers
+
+The two tables are **deployment config, not repo content** — gitignored like `.env`, shipped as examples:
+
+```bash
+cp llm_providers.example.json llm_providers.json   # providers: URL + key NAME
+cp model_routes.example.json  model_routes.json    # models: which endpoints serve each
+```
+
+The **model names are the contract**: `agent_configs/*.yaml` and the vision gate reference `flash` / `pro` / `glm` / `smart` / `vision`, so those keys must exist. What sits behind them is yours — the examples are one operator's answer. Skip this and both fall back to the example, so a fresh clone still runs.
+
+What each model is FOR is fixed, because pipelines and tools pick by job:
+
+| model | used by | has to be |
+|---|---|---|
+| `flash` | most maker and reviewer roles — the bulk of every run | cheap and fast; this is where the budget goes |
+| `pro` | the PM, and roles the rest of the run is built on | a stronger generalist |
+| `glm` | the architect, the final verifier, long-form documents | an alternative strong generalist |
 | `smart` | offered to generated pipelines for judges and architects | strong at one-shot reasoning; **not** for long agentic tool loops |
-| `vision` | the Godot readability gate (`godot_vision`) | **must accept image input** — verify with a real frame, not a model card |
+| `vision` | the Godot readability gate | **must accept image input** — verify with a real frame, not a model card |
 
-Two rules the code enforces rather than trusts:
+Keys are never in these files: a provider records the key's NAME, and the key itself is a secret file (`~/.aitelier-secrets/<NAME>`). Editing all of this at runtime — including from another agent — is the `/api/models` REST surface and the matching MCP tools.
 
-- **Every route should end with a pay-as-you-go endpoint.** Token plans run out; the last candidate is what turns "everything stops until the window resets" into "the next call goes elsewhere". A spent plan is parked until the provider's own reset time, so the list is consumed in order.
-- **Failover is sticky per step, never per call.** Provider prefix caches are per-provider, and this workload measures 26:1 prefill:decode at an 89.4% hit rate — alternating endpoints mid-step converts cached input into full-price input and costs more than a second plan saves.
+### Keys
 
-Check what your table implies before running:
-
-```bash
-python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \
-           print('required:', required_llm_keys()); print('failover:', failover_llm_keys())"
-```
-
-`required` is the first candidate of each route — the endpoints a run actually binds to. `failover` is everything behind them: not needed to start, needed for an outage to be a slowdown instead of a stop. **Out of the box the key you need is `ARK_API_KEY`.** Ask the code rather than trusting this sentence:
+Keys are **secret FILES, not environment variables** — so the test and build subprocesses a pipeline runs cannot inherit them. Ask the code which ones you need rather than trusting this page:
 
 ```bash
 python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \
            print('required:', required_llm_keys()); print('failover:', failover_llm_keys())"
 ```
 
-`DEEPSEEK_API_KEY` shows up as **failover**, not required: the shipped routes try Ark first and fall through to DeepSeek direct on a dead key, a spent token plan, a 429 or a 5xx. You can run on one provider — but with only one, a spent plan parks the whole scheduler until the window reopens, whereas a second candidate just picks up the next call. Failover is sticky per step, never round-robin, so it does not cost you the provider prefix cache.
-
-Keys are **secret FILES, not environment variables** — so the test and build subprocesses a pipeline runs cannot inherit them:
+`required` is the **first** endpoint of each model — what runs actually bind to. `failover` is everything behind them: not needed to start, needed for an outage to be a slowdown instead of a stop. Out of the box that is `ARK_API_KEY` required, DeepSeek and Qwen as failover.
 
 ```bash
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
@@ -127,7 +128,7 @@ chmod 600 ~/.aitelier-secrets/ARK_API_KEY
 cp .env.example .env        # endpoints and options; NOT the keys
 ```
 
-To use a different provider, add it to `llm_providers.json` and point the agent configs at it — see [docs/external-dependencies.md](docs/external-dependencies.md). A missing key fails naming the provider, the key and the file to create.
+A missing key fails naming the provider, the key, the file to create, **and the model whose endpoint list sent it there**.
 
 > **The backend runs in Docker**, always — there is no host-process fallback, because a host process would make the pipeline's git commits carry your own `~/.gitconfig` identity. `aitelier` starts the container for you (and creates the secret files it mounts).
 
@@ -256,7 +257,7 @@ AItelier's backend exposes its whole pipeline surface as an **MCP endpoint** (`/
 
 - **`run_pipeline` + `wait_for_run`** — start a run (returns immediately; runs are long and may pause for human approval) and block until it settles at a checkpoint, completion, *or failure* — push-based, no polling.
 - **the full generate → drive → observe → fix loop** — `generate_pipeline` writes a new pipeline, `run_pipeline` + `wait_for_run` + `answer_checkpoint` drive it, `get_run_summary` and the `trace_*` tools say what broke, and the `edit_*` tools fix it. AItelier's scheduler runs the pipeline; the external agent only decides at checkpoints and between runs.
-- **the model routing tables** — `get_available_models` says which internal model names this deployment serves and whether each endpoint behind them can actually answer; `add_provider` / `map_model` / `unmap_model` / `delete_*` edit them. Which vendors you use is deployment config, so this is how an agent configures a machine it did not set up.
+- **the model routing tables** — `get_available_models` says which models this deployment serves and whether each endpoint behind them can actually answer; `add_provider` / `map_model` / `unmap_model` / `delete_*` edit them. Which vendors you use is deployment config, so this is how an agent configures a machine it did not set up.
 - **`export_pipeline` / `import_pipeline`** — carry a generated pipeline between machines as **one self-contained JSON bundle**: its graph, its roles *with* their prompts, and any custom tool it needs. Import validates everything before writing, renames safely, and refuses to silently overwrite a same-named tool that differs.
 
 Authorization is **per tool**, not per route: read tools are open, write tools require the same authorization as the web UI (Cloudflare Access allowlist, or `AITELIER_ADMIN_TOKEN` off-tunnel). Without credentials you get a legitimate read-only installation — write tools answer `denied: …` and change nothing.

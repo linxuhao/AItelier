@@ -43,11 +43,11 @@ def _providers(tables):
 
 # ── read ─────────────────────────────────────────────────────────────────────
 
-def test_available_models_says_whether_each_candidate_can_actually_serve(tables):
+def test_available_models_says_whether_each_endpoint_can_actually_serve(tables):
     out = reg.list_models()
     fast = next(m for m in out["models"] if m["model"] == "fast")
-    first = fast["candidates"][0]
-    assert first["candidate"] == "alpha/m-1"
+    first = fast["endpoints"][0]
+    assert first["endpoint"] == "alpha/m-1"
     assert first["provider_registered"] is True
     assert first["api_key_env"] == "ALPHA_KEY"
     # Listed is not the same as usable — these three columns are the difference.
@@ -60,7 +60,7 @@ def test_an_unregistered_provider_shows_as_such_rather_than_being_hidden(tables)
     (tables / "model_routes.json").write_text(json.dumps(doc))
     model_routes.reset_cache()
     fast = next(m for m in reg.list_models()["models"] if m["model"] == "fast")
-    ghost = next(c for c in fast["candidates"] if c["candidate"] == "ghost/m-9")
+    ghost = next(c for c in fast["endpoints"] if c["endpoint"] == "ghost/m-9")
     assert ghost["provider_registered"] is False
 
 
@@ -97,12 +97,12 @@ def test_a_provider_nothing_uses_can_be_deleted(tables):
 
 # ── models ───────────────────────────────────────────────────────────────────
 
-def test_a_model_with_no_candidates_is_refused(tables):
-    with pytest.raises(reg.RegistryError, match="at least one candidate"):
+def test_a_model_with_no_endpoints_is_refused(tables):
+    with pytest.raises(reg.RegistryError, match="at least one endpoint"):
         reg.add_model("empty", [])
 
 
-def test_a_candidate_whose_provider_is_not_registered_is_refused(tables):
+def test_an_endpoint_whose_provider_is_not_registered_is_refused(tables):
     with pytest.raises(reg.RegistryError) as ei:
         reg.add_model("new", ["ghost/m-1"])
     assert "not registered" in str(ei.value)
@@ -124,15 +124,15 @@ def test_map_appends_by_default_and_position_inserts(tables):
     assert _routes(tables)["fast"][0] == "beta/m-3"
 
 
-def test_mapping_the_same_candidate_twice_is_refused(tables):
-    with pytest.raises(reg.RegistryError, match="already a candidate"):
+def test_mapping_the_same_endpoint_twice_is_refused(tables):
+    with pytest.raises(reg.RegistryError, match="already an endpoint"):
         reg.map_model("fast", "alpha/m-1")
 
 
-def test_unmapping_the_last_candidate_is_refused(tables):
+def test_unmapping_the_last_endpoint_is_refused(tables):
     """A model that resolves to nothing does not fail here — it fails at the
     first call of whatever step still names it."""
-    with pytest.raises(reg.RegistryError, match="only candidate"):
+    with pytest.raises(reg.RegistryError, match="only endpoint"):
         reg.unmap_model("solo", "alpha/m-2")
     assert _routes(tables)["solo"] == ["alpha/m-2"]
 

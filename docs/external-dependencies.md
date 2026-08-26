@@ -28,10 +28,11 @@ vendor:
 | File | Maps |
 |---|---|
 | [`llm_providers.json`](../llm_providers.json) | provider name → `base_url` + the NAME of the key it reads |
-| [`model_routes.json`](../model_routes.json) | INTERNAL model name → ordered list of `provider/model` endpoints |
+| [`model_routes.json`](../model_routes.json) | model → ordered list of endpoints (`provider/model-id`) |
 
-An `agent_config`'s `model` field names an internal model (`flash`, `pro`,
-`glm`); the route says which real endpoints can serve it. Adding your own is one
+An `agent_config`'s `model` field names a MODEL (`flash`, `pro`, `glm`); the
+table says which ENDPOINTS can serve it. A **provider** is the host, an
+**endpoint** is `provider/model-id`, a **model** is an ordered list of them. Adding your own is one
 entry in each plus a secret file — the rows below are examples of the pattern,
 not requirements.
 

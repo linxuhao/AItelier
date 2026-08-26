@@ -1,6 +1,10 @@
 # api/model_routers.py
-# REST access to the two deployment tables: which providers exist, and which of
-# them serve each INTERNAL model name that agent_configs and tools reference.
+# REST access to the two deployment tables. Three levels, and the names are
+# deliberate — see README "The three levels":
+#
+#   provider   a registered host          `ark`                  (base_url + key NAME)
+#   endpoint   one concrete place to call `ark/deepseek-v4-flash`
+#   model      an ordered list of them    `flash`                (what agent_configs name)
 #
 # Every rule lives in core/model_registry, not here — the MCP endpoint exposes
 # the same operations, and a refusal that only one of the two surfaces enforces
@@ -33,7 +37,7 @@ def _guard(fn, *args, **kwargs):
 
 class ProviderIn(BaseModel):
     name: str = Field(..., description="Registry key; becomes the part before "
-                                       "the '/' in a candidate, e.g. 'ark'.")
+                                       "the '/' in an endpoint, e.g. 'ark'.")
     base_url: str = Field(..., description="OpenAI-compatible base URL.")
     api_key_env: str = Field("", description="NAME of the secret this endpoint "
                                              "reads. The key itself is a file, "
@@ -46,18 +50,20 @@ class ProviderPatch(BaseModel):
 
 
 class ModelIn(BaseModel):
-    name: str = Field(..., description="Internal model name, e.g. 'flash'.")
-    candidates: list[str] = Field(default_factory=list,
-                                  description="Ordered 'provider/model' "
-                                              "endpoints; the FIRST is what "
-                                              "calls bind to.")
+    name: str = Field(..., description="Model name, e.g. 'flash'. Bare — a "
+                                       "'/' would make it read as an endpoint.")
+    endpoints: list[str] = Field(default_factory=list,
+                                 description="Ordered endpoints "
+                                             "(`provider/model-id`); the FIRST "
+                                             "is what calls bind to.")
 
 
 class MapIn(BaseModel):
-    candidate: str = Field(..., description="'provider/model' to add.")
+    endpoint: str = Field(..., description="An endpoint, `provider/model-id` "
+                                           "— e.g. 'ark/deepseek-v4-flash'.")
     position: int | None = Field(None, description="Index to insert at. Order "
                                                    "is policy: the first "
-                                                   "candidate is bound, the "
+                                                   "endpoint is bound, the "
                                                    "rest are failover only.")
 
 
@@ -65,10 +71,10 @@ class MapIn(BaseModel):
 
 @router.get("")
 def get_available_models():
-    """Every internal model, its ordered candidates, and whether each can serve.
+    """Every model, its ordered endpoints, and whether each one can serve.
 
     `provider_registered` / `key_present` / `cooldown_seconds` are the three
-    ways a listed candidate can still be unusable right now.
+    ways a listed endpoint can still be unusable right now.
     """
     return reg.list_models()
 
@@ -95,24 +101,24 @@ def delete_provider(name: str):
     return _guard(reg.delete_provider, name)
 
 
-# ── internal models ──────────────────────────────────────────────────────────
+# ── models ────────────────────────────────────────────────────────────────────
 
 @router.post("")
 def add_model(body: ModelIn):
-    return _guard(reg.add_model, body.name, body.candidates)
+    return _guard(reg.add_model, body.name, body.endpoints)
 
 
-@router.post("/{model}/candidates")
-def map_provider_model(model: str, body: MapIn):
-    """Point an internal model at one more endpoint."""
-    return _guard(reg.map_model, model, body.candidate, body.position)
+@router.post("/{model}/endpoints")
+def map_endpoint(model: str, body: MapIn):
+    """Point a model at one more endpoint."""
+    return _guard(reg.map_model, model, body.endpoint, body.position)
 
 
-@router.delete("/{model}/candidates")
-def unmap_provider_model(model: str, candidate: str):
-    """Remove one endpoint. `candidate` is a query param because it contains a
-    '/' and would otherwise have to be URL-encoded into the path."""
-    return _guard(reg.unmap_model, model, candidate)
+@router.delete("/{model}/endpoints")
+def unmap_endpoint(model: str, endpoint: str):
+    """Remove one endpoint. It is a query param because it contains a '/' and
+    would otherwise have to be URL-encoded into the path."""
+    return _guard(reg.unmap_model, model, endpoint)
 
 
 @router.delete("/{model}")

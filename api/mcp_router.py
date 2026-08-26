@@ -264,11 +264,13 @@ def _register_model_tools(tool):
             return {"error": str(e)}
 
     @tool("get_available_models", "read",
-          "Every INTERNAL model name this deployment serves, its ordered "
-          "endpoint candidates, and whether each one can actually serve right "
-          "now (provider registered / key present / usage window parked). "
-          "agent_configs and tools reference these names, never a "
-          "provider/model string — start here before editing a role's model.")
+          "Every MODEL this deployment serves, its ordered ENDPOINTS, and "
+          "whether each can actually serve right now (provider registered / "
+          "key present / usage window parked). Three levels: a provider is a "
+          "host ('ark'), an endpoint is one place to call "
+          "('ark/deepseek-v4-flash'), a model is an ordered list of endpoints "
+          "('flash'). agent_configs name MODELS, never endpoints — start here "
+          "before editing a role's model.")
     def get_available_models() -> dict:
         return reg.list_models()
 
@@ -279,9 +281,10 @@ def _register_model_tools(tool):
         return reg.list_providers()
 
     @tool("add_provider", "write",
-          "Register an endpoint. `api_key_env` is the NAME of a secret file, "
-          "not the key — keys are never set through this API. Adding a "
-          "provider does not route anything to it; follow with map_model.")
+          "Register a provider (a host: base URL + the NAME of the secret it "
+          "reads). `api_key_env` is a NAME, not the key — keys are never set "
+          "through this API. Registering a provider routes nothing to it; "
+          "follow with map_model.")
     def add_provider(name: str, base_url: str, api_key_env: str = "") -> dict:
         return _guard(reg.add_provider, name, base_url, api_key_env)
 
@@ -293,36 +296,37 @@ def _register_model_tools(tool):
         return _guard(reg.update_provider, name, base_url, api_key_env)
 
     @tool("delete_provider", "write",
-          "Remove an endpoint. Refused while any model still names it — an "
-          "unregistered provider reaches litellm as a bare provider/model it "
-          "cannot place, and that error does NOT fail over.")
+          "Remove a provider. Refused while any model still has an endpoint "
+          "served by it — an unregistered provider reaches litellm as a bare "
+          "provider/model-id it cannot place, and that error does NOT fail "
+          "over.")
     def delete_provider(name: str) -> dict:
         return _guard(reg.delete_provider, name)
 
     @tool("add_model", "write",
-          "Create an INTERNAL model name with its ordered candidates. ORDER IS "
-          "POLICY: calls bind to the first, the rest are tried only when an "
-          "endpoint fails, so put a pay-as-you-go endpoint LAST — it is what "
-          "makes a spent token plan a slowdown rather than a stop.")
-    def add_model(name: str, candidates: list[str]) -> dict:
-        return _guard(reg.add_model, name, candidates)
+          "Create a MODEL with its ordered endpoints. ORDER IS POLICY: calls "
+          "bind to the first, the rest are tried only when one fails, so put a "
+          "pay-as-you-go endpoint LAST — it is what makes a spent token plan a "
+          "slowdown rather than a stop.")
+    def add_model(name: str, endpoints: list[str]) -> dict:
+        return _guard(reg.add_model, name, endpoints)
 
     @tool("map_model", "write",
-          "Point an existing internal model at one more provider/model. "
-          "`position` inserts rather than appends; leave it out to append. "
-          "The provider must already be registered.")
-    def map_model(model: str, candidate: str,
+          "Point an existing model at one more endpoint ('provider/model-id'). "
+          "`position` inserts rather than appends; leave it out to append. The "
+          "provider must already be registered.")
+    def map_model(model: str, endpoint: str,
                   position: int | None = None) -> dict:
-        return _guard(reg.map_model, model, candidate, position)
+        return _guard(reg.map_model, model, endpoint, position)
 
     @tool("unmap_model", "write",
-          "Remove one candidate from an internal model. Refused when it is the "
-          "last one — a model that resolves to nothing fails at its first call.")
-    def unmap_model(model: str, candidate: str) -> dict:
-        return _guard(reg.unmap_model, model, candidate)
+          "Remove one endpoint from a model. Refused when it is the last one — "
+          "a model that resolves to nothing fails at its first call.")
+    def unmap_model(model: str, endpoint: str) -> dict:
+        return _guard(reg.unmap_model, model, endpoint)
 
     @tool("delete_model", "write",
-          "Remove an internal model entirely. Refused while any agent_config "
+          "Remove a model entirely. Refused while any agent_config "
           "or tool still references it, because that breakage would surface at "
           "the first LLM call with an error pointing at the route table rather "
           "than at the config that still names it.")

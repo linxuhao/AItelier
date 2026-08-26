@@ -668,34 +668,48 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str, int]:
     instance = 0
 
     label = "Checkpoint"
-    if step_id:
-        resolver = sf._get_resolver(graph_name)
-        # When skillflow pauses at a checkpoint it sets current_node to the
-        # checkpoint's NEXT node (its checkpoint-guarded transition target) and
-        # marks the checkpoint step itself "completed". Identify the exact
-        # checkpoint step we are paused at: the most recent completed step whose
-        # checkpoint transition points at current_node. This is more precise
-        # than "last completed checkpoint step" when a task loop re-runs
-        # checkpoint-bearing steps (e.g. step 3) more than once.
-        next_node = step_id
-        steps = sf.get_steps(run_id)
-        matched = None
-        for s in reversed(steps):
-            if s["status"] != "completed":
-                continue
-            node = resolver.get_node(s["step_id"])
-            if not (node and node.checkpoint):
-                continue
-            targets = [t.to for t in node.transitions
-                       if t.match and t.match.get("from") == "checkpoint"]
-            if matched is None:
-                matched = (s["step_id"], node.checkpoint_label, s.get("id") or 0)
-            if next_node in targets:
-                matched = (s["step_id"], node.checkpoint_label, s.get("id") or 0)
-                break
-        if matched:
-            step_id, _lbl, instance = matched
-            label = _lbl or label
+    resolver = sf._get_resolver(graph_name)
+    # When skillflow pauses at a checkpoint it sets current_node to the
+    # checkpoint's NEXT node (its checkpoint-guarded transition target) and
+    # marks the checkpoint step itself "completed". Identify the exact
+    # checkpoint step we are paused at: the most recent completed step whose
+    # checkpoint transition points at current_node. This is more precise
+    # than "last completed checkpoint step" when a task loop re-runs
+    # checkpoint-bearing steps (e.g. step 3) more than once.
+    #
+    # But current_node is NOT reliable, and this scan must not depend on it.
+    # skillflow's `recover_stale_claims` reaps a dead owner's claim by setting
+    # the run's current_node to NULL — unconditionally, including on a run that
+    # is PAUSED, where the reaped claim says nothing about where the run sits.
+    # Restart the container while a checkpoint waits and the pointer is gone;
+    # this used to return step_id="" and every answer path — SPA, CLI, butler,
+    # MCP — reported "no checkpoint to answer" for a run visibly paused at one.
+    # The checkpoint became unanswerable and the run could never be resumed.
+    # Measured on jinyong-hud, 2026-08-27, with a human verdict in hand.
+    #
+    # So the refinement by current_node is now an OPTIMISATION over a scan that
+    # stands on its own: absent that pointer, the most recent completed
+    # checkpoint step is both the best available inference and the one the run
+    # is in fact paused at.
+    next_node = step_id
+    steps = sf.get_steps(run_id)
+    matched = None
+    for s in reversed(steps):
+        if s["status"] != "completed":
+            continue
+        node = resolver.get_node(s["step_id"])
+        if not (node and node.checkpoint):
+            continue
+        targets = [t.to for t in node.transitions
+                   if t.match and t.match.get("from") == "checkpoint"]
+        if matched is None:
+            matched = (s["step_id"], node.checkpoint_label, s.get("id") or 0)
+        if next_node and next_node in targets:
+            matched = (s["step_id"], node.checkpoint_label, s.get("id") or 0)
+            break
+    if matched:
+        step_id, _lbl, instance = matched
+        label = _lbl or label
 
     return step_id, label, run_id, graph_name, instance
 

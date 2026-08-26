@@ -491,6 +491,7 @@ def workspace_raw(
 @router.get("/{project_id}/repo/status")
 def repo_status(
     project_id: str,
+    request: Request,
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),

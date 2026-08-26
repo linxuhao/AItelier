@@ -7,6 +7,23 @@
  */
 
 import { marked } from 'marked';
+
+// GFM task lists render as `<input type=checkbox disabled>`, and the sanitizer
+// below forbids `input` — correctly, because `<input type="password">` inside
+// agent-authored markdown is the phishing case this whole config exists for.
+// Stripping the tag silently made `- [x] gate passed` and `- [ ] gate failed`
+// render IDENTICALLY, which inverts meaning rather than degrading it, in
+// exactly the documents where it matters: the Verifier writes its gate reports
+// in that shape. So the checkbox becomes a character before it ever reaches the
+// sanitizer, and `input` stays forbidden.
+marked.use({
+  renderer: {
+    checkbox(this: unknown, checked: boolean | { checked: boolean }): string {
+      const on = typeof checked === 'object' ? checked.checked : checked;
+      return on ? '\u2611\uFE0F ' : '\u2610 ';
+    },
+  },
+});
 import createDOMPurify from 'dompurify';
 import { escapeHtml } from './format';
 

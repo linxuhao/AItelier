@@ -145,3 +145,28 @@ describe('renderMarkdown: what the defaults do not stop', () => {
     expect(renderMarkdown('<a href="javascript:alert(1)">x</a>')).not.toContain('javascript:');
   });
 });
+
+describe('renderMarkdown: task lists survive the sanitizer', () => {
+  /**
+   * The sanitizer forbids `input` — correctly; `<input type="password">` in
+   * agent-authored markdown is the phishing case it exists for. But GFM task
+   * lists render as `<input type=checkbox disabled>`, so stripping the tag made
+   * `- [x] gate passed` and `- [ ] gate failed` render IDENTICALLY. That
+   * inverts meaning rather than degrading it, in exactly the documents where it
+   * matters: the Verifier writes its gate reports in that shape.
+   */
+  it('renders checked and unchecked differently', () => {
+    const out = renderMarkdown('- [x] gate passed\n- [ ] gate failed');
+    const [a, b] = out.split('gate');
+    expect(a).not.toEqual(b);
+    expect(out).toContain('gate passed');
+    expect(out).toContain('gate failed');
+    // Whatever glyphs are chosen, the two states must be distinguishable.
+    expect(out.match(/☑|☐/g)?.length).toBe(2);
+  });
+
+  it('still admits no <input> element', () => {
+    expect(renderMarkdown('- [x] done')).not.toContain('<input');
+    expect(renderMarkdown('<input type="password" name="p">')).not.toContain('<input');
+  });
+});

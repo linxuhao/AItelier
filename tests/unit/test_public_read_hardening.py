@@ -807,38 +807,95 @@ class TestAnUnknownKidCannotLockOutTheRealWriter:
         assert "real" in cf_access._bad_kids
 
 
-def test_project_ids_are_validated_at_the_choke_points_not_the_callers():
+@pytest.mark.parametrize("bad", ['<img src=x onerror=1>', "../escape", ".", ""])
+def test_project_ids_are_validated_at_the_choke_points_not_the_callers(bad, tmp_path):
     """There are thirteen `pid = args["project_id"]` sites in core/meta_agent
     alone, plus core/run_launcher. The first attempt put a `pattern=` on the
     REST schema — which guards `POST /api/projects`, a writer-gated mutating
     method, i.e. not the door the model uses. Validating at creation is the one
-    place that cannot be walked around."""
-    import inspect as _i
+    place that cannot be walked around.
+
+    Called, not grepped — same reason as the repo-reader test above.
+    """
     from core.db_manager import DBManager
     from core.workspace_manager import WorkspaceManager
-    assert "require_valid" in _i.getsource(DBManager.ensure_project)
-    assert "require_valid" in _i.getsource(WorkspaceManager.setup_workspace)
+    db = DBManager(str(tmp_path / "t.db"))
+    with pytest.raises(ValueError):
+        db.ensure_project(bad)
+    with pytest.raises(ValueError):
+        WorkspaceManager.setup_workspace(object(), bad)
 
 
-def test_the_read_window_cannot_be_widened_by_the_caller():
+def test_the_read_window_cannot_be_widened_by_the_caller(repo):
     """Streaming bounded memory by the PAGE — and then `?end_line=99999999`
     made the page the whole file again, measured at 76MB, within 13% of the
-    pre-fix cost. A caller picking the page size is the same lever renamed."""
+    pre-fix cost. A caller picking the page size is the same lever renamed.
+
+    Asserted on the RESULT, not on the source line that produces it: a test
+    that greps for `min(stop_idx, ...)` fails on a rename and passes on a
+    reordering, which is the opposite of what it is for."""
     import api.project_routers as pr
-    src = inspect.getsource(pr.workspace_file)
-    assert "min(stop_idx, start_idx + _WORKSPACE_FILE_MAX_LINES)" in src
+    n = pr._WORKSPACE_FILE_MAX_LINES * 3
+    (repo / "huge.txt").write_text("\n".join(str(i) for i in range(n)))
+    out = pr.workspace_file("p1", None, "huge.txt", "code", 1, 99999999,
+                            None, _Db(), _Ws(repo))
+    assert out["total_lines"] == n
+    assert len(out["content"].splitlines()) == pr._WORKSPACE_FILE_MAX_LINES
+    assert out["truncated"] is True
 
 
-def test_all_four_repo_readers_are_gated(monkeypatch):
+def test_all_four_repo_readers_are_gated(repo):
     """`repo_status` was the fourth. The batch that added the gate said "three
     readers together" and there were four — it publishes the absolute host path,
-    the remote URL, branch state and 20 commit subjects with author identities."""
+    the remote URL, branch state and 20 commit subjects with author identities.
+
+    CALLED, not grepped. The first version of this test asserted that the string
+    `_require_writer_for_external_repo` appeared in each function's source, and
+    it passed while `repo_status` was raising `NameError: name 'request' is not
+    defined` on the FIRST line of the gate — a hard 500 on the public host, for
+    a whole day, with a green suite. A source-string assertion is a comment that
+    fails the build; it cannot tell "the gate runs" from "the gate crashes
+    before it runs".
+    """
     import api.project_routers as pr
-    for fn in (pr._resolve_workspace_target, pr.workspace_tree, pr.repo_status):
-        assert "_require_writer_for_external_repo" in inspect.getsource(fn), fn.__name__
+
+    class _Ws2(_Ws):
+        def repo_status(self, project_id):
+            return {"is_git": False, "path": str(self._base)}
+
+    ws = _Ws2(repo)
+    # Each reader, invoked. A project inside the data dir stays public, so the
+    # gate must let these through rather than raise anything.
+    assert pr.workspace_tree("p1", None, None, "code", None, _Db(), ws)["tree"]
+    assert pr._resolve_workspace_target(
+        "p1", "src/main.gd", "code", None, _Db(), ws, None).name == "main.gd"
+    assert pr.repo_status("p1", None, None, _Db(), ws)["is_git"] is False
+
     route = next(r for r in pr.router.routes if r.path.endswith("/repo/archive"))
     from api.authz import require_writer
     assert require_writer in [d.call for d in route.dependant.dependencies]
+
+
+def test_an_external_repo_is_refused_by_all_of_them(repo):
+    """The other direction: the gate must actually REFUSE, not just not-crash."""
+    import api.project_routers as pr
+
+    class _ExternalDb:
+        def get_project(self, pid):
+            return {"project_id": pid, "owner_email": "cli@local",
+                    "repo_path": "/app"}
+
+    db = _ExternalDb()
+    ws = _Ws(repo)
+    for call in (
+        lambda: pr.workspace_tree("p1", None, None, "code", None, db, ws),
+        lambda: pr._resolve_workspace_target(
+            "p1", "src/main.gd", "code", None, db, ws, None),
+        lambda: pr.repo_status("p1", None, None, db, ws),
+    ):
+        with pytest.raises(HTTPException) as e:
+            call()
+        assert e.value.status_code == 403
 
 
 def test_the_data_dir_itself_is_not_a_legitimate_repo_root():
@@ -870,3 +927,30 @@ def test_the_response_carries_a_content_security_policy():
     src = inspect.getsource(m.security_headers)
     assert "setdefault" in src, (
         "assignment would LOOSEN the raw-image endpoint's stricter own policy")
+
+
+def test_the_cache_ttl_matches_the_polling_interval_it_serves():
+    """The fixed cost of this cache is `keys / TTL * rebuild`, and it does not
+    depend on how many people are watching — two visitors and five hundred pay
+    the same. So the TTL is not a comfort setting, it is the throughput knob.
+
+    At TTL 5 against the SPA's 10s poll it rebuilt twice per poll: ~550ms x3
+    endpoints x2 = about a third of the single core, spent recomputing an answer
+    nobody had asked to change. Pinned against the SPA rather than asserted as a
+    number, because the two drifting apart is the failure — the constant on its
+    own looks arbitrary and would be "tuned" by someone who could not see why.
+    """
+    import re
+    from pathlib import Path as _P
+    from api._read_cache import DEFAULT_TTL
+
+    spa = (_P(__file__).resolve().parents[2] / "web" / "src" / "views"
+           / "UnifiedDashboard.svelte").read_text(encoding="utf-8")
+    poll_ms = max(int(m) for m in re.findall(r"\}, (\d{4,})\);", spa))
+    # Equality, not a range. The first version of this test allowed anything
+    # from half the poll upward, and 5.0 — the exact value being fixed — sat on
+    # the boundary and passed. A bound that admits the bug is not a bound.
+    assert DEFAULT_TTL * 1000 == poll_ms, (
+        f"TTL {DEFAULT_TTL}s and the {poll_ms/1000}s poll have drifted apart. "
+        f"Below the poll, every poll is a miss and the fixed cost is paid twice "
+        f"or more per poll; above it, staleness (TTL + poll) grows for nothing.")

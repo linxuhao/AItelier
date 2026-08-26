@@ -38,10 +38,28 @@ import threading
 import time
 from typing import Any, Callable, Hashable
 
-# Long enough that a burst of visitors collapses onto one computation, short
-# enough that nobody notices: the SPA polls these every 10s, so a 5s entry is
-# at most half a poll stale and usually less.
-DEFAULT_TTL = 5.0
+# Aligned with the SPA's poll interval (web/src/views/UnifiedDashboard.svelte:165
+# — `setInterval(..., 10000)`), and that alignment is the whole point.
+#
+# Under continuous demand a key rebuilds once per TTL, so the FIXED cost of this
+# cache is `keys / TTL * rebuild`. It does not depend on how many people are
+# watching: two visitors and five hundred pay the same. At TTL 5 against a 10s
+# poll that was two rebuilds per poll — measured ~550ms each across the three
+# cached endpoints, so about a third of the single core, burned on recomputing
+# an answer nobody had asked to change. Matching the TTL to the poll halves it.
+#
+# Longer would halve it again, and is the wrong trade: effective staleness is
+# TTL + poll, so 10s already means a dashboard can show something 20s old, and
+# this page's job is watching a live run. Writes do not wait for the TTL — the
+# invalidation middleware drops the store on any mutating request — so the only
+# thing that ages is out-of-band change, which is exactly the scheduler
+# advancing a run, which is exactly what a 20s-old dashboard is still fine for.
+#
+# The real win left on the table is not a bigger number: all three cached
+# endpoints rebuild the SAME underlying data (`list_projects_with_stats` plus
+# `enrich_project_status` per project). Sharing that would cut the fixed cost by
+# three rather than by two. That is a refactor, not a constant.
+DEFAULT_TTL = 10.0
 
 # Both dicts are keyed on values an ANONYMOUS caller picks: `/api/runs` takes
 # free-form `config_name` and `status` query params, so `?config_name=zzz1`

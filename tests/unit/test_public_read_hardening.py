@@ -68,7 +68,7 @@ def repo(tmp_path: Path) -> Path:
 
 def _resolve(repo: Path, path: str, root: str = "code"):
     from api.project_routers import _resolve_workspace_target
-    return _resolve_workspace_target("p1", path, root, None, _Db(), _Ws(repo))
+    return _resolve_workspace_target("p1", path, root, None, _Db(), _Ws(repo), None)
 
 
 @pytest.mark.parametrize("path", [
@@ -305,7 +305,7 @@ def test_a_workspace_read_is_size_capped(repo, monkeypatch):
     big = repo / "big.txt"
     big.write_text("x" * 4096)
     with pytest.raises(HTTPException) as e:
-        pr.workspace_file("p1", "big.txt", "code", None, None, None, _Db(), _Ws(repo))
+        pr.workspace_file("p1", None, "big.txt", "code", None, None, None, _Db(), _Ws(repo))
     assert e.value.status_code == 413
 
 
@@ -449,7 +449,7 @@ class TestTheTreeListingIsJailedAndBounded:
 
     def _tree(self, repo, subdir=None):
         import api.project_routers as pr
-        return pr.workspace_tree("p1", subdir, "code", None, _Db(), _Ws(repo))
+        return pr.workspace_tree("p1", None, subdir, "code", None, _Db(), _Ws(repo))
 
     @pytest.mark.parametrize("subdir", ["../..", "../../../../../run/secrets", "/etc"])
     def test_escaping_the_workspace_is_refused(self, repo, subdir):
@@ -495,7 +495,7 @@ class TestTheWorkspaceReadIsBoundedByTheWindowNotTheFile:
     def test_the_window_is_what_comes_back(self, repo):
         import api.project_routers as pr
         (repo / "many.txt").write_text("\n".join(str(i) for i in range(5000)))
-        out = pr.workspace_file("p1", "many.txt", "code", 10, 12,
+        out = pr.workspace_file("p1", None, "many.txt", "code", 10, 12,
                                 None, _Db(), _Ws(repo))
         assert out["content"] == "9\n10\n11"
         assert out["total_lines"] == 5000
@@ -645,3 +645,90 @@ def test_the_third_endpoint_with_the_same_core_is_cached_too():
     src = inspect.getsource(pr.list_projects)
     assert "_read_cache.cached" in src
     assert '("projects", owner)' in src, "the key must carry the owner filter"
+
+
+class TestARepoOutsideTheDataDirIsWriterOnly:
+    """The predicate is CONTAINMENT, not `repo_type`.
+
+    A repo AItelier created under its own data dir is AItelier's to publish, and
+    browsing it is the point of a public dashboard. A repo the operator pointed
+    at is not — `repo_path` is an arbitrary absolute path and there is no
+    gitignore filter anywhere in the reader. One project created with
+    `repo_path=/app` (which passes the existing `.git`-presence check, and is
+    the natural answer when you ask the butler to fix something in AItelier
+    itself) makes `?root=code&path=.env` serve AITELIER_ADMIN_TOKEN to the
+    internet: public read to full write, in one request.
+    """
+
+    def _project(self, repo_path):
+        return {"project_id": "p1", "owner_email": "cli@local", "repo_path": repo_path}
+
+    def test_inside_the_data_dir_stays_public(self):
+        from api.project_routers import _repo_is_inside_the_data_dir
+        from core import datadir
+        inside = str(datadir.aitelier_home() / "projects" / "game")
+        assert _repo_is_inside_the_data_dir(self._project(inside))
+
+    @pytest.mark.parametrize("outside", ["/app", "/home/someone/secrets", "/etc"])
+    def test_outside_is_not(self, outside):
+        from api.project_routers import _repo_is_inside_the_data_dir
+        assert not _repo_is_inside_the_data_dir(self._project(outside))
+
+    def test_a_repoless_project_is_not_flagged(self):
+        """`repo_type: none` runs have nothing to expose; treating them as
+        external would break the authoring pipelines' own dashboards."""
+        from api.project_routers import _repo_is_inside_the_data_dir
+        assert _repo_is_inside_the_data_dir({"project_id": "p", "repo_path": None})
+
+    def test_an_anonymous_read_of_an_external_repo_is_refused(self):
+        from api.project_routers import _require_writer_for_external_repo
+        with pytest.raises(HTTPException) as e:
+            _require_writer_for_external_repo(self._project("/app"), None)
+        assert e.value.status_code == 403
+
+    def test_all_three_readers_apply_it(self):
+        """file, raw and tree — the whole point of this round is that a rule
+        applied to some of the readers is a rule that is not applied."""
+        import api.project_routers as pr
+        assert "_require_writer_for_external_repo" in inspect.getsource(
+            pr._resolve_workspace_target)
+        assert "_require_writer_for_external_repo" in inspect.getsource(
+            pr.workspace_tree)
+
+
+class TestProjectIdIsConstrained:
+    """It is interpolated into a filesystem path AND into a `{@html}` block in
+    the SPA's delete confirmation, and its value can come straight from the
+    model — `args.get("project_id") or self._slugify(...)`, where the slugify is
+    only the FALLBACK. "filesystem-safe slug" was a description with nothing
+    enforcing it."""
+
+    @pytest.mark.parametrize("bad", [
+        '<img src=x onerror=alert(1)>',
+        "../escape", "a/b", "", "x" * 65, ".hidden", "-dash",
+    ])
+    def test_dangerous_ids_are_refused(self, bad):
+        from pydantic import ValidationError
+        from models.schemas import ProjectCreate
+        with pytest.raises(ValidationError):
+            ProjectCreate(project_id=bad)
+
+    @pytest.mark.parametrize("ok", ["jinyong-hud", "gen_dsh_code_review",
+                                    "a", "proj.v2", "P1"])
+    def test_real_ids_still_pass(self, ok):
+        from models.schemas import ProjectCreate
+        assert ProjectCreate(project_id=ok).project_id == ok
+
+
+def test_every_subprocess_in_run_tests_scrubs_the_environment():
+    """Third pass over the same module. `bash` was hardened first, `npm ci` and
+    pytest in the second round, and `pip install -e` — which EXECUTES the
+    target's build backend, i.e. LLM-authored setup.py — was still inheriting
+    everything. Counting the spawns is the only way this stops being a
+    one-at-a-time discovery."""
+    import aitelier.tools.run_tests.impl as impl
+    src = inspect.getsource(impl)
+    spawns = src.count("subprocess.run(") + src.count("subprocess.Popen(")
+    scrubbed = src.count("env_scrub.scrubbed_env()") + src.count(
+        "env_scrub.scrubbed_env(PYTHONPATH=")
+    assert scrubbed >= 4, f"{spawns} spawn sites, only {scrubbed} scrubbed"

@@ -39,7 +39,15 @@ class TaskResponse(BaseModel):
     )
 
 class ProjectCreate(BaseModel):
-    project_id: str = Field(..., description="Unique project identifier (filesystem-safe slug)")
+    # Constrained, not merely described. It is interpolated into a filesystem
+    # path (api/project_routers.py) and into a `{@html}` block in the SPA's
+    # delete confirmation, and its value can come straight from the model
+    # (core/meta_agent.py: `args.get("project_id") or self._slugify(...)` —
+    # the slugify is only the FALLBACK). "filesystem-safe slug" was a
+    # description with nothing enforcing it.
+    project_id: str = Field(
+        ..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        description="Unique project identifier (filesystem-safe slug)")
     name: Optional[str] = Field(None, description="Human-readable project name")
     priority: Optional[int] = Field(0, description="Scheduling priority (higher = sooner)")
     repo_type: Optional[str] = Field("new", description="Repository type: 'new', 'existing', or 'clone'")

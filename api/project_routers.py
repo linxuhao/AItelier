@@ -30,7 +30,7 @@ from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner, enrich_project_status
 from api import _read_cache
 from api.auth import CurrentUser, get_optional_user, creator_email
-from api.authz import require_writer
+from api.authz import require_writer, request_can_write
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
@@ -68,8 +68,46 @@ _WORKSPACE_IMAGE_TYPES = {
 }
 
 
+def _repo_is_inside_the_data_dir(project: dict) -> bool:
+    """Is this project's code repo somewhere AItelier owns?
+
+    The predicate is CONTAINMENT, not `repo_type`. A repo AItelier created under
+    its own data dir is AItelier's to publish, and browsing it is the point of a
+    public dashboard. A repo the operator pointed at is not, and `repo_path` is
+    an arbitrary absolute path with no gitignore filter anywhere in the reader:
+    one project created with `repo_path=/app` — the natural answer when you ask
+    the butler to fix something in AItelier itself, and it passes the existing
+    `.git`-presence check — makes `?root=code&path=.env` serve
+    AITELIER_ADMIN_TOKEN to the internet. That is public-read to full write in
+    one request.
+
+    Containment also degrades safely: mount another host path tomorrow and it is
+    covered without anyone remembering this rule.
+    """
+    from core import datadir
+    rp = (project or {}).get("repo_path")
+    if not rp:
+        return True   # repo-less projects have nothing to expose
+    try:
+        return Path(rp).resolve().is_relative_to(datadir.aitelier_home().resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _require_writer_for_external_repo(project: dict, request) -> None:
+    if _repo_is_inside_the_data_dir(project):
+        return
+    if request is None or not request_can_write(request):
+        raise HTTPException(
+            status_code=403,
+            detail=("This project's repository is outside AItelier's data "
+                    "directory; reading it requires write authorization."),
+            headers={"X-AItelier-Reason": "external-repo"})
+
+
 def _resolve_workspace_target(project_id: str, path: str, root: str,
-                              user, db: DBManager, ws: WorkspaceManager) -> Path:
+                              user, db: DBManager, ws: WorkspaceManager,
+                              request=None) -> Path:
     """Owner-checked, traversal-safe resolution of a workspace-relative path.
 
     ``root`` selects "dps" (pipeline staging) or "code" (project code repo).
@@ -79,7 +117,11 @@ def _resolve_workspace_target(project_id: str, path: str, root: str,
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, None, project)
 
-    base = ws.get_code_path(project_id) if root == "code" else ws._get_secure_path(project_id)
+    if root == "code":
+        _require_writer_for_external_repo(project, request)
+        base = ws.get_code_path(project_id)
+    else:
+        base = ws._get_secure_path(project_id)
     base_resolved = base.resolve()
     target = (base_resolved / path).resolve()
     # Proper path-component containment. str.startswith would allow a sibling
@@ -252,6 +294,7 @@ def list_project_tasks(
 @router.get("/{project_id}/workspace/tree")
 def workspace_tree(
     project_id: str,
+    request: Request,
     subdir: str = None,
     root: str = "dps",
     user: CurrentUser | None = Depends(get_optional_user),
@@ -269,6 +312,8 @@ def workspace_tree(
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, None, project)
 
+    if root == "code":
+        _require_writer_for_external_repo(project, request)
     root_dir = (ws.get_code_path(project_id) if root == "code"
                 else ws._get_secure_path(project_id)).resolve()
     # `subdir` was concatenated raw — no resolve, no containment check — while
@@ -315,6 +360,7 @@ def workspace_tree(
 @router.get("/{project_id}/workspace/file")
 def workspace_file(
     project_id: str,
+    request: Request,
     path: str,
     root: str = "dps",
     start_line: int | None = None,
@@ -330,7 +376,8 @@ def workspace_file(
     inclusive) to read a range; the response reports ``total_lines`` and a
     ``truncated`` flag so callers can page rather than be silently cut off.
     """
-    target = _resolve_workspace_target(project_id, path, root, user, db, ws)
+    target = _resolve_workspace_target(project_id, path, root, user, db, ws,
+                                       request)
 
     # Size cap FIRST — but note what it does and does not bound. It was chosen
     # against file bytes while the cost is the decoded string plus the line
@@ -376,6 +423,7 @@ def workspace_file(
 @router.get("/{project_id}/workspace/raw")
 def workspace_raw(
     project_id: str,
+    request: Request,
     path: str,
     root: str = "dps",
     user: CurrentUser | None = Depends(get_optional_user),
@@ -393,7 +441,8 @@ def workspace_raw(
     if media_type is None:
         raise HTTPException(status_code=415, detail=f"Not a displayable image: {path}")
 
-    target = _resolve_workspace_target(project_id, path, root, user, db, ws)
+    target = _resolve_workspace_target(project_id, path, root, user, db, ws,
+                                       request)
     return FileResponse(
         target,
         media_type=media_type,

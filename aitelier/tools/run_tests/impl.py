@@ -191,13 +191,21 @@ def _install_project_deps(venv_py: str, repo: Path) -> str:
             cmd = [venv_py, "-m", "pip", "install", "-q", "-e", target]
         else:
             return ""
+        # `pip install -e` EXECUTES the target's build backend — setup.py or a
+        # PEP 517 hook — i.e. LLM-authored code, which is the same property that
+        # justified scrubbing `npm ci` one commit ago. And the output is
+        # published: `_install_failure_reason` puts it in test_report.json (an
+        # anonymously-readable step output) and in the reviewer's prompt (an
+        # anonymously-readable trace). Third spawn, same rule.
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=300, check=False)
+                              timeout=300, check=False,
+                              env=env_scrub.scrubbed_env())
         if proc.returncode != 0 and extras:
             # An extra that fails to resolve must not cost us the base install:
             # degrade to exactly what this did before extras existed.
             proc = subprocess.run(
                 [venv_py, "-m", "pip", "install", "-q", "-e", str(repo)],
+                env=env_scrub.scrubbed_env(),
                 capture_output=True, text=True, timeout=300, check=False)
         if proc.returncode != 0:
             return _install_failure_reason(proc)

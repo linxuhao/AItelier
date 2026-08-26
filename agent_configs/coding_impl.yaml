@@ -5,7 +5,7 @@
 # task_implementer tooling (write mode auto-derives surgical create/edit).
 
 offload_implementer:
-  model: "ark/deepseek-v4-flash"
+  model: "flash"
   temperature: 0.2
   template: "coding_impl.md"
   # create/edit derived from output.mode: write. list_tree/test helpers as DPE.

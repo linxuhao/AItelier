@@ -52,8 +52,19 @@ services:
       # host IP — not a compose service. Context length is the model's
       # max_model_len, and the tool derives from it how many frames fit per
       # call; it refuses to look at a subset rather than dropping frames.
-      GODOT_VISION_URL: "http://100.68.74.107:8000/v1/chat/completions"
-      GODOT_VISION_MODEL: "qwen3"
+      # The primary judge. It is legitimately absent much of the time (the
+      # box is shared and gets restarted for other work), and that is what
+      # the DeepSeek fallback in godot_vision/impl.py is for — a primary
+      # that is simply not serving is NOT a reason to repoint this at
+      # whatever else happens to be listening on that host. An experimental
+      # vLLM on a neighbouring port is not the vision backend.
+      # WHO judges now lives in model_routes.json under the internal model
+      # `vision` (localqwen -> qwen plan -> deepseek pay-as-you-go); the tool
+      # resolves it through llm_providers.json like every agent step does.
+      # What stays here is the BUDGET, and it stays fixed on purpose: sizing
+      # batches to whichever judge happened to answer would make the batch
+      # layout — and so which frames are compared against each other — depend
+      # on an infra accident.
       GODOT_VISION_CONTEXT_TOKENS: "12288"
     env_file:
       - .env
@@ -68,6 +79,12 @@ services:
       # minimax behind ONE key, so llm_providers.json's `ark` entry is the
       # only place a model needs registering.
       - ARK_API_KEY
+      # Alibaba Qwen token plan — a THIRD endpoint for the deepseek models the
+      # routes already use (`deepseek-v4-pro-0813`, `deepseek-v4-flash-0731`),
+      # plus qwen3.8-max and a vision-capable model of its own. Separate plan,
+      # separate window: model_routes.json lists it as its own candidate so it
+      # parks independently of ark.
+      - QWEN_API_KEY
       # GitHub token (fine-grained PAT) for private clone + push + PR creation.
       # Same file-secret model as the LLM key: read by git-credential-helper.sh
       # (clone/push) and core/git_ops.py (PR REST call), never placed in env.
@@ -161,6 +178,11 @@ secrets:
   #   printf '%s' "$GH_PAT" > ~/.aitelier-secrets/GITHUB_TOKEN && chmod 600 "$_"
   GITHUB_TOKEN:
     file: ${HOME}/.aitelier-secrets/GITHUB_TOKEN
+  # Alibaba's Qwen token plan — a REAL paid key, despite sitting next to the
+  # local one. Create it before `up`:
+  #   printf '%s' "$QWEN_KEY" > ~/.aitelier-secrets/QWEN_API_KEY && chmod 600 "$_"
+  QWEN_API_KEY:
+    file: ${HOME}/.aitelier-secrets/QWEN_API_KEY
   # Placeholder only — the local vLLM does no auth. Create it before `up`:
   #   printf 'local-no-auth' > ~/.aitelier-secrets/LOCAL_QWEN_API_KEY && chmod 600 "$_"
   LOCAL_QWEN_API_KEY:

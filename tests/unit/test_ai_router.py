@@ -302,3 +302,173 @@ def test_escalation_is_self_bounding():
         assert steps < 100, "escalation failed to terminate"
     assert gateway.max_output_tokens == OUTPUT_CAP_CEILING
     assert steps == 4  # 4096 → 8192 → 16384 → 32768 → 65536
+
+
+class TestEffortDelivery:
+    """How the reasoning level reaches the wire — the one place two provider
+    families disagree and litellm has an opinion of its own."""
+
+    def _gw(self, model, effort="low"):
+        from core.ai_router import AIGateway
+        return AIGateway(model, enable_thinking=True, thinking_effort=effort)
+
+    def test_effort_never_rides_as_a_top_level_param(self):
+        """Top-level `reasoning_effort` is broken in BOTH directions.
+
+        DeepSeek: litellm's DeepSeekChatConfig pops it and drops the LEVEL
+        (BerriAI/litellm#27439), so every effort collapses to the default.
+        Everyone else behind the openai/ shim: litellm VALIDATES the param
+        against a model it has never heard of and refuses to send the request
+        at all — measured 2026-08-26, every effort value on qwen/qwen3.8-max
+        raised UnsupportedParamsError before anything left the process. That is
+        a client-side error, so it is not in FAILOVER_EXCEPTIONS: it would have
+        killed the step outright the first time a role with an effort set was
+        routed onto a non-DeepSeek model.
+        """
+        for model in ("deepseek/deepseek-v4-flash", "qwen/qwen3.8-max",
+                      "ark/glm-5.3", "localqwen/qwen3"):
+            kwargs = self._gw(model)._build_kwargs([{"role": "user", "content": "x"}])
+            assert "reasoning_effort" not in kwargs, (
+                f"{model}: effort must go through extra_body, never top-level")
+            assert kwargs["extra_body"]["reasoning_effort"] == "low", model
+
+    def test_no_effort_means_no_key_at_all(self):
+        """Unset must not become a value — the provider's own default applies."""
+        kwargs = self._gw("qwen/qwen3.8-max", effort=None)._build_kwargs(
+            [{"role": "user", "content": "x"}])
+        assert "reasoning_effort" not in kwargs
+        assert "reasoning_effort" not in kwargs["extra_body"]
+
+    def test_no_role_sends_an_effort_qwen3_8_max_does_not_define(self):
+        """`qwen3.8-max` has a different, NARROWER effort vocabulary.
+
+        Its chat template documents low / medium / xhigh (xhigh default) and has
+        no `max` at all; DeepSeek's is low / high / max, with medium and xhigh
+        silently folded into high. The two overlap on `low` alone.
+
+        Out-of-vocabulary values are not rejected — measured 2026-08-26, every
+        value returns 200 — so a wrong one is SILENTLY IGNORED and the model
+        falls back to its own default, which for qwen is its HIGHEST setting. An
+        effort set to `low` to save money would land on maximum reasoning with
+        no error to show for it: the same shape as the truncation that blanked 5
+        of 8 reviewer turns.
+
+        Worse, on a real reasoning task (a rigorous proof, 8192-token cap) the
+        others move with the knob and qwen3.8-max does not:
+
+            ark/glm-5.3      out 6995 (unset) / 3670 (low) / 8192 (max, capped)
+            qwen/glm-5.2     reasoning 874 / 664 / 1389
+            qwen/qwen3.8-max reasoning 144 / 327 / 132   <- no order at all
+
+        n=1 per level, so treat the last row as a warning rather than a result —
+        but do not assume the knob works there. This guard is deliberately
+        narrow: it fires only for the one model whose vocabulary is documented
+        to differ, which is exactly the trap that springs the first time a role
+        moves onto the `smart` route.
+        """
+        import json
+        from pathlib import Path
+
+        import yaml
+
+        root = Path(__file__).resolve().parents[2]
+        routes = json.loads((root / "model_routes.json").read_text(encoding="utf-8"))
+        narrow = {n for n, c in routes.items()
+                  if not n.startswith("_") and "qwen/qwen3.8-max" in c}
+        assert narrow, "expected at least one route to reach qwen3.8-max"
+        ok = {None, "low", "medium"}
+
+        offenders = []
+        for f in sorted((root / "agent_configs").glob("*.yaml")):
+            for role, rc in (yaml.safe_load(f.read_text(encoding="utf-8")) or {}).items():
+                if not isinstance(rc, dict) or rc.get("model") not in narrow:
+                    continue
+                eff = (rc.get("thinking") or {}).get("effort")
+                if eff not in ok:
+                    offenders.append(f"{f.name}:{role} model={rc['model']} effort={eff}")
+        assert not offenders, (
+            "these roles can be served by qwen3.8-max with an effort it does "
+            "not define; it will be silently ignored and you will get that "
+            "model's default (its HIGHEST): " + "; ".join(offenders))
+
+
+class TestThinkingDialect:
+    """One switch shape for every endpoint — and why that is the RIGHT answer,
+    not laziness.
+
+    The temptation is to adapt the switch per provider, because QwenCloud's doc
+    says `enable_thinking: true` where DeepSeek's and z.ai's say
+    `thinking: {"type": "enabled"}`. Measured 2026-08-26 by trying to DISABLE
+    thinking in each dialect (binary, unlike effort levels — either the model
+    stops reasoning or it does not):
+
+        endpoint / model              thinking:{type:disabled}   enable_thinking:false
+        qwen/qwen3.8-max              honoured (no reasoning)    honoured
+        qwen/deepseek-v4-flash-0731   honoured                   honoured
+        qwen/glm-5.2                  honoured                   honoured
+        ark/deepseek-v4-flash         honoured (reasoning 0)     IGNORED (reasoning 55)
+        ark/glm-5.3                   400 BadRequest             n/a (never reports)
+
+    Two conclusions, both against adapting:
+
+    1. The dialect is NOT a provider property — qwen and ark both serve the same
+       DeepSeek models, and only ark tells them apart. It would have to be a
+       per provider/model table, which is a matrix that goes stale every time a
+       vendor ships.
+    2. It does not need to be one. `thinking: {"type": "enabled"}` is understood
+       EVERYWHERE, including by QwenCloud, which accepts both. `enable_thinking`
+       is the narrower dialect — ark/deepseek ignores it outright. Switching
+       qwen to "its own" dialect would gain nothing and lose uniformity.
+
+    Recorded because the pull toward "follow each vendor's doc" is strong and
+    the cost of giving in is a silently-ignored switch on ark.
+    """
+
+    def _eb(self, model, effort="low"):
+        from core.ai_router import AIGateway
+        gw = AIGateway(model, enable_thinking=True, thinking_effort=effort)
+        return gw._build_kwargs([{"role": "user", "content": "x"}])["extra_body"]
+
+    def test_every_non_minimax_endpoint_gets_the_portable_switch(self):
+        for model in ("deepseek/deepseek-v4-flash", "qwen/qwen3.8-max",
+                      "qwen/deepseek-v4-flash-0731", "ark/glm-5.3",
+                      "ark/deepseek-v4-flash", "localqwen/qwen3"):
+            eb = self._eb(model)
+            assert eb.get("thinking") == {"type": "enabled"}, model
+            assert "enable_thinking" not in eb, (
+                f"{model}: enable_thinking is the NARROWER dialect — "
+                f"ark/deepseek ignores it. See this class's docstring.")
+
+    def test_we_never_send_a_disable_that_one_endpoint_rejects(self):
+        """`ark/glm-5.3` answers 400 to thinking.type `disabled`.
+
+        Latent today because nothing turns thinking off, so this guards the
+        assumption rather than a live path: if a 'thinking off' mode is ever
+        added, it cannot be done with this key on that endpoint.
+        """
+        from core.ai_router import AIGateway
+        gw = AIGateway("ark/glm-5.3", enable_thinking=False)
+        kwargs = gw._build_kwargs([{"role": "user", "content": "x"}])
+        assert "extra_body" not in kwargs, (
+            "thinking disabled must send NO thinking key at all, never "
+            "thinking:{type:disabled} — ark/glm-5.3 rejects that with a 400")
+
+
+def test_litellm_globals_are_actually_applied():
+    """Building a gateway must set the process-wide litellm settings.
+
+    They were orphaned past a `return` inside `_next_usable` by the routing
+    refactor and silently stopped running — dead code Python does not warn
+    about, and no test noticed because `core/meta_agent.py` sets the same two
+    globals, so anything that had instantiated a MetaAgent first looked fine.
+    Test paths and pipeline-only processes did not.
+    """
+    import litellm
+
+    from core.ai_router import AIGateway
+
+    litellm.telemetry = True
+    litellm.drop_params = False
+    AIGateway("deepseek/deepseek-v4-flash")
+    assert litellm.telemetry is False
+    assert litellm.drop_params is True

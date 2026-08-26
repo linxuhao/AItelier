@@ -4,7 +4,7 @@
 # reviewer role here.
 
 fix_worker:
-  model: "ark/deepseek-v4-flash"
+  model: "flash"
   temperature: 0.2
   template: "fix_tests.md"
   tools: ["list_tree", "test_write", "read_test_written", "delete_file"]

@@ -181,24 +181,19 @@ class TestTheReadmeMatchesTheShippedConfigs:
     they were never told to sign up with. It went stale exactly that way: the
     agent configs moved to `ark/`, the README kept saying DeepSeek."""
 
-    def _shipped_providers(self):
-        import re
-        provs = set()
-        for f in (ROOT / "agent_configs").glob("*.yaml"):
-            for m in re.finditer(r'^\s+model:\s*"?([a-z0-9_]+)/',
-                                 f.read_text(encoding="utf-8"), re.M):
-                provs.add(m.group(1))
-        return provs
-
     def test_the_readme_names_a_key_the_shipped_configs_actually_use(self):
-        import json
+        # Asks PRODUCTION which keys the configs need rather than re-deriving
+        # it here. The private copy of that scan read `model:` for a
+        # `provider/` prefix, and went blind the moment agent_configs moved to
+        # internal model names (model_routes.json) — a second scanner going
+        # stale is the exact failure this class exists to catch, so there is
+        # only one scanner now.
+        from core.external_deps import required_llm_keys
+
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         quick = readme[readme.index("## Quick Start"):readme.index("## Architecture")]
-        providers = json.loads(
-            (ROOT / "llm_providers.json").read_text(encoding="utf-8"))
-        wanted = {providers[p]["api_key_env"] for p in self._shipped_providers()
-                  if p in providers}
-        assert wanted, "no provider prefix found in agent_configs"
+        wanted = set(required_llm_keys())
+        assert wanted, "no provider key derivable from agent_configs"
         # BOTH directions. `any(...)` alone was satisfied by a second mention
         # further down the section, so renaming the headline key stayed green —
         # the same or-across-sources hole this file's own guards had.

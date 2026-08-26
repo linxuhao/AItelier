@@ -4,7 +4,7 @@
 # investigation can never mutate the repo (safe context-offload primitive).
 
 investigator:
-  model: "ark/deepseek-v4-flash"
+  model: "flash"
   temperature: 0.2
   template: "investigate.md"
   tools: ["list_tree"]            # + repo read tools from the context source

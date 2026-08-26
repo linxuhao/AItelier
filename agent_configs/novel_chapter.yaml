@@ -5,7 +5,7 @@
 #   flash = 章纲审查（结构化对照）/细纲审查/记账分录提取（信息抽取）。
 
 novel_outliner:
-  model: "ark/deepseek-v4-pro"
+  model: "pro"
   template: "novel_outline.md"
   # Web tools: pull current 梗/时事 or sample a "写得像《X》/像作者Y" style ref while
   # planning. Used ON DEMAND only (see template) — most chapters need zero searches.
@@ -18,7 +18,7 @@ novel_outliner:
     enable: true
 
 novel_outline_reviewer:
-  model: "ark/deepseek-v4-flash"
+  model: "flash"
   template: "novel_outline_review.md"
   tools: []
   native_tool_calling: true
@@ -27,7 +27,7 @@ novel_outline_reviewer:
     enable: true
 
 novel_writer:
-  model: "ark/deepseek-v4-pro"
+  model: "pro"
   template: "novel_draft.md"
   tools: []
   max_tool_turns: 40   # full chapter prose (2000-4500字) in one write
@@ -37,7 +37,7 @@ novel_writer:
     enable: true
 
 novel_humanizer:
-  model: "ark/deepseek-v4-pro"
+  model: "pro"
   template: "novel_humanize.md"
   tools: []
   max_tool_turns: 40   # rewrites full chapter prose in one write
@@ -47,7 +47,7 @@ novel_humanizer:
     enable: true
 
 novel_chapter_reviewer:
-  model: "ark/deepseek-v4-pro"
+  model: "pro"
   template: "novel_draft_review.md"
   tools: []
   native_tool_calling: true
@@ -59,7 +59,7 @@ novel_humanize_reviewer:
   # A/B fidelity diff (did anything but the language change?) — a comparison
   # task, not creative judgment, so flash is the right tier. Red already judged
   # quality on the draft; this one must NOT re-litigate it.
-  model: "ark/deepseek-v4-flash"
+  model: "flash"
   template: "novel_humanize_review.md"
   tools: []
   native_tool_calling: true
@@ -68,7 +68,7 @@ novel_humanize_reviewer:
     enable: true
 
 novel_finalizer:
-  model: "ark/deepseek-v4-flash"
+  model: "flash"
   template: "novel_finalize.md"
   tools: []
   max_tool_turns: 40   # chapter_events.json can be a sizeable structured write
@@ -80,7 +80,7 @@ novel_finalizer:
 novel_finalize_reviewer:
   # 分录 vs 正文的事实核对（虚报节点/漏记/数字/hint≠resolve）——对照审计而非
   # 创作判断，flash 档与 finalize 同级。这是分录入册前唯一的专业审查。
-  model: "ark/deepseek-v4-flash"
+  model: "flash"
   template: "novel_finalize_review.md"
   tools: []
   native_tool_calling: true

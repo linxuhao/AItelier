@@ -13,26 +13,94 @@ different variable at run time. Edit the table, not this file.
 
 | Capability | Config | Needs | Without it |
 |---|---|---|---|
-| every agent step — an agent with no model cannot run | `llm_providers.json` | an account with SOME LLM provider | agent steps fail at whichever provider their model resolves to |
+| every agent step — an agent with no model cannot run | `llm_providers.json` | an account with SOME LLM provider | agent steps fail at whichever provider their model resolves to — and with a single candidate a spent quota parks the scheduler until it reopens instead of failing over |
 | cloning a private repo, pushing, and opening a PR | `GITHUB_TOKEN` | a fine-grained GitHub PAT (Contents R/W, Pull requests R/W) | private clone and push fail; public repos are unaffected |
 | the `web_search` tool | `SEARXNG_URL` | a SearXNG instance that exposes format=json | agents fall back to model knowledge; `web_fetch` still works on any URL |
 | the `gen_image_asset` / `gen_audio_asset` tools | `AITELIER_MEDIA_MCP_URL`<br>default `http://mcp_server:9003/mcp` | an MCP media server. It holds the models and the GPU — and the CAST: the roster that keeps a character looking like itself and sounding like itself across runs | asset generation refuses; nothing else is affected. Note the roster is DURABLE STATE on that server — repoint this at a different one mid-project and every cast character is recast, so it comes back with a new face and a new voice |
 | the Godot parse gate and head-less play-test (`godot_compile`, `godot_playtest`, `gdscript_check`) | `GODOT_BUILDER_URL`<br>default `http://godot-builder:8080` | the `godot-builder` sidecar | the gate reports `gate_skipped` and the reviewer is told the code shipped UNVERIFIED — it does not silently pass |
-| the Godot readability gate (`godot_vision`) | `GODOT_VISION_URL` | an OpenAI-compatible VISION endpoint (the default is an address on the author's own network) | the gate reports itself BLIND rather than passing a game nobody looked at |
+| the Godot readability gate (`godot_vision`) | `model_routes.json: vision` | at least one OpenAI-compatible VISION endpoint | the gate reports itself BLIND rather than passing a game nobody looked at |
 
 ## Which LLM provider
 
-AItelier is **provider-agnostic**. Nothing in the code names a vendor:
-[`llm_providers.json`](../llm_providers.json) maps a provider name to a
-`base_url` and the NAME of the key it reads, and an `agent_config`'s `model`
-field selects one. Adding your own is one entry there plus a secret file of that
-name — the rows below are examples of the pattern, not requirements.
+AItelier is **provider-agnostic**, in two layers. Nothing in the code names a
+vendor:
+
+| File | Maps |
+|---|---|
+| [`llm_providers.json`](../llm_providers.json) | provider name → `base_url` + the NAME of the key it reads |
+| [`model_routes.json`](../model_routes.json) | INTERNAL model name → ordered list of `provider/model` endpoints |
+
+An `agent_config`'s `model` field names an internal model (`flash`, `pro`,
+`glm`); the route says which real endpoints can serve it. Adding your own is one
+entry in each plus a secret file — the rows below are examples of the pattern,
+not requirements.
 
 | Provider | Base URL | Key it reads |
 |---|---|---|
 | `deepseek` | `https://api.deepseek.com/` | `DEEPSEEK_API_KEY` |
 | `ark` | `https://ark.cn-beijing.volces.com/api/coding/v3` | `ARK_API_KEY` |
 | `localqwen` | `http://100.68.74.107:8000/v1` | `LOCAL_QWEN_API_KEY` |
+
+### Why a second candidate is worth a second account
+
+`AIGateway` binds the FIRST candidate and moves to the next only on an
+**endpoint** error — a dead key, a spent token plan, a 429, a 5xx, a dropped
+connection. A bad request or an oversized context is never failed over: every
+candidate would reject it identically, so walking the list turns one clear error
+into several and spends the quota you are trying to conserve.
+
+With a single candidate, a spent plan stops the pipeline: `core/scheduler.py`
+parks every tick until the provider says the window reopens. With two, the next
+call is simply served elsewhere. That is why
+`core.external_deps.required_llm_keys()` reports only the first candidate's key
+(you can run on one) while `failover_llm_keys()` reports the rest (you should
+not want to).
+
+### More than one plan with the same vendor
+
+A provider entry is a `(base_url, key name)` pair, not a vendor — so a second
+token plan on the SAME vendor is two entries and one route, with no code change:
+
+```json
+// llm_providers.json
+"ark":  { "base_url": "https://ark…/api/coding/v3", "api_key_env": "ARK_API_KEY" },
+"ark2": { "base_url": "https://ark…/api/coding/v3", "api_key_env": "ARK_API_KEY_2" }
+```
+```json
+// model_routes.json
+"flash": ["ark/deepseek-v4-flash", "ark2/deepseek-v4-flash", "deepseek/deepseek-v4-flash"]
+```
+
+Add `ARK_API_KEY_2` to the `secrets:` block in `docker-compose.yml` (both the
+service list and the top-level definition) and drop the key in
+`~/.aitelier-secrets/ARK_API_KEY_2`.
+
+The spent-window cooldown is keyed on `provider/model`, so `ark/…` and `ark2/…`
+park independently — which is what you want, since they are separate plans with
+separate windows. Exhausting the first simply moves work to the second for the
+rest of that window.
+
+A **spent usage window** is remembered, not merely stepped over: that endpoint
+is parked until the instant the provider names, so the steps that follow skip it
+instead of each paying one doomed call to rediscover it. Burst throttling is not
+— it clears in seconds, and retiring the preferred provider over a momentary
+spike would be its own kind of waste. Both arrive as `RateLimitError`; only the
+message distinguishes them. The park is per `provider/model`, capped at six
+hours, held in memory, and if every candidate is parked the gateway tries the
+preferred one anyway — a mis-read timestamp must never be able to make the
+system unrunnable.
+
+Each turn's traced usage row records `served_by`, plus `model_route` and
+`failed_over_from` when routing was involved. That is what makes a run's spend
+attributable to a plan after the fact; without it, tokens billed to the fallback
+look exactly like tokens billed to the preferred endpoint.
+
+Failover is **sticky, never round-robin**: one gateway serves one pipeline step,
+so every turn of that step hits one endpoint. Provider prefix caches are
+per-provider, and this workload measures 26:1 prefill:decode at an 89.4% cache
+hit rate — alternating endpoints per call converts cached input into full-price
+input and costs far more than a second token plan saves. Spread quota per RUN,
+not per call.
 
 The error you get names whichever provider your model resolved to, including one
 you added yourself:
@@ -93,4 +161,4 @@ its own kind of wrong. Loud-skip is the middle.
 |---|---|
 | API keys | Docker **secret files** in `~/.aitelier-secrets/`, never env vars — so test and build subprocesses that inherit `os.environ` cannot read them |
 | Endpoints | environment, via `.env` (see [`.env.example`](../.env.example)) or `docker-compose.yml` |
-| Model → provider | [`llm_providers.json`](../llm_providers.json) |
+| Model → provider | [`model_routes.json`](../model_routes.json) (internal name → candidates), then [`llm_providers.json`](../llm_providers.json) (provider → URL + key) |

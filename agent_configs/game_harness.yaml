@@ -11,7 +11,7 @@
 # create/edit/write itself, and `{from: repository, mode: tool}` supplies the
 # read surface. Nothing to declare here.
 game_designer:
-  model: "ark/glm-5.3"
+  model: "glm"
   temperature: 0.1
   template: "game_designer.md"
   tools: []

@@ -74,11 +74,14 @@ pip install -e .
 
 ## Quick Start
 
-First, a model key. AItelier is provider-agnostic — [`llm_providers.json`](llm_providers.json) maps a provider to a base URL and the NAME of the key it reads, and each `agent_config`'s `model` field selects one. **The shipped configs use `ark/…`, so out of the box the key you need is `ARK_API_KEY`.** Check what yours actually reference:
+First, a model key. AItelier is provider-agnostic in two layers: [`llm_providers.json`](llm_providers.json) maps a provider to a base URL and the NAME of the key it reads, and [`model_routes.json`](model_routes.json) maps the INTERNAL model name an `agent_config` uses (`flash`, `pro`, `glm`) to an ordered list of real endpoints. **Out of the box the key you need is `ARK_API_KEY`.** Ask the code rather than trusting this sentence:
 
 ```bash
-grep -h 'model:' agent_configs/*.yaml | sort -u   # → the provider prefix each step uses
+python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \
+           print('required:', required_llm_keys()); print('failover:', failover_llm_keys())"
 ```
+
+`DEEPSEEK_API_KEY` shows up as **failover**, not required: the shipped routes try Ark first and fall through to DeepSeek direct on a dead key, a spent token plan, a 429 or a 5xx. You can run on one provider — but with only one, a spent plan parks the whole scheduler until the window reopens, whereas a second candidate just picks up the next call. Failover is sticky per step, never round-robin, so it does not cost you the provider prefix cache.
 
 Keys are **secret FILES, not environment variables** — so the test and build subprocesses a pipeline runs cannot inherit them:
 

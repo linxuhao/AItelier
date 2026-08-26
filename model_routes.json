@@ -1,0 +1,123 @@
+{
+  "_comment": [
+    "Internal model name -> ordered list of concrete provider/model endpoints.",
+    "An agent_config's `model` (and the vision gate's judge) names one of these;",
+    "AIGateway binds the first candidate and falls over to the next ONLY on an",
+    "endpoint error (401/403 dead key or lapsed plan, 429 quota/rate limit, 5xx,",
+    "connection loss). A bad request or an oversized context is NOT failed over",
+    "— every candidate would reject it the same way.",
+    "",
+    "STICKY, never round-robin: a gateway lives for one step, so all of that",
+    "step's turns hit one endpoint. Provider prefix caches are per-provider and",
+    "this workload is 26:1 prefill:decode at an 89.4% hit rate; alternating",
+    "endpoints per call converts cached input into full-price input and costs",
+    "more than any token plan saves. Spread quota per RUN, not per call.",
+    "",
+    "A spent usage window parks that ONE provider/model until the provider's",
+    "stated reset instant, so the plans below are consumed in order and a spent",
+    "one is skipped outright rather than re-probed once per step.",
+    "",
+    "Providers referenced here must exist in llm_providers.json, and their key",
+    "must be mounted in docker-compose.yml's `secrets:` block. Names not listed",
+    "here pass through unchanged if they contain a '/', so a concrete",
+    "provider/model still works in an agent_config with no entry."
+  ],
+
+  "_ordering_note": [
+    "Every route ends with a `deepseek/` PAY-AS-YOU-GO candidate on purpose. A",
+    "token plan can run out; pay-as-you-go cannot, so it is the only thing that",
+    "makes 'both plans are spent' a slowdown instead of a stop. ark and qwen are",
+    "separate plans with separate windows, so they are consumed in order and a",
+    "spent one is parked, not re-probed.",
+    "",
+    "How much a failover changes, per route:",
+    "  * flash / pro — NOTHING but the bill. Same model, different door. (Caveat:",
+    "    qwen serves DATED snapshots, deepseek-v4-flash-0731, where ark serves a",
+    "    rolling alias; they can drift when DeepSeek ships a new snapshot.)",
+    "  * glm — degrades. 5.2 is genuinely older than 5.3, and the last candidate",
+    "    is a DIFFERENT FAMILY. See _glm_note.",
+    "  * smart / vision — a different model outright. See their notes.",
+    "",
+    "So `served_by` in the trace is not bookkeeping: for three of the five routes",
+    "it is what tells you whether a result is evidence about the model you think",
+    "you were running."
+  ],
+
+  "flash": [
+    "ark/deepseek-v4-flash",
+    "qwen/deepseek-v4-flash-0731",
+    "deepseek/deepseek-v4-flash"
+  ],
+
+  "pro": [
+    "ark/deepseek-v4-pro",
+    "qwen/deepseek-v4-pro-0813",
+    "deepseek/deepseek-v4-pro"
+  ],
+
+  "_glm_note": [
+    "The last candidate is a DIFFERENT FAMILY, not another door to GLM. That is",
+    "a real behaviour change and it is the point: without it, both token plans",
+    "running out leaves every glm role with nowhere to go and the run stops. A",
+    "DeepSeek answer is a worse GLM answer than GLM's; it is a far better one",
+    "than no answer. Check `served_by` in the trace before reading a glm-role",
+    "verdict as evidence about GLM."
+  ],
+  "glm": [
+    "ark/glm-5.3",
+    "qwen/glm-5.2",
+    "deepseek/deepseek-v4-pro"
+  ],
+
+  "_smart_note": [
+    "qwen3.8-max: a 2.4T MoE (95B active), 262K context, native vision, its own",
+    "low/medium/xhigh effort scale. NOT interchangeable with the others, so it",
+    "is its own route and no existing role has been moved onto it.",
+    "",
+    "What the independent evidence supports (Aug 2026): elite ALGORITHMIC coding",
+    "and tool use (LMArena Code #3), GPQA reproduced at 92.6% vs a claimed 92.7%.",
+    "What it does NOT support: the agentic numbers. Terminal-Bench 2.1 does not",
+    "replicate under a neutral harness, it sits #15/55 on the Coding Agent Index",
+    "with an 11-point SWE-bench gap to Opus 5, and agentic coding is its worst",
+    "LiveBench category. It is also reported unreliable on facts, and to",
+    "'default to wildly overthinking' — pin the effort if you use it.",
+    "",
+    "Read against this pipeline: that profile fits the ONE-SHOT judgement steps",
+    "(the *_review reviewers, the architect, the PM) and argues AGAINST t_impl,",
+    "which is a 24-turn agentic tool loop — its worst category — and against the",
+    "researcher, which must not invent facts. Measure before moving any role:",
+    "replay the step against ~/.AItelier/scratch/effort_ab/ rather than trusting",
+    "this paragraph.",
+    "",
+    "The fallbacks are a DIFFERENT model, so a failover here changes behaviour,",
+    "not just the bill. That is the right trade for availability, but it means a",
+    "run served by the fallback is not evidence about qwen3.8-max — check",
+    "`served_by` in the trace before drawing a conclusion."
+  ],
+  "smart": [
+    "qwen/qwen3.8-max",
+    "ark/deepseek-v4-pro",
+    "deepseek/deepseek-v4-pro"
+  ],
+
+  "_vision_note": [
+    "The judge for the Godot readability gate (aitelier/tools/godot_vision).",
+    "Was three hardcoded env vars inside the tool; it now resolves here so the",
+    "gate picks its judge the same way every other step picks its model.",
+    "",
+    "Order is deliberate: the self-hosted vLLM first (free, and the box is",
+    "already paid for), then the qwen plan, then DeepSeek pay-as-you-go last.",
+    "The GPU box is shared and gets restarted for other work, which is exactly",
+    "the outage this list exists to absorb.",
+    "",
+    "The frame-batching budget does NOT follow the candidate — it stays",
+    "GODOT_VISION_CONTEXT_TOKENS. Sizing batches to whichever judge happened to",
+    "answer would make the batch layout, and thus which frames are compared",
+    "against each other, depend on an infra accident."
+  ],
+  "vision": [
+    "localqwen/qwen3",
+    "qwen/qwen3.8-max",
+    "deepseek/deepseek-v4-flash-vision-exp"
+  ]
+}

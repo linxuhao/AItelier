@@ -40,7 +40,7 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type
+    retry_if_exception
 )
 
 RETRYABLE_EXCEPTIONS = (
@@ -49,6 +49,102 @@ RETRYABLE_EXCEPTIONS = (
     litellm.exceptions.Timeout,
     litellm.exceptions.APIConnectionError
 )
+
+# Errors that another endpoint serving the SAME model might not have. A token
+# plan's failure modes live here: 401/403 (key dead or plan lapsed), 429 (quota
+# or rate limit), 5xx, connection loss.
+#
+# Deliberately EXCLUDED: ContextWindowExceededError and BadRequestError. Those
+# are properties of the request, not the endpoint — failing over just replays
+# the same doomed call against every provider in the list, turning one clear
+# error into N confusing ones and burning the quota we are trying to conserve.
+FAILOVER_EXCEPTIONS = (
+    litellm.exceptions.AuthenticationError,
+    litellm.exceptions.PermissionDeniedError,
+    litellm.exceptions.RateLimitError,
+    litellm.exceptions.ServiceUnavailableError,
+    litellm.exceptions.InternalServerError,
+    litellm.exceptions.APIConnectionError,
+    litellm.exceptions.Timeout,
+    litellm.exceptions.NotFoundError,
+)
+
+
+# A 429 is two different failures wearing one exception class, and treating them
+# alike is what killed the 2026-08-26 game run:
+#
+#   BURST      per-minute/per-second throttling. Clears in seconds; backing off
+#              three times with a 10s cap is exactly right.
+#   QUOTA      a usage window is spent ("You have exceeded the 5-hour usage
+#              quota. It will reset at 2026-08-26 09:18:28 +0800 CST"). NOTHING
+#              clears it but the clock. Retrying inside 20 seconds cannot
+#              succeed, and every wasted attempt still spends a step retry, so
+#              the run burned max_retries in 15 minutes and was marked `failed`
+#              — 18 minutes before the quota came back on its own.
+#
+# So quota exhaustion is NOT retried here. It is raised immediately and the
+# scheduler holds every tick until the reset instant (see _quota_hold).
+# The burst-vs-spent-window test lives in core.llm_quota: the scheduler asks
+# the same questions on a path that must not import litellm.
+from core.llm_quota import is_quota_exhausted, quota_reset_at
+
+
+def _retry_llm_error(exc: BaseException) -> bool:
+    """tenacity predicate: retry transient provider errors, never a spent quota."""
+    if not isinstance(exc, RETRYABLE_EXCEPTIONS):
+        return False
+    return not is_quota_exhausted(exc)
+
+
+# ── Spent-window cooldown, per ENDPOINT ──────────────────────────────────────
+# A spent quota is the one failure that is both certain to clear and certain not
+# to clear soon, so re-electing that endpoint on the next step means paying one
+# doomed call per step for hours. Skipping it until the provider's own reset
+# instant costs one call, once.
+#
+# Keyed on the CONCRETE `provider/model`, not the provider. The blast radius of
+# being wrong is asymmetric: too narrow costs at most one wasted call per model
+# per window; too broad silently retires every model behind one key because a
+# single one ran out. Ark bills a per-model window, so the narrow key is also
+# the accurate one.
+#
+# In-process and unpersisted, on purpose — the same reasoning as the scheduler's
+# hold: a restart during an outage costs one call to re-establish, which is
+# cheaper than a durable record that can outlive the condition it describes.
+_ENDPOINT_COOLDOWN: dict[str, float] = {}
+_COOLDOWN_MAX_S = 6 * 3600      # never trust one report further than this
+_COOLDOWN_FALLBACK_S = 300      # provider named no reset instant
+
+
+def endpoint_cooldowns() -> dict[str, float]:
+    """Live view of `provider/model` → epoch seconds it becomes usable again."""
+    import time as _t
+    now = _t.time()
+    return {k: v for k, v in _ENDPOINT_COOLDOWN.items() if v > now}
+
+
+def reset_endpoint_cooldowns() -> None:
+    """Test hook: forget every cooldown."""
+    _ENDPOINT_COOLDOWN.clear()
+
+
+def _endpoint_available(name: str) -> bool:
+    import time as _t
+    return _ENDPOINT_COOLDOWN.get(name, 0.0) <= _t.time()
+
+
+def _note_endpoint_spent(name: str, err) -> float:
+    """Park ONE endpoint until the provider says its window reopens."""
+    import time as _t
+    reset = quota_reset_at(err)
+    until = (reset.timestamp() if reset is not None
+             else _t.time() + _COOLDOWN_FALLBACK_S)
+    # A past instant means the window already reopened — nothing to park.
+    until = min(until, _t.time() + _COOLDOWN_MAX_S)
+    if until <= _t.time():
+        return 0.0
+    _ENDPOINT_COOLDOWN[name] = max(_ENDPOINT_COOLDOWN.get(name, 0.0), until)
+    return _ENDPOINT_COOLDOWN[name]
 
 
 # Some providers (notably DeepSeek) intermittently emit their tool calls as
@@ -161,28 +257,80 @@ class AIGateway:
 
     def __init__(self, model_name: str, config_path: str = "llm_providers.json",
                  enable_thinking: bool = False, thinking_effort: str | None = None,
-                 temperature: float = 0.2, max_output_tokens: int = 8192):
+                 temperature: float = 0.2, max_output_tokens: int = 8192,
+                 routes_path: str | None = None):
         model_name = resolve_agent_model(model_name)
+        self.enable_thinking = enable_thinking
+        self.thinking_effort = thinking_effort
+        self.temperature = temperature
+        self.max_output_tokens = max_output_tokens
+        # Phase 0 cache telemetry: usage of the most recent completion.
+        self.last_usage: dict = {}
+        self._config_path = config_path
+
+        # An agent_config may name an INTERNAL model ("flash"); resolve it to
+        # the ordered list of concrete provider/model endpoints that can serve
+        # it. A concrete name resolves to itself, so this is a no-op for every
+        # config that has not opted in. See core/model_routes.py.
+        from core.model_routes import get_routes
+        self.internal_model = model_name
+        self._candidates = get_routes(routes_path).resolve(model_name)
+        self._failovers: list[tuple[str, str]] = []   # (from_model, why)
+        # Start at the first candidate whose usage window is not already known
+        # to be spent, so a fresh gateway does not re-discover the same
+        # exhausted plan once per step.
+        self._candidate_ix = self._next_usable(0)
+        self._bind(self._candidates[self._candidate_ix])
+
+        # Process-wide litellm settings. They live at the END of __init__ so
+        # every gateway re-asserts them; a refactor once orphaned them past a
+        # `return` and they silently stopped running (caught in review
+        # 2026-08-26). `drop_params` matters more than it looks: with it False,
+        # an unrecognised TOP-LEVEL param raises UnsupportedParamsError instead
+        # of being dropped — which is how the qwen `reasoning_effort` failure
+        # surfaced as a loud crash. Restoring it does NOT make the extra_body
+        # routing in _build_kwargs unnecessary: dropping the effort silently is
+        # worse than raising, and extra_body is the only path that actually
+        # delivers it.
+        litellm.telemetry = False
+        litellm.drop_params = True
+
+    def _next_usable(self, start: int) -> int:
+        """First candidate index >= start that is not cooling down.
+
+        Falls back to `start` when every remaining candidate is parked. Degrading
+        to "try it anyway" rather than "refuse" is deliberate: a mis-parsed reset
+        timestamp must never be able to make the system unrunnable, and the
+        provider is the authority on its own quota — let it answer.
+        """
+        for i in range(start, len(self._candidates)):
+            if _endpoint_available(self._candidates[i]):
+                return i
+        return start
+
+    def _bind(self, concrete_model: str) -> None:
+        """Point this gateway at ONE concrete provider/model.
+
+        Every provider-specific behaviour downstream (`_cache_control_points`,
+        the minimax/deepseek branches in `_build_kwargs`, `_explain_auth`) reads
+        the attributes set here, so re-binding mid-life switches all of them
+        together and `_build_kwargs` needs no failover awareness.
+        """
+        self.active_model = concrete_model
         self.api_base = None
         self.api_key = None
         # Set to the key's NAME when a provider wants one and it is
         # absent, so the failure can say what to configure.
         self.missing_key_env = None
-        self.litellm_model = model_name
-        self.enable_thinking = enable_thinking
-        self.thinking_effort = thinking_effort
-        self.temperature = temperature
-        self.max_output_tokens = max_output_tokens
+        self.litellm_model = concrete_model
         self.provider = None
-        # Phase 0 cache telemetry: usage of the most recent completion.
-        self.last_usage: dict = {}
 
         # 读取本地 Provider 注册表
-        if os.path.exists(config_path) and '/' in model_name:
-            provider, actual_model = model_name.split('/', 1)
+        if os.path.exists(self._config_path) and '/' in concrete_model:
+            provider, actual_model = concrete_model.split('/', 1)
             self.provider = provider
 
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(self._config_path, "r", encoding="utf-8") as f:
                 providers = json.load(f)
 
             if provider in providers:
@@ -201,16 +349,13 @@ class AIGateway:
 
                 # Use LiteLLM's native provider when available (minimax, etc.).
                 try:
-                    _, native_provider, _, _ = litellm.get_llm_provider(model_name)
+                    _, native_provider, _, _ = litellm.get_llm_provider(concrete_model)
                     if native_provider and native_provider != "openai":
-                        self.litellm_model = model_name
+                        self.litellm_model = concrete_model
                     else:
                         self.litellm_model = f"openai/{actual_model}"
                 except Exception:
                     self.litellm_model = f"openai/{actual_model}"
-
-        litellm.telemetry = False
-        litellm.drop_params = True
 
     # ── cache telemetry ──────────────────────────────────────────────
 
@@ -333,21 +478,106 @@ class AIGateway:
                                      OUTPUT_CAP_CEILING)
         return self.max_output_tokens
 
-    def _build_kwargs(self, messages: list[dict], **extra) -> dict:
-        """Build litellm completion kwargs from state + extra."""
-        messages = self._sanitize_messages(messages)
-        kwargs = {
-            "model": self.litellm_model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": self.max_output_tokens,
-            # A2 fix: bound LiteLLM call. Without this, a stalled provider
-            # (e.g. deepseek v4-flash hung on 2nd native turn) blocks the
-            # asyncio loop for the litellm default 6000s before failing.
-            # 300s (5 min) + tenacity retry (3x exp backoff) caps a single
-            # failure burst at ~34s; even worst-case 3 failures = ~15 min.
-            "timeout": 300.0,
-        }
+    # ── Sticky failover across the internal model's candidates ───────
+
+    def _complete_prebuilt(self, kwargs: dict):
+        """One completion, walking this model's candidates on endpoint errors.
+
+        STICKY, never round-robin. Once a candidate answers, the gateway stays
+        bound to it — and a gateway lives for one step (AgentFactory builds it
+        per `create_agent`), so every turn of a multi-turn step hits the same
+        endpoint. Two reasons, both load-bearing:
+
+        1. Prefix caches are per-provider. Measured over this repo's whole trace
+           history: 464M input tokens at an 89.4% cache-hit rate, against 18M
+           output — a 26:1 prefill:decode workload. Alternating providers turns
+           cached input into full-price input; at a 50% hit rate the full-price
+           volume goes from 49M to ~232M. No per-token plan discount survives
+           that, so spreading quota must happen at a granularity COARSER than a
+           step (per run / per project), never per call.
+        2. DeepSeek requires the assistant's `reasoning_content` to be replayed
+           in every subsequent turn once `tools` is present, or the API returns
+           400. Mid-step provider changes cannot guarantee that field survives
+           in a form the new endpoint accepts.
+
+        Raises the LAST error once the candidates are exhausted, so the caller
+        still sees a real provider error (and `_explain_auth` can still name the
+        missing secret).
+        """
+        while True:
+            try:
+                response = litellm.completion(**kwargs)
+            except FAILOVER_EXCEPTIONS as e:
+                if not self._failover(e):
+                    raise self._explain_auth(e) from e
+                self._apply_binding(kwargs)
+                continue
+            except Exception as e:
+                # Request-shaped failure (bad params, context overflow): every
+                # candidate would reject it identically.
+                raise self._explain_auth(e) from e
+            # Stamp WHICH endpoint answered onto the usage record. That record
+            # is traced per turn (dpe_pipeline: category="usage"), and without
+            # this a run's cost cannot be attributed: after a failover every
+            # token in the trace looks identical to one served by the preferred
+            # endpoint, so "which plan did this run actually spend" has no
+            # answer. Only when there IS usage, so the existing `if usage:`
+            # guard keeps behaving the same.
+            usage = self._extract_usage(response)
+            if usage:
+                usage["served_by"] = self.active_model
+                if self.internal_model != self.active_model:
+                    usage["model_route"] = self.internal_model
+                if self._failovers:
+                    usage["failed_over_from"] = [f for f, _ in self._failovers]
+            self.last_usage = usage
+            return response
+
+    def _failover(self, exc: Exception) -> bool:
+        """Advance to the next usable candidate. False when none is left.
+
+        A SPENT WINDOW is remembered, a transient error is not. `is_quota_exhausted`
+        distinguishes them — both arrive as RateLimitError and only the prose
+        says which — because the two want opposite handling: burst throttling
+        clears in seconds and the endpoint should stay in rotation, while a
+        5-hour window will reject every call until the clock says otherwise.
+        """
+        failed = self.active_model
+        held = ""
+        if is_quota_exhausted(exc):
+            import time as _t
+            until = _note_endpoint_spent(failed, exc)
+            if until:
+                held = f", parked {until - _t.time():.0f}s"
+
+        nxt_ix = self._next_usable(self._candidate_ix + 1)
+        if nxt_ix <= self._candidate_ix or nxt_ix >= len(self._candidates):
+            return False
+        self._candidate_ix = nxt_ix
+        nxt = self._candidates[nxt_ix]
+        self._failovers.append((failed, f"{type(exc).__name__}: {str(exc)[:200]}"))
+        self._bind(nxt)
+        # Loud on purpose. A silent failover reads as "the cheap provider is
+        # fine" while every run is quietly served by the expensive fallback.
+        print(f"[ai_router] failover {self.internal_model}: {failed} -> {nxt} "
+              f"({type(exc).__name__}{held})", flush=True)
+        return True
+
+    def _apply_binding(self, kwargs: dict) -> dict:
+        """(Re)write the keys that depend on WHICH endpoint is bound.
+
+        Split out of `_build_kwargs` so a failover can re-target an
+        already-assembled kwargs dict — the caller's own mutations (JSON-mode
+        system nudge, `tools`, the `response_format` pop) are preserved, while
+        model / credentials / provider quirks follow the new binding. Every key
+        it can set, it also CLEARS when the new provider does not want it:
+        leaving the previous provider's `api_key` or `cache_control_*` behind is
+        how a failover turns one endpoint's outage into a second endpoint's 400.
+        """
+        kwargs["model"] = self.litellm_model
+        for k in ("api_base", "api_key", "cache_control_injection_points",
+                  "reasoning_effort", "extra_body"):
+            kwargs.pop(k, None)
         if self.api_base:
             kwargs["api_base"] = self.api_base
         if self.api_key:
@@ -370,19 +600,46 @@ class AIGateway:
             else:
                 extra_body["thinking"] = {"type": "enabled"}
             if self.thinking_effort:
-                # litellm's DeepSeekChatConfig pops `reasoning_effort` and maps
-                # it to a bare `thinking: {"type": "enabled"}`, dropping the
-                # level (BerriAI/litellm#27439), so every effort silently
-                # collapses to DeepSeek's default `high`. extra_body is
-                # forwarded verbatim, so route the level through it for
-                # DeepSeek and keep the normal top-level param elsewhere.
-                model = (self.litellm_model or "").lower()
-                if self.provider == "deepseek" or "deepseek" in model:
-                    extra_body["reasoning_effort"] = self.thinking_effort
-                else:
-                    kwargs["reasoning_effort"] = self.thinking_effort
+                # ALWAYS through extra_body, never as a top-level param.
+                #
+                # Two independent reasons, one per provider family:
+                #   * DeepSeek — litellm's DeepSeekChatConfig pops
+                #     `reasoning_effort` and maps it to a bare
+                #     `thinking: {"type": "enabled"}`, dropping the LEVEL
+                #     (BerriAI/litellm#27439), so every effort silently
+                #     collapses to DeepSeek's default `high`.
+                #   * everyone else reached through the openai/ shim — litellm
+                #     VALIDATES top-level params against what it believes the
+                #     model supports, and it believes nothing about a model it
+                #     has never heard of. Measured 2026-08-26: every single
+                #     effort value on `qwen/qwen3.8-max` raised
+                #     UnsupportedParamsError("openai does not support
+                #     parameters: ['reasoning_effort']") before a request was
+                #     even sent. That is a CLIENT-side error, so it is not in
+                #     FAILOVER_EXCEPTIONS and not a provider fault — it would
+                #     simply have killed the step, and it would have appeared
+                #     the moment a role with an effort set was routed onto a
+                #     non-DeepSeek model.
+                #
+                # extra_body is forwarded verbatim, which sidesteps both.
+                extra_body["reasoning_effort"] = self.thinking_effort
             kwargs["extra_body"] = extra_body
+        return kwargs
 
+    def _build_kwargs(self, messages: list[dict], **extra) -> dict:
+        """Build litellm completion kwargs from state + extra."""
+        kwargs = {
+            "messages": self._sanitize_messages(messages),
+            "temperature": self.temperature,
+            "max_tokens": self.max_output_tokens,
+            # A2 fix: bound LiteLLM call. Without this, a stalled provider
+            # (e.g. deepseek v4-flash hung on 2nd native turn) blocks the
+            # asyncio loop for the litellm default 6000s before failing.
+            # 300s (5 min) + tenacity retry (3x exp backoff) caps a single
+            # failure burst at ~34s; even worst-case 3 failures = ~15 min.
+            "timeout": 300.0,
+        }
+        self._apply_binding(kwargs)
         kwargs.update(extra)
         return kwargs
 
@@ -391,7 +648,7 @@ class AIGateway:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception(_retry_llm_error),
         reraise=True
     )
     def generate(self, system_prompt: str, user_prompt: str,
@@ -417,12 +674,8 @@ class AIGateway:
                     msgs.append({"role": "system",
                                  "content": "Respond with valid JSON."})
 
-        try:
-            response = litellm.completion(**kwargs)
-            self.last_usage = self._extract_usage(response)
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            raise self._explain_auth(e) from e
+        response = self._complete_prebuilt(kwargs)   # sets self.last_usage
+        return response.choices[0].message.content.strip()
 
     def _explain_auth(self, e: Exception) -> Exception:
         """Prefix a provider AUTH failure with the secret it wanted.
@@ -450,13 +703,7 @@ class AIGateway:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
-        reraise=True
-    )
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        retry=retry_if_exception(_retry_llm_error),
         reraise=True
     )
     def generate_native(self, messages: list[dict], *,
@@ -480,14 +727,10 @@ class AIGateway:
         # Native tool calling is incompatible with JSON mode response_format
         kwargs.pop("response_format", None)
 
-        try:
-            response = litellm.completion(**kwargs)
-            self.last_usage = self._extract_usage(response)
-            choice = response.choices[0]
-            msg = choice.message
-            finish_reason = getattr(choice, "finish_reason", "") or ""
-        except Exception as e:
-            raise self._explain_auth(e) from e
+        response = self._complete_prebuilt(kwargs)   # sets self.last_usage
+        choice = response.choices[0]
+        msg = choice.message
+        finish_reason = getattr(choice, "finish_reason", "") or ""
 
         tool_calls = []
         if msg.tool_calls:

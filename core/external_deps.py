@@ -41,12 +41,19 @@ DEPS: tuple[Dep, ...] = (
     Dep("llm_providers.json",
         capability="every agent step — an agent with no model cannot run",
         resource="an account with SOME LLM provider",
-        how="AItelier is provider-agnostic: `llm_providers.json` maps a "
-            "provider name to a base_url and the NAME of the key it reads, and "
-            "an agent_config's `model` field selects one. Adding a provider is "
-            "one entry there plus a secret file of that name — no code names a "
-            "vendor. The shipped entries are examples, not requirements",
-        without="agent steps fail at whichever provider their model resolves to"),
+        how="AItelier is provider-agnostic in two layers: `llm_providers.json` "
+            "maps a provider name to a base_url and the NAME of the key it "
+            "reads, and `model_routes.json` maps the INTERNAL model name an "
+            "agent_config uses to an ordered list of `provider/model` "
+            "endpoints. Adding a provider is one entry in each plus a secret "
+            "file of that name — no code names a vendor. A SECOND candidate is "
+            "what turns a spent token plan from 'everything stops until the "
+            "window reopens' into 'the next call goes elsewhere'; "
+            "`required_llm_keys()` reports the first candidate's key and "
+            "`failover_llm_keys()` the rest",
+        without="agent steps fail at whichever provider their model resolves to "
+                "— and with a single candidate a spent quota parks the "
+                "scheduler until it reopens instead of failing over"),
     Dep("GITHUB_TOKEN",
         capability="cloning a private repo, pushing, and opening a PR",
         resource="a fine-grained GitHub PAT (Contents R/W, Pull requests R/W)",
@@ -82,13 +89,16 @@ DEPS: tuple[Dep, ...] = (
             "variable elsewhere only to use a builder you host yourself",
         without="the gate reports `gate_skipped` and the reviewer is told the "
                 "code shipped UNVERIFIED — it does not silently pass"),
-    Dep("GODOT_VISION_URL",
+    Dep("model_routes.json: vision",
         capability="the Godot readability gate (`godot_vision`)",
-        resource="an OpenAI-compatible VISION endpoint (the default is an "
-                 "address on the author's own network)",
-        how="export GODOT_VISION_URL / GODOT_VISION_MODEL / "
-            "GODOT_VISION_CONTEXT_TOKENS, or set GODOT_VISION_FALLBACK_KEY to "
-            "use a hosted vision model",
+        resource="at least one OpenAI-compatible VISION endpoint",
+        how="the gate no longer names an endpoint of its own: it resolves the "
+            "internal model `vision` in model_routes.json (shipped as "
+            "self-hosted vLLM -> qwen token plan -> DeepSeek pay-as-you-go) "
+            "through llm_providers.json, like every agent step. Edit the route "
+            "to change judges; GODOT_VISION_CONTEXT_TOKENS still sets the "
+            "frame-batching budget, and GODOT_VISION_FALLBACK=0 pins it to the "
+            "first judge to prove that one is serving",
         without="the gate reports itself BLIND rather than passing a game "
                 "nobody looked at"),
 )
@@ -104,7 +114,31 @@ def required_llm_keys() -> list[str]:
     — which is exactly how the CLI came to tell a new user to create
     DEEPSEEK_API_KEY on the same install where the README (correctly) said
     ARK_API_KEY. Empty when nothing can be determined; callers must cope.
+
+    An agent_config's `model` may be an INTERNAL name (model_routes.json). Only
+    the FIRST candidate's key is required: that is the endpoint every call is
+    bound to, and the install runs on it alone. The later candidates' keys
+    enable failover and are reported by `failover_llm_keys()` — listing them
+    here would tell an Ark-only user to go create a DeepSeek key for a system
+    that works without it, which is the same false alarm, pointed the other way,
+    that this function was written to stop.
     """
+    return _llm_keys()[0]
+
+
+def failover_llm_keys() -> list[str]:
+    """Keys that are not needed to RUN, but are needed to fail over.
+
+    Absent, a spent quota or a dead key on the preferred endpoint stops the
+    pipeline (core/scheduler.py parks every tick until the window reopens)
+    instead of moving to the next candidate. Recommended, never required — so
+    nothing that gates startup may read this.
+    """
+    return _llm_keys()[1]
+
+
+def _llm_keys() -> tuple[list[str], list[str]]:
+    """(required, failover-only) provider key names, derived from the configs."""
     import json
     import re
     from pathlib import Path
@@ -113,17 +147,43 @@ def required_llm_keys() -> list[str]:
         providers = json.loads(
             (root / "llm_providers.json").read_text(encoding="utf-8")) or {}
     except (OSError, ValueError):
-        return []
-    used: set[str] = set()
+        return [], []
+    try:
+        from core.model_routes import ModelRoutes
+        routes = ModelRoutes(root / "model_routes.json")
+    except Exception:
+        routes = None
+    primary: set[str] = set()
+    spare: set[str] = set()
     try:
         for f in sorted((root / "agent_configs").glob("*.yaml")):
-            for m in re.finditer(r'^\s+model:\s*"?([a-z0-9_]+)/',
+            for m in re.finditer(r'^\s+model:\s*"?([a-zA-Z0-9_.\-]+(?:/[^"\s]+)?)"?\s*$',
                                  f.read_text(encoding="utf-8"), re.M):
-                used.add(m.group(1))
+                name = m.group(1)
+                if "/" in name:
+                    primary.add(name.split("/", 1)[0])
+                    continue
+                if routes is None:
+                    continue
+                try:
+                    candidates = routes.resolve(name)
+                except RuntimeError:
+                    # "host"/"default" sentinels and typos alike: not a provider
+                    # this scan can name. A typo is caught at gateway build with
+                    # a message that names the route table.
+                    continue
+                primary.add(candidates[0].split("/", 1)[0])
+                for c in candidates[1:]:
+                    spare.add(c.split("/", 1)[0])
     except OSError:
-        return []
-    return sorted({providers[p]["api_key_env"] for p in used
-                   if p in providers and providers[p].get("api_key_env")})
+        return [], []
+
+    def keys(names):
+        return sorted({providers[p]["api_key_env"] for p in names
+                       if p in providers and providers[p].get("api_key_env")})
+
+    req = keys(primary)
+    return req, [k for k in keys(spare) if k not in req]
 
 
 def _provider_dep(key: str) -> Dep | None:

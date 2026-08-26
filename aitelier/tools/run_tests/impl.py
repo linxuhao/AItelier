@@ -29,6 +29,8 @@ import re
 import shutil
 import signal
 import subprocess
+
+from core import env_scrub
 import sys
 import tempfile
 import time
@@ -536,6 +538,9 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int) -> dict:
         proc = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=str(pkg_dir), start_new_session=True,
+            # `npm ci` runs whatever `postinstall` the generated package.json
+            # names. With no env= it inherited everything this process holds.
+            env=env_scrub.scrubbed_env(),
         )
         stdout, stderr = proc.communicate(timeout=timeout)
         out = ((stdout or "") + "\n" + (stderr or "")).strip()
@@ -621,7 +626,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # point to AItelier's own source tree, causing pytest to discover
             # AItelier's tests instead of the project's.  Only the project root
             # belongs on the path.
-            env = {**os.environ, "PYTHONPATH": _pythonpath_for(repo)}
+            # Scrubbed, not raw. This runs LLM-authored pytest; passing the
+            # server's whole environment handed it AITELIER_ADMIN_TOKEN and
+            # every provider key, and whatever it printed went into
+            # test_report.json (a public step output) and the reviewer's prompt.
+            env = env_scrub.scrubbed_env(PYTHONPATH=_pythonpath_for(repo))
             # Cheapest possible check, and the one that would have caught two
             # failed drives on the same task: does the delivered package import?
             import_error = _import_smoke_error(py, repo, env)

@@ -5,6 +5,12 @@ import json
 from typing import Dict, AsyncGenerator, Set
 
 
+# Per-connection backlog before a consumer is considered gone and dropped.
+_QUEUE_MAX = 1000
+# Events retained for a channel with no consumer at all.
+_BUFFER_MAX = 500
+
+
 class StreamManager:
     """Broadcast-based SSE event stream.
 
@@ -31,9 +37,15 @@ class StreamManager:
         """
         queues = self._queues.get(task_id, set())
         if not queues:
-            # No active consumers — buffer for later replay
+            # No active consumers — buffer for later replay, but bounded: with
+            # nobody watching overnight this grew for the life of the process,
+            # and the first visitor then had the whole backlog replayed into
+            # their queue in one go. Keep the newest; a replay is a courtesy,
+            # not a delivery guarantee.
             buf = self._buffers.setdefault(task_id, [])
             buf.append(message)
+            if len(buf) > _BUFFER_MAX:
+                del buf[:-_BUFFER_MAX]
             return
 
         dead = []
@@ -51,7 +63,14 @@ class StreamManager:
         Any messages buffered before the first consumer connects are
         replayed first.
         """
-        queue: asyncio.Queue = asyncio.Queue()
+        # Bounded on purpose. This was `asyncio.Queue()` — unbounded — which
+        # meant `put_nowait` could never raise, so the slow-consumer eviction in
+        # push_log was dead code and a connected-but-not-reading client
+        # accumulated events without limit. On a public hostname that is a
+        # memory lever anyone can pull by opening a stream and not reading it.
+        # The cap is generous: a live client drains continuously, so reaching it
+        # means the consumer is gone, which is exactly when we want it dropped.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
         queues = self._get_queues(task_id)
         queues.add(queue)
 

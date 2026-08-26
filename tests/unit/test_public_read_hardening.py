@@ -215,3 +215,224 @@ def test_no_repo_handler_is_async():
         assert not inspect.iscoroutinefunction(fn), (
             f"{name} is async around a fully synchronous call — it blocks the "
             f"event loop, and with it the scheduler, SSE and /health")
+
+
+# ── 4. Second pass: everything else the audit turned up ───────────────────────
+
+class TestCredentialsNeverRideOnAnOpenRead:
+    """`create_github_pr` documents `https://x:<PAT>@github.com/...` as an
+    anticipated remote, and the remote URL is served by `repo_status`, by
+    `/api/repos`, and (before the `.git` fix above) by `.git/config`. One
+    writer setting such a remote would have turned a PAT into an anonymous GET.
+    """
+
+    def test_userinfo_is_stripped(self):
+        from core.git_ops import redact_url_credentials as r
+        assert r("https://x:ghp_SECRET@github.com/o/r.git") == "https://github.com/o/r.git"
+        assert "ghp_SECRET" not in r("https://x:ghp_SECRET@github.com/o/r.git")
+
+    def test_ordinary_urls_are_untouched(self):
+        """Redaction that mangles the common case gets reverted, not fixed."""
+        from core.git_ops import redact_url_credentials as r
+        for u in ("https://github.com/o/r.git", "git@github.com:o/r.git", "", None):
+            assert r(u) == u
+
+    def test_both_open_readers_apply_it(self):
+        """Two independent paths serve a remote URL — the git-derived one and
+        the DB-derived one. Fixing either alone leaves the leak."""
+        import core.workspace_manager as wm
+        import api.repo_routers as rr
+        # The CALL, not the name: both files also import it, and a mutation
+        # that deleted only the call left the import behind — this assertion
+        # passed on code that had stopped redacting anything.
+        assert "redact_url_credentials(remote_url)" in inspect.getsource(
+            wm.WorkspaceManager.repo_status)
+        assert "redact_url_credentials(ru)" in inspect.getsource(
+            rr._build_repo_groups)
+
+
+class TestGitReadsCannotFightTheRunningPipeline:
+    def test_optional_locks_are_off(self):
+        """`repo_status` is an open read that shells out to `git status`, which
+        takes .git/index.lock. The pipeline commits into the same repo, so a
+        flood of reads could fail `repo_apply` — a read-only endpoint breaking
+        a paid run."""
+        from core.workspace_manager import _GIT_ENV
+        assert _GIT_ENV["GIT_OPTIONAL_LOCKS"] == "0"
+
+    def test_the_overrides_actually_win(self, monkeypatch):
+        """`{"LC_ALL": "C", **os.environ}` put the override BEFORE the spread,
+        so the environment won and the "force English locale" line did nothing
+        in exactly the case it was written for. Rebuilt with the same ordering,
+        this fails."""
+        import importlib
+        import os as _os
+        monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+        monkeypatch.setenv("GIT_OPTIONAL_LOCKS", "1")
+        import core.workspace_manager as wm
+        env = importlib.reload(wm)._GIT_ENV
+        assert env["LC_ALL"] == "C"
+        assert env["GIT_OPTIONAL_LOCKS"] == "0"
+
+
+def test_the_archive_requires_a_writer():
+    """It builds the whole working tree into an in-memory zip before streaming
+    a byte — 12.6MB measured, edge-uncacheable, and a slow reader pins the
+    buffer. Confidentiality was never the argument against it; cost is."""
+    import api.project_routers as pr
+    from api.authz import require_writer
+    route = next(r for r in pr.router.routes if r.path.endswith("/repo/archive"))
+    calls = [d.call for d in route.dependant.dependencies]
+    assert require_writer in calls
+
+
+def test_the_workspace_read_cap_is_actually_small():
+    """Pins the VALUE, not just the mechanism.
+
+    The behavioural test below monkeypatches the constant, so it stays green
+    with the cap set to 10**18 — a mutation sweep caught it passing on exactly
+    that. A ceiling nobody can reach is not a ceiling.
+    """
+    from api.project_routers import _WORKSPACE_FILE_MAX_BYTES
+    assert 0 < _WORKSPACE_FILE_MAX_BYTES <= 64 * 1024 * 1024
+
+
+def test_a_workspace_read_is_size_capped(repo, monkeypatch):
+    """Paging was by line but the read was whole-file, so page 1 of a huge file
+    still allocated the whole thing."""
+    import api.project_routers as pr
+    monkeypatch.setattr(pr, "_WORKSPACE_FILE_MAX_BYTES", 8)
+    big = repo / "big.txt"
+    big.write_text("x" * 4096)
+    with pytest.raises(HTTPException) as e:
+        pr.workspace_file("p1", "big.txt", "code", None, None, None, _Db(), _Ws(repo))
+    assert e.value.status_code == 413
+
+
+class TestStepOutputIsBounded:
+    @pytest.mark.parametrize("bad", [".", "..", "./x", "%2e%2e", "a/b", ""])
+    def test_a_step_id_that_is_a_path_is_refused(self, bad):
+        """`step_id` was interpolated into a filesystem path unvalidated: "."
+        walked out of the step directory into the workspace root, and ".." is
+        reachable percent-encoded because uvicorn decodes before routing."""
+        from api.routers import _STEP_ID_RE
+        assert not _STEP_ID_RE.fullmatch(bad)
+
+    @pytest.mark.parametrize("ok", ["1", "t_impl", "1_5", "5_review", "t_plan_review"])
+    def test_real_step_ids_still_match(self, ok):
+        """A guard that rejects the legitimate ids is an outage, not a fix."""
+        from api.routers import _STEP_ID_RE
+        assert _STEP_ID_RE.fullmatch(ok)
+
+    def test_the_reader_has_ceilings_and_reports_what_it_dropped(self):
+        """Silent truncation reads as "that is all there was" — the same class
+        this codebase already fixed for gate skips."""
+        import api.routers as r
+        src = inspect.getsource(r.get_step_output)
+        assert "_STEP_FILE_MAX_BYTES" in src and "_STEP_TOTAL_MAX_BYTES" in src
+        assert "skipped" in src
+
+
+def test_no_event_is_pushed_to_a_channel_nobody_reads():
+    """Every skillflow event was published twice, and the second channel ("0")
+    has no subscriber — so push_log took its no-consumer branch every time and
+    appended to a buffer nothing drains: ~60MB/day per active run, for the life
+    of the process."""
+    import api.main as m
+    assert 'push_log("0"' not in inspect.getsource(m)
+
+
+def test_sse_queues_are_bounded():
+    """Unbounded, `put_nowait` could never raise, so the slow-consumer eviction
+    in push_log was dead code and a connected-but-not-reading client
+    accumulated without limit."""
+    import api.sse_manager as sm
+    assert sm._QUEUE_MAX > 0 and sm._BUFFER_MAX > 0
+    assert "maxsize=_QUEUE_MAX" in inspect.getsource(sm.StreamManager.event_generator)
+
+
+class TestTheReadCache:
+    def test_one_computation_serves_every_caller(self):
+        """The point is not that a request gets faster — it is that the Nth
+        concurrent request costs nothing. At ~1.13s per dashboard tick on a
+        single-core process, that is the difference between saturating at nine
+        visitors and at hundreds."""
+        from api import _read_cache
+        _read_cache.clear()
+        calls = []
+        for _ in range(5):
+            _read_cache.cached(("k", None), lambda: calls.append(1) or "v")
+        assert len(calls) == 1
+
+    def test_a_different_identity_gets_its_own_entry(self):
+        """`/api/runs` is owner-filtered. A key that dropped the owner would
+        serve one identity's runs to another — a performance fix turning into
+        a disclosure."""
+        from api import _read_cache
+        _read_cache.clear()
+        a = _read_cache.cached(("runs", None, None, "a@x"), lambda: "A")
+        b = _read_cache.cached(("runs", None, None, "b@x"), lambda: "B")
+        assert (a, b) == ("A", "B")
+
+    def test_the_owner_is_in_the_key(self):
+        """Pinned at the call site too: the tuple above is easy to shorten by
+        accident while the cache itself stays correct."""
+        import api.run_routers as rr
+        src = inspect.getsource(rr.list_all_runs)
+        assert '("runs", config_name, status, owner)' in src
+
+    def test_it_expires(self):
+        from api import _read_cache
+        _read_cache.clear()
+        calls = []
+        _read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)
+        _read_cache.cached(("k2",), lambda: calls.append(1) or "v", ttl=-1)
+        assert len(calls) == 2
+
+
+class TestTheEnvScrubCoversTheUnattendedPath:
+    def test_the_rule_has_one_definition(self):
+        """It was a private attribute on MetaAgent and applied to the one
+        subprocess a human watches. The pipeline's test runner — which runs
+        LLM-authored pytest and `npm ci` postinstall scripts unattended —
+        passed os.environ through untouched."""
+        from core.env_scrub import ENV_SECRET_RE
+        from core.meta_agent import MetaAgent
+        assert MetaAgent._ENV_SECRET_RE is ENV_SECRET_RE
+
+    def test_secrets_are_dropped_and_ordinary_vars_kept(self, monkeypatch):
+        from core.env_scrub import scrubbed_env
+        monkeypatch.setenv("SOMETHING_API_KEY", "x")
+        monkeypatch.setenv("SOMETHING_TOKEN", "x")
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        env = scrubbed_env()
+        assert "SOMETHING_API_KEY" not in env
+        assert "SOMETHING_TOKEN" not in env
+        assert env["GIT_CONFIG_COUNT"] == "1"
+
+    def test_an_override_survives_the_filter(self):
+        """PYTHONPATH is set deliberately by the caller; the filter must not be
+        able to remove what the caller just asked for."""
+        from core.env_scrub import scrubbed_env
+        assert scrubbed_env(PYTHONPATH="/p")["PYTHONPATH"] == "/p"
+
+    def test_both_subprocess_paths_in_run_tests_use_it(self):
+        """pytest and `npm ci` are two separate spawns; the node one passed no
+        env= at all, so it inherited everything."""
+        import aitelier.tools.run_tests.impl as impl
+        assert "env_scrub.scrubbed_env" in inspect.getsource(impl._run_node_cmd)
+        assert inspect.getsource(impl).count("env_scrub.scrubbed_env") >= 2
+
+
+def test_the_code_path_jail_uses_component_containment():
+    """`str(target).startswith(str(base))` admitted a SIBLING sharing the
+    prefix — a project at .../projects/foo could read .../projects/foo-backup."""
+    import core.meta_agent as ma
+    src = inspect.getsource(ma.MetaAgent._resolve_code_target)
+    # Comments stripped: the fix's own note explains what `startswith` did
+    # wrong, and a naive substring check matched that explanation instead of
+    # the code — the guard would have passed on a revert that kept the comment.
+    code = "\n".join(l for l in src.splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert "is_relative_to" in code
+    assert "startswith" not in code

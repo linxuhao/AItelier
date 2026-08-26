@@ -179,6 +179,21 @@ class TestTheCallersUseIt:
                                 f"provider '{gw.provider}', which reads it.")
 
 
+def _quick_start_section(readme: str) -> str:
+    """The Quick Start section, bounded by the NEXT `## ` heading.
+
+    This used to slice `index("## Quick Start") : index("## Architecture")`,
+    which made an unrelated rename of a later heading raise ValueError inside
+    the test — a doc reorganisation reads as a broken key guarantee, and the
+    real assertions never get to run. What these tests are about is what the
+    Quick Start says; where it ends is whatever comes next.
+    """
+    start = readme.index("## Quick Start")
+    rest = readme[start + len("## Quick Start"):]
+    m = re.search(r"^## ", rest, re.M)
+    return rest[:m.start()] if m else rest
+
+
 class TestTheReadmeMatchesTheShippedConfigs:
     """The install page's first instruction is "get this key". Naming the wrong
     one costs a new user their entire first run — every step fails at a provider
@@ -195,7 +210,7 @@ class TestTheReadmeMatchesTheShippedConfigs:
         from core.external_deps import required_llm_keys
 
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        quick = readme[readme.index("## Quick Start"):readme.index("## Architecture")]
+        quick = _quick_start_section(readme)
         wanted = set(required_llm_keys())
         assert wanted, "no provider key derivable from agent_configs"
         # BOTH directions. `any(...)` alone was satisfied by a second mention
@@ -234,7 +249,7 @@ class TestTheReadmeMatchesTheShippedConfigs:
         to say the opposite two paragraphs earlier. Contradicting docs on step
         one are worse than one silent doc."""
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        quick = readme[readme.index("## Quick Start"):readme.index("## Architecture")]
+        quick = _quick_start_section(readme)
         assert "add DEEPSEEK_API_KEY to .env" not in quick
         assert "aitelier-secrets" in quick
 

@@ -1,5 +1,6 @@
 # File: api/routers.py
 
+import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -11,6 +12,14 @@ from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner
 from api.auth import CurrentUser, get_optional_user, creator_email
 from api.sse_manager import stream_manager
+
+# A step id is a graph node name — letters, digits, underscore, dash, dot as a
+# separator inside names like "1_5". Never a path separator, never a bare dot.
+_STEP_ID_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
+
+# Ceilings for one step-output read: per file, and for the response as a whole.
+_STEP_FILE_MAX_BYTES = 2 * 1024 * 1024
+_STEP_TOTAL_MAX_BYTES = 16 * 1024 * 1024
 
 router = APIRouter(prefix="/api/tasks", tags=["Tasks"])
 
@@ -150,6 +159,17 @@ def get_step_output(
 
     check_read_owner(user, request, dict(row))
 
+    # `step_id` is interpolated into a filesystem path with no validation, so
+    # "." walked out of the intended step directory into the workspace root
+    # (confirmed: `GET .../steps/./output` returned 200 instead of 404), and
+    # ".." is reachable percent-encoded because uvicorn decodes before routing.
+    # The read below then rglobs and read_text()s EVERYTHING it finds — pointed
+    # at the workspace root that is ~56MB, and the dpe_game 5_compile dirs are
+    # ~100MB of PNG frames each. A step id is a graph node name; anything that
+    # is not one is a probe, not a typo.
+    if not _STEP_ID_RE.fullmatch(step_id):
+        raise HTTPException(status_code=404, detail=f"No output found for step {step_id}")
+
     project_id = row["project_id"]
     final_dir = ws.get_final_path(project_id, step_id)
 
@@ -157,12 +177,25 @@ def get_step_output(
         raise HTTPException(status_code=404, detail=f"No output found for step {step_id}")
 
     files = {}
-    for item in final_dir.rglob("*"):
-        if item.is_file() and item.name != "_snapshot.json":
-            rel = str(item.relative_to(final_dir))
-            files[rel] = item.read_text(encoding="utf-8", errors="replace")
+    skipped = []
+    total = 0
+    for item in sorted(final_dir.rglob("*")):
+        if not item.is_file() or item.name == "_snapshot.json":
+            continue
+        rel = str(item.relative_to(final_dir))
+        # Bounded, and it says what it left out. Reading a whole step directory
+        # into one JSON response is unbounded by construction — a step that
+        # renders frames or vendors a dependency turns one GET into hundreds of
+        # megabytes of str. Reporting the skips matters more than the cap: a
+        # silent truncation reads as "that is all there was".
+        size = item.stat().st_size
+        if size > _STEP_FILE_MAX_BYTES or total + size > _STEP_TOTAL_MAX_BYTES:
+            skipped.append({"path": rel, "bytes": size})
+            continue
+        total += size
+        files[rel] = item.read_text(encoding="utf-8", errors="replace")
 
-    return {"step_id": step_id, "files": files}
+    return {"step_id": step_id, "files": files, "skipped": skipped}
 
 
 @router.post("/{task_id}/retry")

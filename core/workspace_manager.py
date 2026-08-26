@@ -17,7 +17,17 @@ from typing import Optional
 
 # Force English locale for all git subprocess calls — prevents French
 # locale leakage in dashboard action result messages (res.detail).
-_GIT_ENV = {"LC_ALL": "C", **os.environ}
+# GIT_OPTIONAL_LOCKS=0 because `repo_status` is an OPEN read that shells out
+# to `git status`, and `git status` takes .git/index.lock to write a refreshed
+# index. The pipeline commits into the same repo every few minutes, so on a
+# public hostname a flood of status reads is a way for a stranger to fail
+# repo_apply with "Unable to create '.git/index.lock'" — a read-only endpoint
+# breaking a paid run. With optional locks off, the read cannot contend.
+# NOTE the ordering: the overrides come AFTER the spread. They were before it,
+# which meant `**os.environ` won and the "force English" line above did
+# nothing whenever LC_ALL was actually set in the environment — i.e. exactly
+# in the case it was written for.
+_GIT_ENV = {**os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0"}
 
 # 六步法步骤序列（string ID）
 STEP_SEQUENCE = ["1", "2", "3", "5"]
@@ -280,6 +290,9 @@ class WorkspaceManager:
         _, porcelain = _git("status", "--porcelain")
         dirty_files = [ln for ln in porcelain.splitlines() if ln.strip()]
         _, remote_url = _git("remote", "get-url", "origin")
+        # Never hand a credential-bearing remote to an open read.
+        from core.git_ops import redact_url_credentials
+        remote_url = redact_url_credentials(remote_url)
 
         # ahead/behind vs the upstream the current branch tracks (if any).
         ahead = behind = None

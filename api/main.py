@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from core import cf_access
+from api import _read_cache
 from api import authz
 from starlette.routing import Route as _StarletteRoute
 from api.mcp_router import MCPEndpoint
@@ -202,7 +203,12 @@ async def lifespan(app: FastAPI):
             data["run_id"] = notification.run_id
         payload_str = _json.dumps(data)
         await stream_manager.push_log("__global__", payload_str)
-        await stream_manager.push_log("0", payload_str)
+        # There was a second push to channel "0" here. Nothing subscribes to
+        # it — the only consumers are "__global__" and /api/tasks/{id}/stream,
+        # which the SPA never opens — so push_log took its no-consumer branch
+        # every time and appended to a buffer that is never drained. Measured
+        # on the live run: ~245 events/10min at ~1.8KB each, so roughly 60MB a
+        # day of unreclaimable heap for as long as the process lives.
 
     sf.notifications.subscribe(_on_skillflow_event)
 
@@ -273,6 +279,29 @@ async def localhost_only(request: Request, call_next):
 #    lives in api/authz so the GET-endpoint guard (require_writer) can't diverge
 #    from this middleware. ───────────────────────────────────────────────────
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+@app.middleware("http")
+async def invalidate_read_cache(request: Request, call_next):
+    """Drop the few-second read cache after anything that could have changed.
+
+    `api/_read_cache` exists so that N dashboard tabs cost one computation
+    instead of N. The cost of any cache is staleness, and the one place
+    staleness is actually surprising is right after you did something: create a
+    project and it is reasonable to expect the list to contain it, not to
+    contain it in up to five seconds.
+
+    Deliberately NOT hooked into `write_gate` — that middleware returns early
+    when the gate is disabled or in test mode, so invalidation would silently
+    not happen in exactly the configurations where nobody is watching for it.
+    It found the bug that way too: an integration test passed alone and failed
+    in the suite, because one test's writes were invisible to the next test's
+    read.
+    """
+    response = await call_next(request)
+    if request.method not in _SAFE_METHODS:
+        _read_cache.clear()
+    return response
 
 
 @app.middleware("http")

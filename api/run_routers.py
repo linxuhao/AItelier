@@ -5,6 +5,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional
 from pydantic import BaseModel
+from api import _read_cache
 from api.dependencies import (
     get_skillflow, get_db_manager, get_config_registry, owner_filter,
     get_workspace_manager, enrich_project_status,
@@ -69,8 +70,19 @@ def list_all_runs(
     registry=Depends(get_config_registry),
 ):
     """List config runs across all configs (newest first), with config label and
-    step labels attached so any config renders generically."""
+    step labels attached so any config renders generically.
+
+    Cached for a few seconds (api/_read_cache) — see the note in `list_repos`.
+    The cache key carries `owner`, because this list IS owner-filtered and a key
+    that dropped it would serve one identity's runs to another.
+    """
     owner = owner_filter(user, request)
+    return _read_cache.cached(
+        ("runs", config_name, status, owner),
+        lambda: _list_all_runs_uncached(config_name, status, owner, db, registry))
+
+
+def _list_all_runs_uncached(config_name, status, owner, db, registry):
     rows = db.list_projects_with_stats(owner_email=owner)
     out = []
     for r in rows:

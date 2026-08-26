@@ -19,6 +19,27 @@ from core.ai_router import _read_secret
 _GIT_ENV = {"LC_ALL": "C", **os.environ}
 
 
+def redact_url_credentials(url: str | None) -> str | None:
+    """Strip any userinfo from an http(s) URL: `https://x:tok@host/…` → `https://host/…`.
+
+    A remote URL is served on OPEN reads — `repo_status`, `/api/repos`, and the
+    project payloads — and `create_github_pr` documents token-in-URL remotes as
+    an anticipated input. That combination turns a PAT into an anonymous GET the
+    moment anybody sets one, which on a public hostname is a credential
+    disclosure rather than an inconvenience.
+
+    Redacts rather than removes the field: a caller that sees no remote at all
+    cannot tell "no remote" from "remote hidden", and the host part is what the
+    UI actually shows.
+    """
+    if not url:
+        return url
+    m = re.match(r"^(https?://)([^@/]+)@(.*)$", url.strip())
+    if not m:
+        return url
+    return f"{m.group(1)}{m.group(3)}"
+
+
 def parse_github_owner_repo(remote_url: str) -> tuple[str, str]:
     """Extract (owner, repo) from a GitHub remote URL.
 

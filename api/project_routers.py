@@ -28,12 +28,16 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from api.dependencies import get_db_manager, get_workspace_manager, owner_filter, check_write_owner, check_read_owner, enrich_project_status
 from api.auth import CurrentUser, get_optional_user, creator_email
+from api.authz import require_writer
 
 router = APIRouter(prefix="/api/projects", tags=["Projects"])
 
 # Default line window for workspace_file when no range is given — replaces the
 # old silent 50000-char truncation with line paging + a `truncated` signal.
 _WORKSPACE_FILE_MAX_LINES = 2000
+
+# Hard ceiling on a single workspace read, checked before the file is opened.
+_WORKSPACE_FILE_MAX_BYTES = 8 * 1024 * 1024
 
 # Extensions the raw-bytes endpoint serves inline, so the file browser can show
 # a picture instead of mojibake. An allowlist, not a general blob server: an
@@ -266,6 +270,16 @@ def workspace_file(
     """
     target = _resolve_workspace_target(project_id, path, root, user, db, ws)
 
+    # Size-check BEFORE reading. The paging below is by line, but the read was
+    # whole-file first, so "page 1 of a big file" still allocated the file plus
+    # its line list. Anonymous and public, that is a memory lever; the largest
+    # file reachable in the live workspace today is an 8.3MB font.
+    size = target.stat().st_size
+    if size > _WORKSPACE_FILE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"File is {size} bytes, over the "
+                    f"{_WORKSPACE_FILE_MAX_BYTES}-byte read limit"))
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     total = len(lines)
     start_idx = (start_line - 1) if start_line and start_line > 0 else 0
@@ -342,10 +356,21 @@ def repo_archive(
     user: CurrentUser | None = Depends(get_optional_user),
     db: DBManager = Depends(get_db_manager),
     ws: WorkspaceManager = Depends(get_workspace_manager),
+    _=Depends(require_writer),
 ):
     """Download the project code repo as a zip (working tree, excluding .git).
-    Open to readers (owner-scoped via check_read_owner) — same access surface as
-    the workspace file-tree/file-content reads, which already expose every file."""
+
+    WRITERS ONLY. It used to be open, arguing it was "the same access surface as
+    the workspace file-tree/file-content reads, which already expose every file".
+    That argument is about CONFIDENTIALITY and it was sound; the cost was never
+    considered. The file reads are one file per request. This one walks the whole
+    working tree and deflates it into an in-memory buffer BEFORE streaming a
+    byte — measured 12.6MB for the live repo, ~0.6s of CPU, `cf-cache-status:
+    DYNAMIC` so the edge absorbs none of it, and 18 distinct project URLs return
+    the same blob. A slow reader pins that buffer for as long as it likes.
+    On a public hostname that is the cheapest route to an OOM kill of the
+    process running the pipelines, which is why this one is gated on cost even
+    though the bytes themselves are already readable one file at a time."""
     project = db.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")

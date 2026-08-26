@@ -4,6 +4,7 @@
 import os
 from fastapi import APIRouter, Depends, HTTPException
 from api.dependencies import get_db_manager, enrich_project_status
+from api import _read_cache
 from core.db_manager import DBManager
 
 # Imported lazily to avoid circular imports at module level.
@@ -56,6 +57,9 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
             rp: str = row["repo_path"]
             rt: str | None = row["repo_type"]
             ru: str | None = row["repo_url"]
+            # Open read — never serve a token-in-URL remote.
+            from core.git_ops import redact_url_credentials
+            ru = redact_url_credentials(ru)
 
             # Fetch all projects sharing this repo_path
             project_rows = conn.execute(
@@ -149,8 +153,12 @@ def list_repos(db: DBManager = Depends(get_db_manager)):
     with py-spy, the loop was sitting in `get_run_by_project` under
     `_build_repo_groups`. A plain `def` hands it to the threadpool, which is
     where `list_projects` next door already runs.
+
+    Cached for a few seconds (api/_read_cache): every open dashboard tab asks
+    for this every 10s and the answer is identical for all of them, so it was
+    being recomputed once per tab per tick on a single-core process.
     """
-    return _build_repo_groups(db)
+    return _read_cache.cached(("repos", None), lambda: _build_repo_groups(db))
 
 
 @router.get("/{repo_path:path}")

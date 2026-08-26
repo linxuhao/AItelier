@@ -6,6 +6,7 @@
 import asyncio
 import json
 import os
+from core import env_scrub as _env_scrub
 import re
 import traceback
 from pathlib import Path
@@ -2847,7 +2848,10 @@ class MetaAgent:
         if not base.is_dir():
             return None, None, {"error": f"No code directory for project '{pid}'"}
         target = (base / path).resolve()
-        if not str(target).startswith(str(base)):
+        # Component containment, not string prefix: `startswith` accepted a
+        # SIBLING whose name merely shares the prefix, so a project at
+        # `.../projects/foo` could read `.../projects/foo-backup`.
+        if not target.is_relative_to(base.resolve()):
             return None, None, {"error": "Path traversal denied"}
         return base, target, None
 
@@ -2903,8 +2907,10 @@ class MetaAgent:
     # GITHUB_TOKEN, MY_PASSWORD) — an unanchored _KEY also killed
     # GIT_CONFIG_KEY_0 (the compose-wired credential helper) while leaving
     # GIT_CONFIG_COUNT, which broke every git command in the container.
-    _ENV_SECRET_RE = re.compile(
-        r"(_KEY|_TOKEN|_SECRET|_SECRETS|PASSWORD|_CREDENTIAL|_CREDENTIALS)$", re.I)
+    # Defined in core/env_scrub so the pipeline's test runner uses the SAME
+    # rule — it used to pass os.environ through unfiltered while this path was
+    # hardened.
+    _ENV_SECRET_RE = _env_scrub.ENV_SECRET_RE
 
     async def _tool_bash(self, args: dict) -> dict:
         pid = (args.get("project_id") or "").strip()

@@ -120,3 +120,19 @@ def client_fixture(tmp_path):
 
     app.state._test_mode = False
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_read_cache():
+    """The `/api/repos` + `/api/runs` read cache is process-global and TTL-only.
+
+    Each test gets its own DB, the cache does not, so one test's response
+    survived into the next test's read — `test_list_all_runs_includes_cache_stats`
+    passed alone and failed in the suite. Production has the middleware in
+    api/main; tests get this, because a test that never issues a write would
+    not trip it.
+    """
+    from api import _read_cache
+    _read_cache.clear()
+    yield
+    _read_cache.clear()

@@ -585,25 +585,44 @@ def test_registration_writes_nothing_when_hint_derivation_fails(sf, registry,
 
 
 def test_the_vision_judge_is_not_swept_into_a_provider_migration():
-    """godot_vision must keep talking to DeepSeek directly.
+    """The `vision` route must only name endpoints that accept IMAGE input.
 
-    It is the one model call that does NOT go through `ai_router` /
-    `llm_providers.json`: it POSTs `api.deepseek.com` with `DEEPSEEK_API_KEY`,
-    because the judge needs IMAGE input. Verified against the Ark coding plan
-    2026-08-25: `deepseek-v4-flash-vision-exp` answers text there (HTTP 200) but
-    refuses an image — `Model do not support image input`. So a global
-    `deepseek/... -> ark/...` sweep that also "tidied up" this tool, or dropped
-    DEEPSEEK_API_KEY from the compose secrets, would leave the readability gate
-    with a judge that 400s on every frame — while a text-only smoke test passed.
+    This is the one capability a text smoke test cannot see. Verified against
+    the Ark coding plan 2026-08-25: `deepseek-v4-flash-vision-exp` answers TEXT
+    there (HTTP 200) but refuses an image — `Model do not support image input`.
+    So a global `deepseek/... -> ark/...` sweep that also "tidied up" this route
+    would leave the readability gate with a judge that 400s on every frame,
+    while every text-only check stayed green.
+
+    The judge used to be three env vars inside the tool and this guard read
+    them; it now reads the route, because that is where the choice lives.
+    Candidates verified to accept a real 960x704 play-test frame:
+    `qwen/qwen3.8-max` and `deepseek/deepseek-v4-flash-vision-exp` (2026-08-26,
+    both answered the same health-bar question correctly). Adding a candidate
+    means POSTing it a real frame first — not reading a model card.
     """
-    from aitelier.tools.godot_vision.impl import (_FALLBACK_KEY_NAME,
-                                                  _FALLBACK_URL)
-    assert "api.deepseek.com" in _FALLBACK_URL, (
-        "the vision fallback was pointed away from DeepSeek — check the target "
-        "actually accepts image input before allowing this")
-    assert _FALLBACK_KEY_NAME == "DEEPSEEK_API_KEY"
+    import json
 
-    compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml"
-               ).read_text(encoding="utf-8")
-    assert "DEEPSEEK_API_KEY" in compose, (
-        "the vision judge's key was removed from the compose secrets")
+    root = Path(__file__).resolve().parents[2]
+    route = json.loads(
+        (root / "model_routes.json").read_text(encoding="utf-8"))["vision"]
+    providers = {c.split("/", 1)[0] for c in route}
+
+    assert not any(c.startswith("ark/") for c in route), (
+        "an ark/ endpoint was added to the vision route — Ark's plan serves "
+        "deepseek-v4-flash-vision-exp for TEXT and refuses image input, so this "
+        "would 400 on every frame while text checks stayed green")
+    assert any(c.startswith("deepseek/") for c in route), (
+        "the vision route lost its DeepSeek judge — it is the pay-as-you-go one "
+        "that cannot run out of plan quota, which is why it is last")
+
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    from core.model_routes import ModelRoutes  # noqa: F401  (import guard)
+    llm = json.loads((root / "llm_providers.json").read_text(encoding="utf-8"))
+    for prov in providers:
+        assert prov in llm, f"vision route names unknown provider '{prov}'"
+        key = llm[prov].get("api_key_env")
+        if key:
+            assert key in compose, (
+                f"the vision judge '{prov}' needs {key}, which is not mounted "
+                f"in docker-compose.yml's secrets — the gate would go blind")

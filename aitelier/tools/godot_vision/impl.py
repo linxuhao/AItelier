@@ -50,19 +50,33 @@ import json
 import os
 import re
 import struct
+import http.client
+import socket
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-_URL = os.environ.get(
-    "GODOT_VISION_URL", "http://100.68.74.107:8000/v1/chat/completions")
-_MODEL = os.environ.get("GODOT_VISION_MODEL", "qwen3")
+# ── The judges ────────────────────────────────────────────────────────────────
+# WHO judges is config, not code. This used to be three hardcoded env vars
+# (GODOT_VISION_URL / _MODEL / _FALLBACK_*), which meant the one step that picks
+# a model by hand was the one step you could not see in `model_routes.json`.
+# It now resolves the internal model name `vision` through the same two layers
+# every agent step uses: model_routes.json for the ordered candidates,
+# llm_providers.json for each one's base_url and key name.
+#
+# Order (see model_routes.json): the self-hosted vLLM first — free, and the box
+# is already paid for — then the qwen plan, then DeepSeek pay-as-you-go last.
+# That GPU box is shared and gets restarted for other work, which is exactly the
+# outage this list absorbs.
+_ROUTE = os.environ.get("GODOT_VISION_ROUTE", "vision")
+
 # Read off the vLLM startup log / GET /v1/models (max_model_len), not a flag.
 _CONTEXT_TOKENS = int(os.environ.get("GODOT_VISION_CONTEXT_TOKENS", "12288"))
 _MAX_TOKENS = int(os.environ.get("GODOT_VISION_MAX_TOKENS", "2048"))
-# The fallback judge needs its OWN, much larger budget. 2048 is right for the
-# primary (qwen3 on vLLM), and structurally too small for DeepSeek's reasoning
-# model: measured 2026-08-25, three runs at 2048 all came back
+# Every judge AFTER the first needs its OWN, much larger budget. 2048 is right
+# for the primary (qwen3 on vLLM), and structurally too small for a hosted
+# reasoning model: measured 2026-08-25, three runs at 2048 all came back
 # finish_reason="length" with reasoning_tokens=2048 (the WHOLE budget) and an
 # EMPTY content — the model spends everything thinking and never writes the
 # answers. At 6144 it finishes: reasoning 3146 / 3537, content 341 / 288 chars.
@@ -71,33 +85,85 @@ _MAX_TOKENS = int(os.environ.get("GODOT_VISION_MAX_TOKENS", "2048"))
 _MAX_TOKENS_FALLBACK = int(
     os.environ.get("GODOT_VISION_FALLBACK_MAX_TOKENS", "8192"))
 _TIMEOUT = int(os.environ.get("GODOT_VISION_TIMEOUT", "300"))
-
-# ── Fallback judge ────────────────────────────────────────────────────────────
-# The primary endpoint is a self-hosted vLLM on a GPU box that is also used for
-# other experiments; while it is down the gate has no eyes and the round stalls
-# on `endpoint_unreachable` — a correct verdict about infra, not about the game.
-# DeepSeek serves a vision model behind the SAME provider and key the rest of
-# the system already uses, so the fallback needs no new credential.
-#
-# Verified 2026-08-24 against a real play-test frame (960x704 PNG as a base64
-# data URL, byte-identical payload shape): HTTP 200, question answered. The
-# model id came from GET https://api.deepseek.com/models, not from memory.
-#
-# The token budget deliberately stays the PRIMARY endpoint's. DeepSeek's context
-# is not smaller, so reusing it only makes batches conservative. Sizing batches
-# to whichever judge happened to answer would make the batch layout — and thus
-# which frames get compared against each other — depend on an infra accident.
-_FALLBACK_URL = os.environ.get(
-    "GODOT_VISION_FALLBACK_URL", "https://api.deepseek.com/chat/completions")
-_FALLBACK_MODEL = os.environ.get(
-    "GODOT_VISION_FALLBACK_MODEL", "deepseek-v4-flash-vision-exp")
-_FALLBACK_KEY_NAME = os.environ.get(
-    "GODOT_VISION_FALLBACK_KEY", "DEEPSEEK_API_KEY")
-# "0" forces primary-only — the way to PROVE the GPU box is serving, which a
-# silent fallback would otherwise hide.
+# "0" forces the FIRST judge only — the way to PROVE the GPU box is serving,
+# which a silent fallback would otherwise hide.
 _FALLBACK_ENABLED = os.environ.get("GODOT_VISION_FALLBACK", "1") != "0"
-# The checklist prompt measured 357 tokens at 6 questions; 600 leaves headroom
-# for a longer question set without ever borrowing from the completion reserve.
+
+
+class _Judge:
+    """One candidate: where to POST, as what, with which key, how much room."""
+
+    __slots__ = ("label", "url", "model", "api_key", "max_tokens")
+
+    def __init__(self, label, url, model, api_key, max_tokens):
+        self.label = label            # "provider/model", as the report records it
+        self.url = url
+        self.model = model
+        self.api_key = api_key
+        self.max_tokens = max_tokens
+
+    def __repr__(self):
+        return f"_Judge({self.label!r})"
+
+
+def _judges() -> list["_Judge"]:
+    """Resolve the `vision` route into POSTable endpoints, best first.
+
+    Rebuilt per call, not cached at import: a key that arrives after the process
+    started (a secret remounted, a plan topped up) has to be picked up without a
+    restart, and this runs once per gate — the cost is a JSON read.
+
+    A candidate whose provider is unknown is SKIPPED with a warning rather than
+    failing the gate: the remaining judges can still see, and a gate that goes
+    blind over a typo in a fallback entry is worse than one that says so.
+    """
+    from core.ai_router import _read_secret
+    from core.model_routes import get_routes
+
+    root = Path(__file__).resolve().parents[3]
+    try:
+        providers = json.loads(
+            (root / "llm_providers.json").read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError) as e:                   # noqa: BLE001
+        raise RuntimeError(f"vision judge: llm_providers.json unreadable: {e}") from e
+
+    out: list[_Judge] = []
+    for position, candidate in enumerate(
+            get_routes(str(root / "model_routes.json")).resolve(_ROUTE)):
+        provider, _, model = candidate.partition("/")
+        cfg = providers.get(provider)
+        if not cfg:
+            print(f"[godot_vision] skipping {candidate}: provider "
+                  f"'{provider}' is not in llm_providers.json", flush=True)
+            continue
+        base = (cfg.get("base_url") or "").rstrip("/")
+        key_env = cfg.get("api_key_env")
+        api_key = (_read_secret(key_env) or "") if key_env else ""
+        out.append(_Judge(
+            label=candidate,
+            url=f"{base}/chat/completions",
+            model=model,
+            api_key=api_key,
+            # Keyed on the position in the ROUTE, not on `not out` (position in
+            # the surviving list). The small budget belongs to the local vLLM
+            # itself, and if it were merely "whoever ended up first" then
+            # dropping `localqwen` from llm_providers.json — the normal state on
+            # any host without reach to that GPU box — would hand a hosted
+            # reasoner the 2048 budget that is measured to starve it: three runs
+            # at 2048 all returned finish_reason="length" with the whole budget
+            # spent thinking and empty content. It would then starve, escalate
+            # once to 4096, starve again, and fall through to the pay-as-you-go
+            # judge — two wasted calls per scenario and nothing in the report
+            # saying why.
+            max_tokens=_MAX_TOKENS if position == 0 else _MAX_TOKENS_FALLBACK,
+        ))
+    if not out:
+        raise RuntimeError(
+            f"vision judge: route '{_ROUTE}' resolved to no usable endpoint — "
+            f"check model_routes.json and llm_providers.json")
+    return out if _FALLBACK_ENABLED else out[:1]
+
+
 _PROMPT_RESERVE = 600
 
 # ── The checklist ─────────────────────────────────────────────────────────────
@@ -295,7 +361,52 @@ class ReasoningStarved(RuntimeError):
     budget instead of at the parser."""
 
 
+# A connection that was ESTABLISHED and then broke mid-flight. One retry fixes
+# these; nothing else does. Deliberately excluded:
+#   connection refused   deterministic — the box is not serving, and the caller's
+#                        job is to fall back immediately, not to sit and wait
+#   4xx                  a wrong model name is wrong the second time too
+#   ReasoningStarved     already retried, with a bigger budget (see _ask)
+# This gate walks 47 scenarios in ~50 calls, so a per-call failure probability
+# that looks negligible is a coin flip across a run — and ONE such failure
+# blinded the whole verdict: 2026-08-26 died on `IncompleteRead(1 bytes read)`
+# at scenario 5 of 47, throwing away 4 batches that had already been judged and
+# never looking at the other 43.
+_TRANSIENT_TRANSPORT = (http.client.IncompleteRead,
+                        http.client.RemoteDisconnected,
+                        ConnectionResetError, TimeoutError, socket.timeout)
+_POST_ATTEMPTS = 3
+_POST_BACKOFF_S = 2.0
+
+
+def _retryable(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500          # the server, not the request
+    if isinstance(exc, urllib.error.URLError):
+        return isinstance(exc.reason, _TRANSIENT_TRANSPORT)
+    return isinstance(exc, _TRANSIENT_TRANSPORT)
+
+
 def _post(url: str, model: str, api_key: str,
+          files: list[Path], questions: list[dict],
+          max_tokens: int = 0) -> str:
+    """Retrying wrapper around one call. See _retryable for what is retried."""
+    last: BaseException | None = None
+    for attempt in range(1, _POST_ATTEMPTS + 1):
+        try:
+            return _post_once(url, model, api_key, files, questions, max_tokens)
+        except Exception as e:                           # noqa: BLE001
+            if not _retryable(e) or attempt == _POST_ATTEMPTS:
+                raise
+            last = e
+            print(f"[godot_vision] {type(e).__name__} on attempt {attempt}/"
+                  f"{_POST_ATTEMPTS} to {url} — retrying in "
+                  f"{_POST_BACKOFF_S * attempt:.0f}s: {e}", flush=True)
+            time.sleep(_POST_BACKOFF_S * attempt)
+    raise last                                            # unreachable
+
+
+def _post_once(url: str, model: str, api_key: str,
           files: list[Path], questions: list[dict],
           max_tokens: int = 0) -> str:
     """One chat/completions call with the frames inline as base64 data URLs.
@@ -336,45 +447,24 @@ def _post(url: str, model: str, api_key: str,
     return text
 
 
-def _fallback_key() -> str:
-    """The DeepSeek key, through the same secret-file precedence the router uses
-    (mounted /run/secrets first, env only as local-dev fallback)."""
-    try:
-        from core.ai_router import _read_secret
-        return _read_secret(_FALLBACK_KEY_NAME) or ""
-    except Exception:                                    # noqa: BLE001
-        return os.getenv(_FALLBACK_KEY_NAME, "")
-
-
 def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
-    """Ask the primary judge; fall back to DeepSeek if it is not SERVING.
+    """Ask each judge in turn; return ``(answer_text, label)`` of the one that
+    answered. Raises only when EVERY judge is unusable — the caller turns that
+    into endpoint_unreachable.
 
-    Returns ``(answer_text, backend)`` where backend is "primary" or "fallback".
-    Raises only when BOTH are unusable — the caller turns that into
-    endpoint_unreachable.
-
-    Only transport-level failure falls back: refused / timed out / non-200 /
-    unreadable envelope. A primary that answers 200 with a WRONG answer must NOT
-    fall back — that would silently swap judges to paper over a real regression
-    in the model or the prompt, and the report would carry a verdict nobody
-    could attribute.
+    Only transport-level failure moves on: refused / timed out / non-200 /
+    unreadable envelope. A judge that answers 200 with a WRONG answer must NOT
+    fall through — that would silently swap judges to paper over a real
+    regression in the model or the prompt, and the report would carry a verdict
+    nobody could attribute.
     """
-    try:
-        return _post(_URL, _MODEL, "", files, questions), "primary"
-    except Exception as primary_exc:                     # noqa: BLE001
-        if not _FALLBACK_ENABLED:
-            raise
-        key = _fallback_key()
-        if not key:
-            raise RuntimeError(
-                f"primary vision endpoint {_URL} failed ({primary_exc}) and the "
-                f"fallback has no {_FALLBACK_KEY_NAME} — no judge available"
-            ) from primary_exc
+    judges = _judges()
+    failures: list[str] = []
+    for judge in judges:
         try:
             try:
-                return _post(_FALLBACK_URL, _FALLBACK_MODEL, key, files,
-                             questions,
-                             max_tokens=_MAX_TOKENS_FALLBACK), "fallback"
+                return _post(judge.url, judge.model, judge.api_key, files,
+                             questions, max_tokens=judge.max_tokens), judge.label
             except ReasoningStarved as starved:
                 # Guessing a budget that fits every scenario does not work: how
                 # long this model thinks scales with the frames it is shown, and
@@ -382,17 +472,16 @@ def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
                 # and actually retry — an escalation that only logs is how the
                 # planner starved nine times in a row while announcing a retry
                 # it could never take (a3846df).
-                bigger = _MAX_TOKENS_FALLBACK * 2
-                print(f"[godot_vision] fallback starved ({starved}); "
+                bigger = judge.max_tokens * 2
+                print(f"[godot_vision] {judge.label} starved ({starved}); "
                       f"retrying once at max_tokens={bigger}", flush=True)
-                return _post(_FALLBACK_URL, _FALLBACK_MODEL, key, files,
-                             questions, max_tokens=bigger), "fallback"
-        except Exception as fb_exc:                       # noqa: BLE001
-            raise RuntimeError(
-                f"primary {_URL} ({_MODEL}) failed: {primary_exc}; "
-                f"fallback {_FALLBACK_URL} ({_FALLBACK_MODEL}) also failed: "
-                f"{fb_exc}"
-            ) from fb_exc
+                return _post(judge.url, judge.model, judge.api_key, files,
+                             questions, max_tokens=bigger), judge.label
+        except Exception as exc:                         # noqa: BLE001
+            failures.append(f"{judge.label} ({judge.url}): {exc}")
+            continue
+    raise RuntimeError(
+        "no vision judge could answer — " + "; ".join(failures))
 
 
 # ── The gate ──────────────────────────────────────────────────────────────────
@@ -419,17 +508,37 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
 
     Writes vision_report.json and returns {written, passed, summary}."""
     repo = Path(project_root or workspace_root or ".").resolve()
+    # Resolved once for the report header; `_ask` re-resolves per call so a key
+    # that arrives mid-run is picked up. A route that resolves to nothing is a
+    # config error, and the gate must go BLIND about it rather than pass.
+    try:
+        _panel = _judges()
+    except Exception as e:                              # noqa: BLE001
+        _panel = []
+        _panel_error = str(e)
+    else:
+        _panel_error = ""
     report: dict = {"passed": True, "blind": False, "blind_reason": "",
-                    "endpoint": _URL, "model": _MODEL, "from_step": from_step,
+                    "route": _ROUTE,
+                    "judges": [j.label for j in _panel],
+                    "endpoint": _panel[0].url if _panel else "",
+                    "model": _panel[0].model if _panel else "",
+                    "from_step": from_step,
                     # Which judge actually answered. A gate that can silently
                     # swap models is a gate whose verdict cannot be interpreted:
                     # "Q3 got worse" means nothing if nobody recorded that a
-                    # different model answered it.
-                    "backend": "", "fallback_used": False,
-                    "fallback_model": _FALLBACK_MODEL,
+                    # different model answered it. `served_by` is the concrete
+                    # provider/model; `backend` keeps the coarse
+                    # primary/fallback/mixed reading the report has always had.
+                    "backend": "", "served_by": "", "fallback_used": False,
+                    "fallback_model": _panel[1].label if len(_panel) > 1 else "",
                     "scenarios": 0, "frames_checked": 0, "calls": 0,
                     "questions": [], "failures": [], "batches": [],
                     "summary": ""}
+
+    if _panel_error:
+        return _write(_blind(report, "endpoint_unreachable", _panel_error),
+                      out_dir, repo)
 
     # The ONE legitimate pass without looking: not a game.
     if not (repo / "project.godot").is_file():
@@ -527,11 +636,11 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         # asking it separately would double the vision spend per scenario.
         asked = [_GATE] + asked
         try:
-            raw, backend = _ask([f["path"] for f in batch], asked)
+            raw, served_by = _ask([f["path"] for f in batch], asked)
         except Exception as e:                          # noqa: BLE001
             return _write(_blind(
                 report, "endpoint_unreachable",
-                f"Vision endpoint {_URL} (model {_MODEL}) failed on scenario "
+                f"Every judge on route '{_ROUTE}' failed on scenario "
                 f"'{scen}' after {report['calls']} successful call(s): {e}. "
                 f"The frames were NOT judged. Vision gate NOT run."),
                 out_dir, repo)
@@ -539,10 +648,14 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         # Record the judge per call, not just once: a run that starts on the
         # primary and finishes on the fallback has TWO judges in one verdict,
         # and that is exactly the thing a reader needs told.
+        backend = "primary" if served_by == _panel[0].label else "fallback"
         if backend == "fallback":
             report["fallback_used"] = True
         prev = report.get("backend") or ""
         report["backend"] = (backend if not prev or prev == backend else "mixed")
+        prev_who = report.get("served_by") or ""
+        report["served_by"] = (served_by if not prev_who or prev_who == served_by
+                               else "mixed")
         answers = _parse_answers(raw)
         unanswered = [q["id"] for q in asked if q["id"] not in answers]
         if unanswered:

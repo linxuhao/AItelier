@@ -494,14 +494,30 @@ def test_a_per_frame_question_still_needs_a_majority(tmp_path, monkeypatch):
 # is offline" is an expected operating state, not an incident.
 
 class TestVisionFallback:
-    """`_ask` falls back ONLY on transport failure, and says who answered."""
+    """`_ask` walks the `vision` route, falls through ONLY on transport failure,
+    and says who answered.
+
+    The panel is stubbed rather than resolved from the real tables: these are
+    assertions about the walk, and binding them to whatever model_routes.json
+    happens to list today would make an unrelated route edit fail them.
+    """
 
     def _mod(self):
         import aitelier.tools.godot_vision.impl as m
         return m
 
-    def test_primary_success_never_touches_the_fallback(self, monkeypatch, tmp_path):
+    def _panel(self, m, monkeypatch):
+        judges = [
+            m._Judge("local/v", "http://local/chat/completions", "v", "", 2048),
+            m._Judge("plan/big", "http://plan/chat/completions", "big", "k1", 8192),
+            m._Judge("payg/eyes", "http://payg/chat/completions", "eyes", "k2", 8192),
+        ]
+        monkeypatch.setattr(m, "_judges", lambda: list(judges))
+        return judges
+
+    def test_first_judge_answering_never_touches_the_rest(self, monkeypatch):
         m = self._mod()
+        panel = self._panel(m, monkeypatch)
         calls = []
 
         def fake_post(url, model, api_key, files, questions, max_tokens=0):
@@ -509,49 +525,54 @@ class TestVisionFallback:
             return "1: YES - fine"
 
         monkeypatch.setattr(m, "_post", fake_post)
-        text, backend = m._ask([], [{"id": 1, "text": "q"}])
-        assert backend == "primary"
-        assert calls == [m._URL]
+        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
+        assert served_by == panel[0].label
+        assert calls == [panel[0].url]
 
-    def test_transport_failure_falls_back_and_reports_it(self, monkeypatch):
+    def test_transport_failure_moves_to_the_next_judge_and_reports_it(self, monkeypatch):
         m = self._mod()
+        panel = self._panel(m, monkeypatch)
         seen = []
 
         def fake_post(url, model, api_key, files, questions, max_tokens=0):
             seen.append((url, model, api_key, max_tokens))
-            if url == m._URL:
+            if url == panel[0].url:
                 raise OSError("connection refused")
             return "1: YES - fine"
 
         monkeypatch.setattr(m, "_post", fake_post)
-        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
-        text, backend = m._ask([], [{"id": 1, "text": "q"}])
-        assert backend == "fallback"
-        assert seen[0][0] == m._URL
-        assert seen[1][0] == m._FALLBACK_URL
-        assert seen[1][1] == m._FALLBACK_MODEL
-        assert seen[1][2] == "k"          # the key is actually sent
-        # The fallback must get its OWN budget, not the primary's. 2048 fits the
-        # primary (qwen3) and starves DeepSeek's reasoning model, which spends
-        # the WHOLE budget thinking and returns empty content — measured 3/3 at
-        # 2048. A shared budget sized for one backend silently blinds the other.
-        assert seen[0][3] == 0                          # primary: caller default
-        assert seen[1][3] == m._MAX_TOKENS_FALLBACK     # fallback: its own
+        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
+        assert served_by == panel[1].label
+        assert seen[0][0] == panel[0].url
+        assert seen[1][0] == panel[1].url
+        assert seen[1][1] == panel[1].model
+        assert seen[1][2] == "k1"                     # the key is actually sent
+        # Each judge gets its OWN budget. 2048 fits the local vLLM and starves a
+        # hosted reasoning model, which spends the WHOLE budget thinking and
+        # returns empty content — measured 3/3 at 2048. A shared budget sized
+        # for one backend silently blinds the other.
+        assert seen[0][3] == panel[0].max_tokens
+        assert seen[1][3] == panel[1].max_tokens
+        assert panel[1].max_tokens > panel[0].max_tokens
+
+    def test_the_route_supplies_the_budget_split(self):
+        """The real panel must keep giving the first judge the small budget and
+        everything after it the large one — the split is the point."""
+        m = self._mod()
         assert m._MAX_TOKENS_FALLBACK > m._MAX_TOKENS
 
-    def test_a_starved_fallback_escalates_and_actually_retries(self, monkeypatch):
+    def test_a_starved_judge_escalates_and_actually_retries(self, monkeypatch):
         """Starving on reasoning must escalate the budget AND take the retry.
 
         An escalation that only logs is how the planner starved nine times in a
-        row while announcing a retry it could never take (a3846df). Here the
-        first fallback call starves; the second must arrive with a bigger budget
-        and its answer must be the one returned.
+        row while announcing a retry it could never take (a3846df).
         """
         m = self._mod()
+        panel = self._panel(m, monkeypatch)
         budgets = []
 
         def fake_post(url, model, api_key, files, questions, max_tokens=0):
-            if url == m._URL:
+            if url == panel[0].url:
                 raise OSError("connection refused")
             budgets.append(max_tokens)
             if len(budgets) == 1:
@@ -559,39 +580,39 @@ class TestVisionFallback:
             return "1: YES - fine"
 
         monkeypatch.setattr(m, "_post", fake_post)
-        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
-        text, backend = m._ask([], [{"id": 1, "text": "q"}])
-        assert backend == "fallback"
+        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
+        assert served_by == panel[1].label
         assert text == "1: YES - fine"           # the RETRY's answer, not a raise
         assert len(budgets) == 2                 # it really retried
         assert budgets[1] > budgets[0]           # and with a bigger budget
 
-    def test_a_starved_fallback_that_stays_starved_is_a_loud_failure(self, monkeypatch):
-        """Two starves in a row must raise, never return an empty verdict.
+    def test_a_judge_that_stays_starved_is_not_a_verdict(self, monkeypatch):
+        """A judge that answered nothing is not a judge that answered NO.
 
-        A judge that answered nothing is not a judge that answered NO.
+        It moves on to the next one; when none is left it RAISES.
         """
         m = self._mod()
+        panel = self._panel(m, monkeypatch)
 
         def fake_post(url, model, api_key, files, questions, max_tokens=0):
-            if url == m._URL:
-                raise OSError("connection refused")
             raise m.ReasoningStarved("spent it all thinking")
 
         monkeypatch.setattr(m, "_post", fake_post)
-        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
         with pytest.raises(RuntimeError) as exc:
             m._ask([], [{"id": 1, "text": "q"}])
         assert "spent it all thinking" in str(exc.value)
+        for j in panel:
+            assert j.label in str(exc.value)
 
     def test_a_wrong_answer_is_not_a_reason_to_switch_judges(self, monkeypatch):
-        """A primary that ANSWERS must never be second-guessed by the fallback.
+        """A judge that ANSWERS must never be second-guessed by the next one.
 
-        Falling back on a bad answer would silently swap judges to paper over a
-        real regression in the model or the prompt, and the report would carry a
-        verdict nobody could attribute. Only "not serving" is a fallback reason.
+        Falling through on a bad answer would silently swap judges to paper over
+        a real regression in the model or the prompt, and the report would carry
+        a verdict nobody could attribute. Only "not serving" is a reason.
         """
         m = self._mod()
+        panel = self._panel(m, monkeypatch)
         urls = []
 
         def fake_post(url, model, api_key, files, questions, max_tokens=0):
@@ -599,36 +620,103 @@ class TestVisionFallback:
             return "complete nonsense, no answers at all"
 
         monkeypatch.setattr(m, "_post", fake_post)
-        text, backend = m._ask([], [{"id": 1, "text": "q"}])
-        assert backend == "primary"
-        assert urls == [m._URL]           # fallback never called
+        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
+        assert served_by == panel[0].label
+        assert urls == [panel[0].url]          # the others were never called
 
-    def test_no_key_is_a_loud_failure_not_a_silent_pass(self, monkeypatch):
+    def test_every_judge_down_raises_and_names_them_all(self, monkeypatch):
+        """Never a silent pass, and the message must be actionable: which
+        endpoints were tried, and what each one said."""
         m = self._mod()
-        monkeypatch.setattr(
-            m, "_post",
-            lambda *a, **k: (_ for _ in ()).throw(OSError("refused")))
-        monkeypatch.setattr(m, "_fallback_key", lambda: "")
-        with pytest.raises(Exception) as ei:
-            m._ask([], [{"id": 1, "text": "q"}])
-        assert "no judge available" in str(ei.value)
-
-    def test_both_down_reports_both_endpoints(self, monkeypatch):
-        m = self._mod()
+        panel = self._panel(m, monkeypatch)
         monkeypatch.setattr(
             m, "_post",
             lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-        monkeypatch.setattr(m, "_fallback_key", lambda: "k")
         with pytest.raises(Exception) as ei:
             m._ask([], [{"id": 1, "text": "q"}])
         msg = str(ei.value)
-        assert m._URL in msg and m._FALLBACK_URL in msg
+        for j in panel:
+            assert j.label in msg and j.url in msg
 
-    def test_fallback_can_be_disabled_to_prove_the_gpu_box_is_serving(self, monkeypatch):
+    def test_fallback_can_be_disabled_to_prove_the_gpu_box_is_serving(
+            self, monkeypatch):
+        """A silent fallback hides an unserving primary; this is how you prove
+        it. GODOT_VISION_FALLBACK=0 must leave exactly one judge."""
         m = self._mod()
         monkeypatch.setattr(m, "_FALLBACK_ENABLED", False)
-        monkeypatch.setattr(
-            m, "_post",
-            lambda *a, **k: (_ for _ in ()).throw(OSError("refused")))
-        with pytest.raises(OSError):
-            m._ask([], [{"id": 1, "text": "q"}])
+        monkeypatch.setenv("QWEN_API_KEY", "k")
+        panel = m._judges()
+        assert len(panel) == 1
+
+
+class TestVisionJudgeResolution:
+    """`_judges()` reads the same two tables every agent step reads."""
+
+    def _mod(self):
+        import aitelier.tools.godot_vision.impl as m
+        return m
+
+    def test_the_panel_comes_from_the_route_not_from_hardcoded_urls(self):
+        m = self._mod()
+        labels = [j.label for j in m._judges()]
+        assert labels, "the vision route must resolve to at least one judge"
+        # Every judge is a provider/model from the tables, not a bare URL.
+        for label in labels:
+            assert "/" in label
+        assert all(j.url.endswith("/chat/completions") for j in m._judges())
+
+    def test_a_candidate_with_no_provider_entry_is_skipped_not_fatal(
+            self, monkeypatch, tmp_path, capsys):
+        """A typo in a FALLBACK entry must not blind the gate — the judges that
+        do resolve can still see."""
+        import json
+
+        from core import model_routes
+        m = self._mod()
+        routes = tmp_path / "model_routes.json"
+        routes.write_text(json.dumps(
+            {"vision": ["nosuchprovider/x", "deepseek/eyes"]}), encoding="utf-8")
+        real_get = model_routes.get_routes
+        monkeypatch.setattr(model_routes, "get_routes",
+                            lambda _p=None: real_get(str(routes)))
+        model_routes.reset_cache()
+        try:
+            panel = m._judges()
+        finally:
+            model_routes.reset_cache()
+        assert [j.label for j in panel] == ["deepseek/eyes"]
+        assert "nosuchprovider" in capsys.readouterr().out
+
+
+def test_the_small_budget_follows_the_local_box_not_the_list_head(
+        monkeypatch, tmp_path, capsys):
+    """Skipping the first candidate must not hand its budget to the next one.
+
+    2048 is calibrated for the self-hosted vLLM and is measured to STARVE a
+    hosted reasoning model. Keying the small budget on "first in the surviving
+    list" meant that removing `localqwen` from llm_providers.json — the normal
+    state on any host that cannot reach that GPU box — silently gave
+    qwen3.8-max the starving budget.
+    """
+    import json
+
+    from core import model_routes
+    import aitelier.tools.godot_vision.impl as m
+
+    routes = tmp_path / "model_routes.json"
+    routes.write_text(json.dumps(
+        {"vision": ["nosuchprovider/local", "deepseek/hosted"]}), encoding="utf-8")
+    real_get = model_routes.get_routes
+    monkeypatch.setattr(model_routes, "get_routes",
+                        lambda _p=None: real_get(str(routes)))
+    model_routes.reset_cache()
+    try:
+        panel = m._judges()
+    finally:
+        model_routes.reset_cache()
+
+    assert [j.label for j in panel] == ["deepseek/hosted"]
+    assert panel[0].max_tokens == m._MAX_TOKENS_FALLBACK, (
+        "the survivor was position 1 in the route, so it must get the hosted "
+        "budget — not the local box's 2048")
+    assert "nosuchprovider" in capsys.readouterr().out

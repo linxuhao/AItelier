@@ -421,6 +421,8 @@ steps:
       # (current_task) so each iteration is scoped to its own task card.
       - source: { from: "repository", mode: "tool" }
       - source: { step: "3", file: "tasks/$current_task.json" }
+      # Bare on purpose — `output:` would relabel this past
+      # drop_preamble_steps and duplicate the preamble. See t_impl_review.
       - source: { step: "1", mode: "summary" }
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan_review" }
@@ -538,6 +540,8 @@ steps:
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "3", file: "tasks/$current_task.json" }
+      # Bare on purpose — `output:` would relabel this past
+      # drop_preamble_steps and duplicate the preamble. See t_impl_review.
       - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
@@ -654,29 +658,39 @@ steps:
     agent_config: "task_implementer_reviewer"
     context:
       - source: { from: "repository", mode: "tool" }
-      # `output:` is what ARMS `mode: interfaces`, not decoration. skillflow's
-      # context resolver applies mode ONLY on the named-single-file branch
-      # (context.py:_resolve_step_output); with no `output:` it takes the
-      # "concatenate every file in the step dir" branch, which never looks at
-      # mode. So `{step: "2", mode: "interfaces"}` was a silent no-op and the
-      # FULL step2_design.md went into every reviewer turn.
-      # Measured over 11 live runs: Step 2 was 40,798 chars median = 40.4% of
-      # this step's whole context, byte-identical to what t_impl got (the tell —
-      # two steps asking for different modes received the same bytes).
-      # Naming the file costs nothing: step 2 emits exactly step2_design.md +
-      # linter_manifest.json (60-115 B), and the reviewer reviews an
-      # implementation against the design, not against the linter map.
-      # Interfaces extraction takes the doc 35-50 KB → 8000 chars (the cap in
-      # skillflow's _extract_interfaces), ~10k tokens off every turn of the
-      # busiest reviewer.
-      # The extract is LOSSY and says so: skillflow >=1.5.40 appends a marker
-      # naming the file, how much was cut, and the read/search tools to fetch
-      # the rest — which this step already has via `from: repository` above and
-      # already uses (read x556, search x385 over 160 live step instances).
-      # Below 1.5.40 the cut is SILENT and this line hands the reviewer a fifth
-      # of the design labelled as the whole of it; don't ship it against an
-      # older skillflow.
-      - source: { step: "2", output: "step2_design.md", mode: "interfaces" }
+      # KEEP THIS BARE. `output:` here is not an improvement — it is a
+      # REGRESSION, and the earlier version of this comment argued for it from
+      # the wrong artifact. Both halves, so neither gets re-"fixed":
+      #
+      # 1. `mode:` really is inert without `output:` — skillflow applies mode
+      #    only on the named-single-file branch (context.py
+      #    :_resolve_step_output); the bare form takes the "concatenate every
+      #    file in the step dir" branch, which never looks at mode. True, and
+      #    irrelevant here, because of (2).
+      # 2. This config sets `x-aitelier.preamble_steps: ["1", "2"]` (line 31),
+      #    so with AITELIER_HOIST_DESIGN=1 (the default) step 1 + step 2 are
+      #    hoisted into the byte-identical shared SYSTEM preamble, and
+      #    `PromptAssembler.drop_preamble_steps` removes their resolved_context
+      #    copies from the user message. That drop matches the exact label
+      #    `"Step 2"`. Naming the file relabels the source
+      #    `"Step 2 — step2_design.md"`, which no longer matches — so the drop
+      #    stops firing and the slice is ADDED back on top of the preamble.
+      #
+      # Verified on live prompts (trace `prompt`/`user_prompt`, 2026-08-26):
+      # t_impl and t_plan carry the design in `system` only, `"Step 2"` absent
+      # from `user` — dropped, as designed. This step, with the named form, had
+      # it in BOTH: `system` carried the full doc AND `user` carried an
+      # 8,311-char interfaces extract of the same doc, complete with a
+      # "TRUNCATED … Anything past this point is NOT shown" marker about text
+      # that was sitting in its own system message. ~2.8k wasted tokens every
+      # turn, and a marker actively lying to the reviewer.
+      #
+      # The 40,798-char "40.4% of this step's context" figure that justified
+      # the change was read from `skillflow_steps.inputs_json`, which is the
+      # PRE-drop resolved context — not what reaches the model. Measure the
+      # traced prompt, not the inputs, before touching a context source in a
+      # config that declares preamble_steps.
+      - source: { step: "2", mode: "interfaces" }
       - source: { step: "t_plan" }
       - source: { step: "t_impl" }
       - source: { tool: "dir_tree" }

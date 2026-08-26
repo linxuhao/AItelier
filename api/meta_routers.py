@@ -902,12 +902,8 @@ def reject_checkpoint(
     # defaults to the checkpoint step itself, so a gate that should revise an
     # upstream maker just re-runs the gate and re-pauses. Older checkpoints all
     # set checkpoint_reject_to == themselves, so this is a no-op for them.
-    redirect_to = ""
-    try:
-        _node = sf._get_resolver(_graph).get_node(step_id)
-        redirect_to = (_node.checkpoint_reject_to or "") if _node else ""
-    except Exception:
-        redirect_to = ""
+    from core.run_driver import checkpoint_reject_target
+    redirect_to = checkpoint_reject_target(sf, _graph, step_id)
     sf.reject_checkpoint(run_id, step_id, request.feedback, redirect_to=redirect_to)
 
     from core.scheduler import wake_scheduler

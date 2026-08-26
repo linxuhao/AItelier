@@ -4147,7 +4147,11 @@ class MetaAgent:
 
         # Reject
         try:
-            sf.reject_checkpoint(run_id, checkpoint_step_id, feedback)
+            from core.run_driver import checkpoint_reject_target
+            sf.reject_checkpoint(
+                run_id, checkpoint_step_id, feedback,
+                redirect_to=checkpoint_reject_target(
+                    sf, run["graph_name"], checkpoint_step_id))
         except Exception as e:
             return {"error": f"Failed to reject checkpoint: {e}"}
 

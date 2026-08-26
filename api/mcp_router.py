@@ -1223,7 +1223,11 @@ def _register_run_tools(tool):
                     return {**echo,
                             "error": f"run '{run_id}' is paused but no checkpoint "
                                      f"step could be resolved for it"}
-                sf.reject_checkpoint(run_id, step_id, feedback)
+                from core.run_driver import checkpoint_reject_target
+                sf.reject_checkpoint(
+                    run_id, step_id, feedback,
+                    redirect_to=checkpoint_reject_target(
+                        sf, run.get("graph_name") or _graph, step_id))
         except Exception as e:
             return {**echo, "error": f"{decision} failed: {e}"}
         # Answering releases the run; whoever was driving it keeps going.

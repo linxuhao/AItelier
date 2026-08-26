@@ -62,6 +62,32 @@ _TERMINAL = ("completed", "failed")
 _STALL_HINT_S = 10 * 60
 
 
+def checkpoint_reject_target(sf, graph_name: str, step_id: str) -> str:
+    """Where a rejected checkpoint rewinds to, per the graph's `checkpoint_reject_to`.
+
+    skillflow's ``reject_checkpoint(run_id, step_id, feedback, redirect_to="")``
+    resolves the target as ``redirect_to or step_id`` — it never reads the graph.
+    So a caller that omits `redirect_to` silently re-runs the checkpoint STEP,
+    and a gate whose whole purpose is to send work back to an upstream maker
+    just re-pauses itself with the feedback addressed to nobody.
+
+    Measured, jinyong-hud 2026-08-27: the blind-vision checkpoint declares
+    `checkpoint_reject_to: "3"`. Rejected over MCP, the feedback landed in
+    `_feedback/5_vision_human.md` and the run re-paused on the same checkpoint;
+    the PM never saw it. The HTTP path (api/meta_routers.py) had already been
+    fixed for exactly this reason and the fix was never carried to the other
+    two callers — hence one helper instead of a third copy.
+
+    Returns "" when the node declares no target, which is precisely what
+    skillflow's default already means: re-run the checkpoint in place.
+    """
+    try:
+        node = sf._get_resolver(graph_name).get_node(step_id)
+    except Exception:
+        return ""
+    return (node.checkpoint_reject_to or "") if node else ""
+
+
 def restore_retry_budget(sf, run_id: str) -> dict | None:
     """Give a resumed run's failed step its retries back. Returns what it reset.
 

@@ -2,19 +2,15 @@
 
 # AItelier
 
-**The trusted, auditable layer for AI agents — run _any_ multi-agent workflow deterministically, with a complete audit trace and human checkpoints.**
+**Structured-but-dynamic subagent workflows for AI agents — your agent delegates work to deterministic, fully-audited pipelines it can generate, run, and edit over MCP.**
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Python](https://img.shields.io/badge/python-3.12%2B-3776AB)
 [![Engine: SkillFlow](https://img.shields.io/badge/engine-SkillFlow%20(MIT)-F59E0B)](https://github.com/linxuhao/SkillFlow)
 
-![AItelier pipeline](docs/demo/aitelier_hero.gif)
-
-*The flagship pipeline: research → architect → plan → implement → verify — with reject-with-feedback checkpoints and a goal-loop that sends work back to planning on its own.*
-
 </div>
 
-AItelier makes multi-agent AI pipelines **deterministic and fully auditable** — define a pipeline, run it, and inspect *why* it did everything it did. Today that's an open engine ([SkillFlow](https://github.com/linxuhao/SkillFlow), MIT, on PyPI as `skillflow-py`) plus a flagship software-delivery pipeline; the broader no-code **workflow platform** is on the [roadmap](#roadmap).
+AItelier makes multi-agent AI pipelines **deterministic and fully auditable** — define a pipeline (or have your agent generate one), run it, and inspect *why* it did everything it did. The whole surface is exposed over **MCP**, so any MCP-speaking agent can use AItelier as its workflow engine: delegate bulk work to cheap, deterministic pipelines and only decide at checkpoints (see [Use AItelier from another agent](#use-aitelier-from-another-agent-mcp)). Under it all is an open engine ([SkillFlow](https://github.com/linxuhao/SkillFlow), MIT, on PyPI as `skillflow-py`) plus a flagship software-delivery pipeline; the broader no-code **workflow platform** is on the [roadmap](#roadmap).
 
 ## Why AItelier
 
@@ -29,14 +25,17 @@ AItelier is built on the opposite premise — that an autonomous pipeline should
 - **Adversarial quality** — every step is produced by a Green (Maker) agent and reviewed by a Red (Checker) agent before it advances.
 - **Config-agnostic** — a pipeline can be *anything*. Nothing about the engine is hardcoded to one workflow; SkillFlow can even generate a new pipeline from a plain-language description.
 
+**Where this sits.** Classic workflow engines are structured but *static* — a human authors the graph, and changing it is a deploy. Autonomous agent swarms are dynamic but *unstructured* — improvised control flow that can't be reproduced or audited. AItelier is deliberately the missing quadrant: **structured but dynamic**. *During* a run the graph is fixed and engine-traversed — gates, retries, and the trace are mechanical. *Between* runs, an agent can generate a new pipeline from a description, drive it, read the trace of what broke, and edit it — all over MCP. Your agent stays the brain; AItelier is the factory floor it can re-tool.
+
 ## What you can build
 
 > **The vision** (see [Project status](#project-status) for exactly what's built today vs. what's planned).
 
-AItelier is meant to be used two ways:
+AItelier is meant to be used three ways — the first is the center of gravity:
 
-1. **Run the flagship software pipeline (DPE)** — ✅ *works today.* Describe a project; it researches, architects, plans, implements, and verifies it end-to-end, with human checkpoints and a complete trace. (That's the demos below.)
-2. **Build your own auditable workflow — just describe it** — ✅ *works today.* Pipelines aren't limited to software. **Describe a workflow in chat** and AItelier's grounded generator turns it into a real SkillFlow pipeline — provisioning any missing tools, wiring and gating the graph, and registering it to run by name (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)). You can still hand-author YAML directly; a no-code *visual* builder and managed workspaces are on the [roadmap](#roadmap).
+1. **Give your agent a workflow engine (MCP)** — ✅ *works today.* Point any MCP-speaking agent at the `/mcp` endpoint and it gets the whole surface as native tools: the full **generate → run → observe → fix** loop, checkpoint answering, the trace, model routing, and pipeline export/import. Your agent delegates the bulk work to deterministic pipelines on cheap models and only decides at the checkpoints (see [Use AItelier from another agent](#use-aitelier-from-another-agent-mcp)).
+2. **Build your own auditable workflow — just describe it** — ✅ *works today.* Pipelines aren't limited to software. **Describe a workflow in chat** (or over MCP) and AItelier's grounded generator turns it into a real SkillFlow pipeline — provisioning any missing tools, wiring and gating the graph, and registering it to run by name (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)). You can still hand-author YAML directly; a no-code *visual* builder and managed workspaces are on the [roadmap](#roadmap).
+3. **Run the flagship software pipeline (DPE) standalone** — ✅ *works today.* Describe a project; it researches, architects, plans, implements, and verifies it end-to-end, with human checkpoints and a complete trace. (That's the demos below — and the proof that the engine holds up under the hardest workload.)
 
 **Why software-delivery is the wedge _and_ the keystone.** We lead with autonomous software-building because it's the hardest possible proof the engine works — and because **an AI workflow *is* software** (a pipeline is a graph plus tools plus templates). The same deterministic factory that builds software is what will let you *trust a workflow you build on AItelier* — building a new auditable workflow is itself a software-engineering task. A trusted software pipeline builds trusted workflows.
 
@@ -51,16 +50,58 @@ Honest, current state — so nothing here reads as more finished than it is.
 | Capability | Status |
 | --- | --- |
 | Flagship **DPE software pipeline** — research → architect → plan → implement → verify | ✅ Available today |
+| **MCP endpoint + DeepSeek Harness plugin** — drive AItelier from any MCP-speaking agent: list / edit / run / export / import pipelines as native tools | ✅ Available today |
 | Green/Red adversarial review · human approve/reject-with-feedback checkpoints · autonomous goal-loop | ✅ Available today |
 | Append-only trace + trace API · Git event-sourcing · Rich CLI/TUI | ✅ Available today |
 | Runs on the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine (deterministic DAG execution, tools, checkpoints, durable trace) | ✅ Available today |
 | **Generate a pipeline from a plain-language description** — grounded generator provisions missing tools, wires + gates the graph, registers it to run by name | ✅ Available today |
-| **MCP endpoint + DeepSeek Harness plugin** — drive AItelier from any MCP-speaking agent: list / edit / run / export / import pipelines as native tools | ✅ Available today |
 | Final verifier **runs** the generated app (runtime smoke-test) | 🚧 Roadmap — *today it reviews code statically and can miss runtime bugs* |
 | No-code visual workflow builder · managed multi-tenant SaaS · collaboration & compliance tooling | 🚧 Roadmap |
 | Horizontal expansion beyond software delivery, on the same engine | 🔭 Vision |
 
 **Where the company is:** the engine and the flagship pipeline are built and tested; there are **no users, revenue, or managed platform yet.** This is a working foundation, not a finished product.
+
+## Demos
+
+> These are recordings; a **live, browsable deployment** is linked in [See it in action](#see-it-in-action) below.
+
+The flagship DPE pipeline planning, building, and reviewing a real e-commerce app — a customer storefront **and** an admin panel — end to end: **66 pipeline steps, 0 failures, entirely on cheap non-frontier models** (DeepSeek — no GPT/Claude/Gemini in the loop). The trace demo below is from this run. *Separately*, when a bug report was later fed back in, AItelier diagnosed and fixed its own code (see below).
+
+**The generated app — customer storefront & admin panel** (from a single goal, pure Python standard library)
+
+**📂 Browse the full generated source: [linxuhao/aitelier-e-commerce-store-demo](https://github.com/linxuhao/aitelier-e-commerce-store-demo)** — every file was produced by the pipeline (the commit history *is* the build log); only its README is hand-written.
+
+| Customer storefront | Admin panel |
+| --- | --- |
+| ![Client](docs/demo/aitelier_client_demo.gif) | ![Admin](docs/demo/aitelier_admin_demo.gif) |
+
+> Browse → cart → checkout → order confirmed, and admin login → dashboard → add / edit / delete.
+
+**Every decision is auditable — the trace API**
+
+![Trace API](docs/demo/aitelier_trace_api_demo.gif)
+
+> 1000+ durable records per run — every prompt, model response, tool call, and Green/Red review verdict — queryable by step or category.
+
+**What this run demonstrates**
+- The **goal-loop fired autonomously** (final verifier → back to planning → converged on the next pass) — not scripted.
+- Re-pointed at the existing codebase with a bug report, AItelier **diagnosed the root cause and authored the fix itself**.
+- The intelligence is in the **orchestration**, not the model bill — the whole pipeline runs on DeepSeek `v4-flash` / `v4-pro`.
+
+> Honest caveat: the cart bug above slipped past the pipeline's verifier because it reviews code *statically* and doesn't yet run the app — see [Project status](#project-status) and [Roadmap](#roadmap). Finding it required running the app by hand; AItelier then fixed it.
+
+## See it in action
+
+**Skip the recordings — browse a live deployment: [aitelier.linxuhao.app](https://aitelier.linxuhao.app)** (public read access). Open any run and you get what the GIFs can't show: the pipeline graph with the **current step highlighted and its trace streaming live beside it** — for example, [a real game-feature run](https://aitelier.linxuhao.app/#/projects/jinyong-hud). Reads are open to anyone; writes require the Cloudflare Access allowlist ([how that split works](#run-with-docker--cloudflare)).
+
+A typical run with the flagship DPE pipeline:
+
+1. **Describe what you want.** Tell the butler your goal. It picks one of two paths automatically:
+   - **Path A — Pipeline Offload** (fast): for small bug fixes or features (~5 files) on existing projects, offloads directly to a subagent/fix_tests/investigate pipeline — no requirements conversation needed.
+   - **Path B — DPE** (safe default): for new projects and non-trivial changes, asks scoping questions, drafts a project brief, and — once you approve — starts the full research → architect → plan → build pipeline.
+2. **Watch it work, with checkpoints.** Research → Architect → PM → per-task Plan/Implement/Review → Final Verification. It **pauses at review checkpoints** so you can **approve** or **reject with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
+3. **Inspect the trace.** Every prompt, response, and tool call is in an append-only audit log — answer "why did it do that?" for any step, after the fact.
+4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.
 
 ## Install
 
@@ -74,68 +115,26 @@ pip install -e .
 
 ## Quick Start
 
-### The three levels
-
-Two of these used to share the word "model", which is why they now do not:
-
-| | example | what it is |
-|---|---|---|
-| **provider** | `ark` | a host — a base URL plus the NAME of the secret it reads |
-| **endpoint** | `ark/deepseek-v4-flash` | one concrete place to send a call |
-| **model** | `flash` | an ordered list of endpoints. **This is what `agent_configs` name** |
-| **agent** | `task_implementer` | a model + tools + a prompt template |
-
-Order inside a model is policy, not preference: calls bind to the **first** endpoint and the rest are tried only when one fails. So the last one should be **pay-as-you-go** — a token plan runs out, and that final entry is what turns "everything stops until the window resets" into "the next call goes elsewhere". A spent plan is parked until the provider's own reset time. Failover is sticky per pipeline step, never per call: provider prefix caches are per-provider, and this workload measures 26:1 prefill:decode at an 89.4% hit rate, so alternating endpoints mid-step converts cached input into full-price input.
-
-### Pick your providers
-
-The two tables are **deployment config, not repo content** — gitignored like `.env`, shipped as examples:
-
 ```bash
 cp llm_providers.example.json llm_providers.json   # providers: URL + key NAME
 cp model_routes.example.json  model_routes.json    # models: which endpoints serve each
-```
-
-The **model names are the contract**: `agent_configs/*.yaml` and the vision gate reference `flash` / `pro` / `glm` / `smart` / `vision`, so those keys must exist. What sits behind them is yours — the examples are one operator's answer. Skip this and both fall back to the example, so a fresh clone still runs.
-
-What each model is FOR is fixed, because pipelines and tools pick by job:
-
-| model | used by | has to be |
-|---|---|---|
-| `flash` | most maker and reviewer roles — the bulk of every run | cheap and fast; this is where the budget goes |
-| `pro` | the PM, and roles the rest of the run is built on | a stronger generalist |
-| `glm` | the architect, the final verifier, long-form documents | an alternative strong generalist |
-| `smart` | offered to generated pipelines for judges and architects | strong at one-shot reasoning; **not** for long agentic tool loops |
-| `vision` | the Godot readability gate | **must accept image input** — verify with a real frame, not a model card |
-
-Keys are never in these files: a provider records the key's NAME, and the key itself is a secret file (`~/.aitelier-secrets/<NAME>`). Editing all of this at runtime — including from another agent — is the `/api/models` REST surface and the matching MCP tools.
-
-### Keys
-
-Keys are **secret FILES, not environment variables** — so the test and build subprocesses a pipeline runs cannot inherit them. Ask the code which ones you need rather than trusting this page:
-
-```bash
-python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \
-           print('required:', required_llm_keys()); print('failover:', failover_llm_keys())"
-```
-
-`required` is the **first** endpoint of each model — what runs actually bind to. `failover` is everything behind them: not needed to start, needed for an outage to be a slowdown instead of a stop. Out of the box that is `ARK_API_KEY` required, DeepSeek and Qwen as failover.
-
-```bash
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
-chmod 600 ~/.aitelier-secrets/ARK_API_KEY
+printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY && chmod 600 ~/.aitelier-secrets/ARK_API_KEY
 cp .env.example .env        # endpoints and options; NOT the keys
 ```
 
-A missing key fails naming the provider, the key, the file to create, **and the model whose endpoint list sent it there**.
+Three things worth knowing before you customize — the full routing story (provider/endpoint/model levels, the failover policy, what each model must be) is in **[docs/models-and-providers.md](docs/models-and-providers.md)**:
 
-> **The backend runs in Docker**, always — there is no host-process fallback, because a host process would make the pipeline's git commits carry your own `~/.gitconfig` identity. `aitelier` starts the container for you (and creates the secret files it mounts).
+- The **model names are the contract**: `agent_configs/*.yaml` reference `flash` / `pro` / `glm` / `smart` / `vision`; what sits behind each is yours to choose. Skip the `cp` entirely and the examples serve as fallback, so a fresh clone still runs.
+- Keys are **secret FILES, not environment variables** — so the test/build subprocesses a pipeline runs cannot inherit them. Ask the code which ones you need: `python -c "from core.external_deps import required_llm_keys, failover_llm_keys; print(required_llm_keys(), failover_llm_keys())"`. Out of the box: `ARK_API_KEY` required, DeepSeek and Qwen as failover.
+- A missing key fails **loudly**, naming the provider, the key, the file to create, and the model that sent it there.
+
+> **The backend runs in Docker** — a host process would make the pipeline's git commits carry your own `~/.gitconfig` identity, so the CLI never silently falls back to one. `aitelier` starts the container for you (and creates the secret files it mounts). The one escape hatch is explicit: `aitelier server --no-docker` runs uvicorn in-process, for debugging outside a container or a deployment that supplies its own git identity.
 
 ```bash
 aitelier                          # Interactive CLI dashboard
 aitelier "build me a todo app"    # One-shot pipeline
-aitelier server                   # Backend container (start/reuse); --no-docker to run in-process
+aitelier server                   # Backend container (start/reuse)
 ```
 
 ### Run with Docker (+ Cloudflare)
@@ -192,71 +191,14 @@ It rotates (5MB × 3) and lives on the mounted volume, so it survives container
 recreation. One line per tick; outcomes are `idle`, `locked`, `run_start_failed`,
 `active_claim`, `terminal`, `claim_failed`, `no_claim`, `executed`.
 
-In Docker the **API key is a secret file, not an env var** (so the pipeline's test/build subprocesses never inherit it). Put the key outside the repo and mount it:
-
-```bash
-mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-printf '%s' "<your-key>" > ~/.aitelier-secrets/ARK_API_KEY
-chmod 600 ~/.aitelier-secrets/ARK_API_KEY           # keys are FILES, never .env
-```
-
 State lives in host `~/.AItelier` (bind-mounted). The port is published on loopback only; expose it publicly via a **Cloudflare tunnel**. With Cloudflare Access in front, **reads are open to any logged-in user and writes are restricted to an allowlist** — set `AITELIER_CF_TEAM_DOMAIN`, `AITELIER_CF_AUD`, and `AITELIER_WRITERS` in `.env` (all documented in `.env.example`). The CLI authenticates to its own container with `AITELIER_ADMIN_TOKEN`.
-
-## Demos
-
-The flagship DPE pipeline planning, building, and reviewing a real e-commerce app — a customer storefront **and** an admin panel — end to end: **66 pipeline steps, 0 failures, entirely on cheap non-frontier models** (DeepSeek — no GPT/Claude/Gemini in the loop). The hero GIF at the top and the trace below are from this run. *Separately*, when a bug report was later fed back in, AItelier diagnosed and fixed its own code (see below).
-
-**The generated app — customer storefront & admin panel** (from a single goal, pure Python standard library)
-
-**📂 Browse the full generated source: [linxuhao/aitelier-e-commerce-store-demo](https://github.com/linxuhao/aitelier-e-commerce-store-demo)** — every file was produced by the pipeline (the commit history *is* the build log); only its README is hand-written.
-
-| Customer storefront | Admin panel |
-| --- | --- |
-| ![Client](docs/demo/aitelier_client_demo.gif) | ![Admin](docs/demo/aitelier_admin_demo.gif) |
-
-> Browse → cart → checkout → order confirmed, and admin login → dashboard → add / edit / delete.
-
-**Every decision is auditable — the trace API**
-
-![Trace API](docs/demo/aitelier_trace_api_demo.gif)
-
-> 1000+ durable records per run — every prompt, model response, tool call, and Green/Red review verdict — queryable by step or category.
-
-**What this run demonstrates**
-- The **goal-loop fired autonomously** (final verifier → back to planning → converged on the next pass) — not scripted.
-- Re-pointed at the existing codebase with a bug report, AItelier **diagnosed the root cause and authored the fix itself**.
-- The intelligence is in the **orchestration**, not the model bill — the whole pipeline runs on DeepSeek `v4-flash` / `v4-pro`.
-
-> Honest caveat: the cart bug above slipped past the pipeline's verifier because it reviews code *statically* and doesn't yet run the app — see [Project status](#project-status) and [Roadmap](#roadmap). Finding it required running the app by hand; AItelier then fixed it.
-
-## See it in action
-
-A typical run with the flagship DPE pipeline:
-
-1. **Describe what you want.** Tell the butler your goal. It picks one of two paths automatically:
-   - **Path A — Pipeline Offload** (fast): for small bug fixes or features (~5 files) on existing projects, offloads directly to a subagent/fix_tests/investigate pipeline — no requirements conversation needed.
-   - **Path B — DPE** (safe default): for new projects and non-trivial changes, asks scoping questions, drafts a project brief, and — once you approve — starts the full research → architect → plan → build pipeline.
-2. **Watch it work, with checkpoints.** Research → Architect → PM → per-task Plan/Implement/Review → Final Verification. It **pauses at review checkpoints** so you can **approve** or **reject with feedback** (e.g. *"the design is missing input validation"*) and watch the agent revise.
-3. **Inspect the trace.** Every prompt, response, and tool call is in an append-only audit log — answer "why did it do that?" for any step, after the fact.
-4. **Run the result.** The generated project (code + tests + README) lands in your workspace, ready to run.
-
-## Generate a workflow from a description
-
-**Don't want to hand-write a pipeline? Describe it.** ✅ *Works today.* In the butler's **coding mode**, the `generate_pipeline` tool turns a plain-language workflow into a real, runnable [SkillFlow](https://github.com/linxuhao/SkillFlow) pipeline — grounded in the live tool registry, self-provisioning any tools it needs, and gated before it ships. No YAML by hand, no server restart.
-
-1. **Describe it.** *"Make a pipeline that researches a topic, drafts a summary, then fact-checks it."* The grounded `pipeline_forge` generator surveys the real tool registry → designs the graph → **builds and registers any missing tools** → emits the config → passes a 3-part gate (lint + registry check + dry-run smoke) → pauses at a review checkpoint.
-2. **It's registered automatically.** On approval the graph lands under a namespaced name like `gen_research_draft_factcheck` (the `gen_` prefix can never clash with a built-in config).
-3. **Run it by name.** *"Run it on 'CRISPR gene editing'."* → the butler launches it, and it shows up in the dashboards — and the trace — like any other run.
-4. **Iterate in place.** *"Add a citation step and run it again."* → re-describe it under the **same name** and it's **updated in place**; the next run uses the new version.
-
-Every generated run gets the same deterministic execution, human checkpoints, and append-only trace as the flagship pipeline. Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. This is the working core of the [no-code workflow platform](#roadmap) — the visual builder on top of it is still to come.
 
 ## Use AItelier from another agent (MCP)
 
-AItelier's backend exposes its whole pipeline surface as an **MCP endpoint** (`/mcp`, streamable HTTP) — so any MCP-speaking agent can use AItelier as a subagent: **39 tools** covering the four artefact kinds (pipeline graph, agent roles, prompt templates, custom tools) with list / get / edit on each, plus:
+**This is the primary way to use AItelier.** The backend exposes its whole pipeline surface as an **MCP endpoint** (`/mcp`, streamable HTTP) — so any MCP-speaking agent can use AItelier as a *structured-but-dynamic subagent*: instead of improvising a long multi-step job in its own context (unreproducible, unauditable, at frontier-model prices), the agent delegates it to a deterministic pipeline and gets back a durable trace it can query. The surface is **39 tools** covering the four artefact kinds (pipeline graph, agent roles, prompt templates, custom tools) with list / get / edit on each, plus:
 
-- **`run_pipeline` + `wait_for_run`** — start a run (returns immediately; runs are long and may pause for human approval) and block until it settles at a checkpoint, completion, *or failure* — push-based, no polling.
-- **the full generate → drive → observe → fix loop** — `generate_pipeline` writes a new pipeline, `run_pipeline` + `wait_for_run` + `answer_checkpoint` drive it, `get_run_summary` and the `trace_*` tools say what broke, and the `edit_*` tools fix it. AItelier's scheduler runs the pipeline; the external agent only decides at checkpoints and between runs.
+- **`run_pipeline` + `wait_for_run` + `answer_checkpoint`** — start a run (returns immediately; runs are long and may pause for approval) and block until it settles at a checkpoint, completion, *or failure* — push-based, no polling. Checkpoints stay first-class in this frame: the **calling agent** can approve or reject-with-feedback itself, or escalate the decision to its human.
+- **the full generate → drive → observe → fix loop** — `generate_pipeline` writes a new pipeline ([how generation works](#generate-a-workflow-from-a-description)), `run_pipeline` + `wait_for_run` + `answer_checkpoint` drive it, `get_run_summary` and the `trace_*` tools say what broke, and the `edit_*` tools fix it. AItelier's scheduler runs the pipeline; the external agent only decides at checkpoints and between runs.
 - **the model routing tables** — `get_available_models` says which models this deployment serves and whether each endpoint behind them can actually answer; `add_provider` / `map_model` / `unmap_model` / `delete_*` edit them. Which vendors you use is deployment config, so this is how an agent configures a machine it did not set up.
 - **`export_pipeline` / `import_pipeline`** — carry a generated pipeline between machines as **one self-contained JSON bundle**: its graph, its roles *with* their prompts, and any custom tool it needs. Import validates everything before writing, renames safely, and refuses to silently overwrite a same-named tool that differs.
 
@@ -269,13 +211,24 @@ dsh plugin --profile headless add <path-to>/AItelier/integrations/dsh
 echo 'AITELIER_MCP_URL=http://127.0.0.1:4444/mcp' >> ~/.dsh/.env   # where your AItelier runs
 ```
 
-Any other MCP host configures the same endpoint URL directly (streamable HTTP transport).
+Any other MCP host configures the same endpoint URL directly (streamable HTTP transport). It needs a running backend — [Install](#install) above, or `docker compose up -d`.
+
+## Generate a workflow from a description
+
+**Don't want to hand-write a pipeline? Describe it.** ✅ *Works today.* In the butler's **coding mode** — or from any external agent [over MCP](#use-aitelier-from-another-agent-mcp) — the `generate_pipeline` tool turns a plain-language workflow into a real, runnable [SkillFlow](https://github.com/linxuhao/SkillFlow) pipeline — grounded in the live tool registry, self-provisioning any tools it needs, and gated before it ships. No YAML by hand, no server restart.
+
+1. **Describe it.** *"Make a pipeline that researches a topic, drafts a summary, then fact-checks it."* The grounded `pipeline_forge` generator surveys the real tool registry → designs the graph → **builds and registers any missing tools** → emits the config → passes a 3-part gate (lint + registry check + dry-run smoke) → pauses at a review checkpoint.
+2. **It's registered automatically.** On approval the graph lands under a namespaced name like `gen_research_draft_factcheck` (the `gen_` prefix can never clash with a built-in config).
+3. **Run it by name.** *"Run it on 'CRISPR gene editing'."* → the butler launches it, and it shows up in the dashboards — and the trace — like any other run.
+4. **Iterate in place.** *"Add a citation step and run it again."* → re-describe it under the **same name** and it's **updated in place**; the next run uses the new version.
+
+Every generated run gets the same deterministic execution, human checkpoints, and append-only trace as the flagship pipeline. Generated pipelines are stored as gitignored user data under `~/.AItelier/configs/`, so they survive a restart but never land in the repo. This is the working core of the [no-code workflow platform](#roadmap) — the visual builder on top of it is still to come.
 
 ## Configuration
 
 To change which models or agents the pipeline uses, edit the config files directly:
 
-- **`llm_providers.json`** — LLM providers (base URLs, API-key env var names). Register a provider here before pointing an agent at it.
+- **`llm_providers.json` + `model_routes.json`** — providers, endpoints, and which endpoints serve each model name; the full story is [docs/models-and-providers.md](docs/models-and-providers.md).
 - **`agent_configs/`** — per-role model, template, tools, and thinking settings. Every agent's model is just a YAML field here: the DPE pipeline roles live in `dpe_default.yaml`, and the **chat butler / meta agent** lives in `meta_conversation.yaml` (`meta_agent.model`) — so the conversational front-end is configurable exactly like the pipeline roles.
 - **`templates/`** — the LLM prompt templates each step uses
 - **`AITELIER_HOST_AGENT_MODEL`** (env, default `ark/deepseek-v4-flash`) — the model for skillflow *host-delegated* agents. A **generated** pipeline ships its agents as `model:"host"` with the prompt embedded; AItelier maps that single token to this one model, so you don't declare a per-role config for them (see [Generate a workflow from a description](#generate-a-workflow-from-a-description)).
@@ -286,9 +239,7 @@ AItelier defines its workflow as a **SkillFlow graph** of stateless agent steps.
 
 Agents never hold state in memory. Each step receives its context from the outputs of prior steps, writes its results into a per-step staging directory that the engine validates and then promotes, and every promoted change is committed to **Git (event sourcing)** — so any run can be replayed or inspected after the fact. A scheduler drives the loop one step at a time: `advance → claim → execute → confirm`. The default DPE pipeline applies this to software delivery, but because a pipeline is just config, the same engine runs any auditable multi-agent workflow.
 
-## Architecture
-
-AItelier is a **host application** on top of the SkillFlow framework:
+As a codebase, AItelier is a **host application** on top of the SkillFlow framework:
 
 - **Configs** (`configs/`, `agent_configs/`) — pipeline graph and LLM agent definitions
 - **Templates** (`templates/`) — per-step LLM system prompts
@@ -297,13 +248,6 @@ AItelier is a **host application** on top of the SkillFlow framework:
 - **API** (`api/`, `web_api/`) — the CLI backend, plus an early multi-tenant Web backend. Includes admin endpoints (`/api/admin/`) for user tracking with per-user delete, writer-only access via Cloudflare Access, and the MCP endpoint (`api/mcp_router.py`, served at `/mcp`) that exposes the pipeline surface to external agents.
 - **Web** (`web/`) — Svelte 5 + Vite SPA, compiled to `web/dist/` and served by FastAPI
 - **CLI** (`cli/`) — Rich TUI dashboard
-
-```
-Meta Conversation (gather requirements)
-  → DPE Pipeline:
-    Research → Architect → PM → [per task: Plan → Implement → Review]
-    → Final Verification
-```
 
 ## Roadmap
 
@@ -327,28 +271,17 @@ pytest tests/ -v               # full suite (~945 tests)
 
 ## Web Frontend
 
-The web UI is a **Svelte 5 + Vite** SPA (`web/src/`), replacing the original vanilla HTML/CSS/JS frontend. The compiled bundle (`web/dist/`) is served directly by the FastAPI backend.
+A **Svelte 5 + Vite** SPA (`web/src/`); the compiled bundle (`web/dist/`) is served directly by the FastAPI backend. It ships in **8 languages** (en, zh-CN, zh-TW, ja, ko, fr, de, es) with live language switching.
 
 ```bash
 cd web
-npm install                     # install dependencies
-npm run build                   # compile to web/dist/
-npm test                        # run ~120 vitest tests (stores, lib, views)
+npm install && npm run build    # compile to web/dist/
+npm test                        # vitest (stores, lib, views)
 npm run lint                    # ESLint + eslint-plugin-svelte
-npm run dev                     # dev server with HMR
+node audit-i18n.mjs             # verify every t() key exists in all 8 languages
 ```
 
-The frontend uses Svelte 5 runes (`$props()`, `$state()`, `$derived()`) throughout. Key libraries: `marked` (Markdown), `DOMPurify` (HTML sanitization), `svelte-spa-router` (client-side routing). The DPE pipeline's test step (`run_tests`, 5_test) gates node projects automatically: it finds `package.json` (root or one level deep, e.g. `web/`) and runs `npm ci` + `npm run build` + `npm test`, folding failures into the goal-loop.
-
-### i18n (Internationalization)
-
-The app supports **8 languages**: English (`en`), Simplified Chinese (`zh-CN`), Traditional Chinese (`zh-TW`), Japanese (`ja`), Korean (`ko`), French (`fr`), German (`de`), and Spanish (`es`). The i18n module (`web/src/lib/i18n.svelte.ts`) uses a **Svelte 5 `$state` rune** + `langStore.subscribe()` pattern to make the `t()` translation function reactive — switching languages in the AppBar dropdown triggers an automatic live re-render of all visible components, with no page navigation required.
-
-```bash
-node web/audit-i18n.mjs            # verify all t() keys exist in all 8 languages
-```
-
-The persistent language store (`web/src/stores/i18n.ts`) syncs the user's selection to `localStorage` and the backend API (`POST /api/settings/user/language`).
+The DPE pipeline's test step gates node projects automatically: it finds `package.json` (root or one level deep, e.g. `web/`) and runs `npm ci` + `npm run build` + `npm test`, folding failures into the goal-loop.
 
 ## License
 

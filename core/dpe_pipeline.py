@@ -2353,6 +2353,23 @@ class PipelineEngine:
                     f"Native step '{step_id}' failed: {type(e).__name__}: {e}",
                     exc_info=True,
                 )
+                # A spent quota is not a native-tool-calling failure, and this
+                # `except` was quietly undoing the re-raise `_run_native_step`
+                # performs on purpose (see the `is_quota_exhausted` guard there
+                # and the outage it names). EVERY role sets
+                # `fallback_to_json_mode: true`, so the re-raise never once
+                # reached the scheduler through this path.
+                #
+                # Falling through costs more than a mislabel: the JSON path
+                # re-walks the same candidate list, and `_next_usable`
+                # deliberately degrades to "try it anyway" when every endpoint
+                # is parked — so it re-pays one real 429 per candidate against
+                # endpoints already known to be spent, on top of the walk the
+                # native path just finished. The scheduler's quota hold exists
+                # to stop exactly that.
+                from core.llm_quota import is_quota_exhausted
+                if is_quota_exhausted(e):
+                    raise
                 if not self.factory.get_fallback_to_json(agent_config_name):
                     raise
                 # Fall through to JSON mode dispatch below

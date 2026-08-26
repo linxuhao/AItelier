@@ -146,8 +146,18 @@ def test_the_file_marker_is_explicit_so_nothing_has_to_be_guessed():
 def test_the_emitters_on_both_sides_use_the_same_marker():
     """The marker is a contract between skillflow (which concatenates the files)
     and this module (which clips the result). A parser aligned to one emitter
-    and not the other reads every bundle as a single unnamed blob."""
+    and not the other reads every bundle as a single unnamed blob.
+
+    Read the INSTALLED skillflow, deliberately — the interesting failure is not
+    "someone edited the checkout", it is "the deployed wheel is older than the
+    parser". That is what shipped: 1.5.42 in the container emitting the bare
+    marker while this module already required `FILE:`, with no manifest and no
+    dropped-file rows to show for it. This assertion is what the pin
+    (`skillflow-py>=1.5.43`) and `prompt_assembler._check_emitter_agrees` back
+    up at install time and at runtime respectively.
+    """
     import inspect
+    import re
     from pathlib import Path
 
     from core import prompt_assembler
@@ -159,4 +169,38 @@ def test_the_emitters_on_both_sides_use_the_same_marker():
         "skillflow.context", fromlist=["x"]))).read_text(encoding="utf-8")
     assert '_FILE_MARKER = "### FILE: "' in sf, (
         "skillflow emits a different marker than this module parses")
-    assert 'f"### {rel}' not in sf, "a bare-marker emitter survived in skillflow"
+    # Match the SHAPE, not one spelling: three of the five original emitters
+    # used the local `rel`, but two spelled it inline as
+    # `f"### {f.relative_to(step_dir)}"`. A guard that only knew the first form
+    # let a revert in the second form through, silently.
+    bare = re.findall(r'f"### \{', sf)
+    assert not bare, (
+        f"{len(bare)} bare-marker emitter(s) survived in skillflow — this "
+        f"module's parser stops seeing file boundaries and clips bundles "
+        f"without a manifest")
+
+
+def test_a_marker_mismatch_is_reported_rather_than_absorbed():
+    """The skew's whole danger is that it degrades SILENTLY, so the detector
+    must speak. Drives it against a stand-in emitter, since the real one now
+    agrees."""
+    import sys
+    import types
+
+    from core import prompt_assembler
+
+    real = sys.modules.get("skillflow.context")
+    fake = types.ModuleType("skillflow.context")
+    fake._FILE_MARKER = "### "                      # 1.5.42's emitter
+    sys.modules["skillflow.context"] = fake
+    try:
+        msg = prompt_assembler._check_emitter_agrees()
+    finally:
+        if real is not None:
+            sys.modules["skillflow.context"] = real
+        else:
+            del sys.modules["skillflow.context"]
+
+    assert "1.5.43" in msg and "manifest" in msg, msg
+    # And it stays quiet when they agree.
+    assert prompt_assembler._check_emitter_agrees() == ""

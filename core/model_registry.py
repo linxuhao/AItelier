@@ -151,11 +151,21 @@ def model_consumers(model: str) -> list[str]:
         # dependency": reformat the assignment — wrap it for line length, switch
         # quote style — and the guard silently reports no consumers, so
         # `delete_model("vision")` succeeds and the readability gate loses the
-        # model it resolves. Quote-agnostic and newline-tolerant here, and
+        # model it resolves. So: quote-agnostic, and tolerant of a wrap after
+        # `get(` or after the comma (`\s*` spans newlines in both places).
+        #
+        # The env-var half is `[^,\n]`, NOT `[^,]`, and the newline matters:
+        # unbounded, a call that has lost its default
+        # (`os.environ.get("GODOT_VISION_ROUTE")`) lets the scan run past the
+        # closing paren to the next comma anywhere later in the file and capture
+        # an unrelated literal — a WRONG consumer, which is worse than none. It
+        # either hides the real dependency or blocks a legitimate delete. An
+        # argument is a string literal; it cannot span a line anyway.
+        #
         # `test_the_tool_dependency_guard_still_matches_the_real_source` fails
         # loudly if the shape drifts far enough to break even this.
         m = re.search(
-            rf'{const}\s*=\s*os\.environ\.get\(\s*[^,]+,\s*["\']([^"\']+)["\']',
+            rf'{const}\s*=\s*os\.environ\.get\(\s*[^,\n]+,\s*["\']([^"\']+)["\']',
             src)
         if m and m.group(1) == model:
             out.append(rel)

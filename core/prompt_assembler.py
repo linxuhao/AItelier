@@ -45,6 +45,40 @@ MAX_CONTEXT_LINES = 1500
 _FILE_HEADER_RE = re.compile(r"^###\s+FILE:\s+(\S.*?)\s*$")
 
 
+def _check_emitter_agrees() -> str:
+    """Say so at import if the installed skillflow emits a different marker.
+
+    This regex is one half of a CROSS-REPO contract; skillflow writes the other.
+    They desynced once — AItelier parsing `FILE:` while the container still ran
+    1.5.42's bare `### <relpath>` — and the symptom was silence: `heads` came
+    back empty, every multi-file bundle fell into the single-file branch, and
+    files were dropped whole with no manifest row naming them. Nothing logged,
+    nothing failed; the architect simply never saw half its design docs.
+
+    The pin (`skillflow-py>=1.5.43`) stops that arriving through pip. What it
+    does not stop is the dev-loop override CLAUDE.md documents — a
+    `pip install --force-reinstall` of an older wheel into the running
+    container — which is precisely how the skew happened. So: check, log, and
+    never raise. A hard failure at import would take the whole server down over
+    a degradation, which is the wrong trade in the other direction.
+    """
+    try:
+        from skillflow.context import _FILE_MARKER
+    except Exception:                                        # noqa: BLE001
+        return ""      # old skillflow, or none — the pin is the real guard
+    if _FILE_HEADER_RE.match(f"{_FILE_MARKER}x.md"):
+        return ""
+    msg = (f"skillflow emits file markers as {_FILE_MARKER!r}, which this "
+           f"parser does not accept — multi-file context entries will be "
+           f"clipped WITHOUT a manifest and dropped files will not be named. "
+           f"Upgrade skillflow to >=1.5.43.")
+    logger.error("%s", msg)
+    return msg
+
+
+_EMITTER_SKEW = _check_emitter_agrees()
+
+
 # Tool definitions are handled by skillflow — injected via _tool_schemas and
 # native function calling.  No hardcoded tool descriptions in prompts.
 
@@ -843,7 +877,7 @@ class PromptAssembler:
 
         ONE entry is not always ONE file. `{from: repository, path: "design/"}`
         concatenates a whole directory into a single entry, each file behind its
-        own "### <relpath>" header, in ALPHABETICAL order — so which files
+        own "### FILE: <relpath>" header, in ALPHABETICAL order — so which files
         survive a cut is decided by their names. Live, 2026-08-26: the game's
         design/ bundle ran 1862 lines against a 1500 budget and the tail —
         40_ux_backlog.md, 90_decisions.md, 99_changelog.md, README.md — was
@@ -874,7 +908,7 @@ class PromptAssembler:
             if src_id:
                 src = f", source='step:{src_id}'"
 
-        # Bundle headers are relative to the bundle ROOT ("### 90_decisions.md"),
+        # Bundle headers are relative to the bundle ROOT ("### FILE: 90_decisions.md"),
         # while `read` resolves against the REPO root — measured: every read the
         # architect and PM issue is repo-relative (scripts/…, playtest/…). Emit
         # the joined path or the hint is a second dead end.

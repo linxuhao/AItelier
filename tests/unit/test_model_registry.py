@@ -220,3 +220,26 @@ def test_the_tool_dependency_guard_still_matches_the_real_source():
     assert reg.model_consumers("vision") == [
         "aitelier/tools/godot_vision/impl.py"]
     assert reg.model_consumers("definitely-not-a-route") == []
+
+
+def test_a_defaultless_env_read_yields_no_consumer_rather_than_a_wrong_one(
+        tmp_path, monkeypatch):
+    """The env-var half of the pattern must not cross a newline.
+
+    Unbounded (`[^,]+`), a call that has lost its default runs past the closing
+    paren to the next comma ANYWHERE later in the file and captures an
+    unrelated string literal. That reports a consumer the file does not have —
+    strictly worse than reporting none, because it either hides the real
+    dependency or blocks a `delete_model` that was legitimate. Reporting
+    nothing at least fails in the direction the neighbouring guard test covers.
+    """
+    src = ('import os\n'
+           '_ROUTE = os.environ.get("GODOT_VISION_ROUTE")\n'
+           'OTHER = fn(a, "vision")\n')
+    tool = tmp_path / "aitelier" / "tools" / "godot_vision"
+    tool.mkdir(parents=True)
+    (tool / "impl.py").write_text(src)
+    (tmp_path / "agent_configs").mkdir()
+    monkeypatch.setattr(reg, "_REPO_ROOT", tmp_path)
+
+    assert reg.model_consumers("vision") == []

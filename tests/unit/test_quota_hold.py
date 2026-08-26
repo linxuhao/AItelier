@@ -281,11 +281,16 @@ def test_the_hold_ends_when_the_FIRST_plan_reopens(monkeypatch):
     """
     from core import ai_router
 
-    now = 1_000_000.0
+    # A REAL reset instant, six hours out, or the 300s "no time given" fallback
+    # is smaller than every cooldown and the shortening never runs — the
+    # assertion then passes on a hold that was never shortened at all.
+    last = datetime(2026, 8, 26, 9, 0, 0, tzinfo=timezone.utc)
+    now = last.timestamp() - 6 * 3600
     monkeypatch.setattr(sched._time, "time", lambda: now)
     monkeypatch.setattr(sched, "_QUOTA_HOLD_UNTIL", 0.0)
     ai_router.reset_endpoint_cooldowns()
-    err = Exception("usage quota exceeded, no time given")
+    err = Exception("usage quota exceeded. It will reset at "
+                    "2026-08-26 09:00:00 +0000.")
     err._aitelier_candidates = ["ark/deepseek-v4-flash",
                                "qwen/deepseek-v4-flash-0731",
                                "deepseek/deepseek-v4-flash"]
@@ -299,6 +304,43 @@ def test_the_hold_ends_when_the_FIRST_plan_reopens(monkeypatch):
         held = sched._quota_hold_remaining()
     finally:
         ai_router.reset_endpoint_cooldowns()
-    assert 0 < held <= 3600 + 1, (
-        f"held {held:.0f}s — must end when the earliest endpoint reopens, not "
-        f"when the last one does")
+    assert 3600 < held <= 3600 + sched._QUOTA_HOLD_GRACE + 1, (
+        f"held {held:.0f}s — must end when the earliest endpoint reopens (plus "
+        f"the grace), not when the last one does")
+
+
+def test_the_shortened_hold_still_clears_the_reset_instant(monkeypatch):
+    """`_QUOTA_HOLD_GRACE` must survive the shortening, and it did not.
+
+    The two sides stored different things: `until` above is grace-padded, while
+    the cooldown map holds the RAW reset instant (`_note_endpoint_spent`). A
+    bare `min()` across them therefore threw the grace away — and not
+    occasionally: `_note_endpoint_spent` runs before the escaping candidate's
+    `return False`, so that candidate is ALWAYS in the map at exactly the
+    instant the error names, and always in `_candidates`. Every shortened hold
+    expired on the reset tick, which is the one moment the grace exists to step
+    past — costing a claim and a retry each time.
+    """
+    from core import ai_router
+
+    now = datetime(2026, 8, 26, 9, 0, 0, tzinfo=timezone.utc).timestamp() - 3600
+    reset = now + 900
+    monkeypatch.setattr(sched._time, "time", lambda: now)
+    monkeypatch.setattr(sched, "_QUOTA_HOLD_UNTIL", 0.0)
+    ai_router.reset_endpoint_cooldowns()
+    err = Exception("usage quota exceeded. It will reset at "
+                    "2026-08-26 09:00:00 +0000.")
+    err._aitelier_candidates = ["ark/flash", "qwen/flash"]
+    try:
+        monkeypatch.setattr(ai_router, "_ENDPOINT_COOLDOWN", {
+            "ark/flash": reset,          # …shortened to this, raw and un-padded
+            "qwen/flash": reset + 600,
+        })
+        sched._note_quota_exhausted(err)
+        held = sched._quota_hold_remaining()
+    finally:
+        ai_router.reset_endpoint_cooldowns()
+    assert held > 900, (
+        f"held {held:.0f}s — the hold ends ON the reset tick; the {sched._QUOTA_HOLD_GRACE}s "
+        f"grace was discarded by comparing a padded instant against a raw one")
+    assert held <= 900 + sched._QUOTA_HOLD_GRACE + 1, f"held {held:.0f}s — over-padded"

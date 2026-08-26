@@ -87,12 +87,28 @@ def _note_quota_exhausted(err) -> float:
             cooling = endpoint_cooldowns()
             mine = [v for k, v in cooling.items() if k in candidates]
             if mine:
-                until = min(until, min(mine))
+                # `+ _QUOTA_HOLD_GRACE` again, not a bare `min`: the cooldown
+                # map stores the RAW reset instant (`_note_endpoint_spent`),
+                # while `until` above is grace-padded. Comparing the two forms
+                # discarded the grace on every single call, not occasionally —
+                # `_note_endpoint_spent` runs before the escaping candidate's
+                # `return False`, so that candidate is always in the map at
+                # exactly the instant the error names, and always in
+                # `_candidates`. The scheduler then woke on the precise tick of
+                # the reset, which is the one case the grace was added for.
+                until = min(until, min(mine) + _QUOTA_HOLD_GRACE)
     except Exception:                                    # noqa: BLE001
         pass    # no gateway state to consult: the error's own instant stands
 
     if until <= _time.time():
         return 0.0
+    # `max`, so a hold can be extended but never cut short by a later call. The
+    # shortening above is therefore WITHIN one call only: two steps failing
+    # concurrently in different executor threads, a 5-hour report landing before
+    # a 5-minute one, leaves the process parked for 5 hours. Kept deliberately —
+    # the hold stops ALL ticks, so releasing it while any model is still spent
+    # sends every project back into the wall. Over-waiting costs latency;
+    # under-waiting costs the retry budget that the run needs to survive.
     _QUOTA_HOLD_UNTIL = max(_QUOTA_HOLD_UNTIL, until)
     _QUOTA_HOLD_REASON = str(err)[:200]
     logging.getLogger("aitelier.scheduler").warning(

@@ -15,8 +15,14 @@ export default [
       parserOptions: { parser: tsParser },
     },
     rules: {
-      // Every {@html} site renders DOMPurify-sanitized output (lib/markdown.ts).
-      'svelte/no-at-html-tags': 'off',
+      // Was 'off', on the stated grounds that "every {@html} site renders
+      // DOMPurify-sanitized output (lib/markdown.ts)". That was not true — four
+      // of the eight interpolated a raw value, and one of them (the delete
+      // dialog's project id) was a real XSS whose value the butler takes
+      // straight from the model. A blanket exemption justified by a claim
+      // nobody re-checked is how it shipped, so the rule is on and the
+      // legitimately-sanitized sites carry their own disable comment.
+      'svelte/no-at-html-tags': 'warn',
       // Pre-existing unkeyed each blocks; visible but non-blocking. Note some
       // lists key by position ON PURPOSE (see Trace.svelte: duplicate seq
       // values made a seq-keyed each fatal).

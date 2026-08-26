@@ -390,7 +390,7 @@
       {:else if loadedContentHtml}
         {@html loadedContentHtml}
       {:else}
-        <p>{@html t('modal.checkpointReached').replace('{id}', projectId || '')}</p>
+        <p>{@html t('modal.checkpointReached').replace('{id}', () => escapeHtml(projectId || ''))}</p>
       {/if}
     </div>
 

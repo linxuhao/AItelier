@@ -13,7 +13,7 @@
     pipelineStateFile,
   } from '../lib/api';
   import type { RepoItem, RepoProjectSummary } from '../lib/api';
-  import {
+  import { escapeHtml,
     formatTime,
     formatTokens,
     formatBytes,
@@ -992,7 +992,7 @@
         <header>
           <h3>{t('dashboard.deleteTitle')}</h3>
         </header>
-        <p>{@html t('dashboard.deleteConfirmMsg').replace('{id}', pendingDeleteId || '')}</p>
+        <p>{@html t('dashboard.deleteConfirmMsg').replace('{id}', () => escapeHtml(pendingDeleteId || ''))}</p>
         <p class="warning">{t('dashboard.deleteWarning')}</p>
         <footer>
           <button class="secondary" onclick={cancelDelete}>{t('dashboard.cancel')}</button>

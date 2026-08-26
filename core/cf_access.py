@@ -89,7 +89,25 @@ def verify(token: str) -> dict | None:
         return None
     try:
         import jwt
+    except Exception:
+        return None
+    # ONLY the key lookup may poison the cache. Wrapping `jwt.decode` in it too
+    # was an anonymous denial-of-WRITE: the `kid` is public (it is in the JWKS
+    # and in the header of every Access token), so one unauthenticated request
+    # carrying the REAL kid with a garbage signature marked that kid bad and
+    # locked every legitimate writer out of write_gate, require_writer and
+    # /api/me for the full TTL, at zero cost, repeatably. An expired cookie in a
+    # a stale tab did the same thing by accident.
+    #
+    # The cache is for "Cloudflare does not have this key", which is a property
+    # of the KID. Signature and claim failures are properties of the TOKEN and
+    # must never be attributed to the key it names.
+    try:
         signing_key = _client().get_signing_key_from_jwt(token).key
+    except Exception:
+        _remember_bad_kid(token)
+        return None
+    try:
         return jwt.decode(
             token,
             signing_key,
@@ -98,7 +116,6 @@ def verify(token: str) -> dict | None:
             issuer=_ISSUER,
         )
     except Exception:
-        _remember_bad_kid(token)
         return None
 
 

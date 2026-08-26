@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Literal, Optional
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
+from core.project_id import PROJECT_ID_PATTERN
 
 class TaskStatus(str, Enum):
     """任务状态枚举定义"""
@@ -46,7 +47,7 @@ class ProjectCreate(BaseModel):
     # the slugify is only the FALLBACK). "filesystem-safe slug" was a
     # description with nothing enforcing it.
     project_id: str = Field(
-        ..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        ..., pattern=PROJECT_ID_PATTERN,
         description="Unique project identifier (filesystem-safe slug)")
     name: Optional[str] = Field(None, description="Human-readable project name")
     priority: Optional[int] = Field(0, description="Scheduling priority (higher = sooner)")

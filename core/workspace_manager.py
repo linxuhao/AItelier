@@ -116,6 +116,8 @@ class WorkspaceManager:
         :param repo_url: 远程仓库 URL (clone 模式必填)
         :param graph_name: skillflow graph config name
         """
+        from core.project_id import require_valid
+        require_valid(project_id)
         dps_path = self._get_secure_path(project_id)
         dps_path.mkdir(parents=True, exist_ok=True)
 

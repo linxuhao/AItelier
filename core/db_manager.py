@@ -729,7 +729,17 @@ class DBManager:
         """
         Idempotently create a run row if it does not exist.
         Returns the run dict (existing or newly created).
+
+        Validates `project_id` HERE, at the choke point, rather than at the
+        callers. There are thirteen `pid = args["project_id"]` sites in
+        core/meta_agent alone plus core/run_launcher, and the id becomes a
+        directory name and is displayed verbatim — so a rule enforced at some of
+        the doors is a rule that is not enforced. The REST schema keeps its
+        `pattern=` for the error message a client wants; this is the one that
+        cannot be walked around.
         """
+        from core.project_id import require_valid
+        require_valid(project_id)
         if name is None:
             name = project_id.replace("-", " ").replace("_", " ").title()
         # For new/clone projects the code repo lives at projects_dir()/project_id

@@ -418,7 +418,7 @@ describe('Project.svelte', () => {
         ...MOCK_CHECKPOINT, checkpoint: '5_review', step: '5_review',
         label: 'Final Review',
       });
-      await vi.advanceTimersByTimeAsync(3200);
+      await vi.advanceTimersByTimeAsync(31000);   // safety-net poll, no longer 3s
 
       // The box is gone with its text, and Approve is available again for the
       // checkpoint now on screen.
@@ -449,7 +449,7 @@ describe('Project.svelte', () => {
 
       mockApi.getCheckpoint.mockResolvedValue(
         { ...MOCK_CHECKPOINT, rejection_count: 1 });
-      await vi.advanceTimersByTimeAsync(3200);
+      await vi.advanceTimersByTimeAsync(31000);   // safety-net poll, no longer 3s
 
       expect(container.querySelector('#cp-feedback')).toBeNull();
     } finally {

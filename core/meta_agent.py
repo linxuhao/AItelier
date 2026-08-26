@@ -2403,7 +2403,21 @@ class MetaAgent:
         from core.meta_run import META_GRAPH
 
         initial = (args.get("initial_message") or "").strip()
+        # Validated HERE, not only in the REST schema. This is the door the
+        # model uses: `project_id` is a tool argument it chooses, and it lands
+        # in `ws.setup_workspace(pid)` and `ws._get_secure_path(pid)` — a path
+        # traversal independently of the fact that the SPA renders it verbatim.
+        # The slugify is the FALLBACK, so it protects nothing when the model
+        # supplies the field.
+        from core.project_id import is_valid as _pid_ok
         pid = args.get("project_id") or self._slugify(args.get("name") or initial)
+        if not _pid_ok(pid):
+            return {"error": (
+                f"project_id {pid!r} is not usable: it becomes a directory name "
+                f"and is displayed verbatim, so it must be 1-64 characters of "
+                f"letters, digits, '.', '_' or '-', starting with a letter or "
+                f"digit. Pass a simpler project_id, or omit it and one will be "
+                f"derived from the name.")}
         repo_type = args.get("repo_type", "new")
         repo_path = args.get("repo_path")
         repo_url = args.get("repo_url")

@@ -4,9 +4,9 @@
  * It used to be fetched exactly once — on the click that opened it — so a
  * reader watching a live run saw a frozen graph: the node drawn as running had
  * often finished minutes earlier, and the trace pane followed it there. The
- * page already polls every 3s for project/runs/checkpoint; the run detail now
- * rides along, and stops once the run is terminal so a finished run is not
- * re-read forever.
+ * page refreshes on SSE events (with a 30s safety-net poll) for
+ * project/runs/checkpoint; the run detail rides along, and stops once the run
+ * is terminal so a finished run is not re-read forever.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
@@ -93,7 +93,12 @@ describe('Project run detail polling', () => {
     mockApi.getRunDetail.mockResolvedValue(detail('running', 'completed'));
     await waitFor(() => expect(container.querySelector('.node.is-current')).not.toBeNull());
 
-    vi.advanceTimersByTime(3100);
+    // 31s, not 3.1s: the page no longer polls every 3 seconds. It refreshes
+    // from the SSE stream and keeps a 30s interval as the SAFETY NET for events
+    // that never arrive. This test drives the safety net on purpose — the
+    // event-driven path is covered separately below — because "it keeps moving
+    // even when the stream is broken" is its own guarantee.
+    vi.advanceTimersByTime(31000);
 
     await waitFor(() => {
       expect(mockApi.getRunDetail.mock.calls.length).toBeGreaterThan(1);
@@ -110,10 +115,10 @@ describe('Project run detail polling', () => {
     await waitFor(() => expect(container.querySelector('.step-graph svg')).not.toBeNull());
     expect(mockApi.getRunDetail).toHaveBeenCalledTimes(1);
 
-    // Three ticks' worth. The other test proves a tick DOES re-read an active
-    // run, so this staying at one call is the guard doing its job, not a poll
-    // that never ran.
-    vi.advanceTimersByTime(9300);
+    // Three safety-net ticks' worth (30s each). The other test proves a tick
+    // DOES re-read an active run, so this staying at one call is the guard
+    // doing its job, not a poll that never ran.
+    vi.advanceTimersByTime(93000);
     await waitFor(() => expect(mockApi.getProject.mock.calls.length).toBeGreaterThan(1));
 
     expect(mockApi.getRunDetail).toHaveBeenCalledTimes(1);

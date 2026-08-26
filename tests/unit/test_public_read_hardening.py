@@ -374,12 +374,25 @@ class TestTheReadCache:
         b = _read_cache.cached(("runs", None, None, "b@x"), lambda: "B")
         assert (a, b) == ("A", "B")
 
-    def test_the_owner_is_in_the_key(self):
-        """Pinned at the call site too: the tuple above is easy to shorten by
-        accident while the cache itself stays correct."""
+    def test_the_key_carries_the_owner_and_nothing_a_caller_picks(self):
+        """Two properties, and the second one was learned the hard way.
+
+        The owner must be IN the key or one identity's runs reach another. And
+        nothing else may be: the key used to carry `config_name` and `status`,
+        which are free-form query params, so `?status=<random>` was a fresh key
+        every time — never a hit, full ~0.5s uncached kernel, i.e. the exact
+        amplifier the cache was added to remove, one parameter away. After the
+        cache grew a key cap it was worse: ~512 such requests evicted the real
+        entries and pushed every dashboard tab back onto the slow path.
+        """
         import api.run_routers as rr
         src = inspect.getsource(rr.list_all_runs)
-        assert '("runs", config_name, status, owner)' in src
+        assert '("runs", owner)' in src
+        key_line = next(l for l in src.splitlines() if '("runs", owner)' in l)
+        for caller_supplied in ("config_name", "status"):
+            assert caller_supplied not in key_line, (
+                f"{caller_supplied} is caller-controlled; keying on it makes the "
+                f"cache bypassable and, with a key cap, flushable")
 
     def test_it_expires(self):
         from api import _read_cache
@@ -732,3 +745,128 @@ def test_every_subprocess_in_run_tests_scrubs_the_environment():
     scrubbed = src.count("env_scrub.scrubbed_env()") + src.count(
         "env_scrub.scrubbed_env(PYTHONPATH=")
     assert scrubbed >= 4, f"{spawns} spawn sites, only {scrubbed} scrubbed"
+
+
+# ── 6. Round 3: the critical one was mine ─────────────────────────────────────
+
+class TestAnUnknownKidCannotLockOutTheRealWriter:
+    """The negative cache was an anonymous denial-of-WRITE.
+
+    `_remember_bad_kid` sat in the `except` of the whole try, which covered
+    `jwt.decode` — so a token whose key resolved fine and whose SIGNATURE was
+    wrong marked that `kid` bad. The kid is public: it is in the JWKS and in the
+    header of every Access token. One unauthenticated request carrying the REAL
+    kid with a garbage signature locked every legitimate writer out of
+    write_gate, require_writer and /api/me for the full TTL, at zero cost,
+    repeatably. An expired cookie in a stale tab did it by accident.
+
+    The cache means "Cloudflare does not have this key" — a property of the KID.
+    A signature or claim failure is a property of the TOKEN and must never be
+    attributed to the key it names. This is the round-2 lesson recurring: a
+    cache added to a previously-dead path, whose new behaviour was not examined.
+    """
+
+    @pytest.fixture
+    def signed(self, monkeypatch):
+        import types
+        import jwt as _jwt
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from core import cf_access
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        monkeypatch.setattr(cf_access, "_TEAM_DOMAIN", "t.example")
+        monkeypatch.setattr(cf_access, "_AUD", "aud")
+        monkeypatch.setattr(cf_access, "_ISSUER", "https://t.example")
+        cf_access._bad_kids.clear()
+        claims = {"email": "w@x.y", "aud": "aud", "iss": "https://t.example"}
+        good = _jwt.encode(claims, key, algorithm="RS256", headers={"kid": "real"})
+        forged = _jwt.encode(claims, other, algorithm="RS256", headers={"kid": "real"})
+
+        class _Client:
+            def get_signing_key_from_jwt(self, tok):
+                return types.SimpleNamespace(key=key.public_key())
+
+        monkeypatch.setattr(cf_access, "_client", lambda: _Client())
+        return cf_access, good, forged
+
+    def test_a_forged_signature_does_not_poison_the_real_key(self, signed):
+        cf_access, good, forged = signed
+        assert cf_access.verify(forged) is None
+        assert not cf_access._bad_kids, "a signature failure blamed the key"
+        assert (cf_access.verify(good) or {}).get("email") == "w@x.y"
+
+    def test_a_kid_the_jwks_does_not_have_is_still_cached(self, signed, monkeypatch):
+        """The protection this cache exists for must survive the fix."""
+        cf_access, good, _ = signed
+
+        def _missing():
+            raise KeyError("no such kid")
+
+        monkeypatch.setattr(cf_access, "_client", _missing)
+        assert cf_access.verify(good) is None
+        assert "real" in cf_access._bad_kids
+
+
+def test_project_ids_are_validated_at_the_choke_points_not_the_callers():
+    """There are thirteen `pid = args["project_id"]` sites in core/meta_agent
+    alone, plus core/run_launcher. The first attempt put a `pattern=` on the
+    REST schema — which guards `POST /api/projects`, a writer-gated mutating
+    method, i.e. not the door the model uses. Validating at creation is the one
+    place that cannot be walked around."""
+    import inspect as _i
+    from core.db_manager import DBManager
+    from core.workspace_manager import WorkspaceManager
+    assert "require_valid" in _i.getsource(DBManager.ensure_project)
+    assert "require_valid" in _i.getsource(WorkspaceManager.setup_workspace)
+
+
+def test_the_read_window_cannot_be_widened_by_the_caller():
+    """Streaming bounded memory by the PAGE — and then `?end_line=99999999`
+    made the page the whole file again, measured at 76MB, within 13% of the
+    pre-fix cost. A caller picking the page size is the same lever renamed."""
+    import api.project_routers as pr
+    src = inspect.getsource(pr.workspace_file)
+    assert "min(stop_idx, start_idx + _WORKSPACE_FILE_MAX_LINES)" in src
+
+
+def test_all_four_repo_readers_are_gated(monkeypatch):
+    """`repo_status` was the fourth. The batch that added the gate said "three
+    readers together" and there were four — it publishes the absolute host path,
+    the remote URL, branch state and 20 commit subjects with author identities."""
+    import api.project_routers as pr
+    for fn in (pr._resolve_workspace_target, pr.workspace_tree, pr.repo_status):
+        assert "_require_writer_for_external_repo" in inspect.getsource(fn), fn.__name__
+    route = next(r for r in pr.router.routes if r.path.endswith("/repo/archive"))
+    from api.authz import require_writer
+    assert require_writer in [d.call for d in route.dependant.dependencies]
+
+
+def test_the_data_dir_itself_is_not_a_legitimate_repo_root():
+    """`is_relative_to(aitelier_home())` also admitted the data dir and
+    `projects/` as a whole, so one project whose repo_path was an ANCESTOR
+    published every other project's tree through a single reader — and bypassed
+    each of their own owner checks getting there."""
+    from api.project_routers import _repo_is_inside_the_data_dir as ok
+    from core import datadir
+    assert not ok({"repo_path": str(datadir.aitelier_home())})
+    assert not ok({"repo_path": str(datadir.projects_dir())})
+    assert ok({"repo_path": str(datadir.projects_dir() / "a-real-project")})
+
+
+def test_the_response_carries_a_content_security_policy():
+    """The SPA renders content authored by agents that read the open web, to
+    anonymous strangers. The CSP is the compensating control for every
+    `{@html}` site — the ones that exist and the one somebody adds next."""
+    import api.main as m
+    csp = m._SEC_HEADERS["Content-Security-Policy"]
+    for directive in ("default-src 'self'", "script-src 'self'",
+                      "object-src 'none'", "frame-ancestors 'none'",
+                      "base-uri 'none'", "form-action 'none'"):
+        assert directive in csp
+    # Verified against the real build: no inline <script>, no eval. If either
+    # ever appears, this must fail rather than be loosened quietly.
+    assert "'unsafe-eval'" not in csp
+    assert "'unsafe-inline'" not in csp.split("style-src")[0]
+    src = inspect.getsource(m.security_headers)
+    assert "setdefault" in src, (
+        "assignment would LOOSEN the raw-image endpoint's stricter own policy")

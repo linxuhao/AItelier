@@ -5,7 +5,7 @@
   import { connectionStore } from '../stores/connection';
   import { projectStore, setCurrentProject } from '../stores/project';
   import { listAllRuns, createProject, deleteProject } from '../lib/api';
-  import { formatTime, formatTokens, formatTaskProgress, parseStatus, cacheBadgeClass } from '../lib/format';
+  import { escapeHtml, formatTime, formatTokens, formatTaskProgress, parseStatus, cacheBadgeClass } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
 
   // ── State ──
@@ -389,7 +389,7 @@
         <header>
           <h3>{t('dashboard.deleteTitle')}</h3>
         </header>
-        <p>{@html t('dashboard.deleteConfirmMsg').replace('{id}', pendingDeleteId || '')}</p>
+        <p>{@html t('dashboard.deleteConfirmMsg').replace('{id}', () => escapeHtml(pendingDeleteId || ''))}</p>
         <p class="warning">{t('dashboard.deleteWarning')}</p>
         <footer>
           <button class="secondary" onclick={cancelDelete}>{t('dashboard.cancel')}</button>

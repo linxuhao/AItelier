@@ -281,6 +281,46 @@ async def localhost_only(request: Request, call_next):
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
+# Security headers. The SPA renders content authored by agents that read the
+# open web, and the page is served to anonymous strangers, so a CSP is the
+# compensating control for every `{@html}` site — the ones that exist and the
+# ones somebody adds next.
+#
+# Verified against the real build before choosing the directives: no inline
+# <script>, no eval / new Function (Svelte 5 runes compile without them), CSS is
+# extracted to a file, but inline `style=` ATTRIBUTES are used (progress bars)
+# and Pico ships data: SVG backgrounds — hence 'unsafe-inline' for style-src and
+# data: for img-src, and nothing else loosened. All three <form>s are
+# onsubmit+preventDefault, so `form-action 'none'` costs nothing and
+# independently neuters a phishing form written into a markdown file.
+#
+# Set as a RESPONSE HEADER, not an index.html meta tag: `frame-ancestors` is
+# ignored in a meta tag, a meta tag would not cover /assets, and index.html is a
+# build input baked into the image, so it would drift from what is served.
+_SEC_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'; "
+        "object-src 'none'; frame-src 'none'; frame-ancestors 'none'; "
+        "base-uri 'none'; form-action 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "X-Frame-Options": "DENY",
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for k, v in _SEC_HEADERS.items():
+        # setdefault, NOT assignment: the raw-image endpoint sets a STRICTER
+        # policy of its own (`default-src 'none'`), and overwriting it here
+        # would LOOSEN the one response that was already thought about.
+        response.headers.setdefault(k, v)
+    return response
+
+
 @app.middleware("http")
 async def invalidate_read_cache(request: Request, call_next):
     """Drop the few-second read cache after anything that could have changed.

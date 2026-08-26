@@ -46,7 +46,11 @@ _WORKSPACE_FILE_MAX_BYTES = 4 * 1024 * 1024
 # everything and then truncating.
 # Infrastructure files the workspace readers never serve: engine
 # bookkeeping, not anything the pipeline produced.
-_WORKSPACE_HIDDEN_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm"}
+_WORKSPACE_HIDDEN_SUFFIXES = {
+    ".db", ".sqlite", ".sqlite3",
+    ".db-wal", ".db-shm", ".db-journal",
+    ".sqlite-wal", ".sqlite-shm", ".sqlite3-wal", ".sqlite3-shm",
+}
 _WORKSPACE_TREE_MAX = 200
 _WORKSPACE_TREE_SCAN_MAX = 20000
 
@@ -88,10 +92,22 @@ def _repo_is_inside_the_data_dir(project: dict) -> bool:
     rp = (project or {}).get("repo_path")
     if not rp:
         return True   # repo-less projects have nothing to expose
+    # Under a project/workspace root, NOT merely under the data dir. `is_relative_to`
+    # on `aitelier_home()` also admits the data dir itself and `projects/` as a
+    # whole, so one project whose repo_path was an ANCESTOR would publish every
+    # other project's tree through a single reader — and bypass each of their
+    # own owner checks on the way.
     try:
-        return Path(rp).resolve().is_relative_to(datadir.aitelier_home().resolve())
+        target = Path(rp).resolve()
     except (OSError, ValueError):
         return False
+    for root in (datadir.projects_dir(), datadir.workspaces_dir()):
+        try:
+            if target.is_relative_to(root.resolve()) and target != root.resolve():
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
 
 
 def _require_writer_for_external_repo(project: dict, request) -> None:
@@ -343,14 +359,24 @@ def workspace_tree(
         # Prune, don't filter: descending into .git and discarding the results
         # is the expensive half of the work this is meant to avoid.
         dirnames[:] = [d for d in dirnames if d != ".git"]
+        # Directories count toward the scan budget too. Counting only files made
+        # `_WORKSPACE_TREE_SCAN_MAX` unreachable — `scanned` incremented on the
+        # same line as `tree.append`, so it could never exceed the 200-file cap
+        # — and left a directory-heavy subtree walked end to end for free.
+        scanned += len(dirnames) + len(filenames)
         rel_dir = Path(dirpath).relative_to(base)
         for name in filenames:
-            scanned += 1
-            tree.append(str(rel_dir / name) if rel_dir.parts else name)
-            if len(tree) >= _WORKSPACE_TREE_MAX or scanned >= _WORKSPACE_TREE_SCAN_MAX:
+            # `.git` as a FILE is the gitfile pointer a submodule or worktree
+            # leaves behind; pruning dirnames does not touch it, and listing an
+            # entry whose read 404s both confirms it exists and looks broken.
+            if name == ".git" or Path(name).suffix.lower() in _WORKSPACE_HIDDEN_SUFFIXES:
+                continue
+            if len(tree) >= _WORKSPACE_TREE_MAX:
                 truncated = True
                 break
-        if truncated:
+            tree.append(str(rel_dir / name) if rel_dir.parts else name)
+        if truncated or scanned >= _WORKSPACE_TREE_SCAN_MAX:
+            truncated = truncated or scanned >= _WORKSPACE_TREE_SCAN_MAX
             break
     tree.sort()
     return {"project_id": project_id, "root": root, "tree": tree,
@@ -397,10 +423,15 @@ def workspace_file(
     # (2000 lines) no matter how the bytes decode. The cap above now bounds
     # time rather than memory, which is what a size check can honestly do.
     start_idx = (start_line - 1) if start_line and start_line > 0 else 0
+    # The window is capped, not just defaulted. Streaming bounded memory by the
+    # PAGE — and then `?end_line=99999999` made the page the whole file again,
+    # measured at 76MB, within 13% of the pre-fix cost. A caller picking the
+    # page size is the same lever wearing a different name.
     if end_line and end_line > 0:
         stop_idx = max(end_line, start_idx)
     else:
         stop_idx = start_idx + _WORKSPACE_FILE_MAX_LINES
+    stop_idx = min(stop_idx, start_idx + _WORKSPACE_FILE_MAX_LINES)
     window: list[str] = []
     total = 0
     with target.open("r", encoding="utf-8", errors="replace") as fh:
@@ -471,6 +502,7 @@ def repo_status(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, None, project)
+    _require_writer_for_external_repo(project, request)
     return ws.repo_status(project_id)
 
 

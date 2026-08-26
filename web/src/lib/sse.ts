@@ -140,8 +140,15 @@ function _dispatch(event: Record<string, unknown>): void {
   }
 
   const etype = event.type as string;
-  const set = _handlers.get(etype);
-  if (set) {
+  // '*' receives every event. A view that wants to refresh "when anything
+  // happened to my project" must not have to enumerate event types — that list
+  // goes stale silently the first time the backend adds one, and the symptom is
+  // a page that quietly stops updating.
+  const set = new Set([
+    ...(_handlers.get(etype) ?? []),
+    ...(_handlers.get('*') ?? []),
+  ]);
+  if (set.size) {
     // Iterate over a copy so handler removal during iteration is safe
     const copy = [...set];
     for (const handler of copy) {

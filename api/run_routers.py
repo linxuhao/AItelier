@@ -77,21 +77,32 @@ def list_all_runs(
     that dropped it would serve one identity's runs to another.
     """
     owner = owner_filter(user, request)
-    return _read_cache.cached(
-        ("runs", config_name, status, owner),
-        lambda: _list_all_runs_uncached(config_name, status, owner, db, registry))
+    # The key carries the OWNER and nothing else. It used to carry `config_name`
+    # and `status` too, which are free-form query params an anonymous caller
+    # picks: `?status=<random>` was a fresh key every time, so it never hit and
+    # paid the full ~0.5s uncached kernel — the same amplifier the cache was
+    # added to remove, one query param away. Worse, once `_read_cache` grew a
+    # key cap, ~512 such requests EVICTED the legitimate entries and pushed
+    # every real dashboard tab back onto the uncached path.
+    #
+    # So: cache the unfiltered list, and filter the cached copy. The filters are
+    # a list comprehension over ~20 rows; the expensive part is what is now
+    # shared. Nothing an attacker types reaches the key.
+    rows = _read_cache.cached(("runs", owner),
+                              lambda: _list_all_runs_uncached(owner, db, registry))
+    if config_name:
+        rows = [r for r in rows if (r.get("config_name") or "dpe_default_v2") == config_name]
+    if status:
+        rows = [r for r in rows if (r.get("status") or "").split(":")[0] == status]
+    return {"runs": rows}
 
 
-def _list_all_runs_uncached(config_name, status, owner, db, registry):
+def _list_all_runs_uncached(owner, db, registry):
     rows = db.list_projects_with_stats(owner_email=owner)
     out = []
     for r in rows:
         cfg = r.get("config_name") or "dpe_default_v2"
-        if config_name and cfg != config_name:
-            continue
         r = enrich_project_status(r) or r
-        if status and (r.get("status") or "").split(":")[0] != status:
-            continue
         m = registry.get(cfg)
         r["config_label"] = m.label if m else cfg
         r["has_task_loop"] = bool(m and m.has_task_loop)
@@ -140,7 +151,7 @@ def _list_all_runs_uncached(config_name, status, owner, db, registry):
         for r in out:
             r["cache_stats"] = None
 
-    return {"runs": out}
+    return out
 
 
 # ── Run listing (per project) ────────────────────────────────────────

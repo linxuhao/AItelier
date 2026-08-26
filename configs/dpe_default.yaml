@@ -280,15 +280,37 @@ steps:
       - source: { tool: "dir_tree" }
     output:
       mode: "content"
+      # Promotion REPLACES this step's directory, and a re-planned PM re-emits
+      # only the cards it changed — the reasonable reading of a briefing that
+      # describes staging and step output as layered for READING and says
+      # nothing about the destructive write. Live 2026-08-26: a re-plan wrote 2
+      # of 9 cards and promotion deleted the other 8 while the manifest still
+      # named them. carry_forward (skillflow >=1.5.44) seeds staging from this
+      # step's own promoted output, so an untouched card survives and dropping
+      # one becomes an explicit `delete_task_card` call.
+      carry_forward: true
       fixed:
         tasks_manifest: { file: "tasks_manifest.json", format: '{"execution_order": [[str, ...], ...]}' }
         task_card: { file: "tasks/*.json", format: '{"id": str, "description": "ONE-LINE summary (max 80 chars)", "detailed_requirements": str, "artifact_requirement": str, "dependencies": [str, ...], "task_type": str, "interface_contract": str}' }
     validation:
       - files: ["tasks_manifest.json"]
         tool: "file_exists"
+      # …and the manifest must agree with the cards. This step is
+      # output.mode=content: promotion rmtree's the step dir and renames staging
+      # over it, so a card not re-written this run is DELETED — while the agent's
+      # prompt describes staging and step output as LAYERED for reading and says
+      # nothing about the destructive write. A rejected agent therefore re-emits
+      # only what it changed, which is the reasonable reading of what it was told.
+      # Live 2026-08-26 (jinyong-hud): a re-plan wrote 2 of 9 cards, promotion
+      # deleted the other 8 (git-confirmed), `file_exists` passed, and the break
+      # would have surfaced only when the task loop reached the first missing
+      # card — by then the cards were gone from the step dir.
+      - files: ["tasks_manifest.json"]
+        tool: "tasks_manifest_complete"
     # SF-4: removed json_schema validation — LLM-generated JSON format varies;
     # strict schema causes infinite retry loops when validation fails on each
-    # attempt. file_exists is sufficient; the reviewer (3_review) catches issues.
+    # attempt. The two checks above are shape-free: one file must exist, and the
+    # manifest must not name a card that is not there.
     checkpoint: true
     checkpoint_label: "Review Task Breakdown"
     transitions:

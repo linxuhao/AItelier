@@ -98,8 +98,7 @@ cp .env.example .env        # endpoints and options; NOT the keys
 A missing key fails naming the provider, the key, the file to create, **and
 the model whose endpoint list sent it there**.
 
-One Docker-specific constraint: the container mounts **only the secret names
-enumerated in `docker-compose.yml`** — the secrets dir itself is deliberately
-not bind-mounted, so keys never appear in any workspace-visible path. Register
-a provider whose key name isn't in that list and the file will sit unread on
-the host until you add a matching `secrets:` entry to the compose file.
+No Docker step at all: the whole `~/.aitelier-secrets` dir is mounted
+read-only at `/run/aitelier-secrets`, so **whatever** key name a provider
+declares resolves the moment its file exists — no compose edit, no restart.
+(The dir still never appears in any workspace-visible path.)

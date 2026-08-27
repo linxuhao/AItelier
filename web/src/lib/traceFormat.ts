@@ -160,6 +160,14 @@ export function modelBinding(payload: unknown): string | null {
   if (!payload || typeof payload !== 'object') return null;
   const p = payload as Record<string, any>;
   if (!p.served_by) return null;
-  const route = p.model_route && p.model_route !== p.served_by ? p.model_route + ' \u2192 ' : '';
-  return route + p.served_by;
+  // Display the MODEL only, never the provider: this renders on a public
+  // page, and which reseller served a given model is commercial information
+  // some providers do not want advertised. The full served_by stays in the
+  // trace payload for the operator.
+  const model = String(p.served_by).includes('/')
+    ? String(p.served_by).split('/', 2)[1]
+    : String(p.served_by);
+  const route = p.model_route && p.model_route !== model && p.model_route !== p.served_by
+    ? p.model_route + ' \u2192 ' : '';
+  return route + model;
 }

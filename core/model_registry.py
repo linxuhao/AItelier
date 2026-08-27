@@ -33,7 +33,7 @@ Three rules, all of them about not breaking a running deployment:
     down at once.
 
 Keys are never written here. They are secret FILES (`~/.aitelier-secrets/<NAME>`
-mounted at `/run/secrets/<NAME>`); this layer only records which NAME a provider
+reached via the whole-dir mount at `/run/aitelier-secrets`); this layer only records which NAME a provider
 reads, which is exactly the split that keeps credentials out of the API surface.
 """
 
@@ -101,9 +101,36 @@ def _routes_raw() -> dict:
     return _load(ROUTES_FILE)
 
 
+def _candidates_of(value) -> list[str] | None:
+    """Flatten a route VALUE to its candidate list, dict form included.
+
+    The `isinstance(v, list)` filter that used to live in `_routes()` was
+    written when the only non-list values were `_comment` strings. The
+    rotate/fallback dict form fell into that comment bucket, which blinded
+    every registry READ: `provider_consumers` could not see a provider named
+    only inside a rotate pool (so `delete_provider` sailed past its own
+    guard), and `list_models` silently omitted the deployment's primary
+    routes from /api/models and the MCP tools. Flatten instead of filter.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        rotate = value.get("rotate")
+        fallback = value.get("fallback", [])
+        if isinstance(rotate, list) and isinstance(fallback, list):
+            return list(rotate) + list(fallback)
+    return None
+
+
 def _routes() -> dict:
-    return {k: v for k, v in _routes_raw().items()
-            if not k.startswith("_") and isinstance(v, list)}
+    out = {}
+    for k, v in _routes_raw().items():
+        if k.startswith("_"):
+            continue
+        cands = _candidates_of(v)
+        if cands is not None:
+            out[k] = cands
+    return out
 
 
 def _validate_or_raise(routes_doc: dict) -> None:

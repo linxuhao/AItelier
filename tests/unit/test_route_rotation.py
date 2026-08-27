@@ -77,3 +77,55 @@ def test_registry_refuses_to_blind_edit_a_rotation_route(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "PROVIDERS_FILE", provs)
     with pytest.raises(reg.RegistryError, match="dict form"):
         reg.map_model("flash", "a/m3")
+
+
+def test_registry_reads_see_dict_form_routes(tmp_path, monkeypatch):
+    """The read side must flatten the dict form, or delete_provider's guard
+    goes blind for providers named only inside a rotate pool — found live:
+    opencodego was deletable while flash/pro still rotated through it, and
+    /api/models had silently stopped listing both primary routes."""
+    import json as _json
+    import core.model_registry as reg
+    routes = tmp_path / "model_routes.json"
+    provs = tmp_path / "llm_providers.json"
+    routes.write_text(_json.dumps(
+        {"flash": {"rotate": ["a/m1", "b/m2"], "fallback": ["payg/m9"]},
+         "plain": ["a/m1"]}))
+    provs.write_text(_json.dumps({
+        "a": {"base_url": "u", "api_key_env": ""},
+        "b": {"base_url": "u", "api_key_env": ""},
+        "payg": {"base_url": "u", "api_key_env": ""}}))
+    monkeypatch.setattr(reg, "ROUTES_FILE", routes)
+    monkeypatch.setattr(reg, "PROVIDERS_FILE", provs)
+
+    assert reg.provider_consumers("b") == ["flash"]        # rotate member
+    assert reg.provider_consumers("payg") == ["flash"]     # fallback member
+    listed = {m["model"] for m in reg.list_models()["models"]}
+    assert listed == {"flash", "plain"}
+    flash = next(m for m in reg.list_models()["models"] if m["model"] == "flash")
+    assert [e["endpoint"] for e in flash["endpoints"]] == ["a/m1", "b/m2", "payg/m9"]
+    with pytest.raises(reg.RegistryError, match="still"):
+        reg.delete_provider("b")
+
+
+def test_next_usable_skips_a_keyless_candidate(tmp_path, monkeypatch):
+    """With rotation, a pool member becomes the FIRST bound endpoint on ~1/n of
+    steps; binding one whose declared key has no value buys a guaranteed
+    AuthenticationError + failover on every such step. Missing key file means
+    'unused' — the gateway must honor that reading too."""
+    import json as _json
+    from core.ai_router import AIGateway
+    provs = tmp_path / "llm_providers.json"
+    provs.write_text(_json.dumps({
+        "nokey": {"base_url": "u", "api_key_env": "NOKEY_API_KEY"},
+        "haskey": {"base_url": "u", "api_key_env": "HAS_API_KEY"},
+    }))
+    monkeypatch.setenv("HAS_API_KEY", "x")
+    monkeypatch.delenv("NOKEY_API_KEY", raising=False)
+    gw = AIGateway.__new__(AIGateway)
+    gw._config_path = str(provs)
+    gw._candidates = ["nokey/m1", "haskey/m2"]
+    assert gw._next_usable(0) == 1
+    # every candidate keyless → degrade to "try it anyway", never brick
+    gw._candidates = ["nokey/m1", "nokey/m2"]
+    assert gw._next_usable(0) == 0

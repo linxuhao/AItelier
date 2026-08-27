@@ -41,19 +41,35 @@
   // fetch — usage rows are ~1 per LLM turn, dozens not thousands).
   let bindings = $state<{ label: string; turns: number; tokens: number }[]>([]);
 
+  let bindingsTruncated = $state(false);
+
   async function loadBindings(): Promise<void> {
     try {
-      const data = await getTrace(runId, { limit: 500, order: 'asc', category: 'usage' });
+      // Page to the END: a long run has well over one page of usage rows, and
+      // a summary computed from the first page only omits late-run failovers —
+      // the exact thing these chips exist to surface.
       const agg = new Map<string, { turns: number; tokens: number }>();
-      for (const e of ((data && data.traces) || [])) {
-        const label = modelBinding(e.payload);
-        if (!label) continue;
-        const cur = agg.get(label) || { turns: 0, tokens: 0 };
-        cur.turns += 1;
-        cur.tokens += Number((e.payload as any)?.prompt_tokens || 0)
-                    + Number((e.payload as any)?.completion_tokens || 0);
-        agg.set(label, cur);
+      let afterSeq: number | null = null;
+      let more = true;
+      for (let page = 0; page < 20 && more; page++) {
+        const data = await getTrace(runId, {
+          limit: 500, order: 'asc', category: 'usage',
+          ...(afterSeq != null ? { afterSeq } : {}),
+        });
+        for (const e of ((data && data.traces) || [])) {
+          const label = modelBinding(e.payload);
+          if (!label) continue;
+          const cur = agg.get(label) || { turns: 0, tokens: 0 };
+          cur.turns += 1;
+          cur.tokens += Number((e.payload as any)?.prompt_tokens || 0)
+                      + Number((e.payload as any)?.completion_tokens || 0);
+          agg.set(label, cur);
+        }
+        more = !!(data && data.has_more);
+        afterSeq = (data && data.next_seq != null) ? data.next_seq : null;
+        if (afterSeq == null) break;
       }
+      bindingsTruncated = more;
       bindings = [...agg.entries()].map(([label, v]) => ({ label, ...v }));
     } catch { /* summary is a courtesy; the list below is the record */ }
   }
@@ -170,6 +186,9 @@
           {b.label} <small>&times;{b.turns}</small>
         </span>
       {/each}
+      {#if bindingsTruncated}
+        <span class="binding-chip" title="summary covers the first 10000 usage rows only">&hellip;</span>
+      {/if}
     </div>
   {/if}
 
@@ -194,7 +213,7 @@
       </select>
     </label>
 
-    <button class="outline" onclick={loadTrace}>{t('trace.refresh')}</button>
+    <button class="outline" onclick={() => { loadTrace(); loadBindings(); }}>{t('trace.refresh')}</button>
   </div>
 
   <!-- Loading state -->

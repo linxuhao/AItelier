@@ -110,13 +110,37 @@ class StreamManager:
         return sum(len(q) for q in self._queues.values())
 
     def connection_snapshot(self) -> list[dict]:
-        """One dict per live SSE connection: {who, since, channel}.
+        """One dict per live VIEWER connection: {who, since, channel}.
 
         `who` is the Cloudflare-Access-verified email or None for anonymous.
         Accuracy comes for free: a tab that closes tears down its generator,
         whose `finally` removes the queue and its meta in the same breath.
+
+        Only `__global__` counts as a viewer. Per-task log channels are
+        auxiliary streams the SAME tab opens next to its global one — counting
+        them reported the signed-in operator's own task tail as an extra
+        "anonymous viewer", which is precisely the working-hours signal the
+        split-visibility design exists to keep honest.
+
+        Iterate over a list() of the values: this is read from a threadpool
+        request handler while the loop thread mutates the dict on every
+        connect/disconnect, and a bare .values() iteration there dies with
+        "dictionary changed size during iteration".
         """
-        return [dict(m) for m in self._conn_meta.values()]
+        return [dict(m) for m in list(self._conn_meta.values())
+                if m.get("channel") == "__global__"]
+
+    def presence_counts(self) -> dict:
+        """{total, authenticated, anonymous} — THE shape, derived once.
+
+        Both the GET seed (/api/connections) and the SSE broadcast feed the
+        same badge; deriving the counts in each caller is how the two sources
+        drift into different shapes.
+        """
+        snap = self.connection_snapshot()
+        auth = sum(1 for m in snap if m.get("who"))
+        return {"total": len(snap), "authenticated": auth,
+                "anonymous": len(snap) - auth}
 
     def _push_presence(self) -> None:
         """Broadcast the aggregate to __global__ so every open tab updates live.
@@ -125,15 +149,18 @@ class StreamManager:
         where an `await` during GeneratorExit is a RuntimeError. Counts only —
         never emails: this lands in every anonymous browser.
         """
-        snap = self.connection_snapshot()
-        auth = sum(1 for m in snap if m.get("who"))
-        msg = json.dumps({"type": "presence", "total": len(snap),
-                          "authenticated": auth, "anonymous": len(snap) - auth})
+        msg = json.dumps({"type": "presence", **self.presence_counts()})
         for q in self._queues.get("__global__", set()):
             try:
                 q.put_nowait(msg)
             except asyncio.QueueFull:
                 pass    # the slow-consumer eviction in push_log owns this case
+
+    def at_capacity(self) -> bool:
+        """Cheap pre-check so the route handler can refuse BEFORE paying for
+        identity resolution — at the cap, every browser retry costs a JWT
+        verify for a stream that yields one comment line and closes."""
+        return self._connection_count() >= _MAX_CONNECTIONS
 
     async def event_generator(self, task_id: str,
                               who: str | None = None) -> AsyncGenerator[str, None]:

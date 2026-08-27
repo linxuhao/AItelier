@@ -11,7 +11,7 @@
     "endpoint error (401/403 dead key or lapsed plan, 429 quota/rate limit, 5xx,",
     "connection loss). A bad request or an oversized context is NOT failed over",
     "— every candidate would reject it the same way.",
-    "STICKY, never round-robin: a gateway lives for one step, so all of that",
+    "STICKY within a step; a dict-form route {\"rotate\": [...], \"fallback\": [...]} additionally rotates its pool head once per STEP so several plans' windows all get used — fallback (pay-as-you-go) never rotates forward.",
     "step's turns hit one endpoint. Provider prefix caches are per-provider and",
     "this workload is 26:1 prefill:decode at an 89.4% hit rate; alternating",
     "endpoints per call converts cached input into full-price input and costs",
@@ -20,7 +20,7 @@
     "stated reset instant, so the plans below are consumed in order and a spent",
     "one is skipped outright rather than re-probed once per step.",
     "Providers referenced here must exist in llm_providers.json, and their key",
-    "must be mounted in docker-compose.yml's `secrets:` block. Names not listed",
+    "file must exist in ~/.aitelier-secrets/ (whole dir is mounted; no compose edit). Names not listed",
     "here pass through unchanged if they contain a '/', so a concrete",
     "provider/model still works in an agent_config with no entry."
   ],

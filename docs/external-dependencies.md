@@ -72,9 +72,9 @@ token plan on the SAME vendor is two entries and one route, with no code change:
 "flash": ["ark/deepseek-v4-flash", "ark2/deepseek-v4-flash", "deepseek/deepseek-v4-flash"]
 ```
 
-Add `ARK_API_KEY_2` to the `secrets:` block in `docker-compose.yml` (both the
-service list and the top-level definition) and drop the key in
-`~/.aitelier-secrets/ARK_API_KEY_2`.
+Write the key to `~/.aitelier-secrets/ARK_API_KEY_2` (chmod 600) — the whole
+secrets dir is mounted, so the file is live the moment it exists; no compose
+edit, no restart.
 
 The spent-window cooldown is keyed on `provider/model`, so `ark/…` and `ark2/…`
 park independently — which is what you want, since they are separate plans with

@@ -103,7 +103,13 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     # a real pipeline status is not touched — this function's job is "the brief
     # is ready, go", not "reset whatever was happening".
     status = (db.get_project(project_id) or {}).get("status") or ""
-    if status.startswith("running:") or status in ("", "drafting"):
+    # `failed:*` too: a fresh brief on a previously-failed project is an
+    # explicit "go again", but get_active_projects never selects failed — so
+    # without this rescue the submit reports "submitted" and every scheduler
+    # tick logs idle forever. (`paused:*` stays untouched: that is a live run
+    # waiting at a checkpoint, not a stranded one.)
+    if (status.startswith("running:") or status.startswith("failed:")
+            or status in ("", "drafting")):
         db.update_project(project_id, status="planning")
 
     wake_scheduler()

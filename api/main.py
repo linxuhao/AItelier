@@ -437,13 +437,23 @@ async def stream_global_events(request: Request):
     Identity is resolved ONCE at connect (verified Cloudflare Access JWT →
     email, else anonymous) and recorded next to the connection's queue, which
     is what /api/connections reports. The stream itself is open either way.
+
+    Two ordering rules, both load-bearing on a single-core loop:
+    - capacity is checked BEFORE identity: at the cap, EventSource retries
+      every few seconds per tab, and each refused retry was paying a JWT
+      verify for a stream that yields one comment line and closes;
+    - the identity resolve runs in the threadpool: verification is CPU RSA
+      plus, on an unknown `kid`, a blocking JWKS fetch with a 3s timeout —
+      on the loop that stalls every open stream and the scheduler with it.
     """
     who = None
-    try:
-        from core import cf_access
-        who = cf_access.email_from_request_headers(request.headers, request.cookies)
-    except Exception:
-        pass
+    if not stream_manager.at_capacity():
+        try:
+            from starlette.concurrency import run_in_threadpool
+            from api.auth import creator_email
+            who = await run_in_threadpool(creator_email, request)
+        except Exception:
+            pass
     return StreamingResponse(
         stream_manager.event_generator("__global__", who=who),
         media_type="text/event-stream",
@@ -451,7 +461,7 @@ async def stream_global_events(request: Request):
 
 
 @app.get("/api/connections")
-def list_connections(request: Request):
+async def list_connections(request: Request):
     """Who is watching right now — the live SSE connection table.
 
     Split visibility: the COUNTS are public (they are also broadcast to every
@@ -460,14 +470,16 @@ def list_connections(request: Request):
     working-hours intelligence the reflog leak taught us not to hand out. So
     the detail list is included only for a caller the write gate would let
     write.
+
+    `async` so the snapshot itself runs on the loop thread that owns the
+    connection table; the authz check (which may verify a JWT) goes to the
+    threadpool.
     """
     from api import authz
-    snap = stream_manager.connection_snapshot()
-    auth = sum(1 for m in snap if m.get("who"))
-    body = {"total": len(snap), "authenticated": auth,
-            "anonymous": len(snap) - auth}
-    if authz.request_can_write(request):
-        body["viewers"] = snap
+    from starlette.concurrency import run_in_threadpool
+    body = dict(stream_manager.presence_counts())
+    if await run_in_threadpool(authz.request_can_write, request):
+        body["viewers"] = stream_manager.connection_snapshot()
     return body
 
 

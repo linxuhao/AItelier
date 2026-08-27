@@ -111,3 +111,36 @@ def test_gate_holds_through_the_submit_endpoint(client):
     assert r.json()["status"] == "error"
     assert db.get_project("p-nometa")["meta_state"] == "drafting"
     assert db.get_next_active_project() is None  # scheduler will not start it
+
+
+def test_a_failed_project_is_rescued_back_to_planning(tmp_path, monkeypatch):
+    """A fresh brief on a previously-failed project is an explicit "go again",
+    but get_active_projects only selects planning/executing/verifying/running —
+    so without the rescue the submit reported "submitted" while every scheduler
+    tick logged idle forever (the jinyong-neigong wedge, one status family over).
+    `paused:*` must stay untouched: that is a live run at a checkpoint."""
+    fin = tmp_path / "meta_conversation" / "finalize"
+    fin.mkdir(parents=True)
+    (fin / "step1_goals.json").write_text('{"goals": ["x"], "user_stories": ["As a..."]}')
+    _patch_skillflow(monkeypatch, tmp_path)
+
+    class _DB(_FakeDB):
+        def __init__(self, status):
+            super().__init__()
+            self._status = status
+            self.updates = {}
+
+        def get_project(self, pid):
+            return {"project_id": pid, "completed_project_steps": "[]",
+                    "status": self._status}
+
+        def update_project(self, pid, **kw):
+            self.updates.update(kw)
+
+    db = _DB("failed:Cycle limit exceeded — review_verdict…")
+    assert ps.seed_and_trigger(db, None, "p1", {"user_stories": ["x"]})["status"] == "submitted"
+    assert db.updates.get("status") == "planning"
+
+    db = _DB("paused:checkpoint")
+    ps.seed_and_trigger(db, None, "p1", {"user_stories": ["x"]})
+    assert "status" not in db.updates          # live checkpoint left alone

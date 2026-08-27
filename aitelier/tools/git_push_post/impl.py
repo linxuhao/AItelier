@@ -24,8 +24,16 @@ _TIMEOUT_S = 120
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root), *args],
-                          capture_output=True, text=True, timeout=_TIMEOUT_S)
+    try:
+        return subprocess.run(["git", "-C", str(root), *args],
+                              capture_output=True, text=True, timeout=_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # A slow first push of a large repo must not fail the run — that is
+        # this tool's whole contract. Shape it like a failed git call so every
+        # caller's returncode check routes it to the skip/error path.
+        return subprocess.CompletedProcess(
+            args=["git", *args], returncode=124, stdout="",
+            stderr=f"timed out after {_TIMEOUT_S}s")
 
 
 def _skip(detail: str) -> dict:

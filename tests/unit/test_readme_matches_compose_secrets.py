@@ -17,7 +17,11 @@ COMPOSE = (ROOT / "docker-compose.yml").read_text()
 
 
 def test_compose_mounts_the_whole_secrets_dir():
-    assert "/.aitelier-secrets:/run/aitelier-secrets:ro" in COMPOSE
+    # The mount SOURCE must follow the same env var the CLI provisions with —
+    # a hardcoded source next to a var-driven provisioner was the recorded
+    # AITELIER_MCP_URL two-meanings trap re-created (found in review 2026-08-27).
+    assert ("${AITELIER_SECRETS_DIR:-${HOME}/.aitelier-secrets}"
+            ":/run/aitelier-secrets:ro") in COMPOSE
     assert "AITELIER_SECRETS_DIR: /run/aitelier-secrets" in COMPOSE
 
 

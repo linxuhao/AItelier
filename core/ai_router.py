@@ -308,10 +308,28 @@ class AIGateway:
         timestamp must never be able to make the system unrunnable, and the
         provider is the authority on its own quota — let it answer.
         """
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                provs = json.load(f)
+        except (OSError, ValueError):
+            provs = None    # no registry to check against — let everything try
         for i in range(start, len(self._candidates)):
-            if (_endpoint_available(self._candidates[i])
-                    and self._registered(self._candidates[i])):
-                return i
+            c = self._candidates[i]
+            if not (_endpoint_available(c) and self._registered(c)):
+                continue
+            # Skip a candidate whose provider declares a key that has no
+            # value. Before rotation this could not happen on a correctly
+            # provisioned install (the FIRST candidate's key is the required
+            # one); with rotation, a pool member becomes the first bound
+            # endpoint on ~1/n of steps, and binding a keyless one buys a
+            # guaranteed AuthenticationError + failover on every such step —
+            # paid latency and trace noise for a call that cannot succeed.
+            # Missing key file = "this provider is unused"; honor it here too.
+            if provs is not None:
+                key_env = (provs.get(c.split("/", 1)[0]) or {}).get("api_key_env")
+                if key_env and not _read_secret(key_env):
+                    continue
+            return i
         return start
 
     def _registered(self, candidate: str) -> bool:

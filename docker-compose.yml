@@ -81,7 +81,12 @@ services:
       # file and the README drift apart (QWEN_API_KEY, 2026-08-27). Note for
       # self-hosted no-auth endpoints (localqwen): LiteLLM still wants SOME key,
       # so give those a placeholder file with any content.
-      - ${HOME}/.aitelier-secrets:/run/aitelier-secrets:ro
+      # The mount SOURCE follows the same env var the CLI provisions with —
+      # one name, one meaning end to end. Before this, exporting
+      # AITELIER_SECRETS_DIR=/data/secrets provisioned /data/secrets while the
+      # container silently mounted the empty default dir (the recorded
+      # AITELIER_MCP_URL two-meanings trap, re-created).
+      - ${AITELIER_SECRETS_DIR:-${HOME}/.aitelier-secrets}:/run/aitelier-secrets:ro
       # The SPA bundle is baked into the image at /srv/web_dist (outside /app,
       # so this mount can't shadow it — served via AITELIER_WEB_DIST). A plain
       # `docker compose up -d --build` deploys frontend changes; no anonymous

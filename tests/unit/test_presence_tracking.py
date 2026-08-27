@@ -83,3 +83,21 @@ def test_endpoint_hides_viewers_from_non_writers(monkeypatch, client):
         assert body["viewers"][0]["who"] == "op@example.com"
     finally:
         m._conn_meta.pop(1, None)
+
+
+@pytest.mark.asyncio
+async def test_per_task_channels_are_not_counted_as_viewers():
+    """A per-task log stream is the SAME tab's auxiliary connection; counting
+    it showed the operator's own task tail as an extra anonymous viewer."""
+    m = StreamManager()
+    g1 = m.event_generator("__global__", who="op@example.com")
+    t1 = asyncio.ensure_future(_drain_one(g1))
+    await asyncio.sleep(0)
+    g2 = m.event_generator("task-123")          # no who — the task-log route
+    t2 = asyncio.ensure_future(_drain_one(g2))
+    await asyncio.sleep(0)
+    assert m.presence_counts() == {"total": 1, "authenticated": 1,
+                                   "anonymous": 0}
+    t1.cancel(); t2.cancel()
+    await asyncio.gather(t1, t2, return_exceptions=True)
+    await g1.aclose(); await g2.aclose()

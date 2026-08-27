@@ -9,14 +9,17 @@ requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
-    # 1.5.45 is the CONTRACT this host calls, not a floor to be polite about:
+    # 1.5.46 is the CONTRACT this host calls, not a floor to be polite about:
     # register_capability(briefing=, owner=), the graph-level `capabilities:`
     # offer list, `{from_item:}` step declarations, and config_name reaching
-    # validation/context tools all arrive there. Against 1.5.44 the host raises
+    # validation/context tools all arrive there, and 1.5.46 adds the
+    # capabilities()/graph_capabilities() accessors that five host call sites
+    # now use — against 1.5.45 they raise AttributeError and the gates go
+    # SILENTLY green. Against 1.5.44 the host raises
     # TypeError inside get_skillflow() at boot — and only in the container,
     # which installs from PyPI while the dev box runs an editable checkout, so
     # no test on this machine can see it.
-    "skillflow-py>=1.5.45",
+    "skillflow-py>=1.5.46",
     "fastapi>=0.136",
     "typer>=0.24",
     "litellm>=1.85",

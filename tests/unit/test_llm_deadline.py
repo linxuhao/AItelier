@@ -39,7 +39,7 @@ def test_a_hung_call_raises_timeout_not_forever(monkeypatch):
 
     monkeypatch.setattr(litellm, "completion", _hang)
     g = _Gate()
-    monkeypatch.setattr(_Gate, "_DEADLINE_GRACE_S", 0.0)
+    monkeypatch.setattr(_Gate, "_WALL_CAP_S", 0.3)
 
     t0 = time.monotonic()
     with pytest.raises(litellm.exceptions.Timeout) as ei:
@@ -48,7 +48,7 @@ def test_a_hung_call_raises_timeout_not_forever(monkeypatch):
 
     assert started.is_set(), "the call must actually have been dispatched"
     assert elapsed < 5, f"the cap did not fire promptly (took {elapsed:.1f}s)"
-    assert "did not honour it" in str(ei.value)
+    assert "cannot catch a response that trickles" in str(ei.value)
     release.set()
 
 
@@ -63,7 +63,7 @@ def test_the_cap_does_not_block_on_the_abandoned_thread(monkeypatch):
         return "late"
 
     monkeypatch.setattr(litellm, "completion", _hang)
-    monkeypatch.setattr(_Gate, "_DEADLINE_GRACE_S", 0.0)
+    monkeypatch.setattr(_Gate, "_WALL_CAP_S", 0.3)
     g = _Gate()
 
     t0 = time.monotonic()

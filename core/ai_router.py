@@ -537,38 +537,55 @@ class AIGateway:
 
     # ── Sticky failover across the internal model's candidates ───────
 
-    # Grace on top of the per-request timeout already in `kwargs`. The library
-    # gets first refusal; this only fires when it fails to honour its own bound.
-    _DEADLINE_GRACE_S = 60.0
+    # A TOTAL-CALL budget, deliberately NOT derived from the per-request
+    # `timeout` in kwargs: the two measure different things. That timeout is
+    # httpx's READ timeout — the maximum GAP between received bytes — and it
+    # works; measured against a socket that sends a partial body and then goes
+    # quiet, `timeout=3.0` raises litellm.Timeout at exactly 3.0s on the same
+    # deepseek/custom-httpx path that hung. What it cannot catch is a response
+    # that keeps trickling: every byte resets the gap, so a call can run
+    # forever without ever being silent for 300s.
+    #
+    # Sized from measured healthy calls on this deployment, not guessed:
+    # consecutive completions inside a step land 4-6s apart, and the slowest
+    # observed were 90-102s. 900s is ~9x the worst healthy call, so this cannot
+    # fire on "slow"; it fires on "never finishes".
+    _WALL_CAP_S = float(os.getenv("AITELIER_LLM_WALL_CAP_S") or 900.0)
 
     def _completion_bounded(self, kwargs: dict):
-        """`litellm.completion` under a wall-clock cap the library cannot ignore.
+        """`litellm.completion` under a TOTAL-time cap, which its timeout is not.
 
-        `_build_kwargs` sets `timeout: 300.0`, litellm plumbs it all the way to
-        `httpx.Client.build_request(timeout=...)` — and it still does not bound
-        the call. Measured 2026-08-27 on run 8305b1e3 (jinyong-aim, step 2):
-        py-spy caught the worker parked for 31 minutes at
+        Measured 2026-08-27 on run 8305b1e3 (jinyong-aim, step 2): the step
+        produced no trace for 35 minutes and py-spy caught the worker parked at
 
             read (ssl.py) <- _receive_response_body (httpcore/_sync/http11.py)
             <- post (litellm .../http_handler.py) <- _complete_deepseek
             <- _complete_prebuilt (core/ai_router.py) <- turn (core/agents.py)
 
-        i.e. the response had STARTED and its body never finished. The step kept
-        heartbeating the whole time, so the reaper correctly read it as "slow,
-        not dead" and left it alone — an unbounded read is indistinguishable
-        from a slow model from the outside, and the pipeline has no way back.
+        The obvious reading — "the 300s timeout is broken" — is WRONG, and the
+        experiment says so: against a socket that sends a partial body and then
+        goes quiet, this same deepseek/custom-httpx path raises litellm.Timeout
+        at exactly `timeout` (3.0s for timeout=3.0). The provider log agrees
+        from the other side: exactly ONE litellm.completion was dispatched in
+        those 35 minutes. A fired timeout would have failed over and dispatched
+        a second one.
 
-        So do not trust the library. Run the call on its own thread and give up
-        on it after `timeout + grace`. The abandoned thread stays blocked on the
-        socket until the peer or the OS closes it; that is the price, and it is
-        bounded by the retry count. An orphaned thread costs one file descriptor;
-        an unbounded wait costs the whole run.
+        Both facts hold together only one way: bytes kept arriving. `timeout` is
+        httpx's READ timeout — the maximum GAP between bytes — so a response
+        that trickles resets it forever. The call was not silent; it was
+        useless. That distinction matters, and it is why this cap is on TOTAL
+        time and is not derived from `timeout`.
 
         Raises `litellm.Timeout`, which is already in FAILOVER_EXCEPTIONS, so a
-        wedged endpoint fails over to the next candidate exactly like a refused
-        connection does — no new error path to route.
+        trickling endpoint fails over to the next candidate exactly like a
+        refused connection does — no new error path to route.
+
+        The abandoned thread stays blocked on the socket until the peer or the
+        OS closes it. That is the price and it is deliberate: an orphaned thread
+        costs one file descriptor and is bounded by the retry count; an
+        unbounded wait costs the whole run.
         """
-        cap = float(kwargs.get("timeout") or 300.0) + self._DEADLINE_GRACE_S
+        cap = self._WALL_CAP_S
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-call")
         try:
             future = pool.submit(litellm.completion, **kwargs)
@@ -577,11 +594,11 @@ class AIGateway:
             except _FutureTimeout as e:
                 raise litellm.exceptions.Timeout(
                     message=(
-                        f"No response after {cap:.0f}s wall-clock — the request "
-                        f"carried timeout={kwargs.get('timeout')} and the client "
-                        f"did not honour it (a started-but-unfinished response "
-                        f"body reads as neither an error nor progress). "
-                        f"Abandoned; failing over."),
+                        f"No completion after {cap:.0f}s of wall clock. The "
+                        f"request carried timeout={kwargs.get('timeout')}, which "
+                        f"is the READ timeout (max gap between bytes) and cannot "
+                        f"catch a response that trickles without ever going "
+                        f"quiet. Abandoned; failing over."),
                     model=str(self.active_model or kwargs.get("model") or ""),
                     llm_provider="aitelier-deadline",
                 ) from e

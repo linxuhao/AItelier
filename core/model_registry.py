@@ -285,10 +285,9 @@ def _key_hint(api_key_env: str) -> dict:
     return {"next_step":
             f"the key itself is NOT set through this API. Create the secret "
             f"file: printf '%s' \"<key>\" > ~/.aitelier-secrets/{api_key_env} "
-            f"&& chmod 600 \"$_\", and add {api_key_env} to docker-compose.yml's "
-            f"`secrets:` block (both the service list and the top-level "
-            f"definition), then recreate the container — `restart` does not "
-            f"attach a new secret mount."}
+            f"&& chmod 600 \"$_\". Nothing else: the whole secrets dir is "
+            f"mounted, so any key name resolves as soon as the file exists — "
+            f"no compose edit, no restart."}
 
 
 # ── route write ──────────────────────────────────────────────────────────────

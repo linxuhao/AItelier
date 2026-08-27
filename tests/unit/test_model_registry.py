@@ -71,7 +71,10 @@ def test_add_provider_records_the_key_NAME_and_says_the_key_is_a_file(tables):
     assert _providers(tables)["gamma"]["api_key_env"] == "GAMMA_KEY"
     # The one thing an operator will get wrong: expecting this to store the key.
     assert "aitelier-secrets/GAMMA_KEY" in out["next_step"]
-    assert "secrets:" in out["next_step"]        # and that compose needs it too
+    # …and must NOT resurrect the compose-secrets instruction: the whole dir is
+    # mounted (2026-08-27), a key file is live the moment it exists.
+    assert "secrets:" not in out["next_step"]
+    assert "no compose edit" in out["next_step"]
 
 
 def test_a_provider_name_that_would_break_candidate_parsing_is_refused(tables):

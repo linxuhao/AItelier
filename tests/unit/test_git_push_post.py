@@ -153,3 +153,69 @@ def test_the_game_pipeline_inherits_it():
     steps = {s["id"]: s for s in merged["steps"]}
     assert "git_push_post" in steps
     assert [t["to"] for t in steps["git_push_post"]["transitions"]] == ["done"]
+
+
+# ── which repo it pushes ─────────────────────────────────────────────────────
+#
+# `$PROJECT_ROOT` expands to skillflow's DEFAULT layout, projects_base/<id>.
+# That is right for repo_type new|clone and WRONG for every repo_type=existing
+# project, whose code is somewhere else entirely. Measured 2026-08-27 on
+# jinyong-neigong: the token pointed at projects/jinyong-neigong (nonexistent)
+# while the code was in projects/jinyong-assets — so the push skipped with
+# "not a git repository" on a repo that had a remote and commits to send.
+
+def test_the_host_resolver_wins_over_the_default_token(tmp_path, monkeypatch):
+    real = _repo(tmp_path / "actual-code")
+    import aitelier.tools.git_push_post.impl as impl
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: str(real))
+
+    assert impl._code_path("proj", str(tmp_path / "wrong")) == real
+
+
+def test_it_falls_back_to_the_token_when_the_resolver_has_no_answer(tmp_path, monkeypatch):
+    # None is the resolver's answer for new/clone projects — exactly the case
+    # where the default token IS the code path.
+    import aitelier.tools.git_push_post.impl as impl
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: None)
+
+    assert impl._code_path("proj", str(tmp_path)) == tmp_path.resolve()
+
+
+def test_no_path_from_either_source_skips(monkeypatch):
+    import aitelier.tools.git_push_post.impl as impl
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: None)
+
+    r = git_push_post(project_id="proj", project_root="")
+    assert r["action"] == "skip" and "no code path" in r["detail"]
+
+
+def test_the_not_a_repo_skip_names_the_path(tmp_path, monkeypatch):
+    # A bare "not a git repository" cannot distinguish a local-only project from
+    # a misresolved path — which is why the same message on git_sync_pre went
+    # unnoticed across every existing-repo run.
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: None)
+
+    r = git_push_post(project_id="proj", project_root=str(tmp_path))
+    assert r["action"] == "skip"
+    assert str(tmp_path) in r["detail"]
+
+
+def test_it_pushes_the_resolved_repo_not_the_token_one(tmp_path, monkeypatch):
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    real = _repo(tmp_path / "actual-code")
+    _git(real, "remote", "add", "origin", str(bare))
+    decoy = _repo(tmp_path / "decoy")          # no remote: would skip if used
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: str(real))
+
+    r = git_push_post(project_id="proj", project_root=str(decoy))
+
+    assert r["pushed"] is True
+    out = subprocess.run(["git", "-C", str(bare), "rev-parse", "refs/heads/main"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0

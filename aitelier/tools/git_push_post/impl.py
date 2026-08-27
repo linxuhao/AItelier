@@ -32,14 +32,45 @@ def _skip(detail: str) -> dict:
     return {"pushed": False, "action": "skip", "detail": detail}
 
 
+def _code_path(project_id: str, project_root: str) -> Path | None:
+    """Where this project's code actually lives.
+
+    `$PROJECT_ROOT` expands to skillflow's DEFAULT layout — `projects_base/<id>`
+    — which is right for `repo_type: new|clone` and WRONG for every
+    `repo_type: existing` project, whose repo is somewhere else entirely
+    (recorded in the DB as `repo_path`). Measured 2026-08-27: on jinyong-neigong
+    that token pointed at `projects/jinyong-neigong`, which does not exist,
+    while the code was in `projects/jinyong-assets`.
+
+    So ask the host's own resolver first — the same one skillflow is handed as
+    `code_path_resolver`, which is what makes `repo_apply` commit into the real
+    repo — and fall back to the token only when the resolver has no answer,
+    which is exactly the new/clone case where the token is correct.
+    """
+    if project_id:
+        try:
+            from api.dependencies import _existing_repo_code_path
+            resolved = _existing_repo_code_path(project_id)
+        except Exception:
+            resolved = None
+        if resolved:
+            return Path(resolved).resolve()
+    return Path(project_root).resolve() if project_root else None
+
+
 def git_push_post(*, project_root: str = "", remote: str = "origin",
-                  **_ignored) -> dict:
-    if not project_root:
-        return _skip("no project_root given")
-    root = Path(project_root).resolve()
+                  project_id: str = "", **_ignored) -> dict:
+    root = _code_path(project_id, project_root)
+    if root is None:
+        return _skip("no code path: neither the host resolver nor "
+                     "$PROJECT_ROOT gave one")
 
     if not (root / ".git").exists():
-        return _skip("not a git repository")
+        # Name the path. `git_sync_pre` has been answering a bare
+        # "not a git repository" on every existing-repo run, and without the
+        # path there is nothing in the answer to tell a local-only project from
+        # a misresolved one.
+        return _skip(f"not a git repository: {root}")
 
     r = _git(root, "remote")
     remotes = r.stdout.split()

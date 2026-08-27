@@ -7,6 +7,7 @@
  * the only thing standing between the reader and a wall of JSON, and two
  * copies of it would drift.
  */
+import { toEpochSeconds } from './format';
 
 /** Collapse a multi-line value into one readable line. */
 function oneLine(s: string, max = 160): string {
@@ -79,6 +80,17 @@ export function extractPayloadText(payload: unknown): string {
 /** HH:MM:SS out of a trace timestamp, or the raw string when it has none. */
 export function shortTime(ts: string | undefined | null): string {
   if (!ts) return '';
+  // Trace `created_at` is a NAIVE SQLite datetime whose value is UTC. The old
+  // regex just displayed the raw wall time, so every viewer saw UTC no matter
+  // where they sat (invisible on this deployment only because the server's tz
+  // happens to be UTC). `toEpochSeconds` already knows the format — it appends
+  // the missing Z before parsing — so render its result in the VIEWER's zone.
+  const epoch = toEpochSeconds(ts);
+  if (epoch != null) {
+    return new Date(epoch * 1000).toLocaleTimeString([], {
+      hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  }
   const m = String(ts).match(/(\d{2}:\d{2}:\d{2})/);
   return m ? m[1] : String(ts);
 }

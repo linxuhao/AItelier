@@ -3,6 +3,7 @@
   import { connectionStore } from '../stores/connection';
   import { notifPanelOpen, notifUnread } from '../stores/notifications';
   import { langStore, setLang } from '../stores/i18n';
+  import { presenceStore } from '../stores/presence';
   import { t } from '../lib/i18n.svelte';
 
   const LANG_OPTIONS: { code: string; label: string }[] = [
@@ -35,7 +36,14 @@
 <header id="app-bar">
   <nav>
     <ul>
-      <li><strong>AItelier</strong></li>
+      <li><strong>AItelier</strong>
+        {#if $presenceStore && $presenceStore.total > 0}
+          <span class="presence-badge"
+                title={`${$presenceStore.authenticated} signed-in · ${$presenceStore.total - $presenceStore.authenticated} anonymous`}>
+            👁 {$presenceStore.total}
+          </span>
+        {/if}
+      </li>
     </ul>
     <ul>
       <li><a href="#/projects">{t('appbar.dashboard')}</a></li>
@@ -132,6 +140,18 @@
 </header>
 
 <style>
+  .presence-badge {
+    font-size: 0.75rem;
+    color: var(--pico-muted-color, #888);
+    border: 1px solid var(--pico-muted-border-color, #ddd);
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    margin-left: 0.5rem;
+    white-space: nowrap;
+    cursor: default;
+    vertical-align: middle;
+  }
+
   .notif-bell {
     position: relative;
     background: none;

@@ -106,8 +106,25 @@ describe('traceSummary', () => {
 });
 
 describe('shortTime', () => {
-  it('extracts the clock out of a trace timestamp', () => {
-    expect(shortTime('2026-08-26T15:06:48Z')).toBe('15:06:48');
+  // The stored value is naive UTC; the display is the VIEWER's zone. Pin the
+  // zone explicitly — on a UTC host an unpinned test passes with or without
+  // the conversion, which is a test of nothing.
+  const withTZ = (tz: string, fn: () => void) => {
+    const prev = process.env.TZ;
+    process.env.TZ = tz;
+    try { fn(); } finally {
+      if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev;
+    }
+  };
+  it('renders a naive SQLite UTC datetime in the viewer zone', () => {
+    withTZ('Asia/Shanghai', () => {
+      expect(shortTime('2026-08-27 16:20:15')).toBe('00:20:15'); // +8, next day
+    });
+  });
+  it('renders an explicit-Z timestamp in the viewer zone too', () => {
+    withTZ('Asia/Shanghai', () => {
+      expect(shortTime('2026-08-26T15:06:48Z')).toBe('23:06:48');
+    });
   });
   it('returns the input when there is no clock in it, and "" for nothing', () => {
     expect(shortTime('yesterday')).toBe('yesterday');

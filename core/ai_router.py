@@ -8,6 +8,8 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeout
 import litellm
 
 
@@ -535,6 +537,60 @@ class AIGateway:
 
     # ── Sticky failover across the internal model's candidates ───────
 
+    # Grace on top of the per-request timeout already in `kwargs`. The library
+    # gets first refusal; this only fires when it fails to honour its own bound.
+    _DEADLINE_GRACE_S = 60.0
+
+    def _completion_bounded(self, kwargs: dict):
+        """`litellm.completion` under a wall-clock cap the library cannot ignore.
+
+        `_build_kwargs` sets `timeout: 300.0`, litellm plumbs it all the way to
+        `httpx.Client.build_request(timeout=...)` — and it still does not bound
+        the call. Measured 2026-08-27 on run 8305b1e3 (jinyong-aim, step 2):
+        py-spy caught the worker parked for 31 minutes at
+
+            read (ssl.py) <- _receive_response_body (httpcore/_sync/http11.py)
+            <- post (litellm .../http_handler.py) <- _complete_deepseek
+            <- _complete_prebuilt (core/ai_router.py) <- turn (core/agents.py)
+
+        i.e. the response had STARTED and its body never finished. The step kept
+        heartbeating the whole time, so the reaper correctly read it as "slow,
+        not dead" and left it alone — an unbounded read is indistinguishable
+        from a slow model from the outside, and the pipeline has no way back.
+
+        So do not trust the library. Run the call on its own thread and give up
+        on it after `timeout + grace`. The abandoned thread stays blocked on the
+        socket until the peer or the OS closes it; that is the price, and it is
+        bounded by the retry count. An orphaned thread costs one file descriptor;
+        an unbounded wait costs the whole run.
+
+        Raises `litellm.Timeout`, which is already in FAILOVER_EXCEPTIONS, so a
+        wedged endpoint fails over to the next candidate exactly like a refused
+        connection does — no new error path to route.
+        """
+        cap = float(kwargs.get("timeout") or 300.0) + self._DEADLINE_GRACE_S
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-call")
+        try:
+            future = pool.submit(litellm.completion, **kwargs)
+            try:
+                return future.result(timeout=cap)
+            except _FutureTimeout as e:
+                raise litellm.exceptions.Timeout(
+                    message=(
+                        f"No response after {cap:.0f}s wall-clock — the request "
+                        f"carried timeout={kwargs.get('timeout')} and the client "
+                        f"did not honour it (a started-but-unfinished response "
+                        f"body reads as neither an error nor progress). "
+                        f"Abandoned; failing over."),
+                    model=str(self.active_model or kwargs.get("model") or ""),
+                    llm_provider="aitelier-deadline",
+                ) from e
+        finally:
+            # NEVER wait: the point of the cap is not to block on the thread we
+            # just gave up on. `with ThreadPoolExecutor(...)` would join it and
+            # reproduce the exact hang this method exists to break.
+            pool.shutdown(wait=False)
+
     def _complete_prebuilt(self, kwargs: dict):
         """One completion, walking this model's candidates on endpoint errors.
 
@@ -561,7 +617,7 @@ class AIGateway:
         """
         while True:
             try:
-                response = litellm.completion(**kwargs)
+                response = self._completion_bounded(kwargs)
             except FAILOVER_EXCEPTIONS as e:
                 if not self._failover(e):
                     # Name the endpoints that would have to reopen. The escaping

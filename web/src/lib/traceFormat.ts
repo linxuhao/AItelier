@@ -82,9 +82,19 @@ export function extractPayloadText(payload: unknown): string {
 // call (~0.1-1ms), and this runs per visible row per re-render. hourCycle
 // 'h23' rather than hour12:false — the latter maps to h24 in some engines,
 // rendering midnight as "24:20:15".
-const _CLOCK_FMT = new Intl.DateTimeFormat([], {
-  hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit',
-});
+let _clockFmt: Intl.DateTimeFormat | null = null;
+function _clock(): Intl.DateTimeFormat {
+  // Lazy, not module-level: Intl.DateTimeFormat captures the zone at
+  // construction, and building it at import time froze the IMPORTING
+  // environment's zone — which is the viewer's zone in a browser (fine) but
+  // defeated the tz-pinned tests, the only place the conversion is proven.
+  if (_clockFmt === null) {
+    _clockFmt = new Intl.DateTimeFormat([], {
+      hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  }
+  return _clockFmt;
+}
 
 export function shortTime(ts: string | undefined | null): string {
   if (!ts) return '';
@@ -95,7 +105,7 @@ export function shortTime(ts: string | undefined | null): string {
   // the missing Z before parsing — so render its result in the VIEWER's zone.
   const epoch = toEpochSeconds(ts);
   if (epoch != null) {
-    return _CLOCK_FMT.format(new Date(epoch * 1000));
+    return _clock().format(new Date(epoch * 1000));
   }
   const m = String(ts).match(/(\d{2}:\d{2}:\d{2})/);
   return m ? m[1] : String(ts);

@@ -235,7 +235,13 @@ def get_skillflow():
                      context_provider=lambda cfg: {
                          "state_dir": str(sf._workspace.state_dir(cfg))})
         _must_define(name="tool_creation", owner="host",
-                     tools=["write", "run_tests", "pytest", "register_tool"])
+                     # register_capability alongside register_tool: a tool that
+                     # needs framework-chosen state (or that only some loop items
+                     # should carry) has nowhere to attach without a capability,
+                     # and a maker with no way to declare one writes the grant by
+                     # hand onto a role instead.
+                     tools=["write", "run_tests", "pytest", "register_tool",
+                            "register_capability"])
         # game_assets: the tools AND the discipline that keeps their output
         # usable. Both used to ride on every DPE implementer — measured across
         # 22 workspaces, 6,996 tool calls, ZERO uses, 55% of that step's tool

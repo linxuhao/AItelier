@@ -1,0 +1,41 @@
+name: register_capability
+description: >
+  Define (or edit) a capability — a named bundle of tools plus the briefing that
+  teaches how to use them — and persist it so it survives a restart. A step then
+  declares `capability: <name>` and the FRAMEWORK grants those tools and injects
+  the briefing; nothing else in the pipeline carries them. Use this instead of
+  adding an expensive toolset to a role that only sometimes needs it. Every tool
+  named must already be registered (build it first with register_tool), or the
+  capability is refused rather than half-created. Returns {registered, name,
+  tools}.
+parameters:
+  name:
+    type: string
+    description: >
+      Capability name. Lowercase, no slashes. This is what a step's `capability:`
+      and a graph's `capabilities:` offer list will say.
+    required: true
+  tools:
+    type: array
+    description: >
+      Tool names this capability grants. Each must resolve NOW — a grant of a
+      tool that does not exist hands the step nothing while reading, in the
+      config, as though it handed it something.
+    required: true
+  briefing:
+    type: string
+    description: >
+      The discipline a step needs in order to use these tools correctly, in a few
+      hundred bytes. It is injected into the prompt of every step that holds the
+      capability, on every turn — so it is a summary of the rules that are
+      expensive to get wrong, not a manual. Put the manual behind a tool the step
+      can call. The FIRST prose line is used as the capability's one-line purpose
+      wherever it is listed, so make that line stand alone.
+    required: false
+  owner:
+    type: string
+    description: >
+      Who owns this definition (default `gen:<name>`). Re-registering under the
+      same owner is an edit; a different owner is refused rather than silently
+      changing what every holder is granted.
+    required: false

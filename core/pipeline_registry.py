@@ -607,6 +607,67 @@ def _json_dumps(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
 
+def set_pipeline_capabilities(sf, registry, config_name: str,
+                              add: list[str] | None = None,
+                              remove: list[str] | None = None) -> dict:
+    """Edit which capabilities a GENERATED pipeline offers.
+
+    Writes where the pipeline lives — the persisted `gen_<slug>.yaml` — and
+    reloads it, which is the path that already exists for editing a generated
+    pipeline. A BUILT-IN config is refused: mutating a repo file at runtime is
+    drift no checkout can see, and the supported way to add anything to a
+    built-in base is the mechanism that already exists for it, an addon.
+
+    This edits the OFFER LIST only. Retiring a definition is
+    `capability_registry.archive`, and keeping the two apart is what makes "a
+    capability a config still offers cannot be deleted" enforceable rather than
+    circular.
+    """
+    import yaml
+    from core import capability_registry as caps
+
+    if not config_name.startswith(GEN_PREFIX):
+        return {"error": f"'{config_name}' is a built-in pipeline; its offer "
+                         f"list lives in the repo (configs/{config_name}.yaml). "
+                         f"To give a built-in base a capability, compose it with "
+                         f"an addon that offers one."}
+    # The REQUEST is checked before the target: offering something nothing
+    # registers means every card declaring it grants nothing, silently, and
+    # naming the bad capability is more useful than naming a missing file.
+    known = set(getattr(sf, "_capabilities", {}) or {})
+    unknown = [c for c in (add or []) if c not in known]
+    if unknown:
+        return {"error": f"not registered on this deployment: {unknown}. "
+                         f"Available: {sorted(known) or 'none'}."}
+
+    f = generated_configs_dir() / f"{config_name}.yaml"
+    if not f.exists():
+        return {"error": f"no persisted config {config_name}.yaml"}
+    try:
+        data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+    except Exception as e:                               # noqa: BLE001
+        return {"error": f"unreadable config {config_name}.yaml: {e}"}
+
+    current = list(data.get("capabilities") or [])
+    after = sorted((set(current) | set(add or [])) - set(remove or []))
+    if after == sorted(current):
+        return {"config_name": config_name, "capabilities": after,
+                "changed": False}
+    if after:
+        data["capabilities"] = after
+    else:
+        data.pop("capabilities", None)
+    tmp = f.with_suffix(".yaml.tmp")
+    tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                   encoding="utf-8")
+    import os as _os
+    _os.replace(tmp, f)
+    r = reload_generated_pipeline(sf, registry, config_name)
+    if "error" in r:
+        return r
+    return {"config_name": config_name, "capabilities": after, "changed": True}
+
+
 def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
     """Re-read a persisted generated pipeline (``gen_<slug>.yaml`` + optional
     ``.roles.json``) from disk and re-register it live, picking up any manual edits

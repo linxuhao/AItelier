@@ -300,3 +300,89 @@ def test_the_installed_skillflow_accepts_the_contract_this_host_calls():
     assert SkillFlow._declared_capability_names(
         node, {"capabilities": ["game_assets"]}) == ["game_assets"], (
         "installed skillflow does not resolve a card-declared capability")
+
+
+# ── Batch 2: generation + management ─────────────────────────────────────
+def test_the_forge_palette_lists_capabilities_live(home):
+    """It was a hand-written list of two.
+
+    A capability added anywhere else — an addon shipping one, the forge
+    authoring one — was invisible to the next generation, and a maker that
+    cannot see a capability writes the tool grant by hand onto a role, which is
+    the thing capabilities exist to stop.
+    """
+    from aitelier.tools.forge_palette.impl import forge_palette
+    md = forge_palette()["palette_markdown"]
+    assert "{CAPABILITIES_SECTION}" not in md, "placeholder was never substituted"
+    assert "## Capabilities" in md
+    assert "game_assets" in md, "a live capability is missing from the palette"
+    assert "from_item" in md, "the per-item declaration form is not taught"
+
+
+def test_the_emit_gate_rejects_capability_mistakes():
+    """`capability_known`, the same rule shape as `role_model_known`: a name
+    outside the registry grants nothing at RUNTIME, silently."""
+    from aitelier.tools.forge_registry_check.impl import _capability_known
+    g = lambda **k: dict(name="g", begin="a", steps=[], **k)
+
+    assert _capability_known(g(), [{"id": "s", "capability": "nope"}])
+    assert _capability_known(g(capabilities=["ghost_cap_nobody_has"]), [])
+    # from_item without a card grants nothing — a loop item is a NAME
+    assert _capability_known(g(capabilities=["stateful"]),
+                             [{"id": "s", "capability": {"from_item": "c"}}])
+    # …and with no offer list the engine refuses every card-declared name
+    assert _capability_known(g(), [{"id": "s", "capability":
+                                    {"from_item": "c", "card": "3/c.json"}}])
+    # the correct shapes are silent
+    assert not _capability_known(g(capabilities=["stateful"]),
+                                 [{"id": "s", "capability": "stateful"}])
+    assert not _capability_known(
+        g(capabilities=["game_assets"]),
+        [{"id": "s", "capability": {"from_item": "capabilities",
+                                    "card": "3/tasks/$t.json"}}])
+
+
+def test_capability_known_is_in_the_taught_rule_table():
+    """An enforced-but-untaught rule costs a rework round per generation,
+    forever — the RULES table is what the palette renders."""
+    from aitelier.tools.forge_registry_check.impl import RULES
+    assert "capability_known" in {r.id for r in RULES}
+
+
+def test_the_forge_can_define_a_capability_not_just_a_tool():
+    """A tool that needs framework-chosen state has nowhere to attach without
+    one, and a maker with no way to declare it writes the grant by hand."""
+    import yaml
+    from api.dependencies import get_skillflow
+    grants = (get_skillflow()._capabilities.get("tool_creation") or {}).get("tools")
+    assert "register_capability" in grants
+    spec = yaml.safe_load(
+        (ROOT / "aitelier" / "tools" / "register_capability" / "tool.yaml").read_text())
+    assert spec["name"] == "register_capability"
+
+
+def test_describe_pipeline_reports_the_offer_list():
+    """A pipeline's offer list is part of its contract, like its seed shape."""
+    from api.dependencies import get_config_registry
+    got = {e["config_name"]: e.get("capabilities")
+           for e in get_config_registry().describe("dpe_game")}
+    assert got.get("dpe_game") == ["game_assets"]
+
+
+def test_a_built_in_pipelines_offer_list_cannot_be_edited_at_runtime():
+    """Runtime mutation of a repo config is drift no checkout can see. The
+    supported way to give a built-in base a capability is an addon."""
+    from api.dependencies import get_config_registry, get_skillflow
+    from core.pipeline_registry import set_pipeline_capabilities
+    r = set_pipeline_capabilities(get_skillflow(), get_config_registry(),
+                                  "dpe_default_v2", add=["game_assets"])
+    assert "error" in r and "addon" in r["error"]
+
+
+def test_offering_something_unregistered_is_refused_at_the_edit(home):
+    """Otherwise every card declaring it grants nothing, silently."""
+    from core.pipeline_registry import set_pipeline_capabilities
+    from api.dependencies import get_config_registry, get_skillflow
+    r = set_pipeline_capabilities(get_skillflow(), get_config_registry(),
+                                  "gen_dsh_code_review", add=["ghost_nobody_has"])
+    assert "error" in r and "not registered" in r["error"]

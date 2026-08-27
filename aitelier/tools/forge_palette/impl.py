@@ -51,29 +51,7 @@ CHEATSHEET = """\
 - loop  : iterates a workspace-file manifest list (loop.source + item_as).
 - gate  : pure flag routing, no execution; use for the loop-external terminal.
 
-## Capabilities — let the FRAMEWORK provision a step's tools + folders
-A step may declare `capability: <keyword>`; the engine then hands that step a
-curated toolset + injected context, so neither you nor the agent picks a write
-folder or a toolset (least privilege). Available capabilities:
-- `stateful` — the step's tool receives a durable, per-config, MOUNTED `state_dir`
-  kwarg (survives across runs AND container recreation). Put it on ANY tool step
-  or context-source-tool step that persists/reads cross-run state (positions
-  carried day to day, an accumulating memo). The tool writes RELATIVE to
-  `state_dir` and NEVER computes its own path (a hardcoded absolute path under
-  the user's home dir escapes the mount and is lost on the next container
-  rebuild). See the durable-state idiom below.
-- `tool_creation` — grants an agent step `write`/`run_tests`/`pytest`/
-  `register_tool` (used by the tool-build loop so a step can author + self-test
-  a tool). You rarely need this in a generated pipeline.
-
-  ```yaml
-    - id: persist_positions
-      step_type: tool
-      tool_name: persist_positions
-      capability: stateful          # → tool receives a durable state_dir kwarg
-      tool_params: { source_path: "$STEP_DIR/positions.json" }
-      transitions: [ { to: done } ]
-  ```
+{CAPABILITIES_SECTION}
 
 ## When in doubt, read the spec — the `skillflow_docs_*` tools
 This cheatsheet is the common case. For ANY field, lifecycle hook, context mode,
@@ -133,6 +111,87 @@ EXEMPLARS = [
     ("configs/fix_tests.yaml", "objective test-fix loop: fix -> run_tests gate -> loop until green"),
     ("agent_configs/dpe_default.yaml", "role table: model/template/tools/thinking per role, maker vs reviewer profiles"),
 ]
+
+
+_CAPABILITY_DECLARATION_HELP = """## Capabilities — let the FRAMEWORK provision a step's tools + context
+A step declares a capability and the ENGINE hands it that capability's tools plus
+its briefing, so neither you nor the agent picks a toolset or a write folder
+(least privilege). Three declaration forms:
+
+```yaml
+  - id: persist_positions
+    step_type: tool
+    tool_name: persist_positions
+    capability: stateful            # one name
+    tool_params: { source_path: "$STEP_DIR/positions.json" }
+    transitions: [ { to: done } ]
+
+  - id: build
+    step_type: agent
+    capability: [stateful, tool_creation]     # several
+
+  - id: t_impl                                # per LOOP ITEM: the planning step
+    step_type: agent                          # writes `capabilities: [...]` on a
+    capability:                               # task card and only THAT task gets
+      from_item: capabilities                 # the tools
+      card: "3/tasks/$current_task.json"
+```
+
+And the graph declares what it OFFERS, at the top level beside `steps:`:
+
+```yaml
+capabilities: ["stateful"]        # bounds what a task CARD may grant
+```
+
+The offer list binds DATA, not you: a name you write into a step is honoured
+even with no offer list, but a name arriving from a task card is refused unless
+the graph advertises it. Declaring an offer list also makes a step's own
+capability checked at registration.
+
+**A tool granted by a capability must never compute its own path.** It writes
+RELATIVE to the `state_dir` (or other kwarg) the capability injects — a
+hardcoded absolute path under the user's home directory escapes the mount and is
+lost on the next container rebuild."""
+
+
+def _capabilities_section() -> str:
+    """The capabilities this deployment can actually provision.
+
+    Rendered LIVE, like the model list and for the same reason: this section was
+    a hand-written list of two, so a capability added anywhere else (an addon
+    shipping one, the forge authoring one) was invisible to the next generation
+    — and a maker that cannot see a capability writes the tool grant by hand,
+    which is precisely what capabilities exist to stop.
+    """
+    try:
+        from api.dependencies import get_skillflow
+        caps = getattr(get_skillflow(), "_capabilities", {}) or {}
+    except Exception as e:                               # noqa: BLE001
+        return (_CAPABILITY_DECLARATION_HELP
+                + f"\n\n> WARNING: could not read the capability registry ({e}). "
+                  "Declare no capability rather than guessing a name.\n")
+    if not caps:
+        return (_CAPABILITY_DECLARATION_HELP
+                + "\n\nThis deployment registers NO capabilities — do not "
+                  "declare one.\n")
+    rows = ["\nAvailable on this deployment (a name outside this list grants "
+            "NOTHING, and the registry gate rejects it):\n"]
+    for name in sorted(caps):
+        cap = caps[name] or {}
+        tools = ", ".join(f"`{t}`" for t in (cap.get("tools") or ()))
+        if not tools:
+            # A capability may grant no tools and still do the important half:
+            # inject framework-chosen kwargs into the step's tool calls. Saying
+            # "no extra tools" reads as "does nothing" and is why a maker would
+            # skip it and let a tool pick its own directory.
+            tools = ("no extra tools — it INJECTS framework kwargs into this "
+                     "step's tool calls" if cap.get("context_provider")
+                     else "no extra tools")
+        first = next((ln.strip() for ln in (cap.get("briefing") or "").splitlines()
+                      if ln.strip() and not ln.startswith("#")), "")
+        purpose = f" — {first[:110]}" if first else ""
+        rows.append(f"- `{name}` → {tools}{purpose}")
+    return _CAPABILITY_DECLARATION_HELP + "\n" + "\n".join(rows) + "\n"
 
 
 def _repo_root() -> Path:
@@ -233,4 +292,14 @@ def forge_palette(include_signatures: bool = True, **kwargs) -> dict:
     # ── What the gate will reject (rendered from the gate's own table) ────
     lines.append(_enforced_rules_section())
 
-    return {"palette_markdown": "\n".join(lines), "tool_count": len(names)}
+    # Capabilities are rendered LIVE from the registry (see
+
+    # _capabilities_section); the cheatsheet only carries the placeholder,
+
+    # so the substitution has to happen after every block is in.
+
+    _md = ("\n".join(lines)).replace("{CAPABILITIES_SECTION}",
+
+                           _capabilities_section())
+
+    return {"palette_markdown": _md, "tool_count": len(names)}

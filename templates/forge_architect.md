@@ -46,6 +46,13 @@ cycle). Follow the cheatsheet EXACTLY:
   Never let a generated tool hardcode a home path — it is lost on container
   recreation. (The forge tool-build loop already uses `capability: tool_creation`;
   you rarely need that one in a generated pipeline.)
+- **Per-ITEM capabilities.** If a pipeline loops over items and only SOME of them
+  need an expensive toolset (generating art, driving a device), do not put those
+  tools on the step — every item would then carry their schemas on every turn.
+  Say instead that the planning step declares the capability on each item's card
+  and the working step reads it (`{from_item: ..., card: ...}`), and name the
+  capability the pipeline must OFFER. The palette's Capabilities section is the
+  list of what exists; anything else grants nothing.
 - The ONLY completed terminal is a `step_type: gate` with `transitions: [{to: null}]`.
   Give-up paths must end failed, never share the success terminal.
 - Put an objective tool gate (tests/compile) BEFORE a reviewer where one exists.

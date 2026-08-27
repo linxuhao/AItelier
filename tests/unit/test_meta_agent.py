@@ -40,7 +40,7 @@ class TestToolDefinitions:
     def test_tool_count(self):
         # 32 orchestration tools + 8 diagnosis tools (trace/registry/config readers);
         # generate_pipeline and config_edit are coding-mode only.
-        assert len(TOOL_DEFINITIONS) == 40
+        assert len(TOOL_DEFINITIONS) == 41
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:

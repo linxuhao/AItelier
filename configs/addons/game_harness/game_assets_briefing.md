@@ -1,7 +1,9 @@
 # 素材生成纪律（capability: game_assets）
 
+生成真实的美术与音频资源并落进工程，而不是交付 ColorRect/Polygon2D 占位图元。
+
 本任务被授予了 `gen_image_asset` / `gen_audio_asset`。它们只发给声明了这项能力的
-任务卡，所以拿到它们就意味着这个任务要交付真实美术/音频，而不是占位图元。
+任务卡，所以拿到它们就意味着这个任务要交付真实美术/音频。
 
 - **视觉与音频交付真实资源，不要交付占位图元**：用 `gen_image_asset` 生成精灵与背景、`gen_audio_asset` 生成音效与背景音乐，资源落在 `assets/` 下，再在 `.tscn` 里引用。
   - 角色/障碍/道具：`gen_image_asset(prompt=…, dest="assets/bird.png", transparent=true, seed=<固定数>)`。**`transparent=true` 不是可选项**——生图模型没有 alpha 通道，你要"透明背景"它会把灰白棋盘格当不透明像素画出来；整屏背景才用 `transparent=false`。

@@ -255,6 +255,22 @@ maker's job to what's achievable, then the reviewer to that same bar).
       tool_params: { source_path: "$STEP_DIR/positions.json" }
       transitions: [ { to: done } ]
   ```
+- **`capability:` takes more than one shape, and the palette lists what exists.**
+  A name, a list of names, or — when the grant belongs to an ITEM rather than to
+  the step — `{from_item: <card field>, card: "<step>/<file with $vars>.json"}`,
+  which reads the list off that loop item's card so only the items that need the
+  tools carry them. Declare a name ONLY if the palette's Capabilities section
+  lists it: an unregistered name grants nothing, silently, and the emit gate
+  rejects it (`capability_known`).
+- **If any step reads capabilities from a card, the graph MUST declare what it
+  offers**, at the top level beside `steps:`:
+  ```yaml
+  capabilities: ["stateful"]     # bounds what a task CARD may grant
+  ```
+  The offer list binds DATA, not you: a name you write into a step is honoured
+  even with no offer list, but a card-declared name is refused by the engine
+  unless the graph advertises it. With no offer list, `from_item` grants nothing
+  at all.
 - `output` is a **mapping**: `{mode: content|write}` and, for named files,
   `fixed: {slot: {file: "name"}}`. Not a list. `content` = the agent may write
   ONLY the declared `fixed` files (use for structured/known outputs); `write` =

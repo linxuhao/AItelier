@@ -63,6 +63,13 @@ RULES: tuple[Rule, ...] = (
          "string. Which vendor serves each name is the deployment's config, so "
          "a concrete endpoint written here is one you guessed at, and an "
          "unknown name fails at the first LLM call rather than at emit."),
+    Rule("capability_known",
+         "A step's `capability:` must name one the palette lists, and a name a "
+         "TASK CARD may declare must also be in the graph's top-level "
+         "`capabilities:` offer list. An unregistered name grants nothing — "
+         "silently, since a missing tool looks to the agent like a world where "
+         "that work is impossible — and a card-declared name outside the offer "
+         "list is refused by the engine at claim time, long after emit."),
     Rule("counter_smell",
          "No hand-rolled counter tools (`increment_*`/`check_*_counter`, or any "
          "name containing 'counter'). Bound cycles with `max_loop` on an edge."),
@@ -431,6 +438,76 @@ def _role_model_known(rt) -> list[str]:
         out.append(
             f"role_model_known: role '{role}' declares model '{model}' — {hint}. "
             f"Available: {sorted(known)} (or 'host').")
+    return out
+
+
+def _capability_known(graph, steps) -> list[str]:
+    """Every declared capability must exist, and a card-declared one be offered.
+
+    Same shape and the same reason as `_role_model_known`: the palette hands the
+    maker a live list, and a name outside it fails at RUNTIME as silence — the
+    step simply runs without the tools it asked for, which no gate downstream
+    can see. The offer list is checked too because it is what bounds a task
+    card: `{from_item: ...}` with nothing offered grants nothing, every time.
+    """
+    out: list[str] = []
+    try:
+        from api.dependencies import get_skillflow
+        known = set(getattr(get_skillflow(), "_capabilities", {}) or {})
+    except Exception:                                    # noqa: BLE001
+        return out          # no registry to check against; not the emitter's fault
+    offers = set((graph.get("capabilities") or []) if isinstance(graph, dict) else ())
+    for name in sorted(offers - known):
+        out.append(
+            f"capability_known: graph offers capability '{name}', which this "
+            f"deployment does not register — every task card declaring it would "
+            f"grant nothing. Available: {sorted(known) or 'none'}.")
+    for st in steps:
+        if not isinstance(st, dict):
+            continue
+        cap = st.get("capability")
+        if not cap:
+            continue
+        sid = st.get("id", "?")
+        if isinstance(cap, str):
+            names = [cap]
+        elif isinstance(cap, list):
+            names = [c for c in cap if isinstance(c, str)]
+        elif isinstance(cap, dict):
+            if not cap.get("from_item"):
+                out.append(
+                    f"capability_known: step '{sid}' declares a capability "
+                    f"object without `from_item` — it grants nothing. Use a "
+                    f"name, a list, or {{from_item: <card field>, card: <path>}}.")
+                continue
+            if not cap.get("card"):
+                out.append(
+                    f"capability_known: step '{sid}' declares `from_item` with "
+                    f"no `card:` — a loop item is a NAME, so the card path is "
+                    f"the only way to read its fields, and without it nothing "
+                    f"is granted.")
+            if not offers:
+                out.append(
+                    f"capability_known: step '{sid}' reads capabilities from a "
+                    f"task card, but the graph offers none — the engine refuses "
+                    f"every card-declared name. Add a top-level "
+                    f"`capabilities: [...]` list.")
+            continue
+        else:
+            out.append(f"capability_known: step '{sid}' has an unusable "
+                       f"`capability:` value of type {type(cap).__name__}.")
+            continue
+        for n in names:
+            if n not in known:
+                out.append(
+                    f"capability_known: step '{sid}' declares capability "
+                    f"'{n}', which this deployment does not register — it would "
+                    f"grant nothing. Available: {sorted(known) or 'none'}.")
+            elif offers and n not in offers:
+                out.append(
+                    f"capability_known: step '{sid}' declares capability "
+                    f"'{n}', absent from the graph's own `capabilities:` offer "
+                    f"list {sorted(offers)} — registration will reject the graph.")
     return out
 
 
@@ -1059,6 +1136,7 @@ def forge_registry_check(graph_path: str = "", role_table: str = "",
 
     violations.extend(_role_tools_unknown(rt, live_tools))
     violations.extend(_role_model_known(rt))
+    violations.extend(_capability_known(graph, steps))
     violations.extend(_template_names_absent_tools(rt, steps, role_table, live_tools))
     violations.extend(_validation_is_a_spec_list(steps))
     violations.extend(_write_steps_without_validation(steps))

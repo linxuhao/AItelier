@@ -753,6 +753,34 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "pipeline_capabilities",
+            "description": "Read or edit which CAPABILITIES a pipeline offers. A capability is a "
+                           "named bundle of tools + the briefing that teaches them; a pipeline's "
+                           "offer list bounds what a task card may declare, and the engine refuses "
+                           "anything outside it. Call with only `config_name` to read; pass `add` "
+                           "or `remove` to edit a GENERATED (gen_*) pipeline. A built-in pipeline "
+                           "is refused — its offer list lives in the repo, and the way to give a "
+                           "built-in base a capability is to compose it with an addon that offers "
+                           "one. This edits the offer list only; it never defines or deletes a "
+                           "capability.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string",
+                                    "description": "Pipeline name, exactly as list_pipelines returns it."},
+                    "add": {"type": "array", "items": {"type": "string"},
+                            "description": "Capability names to offer. Each must be registered on "
+                                           "this deployment or the edit is refused."},
+                    "remove": {"type": "array", "items": {"type": "string"},
+                               "description": "Capability names to stop offering."},
+                },
+                "required": ["config_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_pipeline_addons",
             "description": "List pipeline ADDONS — optional overlays that compose onto a base "
                            "pipeline to add capabilities (e.g. a Godot game harness: compile + "
@@ -3584,6 +3612,43 @@ class MetaAgent:
                       if q in a.get("name", "").lower() or q in a.get("description", "").lower()]
         return {"addons": addons, "count": len(addons)}
 
+    def _tool_pipeline_capabilities(self, args: dict) -> dict:
+        """Read or edit a pipeline's capability offer list.
+
+        Reading is always allowed; editing is only for generated pipelines,
+        because a runtime mutation of a repo config is drift no checkout can
+        see. Definitions are a separate namespace — this never creates or
+        retires one, which is what keeps "a capability a config still offers
+        cannot be deleted" enforceable instead of circular.
+        """
+        name = (args.get("config_name") or "").strip()
+        if not name:
+            return {"error": "config_name is required (see list_pipelines)."}
+        from api.dependencies import get_config_registry, get_skillflow
+        from core import capability_registry as caps
+        sf = get_skillflow()
+        add, remove = args.get("add") or [], args.get("remove") or []
+        if add or remove:
+            from core.pipeline_registry import set_pipeline_capabilities
+            r = set_pipeline_capabilities(sf, get_config_registry(), name,
+                                          add=add, remove=remove)
+            if "error" in r:
+                return r
+            return r | {"registry": [c["name"] for c in
+                                     caps.palette(sf).get("capabilities", [])]}
+        pal = caps.palette(sf, name)
+        if "error" in pal:
+            return pal
+        return {
+            "config_name": name,
+            "offers": [{"name": c["name"], "tools": c["tools"],
+                        "purpose": c.get("purpose", "")}
+                       for c in pal.get("capabilities", [])],
+            "offered_but_not_registered": pal.get("offered_but_not_registered", []),
+            "registry": [c["name"] for c in
+                         caps.palette(sf).get("capabilities", [])],
+        }
+
     def _tool_describe_pipeline(self, args: dict) -> dict:
         """One pipeline's exact input contract by name (targeted PULL).
 
@@ -4726,6 +4791,7 @@ _TOOL_HANDLERS = {
     "generate_addon": MetaAgent._tool_generate_addon,
     "start_config_run": MetaAgent._tool_start_config_run,
     "list_pipelines": MetaAgent._tool_list_pipelines,
+    "pipeline_capabilities": MetaAgent._tool_pipeline_capabilities,
     "list_pipeline_addons": MetaAgent._tool_list_pipeline_addons,
     "describe_pipeline": MetaAgent._tool_describe_pipeline,
     "wait_until_next_checkpoint_or_completion": MetaAgent._tool_wait_until_checkpoint,

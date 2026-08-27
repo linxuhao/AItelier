@@ -197,6 +197,16 @@ def _read_host_hints() -> dict[str, dict]:
     return hints
 
 
+
+def _offered_capabilities(config_name: str) -> list[str]:
+    """The graph's top-level `capabilities:` offer list, or []."""
+    try:
+        from api.dependencies import get_skillflow
+        graph = getattr(get_skillflow(), "_graphs", {}).get(config_name)
+        return sorted(getattr(graph, "capabilities", []) or [])
+    except Exception:                                    # noqa: BLE001
+        return []
+
 class ConfigRegistry:
     """Builds and holds a :class:`ConfigManifest` for every registered graph."""
 
@@ -319,6 +329,11 @@ class ConfigRegistry:
             entry["input_hint"] = m.input_hint
             entry["takes_seed"] = bool(m.seed_file)
             entry["has_task_loop"] = bool(m.has_task_loop)
+            # What this pipeline OFFERS is part of its contract, the same way
+            # its seed shape is: it is the list a task card may declare from,
+            # and a palette that disagreed with this would be a discrepancy
+            # nobody could see.
+            entry["capabilities"] = _offered_capabilities(m.config_name)
         return entry
 
     def describe(self, query: str) -> list[dict]:

@@ -469,12 +469,40 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
     # No run at all (shouldn't happen for projects that went through
     # submit_project) — create one.
 
-    # Gate: don't create a run for projects whose meta conversation hasn't
-    # finished. The meta agent sets meta_state='drafting' on create_project
-    # and the approve_checkpoint handler clears it when the user approves
-    # the brief. Creating a run before the brief is ready causes the first
-    # Researcher (step 1) to run without a [Project Brief].
+    # Gate: don't create a run for a project whose brief does not exist yet.
+    # Creating one makes the first Researcher (step 1) run without a
+    # [Project Brief] — or, when step 1 imports the goals with `required: true`,
+    # fail on its very first claim.
+    #
+    # Two checks, because the FLAG and the FACT are maintained by different code.
+    # `meta_state='drafting'` is set by the meta agent's create_project path and
+    # cleared when the brief is approved. Any other way of creating a project —
+    # `POST /api/projects`, a public endpoint that validates repo inputs and is
+    # perfectly legitimate — never sets it, so the flag reads "ready" for a
+    # project that has no brief at all.
+    #
+    # Live 2026-08-27, jinyong-creation: created via POST /api/projects with
+    # config_name=dpe_game; one second later the poller started a run that died
+    # on its first claim — "Required context source resolved to no content:
+    # finalize". The guard for exactly this already existed in
+    # `start_config_run`, which refuses rather than hand back a run id that will
+    # never claim a step; the poller's own creation path never grew it.
+    #
+    # So ask the artifact, not the flag. And SAY SO: returning None here is
+    # otherwise completely silent — no run, no tick line, a project that simply
+    # never moves, which is the state the tick log exists to make readable.
     if project.get("meta_state") == "drafting":
+        tick_log(project_id, "awaiting_brief", reason="meta_state=drafting")
+        return None
+    try:
+        from core.run_launcher import missing_cross_config_inputs
+        missing = missing_cross_config_inputs(sf, config_name, project_id)
+    except Exception:
+        missing = []          # never let the guard itself stop a healthy project
+    if missing:
+        tick_log(project_id, "awaiting_brief", config=config_name,
+                 reason="; ".join(f"{m['output']} from config '{m['config']}'"
+                                  for m in missing))
         return None
 
     run_id = sf.get_or_create_run(config_name, project_id, {
@@ -1271,6 +1299,7 @@ _tick_last_idle = 0.0
 _TICK_SKIP_HEARTBEAT_S = 60
 _tick_last_skip = 0.0
 _tick_last_hold = 0.0
+_tick_last_brief = 0.0
 
 
 def _get_tick_logger():
@@ -1305,13 +1334,13 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
 
     `outcome` is a short stable token so the log greps cleanly — `idle`,
     `locked`, `advanced`, `claim_failed`, `no_claim`, `executed`, `terminal`,
-    `quota_exhausted`, `quota_hold`.
+    `quota_exhausted`, `quota_hold`, `awaiting_brief`.
 
-    `idle` and `quota_hold` are coalesced to one heartbeat a minute: both repeat
-    at tick cadence and carry no new information, and at 5s either one alone
-    fills the rotation window with lines nobody needs.
+    `idle`, `quota_hold` and `awaiting_brief` are coalesced to one heartbeat a
+    minute: all repeat at tick cadence and carry no new information, and at 5s
+    any one of them alone fills the rotation window with lines nobody needs.
     """
-    global _tick_last_idle, _tick_last_hold, _tick_last_skip
+    global _tick_last_idle, _tick_last_hold, _tick_last_skip, _tick_last_brief
     try:
         if outcome == "idle":
             now = _time.time()
@@ -1323,6 +1352,11 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             if now - _tick_last_hold < _TICK_HOLD_HEARTBEAT_S:
                 return
             _tick_last_hold = now
+        elif outcome == "awaiting_brief":
+            now = _time.time()
+            if now - _tick_last_brief < _TICK_HOLD_HEARTBEAT_S:
+                return
+            _tick_last_brief = now
         elif outcome == "tick_skipped":
             # Same repeater shape as `idle`: a tool step that owns the interval
             # job for its whole duration (godot_compile declares 3900s) makes

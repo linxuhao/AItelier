@@ -131,18 +131,6 @@ def _compose_files() -> list[str]:
     return ["-f", str(_COMPOSE_FILE)]
 
 
-def _mounted_secrets() -> tuple[str, ...]:
-    """The secret names docker-compose.yml mounts. Read from the file, so a
-    secret added there cannot be silently left unprovisioned here."""
-    try:
-        import yaml
-        data = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8")) or {}
-        return tuple(data.get("secrets") or ())
-    except Exception:
-        return ("DEEPSEEK_API_KEY", "ARK_API_KEY", "GITHUB_TOKEN",
-                "LOCAL_QWEN_API_KEY")
-
-
 def _ensure_host_dirs() -> None:
     """Create what compose BIND-MOUNTS, before Docker does it for us.
 
@@ -155,11 +143,12 @@ def _ensure_host_dirs() -> None:
     NEW one, which is why it never showed up on a machine that has had it for
     months. Found by actually starting a cold container on a second host.
 
-    Also creates the DIRECTORY and an EMPTY file for each optional secret; every
-    reader of these treats empty as "not configured" (the git credential helper
-    says so explicitly). The LLM key is not invented: an empty one would turn a
-    setup mistake into an authentication error on the first model call, so it is
-    reported here instead, once, with the command that fixes it.
+    The secrets dir is bind-mounted WHOLE (no per-key enumeration since
+    2026-08-27), so a missing key file just means "this provider is unused" and
+    optional secrets need no placeholder. Only the REQUIRED LLM keys get an
+    empty file created — not invented: an empty one would turn a setup mistake
+    into an authentication error on the first model call, so it is reported
+    here instead, once, with the command that fixes it.
 
     Never raises: a read-only or unusual HOME must not stop a user who mounts
     their secrets some other way — Docker will report that in its own terms.
@@ -180,9 +169,7 @@ def _ensure_host_dirs() -> None:
             pass
         from core.external_deps import required_llm_keys
         needed = set(required_llm_keys())
-        # Create EVERY secret compose mounts, needed or not: Docker refuses a
-        # missing secret source, so an unused one still has to exist.
-        for name in sorted(set(_mounted_secrets()) | needed):
+        for name in sorted(needed):
             f = d / name
             if not f.exists():
                 f.write_text("", encoding="utf-8")

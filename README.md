@@ -116,7 +116,7 @@ pip install -e .
 ```bash
 cp llm_providers.example.json llm_providers.json   # providers: URL + key NAME
 cp model_routes.example.json  model_routes.json    # models: which endpoints serve each
-cp .env.example .env                               # endpoints and options; NOT the keys
+cp .env.example .env                               # endpoints and options; keys prefer ~/.aitelier-secrets (see Docker section)
 
 # Which key files do YOUR tables need? The key name is the provider table's, not this page's
 # (imports core.*, so run it inside the venv the Install step created):
@@ -150,29 +150,35 @@ docker compose up -d              # multi-stage build (Node.js → Svelte bundle
 docker compose logs -f
 ```
 
-Compose mounts its API keys as **secret files**, and Docker refuses to start a
-service whose secret source is missing. The CLI creates them for you; if you run
-`docker compose` by hand, create them first (empty means "I don't use this").
-Also create the state dir **as your user** — if it does not exist, the Docker
-daemon creates the bind source as `root:root` and the container (which runs as
-your uid) crash-loops on `sqlite3.OperationalError: unable to open database
-file` without ever mentioning permissions:
+API keys are **files in `~/.aitelier-secrets/`**, one per key name — the whole
+dir is mounted read-only and resolved by name, so *whatever* key names your
+provider tables declare just work; nothing in `docker-compose.yml` needs
+editing when you add a provider. A missing file simply means "I don't use this
+provider" (exception: a self-hosted endpoint with no auth still wants a
+placeholder file with any content — the OpenAI client refuses to start with no
+key at all).
+
+Before the first `docker compose up -d`, create both host dirs **as your
+user** — if a bind-source dir does not exist, the Docker daemon creates it as
+`root:root`, and the container (which runs as your uid) crash-loops on
+`sqlite3.OperationalError: unable to open database file` without ever
+mentioning permissions:
 
 ```bash
 mkdir -p ~/.AItelier
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-cd ~/.aitelier-secrets && touch ARK_API_KEY DEEPSEEK_API_KEY QWEN_API_KEY GITHUB_TOKEN LOCAL_QWEN_API_KEY && chmod 600 *
-printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME>   # the probe in Quick Start names it
+printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME> && chmod 600 ~/.aitelier-secrets/<KEY_NAME>
+# <KEY_NAME> comes from YOUR provider tables — the probe in Quick Start prints the list.
 ```
+
+Keys in `.env` also work (`env_file:` passes them through, and the resolver
+falls back to the environment) — but then they sit in the container's
+environment where any subprocess that inherits it can see them. Files are the
+recommended path; that is the whole reason they exist.
 
 `docker compose up -d` also starts **aitelier-godot** — the compile/playtest
 sidecar for the game pipeline. Harmless if unused; `docker compose up -d aitelier`
 starts just the main service.
-
-The names above mirror the shipped example provider tables — the authoritative
-list is the `secrets:` block at the bottom of `docker-compose.yml`, and it is
-not fixed: swap the provider tables and your key names change with them. The
-secrets dir is deliberately **not** bind-mounted (so keys never appear in any workspace-visible path), which means a provider you add with a **new** key name also needs its own `secrets:` entry in the compose file.
 
 Publishing through an existing **cloudflared** connector is one line. The network
 lives in `docker-compose.yml` itself and is selected BY NAME, with no

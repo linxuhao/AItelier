@@ -1,32 +1,34 @@
-"""The README's touch-list and docker-compose's secrets block must name the same files.
+"""The secrets dir is mounted WHOLE — compose must never enumerate key names again.
 
-This is not documentation polish. The compose file grew a fifth secret
-(`QWEN_API_KEY`) after the README's touch-list was written naming four, and a
-clean-machine install that followed the README verbatim was refused by Docker
-at `up -d` — `bind source path does not exist` — 2026-08-27, on the first
-stranger-simulation install ever run against the public repo. The two lists
-live in different files, so nothing but a test makes them move together.
+History, because this test replaces one that pointed the opposite way: compose
+used to enumerate five Docker secrets, the README's touch-list said four, and
+the first stranger install (2026-08-27) died at `up -d` on the drift. The first
+fix pinned the two lists together; the real fix (same day) removed the
+enumeration entirely — the whole `~/.aitelier-secrets` dir is mounted and
+`ai_router._read_secret` resolves `$AITELIER_SECRETS_DIR/<name>`, so the set of
+key names is owned by the provider tables alone. This test pins THAT: if a
+per-key `secrets:` enumeration creeps back into compose, the drift class it
+enables comes back with it.
 """
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+COMPOSE = (ROOT / "docker-compose.yml").read_text()
 
 
-def _compose_secret_files() -> set[str]:
-    text = (ROOT / "docker-compose.yml").read_text()
-    # Every secret is declared as `file: ${HOME}/.aitelier-secrets/<NAME>`.
-    names = set(re.findall(r"\.aitelier-secrets/([A-Z0-9_]+)", text))
-    assert names, "no secrets found in docker-compose.yml — pattern rot?"
-    return names
+def test_compose_mounts_the_whole_secrets_dir():
+    assert "/.aitelier-secrets:/run/aitelier-secrets:ro" in COMPOSE
+    assert "AITELIER_SECRETS_DIR: /run/aitelier-secrets" in COMPOSE
 
 
-def _readme_touch_names() -> set[str]:
-    text = (ROOT / "README.md").read_text()
-    m = re.search(r"cd ~/\.aitelier-secrets && touch ([A-Z0-9_ ]+?) && chmod", text)
-    assert m, "README no longer has the touch-list line this test pins"
-    return set(m.group(1).split())
+def test_compose_enumerates_no_per_key_secrets():
+    # A top-level `secrets:` block or a service-level `secrets:` list is the
+    # enumeration pattern this repo left behind.
+    for line in COMPOSE.splitlines():
+        assert not line.rstrip().endswith("secrets:") or "aitelier-secrets" in line, (
+            f"per-key secrets enumeration is back: {line!r}")
 
 
-def test_readme_touch_list_names_every_compose_secret():
-    assert _readme_touch_names() == _compose_secret_files()
+def test_credential_helper_follows_the_mounted_dir():
+    """git-credential-helper.sh reads a path env; compose must point it at the mount."""
+    assert "AITELIER_GITHUB_TOKEN_FILE: /run/aitelier-secrets/GITHUB_TOKEN" in COMPOSE

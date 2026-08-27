@@ -103,23 +103,21 @@ def test_no_compose_overlay_file_remains():
 
 # ── Secret files ────────────────────────────────────────────────────────────
 
-def test_every_mounted_secret_is_provisioned(tmp_path, monkeypatch, capsys):
-    """Whatever docker-compose mounts, the CLI must create — or `up` dies on a
-    bind mount. Read the names from the compose file so a NEW secret cannot be
-    added there and silently left unprovisioned."""
-    monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
-    srv._ensure_host_dirs()
-    declared = set(_compose("docker-compose.yml").get("secrets") or {})
-    created = {p.name for p in (tmp_path / "s").iterdir()}
-    assert declared <= created, f"never created: {sorted(declared - created)}"
+def test_compose_declares_no_per_key_secrets(tmp_path, monkeypatch, capsys):
+    """The whole secrets dir is mounted; a per-key `secrets:` enumeration coming
+    back would resurrect the compose/README drift class (QWEN_API_KEY,
+    2026-08-27) and the bind-refusal on missing files with it."""
+    assert not _compose("docker-compose.yml").get("secrets")
 
 
-def test_an_optional_secret_is_created_empty(tmp_path, monkeypatch):
-    """Empty is the correct content for "I do not use this" — the git credential
-    helper documents exactly that reading."""
+def test_an_optional_secret_is_not_manufactured(tmp_path, monkeypatch):
+    """With the whole dir mounted, ABSENCE is the correct spelling of "I do not
+    use this" — a manufactured empty file would only re-suggest the old
+    enumeration contract. The dir itself must exist, as the user, 0700."""
     monkeypatch.setenv("AITELIER_SECRETS_DIR", str(tmp_path / "s"))
     srv._ensure_host_dirs()
-    assert (tmp_path / "s" / "GITHUB_TOKEN").read_text() == ""
+    assert not (tmp_path / "s" / "GITHUB_TOKEN").exists()
+    assert (tmp_path / "s").is_dir()
 
 
 def test_a_missing_llm_key_is_reported_with_the_fix(tmp_path, monkeypatch, capsys):
@@ -201,7 +199,7 @@ def test_everything_compose_bind_mounts_is_provisioned(tmp_path, monkeypatch):
     for v in homed:
         src = v.split(":")[0]
         name = re.sub(r"^\$\{HOME\}/", "", src)
-        assert name == ".AItelier", (
+        assert name in (".AItelier", ".aitelier-secrets"), (
             f"{src} is bind-mounted but nothing creates it — Docker will, as "
             f"root, and the container (host uid) will not be able to write it.")
 

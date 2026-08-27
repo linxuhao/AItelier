@@ -646,6 +646,8 @@ def test_the_vision_judge_is_not_swept_into_a_provider_migration():
         assert prov in llm, f"vision route names unknown provider '{prov}'"
         key = llm[prov].get("api_key_env")
         if key:
-            assert key in compose, (
-                f"the vision judge '{prov}' needs {key}, which is not mounted "
-                f"in docker-compose.yml's secrets — the gate would go blind")
+            # The whole secrets dir is mounted (no per-key enumeration), so any
+            # key name resolves — what must hold is that the mount is there.
+            assert "/run/aitelier-secrets" in compose, (
+                f"the vision judge '{prov}' needs {key} and the secrets-dir "
+                f"mount is gone from docker-compose.yml — the gate would go blind")

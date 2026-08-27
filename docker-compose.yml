@@ -36,6 +36,8 @@ services:
       # never 127.0.0.1, so the app-level localhost guard must be relaxed.
       # Put Cloudflare Access (or equivalent auth) in front of the published port.
       AITELIER_ALLOW_EXTERNAL: "1"
+      AITELIER_SECRETS_DIR: /run/aitelier-secrets
+      AITELIER_GITHUB_TOKEN_FILE: /run/aitelier-secrets/GITHUB_TOKEN
       # Git auth for clone/push of GitHub repos. The credential helper feeds the
       # GITHUB_TOKEN secret (below) to github.com HTTPS remotes only — the token
       # stays in the secret file, only the helper *path* is in the environment.
@@ -68,36 +70,18 @@ services:
       GODOT_VISION_CONTEXT_TOKENS: "12288"
     env_file:
       - .env
-    secrets:
-      # LLM API key delivered as a file (mounted at /run/secrets/DEEPSEEK_API_KEY),
-      # NOT an env var → test/build subprocesses that inherit os.environ never see
-      # it. ai_router._read_secret() reads it. Source lives outside any mounted
-      # path so it isn't visible in the workspace tree.
-      - DEEPSEEK_API_KEY
-      # Volcengine Ark (token plan) — the same file-secret model. Its
-      # OpenAI-compatible endpoint serves deepseek, glm, doubao, kimi and
-      # minimax behind ONE key, so llm_providers.json's `ark` entry is the
-      # only place a model needs registering.
-      - ARK_API_KEY
-      # Alibaba Qwen token plan — a THIRD endpoint for the deepseek models the
-      # routes already use (`deepseek-v4-pro-0813`, `deepseek-v4-flash-0731`),
-      # plus qwen3.8-max and a vision-capable model of its own. Separate plan,
-      # separate window: model_routes.json lists it as its own candidate so it
-      # parks independently of ark.
-      - QWEN_API_KEY
-      # GitHub token (fine-grained PAT) for private clone + push + PR creation.
-      # Same file-secret model as the LLM key: read by git-credential-helper.sh
-      # (clone/push) and core/git_ops.py (PR REST call), never placed in env.
-      - GITHUB_TOKEN
-      # Self-hosted vLLM (llm_providers.json: localqwen) serves without
-      # --api-key, so this file's CONTENT is irrelevant — but ai_router passes
-      # api_key only `if self.api_key`, and with none passed LiteLLM's OpenAI
-      # client falls back to OPENAI_API_KEY and errors when that is unset too.
-      # A placeholder file is what makes the local endpoint reachable at all.
-      - LOCAL_QWEN_API_KEY
     volumes:
       # Live source: host repo shadows the baked-in copy (no rebuild on edits).
       - .:/app
+      # API keys as FILES, not env vars → test/build subprocesses that inherit
+      # os.environ never see them (same-uid code can read the files either way;
+      # full isolation needs a separate sandbox). The WHOLE dir is mounted and
+      # ai_router._read_secret() resolves them, so the set of key names is owned
+      # by llm_providers.json alone — per-key enumeration here is what let this
+      # file and the README drift apart (QWEN_API_KEY, 2026-08-27). Note for
+      # self-hosted no-auth endpoints (localqwen): LiteLLM still wants SOME key,
+      # so give those a placeholder file with any content.
+      - ${HOME}/.aitelier-secrets:/run/aitelier-secrets:ro
       # The SPA bundle is baked into the image at /srv/web_dist (outside /app,
       # so this mount can't shadow it — served via AITELIER_WEB_DIST). A plain
       # `docker compose up -d --build` deploys frontend changes; no anonymous
@@ -184,33 +168,6 @@ services:
   # ── Cloudflare ────────────────────────────────────────────────────────────
   # Publishing through an existing cloudflared connector is OPTIONAL and lives
   # named by AITELIER_EDGE_NETWORK — see the networks: block below.
-
-secrets:
-  # LLM API key, kept out of the environment. Source is outside any path
-  # bind-mounted into the container (not ~/.AItelier, not the repo).
-  #   mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-  #   printf '%s' "$DEEPSEEK_KEY" > ~/.aitelier-secrets/DEEPSEEK_API_KEY && chmod 600 "$_"
-  DEEPSEEK_API_KEY:
-    file: ${HOME}/.aitelier-secrets/DEEPSEEK_API_KEY
-  #   printf '%s' "$ARK_KEY" > ~/.aitelier-secrets/ARK_API_KEY && chmod 600 "$_"
-  ARK_API_KEY:
-    file: ${HOME}/.aitelier-secrets/ARK_API_KEY
-  # GitHub fine-grained PAT — scope to the repos you push to (Contents: R/W,
-  # Pull requests: R/W). Create the file before `up` (may be empty to start;
-  # the helper treats an empty file as "no credentials"):
-  #   printf '%s' "$GH_PAT" > ~/.aitelier-secrets/GITHUB_TOKEN && chmod 600 "$_"
-  GITHUB_TOKEN:
-    file: ${HOME}/.aitelier-secrets/GITHUB_TOKEN
-  # Alibaba's Qwen token plan — a REAL paid key, despite sitting next to the
-  # local one. Create it before `up`:
-  #   printf '%s' "$QWEN_KEY" > ~/.aitelier-secrets/QWEN_API_KEY && chmod 600 "$_"
-  QWEN_API_KEY:
-    file: ${HOME}/.aitelier-secrets/QWEN_API_KEY
-  # Placeholder only — the local vLLM does no auth. Create it before `up`:
-  #   printf 'local-no-auth' > ~/.aitelier-secrets/LOCAL_QWEN_API_KEY && chmod 600 "$_"
-  LOCAL_QWEN_API_KEY:
-    file: ${HOME}/.aitelier-secrets/LOCAL_QWEN_API_KEY
-  # (Godot needs no account or license — the game builder carries no secrets.)
 
 networks:
   # The backend's own private network.

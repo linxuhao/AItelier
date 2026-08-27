@@ -78,6 +78,14 @@ export function extractPayloadText(payload: unknown): string {
 }
 
 /** HH:MM:SS out of a trace timestamp, or the raw string when it has none. */
+// Module-level: toLocaleTimeString builds a fresh Intl.DateTimeFormat per
+// call (~0.1-1ms), and this runs per visible row per re-render. hourCycle
+// 'h23' rather than hour12:false — the latter maps to h24 in some engines,
+// rendering midnight as "24:20:15".
+const _CLOCK_FMT = new Intl.DateTimeFormat([], {
+  hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit',
+});
+
 export function shortTime(ts: string | undefined | null): string {
   if (!ts) return '';
   // Trace `created_at` is a NAIVE SQLite datetime whose value is UTC. The old
@@ -87,9 +95,7 @@ export function shortTime(ts: string | undefined | null): string {
   // the missing Z before parsing — so render its result in the VIEWER's zone.
   const epoch = toEpochSeconds(ts);
   if (epoch != null) {
-    return new Date(epoch * 1000).toLocaleTimeString([], {
-      hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit',
-    });
+    return _CLOCK_FMT.format(new Date(epoch * 1000));
   }
   const m = String(ts).match(/(\d{2}:\d{2}:\d{2})/);
   return m ? m[1] : String(ts);
@@ -176,9 +182,11 @@ export function modelBinding(payload: unknown): string | null {
   // page, and which reseller served a given model is commercial information
   // some providers do not want advertised. The full served_by stays in the
   // trace payload for the operator.
-  const model = String(p.served_by).includes('/')
-    ? String(p.served_by).split('/', 2)[1]
-    : String(p.served_by);
+  // slice, not split-with-limit: JS split(sep, 2) TRUNCATES, so an HF-style
+  // id like org/model-name under a provider prefix would lose the model half
+  // and two different models from one org would merge into one chip.
+  const sb = String(p.served_by);
+  const model = sb.includes('/') ? sb.slice(sb.indexOf('/') + 1) : sb;
   const route = p.model_route && p.model_route !== model && p.model_route !== p.served_by
     ? p.model_route + ' \u2192 ' : '';
   return route + model;

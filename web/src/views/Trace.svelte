@@ -41,6 +41,11 @@
   // fetch — usage rows are ~1 per LLM turn, dozens not thousands).
   let bindings = $state<{ label: string; turns: number; tokens: number }[]>([]);
 
+  // Full endpoint page size (le=1000, api/run_routers.py): keyset pages are
+  // sequential, so half-size pages doubled the serialized RTTs over the tunnel.
+  const _BINDING_PAGE_SIZE = 1000;
+  const _BINDING_PAGES = 10;
+
   let bindingsTruncated = $state(false);
 
   async function loadBindings(): Promise<void> {
@@ -51,9 +56,9 @@
       const agg = new Map<string, { turns: number; tokens: number }>();
       let afterSeq: number | null = null;
       let more = true;
-      for (let page = 0; page < 20 && more; page++) {
+      for (let page = 0; page < _BINDING_PAGES && more; page++) {
         const data = await getTrace(runId, {
-          limit: 500, order: 'asc', category: 'usage',
+          limit: _BINDING_PAGE_SIZE, order: 'asc', category: 'usage',
           ...(afterSeq != null ? { afterSeq } : {}),
         });
         for (const e of ((data && data.traces) || [])) {
@@ -187,7 +192,7 @@
         </span>
       {/each}
       {#if bindingsTruncated}
-        <span class="binding-chip" title="summary covers the first 10000 usage rows only">&hellip;</span>
+        <span class="binding-chip" title={`summary covers the first ${_BINDING_PAGES * _BINDING_PAGE_SIZE} usage rows only`}>&hellip;</span>
       {/if}
     </div>
   {/if}

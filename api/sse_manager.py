@@ -116,19 +116,18 @@ class StreamManager:
         Accuracy comes for free: a tab that closes tears down its generator,
         whose `finally` removes the queue and its meta in the same breath.
 
-        Only `__global__` counts as a viewer. Per-task log channels are
-        auxiliary streams the SAME tab opens next to its global one — counting
-        them reported the signed-in operator's own task tail as an extra
-        "anonymous viewer", which is precisely the working-hours signal the
-        split-visibility design exists to keep honest.
+        ALL channels, deliberately: this feeds the write-gated `viewers`
+        detail, and the capacity machinery counts every channel — a snapshot
+        filtered to `__global__` could not explain the system's own refusals
+        (512 task-log streams fill the cap while the table shows an empty
+        house). The viewer-shaped filtering lives in `presence_counts`.
 
         Iterate over a list() of the values: this is read from a threadpool
         request handler while the loop thread mutates the dict on every
         connect/disconnect, and a bare .values() iteration there dies with
         "dictionary changed size during iteration".
         """
-        return [dict(m) for m in list(self._conn_meta.values())
-                if m.get("channel") == "__global__"]
+        return [dict(m) for m in list(self._conn_meta.values())]
 
     def presence_counts(self) -> dict:
         """{total, authenticated, anonymous} — THE shape, derived once.
@@ -136,8 +135,13 @@ class StreamManager:
         Both the GET seed (/api/connections) and the SSE broadcast feed the
         same badge; deriving the counts in each caller is how the two sources
         drift into different shapes.
+
+        Counts only `__global__` connections: a per-task log channel is the
+        SAME tab's auxiliary stream, and counting it reported the operator's
+        own task tail as an extra "anonymous viewer".
         """
-        snap = self.connection_snapshot()
+        snap = [m for m in self.connection_snapshot()
+                if m.get("channel") == "__global__"]
         auth = sum(1 for m in snap if m.get("who"))
         return {"total": len(snap), "authenticated": auth,
                 "anonymous": len(snap) - auth}
@@ -176,7 +180,7 @@ class StreamManager:
         # memory lever anyone can pull by opening a stream and not reading it.
         # The cap is generous: a live client drains continuously, so reaching it
         # means the consumer is gone, which is exactly when we want it dropped.
-        if self._connection_count() >= _MAX_CONNECTIONS:
+        if self.at_capacity():
             # Refuse by ENDING the stream rather than by hanging or erroring:
             # the client sees a normal close, EventSource retries with its own
             # backoff, and a transient crowd resolves itself. A comment line

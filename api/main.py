@@ -446,14 +446,23 @@ async def stream_global_events(request: Request):
       plus, on an unknown `kid`, a blocking JWKS fetch with a 3s timeout —
       on the loop that stalls every open stream and the scheduler with it.
     """
+    if stream_manager.at_capacity():
+        # Refuse HERE, before paying for identity. Skipping only the identity
+        # resolve and letting the generator decide later re-created the race
+        # this ordering exists to prevent: a slot freeing between the two
+        # checks admitted a signed-in operator as who=None — permanently
+        # mislabeled anonymous for the stream's whole life. One refusal
+        # decision, made once. (The generator keeps its own check as a belt.)
+        async def _refuse():
+            yield ": at capacity\n\n"
+        return StreamingResponse(_refuse(), media_type="text/event-stream")
     who = None
-    if not stream_manager.at_capacity():
-        try:
-            from starlette.concurrency import run_in_threadpool
-            from api.auth import creator_email
-            who = await run_in_threadpool(creator_email, request)
-        except Exception:
-            pass
+    try:
+        from starlette.concurrency import run_in_threadpool
+        from api.auth import creator_email
+        who = await run_in_threadpool(creator_email, request)
+    except Exception:
+        pass
     return StreamingResponse(
         stream_manager.event_generator("__global__", who=who),
         media_type="text/event-stream",

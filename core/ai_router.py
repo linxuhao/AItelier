@@ -313,10 +313,11 @@ class AIGateway:
                 provs = json.load(f)
         except (OSError, ValueError):
             provs = None    # no registry to check against — let everything try
+        first_keyed = None
         for i in range(start, len(self._candidates)):
             c = self._candidates[i]
-            if not (_endpoint_available(c) and self._registered(c)):
-                continue
+            if provs is not None and c.split("/", 1)[0] not in provs:
+                continue    # unregistered — same verdict _registered() gives
             # Skip a candidate whose provider declares a key that has no
             # value. Before rotation this could not happen on a correctly
             # provisioned install (the FIRST candidate's key is the required
@@ -325,12 +326,26 @@ class AIGateway:
             # guaranteed AuthenticationError + failover on every such step —
             # paid latency and trace noise for a call that cannot succeed.
             # Missing key file = "this provider is unused"; honor it here too.
+            # LOUDLY: the old path failed over with a printed line and a
+            # failed_over_from trace mark, and a silent skip reads as "the
+            # cheap provider is fine" while the fallback quietly pays.
             if provs is not None:
                 key_env = (provs.get(c.split("/", 1)[0]) or {}).get("api_key_env")
                 if key_env and not _read_secret(key_env):
+                    print(f"[ai_router] skip {c}: no key — create "
+                          f"~/.aitelier-secrets/{key_env} to enable it")
+                    if first_keyed is None:
+                        pass    # keyless can never serve; not a fallback
                     continue
-            return i
-        return start
+            if first_keyed is None:
+                first_keyed = i      # registered + keyed, maybe parked
+            if _endpoint_available(c):
+                return i
+        # Everything usable is parked (or nothing is usable). Degrade to "try
+        # it anyway" — but prefer the first candidate that at least HAS a key:
+        # a parked endpoint might answer (parking is prose-parsed guesswork),
+        # a keyless one cannot.
+        return first_keyed if first_keyed is not None else start
 
     def _registered(self, candidate: str) -> bool:
         """Is this candidate's provider actually in llm_providers.json?

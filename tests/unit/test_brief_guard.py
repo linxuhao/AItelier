@@ -113,12 +113,12 @@ def test_gate_holds_through_the_submit_endpoint(client):
     assert db.get_next_active_project() is None  # scheduler will not start it
 
 
-def test_a_failed_project_is_rescued_back_to_planning(tmp_path, monkeypatch):
-    """A fresh brief on a previously-failed project is an explicit "go again",
-    but get_active_projects only selects planning/executing/verifying/running —
-    so without the rescue the submit reported "submitted" while every scheduler
-    tick logged idle forever (the jinyong-neigong wedge, one status family over).
-    `paused:*` must stay untouched: that is a live run at a checkpoint."""
+def test_a_failed_project_is_refused_with_directions(tmp_path, monkeypatch):
+    """A failed project must be REFUSED with directions, not silently accepted:
+    the scheduler leaves a failed run dormant (NB-5; only /retry reactivates),
+    so accepting the brief produced "submitted" + a no_run tick forever — and
+    quietly resuming a half-dead run under a NEW brief would serve old goals.
+    `paused:*` stays untouched: that is a live run at a checkpoint."""
     fin = tmp_path / "meta_conversation" / "finalize"
     fin.mkdir(parents=True)
     (fin / "step1_goals.json").write_text('{"goals": ["x"], "user_stories": ["As a..."]}')
@@ -138,8 +138,13 @@ def test_a_failed_project_is_rescued_back_to_planning(tmp_path, monkeypatch):
             self.updates.update(kw)
 
     db = _DB("failed:Cycle limit exceeded — review_verdict…")
-    assert ps.seed_and_trigger(db, None, "p1", {"user_stories": ["x"]})["status"] == "submitted"
-    assert db.updates.get("status") == "planning"
+    r = ps.seed_and_trigger(db, None, "p1", {"user_stories": ["x"]})
+    # NOT silently "submitted": the scheduler's NB-5 leaves a failed run
+    # dormant (only POST /retry reactivates), so the first fix's status flip
+    # produced "submitted" + no_run on every tick. Refuse with directions.
+    assert r["status"] == "error"
+    assert "retry" in r["message"]
+    assert "status" not in db.updates
 
     db = _DB("paused:checkpoint")
     ps.seed_and_trigger(db, None, "p1", {"user_stories": ["x"]})

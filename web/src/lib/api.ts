@@ -438,6 +438,17 @@ export interface TraceQueryOptions {
   stepInstanceId?: number;
 }
 
+export interface ConnectionCounts {
+  total: number;
+  authenticated: number;
+  anonymous: number;
+}
+
+/** Live SSE viewer counts (public shape; writers also get a viewers list). */
+export function getConnections(): Promise<ConnectionCounts> {
+  return _get('/api/connections');
+}
+
 export function getTrace(
   runId: string,
   opts?: TraceQueryOptions,

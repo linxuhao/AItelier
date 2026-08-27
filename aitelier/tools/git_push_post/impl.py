@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 _TIMEOUT_S = 120
+_TIMEOUT_RC = 124      # timeout(1)'s shell convention
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -32,7 +33,7 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
         # this tool's whole contract. Shape it like a failed git call so every
         # caller's returncode check routes it to the skip/error path.
         return subprocess.CompletedProcess(
-            args=["git", *args], returncode=124, stdout="",
+            args=["git", *args], returncode=_TIMEOUT_RC, stdout="",
             stderr=f"timed out after {_TIMEOUT_S}s")
 
 
@@ -68,6 +69,20 @@ def _code_path(project_id: str, project_root: str) -> Path | None:
 
 def git_push_post(*, project_root: str = "", remote: str = "origin",
                   project_id: str = "", **_ignored) -> dict:
+    # The whole contract in one wrapper: NOTHING that goes wrong in a push may
+    # take down (or wedge) a run that already passed review. The Timeout shim
+    # covers one class; a raised OSError (git binary missing, fork failure)
+    # would make skillflow reopen the step and re-raise on every tick — the
+    # run never fails, it just never reaches done.
+    try:
+        return _git_push_post(project_root=project_root, remote=remote,
+                              project_id=project_id)
+    except Exception as e:
+        return {"pushed": False, "action": "error",
+                "error": f"{type(e).__name__}: {e}"[:400]}
+
+
+def _git_push_post(*, project_root: str, remote: str, project_id: str) -> dict:
     root = _code_path(project_id, project_root)
     if root is None:
         return _skip("no code path: neither the host resolver nor "
@@ -81,6 +96,13 @@ def git_push_post(*, project_root: str = "", remote: str = "origin",
         return _skip(f"not a git repository: {root}")
 
     r = _git(root, "remote")
+    if r.returncode != 0:
+        # A timed-out or failed PROBE must not masquerade as a normal state:
+        # rc 124 with empty stdout used to read "no remote configured
+        # (local-only)" — a confident wrong diagnosis for a hung mount or a
+        # stale index.lock, after which pushes silently stop forever.
+        return {"pushed": False, "action": "error",
+                "error": f"git remote failed: {(r.stderr or '').strip()[:300]}"}
     remotes = r.stdout.split()
     if not remotes:
         return _skip("no remote configured (local-only)")
@@ -89,7 +111,10 @@ def git_push_post(*, project_root: str = "", remote: str = "origin",
 
     r = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
     branch = r.stdout.strip()
-    if r.returncode != 0 or not branch or branch == "HEAD":
+    if r.returncode != 0:
+        return {"pushed": False, "action": "error",
+                "error": f"git rev-parse failed: {(r.stderr or '').strip()[:300]}"}
+    if not branch or branch == "HEAD":
         return _skip("detached HEAD — nothing to push to a branch")
 
     # Already there? `git push` would say "Everything up-to-date" and succeed,

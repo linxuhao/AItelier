@@ -103,13 +103,21 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     # a real pipeline status is not touched — this function's job is "the brief
     # is ready, go", not "reset whatever was happening".
     status = (db.get_project(project_id) or {}).get("status") or ""
-    # `failed:*` too: a fresh brief on a previously-failed project is an
-    # explicit "go again", but get_active_projects never selects failed — so
-    # without this rescue the submit reports "submitted" and every scheduler
-    # tick logs idle forever. (`paused:*` stays untouched: that is a live run
-    # waiting at a checkpoint, not a stranded one.)
-    if (status.startswith("running:") or status.startswith("failed:")
-            or status in ("", "drafting")):
+    # A `failed:*` project is refused with directions, not silently rescued.
+    # The first version of this fix flipped the status to planning — but the
+    # scheduler's NB-5 deliberately leaves a failed RUN dormant (only
+    # POST /api/projects/{pid}/retry reactivates it), and the status sync then
+    # flips the project right back: "submitted" + no_run on every tick. And
+    # quietly resuming a half-dead run under a NEW brief would be worse — the
+    # new goals never reach the steps that already ran. Say what the two real
+    # options are instead.
+    if status.startswith("failed:"):
+        return {"status": "error",
+                "message": (f"project '{project_id}' has a failed run — resume "
+                            f"it with POST /api/projects/{project_id}/retry, "
+                            f"or start a new project for the new brief")}
+    # (`paused:*` stays untouched: that is a live run at a checkpoint.)
+    if status.startswith("running:") or status in ("", "drafting"):
         db.update_project(project_id, status="planning")
 
     wake_scheduler()

@@ -72,7 +72,8 @@ token plan on the SAME vendor is two entries and one route, with no code change:
 "flash": ["ark/deepseek-v4-flash", "ark2/deepseek-v4-flash", "deepseek/deepseek-v4-flash"]
 ```
 
-Write the key to `~/.aitelier-secrets/ARK_API_KEY_2` (chmod 600) — the whole
+Write the key to `~/.aitelier-secrets/ARK_API_KEY_2` (chmod 600; the dir is
+overridable via `AITELIER_SECRETS_DIR`) — the whole
 secrets dir is mounted, so the file is live the moment it exists; no compose
 edit, no restart.
 

@@ -129,3 +129,38 @@ def test_next_usable_skips_a_keyless_candidate(tmp_path, monkeypatch):
     # every candidate keyless → degrade to "try it anyway", never brick
     gw._candidates = ["nokey/m1", "nokey/m2"]
     assert gw._next_usable(0) == 0
+
+
+def test_degrade_prefers_a_keyed_candidate_over_a_keyless_one(tmp_path, monkeypatch):
+    """When everything usable is parked, 'try it anyway' must try something
+    that CAN answer: a parked endpoint might (parking is prose-parsed
+    guesswork), a keyless one cannot."""
+    import json as _json
+    import core.ai_router as ar
+    provs = tmp_path / "llm_providers.json"
+    provs.write_text(_json.dumps({
+        "nokey": {"base_url": "u", "api_key_env": "NOKEY_API_KEY"},
+        "parked": {"base_url": "u", "api_key_env": "PARKED_API_KEY"},
+    }))
+    monkeypatch.setenv("PARKED_API_KEY", "x")
+    monkeypatch.delenv("NOKEY_API_KEY", raising=False)
+    monkeypatch.setattr(ar, "_endpoint_available", lambda c: False)  # 全部停靠
+    gw = ar.AIGateway.__new__(ar.AIGateway)
+    gw._config_path = str(provs)
+    gw._candidates = ["nokey/m1", "parked/m2"]
+    assert gw._next_usable(0) == 1      # 有 key 的停靠者,而不是 start=0 的无 key 者
+
+
+def test_string_form_route_is_visible_to_registry_reads(tmp_path, monkeypatch):
+    """ModelRoutes coerces '"flash": "ark/m"' to a one-item list; the registry
+    flatten must accept the same shape or the blindness bug returns one value
+    shape over."""
+    import json as _json
+    import core.model_registry as reg
+    routes = tmp_path / "model_routes.json"
+    provs = tmp_path / "llm_providers.json"
+    routes.write_text(_json.dumps({"flash": "a/m1"}))
+    provs.write_text(_json.dumps({"a": {"base_url": "u", "api_key_env": ""}}))
+    monkeypatch.setattr(reg, "ROUTES_FILE", routes)
+    monkeypatch.setattr(reg, "PROVIDERS_FILE", provs)
+    assert reg.provider_consumers("a") == ["flash"]

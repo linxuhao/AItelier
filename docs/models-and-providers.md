@@ -98,7 +98,8 @@ cp .env.example .env        # endpoints and options; NOT the keys
 A missing key fails naming the provider, the key, the file to create, **and
 the model whose endpoint list sent it there**.
 
-No Docker step at all: the whole `~/.aitelier-secrets` dir is mounted
+No Docker step at all: the whole secrets dir (`~/.aitelier-secrets` by default,
+`AITELIER_SECRETS_DIR` overrides — the compose mount source follows it) is mounted
 read-only at `/run/aitelier-secrets`, so **whatever** key name a provider
 declares resolves the moment its file exists — no compose edit, no restart.
 (The dir still never appears in any workspace-visible path.)

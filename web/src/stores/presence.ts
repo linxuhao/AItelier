@@ -6,6 +6,7 @@
 // event handler would have drifted apart on the second page that wanted it.
 import { writable } from 'svelte/store';
 import { on } from '../lib/sse';
+import { getConnections } from '../lib/api';
 
 export interface PresenceState {
   total: number;
@@ -27,8 +28,10 @@ on('presence', (ev: Record<string, unknown>) => {
 // Seed once: the SSE stream only speaks on connect/disconnect, so a page
 // opened into a quiet deployment would otherwise show nothing for hours.
 // The seed must never clobber a FRESHER event that raced ahead of it.
-fetch('/api/connections')
-  .then((r) => (r.ok ? r.json() : null))
+// Through the typed wrapper, not raw fetch: it carries the 10s timeout and
+// the one-shot retry — a transient blip at page load would otherwise leave
+// the badge unseeded for hours on a quiet deployment.
+getConnections()
   .then((j) => {
     if (j && !sawEvent) {
       presenceStore.set({ total: j.total, authenticated: j.authenticated });

@@ -160,8 +160,17 @@ def _ensure_host_dirs() -> None:
     except OSError:
         pass          # let Docker report it in its own terms
     try:
-        d = Path(os.environ.get("AITELIER_SECRETS_DIR")
-                 or (Path.home() / ".aitelier-secrets"))
+        env_dir = os.environ.get("AITELIER_SECRETS_DIR")
+        if env_dir == "/run/aitelier-secrets":
+            # The CONTAINER-side value, copy-pasted to the host (it is visible
+            # in compose, docs, and any `docker exec env`). Following it would
+            # provision /run/... on the host AND redirect the compose mount
+            # source there — silently empty keys. Refuse the footgun.
+            print("AITELIER_SECRETS_DIR=/run/aitelier-secrets is the "
+                  "CONTAINER-side path; on the host it must point at your "
+                  "real secrets dir (default ~/.aitelier-secrets). Ignoring it.")
+            env_dir = None
+        d = Path(env_dir or (Path.home() / ".aitelier-secrets"))
         d.mkdir(parents=True, exist_ok=True)
         try:
             d.chmod(0o700)

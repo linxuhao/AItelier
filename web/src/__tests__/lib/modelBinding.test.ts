@@ -6,6 +6,10 @@ describe('modelBinding', () => {
     expect(modelBinding({ model_route: 'flash', served_by: 'qwen/qwen3.8-flash' }))
       .toBe('flash → qwen3.8-flash');
   });
+  it('keeps the full model id when it contains a slash (HF-style)', () => {
+    expect(modelBinding({ model_route: 'smart', served_by: 'siliconflow/deepseek-ai/DeepSeek-V3' }))
+      .toBe('smart → deepseek-ai/DeepSeek-V3');
+  });
   it('merges same model across providers by design', () => {
     expect(modelBinding({ model_route: 'flash', served_by: 'ark/deepseek-v4-flash' }))
       .toBe(modelBinding({ model_route: 'flash', served_by: 'opencodego/deepseek-v4-flash' }));

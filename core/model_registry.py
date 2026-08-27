@@ -112,6 +112,8 @@ def _candidates_of(value) -> list[str] | None:
     guard), and `list_models` silently omitted the deployment's primary
     routes from /api/models and the MCP tools. Flatten instead of filter.
     """
+    if isinstance(value, str):
+        return [value]      # ModelRoutes._load coerces this shape too
     if isinstance(value, list):
         return value
     if isinstance(value, dict):

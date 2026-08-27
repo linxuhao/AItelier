@@ -101,3 +101,20 @@ async def test_per_task_channels_are_not_counted_as_viewers():
     t1.cancel(); t2.cancel()
     await asyncio.gather(t1, t2, return_exceptions=True)
     await g1.aclose(); await g2.aclose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_keeps_task_channels_for_the_writer_surface():
+    """The write-gated viewers table must be able to explain a capacity
+    refusal: the cap counts EVERY channel, so a snapshot filtered to
+    __global__ showed an empty house while task streams held all the slots.
+    Counts stay viewer-shaped; the snapshot stays whole."""
+    m = StreamManager()
+    g = m.event_generator("task-999")
+    t = asyncio.ensure_future(_drain_one(g))
+    await asyncio.sleep(0)
+    assert [c["channel"] for c in m.connection_snapshot()] == ["task-999"]
+    assert m.presence_counts()["total"] == 0
+    t.cancel()
+    await asyncio.gather(t, return_exceptions=True)
+    await g.aclose()

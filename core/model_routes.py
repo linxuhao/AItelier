@@ -21,6 +21,7 @@ Unknown names pass through unchanged, so a config naming a concrete
 from __future__ import annotations
 
 import json
+import threading
 import os
 from pathlib import Path
 
@@ -76,6 +77,7 @@ class ModelRoutes:
     def __init__(self, path: str | os.PathLike | None = None):
         self._path = Path(path or default_routes_file())
         self._routes: dict[str, list[str]] = {}
+        self._rot_n: dict[str, int] = {}    # route -> size of its rotate pool
         self._load()
 
     def _load(self) -> None:
@@ -95,6 +97,31 @@ class ModelRoutes:
                 continue  # "_comment" and friends
             if isinstance(candidates, str):
                 candidates = [candidates]
+            if isinstance(candidates, dict):
+                # Rotation form: {"rotate": [...], "fallback": [...]}. The
+                # rotate pool spreads SUBSCRIPTION quota (each plan has its own
+                # 5h/weekly window; sticky-first-candidate leaves every other
+                # plan's window to expire unused). Fallback stays ordered and
+                # LAST — pay-as-you-go money is only spent when every plan in
+                # the pool has failed or is parked. Rotation happens per
+                # resolve(rotate=True) call — one gateway per STEP — which is
+                # the cache-safe granularity: the 26:1 prefill:decode economy
+                # lives INSIDE a step's tool loop (the transcript replayed every
+                # turn); across steps only the system prompt is shared.
+                pool = candidates.get("rotate")
+                tail = candidates.get("fallback", [])
+                unknown = set(candidates) - {"rotate", "fallback"}
+                if unknown:
+                    raise RuntimeError(
+                        f"{self._path}: route '{name}' has unknown key(s) "
+                        f"{sorted(unknown)} — only 'rotate' and 'fallback'")
+                if (not isinstance(pool, list) or not pool
+                        or not isinstance(tail, list)):
+                    raise RuntimeError(
+                        f"{self._path}: route '{name}': 'rotate' must be a "
+                        f"non-empty list and 'fallback' a list")
+                self._rot_n[name] = len(pool)
+                candidates = list(pool) + list(tail)
             if not isinstance(candidates, list) or not candidates:
                 raise RuntimeError(
                     f"{self._path}: route '{name}' must be a non-empty list")
@@ -111,7 +138,7 @@ class ModelRoutes:
                         f"another route; candidates must be concrete")
             self._routes[name] = list(candidates)
 
-    def resolve(self, model_name: str) -> list[str]:
+    def resolve(self, model_name: str, rotate: bool = False) -> list[str]:
         """Candidates for `model_name`, best first.
 
         A concrete `provider/model` passes through as its own single candidate.
@@ -119,9 +146,23 @@ class ModelRoutes:
         agent_configs carry internal names, a typo ("flsh") would otherwise sail
         through to litellm and come back as "LLM Provider NOT provided", which
         names neither the role nor the table it should have been added to.
+
+        `rotate=True` (the gateway — i.e. once per STEP) advances this route's
+        rotation pool by one so consecutive steps start on different plans;
+        the pool keeps its relative order for failover and the fallback tail is
+        never rotated into the head. Default False so every other reader
+        (external_deps key derivation, the vision judge panel) stays
+        deterministic.
         """
         if model_name in self._routes:
-            return list(self._routes[model_name])
+            lst = self._routes[model_name]
+            n = self._rot_n.get(model_name, 0)
+            if rotate and n > 1:
+                with _rot_lock:
+                    k = _rot_counters[model_name] = (
+                        _rot_counters.get(model_name, -1) + 1) % n
+                return lst[k:n] + lst[:k] + lst[n:]
+            return list(lst)
         if "/" in model_name:
             return [model_name]
         known = ", ".join(self.names()) or "(none)"
@@ -133,6 +174,12 @@ class ModelRoutes:
     def names(self) -> list[str]:
         return sorted(self._routes)
 
+
+# Per-route rotation counters. In-process on purpose: a restart resetting the
+# rotation to the first plan costs nothing, and persisting a fairness counter
+# would be more machinery than the fairness is worth.
+_rot_counters: dict[str, int] = {}
+_rot_lock = threading.Lock()
 
 _CACHE: dict[str, ModelRoutes] = {}
 

@@ -335,8 +335,12 @@ def map_model(model: str, endpoint: str, position: int | None = None) -> dict:
     slowdown instead of a stop.
     """
     doc = _routes_raw()
-    if model not in doc or not isinstance(doc[model], list):
+    if model not in doc:
         raise RegistryError(f"no model '{model}' — add it first")
+    if not isinstance(doc[model], list):
+        raise RegistryError(
+            f"model '{model}' uses the rotate/fallback dict form — edit "
+            f"model_routes.json directly (registry writes cover plain lists only)")
     _check_endpoint(endpoint, _providers())
     if endpoint in doc[model]:
         raise RegistryError(f"'{endpoint}' is already an endpoint of '{model}'")
@@ -351,8 +355,12 @@ def map_model(model: str, endpoint: str, position: int | None = None) -> dict:
 
 def unmap_model(model: str, endpoint: str) -> dict:
     doc = _routes_raw()
-    if model not in doc or not isinstance(doc[model], list):
+    if model not in doc:
         raise RegistryError(f"no model '{model}'")
+    if not isinstance(doc[model], list):
+        raise RegistryError(
+            f"model '{model}' uses the rotate/fallback dict form — edit "
+            f"model_routes.json directly (registry writes cover plain lists only)")
     if endpoint not in doc[model]:
         raise RegistryError(
             f"'{endpoint}' is not an endpoint of '{model}' — it has "

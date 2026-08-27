@@ -278,7 +278,7 @@ class AIGateway:
         # config that has not opted in. See core/model_routes.py.
         from core.model_routes import get_routes
         self.internal_model = model_name
-        self._candidates = get_routes(routes_path).resolve(model_name)
+        self._candidates = get_routes(routes_path).resolve(model_name, rotate=True)
         self._failovers: list[tuple[str, str]] = []   # (from_model, why)
         self._burst_hits = 0
         # Start at the first candidate whose usage window is not already known

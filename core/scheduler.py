@@ -1806,10 +1806,26 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
             EVENT_JOB_ERROR, EVENT_JOB_MISSED, EVENT_JOB_MAX_INSTANCES,
         )
 
+        _EVENT_OUTCOME = {
+            EVENT_JOB_MAX_INSTANCES: "tick_skipped",
+            EVENT_JOB_MISSED: "tick_missed",
+            EVENT_JOB_ERROR: "tick_error",
+        }
+
         def _log_job_event(ev):
             _odbg(f"apscheduler job={getattr(ev, 'job_id', '?')} code={ev.code} "
                   f"scheduled={getattr(ev, 'scheduled_run_time', None)} "
                   f"exc={getattr(ev, 'exception', None)}")
+            # …and into the TICK log, which is the file someone opens to answer
+            # "why is nothing moving". A max-instances skip means no project was
+            # picked at all: it is the one outcome where the tick log's own
+            # premise (one line per tick) silently fails, because there is no
+            # tick to write a line from. That is the blind spot this log exists
+            # to eliminate, so it cannot be the one thing missing from it.
+            tick_log("(scheduler)", _EVENT_OUTCOME.get(ev.code, "tick_event"),
+                     job=getattr(ev, "job_id", "?"),
+                     scheduled=getattr(ev, "scheduled_run_time", None),
+                     error=getattr(ev, "exception", None))
 
         scheduler.add_listener(
             _log_job_event,

@@ -345,6 +345,23 @@ def test_the_emit_gate_rejects_capability_mistakes():
     # …and with no offer list the engine refuses every card-declared name
     assert _capability_known(g(), S3 + [{"id": "s", "capability":
                                         {"from_item": "c", "card": "3/c.json"}}])
+    # the two checks added in the review round
+    assert _capability_known(g(capabilities="stateful"), S3), "non-list offers"
+    assert _capability_known(g(capabilities=["stateful"]),
+                             S3 + [{"id": "s", "capability":
+                                    {"from_item": "c", "card": "bare.json"}}]), \
+        "a card with no directory part resolves nowhere"
+    assert _capability_known(g(capabilities=["stateful"]),
+                             S3 + [{"id": "s", "capability":
+                                    {"from_item": "c", "card": 123}}]), "non-string card"
+    # …and the shapes the ENGINE accepts must NOT be flagged: it resolves a card
+    # against the config dir and interpolates $vars before splitting.
+    for ok in ("3/t.json", "/3/t.json", "$plan_step/t.json", "Outbox_Final_3/t.json"):
+        assert not [v for v in _capability_known(
+            g(capabilities=["stateful"]),
+            S3 + [{"id": "s", "capability": {"from_item": "c", "card": ok}}])
+            if "card" in v], f"false positive on {ok}"
+
     # the correct shapes are silent
     assert not _capability_known(g(capabilities=["stateful"]),
                                  [{"id": "s", "capability": "stateful"}])
@@ -358,7 +375,11 @@ def test_capability_known_is_in_the_taught_rule_table():
     """An enforced-but-untaught rule costs a rework round per generation,
     forever — the RULES table is what the palette renders."""
     from aitelier.tools.forge_registry_check.impl import RULES
-    assert "capability_known" in {r.id for r in RULES}
+    rule = next(r for r in RULES if r.id == "capability_known")
+    # The id alone passed while two new checks were added with no teaching text
+    # — exactly what this test was written to prevent.
+    for taught in ("card:", "LIST"):
+        assert taught in rule.teaches, f"{taught!r} enforced but not taught"
 
 
 def test_the_forge_can_define_a_capability_not_just_a_tool():
@@ -494,6 +515,7 @@ def test_removing_a_capability_reports_what_still_declares_it():
     revokes it correctly, but only as a claim-time warning: the step quietly
     loses its tools. Either way the caller is told.
     """
+    import yaml
     from core.pipeline_registry import _still_declared_statically
     graph = {"steps": [{"id": "a", "capability": "stateful"},
                        {"id": "b", "capability": ["other"]}]}
@@ -502,3 +524,25 @@ def test_removing_a_capability_reports_what_still_declares_it():
     # nothing declares it statically → the other meaning, still reported
     assert "grants nothing" in _still_declared_statically(graph, {"ghost"})
     assert _still_declared_statically(graph, set()) == ""
+
+    # …and it actually REACHES the caller. Testing the helper alone would pass
+    # with the two lines that attach it to the result deleted.
+    import tempfile, os
+    from unittest import mock
+    d = Path(tempfile.mkdtemp())
+    with mock.patch.dict(os.environ, {"AITELIER_HOME": str(d)}):
+        from core import datadir, pipeline_registry
+        cd = datadir.configs_dir(); cd.mkdir(parents=True, exist_ok=True)
+        (cd / "gen_warn.yaml").write_text(yaml.safe_dump({
+            "name": "gen_warn", "begin": "a", "capabilities": ["stateful"],
+            "steps": [{"id": "a", "step_type": "gate", "transitions": []}]},
+            sort_keys=False), encoding="utf-8")
+        sf = _FakeSF(known_tools=["write"])
+        caps.define(sf, "stateful", tools=["write"], owner="host")
+        # the reload itself is another test's subject; this one is about whether
+        # the warning survives the return
+        with mock.patch.object(pipeline_registry, "reload_generated_pipeline",
+                               return_value={"config_name": "gen_warn"}):
+            r = pipeline_registry.set_pipeline_capabilities(
+                sf, None, "gen_warn", remove=["stateful"])
+        assert r.get("warning"), f"the warning never reaches the caller: {r}"

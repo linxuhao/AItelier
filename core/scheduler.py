@@ -1213,6 +1213,8 @@ _TICK_IDLE_HEARTBEAT_S = 60
 _TICK_HOLD_HEARTBEAT_S = 60
 _tick_logger = None
 _tick_last_idle = 0.0
+_TICK_SKIP_HEARTBEAT_S = 60
+_tick_last_skip = 0.0
 _tick_last_hold = 0.0
 
 
@@ -1254,7 +1256,7 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
     at tick cadence and carry no new information, and at 5s either one alone
     fills the rotation window with lines nobody needs.
     """
-    global _tick_last_idle, _tick_last_hold
+    global _tick_last_idle, _tick_last_hold, _tick_last_skip
     try:
         if outcome == "idle":
             now = _time.time()
@@ -1266,12 +1268,59 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             if now - _tick_last_hold < _TICK_HOLD_HEARTBEAT_S:
                 return
             _tick_last_hold = now
+        elif outcome == "tick_skipped":
+            # Same repeater shape as `idle`: a tool step that owns the interval
+            # job for its whole duration (godot_compile declares 3900s) makes
+            # APScheduler fire MAX_INSTANCES on EVERY tick until it returns —
+            # measured 16,133 events in 5.2 days, which would become the log's
+            # second-largest outcome and evict ~25% of the history it exists to
+            # keep. One heartbeat a minute says the same thing.
+            now = _time.time()
+            if now - _tick_last_skip < _TICK_SKIP_HEARTBEAT_S:
+                return
+            _tick_last_skip = now
         bits = " ".join(f"{k}={v}" for k, v in detail.items() if v not in (None, ""))
         _get_tick_logger().info(
             "project=%s outcome=%s%s", project_id or "-", outcome,
             (" " + bits) if bits else "")
     except Exception:
         pass          # observability must never be able to break the thing observed
+
+
+def log_job_event(ev) -> None:
+    """APScheduler anomaly → the orphan sink AND the tick log.
+
+    Module level so the scheduler and its test run the same code: the first
+    version of this lived inside the start function, and its test could only
+    assert on this file's source text — which is why it could not see that the
+    code read `scheduled_run_time` (singular, an EXECUTION-event field) off a
+    SUBMISSION event that carries `scheduled_run_times`.
+
+    A max-instances skip is the one outcome where the tick log's premise (one
+    line per tick) fails silently: no project was picked, so there is no tick to
+    write the line from.
+    """
+    from apscheduler.events import (
+        EVENT_JOB_ERROR, EVENT_JOB_MISSED, EVENT_JOB_MAX_INSTANCES,
+    )
+    outcome = {EVENT_JOB_MAX_INSTANCES: "tick_skipped",
+               EVENT_JOB_MISSED: "tick_missed",
+               EVENT_JOB_ERROR: "tick_error"}.get(ev.code, "tick_event")
+    _odbg(f"apscheduler job={getattr(ev, 'job_id', '?')} code={ev.code} "
+          f"outcome={outcome} exc={getattr(ev, 'exception', None)}")
+    when = (getattr(ev, "scheduled_run_times", None)
+            or getattr(ev, "scheduled_run_time", None))
+    if isinstance(when, (list, tuple)):
+        when = when[0] if when else None
+    exc = getattr(ev, "exception", None)
+    tick_log("(scheduler)", outcome,
+             job=getattr(ev, "job_id", "?"),
+             scheduled=(when.isoformat() if hasattr(when, "isoformat")
+                        else (str(when) if when else None)),
+             # str + clip like every other error= call site: one line per tick is
+             # this log's contract, and a pydantic ValidationError object turns
+             # one call into eight physical lines.
+             error=(str(exc)[:160].replace("\n", " ") if exc else None))
 
 
 def _record_tick_error(sf, run_id: str, project_id: str, exc: BaseException,
@@ -1799,36 +1848,12 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
         max_instances=1,
     )
 
-    # ORPHAN-DBG: surface APScheduler anomalies (max-instances skip, misfire, job
-    # error) so a skip/miss at the orphan moment is visible in `docker logs`.
     try:
         from apscheduler.events import (
             EVENT_JOB_ERROR, EVENT_JOB_MISSED, EVENT_JOB_MAX_INSTANCES,
         )
-
-        _EVENT_OUTCOME = {
-            EVENT_JOB_MAX_INSTANCES: "tick_skipped",
-            EVENT_JOB_MISSED: "tick_missed",
-            EVENT_JOB_ERROR: "tick_error",
-        }
-
-        def _log_job_event(ev):
-            _odbg(f"apscheduler job={getattr(ev, 'job_id', '?')} code={ev.code} "
-                  f"scheduled={getattr(ev, 'scheduled_run_time', None)} "
-                  f"exc={getattr(ev, 'exception', None)}")
-            # …and into the TICK log, which is the file someone opens to answer
-            # "why is nothing moving". A max-instances skip means no project was
-            # picked at all: it is the one outcome where the tick log's own
-            # premise (one line per tick) silently fails, because there is no
-            # tick to write a line from. That is the blind spot this log exists
-            # to eliminate, so it cannot be the one thing missing from it.
-            tick_log("(scheduler)", _EVENT_OUTCOME.get(ev.code, "tick_event"),
-                     job=getattr(ev, "job_id", "?"),
-                     scheduled=getattr(ev, "scheduled_run_time", None),
-                     error=getattr(ev, "exception", None))
-
         scheduler.add_listener(
-            _log_job_event,
+            log_job_event,
             EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES,
         )
     except Exception:

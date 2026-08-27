@@ -69,7 +69,12 @@ RULES: tuple[Rule, ...] = (
          "`capabilities:` offer list. An unregistered name grants nothing — "
          "silently, since a missing tool looks to the agent like a world where "
          "that work is impossible — and a card-declared name outside the offer "
-         "list is refused by the engine at claim time, long after emit."),
+         "list is refused by the engine at claim time, long after emit. "
+         "`capabilities:` is a LIST, not a string. A `{from_item: ...}` "
+         "declaration also needs `card:` — a loop item is a NAME, so the card "
+         "path is the only way to reach its fields — and that path is resolved "
+         "against the CONFIG directory, so it needs the folder holding the card "
+         "(e.g. `3/tasks/$current_task.json`), not a bare filename."),
     Rule("counter_smell",
          "No hand-rolled counter tools (`increment_*`/`check_*_counter`, or any "
          "name containing 'counter'). Bound cycles with `max_loop` on an edge."),
@@ -494,22 +499,31 @@ def _capability_known(graph, steps) -> list[str]:
                     f"no `card:` — a loop item is a NAME, so the card path is "
                     f"the only way to read its fields, and without it nothing "
                     f"is granted.")
-            elif isinstance(card, str):
-                # The engine splits on the FIRST '/': everything before it is a
-                # step id. A path without one, or naming a step this graph does
-                # not have, resolves to a file that is not there and grants
-                # nothing — with a log line as the only trace.
-                head = card.split("/")[0]
-                if "/" not in card:
-                    out.append(
-                        f"capability_known: step '{sid}' has card '{card}' with "
-                        f"no step prefix — it must start with the id of the step "
-                        f"that WRITES the card, e.g. '3/tasks/$current_task.json'.")
-                elif head not in step_ids:
-                    out.append(
-                        f"capability_known: step '{sid}' reads its card from "
-                        f"step '{head}', which is not in this graph. Steps: "
-                        f"{sorted(x for x in step_ids if x)}.")
+            elif not isinstance(card, str):
+                out.append(
+                    f"capability_known: step '{sid}' has a non-string `card:` "
+                    f"({type(card).__name__}) — it must be a path relative to "
+                    f"the config directory, e.g. '3/tasks/$current_task.json'.")
+            elif "/" not in card.strip("/"):
+                # Only the unambiguous error is enforced. The engine resolves a
+                # card against the CONFIG directory (not a step dir) and
+                # interpolates $vars BEFORE splitting, so '/3/x.json',
+                # '$plan_step/x.json' and a real non-step folder like
+                # 'Outbox_Final_3/x.json' are all VALID — an earlier version of
+                # this rule rejected all three, and a gate that blocks correct
+                # output is worse than one that misses.
+                out.append(
+                    f"capability_known: step '{sid}' has card '{card}' with no "
+                    f"directory part — it is resolved against the config "
+                    f"directory, so it needs the folder that holds the card, "
+                    f"e.g. '3/tasks/$current_task.json'.")
+            elif (head := card.strip("/").split("/")[0]) not in step_ids \
+                    and "$" not in head and "_" not in head and not head[:1].isupper():
+                out.append(
+                    f"capability_known: step '{sid}' reads its card from "
+                    f"'{head}/', which is neither a step in this graph nor an "
+                    f"obvious data folder. Steps: "
+                    f"{sorted(x for x in step_ids if x)}.")
             if not offers:
                 out.append(
                     f"capability_known: step '{sid}' reads capabilities from a "

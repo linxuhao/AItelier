@@ -12,13 +12,6 @@ home-relative directory — the failure the capability mechanism exists to stop.
 """
 
 
-# A briefing rides the step's per-turn context — deliberately NOT the cacheable
-# preamble — so every holder pays it on every turn. Unbounded, it is the same
-# token leak this whole mechanism was built to remove, except invisible: every
-# place a capability is listed shows only the first line.
-_MAX_BRIEFING = 4096
-
-
 def register_capability(name: str = "", tools=None, briefing: str = "",
                         **kwargs) -> dict:
     from api.dependencies import get_skillflow
@@ -39,13 +32,6 @@ def register_capability(name: str = "", tools=None, briefing: str = "",
                          "useful when it injects framework kwargs, and that half "
                          "is a host-side callable — it cannot be declared from "
                          "here. Grant at least one tool."}
-    if len(briefing or "") > _MAX_BRIEFING:
-        return {"registered": False,
-                "error": f"briefing is {len(briefing)} bytes, over the "
-                         f"{_MAX_BRIEFING} limit. It is re-sent on every turn of "
-                         f"every step that holds this capability. Keep the rules "
-                         f"that are expensive to get wrong; put the rest behind a "
-                         f"tool the step can call."}
     # OWNER IS NOT A PARAMETER. It was, and that made the ownership invariant a
     # suggestion: the refusal message names the owner that would win, and an
     # agent's most natural repair is to echo it back. Passing owner="host" then

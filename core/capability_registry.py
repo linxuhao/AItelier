@@ -38,6 +38,12 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# A briefing rides the holder step's per-turn context (deliberately not the
+# cacheable preamble), and every listing shows only its first line — so an
+# oversized one is an invisible per-turn payload, the same leak this whole
+# mechanism removed.
+MAX_BRIEFING_BYTES = 4096
+
 ARCHIVE_DIR = "_archived"
 ARCHIVE_INDEX = "archived.json"
 
@@ -107,6 +113,14 @@ def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "ho
         return {"error": f"invalid capability name {name!r} — lowercase letters, "
                          f"digits, '_' and '-', starting with a letter or digit, "
                          f"at most 64 characters"}
+    nbytes = len((briefing or "").encode("utf-8"))
+    if nbytes > MAX_BRIEFING_BYTES:
+        # The cap belongs HERE, not only in the tool: define() is what persists,
+        # and the boot scan reloads whatever is on disk in full. Bytes, not
+        # characters — a character cap is ~3x looser than it reads for CJK.
+        return {"error": f"briefing is {nbytes} bytes, over the "
+                         f"{MAX_BRIEFING_BYTES} limit. It is re-sent on every "
+                         f"turn of every step holding this capability."}
     missing = _unresolved(sf, tools)
     if missing:
         # Refused rather than warned: skillflow's own note on the same class of
@@ -231,9 +245,12 @@ def load_generated(sf) -> list[str]:
         name = d.get("name") or f.stem
         if name in skip:
             continue
+        # The owner is NOT read from the file. This directory IS the generated
+        # namespace; a JSON claiming `owner: "host"` for a name the host does not
+        # define would otherwise mint a permanently un-editable capability from
+        # data on disk.
         r = define(sf, name, tools=d.get("tools") or [],
-                   briefing=d.get("briefing") or "",
-                   owner=d.get("owner") or f"gen:{name}")
+                   briefing=d.get("briefing") or "", owner=f"gen:{name}")
         if r.get("ok"):
             loaded.append(name)
         else:

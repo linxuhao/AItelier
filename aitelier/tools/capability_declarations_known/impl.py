@@ -22,8 +22,7 @@ def capability_declarations_known(*, files=None, workspace_root: str = "",
     try:
         from api.dependencies import get_skillflow
         sf = get_skillflow()
-        graph = getattr(sf, "_graphs", {}).get(config_name)
-        offers = set(getattr(graph, "capabilities", []) or []) if graph else set()
+        offers = set(sf.graph_capabilities(config_name))
         registered = set(sf.capabilities())
     except Exception as e:      # no host wired (unit context) → nothing to check
         return {"all_passed": True,

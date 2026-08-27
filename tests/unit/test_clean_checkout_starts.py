@@ -327,3 +327,17 @@ def test_a_docker_failure_never_breaks_the_start(monkeypatch, capsys):
     monkeypatch.setenv("AITELIER_EDGE_NETWORK", "cloudflare_edge")
     monkeypatch.setattr(srv.subprocess, "run", boom)
     srv._warn_if_edge_network_is_alone()          # must not raise
+
+
+def test_container_side_secrets_dir_is_scrubbed_from_the_environment(
+        tmp_path, monkeypatch, capsys):
+    """Setting the env to the CONTAINER-side path must be neutralised in
+    os.environ itself — the first guard fixed only a local variable while
+    _compose_env() passed the poisoned value to compose, whose mount source
+    (${AITELIER_SECRETS_DIR:-…}) followed it: silently empty keys, with a
+    message claiming the value was ignored."""
+    monkeypatch.setenv("AITELIER_SECRETS_DIR", "/run/aitelier-secrets")
+    srv._ensure_host_dirs()
+    import os as _os
+    assert "AITELIER_SECRETS_DIR" not in _os.environ
+    assert "CONTAINER-side" in capsys.readouterr().out

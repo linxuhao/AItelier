@@ -621,6 +621,17 @@ class BriefReviewModal(ModalScreen[bool]):
         try:
             resp = await self.app.http.post(path, json=body, timeout=30.0)
             resp.raise_for_status()
+            # The submit endpoint answers 201 even for refusals — the verdict
+            # is in the body's `status`. Trusting the HTTP code alone showed
+            # "submitted — pipeline starting" for every refusal seed_and_trigger
+            # produces (no finalized brief, failed:* project → use /retry, …),
+            # discarding the one message that says what to actually do.
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            if isinstance(data, dict) and data.get("status") == "error":
+                return False, str(data.get("message") or "refused")
             return True, ""
         except Exception as e:
             return False, str(e)

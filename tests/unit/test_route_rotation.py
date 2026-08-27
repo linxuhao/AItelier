@@ -164,3 +164,21 @@ def test_string_form_route_is_visible_to_registry_reads(tmp_path, monkeypatch):
     monkeypatch.setattr(reg, "ROUTES_FILE", routes)
     monkeypatch.setattr(reg, "PROVIDERS_FILE", provs)
     assert reg.provider_consumers("a") == ["flash"]
+
+
+def test_string_form_route_is_writable_too(tmp_path, monkeypatch):
+    """map/unmap must coerce the string form the way ModelRoutes does — the
+    read side learned it, and refusing the write with a message about the
+    'dict form' diagnosed a shape the operator's file does not contain."""
+    import json as _json
+    import core.model_registry as reg
+    routes = tmp_path / "model_routes.json"
+    provs = tmp_path / "llm_providers.json"
+    routes.write_text(_json.dumps({"flash": "a/m1"}))
+    provs.write_text(_json.dumps({
+        "a": {"base_url": "u", "api_key_env": ""},
+        "b": {"base_url": "u", "api_key_env": ""}}))
+    monkeypatch.setattr(reg, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(reg, "config_or_example", lambda p: str(tmp_path / p))
+    out = reg.map_model("flash", "b/m2")
+    assert out["endpoints"] == ["a/m1", "b/m2"]

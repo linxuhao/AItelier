@@ -34,6 +34,24 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     if not existing:
         return {"status": "error", "message": f"Project '{project_id}' not found."}
 
+    # A `failed:*` project is refused FIRST — before already_planned and before
+    # any mutation. Two review rounds taught the ordering: (1) the scheduler's
+    # NB-5 leaves a failed run dormant (only POST /retry reactivates), so
+    # accepting produced "submitted" + no_run forever; (2) the check originally
+    # sat AFTER the already_planned early-return — and a run that failed in
+    # task_loop or step 5 has all three planning steps synced complete, so the
+    # COMMON failure class got a success-shaped "already_planned" and never saw
+    # the directions; (3) it also sat after three mutations, so a refused
+    # submit had already overwritten the cached brief and reset
+    # completed_project_steps — /retry then resumed the old run under
+    # half-clobbered state.
+    status = (existing.get("status") or "")
+    if status.startswith("failed:"):
+        return {"status": "error", "project_id": project_id,
+                "message": (f"project '{project_id}' has a failed run — resume "
+                            f"it with POST /api/projects/{project_id}/retry, "
+                            f"or start a new project for the new brief")}
+
     # Don't re-trigger if planning already completed.
     raw = existing.get("completed_project_steps", "[]")
     existing_steps = json.loads(raw) if isinstance(raw, str) else (raw or [])
@@ -103,20 +121,8 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     # a real pipeline status is not touched — this function's job is "the brief
     # is ready, go", not "reset whatever was happening".
     status = (db.get_project(project_id) or {}).get("status") or ""
-    # A `failed:*` project is refused with directions, not silently rescued.
-    # The first version of this fix flipped the status to planning — but the
-    # scheduler's NB-5 deliberately leaves a failed RUN dormant (only
-    # POST /api/projects/{pid}/retry reactivates it), and the status sync then
-    # flips the project right back: "submitted" + no_run on every tick. And
-    # quietly resuming a half-dead run under a NEW brief would be worse — the
-    # new goals never reach the steps that already ran. Say what the two real
-    # options are instead.
-    if status.startswith("failed:"):
-        return {"status": "error",
-                "message": (f"project '{project_id}' has a failed run — resume "
-                            f"it with POST /api/projects/{project_id}/retry, "
-                            f"or start a new project for the new brief")}
-    # (`paused:*` stays untouched: that is a live run at a checkpoint.)
+    # (`failed:*` was refused at the top, before any mutation; `paused:*`
+    # stays untouched: that is a live run at a checkpoint.)
     if status.startswith("running:") or status in ("", "drafting"):
         db.update_project(project_id, status="planning")
 

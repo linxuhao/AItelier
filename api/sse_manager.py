@@ -140,11 +140,15 @@ class StreamManager:
         SAME tab's auxiliary stream, and counting it reported the operator's
         own task tail as an extra "anonymous viewer".
         """
-        snap = [m for m in self.connection_snapshot()
-                if m.get("channel") == "__global__"]
-        auth = sum(1 for m in snap if m.get("who"))
-        return {"total": len(snap), "authenticated": auth,
-                "anonymous": len(snap) - auth}
+        total = auth = 0
+        for m in list(self._conn_meta.values()):   # list(): threadpool readers
+            if m.get("channel") != "__global__":
+                continue
+            total += 1
+            if m.get("who"):
+                auth += 1
+        return {"total": total, "authenticated": auth,
+                "anonymous": total - auth}
 
     def _push_presence(self) -> None:
         """Broadcast the aggregate to __global__ so every open tab updates live.

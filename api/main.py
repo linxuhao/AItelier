@@ -453,6 +453,12 @@ async def stream_global_events(request: Request):
         # checks admitted a signed-in operator as who=None — permanently
         # mislabeled anonymous for the stream's whole life. One refusal
         # decision, made once. (The generator keeps its own check as a belt.)
+        # The generator's own refusal branch carried the only "refused" log
+        # line; short-circuiting before it must not turn a bulk-open attack
+        # into a silent one.
+        import logging
+        logging.getLogger("aitelier.sse").warning(
+            "SSE connection refused at handler: at capacity")
         async def _refuse():
             yield ": at capacity\n\n"
         return StreamingResponse(_refuse(), media_type="text/event-stream")

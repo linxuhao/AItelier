@@ -11,6 +11,10 @@ from typing import Optional
 import litellm
 
 
+# Keyless-skip lines already printed, per (candidate, key_env).
+_warned_keyless: set = set()
+
+
 def _read_secret(name: str) -> str | None:
     """Resolve a secret value WITHOUT relying on the environment.
 
@@ -317,7 +321,11 @@ class AIGateway:
         for i in range(start, len(self._candidates)):
             c = self._candidates[i]
             if provs is not None and c.split("/", 1)[0] not in provs:
-                continue    # unregistered — same verdict _registered() gives
+                # Unregistered: handing it to litellm raises a client-side
+                # BadRequestError that deliberately does NOT fail over, so the
+                # gateway would die with healthy candidates still queued.
+                # (provs=None — unreadable registry — falls open: let it try.)
+                continue
             # Skip a candidate whose provider declares a key that has no
             # value. Before rotation this could not happen on a correctly
             # provisioned install (the FIRST candidate's key is the required
@@ -332,10 +340,16 @@ class AIGateway:
             if provs is not None:
                 key_env = (provs.get(c.split("/", 1)[0]) or {}).get("api_key_env")
                 if key_env and not _read_secret(key_env):
-                    print(f"[ai_router] skip {c}: no key — create "
-                          f"~/.aitelier-secrets/{key_env} to enable it")
-                    if first_keyed is None:
-                        pass    # keyless can never serve; not a fallback
+                    # Once per (candidate, key) per process: _next_usable runs
+                    # per step + per failover, and a permanently keyless pool
+                    # member would otherwise print the identical line on every
+                    # step of every run — spam that drowns the failover print
+                    # this is meant to match. (Keyless is never a degrade
+                    # fallback either: it cannot serve.)
+                    if (c, key_env) not in _warned_keyless:
+                        _warned_keyless.add((c, key_env))
+                        print(f"[ai_router] skip {c}: no key — create "
+                              f"~/.aitelier-secrets/{key_env} to enable it")
                     continue
             if first_keyed is None:
                 first_keyed = i      # registered + keyed, maybe parked
@@ -347,24 +361,6 @@ class AIGateway:
         # a keyless one cannot.
         return first_keyed if first_keyed is not None else start
 
-    def _registered(self, candidate: str) -> bool:
-        """Is this candidate's provider actually in llm_providers.json?
-
-        An unregistered one is handed to litellm as a bare `provider/model` it
-        cannot place, which raises BadRequestError — deliberately NOT a failover
-        error, so the gateway dies on it with healthy candidates still queued
-        behind. `godot_vision._judges` already skips these with a warning on the
-        reasoning that a gate blinded by a typo in a FALLBACK entry is worse
-        than one that says so; the same holds here. Route tables are
-        user-editable and ModelRoutes validates only the `provider/model` shape,
-        never that the provider exists.
-        """
-        provider = candidate.split("/", 1)[0]
-        try:
-            with open(self._config_path, "r", encoding="utf-8") as f:
-                return provider in json.load(f)
-        except (OSError, ValueError):
-            return True     # no registry to check against — let it try
 
     def _bind(self, concrete_model: str) -> None:
         """Point this gateway at ONE concrete provider/model.

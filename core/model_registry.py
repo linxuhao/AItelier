@@ -366,6 +366,8 @@ def map_model(model: str, endpoint: str, position: int | None = None) -> dict:
     doc = _routes_raw()
     if model not in doc:
         raise RegistryError(f"no model '{model}' — add it first")
+    if isinstance(doc[model], str):
+        doc[model] = [doc[model]]     # ModelRoutes coerces this shape; so do we
     if not isinstance(doc[model], list):
         raise RegistryError(
             f"model '{model}' uses the rotate/fallback dict form — edit "
@@ -386,6 +388,8 @@ def unmap_model(model: str, endpoint: str) -> dict:
     doc = _routes_raw()
     if model not in doc:
         raise RegistryError(f"no model '{model}'")
+    if isinstance(doc[model], str):
+        doc[model] = [doc[model]]     # ModelRoutes coerces this shape; so do we
     if not isinstance(doc[model], list):
         raise RegistryError(
             f"model '{model}' uses the rotate/fallback dict form — edit "

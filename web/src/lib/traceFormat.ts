@@ -83,15 +83,19 @@ export function extractPayloadText(payload: unknown): string {
 // 'h23' rather than hour12:false — the latter maps to h24 in some engines,
 // rendering midnight as "24:20:15".
 let _clockFmt: Intl.DateTimeFormat | null = null;
+let _clockFmtOffset: number | null = null;
 function _clock(): Intl.DateTimeFormat {
-  // Lazy, not module-level: Intl.DateTimeFormat captures the zone at
-  // construction, and building it at import time froze the IMPORTING
-  // environment's zone — which is the viewer's zone in a browser (fine) but
-  // defeated the tz-pinned tests, the only place the conversion is proven.
-  if (_clockFmt === null) {
+  // Cached, but keyed on the current UTC offset (getTimezoneOffset is ~ns):
+  // Intl.DateTimeFormat freezes its zone at construction, and a plain
+  // process-lifetime cache made the tz-pinned tests order-dependent — the
+  // first call froze whatever zone happened to be active. Rebuilding on
+  // offset change also keeps a stream that crosses a DST boundary honest.
+  const offset = new Date().getTimezoneOffset();
+  if (_clockFmt === null || _clockFmtOffset !== offset) {
     _clockFmt = new Intl.DateTimeFormat([], {
       hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit',
     });
+    _clockFmtOffset = offset;
   }
   return _clockFmt;
 }

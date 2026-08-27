@@ -145,6 +145,26 @@ def test_a_failed_project_is_refused_with_directions(tmp_path, monkeypatch):
     assert r["status"] == "error"
     assert "retry" in r["message"]
     assert "status" not in db.updates
+    # …and BEFORE any mutation: the first refusal fired after the new brief
+    # was cached and completed_project_steps reset, so following its own
+    # /retry directions resumed the old run under half-clobbered state.
+    assert db.brief is None
+    assert db.meta_state is None
+    assert "completed_project_steps" not in db.updates
+
+    # The COMMON failure class: a run that failed in task_loop / step 5 has
+    # all three planning steps synced complete — the refusal must beat the
+    # already_planned early-return, or resubmit reads as success-shaped
+    # "already_planned" and the /retry directions never appear.
+    class _PlannedDB(_DB):
+        def get_project(self, pid):
+            return {"project_id": pid,
+                    "completed_project_steps": '["1", "2", "3"]',
+                    "status": self._status}
+
+    db = _PlannedDB("failed:cycle limit — vision gate blind")
+    r = ps.seed_and_trigger(db, None, "p1", {"user_stories": ["x"]})
+    assert r["status"] == "error" and "retry" in r["message"]
 
     db = _DB("paused:checkpoint")
     ps.seed_and_trigger(db, None, "p1", {"user_stories": ["x"]})

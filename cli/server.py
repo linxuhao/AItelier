@@ -165,10 +165,15 @@ def _ensure_host_dirs() -> None:
             # The CONTAINER-side value, copy-pasted to the host (it is visible
             # in compose, docs, and any `docker exec env`). Following it would
             # provision /run/... on the host AND redirect the compose mount
-            # source there — silently empty keys. Refuse the footgun.
+            # source there — silently empty keys. Refuse the footgun — and
+            # scrub it from os.environ, because _compose_env() passes the
+            # whole environment through and compose's mount source
+            # (${AITELIER_SECRETS_DIR:-...}) would otherwise still follow the
+            # poisoned value while this message claimed it was ignored.
             print("AITELIER_SECRETS_DIR=/run/aitelier-secrets is the "
                   "CONTAINER-side path; on the host it must point at your "
                   "real secrets dir (default ~/.aitelier-secrets). Ignoring it.")
+            os.environ.pop("AITELIER_SECRETS_DIR", None)
             env_dir = None
         d = Path(env_dir or (Path.home() / ".aitelier-secrets"))
         d.mkdir(parents=True, exist_ok=True)

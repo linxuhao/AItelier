@@ -488,35 +488,78 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
 
 
 def recover_claims_on_startup():
-    """Reset ALL claimed steps to pending at server startup.
+    """Reopen the claims a dead process left behind — and only those.
 
-    The server is a singleton (enforced by the scheduler advisory lock).
-    Any step still in 'claimed' status from a previous process is
-    definitively stale — the claiming process no longer exists.
-    No time-based threshold needed.
+    The server is a singleton (enforced by the scheduler advisory lock), so any
+    step still 'claimed' at startup was claimed by a process that no longer
+    exists. Reopening it is right. Reopening it BLINDLY is not, and the two
+    corrections below are each a live incident on jinyong-hud, 2026-08-27.
+
+    1. ONE INSTANCE PER STEP. skillflow appends a new step row per instance and
+       claims with `WHERE run_id = ? AND step_id = ? AND status = 'pending'` —
+       keyed by step id, not by row. Resetting an OLD instance to pending
+       therefore does not restore history, it creates a second claimable row for
+       the same node. Measured: `5_vision_human` had instance 1504 (last really
+       finished 20:20) revived alongside the live instance 1564. At 01:23:10 the
+       engine claimed the zombie, the completion landed on the live row, and
+       1504 sat 'claimed' forever. Only the newest instance is reopened now;
+       older ones are closed as failed, which is what they are.
+
+    2. A PAUSED RUN KEEPS ITS POINTER. `current_node` was nulled for every run
+       touched. On a run paused at a checkpoint the reaped claim says nothing
+       about where the run sits, and the host identifies the pending checkpoint
+       from that pointer — so a restart during a checkpoint made the checkpoint
+       unanswerable from the SPA, the CLI, the butler and MCP alike, with no way
+       to resume. (The read side now falls back to the newest completed
+       checkpoint step; this stops destroying the pointer in the first place.)
     """
     sf = get_skillflow()
     try:
         stale = sf._conn.execute(
-            "SELECT id, run_id, step_id FROM skillflow_steps WHERE status = 'claimed'"
+            "SELECT id, run_id, step_id FROM skillflow_steps "
+            "WHERE status = 'claimed' ORDER BY id"
         ).fetchall()
         if not stale:
             return
+        # The newest row per (run, step) is the live instance; the rest are
+        # history that a blind reset would turn into duplicate claimables.
+        newest: dict[tuple[str, str], int] = {}
+        for row in stale:
+            newest[(row["run_id"], row["step_id"])] = max(
+                newest.get((row["run_id"], row["step_id"]), 0), row["id"])
+        reopened = superseded = 0
         with sf._lock:
             for row in stale:
-                sf._conn.execute(
-                    """UPDATE skillflow_steps SET status = 'pending',
-                       version = version + 1, claimed_at = NULL,
-                       claimed_by = NULL, updated_at = datetime('now')
-                       WHERE id = ?""", (row["id"],))
+                live = newest[(row["run_id"], row["step_id"])] == row["id"]
+                if live:
+                    sf._conn.execute(
+                        """UPDATE skillflow_steps SET status = 'pending',
+                           version = version + 1, claimed_at = NULL,
+                           claimed_by = NULL, updated_at = datetime('now')
+                           WHERE id = ?""", (row["id"],))
+                    reopened += 1
+                else:
+                    sf._conn.execute(
+                        """UPDATE skillflow_steps SET status = 'failed',
+                           version = version + 1, claimed_at = NULL,
+                           claimed_by = NULL, last_error = ?,
+                           updated_at = datetime('now')
+                           WHERE id = ?""",
+                        ("superseded instance of this step, left claimed by a "
+                         "process that died; a newer instance is live",
+                         row["id"]))
+                    superseded += 1
+                # Only a RUNNING run's pointer is invalidated by a reaped claim.
                 sf._conn.execute(
                     "UPDATE skillflow_runs SET current_node = NULL, "
-                    "updated_at = datetime('now') WHERE id = ?",
+                    "updated_at = datetime('now') "
+                    "WHERE id = ? AND status != 'paused'",
                     (row["run_id"],))
             sf._conn.commit()
         import logging
         logging.getLogger("aitelier.scheduler").info(
-            f"Startup recovery: reset {len(stale)} stale claim(s) to pending"
+            f"Startup recovery: reopened {reopened} claim(s), closed "
+            f"{superseded} superseded instance(s)"
         )
     except Exception:
         pass  # Best-effort; scheduler will recover via stale threshold later
@@ -553,9 +596,21 @@ def _has_active_claim(sf, run_id: str) -> bool:
         if not row:
             return False
 
-        dead = owner_is_dead(row["claimed_by"])
-        if dead is not None:
-            return not dead
+        # An INLINE tool claim is owned by this very server process, so
+        # `owner_is_dead` can never say yes while the server runs: an abandoned
+        # one is in flight forever and every tick for that project returns
+        # `active_claim`. Live on jinyong-hud, 2026-08-27: an orphaned
+        # `5_vision_human` claim blocked the project for 66 minutes and would
+        # not have released on its own. The identity probe exists for AGENT
+        # turns, which legitimately run past ten minutes (measured: 1367 s);
+        # an inline tool call is a synchronous call inside one claim, so the
+        # node's own timeout is a real bound for it and the clock is the honest
+        # question to ask.
+        owner = row["claimed_by"] or ""
+        if not owner.startswith("tool-inline"):
+            dead = owner_is_dead(owner)
+            if dead is not None:
+                return not dead
 
         # Unknown owner — the pre-identity fallback, unchanged.
         # Look up the step node's configured timeout to use as the window.

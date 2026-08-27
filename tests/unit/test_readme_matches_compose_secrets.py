@@ -30,11 +30,3 @@ def _readme_touch_names() -> set[str]:
 
 def test_readme_touch_list_names_every_compose_secret():
     assert _readme_touch_names() == _compose_secret_files()
-
-
-def test_readme_spells_out_the_count():
-    """The prose says how many names there are; it must not drift either."""
-    text = (ROOT / "README.md").read_text()
-    n = len(_compose_secret_files())
-    words = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
-    assert f"Those {words[n]} names are the secrets" in text

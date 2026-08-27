@@ -169,8 +169,9 @@ printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME>   # the probe in Quick
 sidecar for the game pipeline. Harmless if unused; `docker compose up -d aitelier`
 starts just the main service.
 
-Those five names are the secrets `docker-compose.yml` enumerates — when in doubt,
-the `secrets:` block at the bottom of that file is the authoritative list. The
+The names above mirror the shipped example provider tables — the authoritative
+list is the `secrets:` block at the bottom of `docker-compose.yml`, and it is
+not fixed: swap the provider tables and your key names change with them. The
 secrets dir is deliberately **not** bind-mounted (so keys never appear in any workspace-visible path), which means a provider you add with a **new** key name also needs its own `secrets:` entry in the compose file.
 
 Publishing through an existing **cloudflared** connector is one line. The network

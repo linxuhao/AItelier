@@ -1,0 +1,30 @@
+name: loop_items_implemented
+description: >
+  Every task the loop was given must have an implementation output on disk.
+  A loop item that reaches its reviewer with no `t_impl/<id>/` directory gets
+  reviewed against the REPOSITORY instead of against itself, and the reviewer
+  passes it — the same fall-back-to-the-repo failure the t_plan validation was
+  added for one step earlier. Live, jinyong-hud 2026-08-27: the loop advanced
+  `fix_battle_hud_overlap_readability` straight from the previous item's review
+  to its OWN review, with no t_plan and no t_impl row. The verdict said
+  `passed: true` and described five other cards' work; the two observables that
+  card was supposed to add did not exist, and the playtest assertions written
+  against them failed with `Invalid named index`. The card was never planned,
+  never implemented, and shipped as green.
+parameters:
+  out_dir:
+    type: string
+    description: "The reading step's dir; its parent is the graph dir. Auto-injected."
+    required: false
+  workspace_root:
+    type: string
+    description: "Fallback locator when out_dir is absent."
+    required: false
+  config_name:
+    type: string
+    description: "Graph name — used to read the loop's own item source. Auto-injected."
+    required: false
+  project_id:
+    type: string
+    description: "Last-resort locator via the workspace manager."
+    required: false

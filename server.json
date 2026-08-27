@@ -1,0 +1,16 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.linxuhao/aitelier",
+  "description": "Maker/checker multi-agent pipelines that plan, build and verify software, driven over MCP.",
+  "repository": {
+    "url": "https://github.com/linxuhao/AItelier",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://aitelier.linxuhao.app/mcp"
+    }
+  ]
+}

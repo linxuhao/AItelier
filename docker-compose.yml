@@ -36,6 +36,10 @@ services:
       # never 127.0.0.1, so the app-level localhost guard must be relaxed.
       # Put Cloudflare Access (or equivalent auth) in front of the published port.
       AITELIER_ALLOW_EXTERNAL: "1"
+      # MCP over the tunnel: the SDK 421s any Host it was not told about.
+      # Reads are open by deployment decision; writes stay behind _authorize
+      # (CF Access JWT — the admin token is refused on tunnel traffic).
+      AITELIER_MCP_ALLOWED_HOSTS: "aitelier.linxuhao.app"
       # Git auth for clone/push of GitHub repos. The credential helper feeds the
       # GITHUB_TOKEN secret (below) to github.com HTTPS remotes only — the token
       # stays in the secret file, only the helper *path* is in the environment.

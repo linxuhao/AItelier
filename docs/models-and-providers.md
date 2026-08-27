@@ -19,10 +19,27 @@ Order inside a model is policy, not preference: calls bind to the **first**
 endpoint and the rest are tried only when one fails. So the last one should be
 **pay-as-you-go** — a token plan runs out, and that final entry is what turns
 "everything stops until the window resets" into "the next call goes elsewhere".
-A spent plan is parked until the provider's own reset time. Failover is sticky
+A spent plan is parked until the provider's own reset time. Binding is sticky
 per pipeline step, never per call: provider prefix caches are per-provider, and
 this workload measures 26:1 prefill:decode at an 89.4% hit rate, so alternating
 endpoints mid-step converts cached input into full-price input.
+
+**Several subscription plans on one model?** A route may use the dict form:
+
+```jsonc
+"flash": {"rotate":   ["ark/deepseek-v4-flash", "qwen/qwen3.8-flash"],
+          "fallback": ["deepseek/deepseek-v4-flash"]}
+```
+
+Each new gateway — one per STEP — starts one position further around the
+`rotate` pool, so consecutive steps draw on different plans and every plan's
+5h/weekly window gets used instead of expiring behind a sticky first pick.
+The step itself stays on one endpoint (the cache economy above lives inside a
+step's tool loop; across steps only the system prompt is shared), failover
+order is preserved from wherever the rotation started, and `fallback`
+(pay-as-you-go) never rotates forward — it still only spends money when the
+whole pool has failed or is parked. Plain-list routes behave exactly as
+before.
 
 ## Pick your providers
 

@@ -4,6 +4,7 @@
 #        Agent 通过工具按需探索 project/，而非被动接收全量上下文。
 #        目录树自动注入确保 Agent 知道确切的文件名，避免浪费工具轮次猜测。
 
+import datetime
 import logging
 import re
 from pathlib import Path
@@ -199,6 +200,38 @@ def build_language_instruction(user_lang: str | None) -> str:
     )
 
 
+
+def build_today_block(now: datetime.datetime | None = None) -> str:
+    """The one fact a stateless agent cannot derive and will otherwise invent.
+
+    Nothing in the assembled prompt used to carry a date, yet the templates ask
+    agents to DATE what they write: ``design/99_changelog.md`` is a dated table
+    (``templates/game_designer.md`` tells the designer to append a row to it),
+    and delivery notes carry a date in their heading.
+
+    Measured on jinyong-assets, 2026-08-27: the last three changelog rows were
+    dated 2026-08-28, 2026-08-29 and 2026-08-29, and a ``final/delivery_notes.md``
+    section heading read 2026-08-29 — every one of them in the FUTURE, because
+    each round extrapolated from the row above it instead of knowing the day.
+    Host, container and sidecar clocks all agreed; the date simply never reached
+    the model.
+
+    A project record that drifts forward is worse than one with no dates at all:
+    it still reads as authoritative, and reconstructing "what did we know when"
+    from it silently produces the wrong answer.
+
+    Lives in the VOLATILE suffix, never in ``build_shared_preamble``: that
+    preamble is a byte-identical cross-step KV-cache prefix, and a date would
+    invalidate it once a day for every project in flight.
+    """
+    day = (now or datetime.datetime.now()).strftime("%Y-%m-%d")
+    return (
+        "[Today]\n"
+        f"The current date is {day}. Use exactly this date whenever you write "
+        "one (changelog rows, delivery notes, decision records, design docs). "
+        "Do NOT infer a date from a neighbouring entry, a filename, an example "
+        "or a prior round — those are other days, and copying them forward is "
+        "how a project record ends up dated in the future.")
 
 # ── The step's mutation vocabulary — ONE definition, two consumers ───────────
 #
@@ -478,6 +511,11 @@ class PromptAssembler:
             # promotion before this ran).
 
         # ── VOLATILE SUFFIX ──────────────────────────────────────────────
+
+        # [Today] — see build_today_block: agents are asked to date what they
+        # write and were never told the date, so they invented one (and invented
+        # it forward). Deliberately here and not in the cached preamble.
+        sections.append(build_today_block())
 
         # [Pre-resolved Context] — context resolved by skillflow from graph specs
         # Includes cross-config reads, step outputs, and tool outputs (e.g. dir_tree).

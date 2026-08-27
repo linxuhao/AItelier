@@ -4,7 +4,7 @@
 import json
 import pytest
 from pathlib import Path
-from core.prompt_assembler import PromptAssembler
+from core.prompt_assembler import PromptAssembler, build_today_block
 
 
 class TestPromptAssembler:
@@ -475,3 +475,64 @@ class TestTruncationResumeHintIsCallable:
         # naming a source there would break a hint that works.
         out = self._clip("Repository — src/app.py")
         assert "source=" not in out
+
+
+class TestTodayBlock:
+    """The date reaches the agent, and reaches it only in the volatile suffix.
+
+    Measured on jinyong-assets 2026-08-27: three `design/99_changelog.md` rows
+    were dated 2026-08-28 / 08-29 / 08-29 and a delivery-note heading read
+    2026-08-29 — all in the future. Every clock (host, container, sidecar)
+    agreed on the real day; the prompt simply never carried it, so each round
+    extrapolated the date from the row above it.
+    """
+
+    def test_block_renders_the_given_day(self):
+        import datetime
+        out = build_today_block(datetime.datetime(2026, 8, 27, 23, 30))
+        assert "[Today]" in out
+        assert "2026-08-27" in out
+
+    def test_block_forbids_inferring_a_date_from_neighbours(self):
+        """The instruction, not just the number: an agent that sees a dated
+        table right above its own row will copy that row's date unless told
+        not to. That copy-forward IS the observed failure."""
+        out = build_today_block()
+        low = out.lower()
+        assert "do not infer" in low
+        assert "neighbouring entry" in low
+
+    def test_assemble_carries_today(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        code = tmp_path / "code"
+        code.mkdir()
+        import datetime
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        out = PromptAssembler().assemble("1", ws, "Task", code_path=code)
+        assert "[Today]" in out
+        assert today in out
+
+    def test_preamble_stays_dateless(self, tmp_path):
+        """The shared preamble is a byte-identical cross-step KV-cache prefix.
+        A date in there would invalidate it once a day for every project in
+        flight, which is why [Today] lives in the volatile suffix instead."""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        code = tmp_path / "code"
+        code.mkdir()
+        pre = PromptAssembler().build_shared_preamble(
+            ws, code_path=code, graph_name="dpe_default_v2")
+        assert "[Today]" not in pre
+
+    def test_preamble_is_byte_identical_across_two_builds(self, tmp_path):
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        code = tmp_path / "code"
+        code.mkdir()
+        a = PromptAssembler()
+        first = a.build_shared_preamble(ws, code_path=code,
+                                        graph_name="dpe_default_v2")
+        second = a.build_shared_preamble(ws, code_path=code,
+                                         graph_name="dpe_default_v2")
+        assert first == second

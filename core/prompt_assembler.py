@@ -224,10 +224,20 @@ def build_today_block(now: datetime.datetime | None = None) -> str:
     preamble is a byte-identical cross-step KV-cache prefix, and a date would
     invalidate it once a day for every project in flight.
     """
-    day = (now or datetime.datetime.now()).strftime("%Y-%m-%d")
+    stamp = now or datetime.datetime.now()
+    day = stamp.strftime("%Y-%m-%d")
+    # Named, not implied. This host runs UTC, and so does every other timestamp
+    # the system writes (git commit dates, DB rows, the scheduler tick log), so
+    # a record dated here lines up with all of them. A reader whose own clock is
+    # ahead of UTC -- a late-evening round in Europe crosses midnight local while
+    # the server is still on the previous day -- would otherwise read the row as
+    # a day behind and "correct" it, re-introducing exactly the drift this block
+    # exists to stop.
+    zone = stamp.astimezone().strftime("%Z") or "UTC"
     return (
         "[Today]\n"
-        f"The current date is {day}. Use exactly this date whenever you write "
+        f"The current date is {day} ({zone}, the clock every timestamp in this "
+        f"system uses). Use exactly this date whenever you write "
         "one (changelog rows, delivery notes, decision records, design docs). "
         "Do NOT infer a date from a neighbouring entry, a filename, an example "
         "or a prior round — those are other days, and copying them forward is "

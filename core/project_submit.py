@@ -88,5 +88,23 @@ def seed_and_trigger(db, ws, project_id: str, brief: dict) -> dict:
     db.set_project_brief(project_id, format_brief_as_markdown(brief))
 
     db.update_project(project_id, completed_project_steps=json.dumps(["1"]))
+
+    # And put the project back in a state the poller will actually pick up.
+    # `get_active_projects` selects on status IN ('planning','executing',
+    # 'verifying','running'); a meta conversation leaves `running:<step>`
+    # behind, which matches none of them. Without this the function returns
+    # {"status": "submitted", "next_step": "1"} — wakes the scheduler, and the
+    # scheduler then skips the project forever, because the row it would have
+    # to select is excluded by the status it was left in. Live 2026-08-27,
+    # jinyong-neigong: "submitted", then `outcome=idle` on every tick while a
+    # finished brief sat on disk waiting.
+    #
+    # Only the meta-conversation leftovers are normalised. A project already in
+    # a real pipeline status is not touched — this function's job is "the brief
+    # is ready, go", not "reset whatever was happening".
+    status = (db.get_project(project_id) or {}).get("status") or ""
+    if status.startswith("running:") or status in ("", "drafting"):
+        db.update_project(project_id, status="planning")
+
     wake_scheduler()
     return {"status": "submitted", "project_id": project_id, "next_step": "1"}

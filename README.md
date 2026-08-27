@@ -118,7 +118,8 @@ cp llm_providers.example.json llm_providers.json   # providers: URL + key NAME
 cp model_routes.example.json  model_routes.json    # models: which endpoints serve each
 cp .env.example .env                               # endpoints and options; NOT the keys
 
-# Which key files do YOUR tables need? The key name is the provider table's, not this page's:
+# Which key files do YOUR tables need? The key name is the provider table's, not this page's
+# (imports core.*, so run it inside the venv the Install step created):
 python -c "from core.external_deps import required_llm_keys, failover_llm_keys; \
            print('required:', required_llm_keys()); print('failover:', failover_llm_keys())"
 
@@ -151,15 +152,26 @@ docker compose logs -f
 
 Compose mounts its API keys as **secret files**, and Docker refuses to start a
 service whose secret source is missing. The CLI creates them for you; if you run
-`docker compose` by hand, create them first (empty means "I don't use this"):
+`docker compose` by hand, create them first (empty means "I don't use this").
+Also create the state dir **as your user** — if it does not exist, the Docker
+daemon creates the bind source as `root:root` and the container (which runs as
+your uid) crash-loops on `sqlite3.OperationalError: unable to open database
+file` without ever mentioning permissions:
 
 ```bash
+mkdir -p ~/.AItelier
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
-cd ~/.aitelier-secrets && touch DEEPSEEK_API_KEY ARK_API_KEY GITHUB_TOKEN LOCAL_QWEN_API_KEY && chmod 600 *
+cd ~/.aitelier-secrets && touch ARK_API_KEY DEEPSEEK_API_KEY QWEN_API_KEY GITHUB_TOKEN LOCAL_QWEN_API_KEY && chmod 600 *
 printf '%s' "<your-key>" > ~/.aitelier-secrets/<KEY_NAME>   # the probe in Quick Start names it
 ```
 
-Those four names are the secrets `docker-compose.yml` enumerates — the secrets dir is deliberately **not** bind-mounted (so keys never appear in any workspace-visible path), which means a provider you add with a **new** key name also needs its own `secrets:` entry in the compose file.
+`docker compose up -d` also starts **aitelier-godot** — the compile/playtest
+sidecar for the game pipeline. Harmless if unused; `docker compose up -d aitelier`
+starts just the main service.
+
+Those five names are the secrets `docker-compose.yml` enumerates — when in doubt,
+the `secrets:` block at the bottom of that file is the authoritative list. The
+secrets dir is deliberately **not** bind-mounted (so keys never appear in any workspace-visible path), which means a provider you add with a **new** key name also needs its own `secrets:` entry in the compose file.
 
 Publishing through an existing **cloudflared** connector is one line. The network
 lives in `docker-compose.yml` itself and is selected BY NAME, with no

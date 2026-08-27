@@ -467,6 +467,82 @@ func _click(spec: String) -> void:
     _click_at(node_name, offset, button, spec)
 
 
+## Resolve a spec's node to the on-SCREEN point a real pointer would sit at,
+## or Vector2(NAN, NAN) when it cannot be delivered (every refusal is a
+## push_error -- an input the spec asked for and the probe never sent is
+## indistinguishable from a game that ignored it). Shared by `click`/`clicks`
+## and by `hover`/`hovers`, so both address a node exactly the same way.
+func _point_of(node_name: String, offset: Vector2, spec: String) -> Vector2:
+    var nan_pt := Vector2(NAN, NAN)
+    var n := _resolve(node_name)
+    if n == null:
+        push_error("aim: node not found: " + node_name + " (spec: " + spec + ")")
+        return nan_pt
+    var pos: Vector2
+    if n is Control:
+        var c := n as Control
+        if not c.is_visible_in_tree():
+            push_error("aim: node is not visible in tree: " + node_name)
+            return nan_pt
+        if c.mouse_filter == Control.MOUSE_FILTER_IGNORE:
+            push_error("aim: node has mouse_filter=IGNORE (cannot be hit): " + node_name)
+            return nan_pt
+        var r := c.get_global_rect()
+        if r.size.x <= 0.0 or r.size.y <= 0.0:
+            push_error("aim: node has a zero-size rect: " + node_name)
+            return nan_pt
+        pos = r.position + r.size * 0.5
+    elif n is Node2D:
+        var n2 := n as Node2D
+        if not n2.is_visible_in_tree():
+            push_error("aim: node is not visible in tree: " + node_name)
+            return nan_pt
+        pos = n2.get_global_transform_with_canvas().origin
+    else:
+        push_error("aim: node is neither a Control nor a Node2D (cannot be aimed at): " + node_name)
+        return nan_pt
+    pos += offset
+    var vp_rect := get_viewport().get_visible_rect()
+    if not vp_rect.has_point(pos):
+        push_error("aim: point %s is outside the viewport %s (spec: %s)" % [pos, vp_rect.size, spec])
+        return nan_pt
+    return pos
+
+
+## MOVE THE POINTER, PRESS NOTHING. `clicks:` already moves the pointer before
+## its button event, so a click has always IMPLIED a hover -- which means a
+## hover-only affordance (a tooltip, a description preview) could be observed
+## by a click but never told apart from what the click itself selected.
+## `hovers:` is that missing half: it fires mouse_entered / mouse_exited and
+## nothing else, so a scenario can assert "pointing at it previews" separately
+## from "pressing it selects". Same spec grammar as `clicks:` minus the button
+## token -- "<Node>[ +dx,dy]"; a button token is refused, not ignored.
+func _hover(spec: String) -> void:
+    var node_name := spec
+    var offset := Vector2.ZERO
+    var toks := spec.split(" ", false)
+    if toks.size() > 0:
+        node_name = toks[0]
+        for i in range(1, toks.size()):
+            var t: String = toks[i]
+            if t.begins_with("+") or t.begins_with("-") or ("," in t):
+                var xy := t.split(",", false)
+                if xy.size() != 2 or not xy[0].is_valid_float() or not xy[1].is_valid_float():
+                    push_error("hover: malformed offset %s in spec: %s" % [t, spec])
+                    return
+                offset = Vector2(float(xy[0]), float(xy[1]))
+            else:
+                push_error("hover: unknown token %s in spec: %s (hover takes no button)" % [t, spec])
+                return
+    var pos := _point_of(node_name, offset, spec)
+    if is_nan(pos.x):
+        return
+    var mm := InputEventMouseMotion.new()
+    mm.position = pos
+    mm.global_position = pos
+    Input.parse_input_event(mm)
+
+
 ## Click a resolved node's on-screen point, optionally displaced by `offset`
 ## screen pixels and with a chosen mouse button.
 ##
@@ -490,56 +566,8 @@ func _click_at(node_name: String, offset: Vector2, button: int, spec: String) ->
     # could not deliver means the scenario did not do what it says it does, and
     # a scenario that quietly skips its own input is how this harness once
     # graded a game nobody played.
-    var n := _resolve(node_name)
-    if n == null:
-        push_error("click: node not found: " + node_name + " (spec: " + spec + ")")
-        return
-    var pos: Vector2
-    if n is Control:
-        var c := n as Control
-        if not c.is_visible_in_tree():
-            push_error("click: node is not visible in tree: " + node_name)
-            return
-        if c.mouse_filter == Control.MOUSE_FILTER_IGNORE:
-            push_error("click: node has mouse_filter=IGNORE (cannot be hit): " + node_name)
-            return
-        var r := c.get_global_rect()
-        if r.size.x <= 0.0 or r.size.y <= 0.0:
-            push_error("click: node has a zero-size rect: " + node_name)
-            return
-        pos = r.position + r.size * 0.5
-    elif n is Node2D:
-        # World-space nodes (units on the battle grid) are how the player
-        # actually targets with the mouse -- player.gd's _handle_click_targeting
-        # picks an enemy by where the click landed on the board, and the enemies
-        # are Node2D, not Control. Refusing them would have made the mouse half
-        # of that funnel untestable, which is the half most likely to rot.
-        # get_global_transform_with_canvas() folds in the canvas/camera
-        # transform, so this is the on-SCREEN point, not the world point.
-        var n2 := n as Node2D
-        if not n2.is_visible_in_tree():
-            push_error("click: node is not visible in tree: " + node_name)
-            return
-        pos = n2.get_global_transform_with_canvas().origin
-    else:
-        push_error("click: node is neither a Control nor a Node2D (cannot be clicked): " + node_name)
-        return
-    # MOVE THE POINTER FIRST. A synthesized button event carries its own
-    # `position`, and Godot's GUI system routes Controls by exactly that -- which
-    # is why clicking a Button worked immediately. World-space picking does NOT:
-    # jinyong-assets' player.gd:460 reads `get_global_mouse_position()`, i.e. the
-    # viewport's CACHED pointer, which a bare button event never updates. The
-    # handler fired and then looked at (0,0). A real mouse is at the point before
-    # it clicks; so is this one now. Measured, not assumed: with only the button
-    # event the enemy took 0 damage and `acted` stayed false, no error raised --
-    # the most dangerous shape, a click that reports success and does nothing.
-    pos += offset
-    var vp_rect := get_viewport().get_visible_rect()
-    if not vp_rect.has_point(pos):
-        # An off-screen point is not a click a player could ever make. Silently
-        # sending it would produce a scenario that "clicked" and changed
-        # nothing -- the exact vacuous green this harness refuses to grade.
-        push_error("click: point %s is outside the viewport %s (spec: %s)" % [pos, vp_rect.size, spec])
+    var pos := _point_of(node_name, offset, spec)
+    if is_nan(pos.x):
         return
     var mm := InputEventMouseMotion.new()
     mm.position = pos
@@ -555,6 +583,11 @@ func _click_at(node_name: String, offset: Vector2, button: int, spec: String) ->
 
 
 func _apply_entry(e: Dictionary) -> void:
+    # Hover BEFORE click on the same frame: a scenario that writes both means
+    # "point here, then press", which is the order a real pointer does it in.
+    var hv = e.get("hover", "")
+    if hv != "":
+        _hover(str(hv))
     var ck = e.get("click", "")
     if ck != "":
         _click(str(ck))
@@ -883,7 +916,8 @@ def _normalize_asserts(raw) -> list:
     return out
 
 
-_TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "clicks"}
+_TIMELINE_KEYS = {"at", "press", "release", "actions", "assert", "click", "clicks",
+                  "hover", "hovers"}
 _MAX_SPEC_FRAMES = 3000   # safety cap on how long one scenario may run
 
 
@@ -938,7 +972,11 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
         clicks = e.get("clicks") or []
         if isinstance(clicks, str):
             clicks = [clicks]
-        base = {k: v for k, v in e.items() if k not in ("actions", "clicks")}
+        hovers = e.get("hovers") or []
+        if isinstance(hovers, str):
+            hovers = [hovers]
+        base = {k: v for k, v in e.items()
+                if k not in ("actions", "clicks", "hovers")}
         if "assert" in base:
             base["assert"] = _normalize_asserts(base["assert"])
         # The probe fires every entry whose `at` matches the frame, so several
@@ -948,13 +986,16 @@ def _normalize_timeline(timeline: list) -> tuple[list, list]:
             out.append({"at": at, "press": a})
         for c in clicks:
             out.append({"at": at, "click": c})
+        for h in hovers:
+            out.append({"at": at, "hover": h})
         # `click` MUST be in this condition. Without it an entry carrying both
         # `actions:` and `click:` would drop the click on the floor -- the same
         # silent-skip that made every shipped `actions:` entry vanish before
         # this function existed. An input the spec asked for and the probe never
         # delivered is indistinguishable from a game that ignored it.
         if (base.get("press") or base.get("release") or base.get("click")
-                or base.get("assert") or not (acts or clicks)):
+                or base.get("hover") or base.get("assert")
+                or not (acts or clicks or hovers)):
             out.append(base)
     return out, errors
 

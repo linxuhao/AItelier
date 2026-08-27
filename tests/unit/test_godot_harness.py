@@ -237,6 +237,64 @@ def test_normalize_timeline_expands_clicks_into_one_entry_each():
     assert [e["click"] for e in out if "click" in e] == ["AttrPlus0", "ConfirmButton"]
 
 
+def test_normalize_timeline_expands_hovers_into_one_entry_each():
+    """`hovers:` is the plural of `hover:`, as `clicks:` is of `click:`."""
+    out, errs = gh._normalize_timeline([
+        {"at": 12, "hovers": ["TraitToggle0", "TraitToggle5"]},
+    ])
+    assert errs == []
+    assert [e["hover"] for e in out if "hover" in e] == [
+        "TraitToggle0", "TraitToggle5"]
+
+
+def test_normalize_timeline_keeps_a_hover_that_shares_a_frame_with_actions():
+    """The `click` lesson applied to `hover`: an entry carrying both `actions:`
+    and `hover:` must not drop the hover on the floor. A pointer move the spec
+    asked for and the probe never sent is indistinguishable from a game that
+    ignores hovering."""
+    out, errs = gh._normalize_timeline([
+        {"at": 7, "actions": ["ui_accept"], "hover": "TraitToggle3"},
+    ])
+    assert errs == []
+    assert [e["press"] for e in out if "press" in e] == ["ui_accept"]
+    assert [e["hover"] for e in out if "hover" in e] == ["TraitToggle3"]
+
+
+def test_normalize_timeline_keeps_an_assert_that_shares_a_frame_with_hovers():
+    out, errs = gh._normalize_timeline([
+        {"at": 9, "hovers": ["TraitToggle1"],
+         "assert": {"CreationScreen.trait_hover_index": 1}},
+    ])
+    assert errs == []
+    assert [e["hover"] for e in out if "hover" in e] == ["TraitToggle1"]
+    kept = [e for e in out if "assert" in e]
+    assert len(kept) == 1
+    assert kept[0]["assert"][0]["name"] == "CreationScreen.trait_hover_index"
+
+
+def test_hover_and_click_are_both_accepted_timeline_keys():
+    assert {"hover", "hovers"} <= gh._TIMELINE_KEYS
+    out, errors = gh._normalize_timeline([{"at": 3, "hovers": ["X"]}])
+    assert errors == []
+    assert out
+
+
+def test_probe_hover_sends_motion_and_no_button():
+    """The GDScript half: `_hover` moves the pointer and presses NOTHING. That
+    is the whole reason it exists — `clicks:` already implies a hover, so a
+    hover-only affordance could be observed by a click but never told apart
+    from what the click selected."""
+    src = _HARNESS.read_text(encoding="utf-8")
+    start = src.index("func _hover(spec: String) -> void:")
+    end = src.index("\nfunc ", start + 1)
+    body = src[start:end]
+    assert "InputEventMouseMotion" in body
+    assert "InputEventMouseButton" not in body
+    assert "_point_of(" in body
+    # a button token in a hover spec is refused, never silently ignored
+    assert "push_error" in body and "hover takes no button" in body
+
+
 def test_normalize_timeline_rejects_an_unknown_key():
     out, errors = gh._normalize_timeline([{"at": 3, "keys": ["ui_accept"]}])
     assert out == []

@@ -196,8 +196,30 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
     # Write seeds into the config's seed dir (read by the first step's
     # {from: config} context spec).
+    #
+    # A config that declares no `seed_file` has nowhere to put seed_text, and
+    # the old code simply skipped the write — the caller got
+    # {"status": "started"} and the text vanished. Live: meta_conversation
+    # declares no seed_file (only dpe_default does), so
+    # `start_config_run("meta_conversation", seed_text=<the whole brief>)`
+    # reported success and launched a conversation that had never been told
+    # what it was about. The caller cannot tell that from the reply, and the
+    # run only looks wrong much later, in what the agent asks.
+    #
+    # Refusing is the honest answer: the caller asked for something this config
+    # cannot do. Same shape as the missing-cross-config-input guard above —
+    # fail at launch, not silently at runtime.
     files: dict[str, str] = {}
-    if seed_text is not None and manifest.seed_file:
+    if seed_text is not None:
+        if not manifest.seed_file:
+            return {"status": "error", "message":
+                    f"Config '{config_name}' declares no `seed_file`, so there "
+                    f"is nowhere to write seed_text ({len(seed_text)} chars) — "
+                    f"it would be silently discarded. Pass the text through "
+                    f"`seed_inputs={{'<filename>': ...}}` naming a file the "
+                    f"first step actually reads, or start a config that "
+                    f"declares a seed_file (dpe_default reads "
+                    f"'project_brief.md')."}
         files[manifest.seed_file] = seed_text
     for fname, content in seed_inputs.items():
         files[fname] = content if isinstance(content, str) else json.dumps(content)

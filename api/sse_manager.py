@@ -1,6 +1,7 @@
 # File: api/sse_manager.py
 
 import asyncio
+import time
 import json
 import logging
 from typing import Dict, AsyncGenerator, Set
@@ -42,6 +43,11 @@ class StreamManager:
     def __init__(self):
         self._queues: Dict[str, Set[asyncio.Queue]] = {}
         self._buffers: Dict[str, list] = {}  # pre-connect buffer per task_id
+        # Who is on the other end of each queue. The queue set is already the
+        # ground truth for "still connected" (the generator's finally removes
+        # it), so presence is a projection of it, never a second bookkeeping
+        # that can drift: entries live and die with the queue they describe.
+        self._conn_meta: Dict[int, dict] = {}   # id(queue) -> {who, since, channel}
 
     def _get_queues(self, task_id: str) -> Set[asyncio.Queue]:
         if task_id not in self._queues:
@@ -103,7 +109,34 @@ class StreamManager:
     def _connection_count(self) -> int:
         return sum(len(q) for q in self._queues.values())
 
-    async def event_generator(self, task_id: str) -> AsyncGenerator[str, None]:
+    def connection_snapshot(self) -> list[dict]:
+        """One dict per live SSE connection: {who, since, channel}.
+
+        `who` is the Cloudflare-Access-verified email or None for anonymous.
+        Accuracy comes for free: a tab that closes tears down its generator,
+        whose `finally` removes the queue and its meta in the same breath.
+        """
+        return [dict(m) for m in self._conn_meta.values()]
+
+    def _push_presence(self) -> None:
+        """Broadcast the aggregate to __global__ so every open tab updates live.
+
+        Synchronous on purpose: it is called from the generator's `finally`,
+        where an `await` during GeneratorExit is a RuntimeError. Counts only —
+        never emails: this lands in every anonymous browser.
+        """
+        snap = self.connection_snapshot()
+        auth = sum(1 for m in snap if m.get("who"))
+        msg = json.dumps({"type": "presence", "total": len(snap),
+                          "authenticated": auth, "anonymous": len(snap) - auth})
+        for q in self._queues.get("__global__", set()):
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass    # the slow-consumer eviction in push_log owns this case
+
+    async def event_generator(self, task_id: str,
+                              who: str | None = None) -> AsyncGenerator[str, None]:
         """Subscribe to the broadcast channel with a private queue.
 
         Any messages buffered before the first consumer connects are
@@ -129,6 +162,9 @@ class StreamManager:
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
         queues = self._get_queues(task_id)
         queues.add(queue)
+        self._conn_meta[id(queue)] = {"who": who, "since": time.time(),
+                                      "channel": task_id}
+        self._push_presence()
 
         # Replay buffered messages first
         buf = self._buffers.pop(task_id, [])
@@ -153,8 +189,10 @@ class StreamManager:
                 yield f"data: {json.dumps(payload)}\n\n"
         finally:
             queues.discard(queue)
+            self._conn_meta.pop(id(queue), None)
             if not queues:  # clean up empty set to avoid leaking keys
                 self._queues.pop(task_id, None)
+            self._push_presence()
 
 
 # Global singleton

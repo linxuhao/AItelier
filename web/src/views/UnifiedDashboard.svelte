@@ -23,6 +23,7 @@
     repoTypeLabel,
   } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
+  import { on as sseOn, off as sseOff } from '../lib/sse';
   import RepoPanel from './RepoPanel.svelte';
   import WorkspaceBrowser from './WorkspaceBrowser.svelte';
   import PipelineGraph from './PipelineGraph.svelte';
@@ -154,9 +155,28 @@
     }
   }
 
+  // ── Presence (who is watching) ──
+  // Seeded by one GET, then kept live by `presence` SSE events the backend
+  // broadcasts on every connect/disconnect — no polling. Counts only here;
+  // per-viewer detail exists server-side for writers via /api/connections.
+  let presence = $state<{ total: number; authenticated: number } | null>(null);
+
+  function onPresence(ev: Record<string, unknown>): void {
+    if (ev?.type !== 'presence') return;
+    presence = {
+      total: Number(ev.total ?? 0),
+      authenticated: Number(ev.authenticated ?? 0),
+    };
+  }
+
   onMount(async () => {
     // The three lists are independent — serialising them added a full RTT each
     // before first paint (the 4ms catalog call used to wait on the 176ms runs call).
+    sseOn('presence', onPresence);
+    fetch('/api/connections')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (j) presence = { total: j.total, authenticated: j.authenticated }; })
+      .catch(() => {});
     await Promise.allSettled([refreshData(), refreshRunsAndCatalog()]);
     pollTimer = setInterval(() => {
       // Poll the run tables too: their status badges are the live data on this
@@ -170,6 +190,7 @@
     if (pollTimer !== null) {
       clearInterval(pollTimer);
     }
+    sseOff('presence', onPresence);
   });
 
   // ── Methods ──
@@ -451,6 +472,12 @@
   <!-- Page header -->
   <header class="dashboard-header">
     <h2>{t('dashboard.projects')}</h2>
+    {#if presence && presence.total > 0}
+      <span class="presence-badge"
+            title={`${presence.authenticated} signed-in · ${presence.total - presence.authenticated} anonymous`}>
+        👁 {presence.total}
+      </span>
+    {/if}
     <div class="dashboard-header-controls">
       <input
         type="search"
@@ -1004,6 +1031,16 @@
 </section>
 
 <style>
+  .presence-badge {
+    font-size: 0.8rem;
+    color: var(--pico-muted-color, #888);
+    border: 1px solid var(--pico-muted-border-color, #ddd);
+    border-radius: 999px;
+    padding: 0.05rem 0.55rem;
+    white-space: nowrap;
+    cursor: default;
+  }
+
   .dashboard-header {
     display: flex;
     justify-content: space-between;

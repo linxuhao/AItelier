@@ -429,15 +429,46 @@ def signin(request: Request):
 
 
 @app.get("/api/events/stream")
-async def stream_global_events():
+async def stream_global_events(request: Request):
     """
     Global SSE endpoint for CLI dashboard.
     Broadcasts all pipeline events (project + task) for real-time status updates.
+
+    Identity is resolved ONCE at connect (verified Cloudflare Access JWT →
+    email, else anonymous) and recorded next to the connection's queue, which
+    is what /api/connections reports. The stream itself is open either way.
     """
+    who = None
+    try:
+        from core import cf_access
+        who = cf_access.email_from_request_headers(request.headers, request.cookies)
+    except Exception:
+        pass
     return StreamingResponse(
-        stream_manager.event_generator("__global__"),
+        stream_manager.event_generator("__global__", who=who),
         media_type="text/event-stream",
     )
+
+
+@app.get("/api/connections")
+def list_connections(request: Request):
+    """Who is watching right now — the live SSE connection table.
+
+    Split visibility: the COUNTS are public (they are also broadcast to every
+    tab as `presence` events), but the per-connection detail carries verified
+    emails, and "is the operator at the dashboard right now" is exactly the
+    working-hours intelligence the reflog leak taught us not to hand out. So
+    the detail list is included only for a caller the write gate would let
+    write.
+    """
+    from api import authz
+    snap = stream_manager.connection_snapshot()
+    auth = sum(1 for m in snap if m.get("who"))
+    body = {"total": len(snap), "authenticated": auth,
+            "anonymous": len(snap) - auth}
+    if authz.request_can_write(request):
+        body["viewers"] = snap
+    return body
 
 
 # ── MCP endpoint ──

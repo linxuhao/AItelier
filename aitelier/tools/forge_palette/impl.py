@@ -165,7 +165,7 @@ def _capabilities_section() -> str:
     """
     try:
         from api.dependencies import get_skillflow
-        caps = getattr(get_skillflow(), "_capabilities", {}) or {}
+        caps = get_skillflow().capabilities()
     except Exception as e:                               # noqa: BLE001
         return (_CAPABILITY_DECLARATION_HELP
                 + f"\n\n> WARNING: could not read the capability registry ({e}). "

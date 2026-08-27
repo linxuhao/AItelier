@@ -24,7 +24,7 @@ def capability_declarations_known(*, files=None, workspace_root: str = "",
         sf = get_skillflow()
         graph = getattr(sf, "_graphs", {}).get(config_name)
         offers = set(getattr(graph, "capabilities", []) or []) if graph else set()
-        registered = set(getattr(sf, "_capabilities", {}) or {})
+        registered = set(sf.capabilities())
     except Exception as e:      # no host wired (unit context) → nothing to check
         return {"all_passed": True,
                 "results": [{"passed": True, "error": f"registry unavailable: {e}"}]}

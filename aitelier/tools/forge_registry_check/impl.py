@@ -453,10 +453,17 @@ def _capability_known(graph, steps) -> list[str]:
     out: list[str] = []
     try:
         from api.dependencies import get_skillflow
-        known = set(getattr(get_skillflow(), "_capabilities", {}) or {})
+        known = set(get_skillflow().capabilities())
     except Exception:                                    # noqa: BLE001
         return out          # no registry to check against; not the emitter's fault
-    offers = set((graph.get("capabilities") or []) if isinstance(graph, dict) else ())
+    declared_offers = (graph.get("capabilities") if isinstance(graph, dict) else None)
+    if declared_offers is not None and not isinstance(declared_offers, list):
+        # `capabilities: "stateful"` makes a set of CHARACTERS, in the gate and
+        # in the engine alike — every name then looks unoffered.
+        return [f"capability_known: graph `capabilities:` must be a LIST of "
+                f"names, got {type(declared_offers).__name__}."]
+    offers = set(declared_offers or ())
+    step_ids = {st.get("id") for st in steps if isinstance(st, dict)}
     for name in sorted(offers - known):
         out.append(
             f"capability_known: graph offers capability '{name}', which this "
@@ -480,12 +487,29 @@ def _capability_known(graph, steps) -> list[str]:
                     f"object without `from_item` — it grants nothing. Use a "
                     f"name, a list, or {{from_item: <card field>, card: <path>}}.")
                 continue
-            if not cap.get("card"):
+            card = cap.get("card")
+            if not card:
                 out.append(
                     f"capability_known: step '{sid}' declares `from_item` with "
                     f"no `card:` — a loop item is a NAME, so the card path is "
                     f"the only way to read its fields, and without it nothing "
                     f"is granted.")
+            elif isinstance(card, str):
+                # The engine splits on the FIRST '/': everything before it is a
+                # step id. A path without one, or naming a step this graph does
+                # not have, resolves to a file that is not there and grants
+                # nothing — with a log line as the only trace.
+                head = card.split("/")[0]
+                if "/" not in card:
+                    out.append(
+                        f"capability_known: step '{sid}' has card '{card}' with "
+                        f"no step prefix — it must start with the id of the step "
+                        f"that WRITES the card, e.g. '3/tasks/$current_task.json'.")
+                elif head not in step_ids:
+                    out.append(
+                        f"capability_known: step '{sid}' reads its card from "
+                        f"step '{head}', which is not in this graph. Steps: "
+                        f"{sorted(x for x in step_ids if x)}.")
             if not offers:
                 out.append(
                     f"capability_known: step '{sid}' reads capabilities from a "

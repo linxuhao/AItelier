@@ -634,7 +634,7 @@ def set_pipeline_capabilities(sf, registry, config_name: str,
     # The REQUEST is checked before the target: offering something nothing
     # registers means every card declaring it grants nothing, silently, and
     # naming the bad capability is more useful than naming a missing file.
-    known = set(getattr(sf, "_capabilities", {}) or {})
+    known = set(sf.capabilities())
     unknown = [c for c in (add or []) if c not in known]
     if unknown:
         return {"error": f"not registered on this deployment: {unknown}. "
@@ -657,15 +657,69 @@ def set_pipeline_capabilities(sf, registry, config_name: str,
         data["capabilities"] = after
     else:
         data.pop("capabilities", None)
-    tmp = f.with_suffix(".yaml.tmp")
+    # VALIDATE BEFORE WRITING. Write-then-reload leaves a rejected config on
+    # disk: the live registry still holds the old graph (register_graph validates
+    # before assigning), so nothing looks wrong — until the next restart, when
+    # the boot scan skips the invalid file and the pipeline VANISHES from the
+    # catalog. Reachable by the common case: adding an offer list to a graph that
+    # already declares a static `capability:` makes that declaration illegal
+    # unless it is in the list, which is exactly what the forge emits.
+    try:
+        from skillflow.graph import PipelineGraph
+        issues = PipelineGraph._from_dict(dict(data)).validate()
+    except Exception as e:                               # noqa: BLE001
+        return {"error": f"the edited config would not parse: {e} — nothing written"}
+    if issues:
+        return {"error": f"the edited config would not register: {issues[0]} — "
+                         f"nothing written. Fix the step's own `capability:` "
+                         f"first, or add it to the same offer list."}
+
+    import os as _os
+    tmp = f.with_suffix(f".yaml.{_os.getpid()}.tmp")
+    prev_text = f.read_text(encoding="utf-8")
     tmp.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
                    encoding="utf-8")
-    import os as _os
     _os.replace(tmp, f)
     r = reload_generated_pipeline(sf, registry, config_name)
     if "error" in r:
-        return r
-    return {"config_name": config_name, "capabilities": after, "changed": True}
+        # Belt and braces: validation passed but registration did not. Put the
+        # file back rather than leaving a pipeline that disappears on restart.
+        f.write_text(prev_text, encoding="utf-8")
+        return {"error": f"{r['error']} — the config file was restored"}
+    warn = _still_declared_statically(data, set(remove or []))
+    out = {"config_name": config_name, "capabilities": after, "changed": True}
+    if warn:
+        out["warning"] = warn
+    return out
+
+
+def _still_declared_statically(data: dict, removed: set) -> str:
+    """Steps that still name a capability the offer list just dropped.
+
+    `remove` has two silently different meanings. Dropping the LAST offered
+    capability empties the list, and an empty list stops binding graph-declared
+    names at all — so "remove X" on a graph whose step statically declares X
+    RE-GRANTS it. Dropping one a task card declares revokes it correctly, but
+    only as a claim-time warning: the step just quietly loses its tools. Either
+    way the caller deserves to be told.
+    """
+    if not removed:
+        return ""
+    hits = []
+    for st in (data.get("steps") or []):
+        cap = st.get("capability") if isinstance(st, dict) else None
+        names = ([cap] if isinstance(cap, str) else
+                 [c for c in cap if isinstance(c, str)] if isinstance(cap, list)
+                 else [])
+        for n in names:
+            if n in removed:
+                hits.append(f"{st.get('id')}:{n}")
+    if not hits:
+        return ("removed from the offer list; any task card still declaring it "
+                "now grants nothing (a claim-time warning, not a failure)")
+    return (f"these steps still declare it in the GRAPH and keep it: "
+            f"{hits} — with an empty offer list a graph-declared capability is "
+            f"honoured unconditionally")
 
 
 def reload_generated_pipeline(sf, registry, config_name: str) -> dict:

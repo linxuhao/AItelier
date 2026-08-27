@@ -37,6 +37,17 @@ class _FakeSF:
         self._capabilities = {}
         self._graphs = graphs or {}
 
+    def capabilities(self):
+        """Mirrors the public accessor — the host reads through it now, so a
+        double that lacks it fails loudly instead of returning an empty table."""
+        return {n: {"tools": list(c.get("tools") or ()),
+                    "briefing": c.get("briefing", ""),
+                    "owner": c.get("owner", "host")}
+                for n, c in self._capabilities.items()}
+
+    def graph_capabilities(self, graph_name):
+        return list(getattr(self._graphs.get(graph_name), "capabilities", []) or [])
+
     def register_capability(self, name, *, tools=(), context_provider=None,
                             briefing="", owner="host"):
         prev = self._capabilities.get(name)
@@ -324,22 +335,23 @@ def test_the_emit_gate_rejects_capability_mistakes():
     outside the registry grants nothing at RUNTIME, silently."""
     from aitelier.tools.forge_registry_check.impl import _capability_known
     g = lambda **k: dict(name="g", begin="a", steps=[], **k)
+    S3 = [{"id": "3"}]      # the step a card path points at must exist
 
     assert _capability_known(g(), [{"id": "s", "capability": "nope"}])
     assert _capability_known(g(capabilities=["ghost_cap_nobody_has"]), [])
     # from_item without a card grants nothing — a loop item is a NAME
     assert _capability_known(g(capabilities=["stateful"]),
-                             [{"id": "s", "capability": {"from_item": "c"}}])
+                             S3 + [{"id": "s", "capability": {"from_item": "c"}}])
     # …and with no offer list the engine refuses every card-declared name
-    assert _capability_known(g(), [{"id": "s", "capability":
-                                    {"from_item": "c", "card": "3/c.json"}}])
+    assert _capability_known(g(), S3 + [{"id": "s", "capability":
+                                        {"from_item": "c", "card": "3/c.json"}}])
     # the correct shapes are silent
     assert not _capability_known(g(capabilities=["stateful"]),
                                  [{"id": "s", "capability": "stateful"}])
     assert not _capability_known(
         g(capabilities=["game_assets"]),
-        [{"id": "s", "capability": {"from_item": "capabilities",
-                                    "card": "3/tasks/$t.json"}}])
+        S3 + [{"id": "s", "capability": {"from_item": "capabilities",
+                                         "card": "3/tasks/$t.json"}}])
 
 
 def test_capability_known_is_in_the_taught_rule_table():
@@ -386,3 +398,107 @@ def test_offering_something_unregistered_is_refused_at_the_edit(home):
     r = set_pipeline_capabilities(get_skillflow(), get_config_registry(),
                                   "gen_dsh_code_review", add=["ghost_nobody_has"])
     assert "error" in r and "not registered" in r["error"]
+
+
+# ── the review round: the two bugs that shipped were in code no test called ──
+def test_a_generated_capability_cannot_impersonate_the_host(home):
+    """`owner` was a tool PARAMETER, so the ownership invariant was a
+    suggestion — and the refusal message names the string that defeats it, which
+    is an LLM's most natural repair.
+
+    Passing owner="host" overwrote a host capability: `stateful` lost its
+    context_provider (state_dir injection dead deployment-wide, persisted, and
+    re-applied by the boot scan on every restart), or `tool_creation` was
+    rewritten to grant repo_apply/repo_delete to the very step that holds it.
+    """
+    import yaml
+    from aitelier.tools.register_capability.impl import register_capability
+    import inspect
+    assert "owner" not in inspect.signature(register_capability).parameters
+    spec = yaml.safe_load((ROOT / "aitelier" / "tools" / "register_capability"
+                           / "tool.yaml").read_text())
+    assert "owner" not in spec["parameters"], "the tool still advertises owner"
+
+    sf = _FakeSF(known_tools=["write"])
+    sf._capabilities["stateful"] = {"tools": [], "owner": "host",
+                                    "briefing": "", "context_provider": object()}
+    r = caps.define(sf, "stateful", tools=["write"], owner="host")
+    assert "error" in r and "host" in r["error"]
+    assert sf._capabilities["stateful"]["tools"] == [], "host definition overwritten"
+
+
+def test_an_edit_does_not_silently_drop_a_context_provider(home):
+    """An edit replaces the whole definition; a caller passing no provider is
+    not asking to remove one."""
+    sf = _FakeSF(known_tools=["write", "pytest"])
+    sentinel = object()
+    caps.define(sf, "x", tools=["write"], owner="gen:x",
+                context_provider=sentinel)
+    caps.define(sf, "x", tools=["write", "pytest"], owner="gen:x")
+    assert sf._capabilities["x"]["context_provider"] is sentinel
+
+
+def test_the_briefing_is_capped(home):
+    """It rides the step's per-turn context and is shown truncated everywhere it
+    is listed — unbounded, it is the same token leak this mechanism removed,
+    wearing different clothes."""
+    from aitelier.tools.register_capability.impl import register_capability
+    r = register_capability(name="probe", tools=["read_file"], briefing="x" * 99999)
+    assert r["registered"] is False and "limit" in r["error"]
+
+
+def test_a_capability_name_must_be_a_safe_filename(home):
+    """The name becomes a filename: a 300-char one came back as
+    OSError(ENAMETOOLONG) out of a function documented to report, never raise."""
+    sf = _FakeSF(known_tools=["write"])
+    for bad in ("a" * 300, "a/b", ".hidden", "a\\b", "Caps"):
+        assert "error" in caps.define(sf, bad, tools=["write"]), bad
+    assert caps.define(sf, "good_name-2", tools=["write"])["ok"]
+
+
+def test_a_rejected_edit_does_not_leave_a_broken_config_on_disk(tmp_path,
+                                                               monkeypatch):
+    """Write-then-reload left the bad file in place: the live registry still
+    held the old graph, so nothing looked wrong until a restart skipped the
+    invalid file and the pipeline VANISHED from the catalog.
+
+    Reachable by the common case — adding an offer list to a graph that already
+    declares a static `capability:`, which is what the forge emits.
+    """
+    import yaml
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path))
+    from core import datadir, pipeline_registry
+    d = datadir.configs_dir(); d.mkdir(parents=True, exist_ok=True)
+    f = d / "gen_probe.yaml"
+    graph = {"name": "gen_probe", "begin": "a", "steps": [
+        {"id": "a", "step_type": "agent", "agent_config": "r",
+         "capability": "stateful", "transitions": [{"to": "done"}]},
+        {"id": "done", "step_type": "gate", "transitions": []}]}
+    before = yaml.safe_dump(graph, sort_keys=False)
+    f.write_text(before, encoding="utf-8")
+
+    sf = _FakeSF(known_tools=["write"])
+    caps.define(sf, "game_assets", tools=["write"], owner="host")
+    r = pipeline_registry.set_pipeline_capabilities(sf, None, "gen_probe",
+                                                    add=["game_assets"])
+    assert "error" in r, "an offer list that outlaws a step's own capability"
+    assert f.read_text(encoding="utf-8") == before, "the bad config was written"
+
+
+def test_removing_a_capability_reports_what_still_declares_it():
+    """`remove` has two silently different meanings.
+
+    Dropping the LAST offered capability empties the list, and an empty list
+    stops binding GRAPH-declared names at all — so "remove X" on a graph whose
+    step statically declares X RE-GRANTS it. Dropping one a task card declares
+    revokes it correctly, but only as a claim-time warning: the step quietly
+    loses its tools. Either way the caller is told.
+    """
+    from core.pipeline_registry import _still_declared_statically
+    graph = {"steps": [{"id": "a", "capability": "stateful"},
+                       {"id": "b", "capability": ["other"]}]}
+    warn = _still_declared_statically(graph, {"stateful"})
+    assert "a:stateful" in warn and "unconditionally" in warn
+    # nothing declares it statically → the other meaning, still reported
+    assert "grants nothing" in _still_declared_statically(graph, {"ghost"})
+    assert _still_declared_statically(graph, set()) == ""

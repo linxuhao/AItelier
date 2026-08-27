@@ -32,10 +32,3 @@ parameters:
       can call. The FIRST prose line is used as the capability's one-line purpose
       wherever it is listed, so make that line stand alone.
     required: false
-  owner:
-    type: string
-    description: >
-      Who owns this definition (default `gen:<name>`). Re-registering under the
-      same owner is an edit; a different owner is refused rather than silently
-      changing what every holder is granted.
-    required: false

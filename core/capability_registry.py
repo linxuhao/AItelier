@@ -19,12 +19,21 @@ The invariants, all enforced here:
 
 Definitions are global; which pipeline may *offer* which capability is the
 graph's own `capabilities:` list (see `design/declarable_capabilities.md`).
+
+This module is the ONE place allowed to reach into skillflow's private
+`_capabilities` dict, and only where the public `sf.capabilities()` accessor
+cannot serve: it needs the live `context_provider` callable (deliberately not
+exposed) and it needs to mutate on archive. Every other reader — the palette,
+the emit gate, the catalog, the validation tool — goes through the accessor, so
+a rename across the repo boundary is an AttributeError instead of a silent
+empty table.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -81,7 +90,8 @@ def _unresolved(sf, tools: list[str]) -> list[str]:
 
 
 def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "host",
-           context_provider=None, persist: bool = False) -> dict:
+           context_provider=None, persist: bool = False,
+           host: bool = False) -> dict:
     """Register (or edit) a capability. Returns `{ok}` or `{error}`.
 
     `persist=True` writes it to `~/.AItelier/capabilities/<name>.json` so a
@@ -89,8 +99,14 @@ def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "ho
     code and are registered with `persist=False` on every boot.
     """
     tools = list(tools or ())
-    if not name or "/" in name or name.startswith("."):
-        return {"error": f"invalid capability name {name!r}"}
+    # The name becomes a FILENAME. `/` and a leading `.` were rejected and
+    # everything else waved through, so a 300-char name reached _write_atomic and
+    # came back as OSError(ENAMETOOLONG) from a function documented to report
+    # rather than raise, and a backslash wrote a file called `a\b.json`.
+    if not name or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
+        return {"error": f"invalid capability name {name!r} — lowercase letters, "
+                         f"digits, '_' and '-', starting with a letter or digit, "
+                         f"at most 64 characters"}
     missing = _unresolved(sf, tools)
     if missing:
         # Refused rather than warned: skillflow's own note on the same class of
@@ -98,6 +114,24 @@ def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "ho
         # quietly". A registration that half-succeeds is the quiet version.
         return {"error": f"capability {name!r} grants tools that do not resolve: "
                          f"{missing}. Register the tool first."}
+    prev = (getattr(sf, "_capabilities", {}) or {}).get(name) or {}
+    if context_provider is None and prev.get("context_provider") is not None:
+        # An edit replaces the whole definition. A caller that passes no
+        # context_provider is not asking to remove one — and removing
+        # `stateful`'s is not a small mistake: state_dir injection dies for every
+        # pipeline, silently, and the boot scan re-applies the loss on every
+        # restart. Keep what you were not asked to change.
+        context_provider = prev["context_provider"]
+    # A capability the HOST defined in code is not editable from a generated
+    # artifact, whatever owner string it presents. The registry's owner check is
+    # about accidents; this is about a tool that an LLM step calls.
+    if prev and prev.get("owner") == "host" and not host:
+        # `owner` was a caller-supplied string, so "is this the host?" could be
+        # answered by presenting the right word — and the refusal message names
+        # that word. Only the boot path (which re-registers the same definitions
+        # on every start) passes host=True; nothing reachable from a step can.
+        return {"error": f"capability {name!r} is defined by the host in code; "
+                         f"it cannot be redefined at runtime. Pick another name."}
     try:
         sf.register_capability(name, tools=tools, briefing=briefing, owner=owner,
                                context_provider=context_provider)
@@ -215,7 +249,7 @@ def palette(sf, config_name: str = "") -> dict:
     pipeline declares but this deployment never registered is a deployment gap
     that has to be visible, not an empty row.
     """
-    caps = getattr(sf, "_capabilities", {}) or {}
+    caps = sf.capabilities()
     if not config_name:
         return {"capabilities": [_row(n, c) for n, c in sorted(caps.items())]}
     graph = getattr(sf, "_graphs", {}).get(config_name)

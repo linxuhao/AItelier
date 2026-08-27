@@ -223,7 +223,9 @@ def get_skillflow():
             # a capability that quietly does not exist — every step declaring it
             # then runs with nothing, which is precisely the failure the registry
             # was built to make impossible.
-            r = _caps.define(sf, **kw)
+            # host=True is the ONE caller allowed to (re)define a host-owned
+            # capability: this runs on every boot with the same definitions.
+            r = _caps.define(sf, host=True, **kw)
             if not r.get("ok"):
                 import logging
                 logging.getLogger(__name__).error(
@@ -231,10 +233,22 @@ def get_skillflow():
                     r.get("error"))
             return r
 
+        # The briefing's first line is what every listing shows. Without one the
+        # palette row for `stateful` no longer names `state_dir` — the single
+        # most important word about it.
         _must_define(name="stateful", owner="host",
+                     briefing="Hands this step's tools a durable, per-pipeline, "
+                              "MOUNTED `state_dir` kwarg. The tool writes "
+                              "RELATIVE to it and never computes its own path: a "
+                              "home-relative path escapes the mount and is lost "
+                              "on the next container rebuild.",
                      context_provider=lambda cfg: {
                          "state_dir": str(sf._workspace.state_dir(cfg))})
         _must_define(name="tool_creation", owner="host",
+                     briefing="Lets this step author, self-test and register a "
+                              "new tool. Build and test before registering: a "
+                              "registered tool that does not import is granted "
+                              "to later steps and silently resolves to nothing.",
                      # register_capability alongside register_tool: a tool that
                      # needs framework-chosen state (or that only some loop items
                      # should carry) has nowhere to attach without a capability,

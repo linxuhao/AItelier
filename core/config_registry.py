@@ -202,8 +202,7 @@ def _offered_capabilities(config_name: str) -> list[str]:
     """The graph's top-level `capabilities:` offer list, or []."""
     try:
         from api.dependencies import get_skillflow
-        graph = getattr(get_skillflow(), "_graphs", {}).get(config_name)
-        return sorted(getattr(graph, "capabilities", []) or [])
+        return sorted(get_skillflow().graph_capabilities(config_name))
     except Exception:                                    # noqa: BLE001
         return []
 

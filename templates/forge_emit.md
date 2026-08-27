@@ -270,7 +270,9 @@ maker's job to what's achievable, then the reviewer to that same bar).
   The offer list binds DATA, not you: a name you write into a step is honoured
   even with no offer list, but a card-declared name is refused by the engine
   unless the graph advertises it. With no offer list, `from_item` grants nothing
-  at all.
+  at all. **But once you declare an offer list it binds every step too** — a
+  step whose `capability:` is not in it makes the graph fail REGISTRATION, so
+  put every capability any step declares into the same list.
 - `output` is a **mapping**: `{mode: content|write}` and, for named files,
   `fixed: {slot: {file: "name"}}`. Not a list. `content` = the agent may write
   ONLY the declared `fixed` files (use for structured/known outputs); `write` =

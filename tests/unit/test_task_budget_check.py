@@ -66,17 +66,19 @@ def test_shape_is_derived_from_the_real_graph(live):
     assert shape["body"] == 4, "the task loop body is t_plan/t_plan_review/t_impl/t_impl_review"
     # Every agent/tool node outside the body, plus the loop node itself (it is
     # marked completed when it drains). Gates leave no row and are excluded.
-    assert shape["linear"] == 13
+    # 14 since git_push_post joined the chain (2026-08-27): a finished round
+    # pushes to its remote branch before `done`.
+    assert shape["linear"] == 14
     assert shape["budget"] == 200
     assert shape["source"] == {"step": "3", "file": "tasks_manifest.json",
                                "field": "execution_order"}
 
 
 def test_the_boltons_list_is_the_one_that_did_not_fit(live):
-    """33 tasks: 145 steps for a clean pass, 246 with one fix round, cap 200."""
+    """33 tasks: 146 steps for a clean pass, 248 with one fix round, cap 200."""
     shape = _graph_shape(GRAPH)
-    assert shape["linear"] + shape["body"] * 33 == 145
-    assert _required_steps(shape, 33) == 246 > shape["budget"]
+    assert shape["linear"] + shape["body"] * 33 == 146
+    assert _required_steps(shape, 33) == 248 > shape["budget"]
 
 
 # ── The verdict ────────────────────────────────────────────────────────────
@@ -95,12 +97,12 @@ def test_a_list_that_does_not_fit_is_rejected_with_the_numbers(tmp_path, live):
     result = _call(out)
     assert result["within_budget"] is False
     assert result["task_count"] == 33
-    assert result["required_steps"] == 246
+    assert result["required_steps"] == 248
     assert result["max_total_steps"] == 200
     assert result["max_tasks"] == 25
     # The PM only ever sees `reason` (it rides the feedback banner), so the
     # numbers have to be in it.
-    for fragment in ("33", "246", "200", "25"):
+    for fragment in ("33", "248", "200", "25"):
         assert fragment in result["reason"]
 
 

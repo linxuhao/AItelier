@@ -91,8 +91,18 @@ def test_passing_verdict_still_reaches_done_with_the_loop_spent():
     resolver = _dpe_resolver()
     passing = lambda p: json.dumps({"passed": True})    # noqa: E731
     spent = {("5_review", "3"): _goal_loop_budget(resolver)}
-    assert resolver.next_node(
-        "5_review", {}, spent, file_reader=passing) == "done"
+    # The pass edge goes to git_push_post (2026-08-27) and from there,
+    # unconditionally, to `done`. What this test pins is that a PASS is not
+    # swallowed by a spent goal loop — so follow the terminal path instead of a
+    # single hop, and it keeps checking that even if another node is inserted
+    # before `done` later.
+    nxt = resolver.next_node("5_review", {}, spent, file_reader=passing)
+    assert nxt != "3", "a passing verdict must not be routed back into the loop"
+    for _ in range(10):
+        if nxt in (None, "done"):
+            break
+        nxt = resolver.next_node(nxt, {}, spent, file_reader=passing)
+    assert nxt == "done"
 
 
 # ── host side: a routing failure must not be offered as a checkpoint ──────────

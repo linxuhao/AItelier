@@ -928,7 +928,7 @@ steps:
             passed: { type: boolean }
             feedback: { type: string }
     transitions:
-      - to: "done"    # passed → loop-external terminal gate (the run's ONLY
+      - to: "git_push_post"    # passed → push, then the loop-external terminal gate (the run's ONLY
                       # completed-terminal; see end_conditions note above)
         match: { from_file: "review_verdict.json", field: "passed", value: true }
       # ── GOAL-LOOP (configurable) ───────────────────────────────────────────
@@ -963,6 +963,30 @@ steps:
   # at most once and can't latch from a prior failed loop iteration. The
   # game_harness addon's anchors resolve against the steps above; `done` is the
   # graph's terminal and is not an anchor.
+  # A finished round ends up on its remote branch — the same thing the
+  # dashboard's push button does, at the pipeline's only clean exit.
+  #
+  # It SKIPS, successfully, whenever there is nothing to push to: no git repo,
+  # no remote, a detached HEAD, or a branch the remote already has. Those are
+  # normal states for a local-only project (and for every `repo_mode: none`
+  # config), and a green run must not be held up by them — the mirror image of
+  # `git_sync_pre`, which skips on exactly the same conditions at the top.
+  #
+  # A real push failure (auth, non-fast-forward, network) is reported in the
+  # step output and the trace as `action: "error"`, and the run still completes:
+  # `repo_apply` committed this round's work locally task by task, long before
+  # here. Failing the run would not undo a commit — it would only replace
+  # "passed, but the push failed" with "failed", which is less true and hides
+  # the round that did pass. The single unconditional edge is deliberate.
+  - id: "git_push_post"
+    step_type: "tool"
+    tool_name: "git_push_post"
+    timeout_seconds: 180
+    tool_params:
+      project_root: "$PROJECT_ROOT"
+    transitions:
+      - to: "done"
+
   - id: "done"
     step_type: "gate"
     transitions:

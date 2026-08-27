@@ -1,0 +1,20 @@
+name: git_push_post
+description: >
+  Push the finished round to its remote branch, the way the dashboard's push
+  button does — and skip, silently and successfully, when there is nothing to
+  push to. No git repo, no remote, a detached HEAD or an already-up-to-date
+  branch are all normal outcomes for a local-only project, not failures: this
+  runs after the pipeline's only clean exit, so refusing to complete a green run
+  over a missing remote would be the tail wagging the dog. A real push FAILURE
+  is reported loudly in the result and the trace, but still lets the run finish
+  — the work is already committed locally, and failing the run would not undo
+  a single commit, it would only hide that the round passed.
+parameters:
+  project_root:
+    type: string
+    description: "The git repo to push (pass $PROJECT_ROOT)."
+    required: true
+  remote:
+    type: string
+    description: "Remote name. Defaults to origin."
+    required: false

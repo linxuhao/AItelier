@@ -16,7 +16,7 @@
    */
   import { onDestroy } from 'svelte';
   import { getTrace } from '../lib/api';
-  import { extractPayloadText, shortTime, traceSummary } from '../lib/traceFormat';
+  import { extractPayloadText, shortTime, traceSummary, modelBinding } from '../lib/traceFormat';
   import { t } from '../lib/i18n.svelte';
 
   interface Props {
@@ -149,6 +149,18 @@
   const timer = setInterval(pollNew, POLL_MS);
   onDestroy(() => clearInterval(timer));
 
+  // The endpoint(s) that actually served this step instance, from the usage
+  // rows currently loaded. More than one chip = the step failed over mid-run,
+  // which is exactly the thing worth seeing at a glance.
+  let stepBindings = $derived.by(() => {
+    const seen: string[] = [];
+    for (const e of entries) {
+      const label = modelBinding((e as any).payload);
+      if (label && !seen.includes(label)) seen.push(label);
+    }
+    return seen;
+  });
+
   function toggle(seq: number): void {
     const next = new Set(expanded);
     if (next.has(seq)) next.delete(seq);
@@ -167,6 +179,13 @@
   {:else if entries.length === 0}
     <p class="nt-muted">{t('pipeline.traceEmpty')}</p>
   {:else}
+    {#if stepBindings.length > 0}
+      <div class="nt-bindings">
+        {#each stepBindings as b (b)}
+          <span class="nt-binding-chip">{b}</span>
+        {/each}
+      </div>
+    {/if}
     <div class="nt-list" bind:this={listEl} onscroll={onScroll}>
       {#if hasEarlier}
         <button class="nt-earlier" onclick={loadEarlier} disabled={loadingEarlier}>
@@ -201,6 +220,22 @@
 </div>
 
 <style>
+  .nt-bindings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0.25rem 0;
+  }
+  .nt-binding-chip {
+    font-family: var(--pico-font-family-monospace, monospace);
+    font-size: 0.68rem;
+    border: 1px solid var(--pico-muted-border-color, #ddd);
+    border-radius: 999px;
+    padding: 0 0.45rem;
+    color: var(--pico-muted-color, #777);
+    white-space: nowrap;
+  }
+
   .nt { display: flex; flex-direction: column; min-height: 0; flex: 1; }
   .nt-list {
     /* Deliberately a BLOCK, not a flex column. As a flex column the entries

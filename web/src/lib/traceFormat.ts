@@ -151,3 +151,15 @@ export function traceSummary(entry: Record<string, any>): string {
       typeof v === 'object' ? JSON.stringify(v) : String(v), 40));
   return bits.join(' · ');
 }
+
+/** "route → provider/model" for a token_usage payload, else null.
+ *  This is the ACTUAL endpoint that served the turn (post-failover), which is
+ *  why it lives on usage rows and never on the claim row: a claim happens
+ *  before the gateway binds, so anything shown there would be a guess. */
+export function modelBinding(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, any>;
+  if (!p.served_by) return null;
+  const route = p.model_route && p.model_route !== p.served_by ? p.model_route + ' \u2192 ' : '';
+  return route + p.served_by;
+}

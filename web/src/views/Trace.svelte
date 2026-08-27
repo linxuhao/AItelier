@@ -3,7 +3,7 @@
   import { push } from 'svelte-spa-router';
   import { getTrace } from '../lib/api';
   import { stepLabel } from '../lib/format';
-  import { extractPayloadText, shortTime } from '../lib/traceFormat';
+  import { extractPayloadText, shortTime, modelBinding } from '../lib/traceFormat';
   import { t } from '../lib/i18n.svelte';
 
   // ── Props ──────────────────────────────────────────────────────────
@@ -35,6 +35,28 @@
   // Categories
   const CATEGORIES = ['', 'prompt', 'response', 'tool_call', 'tool_result',
     'usage', 'step', 'lifecycle', 'error'];
+
+  // Model bindings summary: which endpoint ACTUALLY served each route,
+  // aggregated over the whole run from its usage events (one cheap filtered
+  // fetch — usage rows are ~1 per LLM turn, dozens not thousands).
+  let bindings = $state<{ label: string; turns: number; tokens: number }[]>([]);
+
+  async function loadBindings(): Promise<void> {
+    try {
+      const data = await getTrace(runId, { limit: 500, order: 'asc', category: 'usage' });
+      const agg = new Map<string, { turns: number; tokens: number }>();
+      for (const e of ((data && data.traces) || [])) {
+        const label = modelBinding(e.payload);
+        if (!label) continue;
+        const cur = agg.get(label) || { turns: 0, tokens: 0 };
+        cur.turns += 1;
+        cur.tokens += Number((e.payload as any)?.prompt_tokens || 0)
+                    + Number((e.payload as any)?.completion_tokens || 0);
+        agg.set(label, cur);
+      }
+      bindings = [...agg.entries()].map(([label, v]) => ({ label, ...v }));
+    } catch { /* summary is a courtesy; the list below is the record */ }
+  }
 
   // Derived
   let empty = $derived(!loading && !error && traces.length === 0);
@@ -129,6 +151,7 @@
 
   onMount(() => {
     loadTrace();
+    loadBindings();
   });
 </script>
 
@@ -138,6 +161,17 @@
 
   <!-- Title -->
   <h3>{t('trace.title')} &mdash; {projectId}</h3>
+
+  <!-- Which endpoints actually served this run (route → provider/model) -->
+  {#if bindings.length > 0}
+    <div class="trace-bindings">
+      {#each bindings as b (b.label)}
+        <span class="binding-chip" title={b.tokens.toLocaleString() + ' tokens'}>
+          {b.label} <small>&times;{b.turns}</small>
+        </span>
+      {/each}
+    </div>
+  {/if}
 
   <!-- Toolbar -->
   <div class="trace-toolbar">
@@ -200,6 +234,9 @@
             <span class="trace-cat">{cat}</span>
             <span class="trace-step">{stepLabel(entry.step_id as string)}</span>
             <span class="trace-event">{(entry.event as string) || ''}</span>
+            {#if modelBinding(entry.payload)}
+              <span class="binding-chip">{modelBinding(entry.payload)}</span>
+            {/if}
             <span class="trace-time">{shortTime(entry.created_at as string)}</span>
           </div>
           {#if isExpanded}
@@ -225,6 +262,22 @@
 </section>
 
 <style>
+  .trace-bindings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.4rem 0 0.8rem;
+  }
+  .binding-chip {
+    font-family: var(--pico-font-family-monospace, monospace);
+    font-size: 0.72rem;
+    border: 1px solid var(--pico-muted-border-color, #ddd);
+    border-radius: 999px;
+    padding: 0.05rem 0.5rem;
+    color: var(--pico-muted-color, #777);
+    white-space: nowrap;
+  }
+
   .trace-view {
     padding: 1rem;
   }

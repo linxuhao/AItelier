@@ -366,18 +366,26 @@ class TestEffortDelivery:
         to differ, which is exactly the trap that springs the first time a role
         moves onto the `smart` route.
         """
-        import json
         from pathlib import Path
 
+        import pytest
         import yaml
 
         root = Path(__file__).resolve().parents[2]
-        from core.model_routes import config_or_example
-        routes = json.loads(
-            Path(config_or_example("model_routes.json")).read_text(encoding="utf-8"))
-        narrow = {n for n, c in routes.items()
-                  if not n.startswith("_") and "qwen/qwen3.8-max" in c}
-        assert narrow, "expected at least one route to reach qwen3.8-max"
+        # Derive route membership through ModelRoutes — the same loader the
+        # router uses — rather than hand-parsing the file. A raw `endpoint in
+        # candidates` check silently went empty the day the route switched to
+        # the {"rotate": [...], "fallback": [...]} dict form (it tested dict
+        # KEYS), and this test reads whichever table config_or_example resolves
+        # (live deployment config when present), so the shape is not ours to
+        # assume.
+        from core.model_routes import ModelRoutes, config_or_example
+        routes = ModelRoutes(config_or_example("model_routes.json"))
+        narrow = {n for n in routes.names()
+                  if "qwen/qwen3.8-max" in routes.resolve(n)}
+        if not narrow:
+            pytest.skip("no route in the resolved table reaches "
+                        "qwen/qwen3.8-max — the trap cannot spring")
         ok = {None, "low", "medium"}
 
         offenders = []

@@ -65,6 +65,11 @@ class TestModePlumbing:
                          # generate_pipeline is coding-only so drive_pipeline,
                          # its test-drive/fix loop, is always in reach.
                          "generate_pipeline", "drive_pipeline",
+                         # replay_baseline is the cheap half of the same loop —
+                         # it writes the baseline file, so it sits beside the
+                         # tools that mutate a generated pipeline, not with the
+                         # butler's read-only inspection surface.
+                         "replay_baseline",
                          "skillflow_docs_list", "skillflow_docs_search",
                          "skillflow_docs_read",
                          # editing a generated pipeline mutates it, so it lives

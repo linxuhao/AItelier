@@ -1152,8 +1152,48 @@ CODING_TOOL_DEFINITIONS = [
                                   "(e.g. for a link-fixer, a doc with known-broken links)."},
                     "max_steps": {"type": "integer",
                                   "description": "Step cap (default 40)."},
+                    "update_baseline": {
+                        "type": "boolean",
+                        "description": "Accept this drive's result as the new "
+                        "regression baseline. Default false: when a baseline "
+                        "already exists the drive REPORTS how it differs instead "
+                        "of overwriting it, so a drive that completes with wrong "
+                        "output cannot quietly replace a known-good record."},
                 },
                 "required": ["config_name", "test_seed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replay_baseline",
+            "description": (
+                "Check a generated pipeline or addon against its recorded "
+                "regression baseline — deterministic, no LLM calls, seconds not "
+                "minutes. Re-reads the config from disk (addons: RECOMPOSES onto "
+                "their live base), re-runs the stub drive, and reports what "
+                "changed: steps removed, declared outputs dropped, capability "
+                "offers lost, steps the drive no longer reaches. Run it after "
+                "every config_edit. Records a first baseline if none exists. "
+                "Addons only ever get one this way — a composed addon config has "
+                "no file of its own and its base is a whole DPE run, so it cannot "
+                "be test-driven. It does NOT check agent behavior: drive_pipeline "
+                "is still what proves output is correct."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string",
+                               "description": "A gen_<slug> pipeline, or an addon "
+                               "name as listed by list_pipeline_addons."},
+                    "update": {"type": "boolean",
+                               "description": "Accept the current state as the new "
+                               "baseline (use after an INTENTIONAL change, or the "
+                               "same differences are reported forever). Any "
+                               "recorded real-drive evidence is carried over."},
+                },
+                "required": ["target"],
             },
         },
     },
@@ -3925,6 +3965,12 @@ class MetaAgent:
                                  "version.")
         else:
             result["reloaded"] = True
+            # Only when one was earned: pointing at a baseline that does not exist
+            # would read as "you broke something you never verified".
+            from core import baseline as bl
+            if bl.read(bl.KIND_PIPELINE, config_name) is not None:
+                result["next"] = (f"replay_baseline(target='{config_name}') checks this "
+                                  f"edit against the recorded baseline without a run.")
         return result
 
     def _tool_archive_pipeline(self, args: dict) -> dict:
@@ -4346,7 +4392,7 @@ class MetaAgent:
         verdict = ("completed" if status == "completed"
                    else "did-not-terminate (likely an unbounded loop / persistent step failure)"
                    if status not in ("completed", "failed") else "failed")
-        return {
+        result = {
             "config_name": config_name, "drive_status": status, "verdict": verdict,
             # Both ids: every run-keyed tool accepts either, but returning only the
             # project id sent the driver to get_pipeline_result(project_id) → "not found".
@@ -4360,6 +4406,123 @@ class MetaAgent:
                      "the pipeline for you), then drive_pipeline again. "
                      "trace_list(run, errors_only=true) explains any step failure."),
         }
+        # A completed drive is the only thing that can record what this pipeline
+        # actually PRODUCES per step; every later edit is replayed against it.
+        result["baseline"] = self._baseline_after_drive(
+            config_name, rid, pid, test_seed, status,
+            update=bool(args.get("update_baseline")))
+        return result
+
+    def _baseline_after_drive(self, config_name: str, run_id: str, project_id: str,
+                              test_seed: str, status: str, *, update: bool) -> dict:
+        """Record or check this drive against the pipeline's regression baseline.
+
+        Never raises: a baseline problem must not turn a successful test-drive into
+        a failed tool call, because the drive result is the thing the agent is
+        actually waiting for.
+        """
+        from api.dependencies import get_skillflow
+        from core import baseline as bl
+        if status != "completed":
+            return {"skipped": f"drive ended '{status}' — a baseline is only "
+                               f"recorded from a completed drive"}
+        try:
+            observed = bl.capture_observed(get_skillflow(), self.ws, run_id,
+                                           project_id, config_name, test_seed)
+            fresh = bl.capture(bl.KIND_PIPELINE, config_name, observed=observed)
+            prior = bl.read(bl.KIND_PIPELINE, config_name)
+            if prior is None:
+                p = bl.write(bl.KIND_PIPELINE, config_name, fresh)
+                return {"recorded": str(p), "steps_recorded": len(observed["steps"]),
+                        "hint": "Later edits: replay_baseline(target=...) checks "
+                                "against this without spending an LLM call."}
+            differences = bl.diff(prior, fresh)
+            if update:
+                bl.write(bl.KIND_PIPELINE, config_name, fresh)
+                return {"updated": True, "differences": differences}
+            return {"differences": differences,
+                    "hint": ("Unchanged since the baseline." if not differences else
+                             "This drive differs from the recorded baseline. If the "
+                             "change was intended, re-run with update_baseline=true; "
+                             "otherwise it is a regression to fix.")}
+        except Exception as e:                                   # noqa: BLE001
+            self._log_error(f"baseline for {config_name} failed: {e}")
+            return {"error": str(e)}
+
+    async def _tool_replay_baseline(self, args: dict) -> dict:
+        """Replay a generated pipeline or addon against its recorded baseline."""
+        from core import baseline as bl
+        from api.dependencies import get_config_registry, get_skillflow
+        from core.pipeline_registry import reload_generated_pipeline
+
+        target = (args.get("target") or "").strip()
+        if not target:
+            return {"error": "target is required (a gen_<slug> or an addon name)."}
+        kind = bl.resolve_kind(target)
+        if kind is None:
+            return {"error": f"'{target}' is neither a registered gen_* pipeline nor "
+                             f"a declared addon — list_pipelines / "
+                             f"list_pipeline_addons show what exists."}
+
+        sf = get_skillflow()
+        if kind == bl.KIND_PIPELINE:
+            # Same reason drive_pipeline reloads: the point is to check the config
+            # as it is ON DISK, including edits made since it was registered.
+            rel = reload_generated_pipeline(sf, get_config_registry(), target)
+            if rel.get("error"):
+                return {"error": f"reload {target}: {rel['error']}"}
+
+        prior = bl.read(kind, target)
+        try:
+            fresh = bl.capture(kind, target)
+        except Exception as e:                                   # noqa: BLE001
+            # For an addon this is the headline finding, not a tool failure:
+            # compose_graph raises when an overlay targets a base step id that no
+            # longer exists, which is exactly how a base rename breaks an addon.
+            return {"target": target, "kind": kind, "regressed": True,
+                    "findings": [{"finding": "compose_failed", "detail": str(e)}],
+                    "hint": "The overlay no longer applies to its base. Check the "
+                            "step ids it targets against the current base graph."}
+
+        # A stub drive that never BOOTED checked no reachability at all. Saying so
+        # matters most when nothing else differs: two identical `boot_error`s would
+        # otherwise read as a clean bill of health.
+        smoke_ran = bool(fresh["smoke"].get("usable"))
+        checked = ["structure"] + (["reachability"] if smoke_ran else [])
+        not_run = ("" if smoke_ran else
+                   f" The stub drive could not start ({fresh['smoke'].get('error') or ''}"
+                   f"), so NOTHING about reachability was checked — structure only. "
+                   f"That is expected for a graph whose first step needs context "
+                   f"from another config's run, which is every DPE-based one.")
+
+        if prior is None:
+            p = bl.write(kind, target, fresh)
+            return {"target": target, "kind": kind, "recorded": str(p),
+                    "smoke": fresh["smoke"]["status"], "checked": checked,
+                    "hint": "First baseline recorded — nothing to compare against "
+                            "yet. Run this again after the next edit." + not_run}
+
+        if args.get("update"):
+            # Carry the real-drive evidence forward: a replay cannot produce it, and
+            # dropping it here would silently retire the only record of what this
+            # pipeline actually writes.
+            if prior.get("observed") and not fresh.get("observed"):
+                fresh["observed"] = prior["observed"]
+            bl.write(kind, target, fresh)
+            return {"target": target, "kind": kind, "updated": True,
+                    "findings": bl.diff(prior, fresh)}
+
+        findings = bl.diff(prior, fresh)
+        return {"target": target, "kind": kind, "regressed": bool(findings),
+                "findings": findings, "smoke": fresh["smoke"]["status"],
+                "checked": checked,
+                "graph_changed": prior.get("graph_digest") != fresh.get("graph_digest"),
+                "hint": (("Matches the baseline." if not findings else
+                          "Fix these, or accept them with update=true if the change "
+                          "was intended.")
+                         + not_run
+                         + " Behavior is not checked either way — drive_pipeline is "
+                           "still what proves the output is right.")}
 
     def _skillflow_docs_fn(self, name: str):
         """Resolve a skillflow_docs_* tool via the registry — the NATIVE skillflow tool
@@ -4815,6 +4978,7 @@ _CODING_TOOL_HANDLERS = {
     "skillflow_docs_read": MetaAgent._tool_skillflow_docs_read,
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "drive_pipeline": MetaAgent._tool_drive_pipeline,
+    "replay_baseline": MetaAgent._tool_replay_baseline,
     "edit_file": MetaAgent._tool_edit_file,
     "create_file": MetaAgent._tool_create_file,
     "bash": MetaAgent._tool_bash,

@@ -7,6 +7,7 @@ loop-external terminal within a step bound. See design/pipeline_forge.md §5c.
 """
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -149,6 +150,12 @@ def forge_dryrun_smoke(graph_path: str = "", max_steps: int = 200,
     except Exception as e:
         return _fail({"passed": False, "status": "boot_error", "error": str(e),
                       "unresolved_tools": unresolved})
+    finally:
+        # The staging tree only ever holds canned stub output, and the :memory: DB
+        # dies with `sf`. Left behind, every smoke leaks a directory — tolerable
+        # when this ran once per generation, not now that a baseline replay calls
+        # it on every edit.
+        shutil.rmtree(tmp, ignore_errors=True)
 
     status = drive.get("status")
     reached_done = status == "completed"

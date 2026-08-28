@@ -743,6 +743,13 @@ def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
         return {"error": f"reload failed: {e}"}
 
 
+# Everything a generated pipeline owns on disk, so archive and un-archive cannot
+# drift apart — the second tuple existed to delete exactly what the first moved,
+# and a suffix added to one alone leaves `_archived/` lying about what is retired.
+# `.baseline.json` is written by core.baseline (regression baselines).
+PIPELINE_FILE_SUFFIXES = (".yaml", ".roles.json", ".baseline.json")
+
+
 def archived_dir() -> Path:
     d = generated_configs_dir() / "_archived"
     d.mkdir(parents=True, exist_ok=True)
@@ -801,7 +808,7 @@ def _unarchive(config_name: str) -> bool:
         return False
     # Stale copies left by a non-purging archive would shadow nothing (the loader
     # reads the live dir) but they make the archive dir lie about what is retired.
-    for suffix in (".yaml", ".roles.json"):
+    for suffix in PIPELINE_FILE_SUFFIXES:
         stale = archived_dir() / f"{config_name}{suffix}"
         if stale.exists():
             try:
@@ -829,7 +836,7 @@ def archive_generated_pipeline(sf, registry, config_name: str,
 
     moved: list[str] = []
     src = generated_configs_dir()
-    for suffix in (".yaml", ".roles.json"):
+    for suffix in PIPELINE_FILE_SUFFIXES:
         f = src / f"{config_name}{suffix}"
         if f.exists():
             target = archived_dir() / f.name

@@ -365,6 +365,12 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
     if roles:
         (cdir / f"{config_name}.roles.json").write_text(
             json.dumps(roles, ensure_ascii=False, indent=2), encoding="utf-8")
+    # A baseline describes the graph it was recorded against, and this is a
+    # DIFFERENT graph under the same name. Bundles deliberately do not carry one:
+    # a baseline is earned by driving the pipeline in the deployment that will run
+    # it. Keeping the old one would report every difference between two unrelated
+    # pipelines as a regression.
+    (cdir / f"{config_name}.baseline.json").unlink(missing_ok=True)
     # Writing the files IS the intent to have this pipeline; a stale tombstone
     # would delete it again at the next boot scan.
     pr._unarchive(config_name)

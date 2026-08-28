@@ -461,3 +461,21 @@ def test_import_vets_a_tool_as_strictly_as_edit_tool(home):
 def test_exporting_cannot_read_outside_the_configs_dir(home):
     with pytest.raises(BundleError, match="invalid config name"):
         pb.export_pipeline("../../../etc/passwd")
+
+
+def test_importing_drops_the_regression_baseline_of_the_pipeline_it_replaces(home):
+    """A baseline describes the graph it was recorded against, and an import puts
+    a DIFFERENT graph under that name. Bundles deliberately carry none: a baseline
+    is earned by driving the pipeline on the host that will run it. Kept, it would
+    report every difference between two unrelated pipelines as a regression."""
+    cfg, _ = home
+    _install_alpha(home)
+    bundle = pb.export_pipeline("gen_alpha")
+    stale = cfg / "gen_alpha.baseline.json"
+    stale.write_text(json.dumps({"target": "gen_alpha", "shape": {}}),
+                     encoding="utf-8")
+
+    pb.import_pipeline(_SF(), _Registry(), bundle)
+
+    assert not stale.exists()
+    assert "baseline" not in bundle

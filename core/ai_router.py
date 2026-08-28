@@ -603,6 +603,16 @@ class AIGateway:
         chars = 0
         t0 = _t.monotonic()
         next_note = 0.0     # first chunk ticks immediately → "it's alive"
+        if self.on_progress is not None:
+            # Dispatch announcement: between here and the first chunk the
+            # server is queueing + prefilling (26:1 prefill:decode on this
+            # workload — tens of seconds on a cache miss), and without this
+            # tick that whole window shows as unexplained blank.
+            try:
+                self.on_progress({"phase": "llm_start",
+                                  "served_by": self.active_model})
+            except Exception:
+                pass
         for chunk in litellm.completion(**skwargs):
             chunks.append(chunk)
             chars += self._chunk_len(chunk)

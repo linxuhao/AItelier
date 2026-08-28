@@ -173,10 +173,12 @@
     }
     llmTick = ev;
     if (llmTimer !== null) clearTimeout(llmTimer);
+    // llm_start (dispatch → first chunk) expires with the 300s read timeout.
     // Tool phase gets a longer leash: gate tools legitimately run minutes
     // and emit no ticks of their own while they do.
     llmTimer = setTimeout(() => { llmTick = null; },
-                          phase === 'tool' ? 600000 : 15000);
+                          phase === 'tool' ? 600000
+                          : phase === 'llm_start' ? 300000 : 15000);
   }
   on('llm_progress', onLlmProgress);
 
@@ -255,6 +257,8 @@
           {#if llmTick}
             {#if (llmTick.phase as string) === 'tool'}
               <span class="nt-llm">· {t('project.toolRunning')} · {llmTick.tool as string}</span>
+            {:else if (llmTick.phase as string) === 'llm_start'}
+              <span class="nt-llm">· {t('project.llmWaiting')}</span>
             {:else}
               <span class="nt-llm">· {t('project.llmStreaming')} · {formatTokens(llmTick.chars as number)} chars · {llmTick.elapsed as number}s</span>
             {/if}

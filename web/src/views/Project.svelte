@@ -141,8 +141,11 @@
     if (llmProgressTimer !== null) clearTimeout(llmProgressTimer);
     // Tools carry no liveness signal of their own, so give the "running
     // tool" line a longer leash (gate tools legitimately run minutes).
+    // llm_start covers dispatch → first chunk: bounded by the backend's
+    // 300s read timeout, so expire in step with it.
     llmProgressTimer = setTimeout(() => { llmProgress = null; },
-                                  phase === 'tool' ? 600000 : 15000);
+                                  phase === 'tool' ? 600000
+                                  : phase === 'llm_start' ? 300000 : 15000);
   }
 
   onMount(async () => {
@@ -598,14 +601,16 @@
             <div class="meta-item">
               <span class="meta-label">
                 {(llmProgress.phase as string) === 'tool'
-                  ? t('project.toolRunning') : t('project.llmStreaming')}
+                  ? t('project.toolRunning')
+                  : (llmProgress.phase as string) === 'llm_start'
+                  ? t('project.llmWaiting') : t('project.llmStreaming')}
               </span>
               <span class="meta-value llm-progress">
                 <span class="llm-progress-dot" aria-hidden="true"></span>
                 {stepLabel((llmProgress.step_id as string) || '')}
                 {#if (llmProgress.phase as string) === 'tool'}
                   · {llmProgress.tool as string}
-                {:else}
+                {:else if (llmProgress.phase as string) !== 'llm_start'}
                   · {formatTokens(llmProgress.chars as number)} chars
                   · {llmProgress.elapsed as number}s
                 {/if}

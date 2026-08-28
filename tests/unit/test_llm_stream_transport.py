@@ -106,6 +106,10 @@ def test_progress_ticks_with_growing_chars(transport, monkeypatch):
     g.on_progress = ticks.append
     g._call_llm({"model": "m", "messages": []})
 
+    # dispatch is announced BEFORE the first chunk, so the queue+prefill
+    # window (dispatch → first token) is visible instead of blank
+    assert ticks[0]["phase"] == "llm_start"
+    assert ticks[0]["served_by"] == "test/model"
     llm = [t for t in ticks if t["phase"] == "llm"]
     assert len(llm) == 4
     # hel(3) → lo(2) → reasoning(5) → tool args(8): content, reasoning and
@@ -124,9 +128,9 @@ def test_progress_throttles(transport, monkeypatch):
     ticks = []
     g.on_progress = ticks.append
     g._call_llm({"model": "m", "messages": []})
-    # the first chunk always ticks ("it's alive"); the rest are inside the
-    # throttle window; the terminal llm_done is never throttled
-    assert [t["phase"] for t in ticks] == ["llm", "llm_done"]
+    # dispatch and the first chunk always tick ("it's alive"); the rest are
+    # inside the throttle window; the terminal llm_done is never throttled
+    assert [t["phase"] for t in ticks] == ["llm_start", "llm", "llm_done"]
 
 
 def test_a_broken_progress_hook_cannot_break_the_call(transport, monkeypatch):

@@ -1293,11 +1293,70 @@ def _advance_recording_crashes(sf, run_id: str, project_id: str = ""):
     Record, then re-raise: skillflow's crash counter and every retry semantic
     stay exactly as they were; only the silence is removed.
     """
+    step_id, tool_name = _peek_inline_tool(sf, run_id)
+    if tool_name:
+        _push_phase_tick(project_id, run_id, step_id, "tool", tool_name)
     try:
         return sf.advance_run(run_id)
     except Exception as e:
         _record_tick_error(sf, run_id, project_id, e, "tool_step_crashed")
         raise
+    finally:
+        if tool_name:
+            _push_phase_tick(project_id, run_id, step_id, "tool_done", tool_name)
+
+
+def _peek_inline_tool(sf, run_id: str) -> tuple[str, str]:
+    """(step_id, tool_name) IF the next advance_run will execute an inline tool.
+
+    advance_run executes at most ONE inline tool step per call (the fast-path
+    in skillflow core), so peeking current_node before the call attributes the
+    coming execution exactly — this is what lets the liveness line say
+    "工具执行中 · godot_playtest" through the minutes-long gate tools instead
+    of going blank (agent-invoked tools are already ticked by the engine; tool
+    NODES never reach the engine). Delegated native tools are excluded: the
+    fast-path skips those, so a tick would wrap nothing.
+
+    Best-effort by construction: any failure means "no tick", never a broken
+    tick.
+    """
+    try:
+        run = sf.get_run(run_id) or {}
+        current = run.get("current_node")
+        if run.get("status") != "running" or not current:
+            return "", ""
+        resolver = sf._get_resolver_for_run(run_id)
+        if not resolver.is_tool(current):
+            return "", ""
+        node = resolver.get_node(current)
+        raw_tool = getattr(node, "tool_name", "") or ""
+        if sf._should_delegate_tool(raw_tool):
+            return "", ""
+        return current, (raw_tool or current)
+    except Exception:
+        return "", ""
+
+
+def _push_phase_tick(project_id: str, run_id: str, step_id: str,
+                     phase: str, tool_name: str) -> None:
+    """Emit one liveness tick on the ephemeral SSE channel (never raises).
+
+    Same event shape as the runner's llm_progress wrapper so the SPA handlers
+    (Project.svelte / NodeTrace.svelte) need no second event type.
+    """
+    try:
+        from api.sse_manager import push_global_event
+        push_global_event({
+            "type": "llm_progress",
+            "project_id": project_id,
+            "run_id": run_id,
+            "step_id": step_id,
+            "phase": phase,
+            "tool": tool_name,
+            "_ts": _time.time(),
+        })
+    except Exception:
+        pass
 
 
 # ── Tick log ────────────────────────────────────────────────────────

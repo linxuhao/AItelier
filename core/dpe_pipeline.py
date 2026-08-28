@@ -56,6 +56,9 @@ class PipelineEngine:
         # wedged one.
         self.factory = AgentFactory(registry=registry, on_progress=llm_progress)
         self.assembler = PromptAssembler(repo_type=repo_type, user_lang=user_lang)
+        # Kept on the engine too: tool-phase ticks ("running run_tests") come
+        # from the tool-execution loop, not from a gateway.
+        self._llm_progress = llm_progress
         self._log = log_callback or (lambda *a, **kw: None)
         self._trace_cb = trace_callback or (lambda *a, **kw: None)
         self._event_bus = event_bus
@@ -90,6 +93,15 @@ class PipelineEngine:
     _FEEDBACK_SEEN: dict[tuple[str, str, str], int] = {}
     _FEEDBACK_SEEN_CAP = 2000
     _FEEDBACK_LOCK = threading.Lock()
+
+    def _note_phase(self, phase: str, tool_name: str = "") -> None:
+        """Emit a liveness phase tick ("tool"/"tool_done") — never raises."""
+        if not self._llm_progress:
+            return
+        try:
+            self._llm_progress({"phase": phase, "tool": tool_name})
+        except Exception:
+            pass
 
     def _note_feedback(self, step_id: str, feedback: str,
                        *, exploratory: bool = False) -> int:
@@ -2216,7 +2228,15 @@ class PipelineEngine:
                     except json.JSONDecodeError:
                         params = {}
 
-                    tool_result = self._exec_tool({"tool": tool_name, "params": params})
+                    # Phase ticks around the tool run: a gate tool (run_tests,
+                    # godot_compile/_playtest) can hold this thread for
+                    # minutes, and without these the liveness line either
+                    # lingers on a stale "generating" or shows nothing.
+                    self._note_phase("tool", tool_name)
+                    try:
+                        tool_result = self._exec_tool({"tool": tool_name, "params": params})
+                    finally:
+                        self._note_phase("tool_done", tool_name)
                     result_str = json.dumps(tool_result, ensure_ascii=False)
 
                     messages.append({

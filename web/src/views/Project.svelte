@@ -128,9 +128,21 @@
 
   function onLlmProgress(event: Record<string, unknown>): void {
     if (event.project_id !== params.id) return;
+    const phase = (event.phase as string) || 'llm';
+    if (phase === 'llm_done' || phase === 'tool_done') {
+      // Explicit end-of-phase: clear NOW instead of letting a stale line
+      // linger until the expiry below.
+      llmProgress = null;
+      if (llmProgressTimer !== null) clearTimeout(llmProgressTimer);
+      llmProgressTimer = null;
+      return;
+    }
     llmProgress = event;
     if (llmProgressTimer !== null) clearTimeout(llmProgressTimer);
-    llmProgressTimer = setTimeout(() => { llmProgress = null; }, 15000);
+    // Tools carry no liveness signal of their own, so give the "running
+    // tool" line a longer leash (gate tools legitimately run minutes).
+    llmProgressTimer = setTimeout(() => { llmProgress = null; },
+                                  phase === 'tool' ? 600000 : 15000);
   }
 
   onMount(async () => {
@@ -584,12 +596,19 @@
           {/if}
           {#if llmProgress}
             <div class="meta-item">
-              <span class="meta-label">{t('project.llmStreaming')}</span>
+              <span class="meta-label">
+                {(llmProgress.phase as string) === 'tool'
+                  ? t('project.toolRunning') : t('project.llmStreaming')}
+              </span>
               <span class="meta-value llm-progress">
                 <span class="llm-progress-dot" aria-hidden="true"></span>
                 {stepLabel((llmProgress.step_id as string) || '')}
-                · {formatTokens(llmProgress.chars as number)} chars
-                · {llmProgress.elapsed as number}s
+                {#if (llmProgress.phase as string) === 'tool'}
+                  · {llmProgress.tool as string}
+                {:else}
+                  · {formatTokens(llmProgress.chars as number)} chars
+                  · {llmProgress.elapsed as number}s
+                {/if}
               </span>
             </div>
           {/if}

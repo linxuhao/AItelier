@@ -164,9 +164,19 @@
     if (!live) return;
     // runId prop can be a run id OR a project id (the backend resolves both).
     if (ev.run_id !== runId && ev.project_id !== runId) return;
+    const phase = (ev.phase as string) || 'llm';
+    if (phase === 'llm_done' || phase === 'tool_done') {
+      llmTick = null;
+      if (llmTimer !== null) clearTimeout(llmTimer);
+      llmTimer = null;
+      return;
+    }
     llmTick = ev;
     if (llmTimer !== null) clearTimeout(llmTimer);
-    llmTimer = setTimeout(() => { llmTick = null; }, 15000);
+    // Tool phase gets a longer leash: gate tools legitimately run minutes
+    // and emit no ticks of their own while they do.
+    llmTimer = setTimeout(() => { llmTick = null; },
+                          phase === 'tool' ? 600000 : 15000);
   }
   on('llm_progress', onLlmProgress);
 
@@ -243,7 +253,11 @@
         <p class="nt-live">
           <span class="nt-dot"></span>{t('pipeline.traceLive')}
           {#if llmTick}
-            <span class="nt-llm">· {t('project.llmStreaming')} · {formatTokens(llmTick.chars as number)} chars · {llmTick.elapsed as number}s</span>
+            {#if (llmTick.phase as string) === 'tool'}
+              <span class="nt-llm">· {t('project.toolRunning')} · {llmTick.tool as string}</span>
+            {:else}
+              <span class="nt-llm">· {t('project.llmStreaming')} · {formatTokens(llmTick.chars as number)} chars · {llmTick.elapsed as number}s</span>
+            {/if}
           {/if}
         </p>
       {/if}

@@ -610,11 +610,21 @@ class AIGateway:
             if self.on_progress is not None and now >= next_note:
                 next_note = now + self._PROGRESS_EVERY_S
                 try:
-                    self.on_progress({"chars": chars,
+                    self.on_progress({"phase": "llm", "chars": chars,
                                       "elapsed": round(now - t0, 1),
                                       "served_by": self.active_model})
                 except Exception:
                     pass
+        if self.on_progress is not None:
+            # The stream ended — tell watchers to clear the line NOW instead
+            # of letting a stale "generating" linger through tool execution
+            # until the client-side expiry.
+            try:
+                self.on_progress({"phase": "llm_done", "chars": chars,
+                                  "elapsed": round(_t.monotonic() - t0, 1),
+                                  "served_by": self.active_model})
+            except Exception:
+                pass
         if not chunks:
             # A stream that opened and closed with zero chunks is an endpoint
             # failure — route it like one (APIConnectionError is in

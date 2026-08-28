@@ -106,12 +106,16 @@ def test_progress_ticks_with_growing_chars(transport, monkeypatch):
     g.on_progress = ticks.append
     g._call_llm({"model": "m", "messages": []})
 
-    assert len(ticks) == 4
-    chars = [t["chars"] for t in ticks]
+    llm = [t for t in ticks if t["phase"] == "llm"]
+    assert len(llm) == 4
     # hel(3) → lo(2) → reasoning(5) → tool args(8): content, reasoning and
     # tool-call arguments all count as liveness
-    assert chars == [3, 5, 10, 18]
-    assert all("elapsed" in t and t["served_by"] == "test/model" for t in ticks)
+    assert [t["chars"] for t in llm] == [3, 5, 10, 18]
+    assert all("elapsed" in t and t["served_by"] == "test/model" for t in llm)
+    # the stream's end is announced so watchers clear the line immediately
+    # instead of showing stale "generating" through tool execution
+    assert ticks[-1]["phase"] == "llm_done"
+    assert ticks[-1]["chars"] == 18
 
 
 def test_progress_throttles(transport, monkeypatch):
@@ -121,8 +125,8 @@ def test_progress_throttles(transport, monkeypatch):
     g.on_progress = ticks.append
     g._call_llm({"model": "m", "messages": []})
     # the first chunk always ticks ("it's alive"); the rest are inside the
-    # throttle window
-    assert len(ticks) == 1
+    # throttle window; the terminal llm_done is never throttled
+    assert [t["phase"] for t in ticks] == ["llm", "llm_done"]
 
 
 def test_a_broken_progress_hook_cannot_break_the_call(transport, monkeypatch):

@@ -225,9 +225,12 @@ class AgentStepRunner:
             try:
                 # Feed the scheduler's hung-step diagnosis: chunk arrival is
                 # what distinguishes "long generation" from "no generation".
-                from core.llm_liveness import note_progress
-                note_progress(step.token.run_id, step.step_id,
-                              progress.get("chars", 0))
+                # LLM ticks only — a tool-phase tick is not evidence the LLM
+                # is producing bytes, and its chars=0 would read as "stalled".
+                if progress.get("phase", "llm") == "llm":
+                    from core.llm_liveness import note_progress
+                    note_progress(step.token.run_id, step.step_id,
+                                  progress.get("chars", 0))
                 from api.sse_manager import push_global_event
                 push_global_event({
                     "type": "llm_progress",

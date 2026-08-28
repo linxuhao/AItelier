@@ -33,7 +33,7 @@ def get_workspace_manager() -> WorkspaceManager:
     return ws_instance
 
 
-def _existing_repo_code_path(project_id: str) -> str | None:
+def _existing_repo_code_path(project_id: str) -> str | bool | None:
     """Code-path resolver handed to skillflow.
 
     skillflow's default layout keys the code repo by project_id
@@ -43,9 +43,19 @@ def _existing_repo_code_path(project_id: str) -> str | None:
     (repo_apply commits the fix into the real repo), `from: repository` context,
     and project-level lint all target that repo. Returns None for new/clone
     projects so skillflow keeps its default projects_base/<id> location.
+
+    `repo_type='none'` answers **False** — "this run owns no code repository" —
+    which is a different statement from None's "no opinion, use your default".
+    `setup_workspace` deliberately creates nothing for such a run, but skillflow
+    still invented projects_base/<id> for it, and the read surface attached that
+    path as a `repo` source on an `is_dir()` check. That made a repo-less run's
+    repo access depend on whether the directory happened to exist rather than on
+    what the run declares.
     """
     try:
         info = db_instance.get_repo_info(project_id)
+        if (info.get("repo_type") or "") == "none":
+            return False
         return info.get("repo_path") or None
     except Exception:
         return None

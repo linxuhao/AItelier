@@ -219,3 +219,22 @@ def test_it_pushes_the_resolved_repo_not_the_token_one(tmp_path, monkeypatch):
     out = subprocess.run(["git", "-C", str(bare), "rev-parse", "refs/heads/main"],
                          capture_output=True, text=True)
     assert out.returncode == 0
+
+
+def test_a_repoless_run_is_skipped_and_the_token_does_not_step_in(tmp_path,
+                                                                  monkeypatch):
+    """`repo_type: none` answers False — an ANSWER, not a missing one.
+
+    The `$PROJECT_ROOT` token expands to skillflow's default layout
+    (`projects_base/<id>`). Treating False like None would let that token push a
+    directory the run never claimed to own.
+    """
+    import aitelier.tools.git_push_post.impl as impl
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: False)
+
+    real = _repo(tmp_path / "not-ours")
+    assert impl._code_path("proj", str(real)) is None
+
+    r = git_push_post(project_id="proj", project_root=str(real))
+    assert r["action"] == "skip" and "no code path" in r["detail"]

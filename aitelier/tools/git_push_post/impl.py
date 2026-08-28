@@ -62,6 +62,12 @@ def _code_path(project_id: str, project_root: str) -> Path | None:
             resolved = _existing_repo_code_path(project_id)
         except Exception:
             resolved = None
+        if resolved is False:
+            # The run DECLARES it owns no code repository. That is an answer,
+            # not the absence of one, so the `$PROJECT_ROOT` token must not step
+            # in: it expands to skillflow's default layout, which does not become
+            # right just because the resolver offered no path.
+            return None
         if resolved:
             return Path(resolved).resolve()
     return Path(project_root).resolve() if project_root else None

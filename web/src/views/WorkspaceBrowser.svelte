@@ -28,6 +28,7 @@
   let dialogOpen = $state(false);
   let filePath = $state('');
   let fileContent = $state('');
+  let treeTruncated = $state(false);
   let fileTruncated = $state(false);
   let fileTotal = $state(0);
   let isMarkdown = $state(false);
@@ -41,6 +42,12 @@
     try {
       const data = await workspaceTree(projectId, root);
       files = (data && data.tree) || [];
+      // The server caps the listing at 200 entries and reports `truncated` for
+      // exactly this reason — its own comment says a cut-off listing that says
+      // nothing reads as "that is the whole tree". This view used to drop the
+      // flag, so a 405-file workspace showed 200 files and looked complete;
+      // whole step directories appeared to be missing rather than elided.
+      treeTruncated = !!(data && data.truncated);
       loaded = true;
     } catch (err: unknown) {
       error = err instanceof Error ? err.message : 'Failed to load files.';
@@ -145,7 +152,7 @@
 <details class="workspace-section" open={startOpen} ontoggle={onToggle}>
   <summary>
     <strong>{title}</strong>
-    {#if loaded}<span class="ws-count">{files.length} {t('wsbrowser.files')}</span>{/if}
+    {#if loaded}<span class="ws-count">{files.length}{treeTruncated ? '+' : ''} {t('wsbrowser.files')}</span>{/if}
   </summary>
 
   {#if loading}
@@ -157,6 +164,9 @@
   {:else if loaded}
     <div class="ws-file-list">
       {@render treeLevel(tree)}
+      {#if treeTruncated}
+        <p class="ws-muted">{t('wsbrowser.treeTruncated')}</p>
+      {/if}
     </div>
   {/if}
 </details>

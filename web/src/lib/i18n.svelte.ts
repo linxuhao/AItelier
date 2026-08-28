@@ -306,6 +306,7 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.files': 'files',
     'wsbrowser.loading': 'Loading workspace files…',
     'wsbrowser.empty': 'No files found.',
+    'wsbrowser.treeTruncated': 'Listing capped at 200 entries — this is not the whole tree.',
     'wsbrowser.close': 'Close',
     'wsbrowser.binary': 'Binary file (preview not available)',
 
@@ -577,6 +578,7 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.files': '个文件',
     'wsbrowser.loading': '加载工作区文件…',
     'wsbrowser.empty': '未找到文件。',
+    'wsbrowser.treeTruncated': '列表已截断到 200 条，这不是完整的目录树。',
     'wsbrowser.close': '关闭',
     'wsbrowser.binary': '二进制文件（无法预览）',
     'error.notAuthenticated': '未登录 — 请使用已授权的账号登录后再进行修改。',
@@ -842,6 +844,7 @@ const translations: Record<Lang, Record<string, string>> = {
     'wsbrowser.files': '個檔案',
     'wsbrowser.loading': '載入工作區檔案…',
     'wsbrowser.empty': '未找到檔案。',
+    'wsbrowser.treeTruncated': '列表已截斷至 200 條，這不是完整的目錄樹。',
     'wsbrowser.close': '關閉',
     'wsbrowser.binary': '二進位檔案（無法預覽）',
     'error.notAuthenticated': '未登入 — 請使用已授權的帳號登入後再進行變更。',

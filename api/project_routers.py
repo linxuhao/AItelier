@@ -358,14 +358,23 @@ def workspace_tree(
     for dirpath, dirnames, filenames in os.walk(base):
         # Prune, don't filter: descending into .git and discarding the results
         # is the expensive half of the work this is meant to avoid.
-        dirnames[:] = [d for d in dirnames if d != ".git"]
+        # SORTED, not just pruned. os.walk yields directories in filesystem
+        # order and `tree.sort()` below runs AFTER the cap has already thrown
+        # entries away, so the 200 that survive were "whichever were reached
+        # first", not "the first 200 by name". On a run workspace that meant a
+        # whole step directory could be absent from the listing while later
+        # ones were present — reported as a missing `2/` on 2026-08-28, with
+        # 405 files on disk and 200 returned. Sorting makes the cut a prefix:
+        # what is missing is the tail, which is a thing a reader can reason
+        # about, instead of an arbitrary subset.
+        dirnames[:] = sorted(d for d in dirnames if d != ".git")
         # Directories count toward the scan budget too. Counting only files made
         # `_WORKSPACE_TREE_SCAN_MAX` unreachable — `scanned` incremented on the
         # same line as `tree.append`, so it could never exceed the 200-file cap
         # — and left a directory-heavy subtree walked end to end for free.
         scanned += len(dirnames) + len(filenames)
         rel_dir = Path(dirpath).relative_to(base)
-        for name in filenames:
+        for name in sorted(filenames):
             # `.git` as a FILE is the gitfile pointer a submodule or worktree
             # leaves behind; pruning dirnames does not touch it, and listing an
             # entry whose read 404s both confirms it exists and looks broken.

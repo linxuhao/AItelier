@@ -4,6 +4,8 @@ Use **AItelier** as a subagent from [DeepSeek Harness](https://github.com/deepse
 
 The plugin is a Profile Bundle that mounts one `@deepseek-ai/dsh-mcp-client` row against AItelier's MCP endpoint. The model then sees the surface as native tools under `mcp__aitelier__*`.
 
+Compatibility: the patch assumes `dsh-mcp-client`'s config shape as of dsh **0.1.0-rc.2** (`serverName`/`transport`/`url`/`headers`/`toolCallTimeoutMs`); every dsh release through 0.1.2-alpha.1 keeps it. This is deliberately **not** a `peerDependencies` entry: the plugin has no code and imports nothing — dsh resolves the `mcp-client` name from its own installation — and a declared peer would invite pnpm's `auto-install-peers` to pull a second, registry-sourced copy of `dsh-mcp-client` into the profile, which dsh's profile-first module resolution would then shadow the installation's instance with.
+
 > ### No `mcp__aitelier__*` tools? Read this first.
 >
 > A connection failure here is **silent**. `dsh-mcp-client` has `failOnStartupError: false`, so an unreachable endpoint does not stop `dsh` booting — the tools simply never appear, and nothing says why. An agent in that state can only report "no such tools" and guess; it cannot diagnose it from the inside. Check, in order:

@@ -97,6 +97,9 @@ async def lifespan(app: FastAPI):
     # Wire the main event loop so notifications from worker threads
     # (e.g. PipelineEngine in thread-pool executor) bridge to SSE.
     sf.notifications.set_event_loop(loop)
+    # Same capture for the outbox-bypassing push (llm_progress liveness ticks).
+    from api.sse_manager import set_main_loop
+    set_main_loop(loop)
 
     # ── NotificationBus → SSE bridge (single event path) ──────────
     _pid_cache: dict[str, str] = {}        # run_id → project_id

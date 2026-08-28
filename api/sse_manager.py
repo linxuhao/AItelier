@@ -232,3 +232,37 @@ class StreamManager:
 
 # Global singleton
 stream_manager = StreamManager()
+
+
+# ── Ephemeral cross-thread push ─────────────────────────────────────────
+#
+# NotificationBus is the normal event path, but it writes EVERY event to the
+# durable skillflow_outbox. High-frequency liveness ticks (llm_progress: one
+# every few seconds for as long as a completion streams) are worthless the
+# moment they are stale, so they bypass the bus entirely: in-memory fan-out
+# to the __global__ SSE channel and nothing else.
+
+_main_loop: "asyncio.AbstractEventLoop | None" = None
+
+
+def set_main_loop(loop) -> None:
+    """Capture the uvicorn loop so worker threads can push SSE events."""
+    global _main_loop
+    _main_loop = loop
+
+
+def push_global_event(data: dict) -> None:
+    """Fire-and-forget one event dict to __global__, safe from ANY thread.
+
+    A silent no-op before the loop is captured (unit tests, CLI imports) or
+    after it stops — an undeliverable progress tick has no value later.
+    """
+    loop = _main_loop
+    if loop is None or not loop.is_running():
+        return
+    try:
+        message = json.dumps(data, default=str)
+        asyncio.run_coroutine_threadsafe(
+            stream_manager.push_log("__global__", message), loop)
+    except Exception:
+        pass

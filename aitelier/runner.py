@@ -93,6 +93,7 @@ class AgentStepRunner:
             registry=sf.agent_registry,
             trace_callback=self._make_trace_wrapper(step),
             user_lang=user_lang,
+            llm_progress=self._make_progress_wrapper(step, project_id),
         )
 
         # skillflow surfaces reject/loop-back feedback and validation errors
@@ -208,6 +209,36 @@ class AgentStepRunner:
         """
         def callback(event_type: str, data: dict):
             step.emit(event_type, data)
+        return callback
+
+    @staticmethod
+    def _make_progress_wrapper(step: ClaimedStep, project_id: str):
+        """Bridge AIGateway's llm_progress ticks to the __global__ SSE channel.
+
+        Deliberately NOT step.emit / NotificationBus: that path writes every
+        event to the durable skillflow_outbox, and a liveness tick (one every
+        few seconds for as long as a completion streams) is worthless the
+        moment it is stale. push_global_event is in-memory fan-out only and
+        thread-safe from the LLM worker thread the callback runs on.
+        """
+        def callback(progress: dict):
+            try:
+                # Feed the scheduler's hung-step diagnosis: chunk arrival is
+                # what distinguishes "long generation" from "no generation".
+                from core.llm_liveness import note_progress
+                note_progress(step.token.run_id, step.step_id,
+                              progress.get("chars", 0))
+                from api.sse_manager import push_global_event
+                push_global_event({
+                    "type": "llm_progress",
+                    "project_id": project_id,
+                    "run_id": step.token.run_id,
+                    "step_id": step.step_id,
+                    "_ts": _time.time(),
+                    **progress,
+                })
+            except Exception:
+                pass
         return callback
 
     @staticmethod

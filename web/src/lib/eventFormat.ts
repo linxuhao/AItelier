@@ -98,6 +98,13 @@ export function formatEvent(event: Record<string, unknown>): FormattedEvent | nu
         severity: 'error',
       };
     }
+    case 'llm_progress':
+      // Liveness tick (~every 3s while a completion streams). It carries a
+      // step_id, so the default branch below would render one notification
+      // per tick — ~20/min of "· step" lines evicting real entries from the
+      // 100-cap store. It is rendered live where it matters (project card,
+      // trace footer); the panel never wants it.
+      return null;
     default:
       // Unknown step-scoped event — show a minimal line rather than dropping it.
       if (stepId) return { icon: '·', text: step || stepId, detail: '', severity: 'info' };

@@ -20,6 +20,15 @@ import pytest
 from core.ai_router import AIGateway
 
 
+@pytest.fixture(autouse=True)
+def _plain_transport(monkeypatch):
+    """These tests pin the WALL CAP, not the transport: run them over the
+    plain (non-streaming) call so the mocked litellm.completion can return
+    plain sentinels. The streaming transport has its own suite
+    (test_llm_stream_transport.py)."""
+    monkeypatch.setenv("AITELIER_LLM_STREAM", "0")
+
+
 class _Gate(AIGateway):
     """AIGateway with construction skipped — only the bounded-call path is under
     test, and building a real gateway would need a provider registry."""

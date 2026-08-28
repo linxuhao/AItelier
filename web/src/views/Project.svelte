@@ -67,6 +67,16 @@
   let expandedSteps = $state<Record<string, boolean>>({});
   let actionLoading = $state<Record<string, boolean>>({});
 
+  // ── LLM liveness ──
+  // llm_progress ticks arrive every few seconds while a pipeline step's
+  // completion streams (core/ai_router.py _call_llm → __global__ SSE).
+  // chars growing = a long response; chars flat = the trickle/hang class
+  // that used to be indistinguishable from "still thinking". Ephemeral by
+  // design: the line disappears after 15s of silence (call ended or failed
+  // over) rather than going stale.
+  let llmProgress = $state<Record<string, unknown> | null>(null);
+  let llmProgressTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Config editing state
   let isEditingConfig = $state(false);
   let configFormData = $state<Record<string, string>>({});
@@ -103,6 +113,10 @@
   let eventTimer: ReturnType<typeof setTimeout> | null = null;
 
   function onAnyEvent(event: Record<string, unknown>): void {
+    // llm_progress is a liveness tick, not a state change — refetching four
+    // endpoints every few seconds for it would resurrect the poll this
+    // handler replaced. It has its own handler below.
+    if (event && event.type === 'llm_progress') return;
     // Only this project's events, and coalesced: one step emits several.
     if (event && event.project_id && event.project_id !== params.id) return;
     if (eventTimer !== null) return;
@@ -112,17 +126,29 @@
     }, _EVENT_DEBOUNCE_MS);
   }
 
+  function onLlmProgress(event: Record<string, unknown>): void {
+    if (event.project_id !== params.id) return;
+    llmProgress = event;
+    if (llmProgressTimer !== null) clearTimeout(llmProgressTimer);
+    llmProgressTimer = setTimeout(() => { llmProgress = null; }, 15000);
+  }
+
   onMount(async () => {
     if (projectId) {
       setCurrentProject(projectId);
       await refreshData();
     }
     on('*', onAnyEvent);
+    on('llm_progress', onLlmProgress);
     pollTimer = setInterval(refreshData, _SAFETY_POLL_MS);
   });
 
   onDestroy(() => {
     off('*', onAnyEvent);
+    off('llm_progress', onLlmProgress);
+    if (llmProgressTimer !== null) {
+      clearTimeout(llmProgressTimer);
+    }
     if (eventTimer !== null) {
       clearTimeout(eventTimer);
     }
@@ -556,6 +582,17 @@
               <span class="meta-value">{stepLabel(project.current_step as string)}</span>
             </div>
           {/if}
+          {#if llmProgress}
+            <div class="meta-item">
+              <span class="meta-label">{t('project.llmStreaming')}</span>
+              <span class="meta-value llm-progress">
+                <span class="llm-progress-dot" aria-hidden="true"></span>
+                {stepLabel((llmProgress.step_id as string) || '')}
+                · {formatTokens(llmProgress.chars as number)} chars
+                · {llmProgress.elapsed as number}s
+              </span>
+            </div>
+          {/if}
         </div>
       </div>
 
@@ -983,6 +1020,25 @@
 </section>
 
 <style>
+  /* ── LLM liveness line ── */
+  .llm-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .llm-progress-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--pico-primary, #06c);
+    animation: llm-pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes llm-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+  }
+
   /* ── Breadcrumb ── */
   .breadcrumb {
     margin-bottom: var(--pico-spacing, 1rem);

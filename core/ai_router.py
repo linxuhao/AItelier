@@ -275,6 +275,11 @@ class AIGateway:
         self.max_output_tokens = max_output_tokens
         # Phase 0 cache telemetry: usage of the most recent completion.
         self.last_usage: dict = {}
+        # Optional liveness hook, set by the host after construction: called
+        # with {"chars", "elapsed", "served_by"} every ~_PROGRESS_EVERY_S
+        # while a completion streams (see _call_llm). Runs on the LLM worker
+        # thread; exceptions are swallowed there.
+        self.on_progress = None
         from core.model_routes import config_or_example
         self._config_path = config_path or config_or_example("llm_providers.json")
 
@@ -552,6 +557,76 @@ class AIGateway:
     # fire on "slow"; it fires on "never finishes".
     _WALL_CAP_S = float(os.getenv("AITELIER_LLM_WALL_CAP_S") or 900.0)
 
+    # Seconds between on_progress ticks while a completion streams.
+    _PROGRESS_EVERY_S = 3.0
+
+    @staticmethod
+    def _chunk_len(chunk) -> int:
+        """Characters this stream chunk contributed (content + reasoning +
+        tool-call arguments) — the liveness signal, not a token count."""
+        try:
+            delta = chunk.choices[0].delta
+        except (AttributeError, IndexError):
+            return 0
+        n = (len(getattr(delta, "content", None) or "")
+             + len(getattr(delta, "reasoning_content", None) or ""))
+        for tc in (getattr(delta, "tool_calls", None) or []):
+            fn = getattr(tc, "function", None)
+            if fn is not None:
+                n += len(getattr(fn, "arguments", None) or "")
+        return n
+
+    def _call_llm(self, kwargs: dict):
+        """The provider call itself, on the bounded worker thread.
+
+        Streams by default — not to show tokens, but because chunk arrival is
+        the only signal that can distinguish a long completion from a wedged
+        one from OUTSIDE the call (the 2026-08-27 trickle hang was invisible
+        precisely because nothing measured arrival). Chunks are re-assembled
+        into the exact non-streaming response shape — verified live against
+        ark / qwen / opencodego: content, tool_calls (parseable args),
+        reasoning_content, usage incl. cache fields all survive
+        stream_chunk_builder — so nothing downstream can tell the difference.
+
+        `on_progress` (optional, set by the host after construction) gets a
+        small dict every ~_PROGRESS_EVERY_S while chunks arrive. It runs on
+        this worker thread and must never break the call — exceptions are
+        swallowed. AITELIER_LLM_STREAM=0 reverts to the plain call.
+        """
+        if os.getenv("AITELIER_LLM_STREAM", "1") == "0" or kwargs.get("stream"):
+            return litellm.completion(**kwargs)
+        import time as _t
+        skwargs = dict(kwargs)
+        skwargs["stream"] = True
+        skwargs["stream_options"] = {"include_usage": True}
+        chunks: list = []
+        chars = 0
+        t0 = _t.monotonic()
+        next_note = 0.0     # first chunk ticks immediately → "it's alive"
+        for chunk in litellm.completion(**skwargs):
+            chunks.append(chunk)
+            chars += self._chunk_len(chunk)
+            now = _t.monotonic()
+            if self.on_progress is not None and now >= next_note:
+                next_note = now + self._PROGRESS_EVERY_S
+                try:
+                    self.on_progress({"chars": chars,
+                                      "elapsed": round(now - t0, 1),
+                                      "served_by": self.active_model})
+                except Exception:
+                    pass
+        if not chunks:
+            # A stream that opened and closed with zero chunks is an endpoint
+            # failure — route it like one (APIConnectionError is in
+            # FAILOVER_EXCEPTIONS) instead of handing the builder nothing.
+            raise litellm.exceptions.APIConnectionError(
+                message="stream closed before the first chunk",
+                llm_provider=str(self.provider or ""),
+                model=str(self.active_model or ""),
+            )
+        return litellm.stream_chunk_builder(chunks,
+                                            messages=kwargs.get("messages"))
+
     def _completion_bounded(self, kwargs: dict):
         """`litellm.completion` under a TOTAL-time cap, which its timeout is not.
 
@@ -588,7 +663,7 @@ class AIGateway:
         cap = self._WALL_CAP_S
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm-call")
         try:
-            future = pool.submit(litellm.completion, **kwargs)
+            future = pool.submit(self._call_llm, kwargs)
             try:
                 return future.result(timeout=cap)
             except _FutureTimeout as e:

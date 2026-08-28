@@ -16,6 +16,8 @@
    */
   import { onDestroy } from 'svelte';
   import { getTrace } from '../lib/api';
+  import { on, off } from '../lib/sse';
+  import { formatTokens } from '../lib/format';
   import { extractPayloadText, shortTime, traceSummary, modelBinding } from '../lib/traceFormat';
   import { t } from '../lib/i18n.svelte';
 
@@ -147,7 +149,32 @@
   });
 
   const timer = setInterval(pollNew, POLL_MS);
-  onDestroy(() => clearInterval(timer));
+
+  // ── LLM liveness in the live footer ──
+  // The trace only gains a row when a TURN finishes; during one completion
+  // (up to minutes) it sits silent, which is indistinguishable from a hang.
+  // llm_progress ticks (SSE, every ~3s while chunks arrive) fill exactly that
+  // gap: chars growing = generating, chars flat = the trickle/hang class.
+  // Matched on run alone — only one completion streams per run at a time, and
+  // the footer only renders while following the running instance (live=true).
+  let llmTick = $state<Record<string, unknown> | null>(null);
+  let llmTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function onLlmProgress(ev: Record<string, unknown>): void {
+    if (!live) return;
+    // runId prop can be a run id OR a project id (the backend resolves both).
+    if (ev.run_id !== runId && ev.project_id !== runId) return;
+    llmTick = ev;
+    if (llmTimer !== null) clearTimeout(llmTimer);
+    llmTimer = setTimeout(() => { llmTick = null; }, 15000);
+  }
+  on('llm_progress', onLlmProgress);
+
+  onDestroy(() => {
+    clearInterval(timer);
+    off('llm_progress', onLlmProgress);
+    if (llmTimer !== null) clearTimeout(llmTimer);
+  });
 
   // The endpoint(s) that actually served this step instance, from the usage
   // rows currently loaded. More than one chip = the step failed over mid-run,
@@ -213,7 +240,12 @@
         </div>
       {/each}
       {#if live}
-        <p class="nt-live"><span class="nt-dot"></span>{t('pipeline.traceLive')}</p>
+        <p class="nt-live">
+          <span class="nt-dot"></span>{t('pipeline.traceLive')}
+          {#if llmTick}
+            <span class="nt-llm">· {t('project.llmStreaming')} · {formatTokens(llmTick.chars as number)} chars · {llmTick.elapsed as number}s</span>
+          {/if}
+        </p>
       {/if}
     </div>
   {/if}
@@ -341,6 +373,9 @@
     margin: 0.25rem 0 0;
     font-size: 0.7rem;
     color: var(--pico-muted-color, #8a8a8a);
+  }
+  .nt-llm {
+    font-variant-numeric: tabular-nums;
   }
   .nt-dot {
     width: 0.45rem;

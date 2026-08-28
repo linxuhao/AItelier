@@ -48,8 +48,13 @@ class MaxRetriesExceeded(Exception):
 class PipelineEngine:
     def __init__(self, log_callback=None,
                  repo_type: str = "new", event_bus=None, *, registry=None,
-                 trace_callback=None, user_lang: str | None = None):
-        self.factory = AgentFactory(registry=registry)
+                 trace_callback=None, user_lang: str | None = None,
+                 llm_progress=None):
+        # llm_progress: liveness hook handed down to every gateway the factory
+        # builds (see AIGateway.on_progress): ticks every few seconds while a
+        # completion streams, so a watcher can tell a long response from a
+        # wedged one.
+        self.factory = AgentFactory(registry=registry, on_progress=llm_progress)
         self.assembler = PromptAssembler(repo_type=repo_type, user_lang=user_lang)
         self._log = log_callback or (lambda *a, **kw: None)
         self._trace_cb = trace_callback or (lambda *a, **kw: None)

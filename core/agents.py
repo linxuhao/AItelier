@@ -71,11 +71,14 @@ class AgentFactory:
     DEFAULT_MAX_TOOL_TURNS = 10
 
     def __init__(self, *, registry=None,
-                 template_base: Path | None = None):
+                 template_base: Path | None = None, on_progress=None):
         self._registry = registry
         self._template_base = template_base or (
             Path(__file__).parent.parent / "templates"
         )
+        # Optional AIGateway.on_progress hook, applied to every gateway this
+        # factory builds (LLM streaming liveness ticks).
+        self._on_progress = on_progress
 
     def _get_config(self, name: str) -> dict:
         """Look up agent config from registry."""
@@ -100,13 +103,16 @@ class AgentFactory:
         temperature = cfg_inner.get("temperature", 0.2)
         max_output_tokens = cfg_inner.get("max_output_tokens", 8192)
 
-        return AIGateway(
+        gateway = AIGateway(
             model_name=model,
             enable_thinking=enable_thinking,
             thinking_effort=thinking_effort,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
         )
+        if self._on_progress is not None:
+            gateway.on_progress = self._on_progress
+        return gateway
 
     def _load_template(self, template_file: str) -> str:
         template_path = (self._template_base / template_file).resolve()

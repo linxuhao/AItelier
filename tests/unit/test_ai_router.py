@@ -4,6 +4,16 @@ from unittest.mock import patch, MagicMock
 from core.ai_router import AIGateway
 import litellm
 
+
+@pytest.fixture(autouse=True)
+def _plain_transport(monkeypatch):
+    """These tests pin retry/parsing over mocked responses, not the transport:
+    disable the streaming transport so mocked litellm.completion can return
+    plain MagicMocks. Streaming has its own suite
+    (test_llm_stream_transport.py)."""
+    monkeypatch.setenv("AITELIER_LLM_STREAM", "0")
+
+
 def test_aigateway_success():
     """验证正常情况下的内容提取"""
     gateway = AIGateway("deepseek/deepseek-v4-flash")

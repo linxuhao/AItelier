@@ -858,13 +858,37 @@ async def _check_hung_claims():
                         del _hung_warnings[k]
 
             duration_min = duration_s / 60.0
+            # A heartbeat only proves the PROCESS is alive; the stream tick
+            # (core/llm_liveness, fed by AIGateway's streaming transport)
+            # proves the LLM CALL is producing bytes. With it this warning can
+            # finally say which of "long generation" and "no generation" it is
+            # looking at — the 2026-08-27 trickle hang printed "slow, not
+            # dead" for 35 minutes because it could not tell.
+            llm_line = "No LLM stream tick on record for this step."
+            try:
+                from core.ai_router import AIGateway
+                from core.llm_liveness import last_progress
+                tick = last_progress(run_id)
+                if tick and tick.get("step_id") == row["step_id"]:
+                    age = now - tick["at"]
+                    if age < 60:
+                        llm_line = (f"LLM is streaming (chars={tick['chars']}, "
+                                    f"last chunk {age:.0f}s ago) — long "
+                                    f"generation, not stuck.")
+                    else:
+                        llm_line = (f"No LLM chunk for {age / 60:.1f} min "
+                                    f"(stalled at chars={tick['chars']}) — if "
+                                    f"a call is still open, the wall cap "
+                                    f"abandons it at "
+                                    f"{AIGateway._WALL_CAP_S:.0f}s.")
+            except Exception:
+                pass
             logger.warning(
                 f"Step may be hung: project={project_id} step={row['step_id']} "
                 f"claimed for {duration_min:.0f} min "
                 f"(threshold: {warn_threshold_s}s = {window_s}s timeout "
                 f"× {_HUNG_WARN_MULTIPLIER}). "
-                f"Still heartbeating, so the reaper leaves it alone — slow, not "
-                f"dead. No restart needed either way."
+                f"Still heartbeating, so the reaper leaves it alone. {llm_line}"
             )
 
             # Publish event for TUI / API consumers

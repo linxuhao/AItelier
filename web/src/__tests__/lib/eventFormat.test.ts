@@ -45,4 +45,14 @@ describe('formatEvent', () => {
   it('drops an unknown event with no step context', () => {
     expect(formatEvent({ type: 'sse_connected' })).toBeNull();
   });
+
+  it('never renders llm_progress ticks as notifications', () => {
+    // One tick every ~3s while a completion streams; despite carrying a
+    // step_id (which the default branch would render), the panel must not
+    // fill with them.
+    expect(formatEvent({
+      type: 'llm_progress', step_id: 't_impl', project_id: 'p',
+      chars: 1234, elapsed: 9.1,
+    })).toBeNull();
+  });
 });

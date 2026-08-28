@@ -23,6 +23,15 @@ PROVIDERS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _plain_transport(monkeypatch):
+    """These tests pin ROUTING (binding, failover, cooldowns), not the
+    transport: run them over the plain non-streaming call so the mocked
+    litellm.completion can return plain _Resp objects. The streaming
+    transport has its own suite (test_llm_stream_transport.py)."""
+    monkeypatch.setenv("AITELIER_LLM_STREAM", "0")
+
+
 @pytest.fixture
 def wiring(tmp_path, monkeypatch):
     providers = tmp_path / "llm_providers.json"

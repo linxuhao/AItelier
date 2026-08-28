@@ -159,3 +159,39 @@ def test_the_step_definition_comes_from_the_graph_not_step_config():
     class _S:
         step_id, step_config, inputs = "check", {}, {}     # empty, as in production
     assert r.run(_S()).flags["verdict"] == "passed"
+
+
+# ── The staging tree must not outlive the run ────────────────────────────────
+# `mkdtemp` had no cleanup at all. That was tolerable while the smoke ran once per
+# generation; a regression baseline replay calls it on every edit, so the leak
+# became one directory per keystroke-sized change. The gap this test closes is the
+# one a reviewer named: a fix that only cleans up on the SUCCESS path still leaks
+# on the failure path, which is the path that runs when the graph is broken —
+# i.e. exactly when a maker is iterating and calling the gate most often.
+
+BOOT_FAILS = {
+    "name": "gen_boom",
+    # No `begin` — skillflow rejects this at registration, INSIDE the try block
+    # that owns the staging dir. Its `except` returns, so success-only cleanup
+    # (or cleanup placed after the return) leaks here and nowhere else.
+    "steps": [{"id": "one", "step_type": "agent", "agent_config": "a",
+               "transitions": [{"to": None}]}],
+}
+
+
+def test_the_staging_tree_is_removed_on_the_failure_path_too(tmp_path, monkeypatch):
+    staging = tmp_path / "tmproot"
+    staging.mkdir()
+    monkeypatch.setattr(_mod.tempfile, "tempdir", str(staging))
+
+    ok = forge_dryrun_smoke(graph_path=_write(tmp_path, PYTEST_CONTRACT))
+    if ok.get("status") in ("import_error", "boot_error"):
+        pytest.skip(f"engine unavailable: {ok.get('error')}")
+    bad = forge_dryrun_smoke(graph_path=_write(tmp_path, BOOT_FAILS))
+
+    # Assert the failure path was actually TAKEN. Without this the test would pass
+    # just as happily on a graph that never reached the try block at all, and the
+    # leak it exists to catch would go unmeasured.
+    assert bad["status"] == "boot_error", bad
+    assert ok["passed"] is True
+    assert list(staging.glob("forge_smoke_*")) == []

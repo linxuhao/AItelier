@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1353,6 +1354,208 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
 
 
 # ── HTTP transport (mirrors the Unity sidecar) ─────────────────────────────
+
+
+# ── The windowed input gate ────────────────────────────────────────────────
+#
+# WHY THIS EXISTS. Everything else in this file delivers input with Godot's
+# `Input.parse_input_event()`. That injects below the window layer and never
+# reaches the GUI phase, where a `mouse_filter = STOP` Control decides whether
+# an event survives to `_unhandled_input`. So no `clicks:` scenario can fail
+# the way a real click fails.
+#
+# On 2026-08-27 that blind spot cost jinyong-assets its primary interaction:
+# `menu.tscn`'s full-rect `SegmentHost` was missing `mouse_filter = 2`, sat
+# over the board for the whole session, and swallowed every mouse press that
+# did not land on a Button. Left-click movement was dead for every player, on
+# web and on desktop, while the 57-scenario suite reported 57/57. It was the
+# second time — the same node in the sibling scene had the same bug — and the
+# contract could not see either, because the contract boots the sibling.
+#
+# This gate runs the game in a REAL X11 window on Xvfb and drives it with REAL
+# events via xdotool. It is the only path here that exercises OS event ->
+# window -> engine -> GUI phase -> handler -> state change.
+#
+# WHAT THE GAME MUST PROVIDE. The gate is deliberately dumb: it does not know
+# how to navigate the game, and it must not, because navigation is not the
+# layer under test. The project supplies an autoload that, when
+# `AITELIER_INPUT_GATE_REPORT` is set, drives itself to the state under test by
+# its own internal calls (never by synthesizing input) and rewrites that path
+# with a JSON object:
+#
+#   {"ready": true,               # the state under test has been reached
+#    "player_world": [x, y],      # where to aim, in VIEWPORT pixels
+#    "grid": "(7, 5)", "moves_left": 4,
+#    "raw_left": 0, "handled_left": 0,     # presses reaching _input / the handler
+#    "raw_right": 0, "handled_right": 0,
+#    "eater": ""}                 # topmost non-IGNORE Control under the last press
+#
+# A report that never turns ready is a SKIP with a reason, never a pass: the
+# caller records it as an open coverage gap. Everything this gate asserts is a
+# differential (a counter moved, a tile changed), so it does not care what the
+# board looks like.
+
+
+
+def _free_display() -> str:
+    """A display number nobody is using.
+
+    Not a fixed one: killing whatever holds a hard-coded display would abort a
+    concurrent gate run and report its half-finished counters as a verdict. The
+    playtest path uses , which allocates the same way.
+    """
+    for n in range(90, 100):
+        if not Path("/tmp/.X%d-lock" % n).exists():
+            return ":%d" % n
+    raise RuntimeError("no free X display in :90-:99")
+
+
+def _xvfb_up(display: str, size: str = "960x704x24"):
+    proc = subprocess.Popen(
+        ["Xvfb", display, "-screen", "0", size],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    return proc
+
+
+def _read_gate_report(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _await_ready(path: Path, deadline: float) -> dict:
+    while time.time() < deadline:
+        rep = _read_gate_report(path)
+        if rep.get("ready"):
+            return rep
+        time.sleep(0.5)
+    return _read_gate_report(path)
+
+
+def _xdo(display: str, *args) -> None:
+    env = dict(os.environ, DISPLAY=display)
+    subprocess.run(["xdotool", *args], env=env, capture_output=True, timeout=20)
+
+
+def x11_input_smoke(project_dir: str, timeout: int = 180) -> dict:
+    """Drive the game in a real window with real X11 events.
+
+    Returns {passed, skipped, reason, steps[]} — `skipped` is NOT a pass; the
+    caller must surface it as an open coverage gap.
+    """
+    out: dict = {"passed": False, "skipped": False, "reason": "", "steps": []}
+    src = Path(project_dir)
+    if not (src / "project.godot").is_file():
+        out.update(skipped=True, reason="no project.godot at %s" % src)
+        return out
+    if shutil.which("xdotool") is None:
+        out.update(skipped=True, reason=(
+            "xdotool is not in this image — the windowed gate cannot inject "
+            "real events. Rebuild the sidecar (Dockerfile.godot installs it); "
+            "installing it into the running container does not survive."))
+        return out
+
+    # The workspace mount is read-only in this container and `--import` writes
+    # res://.godot, so the project has to be copied somewhere writable first.
+    work = Path(tempfile.mkdtemp(prefix="x11gate-"))
+    proj = work / "proj"
+    shutil.copytree(src, proj, ignore=shutil.ignore_patterns(".git"))
+    report = work / "gate.json"
+
+    # Two import passes. Without them every resource fails to load, `preload()`
+    # turns into a parse error, and the autoloads never come up — which reads
+    # as "the game is broken" rather than "the project was not imported".
+    for _ in range(2):
+        subprocess.run([GODOT_BIN, "--headless", "--path", str(proj), "--import"],
+                       capture_output=True, timeout=180)
+
+    display = _free_display()
+    xvfb = _xvfb_up(display)
+    env = dict(os.environ, DISPLAY=display,
+               AITELIER_INPUT_GATE_REPORT=str(report))
+    game = subprocess.Popen(
+        [GODOT_BIN, "--path", str(proj), "--resolution", "960x704", "--position", "0,0"],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    try:
+        deadline = time.time() + timeout
+        rep = _await_ready(report, min(deadline, time.time() + 90))
+        if not rep.get("ready"):
+            out.update(skipped=True, reason=(
+                "the project published no input-gate report (looked for "
+                "AITELIER_INPUT_GATE_REPORT). The game side of the gate is not "
+                "wired, so the real input path is NOT covered."))
+            return out
+
+        px, py = (int(v) for v in rep.get("player_world", [0, 0]))
+        out["steps"].append({"stage": "ready", **rep})
+
+        # LEFT click on the empty tile one above the actor: a real press, at a
+        # real screen coordinate, through the real window.
+        _xdo(display, "mousemove", str(px), str(py - 64))
+        time.sleep(0.5)
+        _xdo(display, "click", "1")
+        time.sleep(2.5)
+        after_left = _read_gate_report(report)
+        out["steps"].append({"stage": "after_left_click", **after_left})
+
+        moved = after_left.get("grid") != rep.get("grid")
+        arrived = after_left.get("raw_left", 0) > rep.get("raw_left", 0)
+        handled = after_left.get("handled_left", 0) > rep.get("handled_left", 0)
+
+        # RIGHT click on the actor's own tile: the undo path, and the exact
+        # point a floating health bar used to swallow.
+        _xdo(display, "mousemove", str(px), str(py))
+        time.sleep(0.5)
+        _xdo(display, "click", "3")
+        time.sleep(2.5)
+        after_right = _read_gate_report(report)
+        out["steps"].append({"stage": "after_right_click", **after_right})
+
+        undone = after_right.get("grid") == rep.get("grid")
+        r_arrived = after_right.get("raw_right", 0) > after_left.get("raw_right", 0)
+        r_handled = after_right.get("handled_right", 0) > after_left.get("handled_right", 0)
+
+        fails = []
+        if not arrived:
+            fails.append("the left press never reached the actor node (raw_left "
+                         "did not move) — it died before the engine")
+        elif not handled:
+            fails.append("the left press reached the actor but never reached the "
+                         "click handler (handled_left did not move) — the GUI "
+                         "phase ate it; eater=%r" % after_left.get("eater", ""))
+        elif not moved:
+            fails.append("the click was handled but the actor did not move "
+                         "(grid %s -> %s) — a gate or the coordinate transform"
+                         % (rep.get("grid"), after_left.get("grid")))
+        if not r_arrived:
+            fails.append("the right press never reached the actor node")
+        elif not r_handled:
+            fails.append("the right press reached the actor but never reached "
+                         "the undo handler; eater=%r" % after_right.get("eater", ""))
+        elif not undone:
+            fails.append("undo did not restore the tile (%s, expected %s)"
+                         % (after_right.get("grid"), rep.get("grid")))
+
+        out["passed"] = not fails
+        out["reason"] = ("a real window, real events: click moved and "
+                         "right-click undid it" if not fails else " | ".join(fails))
+        return out
+    finally:
+        for pr in (game, xvfb):
+            try:
+                pr.terminate()
+                pr.wait(timeout=5)
+            except Exception:
+                try:
+                    pr.kill()
+                except Exception:
+                    pass
+        shutil.rmtree(work, ignore_errors=True)
+
+
 class _Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -1388,6 +1591,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, run_script(
                     proj, req.get("scripts") or [],
                     timeout=req.get("timeout", 600)))
+            elif self.path == "/x11_input_smoke":
+                self._send(200, x11_input_smoke(
+                    proj, timeout=int(req.get("timeout", 180))))
             elif self.path == "/playtest":
                 self._send(200, playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),

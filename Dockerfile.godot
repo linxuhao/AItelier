@@ -7,6 +7,9 @@
 # software rasteriser: the playtest gate captures real rendered frames, so it
 # DOES open a display (--headless forces the dummy renderer, which draws no
 # pixels at all). Serves docker/godot/godot_harness.py over HTTP on :8080.
+# It also carries xdotool, so the sidecar can run a WINDOWED input gate that
+# injects real X11 events — the layer Input.parse_input_event() skips, and the
+# layer a player's mouse actually uses.
 
 FROM python:3.12-slim
 
@@ -18,7 +21,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libxext6 \
         libgl1 libglu1-mesa fontconfig libfontconfig1 \
         xvfb xauth libgl1-mesa-dri \
+        xdotool \
     && rm -rf /var/lib/apt/lists/*
+
+# xdotool is the DRIVER for the windowed input gate, and it is a build-time
+# dependency for a reason. The play-test harness delivers its clicks with
+# Godot's Input.parse_input_event(), which never reaches the GUI phase where a
+# mouse_filter=STOP Control decides whether an event survives. On 2026-08-27
+# that blind spot let jinyong-assets ship a full-screen STOP Control parked over
+# the board: left-click movement was dead for every player, web and desktop,
+# while the 57-scenario suite reported all green.
+#
+# The only way to see it from here is to drive a REAL window — Xvfb (already
+# above, for frame capture) plus real X11 events. Installing xdotool into a
+# RUNNING container works and then silently disappears on the next image
+# rebuild, the same writable-layer trap the skillflow wheel override has, so
+# the gate's driver belongs in the image.
 
 # Fetch the headless-capable Godot 4 binary.
 RUN wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/${GODOT_ZIP}" -O /tmp/godot.zip \

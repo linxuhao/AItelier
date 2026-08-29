@@ -252,6 +252,10 @@ class WorkspaceManager:
     def rollback(self, project_id: str, commit_hash: str) -> bool:
         """[时光机] 强行重置代码仓库状态"""
         code_path = self.get_code_path(project_id)
+        if code_path is None:
+            # `cwd=None` runs git in the SERVER's own checkout. A project that
+            # declares no repository has nothing to roll back.
+            return False
         try:
             subprocess.run(["git", "reset", "--hard", commit_hash], cwd=code_path, check=True, env=_GIT_ENV)
             return True
@@ -276,6 +280,10 @@ class WorkspaceManager:
         or empty/None fields rather than raising.
         """
         code_path = self.get_code_path(project_id)
+        if code_path is None:
+            # Not "no git here" but "no here": `cwd=None` would answer about the
+            # server's own checkout, and the UI would show its branch.
+            return {"is_git": False, "path": None}
 
         def _git(*args: str) -> tuple[int, str]:
             res = subprocess.run(
@@ -359,6 +367,8 @@ class WorkspaceManager:
 
     def _require_git_repo(self, project_id: str) -> Path:
         code_path = self.get_code_path(project_id)
+        if code_path is None:
+            raise RuntimeError("This project declares no code repository")
         res = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
             cwd=code_path, capture_output=True, text=True, env=_GIT_ENV,
@@ -462,16 +472,34 @@ class WorkspaceManager:
             "head": self._get_git_hash(code_path),
         }
 
-    def get_project_path(self, project_id: str) -> Path:
+    def get_project_path(self, project_id: str) -> Path | None:
         """获取 project 代码仓库路径。"""
         return self.get_code_path(project_id)
 
-    def get_code_path(self, project_id: str) -> Path:
-        """
-        获取 project 代码仓库路径。
+    def get_code_path(self, project_id: str) -> Path | None:
+        """The project's code repository, or None if it DECLARES it has none.
+
         从 DB 读取 repo_path, 如未设置则默认为 ~/.AItelier/projects/{project_id}/。
         如果 DB 不可用或项目不在 DB 中，使用默认路径。
+
+        The None answer exists because this result is what the host hands
+        skillflow as `project_root` for every agent-invoked tool
+        (`core/dpe_pipeline.py`). Ignoring `repo_type` made the two halves
+        disagree about the same run: skillflow, told by the code-path resolver
+        that a `repo_mode: none` run owns no repository, attaches no repo read
+        layer — while the host handed `create`/`edit` a baseline pointing at one.
+        `read`/`list`/`search` saw no repo and the write tools saw a repo; the
+        agent could not read what it was writing against. The unconditional
+        `mkdir` below is also what materialised the empty directories sitting
+        under `~/.AItelier/projects/` for runs that never wanted a repo.
+
+        Same predicate as `api/dependencies._existing_repo_code_path`, and it
+        must stay the same: a recorded `repo_path` WINS, because a row can carry
+        both answers. `run_launcher` overwrites `repo_type` with `"none"` for a
+        `repo_mode: none` config while keeping the caller's `repo_path` — the
+        `against_project` shape, a run that emits no code but reads a real repo.
         """
+        default = self.projects_base / project_id
         try:
             from api.dependencies import get_db_manager
             db = get_db_manager()
@@ -479,9 +507,15 @@ class WorkspaceManager:
             repo_path = repo_info.get("repo_path")
             if repo_path:
                 code_path = Path(repo_path).resolve()
+            elif (repo_info.get("repo_type") or "") == "none":
+                return None
             else:
-                code_path = self.projects_base / project_id
+                code_path = default
         except (ValueError, ImportError, Exception):
-            code_path = self.projects_base / project_id
+            # Unknown project / DB unavailable stays "use the default", NOT
+            # "owns no repo": failing to read the row is not a declaration, and
+            # answering None there would strip the repo from a project that has
+            # one every time the lookup hiccups.
+            code_path = default
         code_path.mkdir(parents=True, exist_ok=True)
         return code_path

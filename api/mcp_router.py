@@ -1107,7 +1107,10 @@ def _register_run_tools(tool):
             repo_path = proj.get("repo_path")
             if not repo_path:
                 try:
-                    repo_path = str(ws.get_code_path(against_project))
+                    # `str(None)` is the truthy relative path "None"; a project
+                    # that declares no repository must fall to the error below.
+                    _cp = ws.get_code_path(against_project)
+                    repo_path = str(_cp) if _cp else None
                 except Exception:
                     repo_path = None
             if not repo_path:

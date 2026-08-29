@@ -2854,6 +2854,8 @@ class MetaAgent:
         """List the file tree of a project's actual code repository."""
         pid = args["project_id"]
         base = self.ws.get_code_path(pid)
+        if base is None:
+            return {"error": f"Project '{pid}' declares no code repository"}
         subdir = args.get("subdir")
         if subdir:
             base = base / subdir
@@ -2876,7 +2878,10 @@ class MetaAgent:
         """
         pid = args["project_id"]
         path = args["path"]
-        base = self.ws.get_code_path(pid).resolve()
+        base = self.ws.get_code_path(pid)
+        if base is None:
+            return {"error": f"Project '{pid}' declares no code repository"}
+        base = base.resolve()
         target = (base / path).resolve()
         if not str(target).startswith(str(base)):
             return {"error": "Path traversal denied"}
@@ -2924,9 +2929,13 @@ class MetaAgent:
         Returns (base, target, None) or (None, None, error_dict).
         """
         try:
-            base = self.ws.get_code_path(pid).resolve()
+            base = self.ws.get_code_path(pid)
         except Exception as e:
             return None, None, {"error": f"Cannot resolve code path for '{pid}': {e}"}
+        if base is None:
+            return None, None, {
+                "error": f"Project '{pid}' declares no code repository"}
+        base = base.resolve()
         if not base.is_dir():
             return None, None, {"error": f"No code directory for project '{pid}'"}
         target = (base / path).resolve()
@@ -3006,9 +3015,12 @@ class MetaAgent:
         timeout = args.get("timeout") or 120
         timeout = max(1, min(int(timeout), 600))
         try:
-            base = self.ws.get_code_path(pid).resolve()
+            base = self.ws.get_code_path(pid)
         except Exception as e:
             return {"error": f"Cannot resolve code path for '{pid}': {e}"}
+        if base is None:
+            return {"error": f"Project '{pid}' declares no code repository"}
+        base = base.resolve()
         if not base.is_dir():
             return {"error": f"No code directory for project '{pid}'"}
 
@@ -3125,7 +3137,9 @@ class MetaAgent:
             from api.dependencies import get_skillflow
             pid = get_skillflow()._get_project_id(run_id)
             if pid:
-                project_root = str(self.ws.get_code_path(pid))
+                # "" (the initial value) when the project declares no repo —
+                # `str(None)` would be the relative path "None".
+                project_root = str(self.ws.get_code_path(pid) or "")
         except Exception:
             pass
         return self._runner_service().execute_step_tool(
@@ -3172,7 +3186,10 @@ class MetaAgent:
         pattern = args["pattern"]
         glob = args.get("glob")
         max_results = args.get("max_results") or 100
-        base = self.ws.get_code_path(pid).resolve()
+        base = self.ws.get_code_path(pid)
+        if base is None:
+            return {"error": f"Project '{pid}' declares no code repository"}
+        base = base.resolve()
         if not base.exists():
             return {"error": f"Code repo not found for {pid}"}
         try:
@@ -4882,7 +4899,10 @@ class MetaAgent:
             repo_path = proj.get("repo_path")
             if not repo_path:
                 try:
-                    repo_path = str(self.ws.get_code_path(against))
+                    # `or None`: a project that declares no repository answers
+                    # None, and `str(None)` is the truthy relative path "None".
+                    _cp = self.ws.get_code_path(against)
+                    repo_path = str(_cp) if _cp else None
                 except Exception:
                     repo_path = None
             if not repo_path:

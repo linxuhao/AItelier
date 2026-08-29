@@ -65,9 +65,22 @@ _log = logging.getLogger(__name__)
 
 # Tools that HARD-depend on the project's code repo existing as a git repo
 # (they commit / validate / run against it). Read-type tools (read_file,
-# list_tree) are deliberately NOT here: skillflow's get_project_code_path is
-# lazy and happily returns a path that doesn't exist, so a read just finds
-# nothing — only the git-touching tools actually break without a repo.
+# list_tree) are deliberately NOT here — but no longer because a read is
+# harmless: a run that declares `repo_mode: none` now gets NO repo layer at all
+# (the code-path resolver answers False, so skillflow attaches no `repo` source
+# and the read tools cannot see one), and `from: repository` on such a run
+# injects nothing. A read against a repo the run declared away is therefore a
+# real miss, not a lazy path that finds nothing.
+#
+# They stay out of this set because of what this set is FOR. `derive_repo_mode`
+# is asymmetric on purpose: any signal here means `code`, since a wrong `none`
+# is a hard runtime failure while a wrong `code` only costs an unused repo. A
+# read tool is the weakest possible signal — nearly every generated pipeline
+# lists `read_file` whether or not it touches a repository — so admitting it
+# would make the derivation answer `code` for almost everything and stop
+# discriminating at all. The cost of that trade is the miss described above:
+# a pipeline whose ONLY repo contact is a read is derived `none` and gets no
+# repo. Do NOT change the behaviour here without re-deciding that trade.
 _REPO_TOOLS = frozenset({
     "repo_apply", "draft_commit", "git_sync_pre", "repo_validate",
     "compose_validate", "pytest", "run_tests",

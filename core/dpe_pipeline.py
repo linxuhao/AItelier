@@ -424,8 +424,14 @@ class PipelineEngine:
         """获取 DPS workspace 路径 (Inbox/Outbox/Trace)"""
         return workspace._get_secure_path(project_id)
 
-    def _get_code_path(self, workspace: Any, project_id: str) -> Path:
-        """获取 project 代码仓库路径"""
+    def _get_code_path(self, workspace: Any, project_id: str) -> Path | None:
+        """获取 project 代码仓库路径; None = 这个 run 声明它没有代码仓库。
+
+        Passed straight to skillflow as `project_root` (see `_exec_tool`) and to
+        the prompt assembler, so the host must not invent one here: skillflow's
+        own code-path resolver answers the same question and the two have to
+        agree about the same run.
+        """
         return workspace.get_code_path(project_id)
 
     def _exec_tool(self, action: dict) -> dict:
@@ -449,7 +455,11 @@ class PipelineEngine:
             # unfenced, and skillflow skips the check when either side is 0, so
             # a claim already in flight across the upgrade is never rejected.
             claim_epoch=getattr(self, '_claim_epoch', 0),
-            project_root=str(self._code_path) if hasattr(self, '_code_path') else '',
+            # "" — never `str(None)`, which is the RELATIVE path "None". Empty
+            # means "no opinion from the host": skillflow then asks its own
+            # code_path_resolver, which answers False for a repo-less run and
+            # omits project_root entirely rather than inventing a directory.
+            project_root=str(getattr(self, '_code_path', '') or ''),
         )
 
 

@@ -136,6 +136,10 @@ def _resolve_workspace_target(project_id: str, path: str, root: str,
     if root == "code":
         _require_writer_for_external_repo(project, request)
         base = ws.get_code_path(project_id)
+        if base is None:
+            raise HTTPException(
+                status_code=404,
+                detail="This project declares no code repository")
     else:
         base = ws._get_secure_path(project_id)
     base_resolved = base.resolve()
@@ -330,8 +334,12 @@ def workspace_tree(
 
     if root == "code":
         _require_writer_for_external_repo(project, request)
-    root_dir = (ws.get_code_path(project_id) if root == "code"
-                else ws._get_secure_path(project_id)).resolve()
+    _base = (ws.get_code_path(project_id) if root == "code"
+             else ws._get_secure_path(project_id))
+    if _base is None:
+        raise HTTPException(status_code=404,
+                            detail="This project declares no code repository")
+    root_dir = _base.resolve()
     # `subdir` was concatenated raw — no resolve, no containment check — while
     # both neighbours in this file are jailed. Confirmed against the PUBLIC host:
     # `?subdir=../../../../../run/secrets` listed the mounted secret FILENAMES,
@@ -542,7 +550,11 @@ def repo_archive(
         raise HTTPException(status_code=404, detail="Project not found")
     check_read_owner(user, None, project)
 
-    code_path = ws.get_code_path(project_id).resolve()
+    code_path = ws.get_code_path(project_id)
+    if code_path is None:
+        raise HTTPException(status_code=404,
+                            detail="This project declares no code repository")
+    code_path = code_path.resolve()
     if not code_path.exists():
         raise HTTPException(status_code=404, detail="Repository not found")
 
@@ -712,6 +724,9 @@ def repo_pr(
     _repo_write_project(project_id, user, db)
     from core.git_ops import create_github_pr
     code_path = ws.get_code_path(project_id)
+    if code_path is None:
+        raise HTTPException(status_code=400,
+                            detail="This project declares no code repository")
     # Validate head != base BEFORE pushing — otherwise a head==base==main request
     # would push HEAD straight onto the base branch and only then fail the PR.
     if body.head and body.head == body.base:

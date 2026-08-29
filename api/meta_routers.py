@@ -668,7 +668,20 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str, int]:
     instance = 0
 
     label = "Checkpoint"
-    resolver = sf._get_resolver(graph_name)
+    # The graph this RUN is pinned to, not whatever is registered now.
+    #
+    # This function alone decides which step a paused run is waiting on, and
+    # every surface — SPA, CLI, butler, MCP — takes its answer. Resolving by
+    # name was safe only while one name meant one graph; pinning ended that. If
+    # a config is edited while a run is paused, `node.checkpoint` is read from
+    # the NEW graph and this returns a DIFFERENT step than the one the user is
+    # looking at. Reject then rewinds a completed step and injects the feedback
+    # into the wrong agent's inputs, and Approve trips the AT-7 idempotency
+    # guard, answers "already_advanced", and leaves the run paused forever —
+    # the unanswerable-checkpoint failure that guard's own comment records from
+    # jinyong-hud, through a new door.
+    _pinned = getattr(sf, "_get_resolver_for_run", None)
+    resolver = _pinned(run_id) if _pinned else sf._get_resolver(graph_name)
     # When skillflow pauses at a checkpoint it sets current_node to the
     # checkpoint's NEXT node (its checkpoint-guarded transition target) and
     # marks the checkpoint step itself "completed". Identify the exact
@@ -826,8 +839,21 @@ def approve_checkpoint(
     elif run and run["status"] == "failed":
         sf.reactivate_run(run_id)
         from core.run_driver import restore_retry_budget
-        restore_retry_budget(sf, run_id)   # see the docstring: reactivate alone
-        sf.resume_run(run_id)              # leaves the blocker at max_retries
+        # Restoring the budget is best-effort; RESUMING is not. Unguarded, a
+        # raise here left the run reactivated but never resumed, the drafting
+        # gate never cleared (so the scheduler stays off the project), no
+        # scheduler wake and no SSE — a worse half-written state than the one
+        # the restore was fixing, from a browser's point of view a 500 and a
+        # project that silently stops. Log and carry on to resume_run: a run
+        # that resumes with a stale retry count still moves; one that never
+        # resumes does not.
+        try:
+            restore_retry_budget(sf, run_id)   # see the docstring: reactivate
+        except Exception:                      # alone leaves the blocker at max
+            logger.warning("restore_retry_budget failed for run %s; resuming "
+                           "anyway — the blocked step may re-fail immediately",
+                           run_id, exc_info=True)
+        sf.resume_run(run_id)
 
     # Clear the drafting gate: the user approved the brief, so the scheduler
     # is now allowed to pick up this project. Without this, projects created
@@ -917,7 +943,7 @@ def reject_checkpoint(
     # upstream maker just re-runs the gate and re-pauses. Older checkpoints all
     # set checkpoint_reject_to == themselves, so this is a no-op for them.
     from core.run_driver import checkpoint_reject_target
-    redirect_to = checkpoint_reject_target(sf, _graph, step_id)
+    redirect_to = checkpoint_reject_target(sf, _graph, step_id, run_id)
     try:
         sf.reject_checkpoint(run_id, step_id, request.feedback,
                              redirect_to=redirect_to)

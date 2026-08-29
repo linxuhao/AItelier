@@ -55,10 +55,28 @@ def _calls(node) -> set[str]:
 
 
 def _has_shape(node: ast.Try) -> bool:
+    """Confirms a step, with an await in the same `try` body.
+
+    Deliberately NOT "awaits a call literally named `execute`". That version was
+    blind to both shapes this codebase would plausibly use for a new driver: a
+    helper (`await _execute_and_confirm(...)`) renames the call, and
+    `await asyncio.to_thread(runner.execute, claimed)` — the shape CLAUDE.md
+    points at, since `runner.execute` blocks the loop — passes `execute` as a
+    REFERENCE, which is not an `ast.Call` at all. A leaking driver written
+    either way kept the test green.
+
+    Any `try` that confirms a claim and awaits anything is holding a claim
+    across a suspension point, which is the whole condition. Over-matching here
+    costs a handler on a block that would want one anyway.
+    """
     body = ast.Module(body=node.body, type_ignores=[])
-    awaits_execute = any(isinstance(n, ast.Await) and "execute" in _calls(n)
-                         for n in ast.walk(body))
-    return awaits_execute and "confirm_step" in _calls(body)
+    awaits = any(isinstance(n, ast.Await) for n in ast.walk(body))
+    # Any callee whose name mentions `confirm`, not just `confirm_step`, so an
+    # extracted `await _execute_and_confirm(...)` — where the confirm itself
+    # lives in another function and no AST walk of this body can see it —
+    # still counts as holding a claim across the await.
+    confirms = any("confirm" in n for n in _calls(body))
+    return awaits and confirms
 
 
 def _claim_holding_trys(tree) -> list[ast.Try]:

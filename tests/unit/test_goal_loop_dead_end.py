@@ -114,7 +114,9 @@ def _sf_stub(status: str, reason: str = ""):
         "id": "run1", "graph_name": "dpe_default_v2", "status": status,
         "current_node": "5_review", "error_reason": reason,
     }
-    sf._get_resolver.return_value = _dpe_resolver()
+    _res = _dpe_resolver()
+    sf._get_resolver.return_value = _res
+    sf._get_resolver_for_run.return_value = _res
     sf.get_steps.return_value = [
         {"step_id": "3", "status": "completed"},        # the only checkpoint step
         {"step_id": "5", "status": "completed"},

@@ -1230,7 +1230,7 @@ def _register_run_tools(tool):
                 sf.reject_checkpoint(
                     run_id, step_id, feedback,
                     redirect_to=checkpoint_reject_target(
-                        sf, run.get("graph_name") or _graph, step_id))
+                        sf, run.get("graph_name") or _graph, step_id, run_id))
         except Exception as e:
             # An exception is NOT proof the answer failed. skillflow can persist
             # the state change and then raise on the way out — live, 2026-08-29,

@@ -117,7 +117,8 @@ def release_claim_on_cancel(sf, claimed) -> None:
 _STALL_HINT_S = 10 * 60
 
 
-def checkpoint_reject_target(sf, graph_name: str, step_id: str) -> str:
+def checkpoint_reject_target(sf, graph_name: str, step_id: str,
+                             run_id: str = "") -> str:
     """Where a rejected checkpoint rewinds to, per the graph's `checkpoint_reject_to`.
 
     skillflow's ``reject_checkpoint(run_id, step_id, feedback, redirect_to="")``
@@ -135,9 +136,18 @@ def checkpoint_reject_target(sf, graph_name: str, step_id: str) -> str:
 
     Returns "" when the node declares no target, which is precisely what
     skillflow's default already means: re-run the checkpoint in place.
+
+    Reads the graph the RUN is pinned to when a `run_id` is given. Taken from
+    the current definition, a `checkpoint_reject_to` edited since the run
+    started names a target the run's own version never chose — and if that
+    target happens to exist in both, the engine accepts it and the run rewinds
+    somewhere it was never meant to go, with no guard firing.
     """
     try:
-        node = sf._get_resolver(graph_name).get_node(step_id)
+        _pinned = getattr(sf, "_get_resolver_for_run", None)
+        resolver = (_pinned(run_id) if (_pinned and run_id)
+                    else sf._get_resolver(graph_name))
+        node = resolver.get_node(step_id)
     except Exception:
         return ""
     return (node.checkpoint_reject_to or "") if node else ""

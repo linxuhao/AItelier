@@ -40,6 +40,10 @@ def _sf(current_node):
     resolver = MagicMock()
     resolver.get_node.side_effect = lambda sid: NODES.get(sid)
     sf._get_resolver.return_value = resolver
+    # The pinned accessor is what the code prefers now — a run answers about the
+    # graph version it started with, not whatever is registered. Same resolver
+    # here so these tests keep exercising checkpoint RESOLUTION.
+    sf._get_resolver_for_run.return_value = resolver
     sf.get_steps.return_value = [
         {"step_id": "3", "status": "completed", "id": 10},
         {"step_id": "5_vision", "status": "completed", "id": 20},

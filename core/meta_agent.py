@@ -1113,9 +1113,12 @@ TOOL_DEFINITIONS = [
                 "Open lessons recorded against configs. Read this BEFORE editing "
                 "a generated pipeline — someone (or a past run) may already have "
                 "diagnosed what you are about to re-diagnose. A suggestion marked "
-                "stale_base was written against an older version: re-read it "
-                "against the config as it is now before acting on it, because "
-                "the step it complains about may already be gone."
+                "stale_base=true was written against an older version: "
+                "re-read it against the config as it is now before acting on "
+                "it, because the step it complains about may already be gone. "
+                "stale_base=null means the engine could not read versions at "
+                "all, so freshness is UNKNOWN there, not established — check "
+                "those against the current config yourself."
             ),
             "parameters": {
                 "type": "object",
@@ -4474,7 +4477,7 @@ class MetaAgent:
             sf.reject_checkpoint(
                 run_id, checkpoint_step_id, feedback,
                 redirect_to=checkpoint_reject_target(
-                    sf, run["graph_name"], checkpoint_step_id))
+                    sf, run["graph_name"], checkpoint_step_id, run_id))
         except Exception as e:
             return {"error": f"Failed to reject checkpoint: {e}"}
 

@@ -190,9 +190,11 @@ into an isolated place whose transcript you don't pay for.
   **Before you start editing a pipeline, read what is already known about it.**
   `list_pipeline_suggestions(target="gen_<slug>")` shows lessons recorded from
   earlier runs — someone may already have diagnosed what you are about to
-  re-diagnose. One marked `stale_base` was written against an older version:
+  re-diagnose. One with `stale_base: true` was written against an older version:
   re-read it against the config as it stands now, because the step it complains
-  about may already be gone. `pipeline_versions(config_name=…)` shows how the
+  about may already be gone. `stale_base: null` means the engine could not read
+  versions at all — freshness there is UNKNOWN, not confirmed, so check those
+  against the current config yourself. `pipeline_versions(config_name=…)` shows how the
   config drifted since, and what changed at each version.
 
   **When you find a defect you are NOT fixing now, record it** —

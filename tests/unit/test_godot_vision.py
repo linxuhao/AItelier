@@ -367,6 +367,15 @@ def test_a_menu_that_answers_no_is_not_laundered_into_a_pass(tmp_path,
 def test_frames_are_split_across_calls_never_dropped(tmp_path, monkeypatch):
     calls = []
     _serve(monkeypatch, _sheet(), calls=calls)
+    # Pin the completion reserve too: the image budget is
+    # `_CONTEXT_TOKENS - _MAX_TOKENS - _PROMPT_RESERVE`, so a test that
+    # patches only the context is really asserting a batch layout that
+    # depends on whatever the primary judge's budget happens to be.
+    # Raising that budget on 2026-08-29 (2048 -> 6144, the primary was
+    # starving) turned this test's budget NEGATIVE and it failed for a
+    # reason that has nothing to do with batching. What it means to pin
+    # is the algorithm, so both inputs are now explicit.
+    monkeypatch.setattr(vision_impl, "_MAX_TOKENS", 2048)
     monkeypatch.setattr(vision_impl, "_CONTEXT_TOKENS", 4048)   # budget 1400
     ws = _workspace(tmp_path, scenarios=(("a", 4),))            # 663 each → 2+2
     rep = _run(tmp_path, workspace_root=str(ws))
@@ -382,6 +391,15 @@ def test_a_lone_trailing_frame_is_pulled_back_into_a_comparable_batch(tmp_path, 
     # nothing differential; rebalance to 3+2+2. Still 7 frames, none dropped.
     calls = []
     _serve(monkeypatch, _sheet(), calls=calls)
+    # Pin the completion reserve too: the image budget is
+    # `_CONTEXT_TOKENS - _MAX_TOKENS - _PROMPT_RESERVE`, so a test that
+    # patches only the context is really asserting a batch layout that
+    # depends on whatever the primary judge's budget happens to be.
+    # Raising that budget on 2026-08-29 (2048 -> 6144, the primary was
+    # starving) turned this test's budget NEGATIVE and it failed for a
+    # reason that has nothing to do with batching. What it means to pin
+    # is the algorithm, so both inputs are now explicit.
+    monkeypatch.setattr(vision_impl, "_MAX_TOKENS", 2048)
     monkeypatch.setattr(vision_impl, "_CONTEXT_TOKENS", 4700)   # budget 2052 → 3
     ws = _workspace(tmp_path, scenarios=(("a", 7),))
     rep = _run(tmp_path, workspace_root=str(ws))

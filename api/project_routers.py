@@ -836,7 +836,17 @@ def retry_project(
             # does not: it resets the last COMPLETED step, while a failed run is
             # blocked by a FAILED one sitting at retry_count == max_retries.
             from core.run_driver import restore_retry_budget
-            restore_retry_budget(sf, run["id"])
+            try:
+                restore_retry_budget(sf, run["id"])
+            except Exception:
+                # Was swallowed by an outer `except Exception: pass`, which is
+                # exactly the bug this function's docstring exists to fix — the
+                # endpoint answers "retried", the budget is not restored, and
+                # the run re-dies on its first attempt. Silently.
+                import logging
+                logging.getLogger("aitelier").warning("restore_retry_budget failed for run %s; the "
+                               "retry may re-fail immediately", run["id"],
+                               exc_info=True)
             # Guard against the silent-deadlock case: if the run was pointed at a
             # step that no longer exists in the (possibly edited) graph — e.g. a
             # node removed since the run started — advance_run() returns None

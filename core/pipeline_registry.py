@@ -66,11 +66,17 @@ _log = logging.getLogger(__name__)
 # Tools that HARD-depend on the project's code repo existing as a git repo
 # (they commit / validate / run against it). Read-type tools (read_file,
 # list_tree) are deliberately NOT here — but no longer because a read is
-# harmless: a run that declares `repo_mode: none` now gets NO repo layer at all
-# (the code-path resolver answers False, so skillflow attaches no `repo` source
-# and the read tools cannot see one), and `from: repository` on such a run
-# injects nothing. A read against a repo the run declared away is therefore a
-# real miss, not a lazy path that finds nothing.
+# harmless. A run that declares `repo_mode: none` AND has no `repo_path` on its
+# project row now gets no repo layer at all: `_existing_repo_code_path` answers
+# False, skillflow attaches no `repo` source, the read tools cannot see one, and
+# `from: repository` injects nothing. A read against a repo declared away that
+# way is a real miss, not a lazy path that finds nothing.
+#
+# Not every `repo_mode: none` run, though. `_existing_repo_code_path` returns a
+# recorded `repo_path` FIRST and only then consults `repo_type`, so the
+# `against_project` shape — a repo-less config pointed at a real repository to
+# read — still gets a full repo layer, which is the whole point of that shape.
+# The miss above is the shape with no path recorded.
 #
 # They stay out of this set because of what this set is FOR. `derive_repo_mode`
 # is asymmetric on purpose: any signal here means `code`, since a wrong `none`

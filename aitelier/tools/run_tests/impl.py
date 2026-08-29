@@ -619,31 +619,38 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     ``node`` section (npm install/build/test) when the repo contains a node
     project.
     """
-    root = project_root or workspace_root
     report = {"passed": True, "returncode": 0, "summary": "", "failures": [],
               "collection_errors": []}
 
-    if not root or not Path(root).is_absolute():
-        # `Path("").resolve()` is the process CWD — for the hosted engine, the
-        # AItelier checkout itself, which IS a git repo with its own test suite.
-        # Nothing downstream refuses it (`repo.exists()` is true), so pytest ran
-        # over the server's ~2000 tests and `test_report.json` handed the
-        # reviewer a report about AItelier.
+    if not project_root or not Path(project_root).is_absolute():
+        # The check is on `project_root` — the code repository — and on nothing
+        # else, because that is the only argument that names one.
         #
-        # Reachable because a run that declares no code repository has no
-        # project root to give: the engine omits the argument (and older engines
-        # forward ""), and `tool_creation` grants this tool to pipeline_forge's
-        # `t_tool_impl`. Refusing is the only correct answer — there is no repo
-        # to test — and it is written HERE, in the tool, rather than only in the
-        # engine, because the engine that calls it may be any released version.
+        # It used to read `project_root or workspace_root`, which had two ways to
+        # go wrong and the guard only closed one. `Path("").resolve()` is the
+        # process CWD (in the container `/app`, the AItelier checkout — itself a
+        # git repo with ~2000 tests), and `repo.exists()` is true for it, so
+        # nothing downstream would refuse. But a repo-less run does not leave
+        # BOTH roots empty: the engine omits `project_root` and still supplies an
+        # absolute `workspace_root` — the DPS workspace — so the fallback made
+        # the guard pass and pytest then ran over the run's own step-output tree.
+        # Wrong tree, and a `test_report.json` about it either way.
+        #
+        # Reachable because a run that declares no code repository has no project
+        # root to give: skillflow >=1.5.52 omits the argument, earlier releases
+        # (including the 1.5.46 the container installs from PyPI) forward "", and
+        # `tool_creation` grants this tool to pipeline_forge's `t_tool_impl`.
+        # Refusing is the only correct answer — there is no repo to test — and it
+        # is written HERE rather than only in the engine, because the engine that
+        # calls it may be any released version.
         report.update(
             passed=False,
             summary=f"run_tests: no project repository to test — project_root "
-                    f"must be an absolute path (got {root!r}); refusing to "
-                    f"resolve against the process CWD")
+                    f"must be an absolute path (got {project_root!r}); refusing "
+                    f"to resolve against the process CWD or the DPS workspace")
         repo = None
     else:
-        repo = Path(root).resolve()
+        repo = Path(project_root).resolve()
 
     if repo is None:
         pass                      # refused above — there is nothing to run
@@ -785,9 +792,14 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                             f"node:{name} failed (rc={chk['returncode']}): "
                             f"{chk['output'][-500:]}")
 
-    # `out_dir` is the step's staging dir and is always supplied by the engine.
     # With no repo AND no out_dir there is nowhere to write — say so in the
     # return rather than defaulting to the CWD, which is the whole point above.
+    #
+    # `out_dir` is normally the step's staging dir, but it is NOT guaranteed:
+    # `SkillFlow.execute_tool` setdefaults workspace_root, project_root,
+    # config_name, step_id, run_id, step_tmp_dir and step_dir — not out_dir —
+    # and a tool NODE gets whatever its `tool_params` name. So this branch is
+    # reachable, not defensive padding.
     if not out_dir and repo is None:
         return {"written": None, "passed": False, "error": report["summary"]}
     target_dir = Path(out_dir) if out_dir else repo

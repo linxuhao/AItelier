@@ -143,6 +143,81 @@ def test_an_unreadable_row_is_not_reconciled_on_a_guess(monkeypatch):
     assert _repo_type_writes(db) == []
 
 
+# ── A REFUSED launch must not rewrite the row ─────────────────────────────
+#
+# The reconcile is one-way: nothing ever puts `repo_type='none'` back. So a
+# refusal that happens AFTER it has written has stripped the project id of its
+# repo-less status permanently, while launching nothing.
+
+
+def test_a_launch_refused_for_a_missing_cross_config_input_writes_nothing(
+        monkeypatch):
+    """`missing_cross_config_inputs` refuses before any workspace exists.
+
+    Reconciling ahead of it would rewrite the row of a project that then gets no
+    run, no `setup_workspace`, and no repository — and, the reconcile being
+    one-way, no way back."""
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    _patch_registry(monkeypatch, _manifest("dpe_default"))
+    import core.run_launcher as rl
+    monkeypatch.setattr(
+        rl, "missing_cross_config_inputs",
+        lambda sf, cfg, pid: [{"config": "meta_conversation", "step": "finalize",
+                               "output": "step1_goals.json", "reader": "1"}])
+
+    res = start_config_run(db, ws, "dpe_default", "p", repo_type="new")
+
+    assert res["status"] == "error", res
+    assert _repo_type_writes(db) == [], (
+        "a refused launch rewrote repo_type; the project id is now permanently "
+        "off the repo-less path with nothing to put it back")
+    assert ws.setup_workspace.call_count == 0
+
+
+def test_a_launch_that_setup_workspace_rejects_writes_nothing(monkeypatch):
+    """`repo_type='existing'` with no `repo_path` — `setup_workspace` raises.
+
+    Same tail as above: the row flips, then nothing is built."""
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    ws.setup_workspace.side_effect = ValueError(
+        "repo_path is required for repo_type='existing'")
+    _patch_registry(monkeypatch, _manifest("dpe_default"))
+
+    import pytest
+    with pytest.raises(ValueError):
+        start_config_run(db, ws, "dpe_default", "p", repo_type="existing")
+
+    assert _repo_type_writes(db) == [], (
+        "the row was reconciled to 'existing' for a repository that was never "
+        "set up")
+
+
+def test_the_reconcile_still_happens_on_the_brief_seeding_path(monkeypatch):
+    """The DPE brief path returns before the generic one, so it needs its own
+    call — otherwise the ordinary butler-driven build never reconciles."""
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    _patch_registry(monkeypatch,
+                    _manifest("dpe_default", seed_file="project_brief.md"))
+    import core.project_submit as ps
+    monkeypatch.setattr(ps, "seed_and_trigger",
+                        lambda *a, **k: {"status": "submitted"})
+
+    start_config_run(db, ws, "dpe_default", "p", repo_type="new",
+                     seed_inputs={"brief": {"goal": "x"}})
+
+    assert _repo_type_writes(db) == ["new"]
+    assert ws.setup_workspace.call_count == 1
+
+
 # ── …and the write must reach the row ─────────────────────────────────────
 
 def test_update_project_actually_persists_repo_type_and_path(db_manager):

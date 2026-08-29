@@ -340,12 +340,19 @@ class PromptAssembler:
         :return: 结构化提示词字符串
         """
         # `code_path is None` means "this run declares no code repository"
-        # (WorkspaceManager.get_code_path). It used to fall back to
-        # `project_path`, which is the DPS WORKSPACE — so every agent step of
-        # every repo-less run was shown its own step directories under
-        # `_build_workspace_tree`'s "# repo root (write paths are relative to
-        # here…)" heading. Passed through untouched; the tree builder omits the
-        # repo block entirely.
+        # (WorkspaceManager.get_code_path). Passed through untouched; the tree
+        # builder omits the repo block entirely.
+        #
+        # The `if code_path is None: code_path = project_path` that stood here
+        # was removed rather than fixed. It never ran: until `get_code_path`
+        # learned the None answer — in this same body of work — it ended in
+        # `mkdir` + `return code_path` and could not return None, and the only
+        # caller (`core/dpe_pipeline.py`) passes exactly that. So this is an
+        # unreachable fallback deleted before the newly-created None path could
+        # reach it, NOT a bug anyone observed. Had it stayed, it would have
+        # substituted the DPS WORKSPACE for the repo and rendered the run's own
+        # step directories under `_build_workspace_tree`'s "# repo root (write
+        # paths are relative to here…)" heading.
 
         sections = [""]
 
@@ -639,8 +646,11 @@ class PromptAssembler:
         :param step_id: 当前步骤 ID
         :param for_red: 是否为 Red Agent 构建
         :param code_path: Project 代码仓库路径; None = 这个 run 没有代码仓库,
-            不渲染 repo 块 (旧代码在这里回落到 project_path, 于是把 DPS
-            workspace 挂在 "# repo root" 标题下给 agent 看)
+            不渲染 repo 块。这里原本有一句 `code_path = project_path` 的回落,
+            但在 `get_code_path` 学会返回 None 之前它永远走不到 (改动之前该函数
+            以 mkdir + return 结尾), 所以是删掉一段死代码, 不是修一个出过事的
+            bug —— 只是若留着, 新的 None 路径就会把 DPS workspace 挂在
+            "# repo root" 标题下给 agent 看
         :return: 目录树字符串，为空则返回 ""
         """
         BLOCKED = {".git", "__pycache__", ".venv", "node_modules", ".gitkeep", "_snapshot.json"}

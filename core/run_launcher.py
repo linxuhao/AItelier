@@ -122,36 +122,6 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
                           repo_type=eff_repo_type, repo_path=rpath,
                           repo_url=repo_url, config_name=config_name)
     else:
-        # Reconcile a stored `repo_type: none` when THIS config produces code.
-        #
-        # `eff_repo_type` was computed above and then only ever reached
-        # `ensure_project`, which no-ops on an existing row — so a project id
-        # first used by a `repo_mode: none` config (pipeline_forge, a converter,
-        # a generated pipeline derived `none`) kept `repo_type='none'` forever.
-        # That was cosmetic until `get_code_path` started answering None for it:
-        # a later `dpe_default` run on the same id now gets no code path, no repo
-        # read layer, and dies at the first `on_deliver: repo_apply` — while
-        # `setup_workspace` below has git-init'd a real repository at exactly the
-        # path the row refuses to name.
-        #
-        # ONE-WAY, deliberately. Upgrading 'none' → a real type restores a
-        # repository the run is about to create anyway. The reverse — a
-        # `repo_mode: none` run stamping 'none' onto a project that HAS code —
-        # would take the repository away from the build that owns the id, and is
-        # the shape `against_project` produces (a repo-less run pointed at a real
-        # repo to read). So a repo-less run never rewrites the row.
-        if eff_repo_type != "none":
-            try:
-                _stored = db.get_repo_info(project_id)
-            except Exception:
-                _stored = None
-            if _stored and (_stored.get("repo_type") or "") == "none":
-                _rp = repo_path or _stored.get("repo_path")
-                if eff_repo_type in ("new", "clone") and not _rp:
-                    from core.datadir import projects_dir
-                    _rp = str(projects_dir() / project_id)
-                db.update_project(project_id, repo_type=eff_repo_type,
-                                  repo_path=_rp)
         if manifest.scheduler_owned:
             # Point config_name at THIS config. It was only ever set at
             # creation, so a project created by one config and then run under
@@ -175,6 +145,52 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     if priority:
         db.update_project(project_id, priority=priority)
 
+    def _reconcile_repo_type() -> None:
+        """Upgrade a stored ``repo_type='none'`` once THIS config's repo exists.
+
+        ``eff_repo_type`` was computed above and then only ever reached
+        ``ensure_project``, which no-ops on an existing row — so a project id
+        first used by a ``repo_mode: none`` config (pipeline_forge, a converter,
+        a generated pipeline derived ``none``) kept ``repo_type='none'`` forever.
+        That was cosmetic until ``get_code_path`` started answering None for it:
+        a later ``dpe_default`` run on the same id then gets no code path, no
+        repo read layer, and dies at the first ``on_deliver: repo_apply`` — while
+        ``setup_workspace`` has git-init'd a real repository at exactly the path
+        the row refuses to name.
+
+        ONE-WAY, deliberately. Upgrading 'none' → a real type restores a
+        repository the run has just created. The reverse — a ``repo_mode: none``
+        run stamping 'none' onto a project that HAS code — would take the
+        repository away from the build that owns the id, and is the shape
+        ``against_project`` produces (a repo-less run pointed at a real repo to
+        read). So a repo-less run never rewrites the row.
+
+        Called only AFTER ``setup_workspace`` has succeeded, which is what makes
+        the write safe rather than a guess: the repository the new ``repo_type``
+        names exists by then. Being one-way, a write here cannot be undone by
+        this function, so a guard that runs BEFORE the workspace must run before
+        the write too — otherwise a refused ``dpe_default`` launch against a
+        repo-less project id rewrites the row, launches nothing, and leaves every
+        protection the repo-less path provides switched off for that id with
+        nothing to switch it back. Two guards have that shape and both now
+        precede this call: ``missing_cross_config_inputs``, and
+        ``eff_repo_type == "existing"`` with no ``repo_path``, where
+        ``setup_workspace`` itself raises.
+        """
+        if eff_repo_type == "none":
+            return
+        try:
+            _stored = db.get_repo_info(project_id)
+        except Exception:
+            _stored = None
+        if _stored and (_stored.get("repo_type") or "") == "none":
+            _rp = repo_path or _stored.get("repo_path")
+            if eff_repo_type in ("new", "clone") and not _rp:
+                from core.datadir import projects_dir
+                _rp = str(projects_dir() / project_id)
+            db.update_project(project_id, repo_type=eff_repo_type,
+                              repo_path=_rp)
+
     # DPE (and its addon combos, e.g. dpe_game) keep the proven brief→step-1
     # seeding ritual — keyed on the DPE brief contract (seed_file), not a single
     # config name, so composed game pipelines seed the same way as the base.
@@ -182,6 +198,7 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     if manifest.seed_file == "project_brief.md" and isinstance(seed_inputs.get("brief"), dict):
         ws.setup_workspace(project_id, repo_type=seed_inputs.get("repo_type", repo_type),
                            repo_path=repo_path, repo_url=repo_url)
+        _reconcile_repo_type()
         from core.project_submit import seed_and_trigger
         result = seed_and_trigger(db, ws, project_id, seed_inputs["brief"])
         result.setdefault("config_name", config_name)
@@ -226,6 +243,7 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
     ws.setup_workspace(project_id, repo_type=eff_repo_type,
                        repo_path=repo_path, repo_url=repo_url)
+    _reconcile_repo_type()
 
     # Write seeds into the config's seed dir (read by the first step's
     # {from: config} context spec).

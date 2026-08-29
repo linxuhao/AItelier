@@ -469,17 +469,34 @@ class PipelineEngine:
             #
             # So the host does NOT rely on the engine here. What keeps a
             # repo-less run off the CWD on BOTH engine versions is the tool's own
-            # guard, and only the tools that have one are safe: `run_tests` and
-            # `repo_delete` refuse a non-absolute root; `scaffold`,
-            # `knowledge_sync`, `restage`, the novel tools and the godot tools do
-            # NOT (they resolve `project_root or workspace_root or "."`). None of
-            # those is reachable from a repo-less pipeline today: the only
-            # repo-less shape granting root-resolving tools is `tool_creation`
-            # (write/run_tests/pytest/register_tool/register_capability), and
-            # skillflow's own `read_file`/`list_tree` skip an empty root rather
-            # than resolving it. A generated pipeline that lists one of the
-            # others WOULD reach it — guard the tool before offering it to a
-            # `repo_mode: none` config.
+            # guard. Audited 2026-08-29, every AItelier tool that resolves a root:
+            #
+            #   GUARDED (refuse or resolve to None instead of the CWD)
+            #     run_tests, repo_delete — refuse a non-absolute project_root
+            #     apply_state            — raises unless BOTH roots are absolute
+            #     restage, git_diff_capture — raise / error on a missing root
+            #     scaffold               — `… if (project_root or workspace_root)
+            #                               else None`
+            #     knowledge_sync         — `… if project_root else None`
+            #
+            #   UNGUARDED (`project_root or workspace_root or "."` → the CWD when
+            #   both are empty; `Path("")` → the CWD when there is no `or "."`)
+            #     continuity_check, state_probe            — read
+            #     godot_vision, godot_playtest,            — read the tree, and
+            #     godot_playtest_scenario, godot_compile     write their report
+            #                                                to out_dir or the
+            #                                                resolved root
+            #     ~/.AItelier/tools/md_link_check          — read
+            #
+            # None of the unguarded ones is reachable from a repo-less pipeline
+            # today: the only repo-less shape granting root-resolving tools is
+            # `tool_creation` (write/run_tests/pytest/register_tool/
+            # register_capability), and skillflow's own `read_file`/`list_tree`
+            # skip an empty root rather than resolving it. A generated pipeline
+            # that lists one of the unguarded tools WOULD reach it — guard the
+            # tool before offering it to a `repo_mode: none` config, and check
+            # this list against the tool rather than trusting it, since it is a
+            # snapshot.
             project_root=str(getattr(self, '_code_path', '') or ''),
         )
 

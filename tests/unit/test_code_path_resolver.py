@@ -85,10 +85,18 @@ def test_a_row_holding_both_answers_keeps_its_repo(db):
 
     Testing `repo_type` first answered False for those and took the repository
     away — from the one run shape whose entire purpose is to look at it.
+
+    Also the counter-example to "a `repo_mode: none` run gets no repo layer at
+    all": it gets one whenever a `repo_path` is recorded, whatever `repo_type`
+    says. `core/pipeline_registry.py`'s `_REPO_TOOLS` comment reasons about that
+    claim, so keep the two in step.
     """
     db({"repo_type": "none", "repo_path": "/repos/jinyong-assets",
         "repo_url": None})
-    assert deps._existing_repo_code_path("p") == "/repos/jinyong-assets"
+    assert deps._existing_repo_code_path("p") == "/repos/jinyong-assets", (
+        "a recorded repo_path no longer wins over repo_type='none' — the "
+        "against_project shape just lost its repository, and the comment in "
+        "core/pipeline_registry.py is now wrong the other way")
 
 
 # ── The host's own answer must match the one it gives skillflow ───────────

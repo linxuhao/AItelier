@@ -177,7 +177,9 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
         Called LAST on each branch — after ``setup_workspace`` (so the repository
         the new ``repo_type`` names exists) and after every path that can still
-        refuse, immediately before the success return. Being one-way, a write
+        refuse. Last that can DECIDE anything, not literally the last statement:
+        on the generic branch ``wake_scheduler`` still runs between this and the
+        return, and it cannot refuse a launch. Being one-way, a write
         here cannot be undone, so a launch that rewrites the row and then bails
         leaves the repo-less protections switched off for that project id with
         nothing to switch them back on.

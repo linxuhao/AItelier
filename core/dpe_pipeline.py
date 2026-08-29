@@ -472,26 +472,38 @@ class PipelineEngine:
             # guard — and which tools have one is NOT listed here. It was, and
             # the list was wrong: it claimed to cover "every AItelier tool that
             # resolves a root" and omitted four (capability_declarations_known,
-            # gdscript_check, user_stories_present, tasks_manifest_complete, all
-            # `Path(workspace_root or ".")`). A prose list of 27 tools cannot
-            # stay true across a release, and a reader who guards the tools it
-            # names inherits its omissions.
+            # gdscript_check, user_stories_present, and tasks_manifest_complete —
+            # the first three `Path(workspace_root or ".")`, the last
+            # `Path(workspace_root or step_dir or … or ".")`). A prose list of 27
+            # tools cannot stay true across a release, and a reader who guards
+            # the tools it names inherits its omissions.
             #
-            # The list lives in tests/unit/test_tool_root_guard_inventory.py,
-            # where it is COMPLETE BY CONSTRUCTION: the test enumerates every
-            # tool whose entry point declares `project_root`/`workspace_root` and
-            # fails until each one is classified guarded / unguarded / does-not-
-            # resolve. Adding a tool that takes a root is therefore a deliberate
-            # classification, not a silent omission.
+            # Two inventories carry it instead, both COMPLETE BY CONSTRUCTION:
             #
-            # The conclusion that matters here: none of the unguarded ones is
-            # reachable from a repo-less pipeline today. The only repo-less shape
-            # granting root-resolving tools is `tool_creation`
-            # (write/run_tests/pytest/register_tool/register_capability), and
-            # skillflow's own `read_file`/`list_tree` skip an empty root rather
-            # than resolving it. A generated pipeline that lists an unguarded
-            # tool WOULD reach it — guard the tool before offering it to a
-            # `repo_mode: none` config.
+            #   * tests/unit/test_tool_root_guard_inventory.py enumerates every
+            #     tool under aitelier/tools/ whose entry point declares
+            #     `project_root`/`workspace_root` and fails until each is
+            #     classified guarded / unguarded / does-not-resolve;
+            #   * tests/unit/test_a_capability_grant_survives_the_deployed_engine.py
+            #     covers the half the first one cannot see. A NATIVE skillflow
+            #     tool's guard ships with the PyPI package, not with this repo,
+            #     so this host cannot assert anything about it — the container
+            #     runs whatever version `pip install` resolved (1.5.46 today,
+            #     whose `pytest` has no guard). That test therefore forbids
+            #     granting a native root-resolving tool at all, rather than
+            #     trusting a guard it cannot deploy.
+            #
+            # The conclusion that matters here: no repo-less pipeline reaches an
+            # unguarded root-resolver today. The only repo-less shape granting
+            # root-resolving tools is `tool_creation`
+            # (write/run_tests/register_tool/register_capability): `write` never
+            # reaches ToolLoader (the engine's write path claims the name first),
+            # `run_tests` refuses a non-absolute project_root, and the two
+            # register_* tools declare no root. skillflow's own
+            # `read_file`/`list_tree` skip an empty root rather than resolving
+            # it. A generated pipeline that lists an unguarded tool WOULD reach
+            # one — guard the tool before offering it to a `repo_mode: none`
+            # config.
             project_root=str(getattr(self, '_code_path', '') or ''),
         )
 

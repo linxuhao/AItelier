@@ -18,6 +18,13 @@ takes_a_root_is_classified` enumerates every tool whose entry point declares
 of the three tables below. A new tool that takes a root cannot be omitted; it can
 only be classified.
 
+This file covers `aitelier/tools/` ONLY. skillflow's native tools are the other
+half and cannot be classified here at all: their guards ship in the `skillflow-py`
+wheel, so what the running engine does with a missing root depends on the version
+`pip install` resolved, not on anything in this checkout. That half is
+`test_a_capability_grant_survives_the_deployed_engine.py`, which forbids granting
+a native root-resolving tool rather than trusting a guard it cannot deploy.
+
 The UNGUARDED table is CHARACTERIZATION, not endorsement — pinned so the hazard
 is visible, and so that adding a guard is a deliberate change with a failing test
 rather than a silent one. The behavioural spot-checks further down are the proof

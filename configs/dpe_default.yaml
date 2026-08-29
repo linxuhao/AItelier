@@ -1,7 +1,12 @@
 # configs/dpe_default.yaml — v2 graph config
 # All agents (research, architect, PM, tasks, final verify) are explicit nodes.
 # Reviewers are separate nodes with loop-back transitions on fail.
-# Tool nodes (repo_apply, repo_validate) handle code integration.
+# Code integration is a `lifecycle: on_deliver` HOOK (repo_apply), never a node:
+# every repo_apply in this file hangs off a step's on_deliver, so the step that
+# wrote the files is the one that commits them. (repo_validate is not used here
+# at all.) There ARE tool nodes below — git_sync_pre, task_budget_check,
+# run_tests, knowledge_sync, git_push_post — but code integration is not what
+# any of them does.
 
 name: "dpe_default_v2"
 description: "AItelier DPE: Research → Architect → PM → Task Loop → Verify"

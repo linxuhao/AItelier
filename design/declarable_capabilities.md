@@ -34,7 +34,8 @@ overlay). So a game run pays for it twice, and a non-game run pays for it once f
   `context_provider(config_name) -> dict` as **kwargs on every tool call the step makes**
   (all four invocation paths);
 - registered today: `stateful` (hands a tool its durable `state_dir`), `tool_creation`
-  (grants write/pytest/register_tool to the forge's tool-build step).
+  (grants write/run_tests/register_tool/register_capability to the forge's
+  tool-build step).
 
 Four gaps between that and what this design needs:
 

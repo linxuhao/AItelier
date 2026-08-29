@@ -234,7 +234,8 @@ def get_skillflow():
         # purpose. `stateful` gives a persisting tool a durable, per-config,
         # MOUNTED state_dir (survives across runs AND container recreation) — it
         # replaces a generated tool hardcoding an un-mounted ~/.aitelier path.
-        # `tool_creation` grants a tool-building step the register/test toolset.
+        # `tool_creation` grants a tool-building step the authoring/registration
+        # toolset.
         # Every definition goes through core.capability_registry, which holds the
         # invariants (a grant's tools must resolve; a name is owned; an offered
         # capability cannot be archived) — the same reason core/model_registry.py
@@ -268,16 +269,41 @@ def get_skillflow():
                      context_provider=lambda cfg: {
                          "state_dir": str(sf._workspace.state_dir(cfg))})
         _must_define(name="tool_creation", owner="host",
-                     briefing="Lets this step author, self-test and register a "
-                              "new tool. Build and test before registering: a "
-                              "registered tool that does not import is granted "
-                              "to later steps and silently resolves to nothing.",
+                     briefing="Lets this step author and register a new tool. "
+                              "Registration is the import check: `register_tool` "
+                              "loads the module the way ToolLoader will and "
+                              "refuses to publish one that does not import, so "
+                              "nothing broken reaches a later step. Write the "
+                              "test file alongside the impl — it ships with the "
+                              "tool and runs later; this step cannot execute it.",
                      # register_capability alongside register_tool: a tool that
                      # needs framework-chosen state (or that only some loop items
                      # should carry) has nowhere to attach without a capability,
                      # and a maker with no way to declare one writes the grant by
                      # hand onto a role instead.
-                     tools=["write", "run_tests", "pytest", "register_tool",
+                     #
+                     # NO `pytest`. It was granted here so the step could
+                     # self-test, and it cannot: `pytest` resolves its `file`
+                     # against `workspace_root`, which the engine fills from
+                     # `project_root` — the CODE REPOSITORY — while the file the
+                     # step just wrote is in the step's STAGING dir, reported
+                     # back as a workspace-relative path. There is no argument
+                     # the agent can pass that reaches it.
+                     #
+                     # Worse, granting it is unsafe on a deployed engine we do
+                     # not control. skillflow's `pytest` is a NATIVE tool, so its
+                     # guard ships with the PyPI package, not with this repo: the
+                     # container currently runs 1.5.46, whose body is
+                     # `full = (Path(workspace_root) / file).resolve()` with no
+                     # guard at all. `tool_creation` is held by pipeline_forge's
+                     # `t_tool_impl`, and pipeline_forge is `repo_mode: none`, so
+                     # `_exec_tool` sends `project_root=""` and 1.5.46 copies that
+                     # into `workspace_root` — making the root `/app`, the
+                     # bind-mounted AItelier checkout. Execution still needs
+                     # `full.exists()`, so a hit needs a name collision, but the
+                     # ROOT is already wrong. See
+                     # tests/unit/test_a_capability_grant_survives_the_deployed_engine.py
+                     tools=["write", "run_tests", "register_tool",
                             "register_capability"])
         # game_assets: the tools AND the discipline that keeps their output
         # usable. Both used to ride on every DPE implementer — measured across

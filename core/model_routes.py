@@ -78,6 +78,14 @@ class ModelRoutes:
         self._path = Path(path or default_routes_file())
         self._routes: dict[str, list[str]] = {}
         self._rot_n: dict[str, int] = {}    # route -> size of its rotate pool
+        # route -> {endpoint: reasoning-effort string}. Per ENDPOINT because the
+        # vocabularies are not shared: DeepSeek takes low/high/max while
+        # Qwen3.8's chat template takes low/medium/xhigh and RAISES on anything
+        # else ("Unexpected reasoning effort max" — a 500, measured on
+        # localqwen/qwen3 2026-08-29). One internal model now spans both, so the
+        # role cannot name a string that is valid everywhere; the table states
+        # the concrete string each endpoint accepts.
+        self._effort: dict[str, dict[str, str]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -110,11 +118,20 @@ class ModelRoutes:
                 # turn); across steps only the system prompt is shared.
                 pool = candidates.get("rotate")
                 tail = candidates.get("fallback", [])
-                unknown = set(candidates) - {"rotate", "fallback"}
+                effort = candidates.get("effort", {})
+                unknown = set(candidates) - {"rotate", "fallback", "effort"}
                 if unknown:
                     raise RuntimeError(
                         f"{self._path}: route '{name}' has unknown key(s) "
-                        f"{sorted(unknown)} — only 'rotate' and 'fallback'")
+                        f"{sorted(unknown)} — only 'rotate', 'fallback' "
+                        f"and 'effort'")
+                if not isinstance(effort, dict) or not all(
+                        isinstance(k, str) and isinstance(v, str)
+                        for k, v in effort.items()):
+                    raise RuntimeError(
+                        f"{self._path}: route '{name}': 'effort' must map "
+                        f"'provider/model' to an effort string")
+                self._effort[name] = dict(effort)
                 if (not isinstance(pool, list) or not pool
                         or not isinstance(tail, list)):
                     raise RuntimeError(
@@ -137,6 +154,16 @@ class ModelRoutes:
                         f"{self._path}: route '{name}' candidate {c!r} names "
                         f"another route; candidates must be concrete")
             self._routes[name] = list(candidates)
+
+    def effort_for(self, model_name: str, endpoint: str) -> str | None:
+        """The reasoning effort this route wants ON THIS ENDPOINT, or None.
+
+        None means "the table says nothing", and the caller keeps whatever the
+        role asked for — which is what every route did before this key existed.
+        Declaring it is how an endpoint with a different effort vocabulary joins
+        a model without the role having to know that vocabulary.
+        """
+        return (self._effort.get(model_name) or {}).get(endpoint)
 
     def resolve(self, model_name: str, rotate: bool = False) -> list[str]:
         """Candidates for `model_name`, best first.

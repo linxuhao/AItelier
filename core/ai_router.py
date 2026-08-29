@@ -314,6 +314,7 @@ class AIGateway:
         # config that has not opted in. See core/model_routes.py.
         from core.model_routes import get_routes
         self.internal_model = model_name
+        self._routes_path = routes_path
         self._candidates = get_routes(routes_path).resolve(model_name, rotate=True)
         self._failovers: list[tuple[str, str]] = []   # (from_model, why)
         self._burst_hits = 0
@@ -933,7 +934,32 @@ class AIGateway:
                 extra_body["reasoning_split"] = True
             else:
                 extra_body["thinking"] = {"type": "enabled"}
-            if self.thinking_effort:
+            # The route table may state the effort FOR THIS ENDPOINT, and it
+            # wins over the role's: the role names one string for an internal
+            # model that now spans endpoints whose vocabularies do not overlap.
+            # DeepSeek takes low/high/max; Qwen3.8's chat template takes
+            # low/medium/xhigh and RAISES on anything else — `max` comes back a
+            # 500 ("Unexpected reasoning effort max"), measured on
+            # localqwen/qwen3. Resolved HERE rather than at construction because
+            # a failover rebinds mid-step, and the new endpoint may want a
+            # different string for the same intent.
+            from core.model_routes import get_routes
+            effort = self.thinking_effort
+            try:
+                per_endpoint = get_routes(self._routes_path).effort_for(
+                    self.internal_model or "", self.active_model or "")
+            except (RuntimeError, OSError, ValueError):
+                # An unreadable or malformed TABLE must not break the call —
+                # the role's value stands and the request still goes out.
+                # Deliberately NOT `except Exception`: the first draft of this
+                # caught everything, and the local import of get_routes lives
+                # in __init__, so line 948 raised NameError on every call and
+                # the swallow turned it into "the route never declares an
+                # effort". The tests failed with no error to read.
+                per_endpoint = None
+            if per_endpoint:
+                effort = per_endpoint
+            if effort:
                 # ALWAYS through extra_body, never as a top-level param.
                 #
                 # Two independent reasons, one per provider family:
@@ -956,7 +982,7 @@ class AIGateway:
                 #     non-DeepSeek model.
                 #
                 # extra_body is forwarded verbatim, which sidesteps both.
-                extra_body["reasoning_effort"] = self.thinking_effort
+                extra_body["reasoning_effort"] = effort
             kwargs["extra_body"] = extra_body
         return kwargs
 

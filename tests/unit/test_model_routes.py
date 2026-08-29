@@ -680,3 +680,77 @@ def test_an_exhausted_model_names_its_own_endpoints_on_the_error(
     with pytest.raises(Exception) as ei:
         g.generate_native([{"role": "user", "content": "hi"}])
     assert getattr(ei.value, "_aitelier_candidates", None) == ["alpha/m-1"]
+
+
+# ── per-endpoint reasoning effort ────────────────────────────────────────
+#
+# One internal model now spans endpoints whose effort vocabularies do not
+# overlap: DeepSeek takes low/high/max, Qwen3.8's chat template takes
+# low/medium/xhigh and RAISES on anything else — `max` came back HTTP 500
+# ("Unexpected reasoning effort max", measured on localqwen/qwen3 2026-08-29).
+# So the string cannot live only on the role; the route states what each
+# endpoint accepts.
+
+
+def _effort_wiring(tmp_path, monkeypatch, effort_map):
+    providers = tmp_path / "llm_providers.json"
+    providers.write_text(json.dumps(PROVIDERS), encoding="utf-8")
+    routes = tmp_path / "model_routes.json"
+    # rotate pool of ONE so the binding is deterministic: the rotation counter
+    # is process-wide, so a two-endpoint pool makes each test's binding depend
+    # on how many tests ran before it.
+    routes.write_text(json.dumps({
+        "model_a": {"rotate": ["alpha/m-1"], "fallback": ["beta/m-1"],
+                    "effort": effort_map},
+    }), encoding="utf-8")
+    monkeypatch.setenv("ALPHA_KEY", "a")
+    monkeypatch.setenv("BETA_KEY", "b")
+    model_routes.reset_cache()
+    return str(providers), str(routes)
+
+
+def test_route_effort_overrides_the_role(tmp_path, monkeypatch):
+    w = _effort_wiring(tmp_path, monkeypatch, {"alpha/m-1": "xhigh"})
+    g = gw(w, "model_a", enable_thinking=True, thinking_effort="max")
+    kwargs = g._apply_binding({})
+    assert kwargs["extra_body"]["reasoning_effort"] == "xhigh", (
+        "the role names one string for a model that spans vocabularies; the "
+        "endpoint's own is the only one it is guaranteed to accept")
+
+
+def test_role_effort_stands_where_the_route_is_silent(tmp_path, monkeypatch):
+    """Absent key = the behaviour every route had before it existed. Routes
+    whose endpoints share a vocabulary must not have to declare anything."""
+    w = _effort_wiring(tmp_path, monkeypatch, {"beta/m-1": "medium"})
+    g = gw(w, "model_a", enable_thinking=True, thinking_effort="max")
+    assert g._apply_binding({})["extra_body"]["reasoning_effort"] == "max"
+
+
+def test_effort_follows_a_failover(tmp_path, monkeypatch):
+    """Resolved at binding time, not construction: a failover rebinds mid-step
+    and the new endpoint may want a different string for the same intent."""
+    w = _effort_wiring(tmp_path, monkeypatch,
+                       {"alpha/m-1": "xhigh", "beta/m-1": "max"})
+    g = gw(w, "model_a", enable_thinking=True, thinking_effort="low")
+    assert g._apply_binding({})["extra_body"]["reasoning_effort"] == "xhigh"
+    assert g._failover(litellm.exceptions.ServiceUnavailableError(
+        "down", model="m-1", llm_provider="alpha"))
+    assert g._apply_binding({})["extra_body"]["reasoning_effort"] == "max"
+
+
+def test_an_unknown_route_key_is_still_rejected(tmp_path):
+    """Adding `effort` must not turn the dict form into a place typos hide."""
+    routes = tmp_path / "model_routes.json"
+    routes.write_text(json.dumps(
+        {"model_a": {"rotate": ["alpha/m-1"], "effrot": {}}}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="unknown key"):
+        model_routes.ModelRoutes(str(routes))
+
+
+def test_effort_must_map_endpoint_to_string(tmp_path):
+    routes = tmp_path / "model_routes.json"
+    routes.write_text(json.dumps(
+        {"model_a": {"rotate": ["alpha/m-1"], "effort": {"alpha/m-1": 3}}}),
+        encoding="utf-8")
+    with pytest.raises(RuntimeError, match="'effort' must map"):
+        model_routes.ModelRoutes(str(routes))

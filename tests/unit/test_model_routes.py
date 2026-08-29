@@ -153,6 +153,38 @@ def test_request_error_never_walks_the_list(wiring, monkeypatch):
     assert g.active_model == "alpha/m-1"
 
 
+def test_context_overflow_walks_to_a_bigger_window(wiring, monkeypatch, tmp_path):
+    """A SMALL endpoint's overflow is an endpoint property, not a request one.
+
+    The local llama.cpp endpoint serves 131k where the cloud candidates behind
+    it take far more, and 1.35% of measured flash calls are longer than that.
+    Refusing to walk would hard-fail those steps on the one endpoint that
+    cannot serve them, with usable candidates still queued.
+    """
+    import json as _json
+    cfg = _json.loads(pathlib.Path(wiring["providers"]).read_text()) \
+        if isinstance(wiring, dict) and "providers" in wiring else None
+    g = gw(wiring, "model_a")
+    # alpha declares a small window; beta declares none (= unbounded).
+    provs = _json.loads(open(g._config_path).read())
+    provs["alpha"]["max_input_tokens"] = 1000
+    open(g._config_path, "w").write(_json.dumps(provs))
+
+    seen = []
+
+    def fake(**kwargs):
+        seen.append(kwargs["model"])
+        if len(seen) == 1:
+            raise litellm.exceptions.ContextWindowExceededError(
+                "too long", model="m-1", llm_provider="alpha")
+        return _Resp()
+
+    monkeypatch.setattr(litellm, "completion", fake)
+    g.generate_native([{"role": "user", "content": "hi"}])
+    assert len(seen) == 2, "overflow on a small endpoint must reach a bigger one"
+    assert g.active_model == "beta/m-1"
+
+
 def test_binding_is_sticky_across_turns(wiring, monkeypatch):
     """Once failed over, later turns of the SAME step stay on the new endpoint.
 

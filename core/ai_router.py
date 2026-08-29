@@ -74,6 +74,31 @@ FAILOVER_EXCEPTIONS = (
     litellm.exceptions.Timeout,
     litellm.exceptions.NotFoundError,
 )
+# ContextWindowExceededError is deliberately NOT here. It is not an endpoint
+# outage, so walking the list blindly would replay a doomed request at every
+# provider. But it is not purely request-shaped either: a prompt that overflows
+# a 131k local endpoint fits the cloud candidates queued behind it. It gets its
+# own narrow walk (`_failover_context`) that only advances to a BIGGER window.
+
+
+def _endpoint_window(concrete: str, provs: dict | None) -> int | None:
+    """Declared input-token ceiling for `provider/model`, or None if unbounded.
+
+    Declared, never probed: the only honest source is the operator's own
+    registry. A missing key means "no declared ceiling", which is treated as
+    unbounded — the failure mode of guessing too small (refusing to walk to a
+    candidate that would have served the request) is worse than of guessing too
+    large (one wasted call that raises the same error again).
+    """
+    if not provs:
+        return None
+    prov = concrete.split("/", 1)[0]
+    v = (provs.get(prov) or {}).get("max_input_tokens")
+    try:
+        return int(v) if v else None
+    except (TypeError, ValueError):
+        return None
+
 
 
 # A 429 is two different failures wearing one exception class, and treating them
@@ -750,8 +775,17 @@ class AIGateway:
                     raise exc from e
                 self._apply_binding(kwargs)
                 continue
+            except litellm.exceptions.ContextWindowExceededError as e:
+                # Not an outage and not purely request-shaped — see
+                # _failover_context. Walk only to a bigger declared window;
+                # when there is none, this is a real request-shaped failure and
+                # raises like any other.
+                if not self._failover_context(e):
+                    raise self._explain_auth(e) from e
+                self._apply_binding(kwargs)
+                continue
             except Exception as e:
-                # Request-shaped failure (bad params, context overflow): every
+                # Request-shaped failure (bad params, unsupported args): every
                 # candidate would reject it identically.
                 raise self._explain_auth(e) from e
             # Stamp WHICH endpoint answered onto the usage record. That record
@@ -821,6 +855,47 @@ class AIGateway:
         print(f"[ai_router] failover {self.internal_model}: {failed} -> {nxt} "
               f"({type(exc).__name__}{held})", flush=True)
         return True
+
+    def _failover_context(self, exc: Exception) -> bool:
+        """Advance to a candidate whose declared window is BIGGER. Else False.
+
+        An overflow on a small endpoint is a property of the ENDPOINT, not of
+        the request: the local llama.cpp candidate serves 131k while the cloud
+        candidates behind it take far more, and 1.35% of measured flash calls
+        are longer than 131k. Hard-failing those steps on the one endpoint that
+        cannot serve them — with usable candidates still queued — is the bug
+        this exists to prevent.
+
+        Only bigger windows, never merely "the next one": an equal-or-smaller
+        candidate would reject the same prompt, so walking onto it converts one
+        clear error into N and spends quota proving what the registry already
+        said. A candidate with NO declared ceiling counts as bigger.
+        """
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                provs = json.load(f)
+        except (OSError, ValueError):
+            return False        # no registry to compare against — do not guess
+        here = _endpoint_window(self.active_model, provs)
+        failed = self.active_model
+        for i in range(self._candidate_ix + 1, len(self._candidates)):
+            w = _endpoint_window(self._candidates[i], provs)
+            if here is not None and w is not None and w <= here:
+                continue
+            if here is None:
+                # Already on an endpoint with no declared ceiling: nothing in
+                # the registry can be shown to be bigger, so stop rather than
+                # replay the prompt at a candidate that may be smaller.
+                return False
+            self._candidate_ix = i
+            nxt = self._candidates[i]
+            self._failovers.append(
+                (failed, f"{type(exc).__name__}: {str(exc)[:200]}"))
+            self._bind(nxt)
+            print(f"[ai_router] context-failover {self.internal_model}: "
+                  f"{failed} ({here}) -> {nxt} ({w or 'unbounded'})", flush=True)
+            return True
+        return False
 
     def _apply_binding(self, kwargs: dict) -> dict:
         """(Re)write the keys that depend on WHICH endpoint is bound.

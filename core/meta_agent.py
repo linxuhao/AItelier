@@ -2925,6 +2925,10 @@ class MetaAgent:
                     result = await runner.execute(claimed)
                     sf.confirm_step(claimed.token, result)
                     steps_run += 1
+                except asyncio.CancelledError:
+                    from core.run_driver import release_claim_on_cancel
+                    release_claim_on_cancel(sf, claimed)
+                    raise
                 except Exception as e:
                     try:
                         sf.fail_step(claimed.token, str(e)[:200], retryable=True)
@@ -3628,6 +3632,13 @@ class MetaAgent:
                     result = await runner.execute(claimed)
                     sf.confirm_step(claimed.token, result)
                     steps_run += 1
+                except asyncio.CancelledError:
+                    # The live case: jinyong-touch step `2` finished its work and
+                    # then sat claimed for 80 minutes because this loop's
+                    # `except Exception` cannot see a cancellation.
+                    from core.run_driver import release_claim_on_cancel
+                    release_claim_on_cancel(sf, claimed)
+                    raise
                 except Exception as e:
                     error_msg = str(e)[:200]
                     try:

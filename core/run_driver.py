@@ -47,6 +47,42 @@ DEFAULT_MAX_WATCH_S = 4 * 60 * 60
 
 _TERMINAL = ("completed", "failed")
 
+
+def release_claim_on_cancel(sf, claimed) -> None:
+    """Hand a claim back when the task driving it is cancelled.
+
+    Every driven step loop wraps execute+confirm in `except Exception` so a
+    failing step is failed rather than left claimed. `asyncio.CancelledError` is
+    a **BaseException** (3.8+), so that clause does not see it: a cancelled
+    driver — a client that disconnected, a request that timed out, a session
+    that ended — unwound straight past it, and the step stayed `claimed` with
+    nothing recorded anywhere.
+
+    Nothing else recovers that. skillflow's stale-claim reaper deliberately
+    refuses to reclaim a claim whose owner PROCESS is alive, and the owner of a
+    butler-driven step is the server itself, which never dies. So the row stays
+    claimed for the life of the container, the poller reports `active_claim`
+    every tick forever, and the run never advances again.
+
+    Live 2026-08-29, jinyong-touch step `2`: the agent had already FINISHED —
+    `finish_step` returned completed at 13:54:40 and both output files were
+    staged — when its driver went away. The step sat claimed for 80+ minutes
+    with the work done and 1105 consecutive `active_claim` ticks behind it.
+
+    Best-effort by design: this runs while a cancellation is propagating, and
+    raising here would replace the cancellation with a less useful error. The
+    caller MUST re-raise — swallowing a cancellation is its own bug.
+    """
+    try:
+        sf.fail_step(claimed.token, "driver cancelled before the step was "
+                                    "confirmed", retryable=True)
+    except Exception:                                            # noqa: BLE001
+        import logging
+        logging.getLogger("aitelier").warning(
+            "could not release claim on step %s after cancellation; it will "
+            "stay claimed until the process restarts",
+            getattr(claimed, "step_id", "?"), exc_info=True)
+
 # How long the finest-grained liveness signal may sit unchanged before the
 # summary stops calling the run healthy.
 #
@@ -286,6 +322,9 @@ async def _step(sf, db, ws, run_id: str, auto_approve: bool, max_steps: int) -> 
         try:
             result = await runner.execute(claimed)
             sf.confirm_step(claimed.token, result)
+        except asyncio.CancelledError:
+            release_claim_on_cancel(sf, claimed)
+            raise
         except Exception as e:
             # Retry once, then let it fail: a step that fails identically forever
             # would otherwise eat the whole step budget and report "did not

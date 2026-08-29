@@ -918,7 +918,18 @@ def reject_checkpoint(
     # set checkpoint_reject_to == themselves, so this is a no-op for them.
     from core.run_driver import checkpoint_reject_target
     redirect_to = checkpoint_reject_target(sf, _graph, step_id)
-    sf.reject_checkpoint(run_id, step_id, request.feedback, redirect_to=redirect_to)
+    try:
+        sf.reject_checkpoint(run_id, step_id, request.feedback,
+                             redirect_to=redirect_to)
+    except Exception as e:
+        # `redirect_to` is computed from the CURRENT graph while the run
+        # executes the version it started with, so a config edited since the
+        # run began can name a step the run's version does not have. The engine
+        # refuses (rolling back cleanly — the run stays paused and a later valid
+        # reject still works), and without this the refusal reached the browser
+        # as a bare 500 with its actionable message swallowed. The other two
+        # callers of reject_checkpoint already report the reason.
+        raise HTTPException(status_code=409, detail=str(e))
 
     from core.scheduler import wake_scheduler
     import asyncio, json, time

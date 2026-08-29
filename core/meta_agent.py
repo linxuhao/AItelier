@@ -4791,12 +4791,29 @@ class MetaAgent:
         rows = suggestions.list_for(
             (args.get("target") or "").strip() or None,
             None if status == "all" else status)
-        stale = [r["id"] for r in rows if r.get("stale_base")]
+        # THREE buckets. `stale_base` is tri-state — None means the engine could
+        # not read a version, which is not the same as "not stale" and must not
+        # be bucketed with it. A plain truthiness filter did exactly that, so
+        # the whole point of making it tri-state never reached the agent: on an
+        # engine with no version history every suggestion is None, and the tool
+        # description says a suggestion "marked stale_base" is the stale one —
+        # leaving `null` to read as reassurance.
+        stale = [r["id"] for r in rows if r.get("stale_base") is True]
+        unknown = [r["id"] for r in rows if r.get("stale_base") is None]
         out = {"count": len(rows), "suggestions": rows}
+        notes = []
         if stale:
-            out["note"] = (f"{len(stale)} written against an older version "
-                           f"({', '.join(stale)}) — re-read each against the "
-                           f"config as it is now before acting on it.")
+            notes.append(f"{len(stale)} written against an older version "
+                         f"({', '.join(stale)}) — re-read each against the "
+                         f"config as it is now before acting on it.")
+        if unknown:
+            notes.append(f"{len(unknown)} could not be checked for staleness "
+                         f"({', '.join(unknown)}): this engine reports no "
+                         f"config versions, so 'not stale' is unknown here, "
+                         f"not established. Read each against the current "
+                         f"config yourself.")
+        if notes:
+            out["note"] = " ".join(notes)
         return out
 
     async def _tool_resolve_pipeline_suggestion(self, args: dict) -> dict:
@@ -4809,10 +4826,14 @@ class MetaAgent:
                              "rejection is indistinguishable from tidying the "
                              "finding away."}
         rv = args.get("result_version")
+        try:
+            rv = int(rv) if rv is not None and rv != "" else None
+        except (TypeError, ValueError):
+            return {"error": f"result_version must be a version number, got "
+                             f"{rv!r} — pipeline_versions lists them."}
         return suggestions.resolve(
             (args.get("suggestion_id") or "").strip(), status,
-            result_version=int(rv) if rv is not None else None,
-            note=note or None)
+            result_version=rv, note=note or None)
 
     async def _tool_replay_baseline(self, args: dict) -> dict:
         """Replay a generated pipeline or addon against its recorded baseline."""

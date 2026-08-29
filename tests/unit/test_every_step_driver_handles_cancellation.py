@@ -18,11 +18,22 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
-# core/scheduler.py belongs here. Leaving it out is how its loop stayed
-# unfixed while a test called "every step driver" passed: its handler caught
-# the cancellation, logged richly, and re-raised WITHOUT releasing the claim —
-# by an old deliberate "observe, no fix yet" decision that outlived its reason.
-_FILES = ["core/run_driver.py", "core/meta_agent.py", "core/scheduler.py"]
+
+# SCANNED, not listed. The first version of this file hardcoded two paths and
+# `core/scheduler.py` — which was leaking claims at the time — simply was not
+# among them, so a test named "every step driver" passed while one driver was
+# unfixed. A fixed list can only ever check the drivers someone remembered.
+_SCAN_DIRS = ("core", "api", "web_api", "aitelier")
+
+
+def _sources() -> list[Path]:
+    out = []
+    for d in _SCAN_DIRS:
+        root = _ROOT / d
+        if root.is_dir():
+            out += [p for p in sorted(root.rglob("*.py"))
+                    if "__pycache__" not in p.parts]
+    return out
 
 
 def _calls(node) -> set[str]:
@@ -102,12 +113,22 @@ def _reraises(node: ast.Try) -> bool:
                for n in ast.walk(ast.Module(body=h.body, type_ignores=[])))
 
 
-@pytest.mark.parametrize("rel", _FILES)
-def test_every_claim_holding_loop_handles_cancellation(rel):
-    tree = ast.parse((_ROOT / rel).read_text(encoding="utf-8"))
-    blocks = _claim_holding_trys(tree)
-    assert blocks, f"{rel}: found no claim-holding loop — has the shape moved?"
-    for b in blocks:
+def _all_claim_holding_loops() -> list[tuple[str, ast.Try]]:
+    out = []
+    for path in _sources():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:                      # not ours to police
+            continue
+        rel = str(path.relative_to(_ROOT))
+        out += [(rel, b) for b in _claim_holding_trys(tree)]
+    return out
+
+
+def test_every_claim_holding_loop_handles_cancellation():
+    found = _all_claim_holding_loops()
+    assert found, "found no claim-holding loop anywhere — has the shape moved?"
+    for rel, b in found:
         assert _releases(b), (
             f"{rel}:{b.lineno} awaits a step and confirms it, but its "
             f"cancellation path does not call release_claim_on_cancel. "
@@ -121,12 +142,21 @@ def test_every_claim_holding_loop_handles_cancellation(rel):
 
 
 def test_the_four_known_loops_are_all_seen():
-    """Pins the count. A refactor that collapses or moves one of these should
-    fail here and be re-read, not silently reduce what is checked."""
-    total = sum(len(_claim_holding_trys(
-        ast.parse((_ROOT / rel).read_text(encoding="utf-8")))) for rel in _FILES)
-    assert total == 4, (
-        f"expected the 4 claim-holding step loops (run_driver._step, "
+    """Pins WHICH loops exist, not just how many.
+
+    A new driver in a module nobody thought of is the failure this whole file
+    exists to catch, so the scan finding a fifth should stop the build and be
+    read — and so should a refactor that quietly removes one.
+    """
+    found = sorted(f"{rel}:{b.lineno}" for rel, b in _all_claim_holding_loops())
+    where = {f.split(":")[0] for f in found}
+    assert where == {"core/run_driver.py", "core/meta_agent.py",
+                     "core/scheduler.py"}, (
+        f"the set of files holding a claim across an await changed: {found}. "
+        f"A new one must call release_claim_on_cancel in its CancelledError "
+        f"handler; a vanished one should be confirmed intentional.")
+    assert len(found) == 4, (
+        f"expected 4 claim-holding step loops (run_driver._step, "
         f"meta_agent._run_meta_until_checkpoint, "
         f"meta_agent._run_pipeline_until_checkpoint, "
-        f"scheduler._run_skillflow_tick), found {total}")
+        f"scheduler._run_skillflow_tick), found {found}")

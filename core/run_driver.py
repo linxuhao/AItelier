@@ -186,7 +186,11 @@ def restore_retry_budget(sf, run_id: str) -> dict | None:
         for r in rows:
             sf._conn.execute(
                 "UPDATE skillflow_steps SET status = 'pending', retry_count = 0, "
-                "validation_retry_count = 0, version = version + 1, "
+                # `release_count` too: it is charged against the retry budget,
+                # so restoring the budget without clearing it leaves the step
+                # one cancellation away from spending the restored retries again.
+                "validation_retry_count = 0, release_count = 0, "
+                "version = version + 1, "
                 "claimed_at = NULL, claimed_by = NULL, "
                 "inputs_json = json_remove(COALESCE(inputs_json, '{}'), "
                 "'$._validation_error'), "

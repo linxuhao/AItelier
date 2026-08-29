@@ -856,9 +856,25 @@ def retry_project(
             # post-check keeps the guard working with the pinned skillflow too.)
             after = sf.get_run(run["id"]) or {}
             node = after.get("current_node")
-            if node and sf._get_resolver(
-                    after.get("graph_name", "")).get_node(node) is None:
-                with sf._conn:
+            # Against the graph the run is PINNED to. By name this guard could
+            # only ever FALSE-positive after pinning — the run executes the
+            # version that still has the node — and its remedy is destructive:
+            # it force-fails the run, so every later Retry re-enters the same
+            # branch and the run is permanently un-retryable through the API.
+            # Editing a config while a run sits failed is the documented forge
+            # loop, so this fired on ordinary work.
+            _pinned = getattr(sf, "_get_resolver_for_run", None)
+            _res = (_pinned(run["id"]) if _pinned
+                    else sf._get_resolver(after.get("graph_name", "")))
+            if node and _res.get_node(node) is None:
+                # `sf._lock` — this writes on the ENGINE's shared connection,
+                # whose `_tx` holds that lock across BEGIN IMMEDIATE…commit.
+                # Without it a request thread and a scheduler tick share one
+                # sqlite connection with two notions of "the transaction": this
+                # `with` can COMMIT a transaction the engine intended to roll
+                # back, or collide with "cannot start a transaction within a
+                # transaction".
+                with sf._lock, sf._conn:
                     sf._conn.execute(
                         "UPDATE skillflow_runs SET status = 'failed', "
                         "updated_at = datetime('now') WHERE id = ?", (run["id"],))

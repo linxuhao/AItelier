@@ -1705,7 +1705,9 @@ def _sync_project_status_to_db(project_id: str):
         # Derive a human-readable status label
         status = run["status"]
         if status == "paused" and current_step:
-            resolver = sf._get_resolver(run["graph_name"])
+            _p = getattr(sf, "_get_resolver_for_run", None)
+            resolver = (_p(run["id"]) if _p
+                        else sf._get_resolver(run["graph_name"]))
             # current_node is the step AFTER the checkpoint (e.g. the review step).
             # Find the actual checkpoint step among completed steps to get its label.
             label = current_step

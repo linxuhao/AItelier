@@ -3523,7 +3523,9 @@ class MetaAgent:
                         # Checkpoint — surface to user via the agent
                         label = run.get("current_node", "Checkpoint")
                         # Find the checkpoint step (last completed with checkpoint=True)
-                        resolver = sf._get_resolver(run["graph_name"])
+                        _p = getattr(sf, "_get_resolver_for_run", None)
+                        resolver = (_p(run_id) if _p
+                                    else sf._get_resolver(run["graph_name"]))
                         checkpoint_step_id = ""
                         checkpoint_data = None
                         for s in reversed(steps):
@@ -3768,7 +3770,9 @@ class MetaAgent:
             checkpoint_step_id = ""
             checkpoint_data = None
             try:
-                resolver = sf._get_resolver(run["graph_name"])
+                _p = getattr(sf, "_get_resolver_for_run", None)
+                resolver = (_p(run_id) if _p
+                            else sf._get_resolver(run["graph_name"]))
             except Exception:
                 resolver = None
             for s in reversed(steps):
@@ -4457,9 +4461,23 @@ class MetaAgent:
             return {"error": f"Run is not in a rejectable state (status: {run['status']}). "
                              f"Use get_pipeline_status to check."}
 
-        # Find the checkpoint step
+        # Find the checkpoint step, in the graph THIS RUN is pinned to.
+        #
+        # This is the line that decides which step gets rejected, and it
+        # resolved by name — so with a config edited while the run was paused
+        # the butler rejected a DIFFERENT step than the run is waiting on: an
+        # already-completed step got rewound and re-run, the user's feedback
+        # landed in that other agent's inputs, and the real checkpoint was never
+        # answered. `reject_checkpoint` accepts it because it only requires the
+        # named step be `completed`, never that it is the one paused at.
+        #
+        # The commit that fixed the HTTP path claimed the butler took that
+        # path's answer. It does not — it re-derives its own, three lines above
+        # the line that commit edited.
         steps = sf.get_steps(run_id)
-        resolver = sf._get_resolver(run["graph_name"])
+        _pinned = getattr(sf, "_get_resolver_for_run", None)
+        resolver = (_pinned(run_id) if _pinned
+                    else sf._get_resolver(run["graph_name"]))
         checkpoint_step_id = ""
         for s in reversed(steps):
             if s["status"] == "completed":
@@ -4972,7 +4990,9 @@ class MetaAgent:
         base = {"status": status, "run_id": run_id,
                 "steps_completed": len([s for s in steps if s["status"] == "completed"])}
         if status == "paused":
-            resolver = sf._get_resolver(run["graph_name"])
+            _p = getattr(sf, "_get_resolver_for_run", None)
+            resolver = (_p(run_id) if _p
+                        else sf._get_resolver(run["graph_name"]))
             checkpoint_step_id, label, data = "", run.get("current_node", "Checkpoint"), None
             for s in reversed(steps):
                 if s["status"] == "completed":
@@ -5178,9 +5198,12 @@ class MetaAgent:
         # Inspect the base graph host-side: its anchors are the ONLY legal
         # injection points, so seed them (+ step ids + where each anchor leads)
         # for the converter agents, and the full graph dict for compose_validate.
+        # by-name-ok: `base` is the addon's BASE CONFIG being inspected for its
+        # anchors, not a graph any run is executing — there is no run here.
         graph = sf._graphs.get(base)
         if graph is None:
             try:
+                # by-name-ok: same base config, loaded if it is not cached.
                 graph = sf._get_resolver(base).graph
             except Exception:
                 graph = None

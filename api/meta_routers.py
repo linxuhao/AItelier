@@ -501,7 +501,8 @@ class CheckpointRejectionRequest(BaseModel):
 
 
 def _read_step_output(project_id: str, step_id: str,
-                      graph_name: str = "dpe_default_v2") -> Optional[dict]:
+                      graph_name: str = "dpe_default_v2",
+                      run_id: str = "") -> Optional[dict]:
     """Read step output files and rejection history from the workspace.
 
     ``graph_name`` must match the run's config — ``_final_dir`` lays out step
@@ -524,7 +525,8 @@ def _read_step_output(project_id: str, step_id: str,
 
     return {
         "files": files if files else None,
-        "rejection_history": _read_rejection_rounds(project_id, step_id, graph_name),
+        "rejection_history": _read_rejection_rounds(project_id, step_id,
+                                                    graph_name, run_id),
     }
 
 
@@ -549,7 +551,7 @@ _FEEDBACK_ROUND_RE = re.compile(r"^##[ \t]+\S+[ \t]+#\d+[ \t]*·", re.MULTILINE)
 
 
 def _read_rejection_rounds(project_id: str, step_id: str,
-                           graph_name: str) -> Optional[list]:
+                           graph_name: str, run_id: str = "") -> Optional[list]:
     """The user's own rejection feedback, for the checkpoint modal's banner.
 
     This used to read `user_rejection_history.json` out of the step's final dir.
@@ -572,7 +574,13 @@ def _read_rejection_rounds(project_id: str, step_id: str,
         sf = get_skillflow()
         target = step_id
         try:
-            node = sf._get_resolver(graph_name).get_node(step_id)
+            # Pinned when the caller knows the run: this picks WHICH feedback
+            # log to read, and its sibling three hundred lines down was already
+            # fixed — the two disagreeing is how the modal shows another step's
+            # rejection history, or none.
+            _p = getattr(sf, "_get_resolver_for_run", None)
+            _r = (_p(run_id) if (_p and run_id) else sf._get_resolver(graph_name))
+            node = _r.get_node(step_id)
             target = (node.checkpoint_reject_to or step_id) if node else step_id
         except Exception:
             pass
@@ -744,7 +752,8 @@ def get_pending_checkpoint(
     if not step_id:
         return CheckpointResponse()
 
-    step_output = _read_step_output(project_id, step_id, _graph or "dpe_default_v2")
+    step_output = _read_step_output(project_id, step_id,
+                                    _graph or "dpe_default_v2", _run_id)
 
     return CheckpointResponse(
         checkpoint=step_id,

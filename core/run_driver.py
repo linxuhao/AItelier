@@ -75,11 +75,12 @@ def release_claim_on_cancel(sf, claimed) -> None:
     counter and names the actual cause in `last_error` instead of blaming the
     step for what the client did.
 
-    It is not unlimited: on the third release of one step instance the engine
-    stops releasing and spends a single retry, so a driver that keeps dying
-    cannot re-run a step forever at full LLM cost. That still costs one retry —
-    the difference is one instead of three, and an error that says what
-    happened.
+    There is deliberately no cap. Charging repeated cancellations to the retry
+    budget, in any form, meant a step lost its resilience to real failures and
+    then died on the next genuine one. The engine counts releases in
+    `release_count` and warns every third; nothing terminates the step for
+    them. So a driver that keeps dying does keep re-running the step at full
+    LLM cost — that is the accepted price, and the warning is the signal.
 
     Best-effort by design: this runs while a cancellation is propagating, and
     raising here would replace the cancellation with a less useful error. The
@@ -192,29 +193,25 @@ def restore_retry_budget(sf, run_id: str) -> dict | None:
     ).fetchall()
     if not rows:
         return None
-    # `release_count` is charged against the retry budget, so restoring the
-    # budget without clearing it leaves the step one cancellation away from
-    # spending the restored retries again.
+    # `release_count` is deliberately NOT cleared here. It is no longer charged
+    # against the retry budget — a cancellation never spends a retry — so there
+    # is nothing to restore, and the count is the only surviving record that a
+    # step was repeatedly abandoned by its driver. Clearing it at exactly the
+    # moment an operator investigates that step erases the evidence, which is
+    # the mistake the previous shape of this code made in the engine.
     #
-    # Conditionally, because this is raw SQL from the HOST against the ENGINE's
-    # table and the two ship separately: AItelier is bind-mounted and live on
-    # the next container restart, while skillflow arrives from PyPI. Naming the
-    # column unconditionally broke resume outright on the deployed engine —
-    # `OperationalError: no such column: release_count` — for every failed run,
-    # with nothing red on the dev box where the editable checkout has it.
-    _extra = ""
-    try:
-        cols = {c[1] for c in sf._conn.execute(
-            "PRAGMA table_info(skillflow_steps)").fetchall()}
-        if "release_count" in cols:
-            _extra = "release_count = 0, "
-    except Exception:                                            # noqa: BLE001
-        pass
-    with sf._conn:
+    # `sf._lock` around the write: this is raw SQL on the ENGINE's shared
+    # connection, and `SkillFlow._tx` holds that lock across BEGIN IMMEDIATE …
+    # commit on the same connection. Without it a request thread and a
+    # scheduler tick hold one sqlite connection with two notions of "the
+    # transaction" — this `with` can COMMIT a transaction the engine meant to
+    # roll back (the validation-abort path), or the engine can hit "cannot
+    # start a transaction within a transaction".
+    with sf._lock, sf._conn:
         for r in rows:
             sf._conn.execute(
                 "UPDATE skillflow_steps SET status = 'pending', retry_count = 0, "
-                "validation_retry_count = 0, " + _extra +
+                "validation_retry_count = 0, "
                 "version = version + 1, "
                 "claimed_at = NULL, claimed_by = NULL, "
                 "inputs_json = json_remove(COALESCE(inputs_json, '{}'), "

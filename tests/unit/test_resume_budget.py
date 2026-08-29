@@ -26,6 +26,12 @@ class _FakeSF:
     """
 
     def __init__(self):
+        import threading
+        # The ENGINE lock. Host code that writes on skillflow's shared
+        # connection must hold it — `_tx` spans BEGIN IMMEDIATE…commit on
+        # that same connection, so a host write without it can commit a
+        # transaction the engine meant to roll back.
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(":memory:")
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript("""
@@ -222,9 +228,12 @@ def test_it_survives_an_engine_whose_schema_predates_release_count():
     """)
     conn.commit()
 
+    import threading
+
     class _SF:
         pass
     sf = _SF()
+    sf._lock = threading.RLock()
     sf._conn = conn
 
     out = restore_retry_budget(sf, "r1")

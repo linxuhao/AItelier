@@ -189,3 +189,47 @@ def test_the_stale_validation_complaint_is_dropped(sf):
     inputs = json.loads(sf.step(1800)["inputs_json"])
     assert "_validation_error" not in inputs
     assert inputs["keep"] == "me", "unrelated inputs must survive"
+
+
+def test_it_survives_an_engine_whose_schema_predates_release_count():
+    """Raw SQL from the HOST against the ENGINE's table, and the two ship apart.
+
+    AItelier is bind-mounted and goes live on the next container restart;
+    skillflow arrives from PyPI whenever it is published. Naming `release_count`
+    unconditionally broke resume outright against the deployed engine — every
+    failed run, `OperationalError: no such column` — while the dev box, whose
+    editable checkout has the column, stayed green. That asymmetry is the
+    repo's documented cross-repo-skew class, so the guard belongs in a test
+    that builds the OLD schema on purpose.
+    """
+    import sqlite3
+    from core.run_driver import restore_retry_budget
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE skillflow_steps (
+            id INTEGER PRIMARY KEY, run_id TEXT, step_id TEXT, status TEXT,
+            retry_count INT, validation_retry_count INT DEFAULT 0,
+            max_retries INT, inputs_json TEXT, version INT DEFAULT 1,
+            claimed_at TEXT, claimed_by TEXT, updated_at TEXT);
+        CREATE TABLE skillflow_runs (
+            id TEXT PRIMARY KEY, current_node TEXT, updated_at TEXT);
+        INSERT INTO skillflow_steps
+            (id, run_id, step_id, status, retry_count, max_retries, inputs_json)
+            VALUES (1, 'r1', 'a', 'failed', 3, 3, '{}');
+        INSERT INTO skillflow_runs VALUES ('r1', 'a', '');
+    """)
+    conn.commit()
+
+    class _SF:
+        pass
+    sf = _SF()
+    sf._conn = conn
+
+    out = restore_retry_budget(sf, "r1")
+
+    assert out is not None and out["step"] == "a"
+    row = conn.execute("SELECT status, retry_count FROM skillflow_steps "
+                       "WHERE id = 1").fetchone()
+    assert (row["status"], row["retry_count"]) == ("pending", 0)

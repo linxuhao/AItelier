@@ -293,6 +293,23 @@ def _gen_hints(graph, roles: dict | None = None, config_name: str = "") -> dict:
 
 # ── Naming / storage ───────────────────────────────────────────────────────
 
+def _engine_has_table(sf, name: str) -> bool:
+    """Does the ENGINE's schema have this table?
+
+    Host code that reaches into skillflow's tables with raw SQL has to ask,
+    because the two halves ship on different clocks: this file is bind-mounted
+    and live on the next container restart, while the engine only changes when
+    a new `skillflow-py` is published and the image rebuilt. Assuming a table
+    that has not arrived yet fails only in the container, where no test runs.
+    """
+    try:
+        return bool(sf._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+            (name,)).fetchone())
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
 def generated_configs_dir() -> Path:
     """Where persisted generated configs live (override via env for tests)."""
     d = os.getenv("AITELIER_GENERATED_CONFIGS_DIR")
@@ -906,9 +923,16 @@ def archive_generated_pipeline(sf, registry, config_name: str,
                 # having "removed" every step of a pipeline that no longer
                 # exists. `purge` means gone; a version history of nothing is
                 # not history, it is a booby trap.
-                sf._conn.execute(
-                    "DELETE FROM skillflow_graph_versions WHERE name = ?",
-                    (config_name,))
+                #
+                # Only if the table is there. It arrives with the engine, which
+                # ships from PyPI while this file is bind-mounted and live on
+                # the next restart — and an `OperationalError: no such table`
+                # here would escape the `with` with the FIRST delete uncommitted
+                # on the shared connection, for whoever commits next to adopt.
+                if _engine_has_table(sf, "skillflow_graph_versions"):
+                    sf._conn.execute(
+                        "DELETE FROM skillflow_graph_versions WHERE name = ?",
+                        (config_name,))
                 sf._conn.commit()
             purged = True
         except Exception as e:

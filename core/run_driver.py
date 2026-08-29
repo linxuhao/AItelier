@@ -182,14 +182,29 @@ def restore_retry_budget(sf, run_id: str) -> dict | None:
     ).fetchall()
     if not rows:
         return None
+    # `release_count` is charged against the retry budget, so restoring the
+    # budget without clearing it leaves the step one cancellation away from
+    # spending the restored retries again.
+    #
+    # Conditionally, because this is raw SQL from the HOST against the ENGINE's
+    # table and the two ship separately: AItelier is bind-mounted and live on
+    # the next container restart, while skillflow arrives from PyPI. Naming the
+    # column unconditionally broke resume outright on the deployed engine —
+    # `OperationalError: no such column: release_count` — for every failed run,
+    # with nothing red on the dev box where the editable checkout has it.
+    _extra = ""
+    try:
+        cols = {c[1] for c in sf._conn.execute(
+            "PRAGMA table_info(skillflow_steps)").fetchall()}
+        if "release_count" in cols:
+            _extra = "release_count = 0, "
+    except Exception:                                            # noqa: BLE001
+        pass
     with sf._conn:
         for r in rows:
             sf._conn.execute(
                 "UPDATE skillflow_steps SET status = 'pending', retry_count = 0, "
-                # `release_count` too: it is charged against the retry budget,
-                # so restoring the budget without clearing it leaves the step
-                # one cancellation away from spending the restored retries again.
-                "validation_retry_count = 0, release_count = 0, "
+                "validation_retry_count = 0, " + _extra +
                 "version = version + 1, "
                 "claimed_at = NULL, claimed_by = NULL, "
                 "inputs_json = json_remove(COALESCE(inputs_json, '{}'), "

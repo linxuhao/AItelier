@@ -32,6 +32,9 @@ way of not seeing is a loud, named failure (``blind_reason``):
                        the pixel-less dummy renderer — render_mode "headless")
   missing_frames       captures[] names PNGs that are not on disk (or truncated)
   endpoint_unreachable the vision endpoint refused / timed out / returned non-200
+  judge_budget_exhausted every judge answered 200 but spent its whole completion
+                       budget on reasoning and wrote no verdict — the box is
+                       SERVING; the repair is a bigger max_tokens, not infra
   unparseable_response the answer cannot be read, or answers fewer questions
                        than were asked
   budget_exceeded      a frame does not fit the context budget — refuse and say
@@ -73,10 +76,19 @@ _ROUTE = os.environ.get("GODOT_VISION_ROUTE", "vision")
 
 # Read off the vLLM startup log / GET /v1/models (max_model_len), not a flag.
 _CONTEXT_TOKENS = int(os.environ.get("GODOT_VISION_CONTEXT_TOKENS", "12288"))
-_MAX_TOKENS = int(os.environ.get("GODOT_VISION_MAX_TOKENS", "2048"))
-# Every judge AFTER the first needs its OWN, much larger budget. 2048 is right
-# for the primary (qwen3 on vLLM), and structurally too small for a hosted
-# reasoning model: measured 2026-08-25, three runs at 2048 all came back
+# 2048 was the primary's budget until 2026-08-29, on the belief that only a
+# hosted reasoning model needed more. Measured twice that day on jinyong-facility,
+# the primary starved at it too: qwen3 answered 200, spent the whole budget
+# writing nothing, escalated once to 4096 and starved AGAIN — first on
+# `each_unit_acts_once_per_round_initiative_order` (2 scenarios judged), then
+# on `tutorial_win_routes_to_transition` (14 judged). Both runs ended with the
+# gate blind and a human asked to look at 276 frames instead. 6144 is the value
+# the fallback note below MEASURED as sufficient for this failure mode, and it
+# still leaves 12288 - 6144 - 600 = 5544 for images, comfortably above the 2652
+# a four-frame batch costs, so batches do not shrink.
+_MAX_TOKENS = int(os.environ.get("GODOT_VISION_MAX_TOKENS", "6144"))
+# Every judge AFTER the first needs its OWN, still larger budget — measured for
+# a hosted reasoning model: measured 2026-08-25, three runs at 2048 all came back
 # finish_reason="length" with reasoning_tokens=2048 (the WHOLE budget) and an
 # EMPTY content — the model spends everything thinking and never writes the
 # answers. At 6144 it finishes: reasoning 3146 / 3537, content 341 / 288 chars.
@@ -501,8 +513,10 @@ def _post_once(url: str, model: str, api_key: str,
 
 def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
     """Ask each judge in turn; return ``(answer_text, label)`` of the one that
-    answered. Raises only when EVERY judge is unusable — the caller turns that
-    into endpoint_unreachable.
+    answered. Raises only when EVERY judge is unusable, and the exception TYPE
+    carries which kind: ``ReasoningStarved`` when every judge answered but ran
+    out of completion budget (caller: judge_budget_exhausted), ``RuntimeError``
+    otherwise (caller: endpoint_unreachable).
 
     Only transport-level failure moves on: refused / timed out / non-200 /
     unreadable envelope. A judge that answers 200 with a WRONG answer must NOT
@@ -512,6 +526,7 @@ def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
     """
     judges = _judges()
     failures: list[str] = []
+    starved_only = True
     for judge in judges:
         try:
             try:
@@ -531,7 +546,21 @@ def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
                              questions, max_tokens=bigger), judge.label
         except Exception as exc:                         # noqa: BLE001
             failures.append(f"{judge.label} ({judge.url}): {exc}")
+            starved_only = starved_only and isinstance(exc, ReasoningStarved)
             continue
+    # WHICH way it failed survives, because the two point at different repairs.
+    # Live, jinyong-facility 2026-08-29: localqwen answered 200 twice, then
+    # starved on the third scenario (2048 -> escalated to 4096 -> starved
+    # again), and the report came back `blind_reason: "endpoint_unreachable"`
+    # with `endpoint_unreachable: true`. That name sends the operator to check
+    # a GPU box that was serving fine the whole time, while the tool's own
+    # message ("Raise the budget for this backend") had the answer. A blind
+    # gate that misnames its own cause is the same defect as a verdict over
+    # evidence it never saw — the report is read, and it was wrong.
+    if starved_only and failures:
+        raise ReasoningStarved(
+            "every vision judge ran out of completion budget — "
+            + "; ".join(failures))
     raise RuntimeError(
         "no vision judge could answer — " + "; ".join(failures))
 
@@ -689,6 +718,17 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         asked = [_GATE] + asked
         try:
             raw, served_by = _ask([f["path"] for f in batch], asked)
+        except ReasoningStarved as e:
+            return _write(_blind(
+                report, "judge_budget_exhausted",
+                f"Every judge on route '{_ROUTE}' answered but wrote no "
+                f"verdict for scenario '{scen}', after "
+                f"{report['calls']} successful call(s): {e}. The endpoint is "
+                f"SERVING — raise the judge's max_tokens (it escalates once "
+                f"on its own, so the base is too low by more than 2x) or ask "
+                f"fewer questions per call. The frames were NOT judged. "
+                f"Vision gate NOT run."),
+                out_dir, repo)
         except Exception as e:                          # noqa: BLE001
             return _write(_blind(
                 report, "endpoint_unreachable",

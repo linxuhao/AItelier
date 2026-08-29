@@ -68,6 +68,14 @@ services:
       # layout — and so which frames are compared against each other — depend
       # on an infra accident.
       GODOT_VISION_CONTEXT_TOKENS: "12288"
+      # Completion budget for the PRIMARY judge. Carved out of the
+      # context above, so raising it shrinks the image budget: at 6144
+      # there are still 5544 tokens for frames and a four-frame batch
+      # costs 2652. Raised from 2048 on 2026-08-29 after the primary
+      # starved twice in one day (it escalates once on its own, to
+      # 4096, and starved at that too) — each time the gate went blind
+      # and a human had to judge the frames by hand.
+      GODOT_VISION_MAX_TOKENS: "6144"
     env_file:
       - .env
     volumes:

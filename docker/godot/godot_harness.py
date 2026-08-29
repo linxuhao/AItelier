@@ -751,10 +751,12 @@ def _inject_probe(dst: Path) -> None:
 
 
 def _capture_frames(total: int, timeline: list | None = None) -> list[int]:
-    """Which frames to photograph. Assert frames come FIRST: a PNG earns its
-    bandwidth by showing the very state an assertion judged. The stride only
-    spends whatever budget is left, so a run with no asserts still comes back
-    with a filmstrip instead of nothing.
+    """Which frames to photograph. Assert frames have PRIORITY over the stride
+    (a PNG earns its bandwidth by showing the very state an assertion judged),
+    and when there are more of them than there is budget they are sampled
+    EVENLY ACROSS the scenario rather than taken from its head — see below. The
+    stride only spends whatever budget is left, so a run with no asserts still
+    comes back with a filmstrip instead of nothing.
 
     Never schedules the last frame: the probe calls _finish() and quit() from
     _process once _frame >= _max, so that frame's post-draw never fires and the
@@ -763,7 +765,33 @@ def _capture_frames(total: int, timeline: list | None = None) -> list[int]:
     last = total - 2
     if limit <= 0 or last < 0:
         return []
-    picked = [int(e.get("at", 0)) for e in (timeline or []) if e.get("assert")]
+    asserted = [int(e.get("at", 0)) for e in (timeline or []) if e.get("assert")]
+    # SPREAD them, do not take the head. The loop below stops at `limit`, so
+    # taking assert frames in timeline order photographs a scenario's OPENING
+    # and nothing else — and the more assertions a scenario carries, the smaller
+    # the fraction of it the vision gate can see. That is backwards: a scenario
+    # is almost always "do X, then verify the result", so its subject is at the
+    # END.
+    #
+    # Live, jinyong-facility 2026-08-29: `facility_use_reusable` carries 16
+    # assert frames spanning 400..810. The facility — the entire deliverable of
+    # that round — is used at 530..810. The four captured frames were
+    # [400, 440, 460, 500]: two map screens and an event. The vision judge was
+    # shown a walk to the node and asked whether the round's feature was
+    # readable. Worse, `map_node_event_shaolin` shares that prologue and so has
+    # the same first four assert frames, and the two scenarios came back with
+    # BYTE-IDENTICAL frame sets — the gate spent its budget judging one picture
+    # twice while the thing under test was never photographed.
+    #
+    # Sampling evenly across the assert range keeps both endpoints, so the last
+    # assertion — the one that says the feature finally did the thing — always
+    # gets its picture.
+    if limit == 1:
+        asserted = asserted[-1:]
+    elif len(asserted) > limit:
+        asserted = [asserted[round(i * (len(asserted) - 1) / (limit - 1))]
+                    for i in range(limit)]
+    picked = asserted
     stride = max(1, total // (limit + 1))
     picked += [i * stride for i in range(1, limit + 1)]
     out: list[int] = []

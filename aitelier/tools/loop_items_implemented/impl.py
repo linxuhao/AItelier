@@ -44,7 +44,7 @@ _IMPL_STEP = "t_impl"
 
 def loop_items_implemented(*, out_dir: str = "", workspace_root: str = "",
                            config_name: str = "", project_id: str = "",
-                           **_ignored) -> dict:
+                           run_id: str = "", **_ignored) -> dict:
     graph_dir = _graph_dir(out_dir, workspace_root, config_name, project_id)
     if graph_dir is None:
         # Say so instead of reporting "nothing missing": an unlocatable
@@ -55,7 +55,7 @@ def loop_items_implemented(*, out_dir: str = "", workspace_root: str = "",
                 "content": "IMPLEMENTATION COVERAGE: workspace not locatable — "
                            "NOT checked. Do not read this as a pass."}
 
-    items = _loop_items(graph_dir, config_name)
+    items = _loop_items(graph_dir, config_name, run_id)
     if items is None:
         return {"complete": None, "planned": 0, "implemented": 0, "missing": [],
                 "summary": "task manifest not readable — implementation "
@@ -65,7 +65,16 @@ def loop_items_implemented(*, out_dir: str = "", workspace_root: str = "",
 
     impl_dir = graph_dir / _IMPL_STEP
     built = {p.name for p in impl_dir.iterdir() if p.is_dir()} if impl_dir.is_dir() else set()
-    missing = [i for i in items if i not in built]
+    # Compare on the FOLDER NAME the workspace would give each item, not on the
+    # raw id. `_sanitize_item` rewrites anything outside [A-Za-z0-9._-] and
+    # appends a hash when it does, so `build the login page` lives in
+    # `build_the_login_page-b595fd09` and any CJK id in `item-<hash>`. Comparing
+    # raw ids against directory names therefore reports a fully implemented task
+    # as missing — and this is a GATE whose text accuses the reviewer of having
+    # "reviewed the repository, not the card". Every manifest in the live
+    # workspaces happens to use ASCII snake_case, so it has not fired; it is one
+    # PM wording change away.
+    missing = [i for i in items if _folder_of(i) not in built]
 
     if not missing:
         ok = f"all {len(items)} task(s) have {_IMPL_STEP} output"
@@ -122,7 +131,21 @@ def _graph_dir(out_dir: str, workspace_root: str, config_name: str,
     return None
 
 
-def _loop_items(graph_dir: Path, config_name: str) -> list | None:
+def _folder_of(item: str) -> str:
+    """The folder name the workspace gives a loop item.
+
+    Falls back to the raw id if the engine predates `_sanitize_item`, which is
+    exactly the old behaviour — never worse than before.
+    """
+    try:
+        from skillflow.workspace import _sanitize_item
+        return _sanitize_item(item)
+    except Exception:
+        return item
+
+
+def _loop_items(graph_dir: Path, config_name: str,
+                run_id: str = "") -> list | None:
     """The loop's own item list, read where the loop node says it lives.
 
     Falls back to dpe's `3/tasks_manifest.json` + `execution_order` only when
@@ -132,13 +155,21 @@ def _loop_items(graph_dir: Path, config_name: str) -> list | None:
     step, file, field = "3", "tasks_manifest.json", "execution_order"
     try:
         from api.dependencies import get_skillflow
-        # KNOWN GAP, not a clean exemption: this is a GATE, and a config edited
-        # mid-run can change which loop `source` it reads — a gate reading the
-        # wrong source passes or fails a step silently. It cannot be pinned
-        # because skillflow hands this tool no run_id at all; closing it means
-        # widening the tool-invocation contract.
-        # by-name-ok: gate tool, no run_id available — see KNOWN GAP above
-        resolver = get_skillflow()._get_resolver(config_name)
+        sf = get_skillflow()
+        # The graph THIS RUN is executing. A config edited mid-run can move the
+        # loop's `source`, and a gate reading the wrong source passes or fails a
+        # step silently.
+        #
+        # An earlier comment here called this an unclosable gap "because
+        # skillflow hands this tool no run_id at all". That was wrong: the
+        # engine injects `run_id` on both tool paths (core.py:3642, :6453) and
+        # `**_ignored` was swallowing it. Declaring the parameter was the whole
+        # fix.
+        if run_id:
+            resolver = sf._get_resolver_for_run(run_id)
+        else:
+            # by-name-ok: a direct call outside a run
+            resolver = sf._get_resolver(config_name)
         for node in resolver.graph.steps:
             src = getattr(node, "source", None)
             if getattr(node, "step_type", "") == "loop" and isinstance(src, dict):

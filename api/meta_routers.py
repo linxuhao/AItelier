@@ -647,11 +647,20 @@ def _failed_on_routing(run: dict | None) -> bool:
     return any(m in reason for m in _ROUTING_DEAD_END_MARKERS)
 
 
-def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str, int]:
+def _get_checkpoint_info(project_id: str,
+                         run_id: str = "") -> tuple[str, str, str, str, int]:
     """Get checkpoint state from skillflow (source of truth).
 
     Returns (step_id, label, run_id, graph_name, checkpoint_instance), or
     empty strings / 0 if not at a checkpoint.
+
+    Pass `run_id` when the caller HAS one. Resolving from the project alone
+    means `get_run_by_project` — the newest non-completed run of ANY config —
+    so a project with a paused DPE run plus a newer run of something else
+    answers about the wrong one: MCP handed another run's step id to
+    `reject_checkpoint`, and the dashboard showed a checkpoint that was not the
+    one being answered. A `graph_name` filter would not be enough; two runs of
+    the SAME config collide just as well. The run id is the identity.
 
     A3 fix: now also returns info for runs in 'failed' state IF the last
     completed step is a checkpoint. This allows the user to approve a
@@ -661,7 +670,7 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str, int]:
     ROUTING is excluded — see _failed_on_routing.
     """
     sf = get_skillflow()
-    run = sf.get_run_by_project(project_id)
+    run = sf.get_run(run_id) if run_id else sf.get_run_by_project(project_id)
     if not run or run["status"] not in ("paused", "failed"):
         return "", "", "", "", 0
     if _failed_on_routing(run):

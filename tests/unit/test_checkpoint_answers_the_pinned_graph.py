@@ -82,3 +82,49 @@ def test_the_pinned_accessor_needs_no_fallback():
     assert "getattr(sf, \"_get_resolver_for_run\"" not in \
         (Path(meta_routers.__file__).read_text(encoding="utf-8")), \
         "a guard for an engine that cannot exist reads as a real safety net"
+
+
+def test_it_answers_about_the_run_it_was_given(monkeypatch):
+    """A project can have several runs; `get_run_by_project` returns the newest
+    non-completed one of ANY config. MCP is handed a run_id precisely because of
+    that, and resolving from the project instead made it answer about a
+    different run — then pass that run's step id to `reject_checkpoint` on this
+    one. A `graph_name` filter would not be enough: two runs of the SAME config
+    collide just as well. The run id is the identity.
+    """
+    sf = MagicMock()
+    wanted = {"id": "run-A", "graph_name": "g", "status": "paused",
+              "current_node": "done"}
+    newest = {"id": "run-B", "graph_name": "other", "status": "failed",
+              "current_node": "x"}
+    sf.get_run.side_effect = lambda rid: wanted if rid == "run-A" else newest
+    sf.get_run_by_project.return_value = newest
+    sf.get_steps.return_value = [
+        {"step_id": "a", "status": "completed", "id": 1, "completion_seq": 1}]
+    sf._get_resolver_for_run.return_value.get_node.side_effect = \
+        {"a": _node(True, "A gate")}.get
+    monkeypatch.setattr(meta_routers, "get_skillflow", lambda: sf)
+
+    _step, _label, rid, _graph, _inst = meta_routers._get_checkpoint_info(
+        "p1", "run-A")
+
+    assert rid == "run-A", "answered about the project's newest run, not the one asked for"
+    sf.get_run.assert_called_with("run-A")
+
+
+def test_without_a_run_id_it_still_resolves_from_the_project(monkeypatch):
+    """The control: the HTTP surface has only a project, and must keep working."""
+    sf = MagicMock()
+    sf.get_run_by_project.return_value = {
+        "id": "run-B", "graph_name": "g", "status": "paused",
+        "current_node": "done"}
+    sf.get_steps.return_value = [
+        {"step_id": "a", "status": "completed", "id": 1, "completion_seq": 1}]
+    sf._get_resolver_for_run.return_value.get_node.side_effect = \
+        {"a": _node(True, "A gate")}.get
+    monkeypatch.setattr(meta_routers, "get_skillflow", lambda: sf)
+
+    _step, _label, rid, _graph, _inst = meta_routers._get_checkpoint_info("p1")
+
+    assert rid == "run-B"
+    sf.get_run_by_project.assert_called_once()

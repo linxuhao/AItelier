@@ -386,11 +386,16 @@ class TestEffortDelivery:
         # router uses — rather than hand-parsing the file. A raw `endpoint in
         # candidates` check silently went empty the day the route switched to
         # the {"rotate": [...], "fallback": [...]} dict form (it tested dict
-        # KEYS), and this test reads whichever table config_or_example resolves
-        # (live deployment config when present), so the shape is not ours to
-        # assume.
-        from core.model_routes import ModelRoutes, config_or_example
-        routes = ModelRoutes(config_or_example("model_routes.json"))
+        # KEYS), so the shape is not ours to assume.
+        #
+        # The SHIPPED example, never config_or_example: that prefers the
+        # operator's live table, which made this a statement about one
+        # machine's routing. A unit test must say the same thing on every
+        # checkout. (Whether a given DEPLOYMENT routes a max-effort role onto
+        # qwen3.8-max is a real question, but it is a deployment lint, not
+        # this.)
+        from core.model_routes import ModelRoutes
+        routes = ModelRoutes(root / "model_routes.example.json")
         narrow = {n for n in routes.names()
                   if "qwen/qwen3.8-max" in routes.resolve(n)}
         if not narrow:

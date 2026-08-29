@@ -55,13 +55,29 @@ class TestResolveAgentModel:
 
 
 class TestAgentFactory:
-    def test_unset_keeps_per_role_models(self, factory):
+    def test_unset_keeps_per_role_models(self, factory, monkeypatch):
+        """Unset is a no-op: each role keeps the model it registered, and the
+        host sentinel still resolves through HOST_AGENT_MODEL.
+
+        The host assertion is made against a PINNED host model rather than
+        whatever `flash` resolves to. It used to assert that the sentinel role's
+        litellm_model ends with "flash", which passed only because the shipped
+        table happened to put an endpoint NAMED "...-flash" first; the day a
+        deployment put a differently-named endpoint there, an unrelated unit
+        test went red while nothing was wrong. A unit test must not depend on
+        anyone's routing.
+        """
         assert factory.get_agent("researcher").gateway.litellm_model.endswith(
             "deepseek-v4-flash")
         assert factory.get_agent("architect").gateway.litellm_model.endswith(
             "deepseek-v4-pro")
+
+        # The constant is read at import, so the env var is too late; patch
+        # the name the factory actually reads.
+        import core.agents as agents
+        monkeypatch.setattr(agents, "HOST_AGENT_MODEL", "acme/host-m")
         assert factory.get_agent("generated_role").gateway.litellm_model.endswith(
-            HOST_AGENT_MODEL.split("/")[-1])
+            "host-m"), "the host sentinel resolves through the host model"
 
     def test_pin_wins_over_an_explicit_role_model(self, factory, monkeypatch):
         monkeypatch.setenv(ENV, PIN)

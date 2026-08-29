@@ -190,28 +190,29 @@ def test_the_inbound_and_outbound_mcp_urls_do_not_share_a_name():
     assert "AITELIER_MEDIA_MCP_URL" in read
 
 
-def test_the_peer_range_admits_a_prerelease_of_the_client(manifest):
-    """`"*"` on a peer that only ever ships prereleases matches NOTHING.
+def test_the_client_contract_is_stated_where_the_manifest_no_longer_states_it():
+    """0.1.8 dropped `peerDependencies`, so the compatibility claim moved into
+    prose — and prose nobody checks goes stale.
 
-    node-semver lets a prerelease version satisfy a range only when some
-    comparator in that range carries a prerelease tag AND shares the version's
-    exact major.minor.patch tuple. `*` desugars to `>=0.0.0`, which carries no
-    prerelease tag — so it admits no prerelease at all, and every one of the 11
-    published `@deepseek-ai/dsh-mcp-client` versions is a prerelease. The range
-    that reads as "any version is fine" is the one that accepts none of them,
-    and the user meets it as an `ERESOLVE` they have to work around by hand.
+    Why the peer entry went (commit 0bc1105): the plugin is a codeless patch
+    bundle that imports nothing, dsh resolves the `mcp-client` name from its own
+    installation and never version-checks peers, and a declared peer invited
+    pnpm's `auto-install-peers` to pull a second registry copy into the profile
+    — which dsh's profile-first resolution would then let shadow the
+    installation's instance. The range was unsatisfiable anyway: every published
+    `@deepseek-ai/dsh-mcp-client` is a prerelease, and `*` desugars to `>=0.0.0`,
+    which carries no prerelease tag and so admits none of them.
 
-    The fix, and the shape this pins, is one `||` branch per tuple, each with a
-    prerelease tag (`^0.1.0-rc.2 || ^0.1.1-rc.1`) — the same form `dshmarket`
-    uses for `@deepseek-ai/dsh-settings`.
+    This replaces the test that pinned that range — which kept failing with
+    `KeyError: 'peerDependencies'`, i.e. guarding a decision the repo had
+    already reversed. It guards what took its place: the README must still name
+    the client version the patch's config shape targets, and must still say why
+    this is not a peer entry, or the next reader helpfully adds one back.
     """
-    for name, spec in manifest["peerDependencies"].items():
-        if not name.startswith("@deepseek-ai/"):
-            continue
-        branches = [b.strip() for b in spec.split("||")]
-        assert branches and all(branches), f"{name}: empty branch in {spec!r}"
-        for branch in branches:
-            assert "-" in branch, (
-                f"{name}: branch {branch!r} carries no prerelease tag, so it "
-                f"admits no prerelease build of a package that ships only "
-                f"prereleases (range was {spec!r})")
+    readme = (DSH / "README.md").read_text(encoding="utf-8")
+    assert "peerDependencies" in readme, (
+        "the README must say why there is no peer entry")
+    assert "mcp-client" in readme, (
+        "the README must name the client the patch's config shape targets")
+    assert re.search(r"0\.\d+\.\d+(-[\w.]+)?", readme), (
+        "the README must name a concrete client version, not just 'recent'")

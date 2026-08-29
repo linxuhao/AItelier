@@ -91,11 +91,20 @@
     "run served by the fallback is not evidence about qwen3.8-max — check",
     "`served_by` in the trace before drawing a conclusion."
   ],
-  "smart": [
-    "qwen/qwen3.8-max",
-    "ark/deepseek-v4-pro",
-    "deepseek/deepseek-v4-pro"
-  ],
+  "smart": {
+    "rotate": [
+      "qwen/qwen3.8-max"
+    ],
+    "fallback": [
+      "ark/deepseek-v4-pro",
+      "deepseek/deepseek-v4-pro"
+    ],
+    "effort": {
+      "qwen/qwen3.8-max": "xhigh",
+      "ark/deepseek-v4-pro": "max",
+      "deepseek/deepseek-v4-pro": "max"
+    }
+  },
   "_vision_note": [
     "ONE judge. The hosted candidates were removed 2026-08-26, measured:",
     "neither ever finished a run — two attempts, both blind (4 of 47 scenarios,",

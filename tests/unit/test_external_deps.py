@@ -6,16 +6,47 @@ must name its CONFIG KEY when it refuses, and the doc must describe the same key
 the code actually reads — which is why both come from one table.
 """
 import re
+import shutil
 from pathlib import Path
 
 import pytest
 
 from core import external_deps as ed
-
-from core.model_routes import config_or_example as _cfg
+from core import model_routes
 
 ROOT = Path(__file__).resolve().parents[2]
 DOC = ROOT / "docs" / "external-dependencies.md"
+
+
+@pytest.fixture(autouse=True)
+def _shipped_config_only(tmp_path, monkeypatch):
+    """Every test here reads a PRIVATE COPY of the shipped examples.
+
+    `config_or_example` prefers the operator's live file, which is right for the
+    app and wrong for a unit test: these tests were asserting about whichever
+    routing happened to be on the machine. Putting a self-hosted endpoint first
+    in `flash` — a deployment choice, not a code change — turned three of them
+    red on one box and nowhere else.
+
+    Two of them were worse than coupled: they wrote a fake provider into
+    `llm_providers.json` and restored it in a `finally`. A kill between the two
+    leaves the operator's registry holding `acme`.
+
+    So: copy the examples into tmp and point the resolver there. The tests still
+    assert about SHIPPED content — just not about anyone's deployment, and never
+    by mutating it.
+    """
+    for name in ("llm_providers.json", "model_routes.json"):
+        shutil.copy(ROOT / name.replace(".json", ".example.json"),
+                    tmp_path / name)
+    monkeypatch.setattr(model_routes, "config_or_example",
+                        lambda n: str(tmp_path / n))
+    return tmp_path
+
+
+def _cfg(name):
+    """The copy the fixture made — never the live file."""
+    return model_routes.config_or_example(name)
 
 
 class TestTheTableIsWellFormed:
@@ -290,7 +321,8 @@ def test_a_route_no_agent_config_names_is_still_reported():
     import json
 
     from core.external_deps import failover_llm_keys, required_llm_keys
-    from core.model_routes import ModelRoutes, config_or_example
+    from core.model_routes import ModelRoutes
+    config_or_example = model_routes.config_or_example
 
     providers = json.loads(
         Path(config_or_example("llm_providers.json")).read_text(encoding="utf-8"))
@@ -310,11 +342,37 @@ def test_a_route_no_agent_config_names_is_still_reported():
         f"to nobody — the operator is never asked to create them")
 
 
-def test_a_route_only_a_tool_uses_lands_in_failover_not_required():
+def test_a_route_only_a_tool_uses_lands_in_failover_not_required(
+        _shipped_config_only):
     """Over-reporting is the price of asking the table, and it must stay in the
     advisory list: nothing is currently obliged to call an unreferenced route,
-    so demanding its key would be the false alarm this module exists to stop."""
+    so demanding its key would be the false alarm this module exists to stop.
+
+    Built here rather than asserted about a real endpoint. The earlier version
+    named LOCAL_QWEN_API_KEY, which made it a statement about one deployment's
+    routing: the day a self-hosted endpoint became the FIRST candidate of a
+    route an agent_config names, its key became genuinely required and the test
+    failed while reporting nothing wrong. A tool-only route is a shape, not a
+    vendor.
+    """
+    import json
+
     from core.external_deps import failover_llm_keys, required_llm_keys
 
-    assert "LOCAL_QWEN_API_KEY" in failover_llm_keys()
-    assert "LOCAL_QWEN_API_KEY" not in required_llm_keys()
+    tmp = _shipped_config_only
+    provs = json.loads((tmp / "llm_providers.json").read_text(encoding="utf-8"))
+    provs["toolvendor"] = {"base_url": "https://tool.example/v1",
+                           "api_key_env": "TOOLVENDOR_API_KEY"}
+    (tmp / "llm_providers.json").write_text(json.dumps(provs), encoding="utf-8")
+
+    routes = json.loads((tmp / "model_routes.json").read_text(encoding="utf-8"))
+    # A route no agent_config names — the shape `godot_vision` has, where the
+    # model is a Python constant rather than config.
+    routes["toolonly"] = ["toolvendor/m-1"]
+    (tmp / "model_routes.json").write_text(json.dumps(routes), encoding="utf-8")
+
+    assert "TOOLVENDOR_API_KEY" in failover_llm_keys(), (
+        "a route in the table must be named to the operator somewhere")
+    assert "TOOLVENDOR_API_KEY" not in required_llm_keys(), (
+        "nothing is obliged to call it, so demanding the key would be a "
+        "false alarm at startup")

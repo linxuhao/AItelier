@@ -25,5 +25,10 @@
   "qwen": {
     "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
     "api_key_env": "QWEN_API_KEY"
+  },
+  "localqwen": {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "api_key_env": "LOCAL_QWEN_API_KEY",
+    "max_input_tokens": 131072
   }
 }

@@ -19,7 +19,7 @@ dependencies = [
     # TypeError inside get_skillflow() at boot — and only in the container,
     # which installs from PyPI while the dev box runs an editable checkout, so
     # no test on this machine can see it.
-    "skillflow-py>=1.5.46",
+    "skillflow-py>=1.5.55",
     "fastapi>=0.136",
     "typer>=0.24",
     "litellm>=1.85",

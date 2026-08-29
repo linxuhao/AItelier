@@ -1232,6 +1232,39 @@ def _register_run_tools(tool):
                     redirect_to=checkpoint_reject_target(
                         sf, run.get("graph_name") or _graph, step_id))
         except Exception as e:
+            # An exception is NOT proof the answer failed. skillflow can persist
+            # the state change and then raise on the way out — live, 2026-08-29,
+            # run 0fe350af: `approve_checkpoint` raised
+            # "cannot commit - no transaction is active" while the run had
+            # ALREADY moved from paused@1 to running@1_review and went on to
+            # execute the next step. Reporting that as "approve failed" is a
+            # verdict of failure over a mutation that happened, and the natural
+            # response to it — answer again — is a second answer to a checkpoint
+            # that is no longer there.
+            #
+            # So ask the run, not the exception. If it is no longer paused the
+            # answer landed; say so, and carry the exception text along so the
+            # underlying skillflow bug stays visible instead of being papered
+            # over by a success payload.
+            # `if after and …`, never `(… or {}).get(...)`: an unreadable run
+            # gives status None, which is also `!= "paused"`, so the shortcut
+            # would answer "it landed, do not send it again" about a run it
+            # could not read. That is this bug's own mirror image, and the worse
+            # half — a false failure is re-checked, a false success is not. When
+            # we cannot tell, report the exception we actually saw.
+            try:
+                after = sf.get_run(run_id)
+            except Exception:
+                after = None
+            if after and after.get("status") != "paused":
+                return {**echo, "run_id": run_id, "decision": decision,
+                        "status": after.get("status"),
+                        "current_node": after.get("current_node"),
+                        "warning": (f"{decision} raised {e!r} but the run left "
+                                    f"'paused', so the answer DID land — do not "
+                                    f"send it again. Report the exception: it is "
+                                    f"a defect in the commit path, not in this "
+                                    f"answer.")}
             return {**echo, "error": f"{decision} failed: {e}"}
         # Answering releases the run; whoever was driving it keeps going.
         after = sf.get_run(run_id) or {}

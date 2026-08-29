@@ -1331,3 +1331,61 @@ def test_a_broken_run_listing_does_not_break_the_read():
 
     assert mcp_router._runs_sharing_step_dir(
         _SF(), {"id": "r", "project_id": "p", "graph_name": "c"}) == []
+
+
+# ── An exception is not proof the answer failed — nor proof it landed ────────
+
+class _RaisingApproveSF(_WaitSF):
+    """skillflow persists the state change and then raises on the way out.
+
+    Live, 2026-08-29, run 0fe350af: `approve_checkpoint` raised "cannot commit -
+    no transaction is active" while the run had ALREADY left paused@1 for
+    running@1_review and went on to execute the next step.
+    """
+
+    def __init__(self, after_status="running", readable=True):
+        super().__init__("paused")
+        self._after = after_status
+        self._readable = readable
+        self._answered = False
+
+    def approve_checkpoint(self, run_id):
+        self._answered = True
+        raise RuntimeError("cannot commit - no transaction is active")
+
+    def get_run(self, run_id):
+        if self._answered:
+            if not self._readable:
+                return None
+            return {"id": run_id, "status": self._after,
+                    "current_node": "1_review", "graph_name": "dpe_default_v2"}
+        return super().get_run(run_id)
+
+
+def test_an_approval_that_raised_but_landed_is_not_reported_as_failed(monkeypatch):
+    """Reporting a mutation that happened as a failure invites the operator to
+    answer again — a second answer to a checkpoint that is no longer there."""
+    captured = _run_tools(_RaisingApproveSF(after_status="running"), monkeypatch)
+
+    out = captured["answer_checkpoint"]("r1")
+
+    assert "error" not in out, out
+    assert out["status"] == "running"
+    assert "DID land" in out["warning"]
+    assert "cannot commit" in out["warning"], \
+        "the underlying skillflow defect must stay visible, not be papered over"
+
+
+def test_an_unreadable_run_after_a_raise_is_reported_as_the_failure_it_was(
+        monkeypatch):
+    """The mirror image, and the worse half: `(get_run() or {}).get("status")`
+    is None for a run we could not read, which is also `!= "paused"`, so the
+    shortcut would answer "it landed, do not send it again" about a run whose
+    state it never saw. A false failure gets re-checked; a false success does
+    not."""
+    captured = _run_tools(_RaisingApproveSF(readable=False), monkeypatch)
+
+    out = captured["answer_checkpoint"]("r1")
+
+    assert "cannot commit" in out["error"]
+    assert "warning" not in out

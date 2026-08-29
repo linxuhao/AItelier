@@ -619,11 +619,35 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     ``node`` section (npm install/build/test) when the repo contains a node
     project.
     """
-    repo = Path(project_root or workspace_root).resolve()
+    root = project_root or workspace_root
     report = {"passed": True, "returncode": 0, "summary": "", "failures": [],
               "collection_errors": []}
 
-    if not repo.exists():
+    if not root or not Path(root).is_absolute():
+        # `Path("").resolve()` is the process CWD — for the hosted engine, the
+        # AItelier checkout itself, which IS a git repo with its own test suite.
+        # Nothing downstream refuses it (`repo.exists()` is true), so pytest ran
+        # over the server's ~2000 tests and `test_report.json` handed the
+        # reviewer a report about AItelier.
+        #
+        # Reachable because a run that declares no code repository has no
+        # project root to give: the engine omits the argument (and older engines
+        # forward ""), and `tool_creation` grants this tool to pipeline_forge's
+        # `t_tool_impl`. Refusing is the only correct answer — there is no repo
+        # to test — and it is written HERE, in the tool, rather than only in the
+        # engine, because the engine that calls it may be any released version.
+        report.update(
+            passed=False,
+            summary=f"run_tests: no project repository to test — project_root "
+                    f"must be an absolute path (got {root!r}); refusing to "
+                    f"resolve against the process CWD")
+        repo = None
+    else:
+        repo = Path(root).resolve()
+
+    if repo is None:
+        pass                      # refused above — there is nothing to run
+    elif not repo.exists():
         report.update(passed=False, summary=f"Project root not found: {repo}")
     else:
         py, venv_dir = _resolve_pytest_python(repo, report)
@@ -749,7 +773,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # Node gate (npm install/build/test) — folded into the same report so
     # 5_review loops frontend breakage back through the goal-loop exactly
     # like pytest failures.
-    if repo.exists():
+    if repo is not None and repo.exists():
         node = _run_node_checks(repo)
         if node is not None:
             report["node"] = node
@@ -761,6 +785,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                             f"node:{name} failed (rc={chk['returncode']}): "
                             f"{chk['output'][-500:]}")
 
+    # `out_dir` is the step's staging dir and is always supplied by the engine.
+    # With no repo AND no out_dir there is nowhere to write — say so in the
+    # return rather than defaulting to the CWD, which is the whole point above.
+    if not out_dir and repo is None:
+        return {"written": None, "passed": False, "error": report["summary"]}
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "test_report.json").write_text(

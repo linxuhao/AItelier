@@ -3138,7 +3138,13 @@ class MetaAgent:
             pid = get_skillflow()._get_project_id(run_id)
             if pid:
                 # "" (the initial value) when the project declares no repo —
-                # `str(None)` would be the relative path "None".
+                # `str(None)` would be the relative path "None". "" is then
+                # handled by whatever skillflow release is installed: 1.5.52+
+                # consults its code_path_resolver and omits the argument, older
+                # releases forward "" into `project_root`/`workspace_root` where
+                # `Path("").resolve()` is the process CWD. The tools this proxy
+                # can reach refuse a non-absolute root themselves; see
+                # `core/dpe_pipeline.py:_exec_tool` for the same reasoning.
                 project_root = str(self.ws.get_code_path(pid) or "")
         except Exception:
             pass

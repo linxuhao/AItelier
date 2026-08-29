@@ -121,24 +121,57 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         db.ensure_project(project_id, name=name, owner_email=owner_email,
                           repo_type=eff_repo_type, repo_path=rpath,
                           repo_url=repo_url, config_name=config_name)
-    elif manifest.scheduler_owned:
-        # The project row already exists — point config_name at THIS config.
-        # It was only ever set at creation, so a project created by one config
-        # and then run under another kept the first name forever. That is not
-        # cosmetic: get_next_active_project ends with
-        # `AND config_name IN (<scheduler-owned configs>)`, so a project whose
-        # row still said `meta_conversation` was invisible to the poller and sat
-        # at its first step with the tick log reporting `idle` — no error
-        # anywhere, because nothing was wrong except that nobody could see it.
+    else:
+        # Reconcile a stored `repo_type: none` when THIS config produces code.
         #
-        # Live: jinyong-ux, 2026-08-22. Triggered by doing it in the RIGHT order
-        # (meta_conversation first, then dpe_game); the earlier project only
-        # worked because the two runs happened to be started backwards.
+        # `eff_repo_type` was computed above and then only ever reached
+        # `ensure_project`, which no-ops on an existing row — so a project id
+        # first used by a `repo_mode: none` config (pipeline_forge, a converter,
+        # a generated pipeline derived `none`) kept `repo_type='none'` forever.
+        # That was cosmetic until `get_code_path` started answering None for it:
+        # a later `dpe_default` run on the same id now gets no code path, no repo
+        # read layer, and dies at the first `on_deliver: repo_apply` — while
+        # `setup_workspace` below has git-init'd a real repository at exactly the
+        # path the row refuses to name.
         #
-        # Guarded on scheduler_owned so a butler-driven config
-        # (meta_conversation, the converters) can never steal the name from the
-        # build config the poller has to drive.
-        db.update_project(project_id, config_name=config_name)
+        # ONE-WAY, deliberately. Upgrading 'none' → a real type restores a
+        # repository the run is about to create anyway. The reverse — a
+        # `repo_mode: none` run stamping 'none' onto a project that HAS code —
+        # would take the repository away from the build that owns the id, and is
+        # the shape `against_project` produces (a repo-less run pointed at a real
+        # repo to read). So a repo-less run never rewrites the row.
+        if eff_repo_type != "none":
+            try:
+                _stored = db.get_repo_info(project_id)
+            except Exception:
+                _stored = None
+            if _stored and (_stored.get("repo_type") or "") == "none":
+                _rp = repo_path or _stored.get("repo_path")
+                if eff_repo_type in ("new", "clone") and not _rp:
+                    from core.datadir import projects_dir
+                    _rp = str(projects_dir() / project_id)
+                db.update_project(project_id, repo_type=eff_repo_type,
+                                  repo_path=_rp)
+        if manifest.scheduler_owned:
+            # Point config_name at THIS config. It was only ever set at
+            # creation, so a project created by one config and then run under
+            # another kept the first name forever. That is not cosmetic:
+            # get_next_active_project ends with
+            # `AND config_name IN (<scheduler-owned configs>)`, so a project
+            # whose row still said `meta_conversation` was invisible to the
+            # poller and sat at its first step with the tick log reporting
+            # `idle` — no error anywhere, because nothing was wrong except that
+            # nobody could see it.
+            #
+            # Live: jinyong-ux, 2026-08-22. Triggered by doing it in the RIGHT
+            # order (meta_conversation first, then dpe_game); the earlier
+            # project only worked because the two runs happened to be started
+            # backwards.
+            #
+            # Guarded on scheduler_owned so a butler-driven config
+            # (meta_conversation, the converters) can never steal the name from
+            # the build config the poller has to drive.
+            db.update_project(project_id, config_name=config_name)
     if priority:
         db.update_project(project_id, priority=priority)
 

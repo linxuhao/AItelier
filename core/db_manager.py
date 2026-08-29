@@ -882,7 +882,8 @@ class DBManager:
                        status: str = None,
                        current_project_step: str = None,
                        completed_project_steps: str = None,
-                       config_name: str = None) -> bool:
+                       config_name: str = None,
+                       repo_type: str = None, repo_path: str = None) -> bool:
         """Update run fields. Only sets non-None values.
 
         Run-level fields (name/priority/status/current_project_step) update the
@@ -906,6 +907,17 @@ class DBManager:
         if config_name is not None:
             updates.append("config_name = ?")
             params.append(config_name)
+        # repo_type/repo_path were settable only at creation (ensure_project),
+        # so a project id first used by a `repo_mode: none` config kept
+        # repo_type='none' for every later run on that id — and once
+        # `get_code_path` learned to answer None for that value, a subsequent
+        # code-producing run lost its repository. See run_launcher.
+        if repo_type is not None:
+            updates.append("repo_type = ?")
+            params.append(repo_type)
+        if repo_path is not None:
+            updates.append("repo_path = ?")
+            params.append(repo_path)
 
         dpe_fields = {}
         if brief is not None:

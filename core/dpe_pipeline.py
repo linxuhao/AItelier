@@ -455,10 +455,31 @@ class PipelineEngine:
             # unfenced, and skillflow skips the check when either side is 0, so
             # a claim already in flight across the upgrade is never rejected.
             claim_epoch=getattr(self, '_claim_epoch', 0),
-            # "" — never `str(None)`, which is the RELATIVE path "None". Empty
-            # means "no opinion from the host": skillflow then asks its own
-            # code_path_resolver, which answers False for a repo-less run and
-            # omits project_root entirely rather than inventing a directory.
+            # "" — never `str(None)`, which is the RELATIVE path "None".
+            #
+            # What "" MEANS to skillflow depends on the version installed, and
+            # this comment used to assert the version we wanted rather than the
+            # one that runs: from 1.5.52 `execute_tool` treats "" as "no opinion"
+            # and asks its own code_path_resolver (which answers False for a
+            # repo-less run, and the argument is then OMITTED); every earlier
+            # release — including the 1.5.46 the container installs from PyPI —
+            # forwards "" straight into `project_root` AND `workspace_root`, and
+            # `Path("").resolve()` is the process CWD, i.e. the server's own
+            # checkout.
+            #
+            # So the host does NOT rely on the engine here. What keeps a
+            # repo-less run off the CWD on BOTH engine versions is the tool's own
+            # guard, and only the tools that have one are safe: `run_tests` and
+            # `repo_delete` refuse a non-absolute root; `scaffold`,
+            # `knowledge_sync`, `restage`, the novel tools and the godot tools do
+            # NOT (they resolve `project_root or workspace_root or "."`). None of
+            # those is reachable from a repo-less pipeline today: the only
+            # repo-less shape granting root-resolving tools is `tool_creation`
+            # (write/run_tests/pytest/register_tool/register_capability), and
+            # skillflow's own `read_file`/`list_tree` skip an empty root rather
+            # than resolving it. A generated pipeline that lists one of the
+            # others WOULD reach it — guard the tool before offering it to a
+            # `repo_mode: none` config.
             project_root=str(getattr(self, '_code_path', '') or ''),
         )
 

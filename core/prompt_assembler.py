@@ -332,15 +332,20 @@ class PromptAssembler:
         :param task_card: 任务卡片内容 (deprecated, Inbox removed)
         :param feedback: Red Agent 反馈 (重试时非空)
         :param task_id: Optional task ID — if set, inject project planning context
-        :param code_path: Project 代码仓库路径 (如未提供则使用 project_path)
+        :param code_path: Project 代码仓库路径; None = 这个 run 没有代码仓库
         :param resolved_context: skillflow-resolved context (name→content map)
         :param tool_schemas: skillflow-provided merged tool schemas dict
         :param native: If True, use native-friendly output rules (no JSON format enforcement)
         :param user_lang: User's preferred language (e.g. "zh-CN"), injected as a [Language] block
         :return: 结构化提示词字符串
         """
-        if code_path is None:
-            code_path = project_path
+        # `code_path is None` means "this run declares no code repository"
+        # (WorkspaceManager.get_code_path). It used to fall back to
+        # `project_path`, which is the DPS WORKSPACE — so every agent step of
+        # every repo-less run was shown its own step directories under
+        # `_build_workspace_tree`'s "# repo root (write paths are relative to
+        # here…)" heading. Passed through untouched; the tree builder omits the
+        # repo block entirely.
 
         sections = [""]
 
@@ -633,11 +638,11 @@ class PromptAssembler:
         :param project_path: DPS workspace 根路径
         :param step_id: 当前步骤 ID
         :param for_red: 是否为 Red Agent 构建
-        :param code_path: Project 代码仓库路径
+        :param code_path: Project 代码仓库路径; None = 这个 run 没有代码仓库,
+            不渲染 repo 块 (旧代码在这里回落到 project_path, 于是把 DPS
+            workspace 挂在 "# repo root" 标题下给 agent 看)
         :return: 目录树字符串，为空则返回 ""
         """
-        if code_path is None:
-            code_path = project_path
         BLOCKED = {".git", "__pycache__", ".venv", "node_modules", ".gitkeep", "_snapshot.json"}
         MAX_DEPTH = 3
         MAX_ENTRIES = 100
@@ -681,6 +686,8 @@ class PromptAssembler:
                           "e.g. strkit/core.py — do NOT prefix with project/):")
 
         def _repo_lines() -> list[str]:
+            if code_path is None:
+                return []          # the run declares no code repository
             lines = _tree_lines(code_path, ".")
             return ([REPO_ROOT_NOTE] + lines) if lines else []
 

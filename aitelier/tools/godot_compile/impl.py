@@ -96,9 +96,26 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
                 for x in s.get("asserts") or []:
                     if x.get("passed"):
                         continue
-                    parts = [f"- `{x.get('name')}`",
-                             f"expr `{str(x.get('expr'))[:160]}`",
-                             f"actual `{str(x.get('actual'))[:120]}`"]
+                    # The FRAME first: a scenario asserts the same expression at
+                    # several frames, and without it two lines that read identically
+                    # are indistinguishable — a reader cannot tell "green at f100,
+                    # red at f185" from "red the whole way through".
+                    # Live, jinyong-camera 2026-08-29: click_move_commit_lock
+                    # asserted `grid_pos == Vector2i(7,4)` at f100 (PASS) and again
+                    # at f185 (FAIL). Only failures are printed, unframed, so
+                    # 5_review read it as "the player never moved and never acted …
+                    # the game is effectively dead to that input under the moving
+                    # camera" and blamed the round's new follower. The player HAD
+                    # moved at f45 and was still at (7,4) at f100; the real cause was
+                    # an out-of-reach attack at f105 that left `acted` false, after
+                    # which the f155 right-click lawfully undid the move. The frame
+                    # was in playtest_report.json the whole time — it just never
+                    # reached the file anyone reads.
+                    parts = [f"- `{x.get('name')}`"]
+                    if x.get("frame") is not None:
+                        parts.append(f"at frame `{x.get('frame')}`")
+                    parts += [f"expr `{str(x.get('expr'))[:160]}`",
+                              f"actual `{str(x.get('actual'))[:120]}`"]
                     # `actual` on a comparison assert is just `false`. `observed`
                     # is the value the property ACTUALLY held — the only thing
                     # here that tells a reader what to fix. It has to reach THIS

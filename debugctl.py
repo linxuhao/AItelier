@@ -373,49 +373,87 @@ def cmd_await(args):
     deadline = time.time() + args.timeout
     want = {"checkpoint_paused", "run_completed", "run_failed", "pipeline_failed"}
 
-    try:
-        resp = urllib.request.urlopen(url, timeout=args.timeout)
-    except Exception as e:
-        _die(f"cannot open the event stream at {url}: {e}")
+    # The stream is REOPENED on close instead of ending the watch. `--follow`
+    # promises to witness the run to a terminal state, and an SSE connection
+    # dropping is a TRANSPORT event, not a pipeline event: the run is still
+    # going. Live, jinyong-aim 2026-08-28 — the stream closed about an hour in,
+    # await ended, and the run advanced two more cards with nobody watching.
+    # Worse, the give-up path exited 2, the SAME CODE as a real TIMEOUT, so a
+    # watcher that had silently stopped watching looked exactly like one that
+    # waited out its full deadline. Exhausted reconnects now exit 4, which no
+    # other outcome uses.
+    resp = None
+    backoff = 1.0
+    fails = 0
 
-    for raw in resp:
-        if time.time() > deadline:
-            print(f"TIMEOUT after {args.timeout}s waiting on {pid}")
-            sys.exit(2)
-        line = raw.decode("utf-8", "replace").strip()
-        if not line.startswith("data:"):
-            continue
-        try:
-            # The stream wraps each event as {"log": "<json string>"}.
-            outer = _json.loads(line[5:].strip())
-            ev = _json.loads(outer["log"]) if isinstance(outer.get("log"), str) else outer
-        except Exception:
-            continue
-        if ev.get("project_id") != pid:
-            continue
-        kind = ev.get("type", "")
-        if kind not in want:
-            continue
-        if kind == "checkpoint_paused":
-            print(f"CHECKPOINT {pid} step={ev.get('step_id')} "
-                  f"label={ev.get('label')!r} next={ev.get('next_node')}",
-                  flush=True)
-            if not args.follow:
+    def _reopen():
+        nonlocal resp, backoff, fails
+        while time.time() < deadline:
+            try:
+                resp = urllib.request.urlopen(url, timeout=min(args.timeout, 300))
+                if fails:
+                    print(f"RECONNECTED to {url}", flush=True)
+                backoff, fails = 1.0, 0
+                return True
+            except Exception as e:
+                fails += 1
+                if fails == 1 or fails % 10 == 0:
+                    print(f"RECONNECT failed ({fails}x): {e}", flush=True)
+                if fails >= 60:
+                    return False
+                time.sleep(min(backoff, 30.0))
+                backoff *= 2
+        return False
+
+    if not _reopen():
+        _die(f"cannot open the event stream at {url}")
+
+    while True:
+        for raw in resp:
+            if time.time() > deadline:
+                print(f"TIMEOUT after {args.timeout}s waiting on {pid}")
+                sys.exit(2)
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            try:
+                # The stream wraps each event as {"log": "<json string>"}.
+                outer = _json.loads(line[5:].strip())
+                ev = _json.loads(outer["log"]) if isinstance(outer.get("log"), str) else outer
+            except Exception:
+                continue
+            if ev.get("project_id") != pid:
+                continue
+            kind = ev.get("type", "")
+            if kind not in want:
+                continue
+            if kind == "checkpoint_paused":
+                print(f"CHECKPOINT {pid} step={ev.get('step_id')} "
+                      f"label={ev.get('label')!r} next={ev.get('next_node')}",
+                      flush=True)
+                if not args.follow:
+                    sys.exit(0)
+                continue
+            if kind == "run_completed":
+                print(f"COMPLETED {pid}", flush=True)
                 sys.exit(0)
-            continue
-        if kind == "run_completed":
-            print(f"COMPLETED {pid}", flush=True)
-            sys.exit(0)
-        # Terminal failure ends the watch even under --follow: there is nothing
-        # further to witness, and a watcher that kept waiting here would go
-        # quiet forever on the one event that most needs reporting.
-        print(f"FAILED {pid} {ev.get('error_reason') or ev.get('reason') or ev.get('detail') or ''}".rstrip(),
-              flush=True)
-        sys.exit(1)
+            # Terminal failure ends the watch even under --follow: there is nothing
+            # further to witness, and a watcher that kept waiting here would go
+            # quiet forever on the one event that most needs reporting.
+            print(f"FAILED {pid} {ev.get('error_reason') or ev.get('reason') or ev.get('detail') or ''}".rstrip(),
+                  flush=True)
+            sys.exit(1)
 
-    print(f"STREAM CLOSED before {pid} reached a checkpoint or terminal state",
-          flush=True)
-    sys.exit(2)
+        # Fell out of the read loop: the server closed the stream. The run is
+        # almost certainly still alive, so reconnect and keep watching.
+        if time.time() >= deadline:
+            print(f"TIMEOUT after {args.timeout}s waiting on {pid}", flush=True)
+            sys.exit(2)
+        print(f"STREAM CLOSED, reconnecting (still watching {pid})", flush=True)
+        if not _reopen():
+            print(f"STREAM LOST for {pid}: reconnects exhausted, NOT WATCHING ANY MORE",
+                  flush=True)
+            sys.exit(4)
 
 
 def cmd_trace(args):

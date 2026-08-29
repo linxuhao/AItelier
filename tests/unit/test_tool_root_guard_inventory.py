@@ -223,3 +223,24 @@ def test_continuity_check_resolves_against_the_process_cwd(tmp_path,
     assert "chapter_final.md" in res["error"], (
         "continuity_check no longer resolves the CWD; move it from UNGUARDED "
         "to GUARDED above")
+
+
+def test_run_tests_refuses_a_relative_out_dir(tmp_path):
+    """The root guard covered `project_root` and an EMPTY `out_dir`, not a
+    relative one — and `out_dir` is agent-visible (`tool.yaml`, required: false)
+    while `run_tests` is granted to a repo-less step by `tool_creation`. So
+    `out_dir="reports"` on a run with no repo made `Path("reports").mkdir()`
+    resolve against the process CWD, which in the container is /app, the
+    bind-mounted AItelier checkout.
+    """
+    import importlib.util
+    p = "/home/linxuhao/AItelier/aitelier/tools/run_tests/impl.py"
+    s = importlib.util.spec_from_file_location("run_tests_probe", p)
+    m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
+
+    out = m.run_tests(project_root=str(tmp_path), out_dir="reports")
+
+    assert out["passed"] is False
+    assert "absolute" in out["error"] and "reports" in out["error"]
+    assert not (Path.cwd() / "reports").exists(), \
+        "run_tests created a directory under the process CWD"

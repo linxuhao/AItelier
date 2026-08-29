@@ -5,7 +5,8 @@ returned no next node, without asking whether the run had actually finished. A
 run that is still `running` then reads exactly like a completed one.
 
 Live, jinyong-camera 2026-08-29: `5_review` sat for three hours emitting
-`terminal status=running` every 5s — 200 identical lines. The step was claimable
+`terminal status=running` every 5s — 2266 identical lines, 02:57:23Z to
+06:06:16Z (counted in the tick log; the first report said 200). The step was claimable
 the whole time; a hand-called `sf.claim_next_step(run_id)` returned a ClaimedStep
 immediately and the run resumed. `advance_run` had nothing to say only because
 the node already carried a completed step row from an earlier goal-loop pass.

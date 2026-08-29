@@ -809,6 +809,19 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # config_name, step_id, run_id, step_tmp_dir and step_dir — not out_dir —
     # and a tool NODE gets whatever its `tool_params` name. So this branch is
     # reachable, not defensive padding.
+    # ABSOLUTE, for the same reason the root above must be. Checking only for an
+    # EMPTY out_dir left the hole this guard exists to close: `out_dir` is an
+    # agent-visible parameter (tool.yaml, required: false), and `run_tests` is
+    # granted to a repo-less step by the `tool_creation` capability — so
+    # `out_dir="reports"` on a run with no repo made `Path("reports").mkdir()`
+    # resolve against the process CWD, which in the container is /app, the
+    # bind-mounted AItelier checkout. One directory and one fixed filename, but
+    # written outside the run's jail all the same.
+    if out_dir and not Path(out_dir).is_absolute():
+        return {"written": None, "passed": False,
+                "error": f"run_tests: out_dir must be an absolute path (got "
+                         f"{out_dir!r}) — refusing to resolve against the "
+                         f"process CWD. {report['summary']}"}
     if not out_dir and repo is None:
         return {"written": None, "passed": False, "error": report["summary"]}
     target_dir = Path(out_dir) if out_dir else repo

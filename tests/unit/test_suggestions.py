@@ -12,6 +12,10 @@ import pytest
 
 from core import suggestions
 
+# Captured before the autouse fixture stubs it out, for the two tests that
+# exercise the real lookup rather than assuming a version.
+_REAL_LIVE_VERSION = suggestions._live_version
+
 
 @pytest.fixture(autouse=True)
 def _no_engine(monkeypatch):
@@ -28,7 +32,7 @@ def _no_engine(monkeypatch):
 def _db(tmp_path, monkeypatch):
     from core.db_manager import DBManager
     db = DBManager(str(tmp_path / "t.db"))
-    monkeypatch.setattr(suggestions, "get_db_manager", lambda: db)
+    monkeypatch.setattr(suggestions, "_db", lambda: db)
     return db
 
 
@@ -116,3 +120,67 @@ def test_listing_filters_by_target_and_status():
 @pytest.mark.parametrize("target,title", [("", "t"), ("gen_a", "")])
 def test_an_empty_target_or_title_is_refused(target, title):
     assert "error" in suggestions.create(target, title)
+
+
+def test_a_concurrent_resolve_loses_instead_of_overwriting(monkeypatch, _db):
+    """The read and the write are separate transactions, so the status check is
+    advisory. Without a guard on the UPDATE the second writer silently replaces
+    the first's outcome and is told it succeeded."""
+    monkeypatch.setattr(suggestions, "_live_version", lambda target: 3)
+    sid = suggestions.create("gen_foo", "x")["id"]
+    stale = suggestions.get(sid)          # the read, still `open`
+
+    # Another process resolves it in the window between that read and the write.
+    # Handing resolve() the stale snapshot is what makes the window reachable in
+    # a single-threaded test; the in-process re-read would otherwise catch this
+    # case on its own, which is exactly why it cannot stand in for the guard.
+    with _db.get_connection() as conn:
+        conn.execute("UPDATE pipeline_suggestions SET status='applied', "
+                     "result_version=4, resolved_at=CURRENT_TIMESTAMP "
+                     "WHERE id=?", (sid,))
+        conn.commit()
+    monkeypatch.setattr(suggestions, "get",
+                        lambda i, _s=stale: _s if i == sid else None)
+
+    out = suggestions.resolve(sid, "rejected", note="no longer applies")
+
+    assert "error" in out and "someone else" in out["error"]
+    with _db.get_connection() as conn:
+        row = conn.execute("SELECT status, result_version FROM "
+                           "pipeline_suggestions WHERE id=?", (sid,)).fetchone()
+    assert (row["status"], row["result_version"]) == ("applied", 4), \
+        "the first resolution was overwritten"
+
+
+def test_an_addon_is_versioned_under_its_composed_alias(monkeypatch):
+    """An addon is registered as its overlay's `alias` (game_harness → dpe_game),
+    so looking it up by its own name yields no versions — which would switch off
+    the stale-base rule for the targets it matters most for."""
+    class _SF:
+        _overlays = {"game_harness": {"base": "dpe_default_v2",
+                                      "alias": "dpe_game"}}
+        def list_graph_versions(self, name):
+            return [{"version": 12}] if name == "dpe_game" else []
+
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "get_skillflow", lambda: _SF(), raising=False)
+    monkeypatch.setattr(suggestions, "_live_version", _REAL_LIVE_VERSION)
+
+    assert suggestions._graph_name_of("game_harness") == "dpe_game"
+    assert suggestions.create("game_harness", "overlay targets a bare step id"
+                              )["base_version"] == 12
+
+
+def test_an_unknown_target_keeps_its_own_name(monkeypatch):
+    """The control: the alias mapping must not rewrite a plain pipeline name."""
+    class _SF:
+        _overlays = {}
+        def list_graph_versions(self, name):
+            return [{"version": 5}] if name == "gen_foo" else []
+
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "get_skillflow", lambda: _SF(), raising=False)
+    monkeypatch.setattr(suggestions, "_live_version", _REAL_LIVE_VERSION)
+
+    assert suggestions._graph_name_of("gen_foo") == "gen_foo"
+    assert suggestions.create("gen_foo", "x")["base_version"] == 5

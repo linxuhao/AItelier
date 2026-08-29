@@ -187,6 +187,23 @@ into an isolated place whose transcript you don't pay for.
   4. Only then present it as ready. (Common fix: a reviewer role should drop
      `read_file` and rely on its injected context, like the DPE reviewers.)
 
+  **Before you start editing a pipeline, read what is already known about it.**
+  `list_pipeline_suggestions(target="gen_<slug>")` shows lessons recorded from
+  earlier runs — someone may already have diagnosed what you are about to
+  re-diagnose. One marked `stale_base` was written against an older version:
+  re-read it against the config as it stands now, because the step it complains
+  about may already be gone. `pipeline_versions(config_name=…)` shows how the
+  config drifted since, and what changed at each version.
+
+  **When you find a defect you are NOT fixing now, record it** —
+  `suggest_pipeline_change(target=…, title=…, content=…)`. A finding that stays
+  in this chat dies with the session; that is how the same pipeline bug gets
+  re-diagnosed on three separate days. Record the evidence (step, error, run
+  id), not just the complaint. When an edit of yours answers one, close it with
+  `resolve_pipeline_suggestion(..., status="applied")` so the lesson points at
+  the version that carries the fix. Do not file one for a one-off bad input —
+  a suggestion is about the PIPELINE, not about a single run.
+
   **If `generate_pipeline` FAILS before the checkpoint** (its result is a failure,
   not a design checkpoint — e.g. the emit loop hit its cycle limit), no
   `gen_<slug>` exists yet, so there is nothing to `drive` and nothing to salvage.

@@ -27,13 +27,50 @@ from __future__ import annotations
 
 import uuid
 
-from core.db_manager import get_db_manager
-
 OPEN = "open"
 APPLIED = "applied"
 REJECTED = "rejected"
 _TERMINAL = (APPLIED, REJECTED)
 _ORIGINS = ("user", "agent", "system")
+
+
+def _db():
+    """The SERVER's DBManager, not the CLI accessor.
+
+    `core.db_manager.get_db_manager` is documented host/CLI-only, and every
+    other server-side module in `core/` goes through `api.dependencies` instead.
+    These functions run inside butler tool calls, i.e. in the server: taking the
+    CLI accessor there would construct a SECOND DBManager against the live file,
+    and its `_init_db` runs the versioned-migration runner — which backs up and
+    can rebuild tables — from inside a request handler. Falls back to the CLI
+    accessor so the module still works from the TUI.
+    """
+    try:
+        from api.dependencies import get_db_manager as _server_db
+        return _server_db()
+    except Exception:                                            # noqa: BLE001
+        from core.db_manager import get_db_manager as _cli_db
+        return _cli_db()
+
+
+def _graph_name_of(target: str) -> str:
+    """The name the ENGINE knows this target by.
+
+    An addon is not registered under its own name — its composed graph is
+    registered under the overlay's `alias` (`game_harness` → `dpe_game`). Asking
+    for the addon's own name returns no versions, which would silently give
+    every addon suggestion `base_version = None` and switch off the stale-base
+    rule for exactly the targets it matters most for: an overlay hangs its ops
+    on the base graph's step ids, so "the base moved on" is its whole risk.
+    """
+    try:
+        from api.dependencies import get_skillflow
+        spec = (getattr(get_skillflow(), "_overlays", {}) or {}).get(target)
+        if spec:
+            return spec.get("alias") or target
+    except Exception:                                            # noqa: BLE001
+        pass
+    return target
 
 
 def _live_version(target: str) -> int | None:
@@ -48,7 +85,7 @@ def _live_version(target: str) -> int | None:
         lister = getattr(get_skillflow(), "list_graph_versions", None)
         if lister is None:
             return None
-        rows = lister(target)
+        rows = lister(_graph_name_of(target))
         return rows[0]["version"] if rows else None
     except Exception:                                            # noqa: BLE001
         return None
@@ -71,7 +108,7 @@ def create(target: str, title: str, content: str = "", *,
     if base_version is None:
         base_version = _live_version(target)
     sid = uuid.uuid4().hex[:12]
-    with get_db_manager().get_connection() as conn:
+    with _db().get_connection() as conn:
         conn.execute(
             "INSERT INTO pipeline_suggestions "
             "(id, target, base_version, title, content, origin, created_by, "
@@ -108,7 +145,7 @@ def list_for(target: str | None = None, status: str | None = None) -> list[dict]
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY created_at DESC, rowid DESC"
-    with get_db_manager().get_connection() as conn:
+    with _db().get_connection() as conn:
         rows = conn.execute(sql, params).fetchall()
     # One version lookup per distinct target, not per row.
     live: dict[str, int | None] = {}
@@ -122,7 +159,7 @@ def list_for(target: str | None = None, status: str | None = None) -> list[dict]
 
 
 def get(suggestion_id: str) -> dict | None:
-    with get_db_manager().get_connection() as conn:
+    with _db().get_connection() as conn:
         row = conn.execute("SELECT * FROM pipeline_suggestions WHERE id = ?",
                            (suggestion_id,)).fetchone()
     if not row:
@@ -155,18 +192,30 @@ def resolve(suggestion_id: str, status: str, *,
             return {"error": "applied needs result_version — the config version "
                              "that carries the change. The engine could not "
                              "supply one, so pass it explicitly."}
-    with get_db_manager().get_connection() as conn:
-        conn.execute(
+    # `AND status = OPEN`, not a bare `WHERE id = ?`. The read above and this
+    # write are separate transactions, so the check alone is advisory: two
+    # callers resolving the same suggestion both see `open`, both pass, and the
+    # second silently overwrites the first — turning an `applied` with a result
+    # version into a `rejected` with no trace, while telling the first caller it
+    # succeeded. Let the database decide, and report losing rather than lie.
+    with _db().get_connection() as conn:
+        cur = conn.execute(
             "UPDATE pipeline_suggestions SET status = ?, result_version = ?, "
-            "resolution_note = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (status, result_version, note, suggestion_id))
+            "resolution_note = ?, resolved_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND status = ?",
+            (status, result_version, note, suggestion_id, OPEN))
         conn.commit()
+    if cur.rowcount == 0:
+        now = get(suggestion_id)
+        return {"error": f"suggestion {suggestion_id} was resolved by someone "
+                         f"else first (now {now['status'] if now else 'gone'}) "
+                         f"— re-read it before resolving again."}
     return {"id": suggestion_id, "status": status,
             "result_version": result_version}
 
 
 def open_count(target: str) -> int:
-    with get_db_manager().get_connection() as conn:
+    with _db().get_connection() as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS n FROM pipeline_suggestions "
             "WHERE target = ? AND status = ?", (target, OPEN)).fetchone()

@@ -29,13 +29,27 @@ def claimed():
     return c
 
 
-def test_the_claim_is_handed_back_retryably(claimed):
-    """Retryable, because the step did not fail — nobody was left to record it."""
+def test_the_claim_goes_back_without_spending_a_retry(claimed):
+    """`release_claim`, not `fail_step`. The step did not fail — its executor
+    went away — and `fail_step(retryable=True)` increments retry_count, so three
+    cancellations would kill a healthy step with an error blaming it for what
+    the client did."""
     sf = MagicMock()
     release_claim_on_cancel(sf, claimed)
 
+    sf.release_claim.assert_called_once()
+    assert sf.release_claim.call_args.args[0] is claimed.token
+    sf.fail_step.assert_not_called()
+
+
+def test_an_engine_without_release_claim_still_gets_the_claim_back(claimed):
+    """The container tracks PyPI while the host runs an editable checkout, so
+    the engine can be older than this call. Handing the claim back matters more
+    than handing it back cheaply."""
+    sf = MagicMock(spec=["fail_step"])          # no release_claim attribute
+    release_claim_on_cancel(sf, claimed)
+
     sf.fail_step.assert_called_once()
-    assert sf.fail_step.call_args.args[0] is claimed.token
     assert sf.fail_step.call_args.kwargs["retryable"] is True
 
 
@@ -44,7 +58,7 @@ def test_a_failing_release_is_reported_not_raised(claimed, caplog):
     the cancellation with a less useful error. But silence would hide a claim
     that is now stuck until the process restarts."""
     sf = MagicMock()
-    sf.fail_step.side_effect = RuntimeError("db gone")
+    sf.release_claim.side_effect = RuntimeError("db gone")
 
     with caplog.at_level("WARNING", logger="aitelier"):
         release_claim_on_cancel(sf, claimed)     # must not raise
@@ -68,7 +82,7 @@ async def test_the_real_loop_shape_releases_and_still_cancels(claimed):
     caller would believe the driver finished."""
     sf = MagicMock()
     released = []
-    sf.fail_step.side_effect = lambda *a, **k: released.append(a[0])
+    sf.release_claim.side_effect = lambda *a, **k: released.append(a[0])
 
     async def body():
         try:

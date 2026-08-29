@@ -1043,11 +1043,16 @@ TOOL_DEFINITIONS = [
             "name": "pipeline_versions",
             "description": (
                 "The edit history of a config: every CONTENT version the engine "
-                "recorded, newest first, with its digest and when it landed. A "
+                "recorded, newest first, each with WHAT CHANGED at it — steps "
+                "added or removed, outputs no longer declared, capability offers "
+                "dropped — in the same vocabulary replay_baseline reports. A "
                 "version is minted only when the content actually changed, so "
-                "the count is how many times the config was edited. Use it to "
-                "answer 'what did this run actually execute' (runs are pinned to "
-                "a version) and to name the base version of a suggestion."
+                "the count is how many times the config was edited, not how many "
+                "times the server restarted. Use it to answer 'what did this run "
+                "actually execute' (a run is pinned to the version it started "
+                "with, and drive_pipeline reports which one), to see how a "
+                "pipeline drifted from the shape you last verified, and to name "
+                "the base version of a suggestion."
             ),
             "parameters": {
                 "type": "object",
@@ -1055,7 +1060,13 @@ TOOL_DEFINITIONS = [
                     "config_name": {"type": "string",
                                     "description": "Any registered config — "
                                     "gen_<slug>, a built-in, or a composed addon "
-                                    "alias."},
+                                    "alias (an addon is registered under its "
+                                    "alias, e.g. game_harness → dpe_game)."},
+                    "version": {"type": "integer",
+                                "description": "Show this one version's shape "
+                                "— its steps, their tools and declared outputs, "
+                                "the capabilities it offered. Omit for the "
+                                "history."},
                 },
                 "required": ["config_name"],
             },
@@ -1112,8 +1123,12 @@ TOOL_DEFINITIONS = [
                     "target": {"type": "string",
                                "description": "Limit to one config (default: all)."},
                     "status": {"type": "string",
-                               "enum": ["open", "applied", "rejected"],
-                               "description": "Default: open."},
+                               "enum": ["open", "applied", "rejected", "all"],
+                               "description": "Default: open. 'all' includes "
+                               "resolved ones — read those before filing a new "
+                               "suggestion, so a lesson already applied (or "
+                               "already rejected, with the reason) is not filed "
+                               "a second time."},
                 },
             },
         },
@@ -4629,14 +4644,26 @@ class MetaAgent:
             self._log_error(f"baseline for {config_name} failed: {e}")
             return {"error": str(e)}
 
+    # How many versions get a computed delta. Each one costs parsing two stored
+    # graphs; the history of a config under active editing is long and its tail
+    # is rarely what anyone is asking about.
+    _VERSION_DELTA_WINDOW = 8
+
+    def _version_shape(self, sf, name: str, version: int) -> dict | None:
+        from core import baseline as bl
+        got = sf.get_graph_version(name, version)
+        return bl.capture_shape(got["graph"]) if got else None
+
     async def _tool_pipeline_versions(self, args: dict) -> dict:
-        """The recorded content history of one config."""
+        """The recorded content history of one config, with what changed at each."""
+        from core import baseline as bl
         from api.dependencies import get_skillflow
 
         name = (args.get("config_name") or "").strip()
         if not name:
             return {"error": "config_name is required."}
-        lister = getattr(get_skillflow(), "list_graph_versions", None)
+        sf = get_skillflow()
+        lister = getattr(sf, "list_graph_versions", None)
         if lister is None:
             return {"error": "this engine has no graph version history — the "
                              "container is running a skillflow older than the "
@@ -4647,8 +4674,44 @@ class MetaAgent:
                     "note": "no history yet. A version is recorded the next "
                             "time this config is registered, which happens on "
                             "boot and after every config_edit."}
-        return {"config_name": name, "latest": rows[0]["version"],
-                "versions": rows}
+
+        want = args.get("version")
+        if want is not None:
+            shape = self._version_shape(sf, name, int(want))
+            if shape is None:
+                return {"error": f"{name} has no version {want} — "
+                                 f"{[r['version'] for r in rows]}."}
+            return {"config_name": name, "version": int(want), "shape": shape,
+                    "hint": "The SHAPE as of that version (steps, their tools "
+                            "and declared outputs, the capabilities offered). "
+                            "config_read shows the current file on disk."}
+
+        # What changed at each version, in the SAME vocabulary replay_baseline
+        # reports — `step_removed`, `output_undeclared`, `capability_dropped`.
+        # A version number an agent cannot act on is just a bigger integer; and
+        # one differ means one set of names to learn, not two.
+        out, memo = [], {}
+        for r in rows[:self._VERSION_DELTA_WINDOW]:
+            v = r["version"]
+            entry = dict(r)
+            if v > 1:
+                for n in (v, v - 1):
+                    if n not in memo:
+                        memo[n] = self._version_shape(sf, name, n)
+                if memo[v] is not None and memo[v - 1] is not None:
+                    entry["changed"] = bl.diff({"shape": memo[v - 1]},
+                                               {"shape": memo[v]})
+            else:
+                entry["changed"] = []      # v1 is the beginning, not a change
+            out.append(entry)
+        res = {"config_name": name, "latest": rows[0]["version"],
+               "versions": out}
+        if len(rows) > self._VERSION_DELTA_WINDOW:
+            res["older"] = [r["version"] for r in
+                            rows[self._VERSION_DELTA_WINDOW:]]
+            res["note"] = (f"{len(res['older'])} older version(s) listed by "
+                           f"number only; pass version=<n> to see one.")
+        return res
 
     async def _tool_suggest_pipeline_change(self, args: dict) -> dict:
         from core import suggestions
@@ -4665,9 +4728,10 @@ class MetaAgent:
     async def _tool_list_pipeline_suggestions(self, args: dict) -> dict:
         from core import suggestions
 
+        status = (args.get("status") or suggestions.OPEN).strip()
         rows = suggestions.list_for(
             (args.get("target") or "").strip() or None,
-            (args.get("status") or suggestions.OPEN))
+            None if status == "all" else status)
         stale = [r["id"] for r in rows if r.get("stale_base")]
         out = {"count": len(rows), "suggestions": rows}
         if stale:

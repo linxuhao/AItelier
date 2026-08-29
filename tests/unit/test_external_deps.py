@@ -328,6 +328,22 @@ def test_a_route_no_agent_config_names_is_still_reported():
         Path(config_or_example("llm_providers.json")).read_text(encoding="utf-8"))
     table = ModelRoutes(config_or_example("model_routes.json"))
 
+    # Undeclared providers FIRST. Without this the rest of the test is vacuous
+    # for exactly the case that matters: a provider the routes name but the
+    # registry does not declare contributes no key, so it silently drops out of
+    # `referenced` and the subset check below passes while the operator is told
+    # nothing. That is not hypothetical — `model_routes.example.json` named
+    # `localqwen` (the vision route) while `llm_providers.example.json` never
+    # declared it, and the consequence was that a CLEAN CHECKOUT could not pass
+    # its own unit suite: 33 tests red, 32 of them from this one omission.
+    undeclared = {c.split("/", 1)[0]
+                  for route in table.names() for c in table.resolve(route)
+                  if c.split("/", 1)[0] not in providers}
+    assert not undeclared, (
+        f"{sorted(undeclared)} appear in model_routes.json but are not "
+        f"declared in llm_providers.json — nothing can name their key, so the "
+        f"operator is never asked for it and every check below goes quiet")
+
     referenced = set()
     for route in table.names():
         for candidate in table.resolve(route):

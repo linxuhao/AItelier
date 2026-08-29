@@ -863,9 +863,7 @@ def retry_project(
             # branch and the run is permanently un-retryable through the API.
             # Editing a config while a run sits failed is the documented forge
             # loop, so this fired on ordinary work.
-            _pinned = getattr(sf, "_get_resolver_for_run", None)
-            _res = (_pinned(run["id"]) if _pinned
-                    else sf._get_resolver(after.get("graph_name", "")))
+            _res = sf._get_resolver_for_run(run["id"])
             if node and _res.get_node(node) is None:
                 # `sf._lock` — this writes on the ENGINE's shared connection,
                 # whose `_tx` holds that lock across BEGIN IMMEDIATE…commit.

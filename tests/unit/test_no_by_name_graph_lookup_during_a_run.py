@@ -31,7 +31,6 @@ _ALLOWED = {
     "core/pipeline_registry.py": "registration and archival — no run in scope",
     "core/addon_registry.py": "compose/registration — no run in scope",
     "core/capability_registry.py": "capability definitions are global",
-    "core/baseline.py": "captures a config's shape, not a run's execution",
     "aitelier/tools/forge_dryrun_smoke/impl.py": "stub drive on its own engine",
     "aitelier/stub_runner.py": "stub drive on its own engine",
     "core/run_launcher.py": "pre-flight context check BEFORE a run exists",
@@ -71,19 +70,48 @@ def _by_name_lookups(tree) -> list[int]:
             hits.append(n.lineno)
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
                 and n.func.attr == "get" and isinstance(n.func.value, ast.Attribute) \
-                and n.func.value.attr == "_graphs":
+                and n.func.value.attr in ("_graphs", "_resolvers"):
+            hits.append(n.lineno)
+        # `sf._graphs[name]` / `sf._resolvers[name]`. The docstring and the
+        # failure message both named the subscript form as the rule from the
+        # start, and it was never detected — an advertised, unenforced rule is
+        # worse than none, because it is relied on.
+        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Attribute) \
+                and n.value.attr in ("_graphs", "_resolvers"):
+            hits.append(n.lineno)
+        # `getattr(sf, "_graphs", {}).get(name)` — the defensive form, and the
+        # one `core/baseline.py` actually uses. Attribute matching cannot see it
+        # (the receiver is a Call, not an Attribute), so the detector was blind
+        # to the very file whose blanket exemption was hiding a real bug.
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                and n.func.id == "getattr" and len(n.args) >= 2 \
+                and isinstance(n.args[1], ast.Constant) \
+                and n.args[1].value in ("_graphs", "_resolvers"):
             hits.append(n.lineno)
     return hits
 
 
 def _guarded_lines(src: str) -> set[int]:
-    """Lines inside a `pinned if … else by-name` expression, or one line after
-    it — the fallback idiom, which is correct."""
+    """Lines that are the by-name HALF of a pinned-preferring expression.
+
+    Exact, not a text window. The first version exempted any line within ±3 of a
+    mention of `_get_resolver_for_run` — including a mention in a COMMENT — so a
+    real by-name lookup placed just below a correctly-fixed site, or below a
+    `# TODO: use _get_resolver_for_run`, was silently waved through. A guard
+    with a fuzzy exemption is a guard you cannot rely on, which is the failure
+    mode this whole file exists to end.
+    """
     guarded = set()
     lines = src.splitlines()
     for i, line in enumerate(lines, 1):
-        window = " ".join(lines[max(0, i - 4):i + 2])
-        if "_get_resolver_for_run" in window or "_graph_for_run" in window:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue                       # a comment never guards anything
+        # The by-name call must sit on the same LOGICAL line as the pinned one:
+        # `x = pinned(run_id) if p else sf._get_resolver(name)`, possibly wrapped.
+        joined = " ".join(lines[max(0, i - 3):i + 1])
+        if ("_get_resolver_for_run" in joined or "_graph_for_run" in joined) \
+                and (" if " in joined or "\n" not in joined):
             guarded.add(i)
     return guarded
 
@@ -95,11 +123,16 @@ _MARKER = "by-name-ok:"
 
 
 def _marked_lines(src: str) -> set[int]:
-    """Lines carrying `# by-name-ok: <reason>` on themselves or just above."""
+    """Lines carrying `# by-name-ok:` on themselves or on the line directly above.
+
+    ONE line, not three. A three-line reach meant a second, real lookup just
+    after a legitimately marked one was exempted by its neighbour's reason — an
+    exemption someone else wrote, for a different line.
+    """
     out, lines = set(), src.splitlines()
     for i, line in enumerate(lines, 1):
         if _MARKER in line:
-            out.update({i, i + 1, i + 2})
+            out.update({i, i + 1})
     return out
 
 

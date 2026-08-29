@@ -578,8 +578,11 @@ def _read_rejection_rounds(project_id: str, step_id: str,
             # log to read, and its sibling three hundred lines down was already
             # fixed — the two disagreeing is how the modal shows another step's
             # rejection history, or none.
-            _p = getattr(sf, "_get_resolver_for_run", None)
-            _r = (_p(run_id) if (_p and run_id) else sf._get_resolver(graph_name))
+            # `if run_id` is about the CALLER, not the engine: this helper is
+            # reachable with no run in hand.
+            # by-name-ok: the no-run half
+            _r = (sf._get_resolver_for_run(run_id) if run_id
+                  else sf._get_resolver(graph_name))
             node = _r.get_node(step_id)
             target = (node.checkpoint_reject_to or step_id) if node else step_id
         except Exception:
@@ -688,8 +691,10 @@ def _get_checkpoint_info(project_id: str) -> tuple[str, str, str, str, int]:
     # guard, answers "already_advanced", and leaves the run paused forever —
     # the unanswerable-checkpoint failure that guard's own comment records from
     # jinyong-hud, through a new door.
-    _pinned = getattr(sf, "_get_resolver_for_run", None)
-    resolver = _pinned(run_id) if _pinned else sf._get_resolver(graph_name)
+    # `_get_resolver_for_run` exists on every engine, including the deployed
+    # one — there it IS the by-name lookup, keyed on run_id, so an older engine
+    # degrades to the old behaviour by definition rather than by a fallback.
+    resolver = sf._get_resolver_for_run(run_id)
     # When skillflow pauses at a checkpoint it sets current_node to the
     # checkpoint's NEXT node (its checkpoint-guarded transition target) and
     # marks the checkpoint step itself "completed". Identify the exact

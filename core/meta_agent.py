@@ -3523,9 +3523,7 @@ class MetaAgent:
                         # Checkpoint — surface to user via the agent
                         label = run.get("current_node", "Checkpoint")
                         # Find the checkpoint step (last completed with checkpoint=True)
-                        _p = getattr(sf, "_get_resolver_for_run", None)
-                        resolver = (_p(run_id) if _p
-                                    else sf._get_resolver(run["graph_name"]))
+                        resolver = sf._get_resolver_for_run(run_id)
                         checkpoint_step_id = ""
                         checkpoint_data = None
                         for s in reversed(steps):
@@ -3770,9 +3768,7 @@ class MetaAgent:
             checkpoint_step_id = ""
             checkpoint_data = None
             try:
-                _p = getattr(sf, "_get_resolver_for_run", None)
-                resolver = (_p(run_id) if _p
-                            else sf._get_resolver(run["graph_name"]))
+                resolver = sf._get_resolver_for_run(run_id)
             except Exception:
                 resolver = None
             for s in reversed(steps):
@@ -4475,9 +4471,7 @@ class MetaAgent:
         # path's answer. It does not — it re-derives its own, three lines above
         # the line that commit edited.
         steps = sf.get_steps(run_id)
-        _pinned = getattr(sf, "_get_resolver_for_run", None)
-        resolver = (_pinned(run_id) if _pinned
-                    else sf._get_resolver(run["graph_name"]))
+        resolver = sf._get_resolver_for_run(run_id)
         checkpoint_step_id = ""
         for s in reversed(steps):
             if s["status"] == "completed":
@@ -4678,7 +4672,10 @@ class MetaAgent:
         try:
             observed = bl.capture_observed(get_skillflow(), self.ws, run_id,
                                            project_id, config_name, test_seed)
-            fresh = bl.capture(bl.KIND_PIPELINE, config_name, observed=observed)
+            # `run_id`: `observed` is what THIS run produced, so the shape and
+            # version recorded beside it must be the graph THIS run executed.
+            fresh = bl.capture(bl.KIND_PIPELINE, config_name,
+                               observed=observed, run_id=run_id)
             prior = bl.read(bl.KIND_PIPELINE, config_name)
             if prior is None:
                 p = bl.write(bl.KIND_PIPELINE, config_name, fresh)
@@ -4990,9 +4987,7 @@ class MetaAgent:
         base = {"status": status, "run_id": run_id,
                 "steps_completed": len([s for s in steps if s["status"] == "completed"])}
         if status == "paused":
-            _p = getattr(sf, "_get_resolver_for_run", None)
-            resolver = (_p(run_id) if _p
-                        else sf._get_resolver(run["graph_name"]))
+            resolver = sf._get_resolver_for_run(run_id)
             checkpoint_step_id, label, data = "", run.get("current_node", "Checkpoint"), None
             for s in reversed(steps):
                 if s["status"] == "completed":
@@ -5198,8 +5193,9 @@ class MetaAgent:
         # Inspect the base graph host-side: its anchors are the ONLY legal
         # injection points, so seed them (+ step ids + where each anchor leads)
         # for the converter agents, and the full graph dict for compose_validate.
-        # by-name-ok: `base` is the addon's BASE CONFIG being inspected for its
-        # anchors, not a graph any run is executing — there is no run here.
+        # `base` is the addon's BASE CONFIG being inspected for its anchors, not
+        # a graph any run is executing — there is no run here.
+        # by-name-ok: no run in scope
         graph = sf._graphs.get(base)
         if graph is None:
             try:

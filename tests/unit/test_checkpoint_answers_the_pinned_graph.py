@@ -18,6 +18,7 @@ graph's, so it names a different step than the user is looking at. Then:
             jinyong-hud, reached through a new door.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -65,11 +66,19 @@ def test_it_asks_the_pinned_graph_not_the_current_one(sf):
     sf._get_resolver_for_run.assert_called_with("run1")
 
 
-def test_it_falls_back_by_name_on_an_engine_without_pinning(sf):
-    """The container tracks PyPI while the host runs an editable checkout, so
-    the accessor can be absent. Absent must mean old behaviour, not a crash."""
-    del sf._get_resolver_for_run
+def test_the_pinned_accessor_needs_no_fallback():
+    """`_get_resolver_for_run` is not new — it ships in the DEPLOYED engine too.
 
-    step_id, _label, _run, _graph, _inst = meta_routers._get_checkpoint_info("p1")
+    An earlier version of this test asserted a `getattr`-guarded fallback for
+    "an engine without pinning". There is no such engine: published 1.5.55
+    already has the method, as a by-NAME lookup keyed on run_id. So the guard
+    was unreachable, and an older engine degrades to the old behaviour by
+    definition rather than by anything the host does — which is a better
+    property than the one that was claimed, but only if it is stated truthfully.
+    """
+    import skillflow.core
 
-    assert step_id in ("a", "b"), "the by-name fallback did not run"
+    assert hasattr(skillflow.core.SkillFlow, "_get_resolver_for_run")
+    assert "getattr(sf, \"_get_resolver_for_run\"" not in \
+        (Path(meta_routers.__file__).read_text(encoding="utf-8")), \
+        "a guard for an engine that cannot exist reads as a real safety net"

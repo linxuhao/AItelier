@@ -1222,6 +1222,24 @@ def _register_run_tools(tool):
                 from api.meta_routers import _get_checkpoint_info
                 step_id, _label, _rid, _graph, _inst = _get_checkpoint_info(
                     run.get("project_id") or "")
+                # …but only if it resolved THIS run. `_get_checkpoint_info`
+                # takes a project and picks its newest non-completed run of ANY
+                # config, while this tool was given a run_id precisely because a
+                # project can have several. A project with a paused DPE run plus
+                # a newer `meta_conversation` run therefore either answered
+                # "no checkpoint could be resolved" for an answerable checkpoint,
+                # or handed another run's step id to `reject_checkpoint` on THIS
+                # run — where a colliding id across two runs of one graph rewinds
+                # the wrong step. `core/scheduler.py` learned the same lesson and
+                # added a graph filter; this call never got one.
+                if _rid and _rid != run_id:
+                    return {**echo,
+                            "error": f"run '{run_id}' is paused, but this "
+                                     f"project's checkpoint resolver answered "
+                                     f"for run '{_rid}' instead — the project "
+                                     f"has more than one live run. Resolve the "
+                                     f"checkpoint from the dashboard, or reject "
+                                     f"the run that is actually paused."}
                 if not step_id:
                     return {**echo,
                             "error": f"run '{run_id}' is paused but no checkpoint "

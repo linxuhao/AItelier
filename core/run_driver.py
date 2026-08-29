@@ -145,8 +145,10 @@ def checkpoint_reject_target(sf, graph_name: str, step_id: str,
     somewhere it was never meant to go, with no guard firing.
     """
     try:
-        _pinned = getattr(sf, "_get_resolver_for_run", None)
-        resolver = (_pinned(run_id) if (_pinned and run_id)
+        # `if run_id` is about the CALLER: `run_id` defaults to "" so older
+        # callers still work.
+        # by-name-ok: the no-run half
+        resolver = (sf._get_resolver_for_run(run_id) if run_id
                     else sf._get_resolver(graph_name))
         node = resolver.get_node(step_id)
     except Exception:
@@ -184,46 +186,57 @@ def restore_retry_budget(sf, run_id: str) -> dict | None:
 
     Called AFTER reactivate_run so it wins on current_node.
     """
-    rows = sf._conn.execute(
-        "SELECT id, step_id, retry_count, validation_retry_count, max_retries "
-        "FROM skillflow_steps WHERE run_id = ? AND status = 'failed' "
-        "AND id IN (SELECT MAX(id) FROM skillflow_steps WHERE run_id = ? "
-        "AND status = 'failed' GROUP BY step_id) ORDER BY id DESC",
-        (run_id, run_id),
-    ).fetchall()
-    if not rows:
-        return None
-    # `release_count` is deliberately NOT cleared here. It is no longer charged
+    # One lock hold covers the read AND the write.
+    #
+    # On the engine's SHARED connection an unlocked read executes INSIDE
+    # whatever `_tx` another thread has open, so it sees uncommitted rows — and
+    # this read is what CHOOSES the rows to rewrite. Reading a step another
+    # thread just marked `failed` in a transaction that then rolls back makes
+    # this write `status='pending', retry_count=0, claimed_at=NULL,
+    # version=version+1` onto a row that is really `running` and live-claimed:
+    # the version bump invalidates the running driver's fencing token, its
+    # `confirm_step` is refused, and finished work is discarded. The mirror case
+    # — missing a genuinely failed row because an uncommitted tx moved it — is
+    # "Retry silently did nothing", the bug this function exists to fix.
+    #
+    # `SkillFlow._tx` holds this same lock across BEGIN IMMEDIATE…commit on this
+    # same connection, so without it a request thread and a scheduler tick have
+    # two notions of "the transaction": a host `with sf._conn:` can COMMIT one
+    # the engine meant to roll back, or the engine hits "cannot start a
+    # transaction within a transaction".
+    #
+    # `release_count` is deliberately NOT cleared. It is no longer charged
     # against the retry budget — a cancellation never spends a retry — so there
     # is nothing to restore, and the count is the only surviving record that a
-    # step was repeatedly abandoned by its driver. Clearing it at exactly the
-    # moment an operator investigates that step erases the evidence, which is
-    # the mistake the previous shape of this code made in the engine.
-    #
-    # `sf._lock` around the write: this is raw SQL on the ENGINE's shared
-    # connection, and `SkillFlow._tx` holds that lock across BEGIN IMMEDIATE …
-    # commit on the same connection. Without it a request thread and a
-    # scheduler tick hold one sqlite connection with two notions of "the
-    # transaction" — this `with` can COMMIT a transaction the engine meant to
-    # roll back (the validation-abort path), or the engine can hit "cannot
-    # start a transaction within a transaction".
-    with sf._lock, sf._conn:
-        for r in rows:
+    # step was repeatedly abandoned by its driver. Clearing it at the moment an
+    # operator investigates that step erases the evidence.
+    with sf._lock:
+        rows = sf._conn.execute(
+            "SELECT id, step_id, retry_count, validation_retry_count, max_retries "
+            "FROM skillflow_steps WHERE run_id = ? AND status = 'failed' "
+            "AND id IN (SELECT MAX(id) FROM skillflow_steps WHERE run_id = ? "
+            "AND status = 'failed' GROUP BY step_id) ORDER BY id DESC",
+            (run_id, run_id),
+        ).fetchall()
+        if not rows:
+            return None
+        with sf._conn:
+            for r in rows:
+                sf._conn.execute(
+                    "UPDATE skillflow_steps SET status = 'pending', "
+                    "retry_count = 0, validation_retry_count = 0, "
+                    "version = version + 1, "
+                    "claimed_at = NULL, claimed_by = NULL, "
+                    "inputs_json = json_remove(COALESCE(inputs_json, '{}'), "
+                    "'$._validation_error'), "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    (r["id"],),
+                )
             sf._conn.execute(
-                "UPDATE skillflow_steps SET status = 'pending', retry_count = 0, "
-                "validation_retry_count = 0, "
-                "version = version + 1, "
-                "claimed_at = NULL, claimed_by = NULL, "
-                "inputs_json = json_remove(COALESCE(inputs_json, '{}'), "
-                "'$._validation_error'), "
+                "UPDATE skillflow_runs SET current_node = ?, "
                 "updated_at = datetime('now') WHERE id = ?",
-                (r["id"],),
+                (rows[0]["step_id"], run_id),
             )
-        sf._conn.execute(
-            "UPDATE skillflow_runs SET current_node = ?, "
-            "updated_at = datetime('now') WHERE id = ?",
-            (rows[0]["step_id"], run_id),
-        )
     row = rows[0]
     return {"step": row["step_id"], "instance": row["id"],
             "was_retry_count": row["retry_count"],

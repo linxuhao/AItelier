@@ -147,7 +147,7 @@ def _addon_spec(name: str) -> dict:
     return spec
 
 
-def resolve_graph(kind: str, target: str) -> dict:
+def resolve_graph(kind: str, target: str, run_id: str = "") -> dict:
     """The graph dict a baseline is taken against.
 
     For an addon this RECOMPOSES against the live base instead of reading the
@@ -162,6 +162,9 @@ def resolve_graph(kind: str, target: str) -> dict:
         from skillflow.compose import compose_graph
         spec = _addon_spec(target)
         base = spec.get("base") or ""
+        # Recomposing against the LIVE base is the check itself: a base rename
+        # must surface here as a compose failure.
+        # by-name-ok: an addon has no run
         base_graph = getattr(sf, "_graphs", {}).get(base)
         if base_graph is None:
             raise ValueError(f"addon '{target}' binds to base '{base}', "
@@ -169,6 +172,17 @@ def resolve_graph(kind: str, target: str) -> dict:
         composed = compose_graph(base_graph.to_dict(), [spec])
         composed["name"] = spec.get("alias") or f"{base}__{target}"
         return composed
+    # From the RUN's pinned graph when one is named. `_graphs[target]` is the
+    # current definition, so a baseline recorded after a drive would otherwise
+    # stamp the current shape, digest and version onto `observed` files that
+    # another version produced — a baseline describing a graph the run never
+    # executed, which is precisely what it exists to make impossible.
+    if run_id:
+        fn = getattr(sf, "_graph_for_run", None)
+        pinned = fn(run_id) if fn else None
+        if pinned is not None:
+            return pinned.to_dict()
+    # by-name-ok: the `else` half — no run_id given (a replay, not a drive).
     graph = getattr(sf, "_graphs", {}).get(target)
     if graph is None:
         raise ValueError(f"no registered config '{target}'")
@@ -182,6 +196,7 @@ def _base_step_ids(kind: str, target: str) -> set[str]:
     from api.dependencies import get_skillflow
     try:
         spec = _addon_spec(target)
+        # by-name-ok: addon base, same reason as resolve_graph's.
         base_graph = getattr(get_skillflow(), "_graphs", {}).get(spec.get("base"))
         if base_graph is None:
             return set()
@@ -334,6 +349,17 @@ def graph_name_of(target: str) -> str:
     return target
 
 
+def _pinned_version(run_id: str) -> int | None:
+    """The version a run is pinned to — the honest answer for a drive-derived
+    baseline, where `registered_version`'s "latest" may already be a later edit."""
+    try:
+        from api.dependencies import get_skillflow
+        fn = getattr(get_skillflow(), "graph_version_for_run", None)
+        return fn(run_id)["version"] if fn else None
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
 def registered_version(kind: str, target: str) -> int | None:
     """The engine's content version of the graph this baseline describes.
 
@@ -357,15 +383,22 @@ def registered_version(kind: str, target: str) -> int | None:
         return None
 
 
-def capture(kind: str, target: str, *, observed: dict | None = None) -> dict:
-    """A full baseline for *target*. Raises on an unresolvable graph."""
-    graph = resolve_graph(kind, target)
+def capture(kind: str, target: str, *, observed: dict | None = None,
+            run_id: str = "") -> dict:
+    """A full baseline for *target*. Raises on an unresolvable graph.
+
+    Pass `run_id` when the baseline comes from a DRIVE: the shape and the
+    version must then describe the graph that drive executed, not whatever is
+    registered by the time the baseline is written.
+    """
+    graph = resolve_graph(kind, target, run_id)
     base_ids = _base_step_ids(kind, target) if kind == KIND_ADDON else None
     data = {
         "kind": kind,
         "target": target,
         "graph_digest": graph_digest(graph),
-        "graph_version": registered_version(kind, target),
+        "graph_version": (_pinned_version(run_id) if run_id else None)
+                         or registered_version(kind, target),
         "shape": capture_shape(graph, base_ids=base_ids),
         "smoke": capture_smoke(graph),
     }

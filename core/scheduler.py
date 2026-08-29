@@ -1058,22 +1058,49 @@ async def _run_skillflow_tick(project_id: str, loop):
         pass
 
     if next_node is None:
-        # Handle terminal states
         run = sf.get_run(run_id)
-        # Carry error_reason on a FAILED run. advance_run() ends a routing dead
-        # end by failing the run in-DB ("No matching transition from
-        # 't_impl_review' with flags {}") rather than raising, so this branch is
-        # the only tick surface that sees it — and logging just `status=failed`
-        # sent the operator of the 104-task sweep to sqlite to find out why one
-        # project stopped.
-        tick_log(project_id, "terminal", run=run_id[:8], status=run["status"],
-                 reason=(run.get("error_reason") or "")[:200]
-                 if run["status"] == "failed" else None)
         if run["status"] in ("paused", "completed", "failed"):
+            # Handle terminal states.
+            # Carry error_reason on a FAILED run. advance_run() ends a routing
+            # dead end by failing the run in-DB ("No matching transition from
+            # 't_impl_review' with flags {}") rather than raising, so this branch
+            # is the only tick surface that sees it — and logging just
+            # `status=failed` sent the operator of the 104-task sweep to sqlite
+            # to find out why one project stopped.
+            tick_log(project_id, "terminal", run=run_id[:8], status=run["status"],
+                     reason=(run.get("error_reason") or "")[:200]
+                     if run["status"] == "failed" else None)
             # skillflow notification bus emits checkpoint_paused / run_completed /
             # run_failed; we just sync the AItelier DB status.
             _sync_project_status_to_db(project_id)
-        return
+            return
+
+        # NOT terminal: advance_run produced no next node while the run is still
+        # RUNNING. That is not an ending, it is a WEDGE — and it used to return
+        # here, logging `terminal`, which is the one word that makes an operator
+        # stop looking. A wedged project then reads exactly like a finished one.
+        #
+        # It does NOT block the other projects: `poll_and_execute` has advanced
+        # up to MAX_CONCURRENT_PROJECTS of them concurrently since 933b083
+        # (2026-08-25, four days before the incident below), and a wedged project
+        # returns from its tick immediately, so it holds no slot. The cost is
+        # entirely that the log said `terminal` about a run that was still going.
+        #
+        # Live, jinyong-camera 2026-08-29: the run sat at `5_review` for three
+        # hours emitting `outcome=terminal status=running` every 5 s — 200
+        # identical lines. The step was claimable the whole time: calling
+        # `sf.claim_next_step(run_id)` by hand returned a ClaimedStep for
+        # `5_review` immediately. Only advance_run had nothing to say, because
+        # the node already had a completed step row from an earlier goal-loop
+        # iteration and no new instance had been opened for this pass.
+        #
+        # So do not return on advance's silence alone. Fall through to Phase B
+        # and ASK: if a step is claimable, claiming it is exactly right and the
+        # run un-wedges itself; if it is not, Phase B's own branches
+        # (`no_claim` / `claim_failed` / `claim_terminal`) say so with a reason,
+        # which is strictly more than this branch could.
+        tick_log(project_id, "wedged", run=run_id[:8], status=run["status"],
+                 node=run.get("current_node"))
 
     # Phase B: Claim
     try:
@@ -1110,7 +1137,9 @@ async def _run_skillflow_tick(project_id: str, loop):
         tick_log(project_id, "claim_failed", run=run_id[:8], error=str(e)[:160])
         return
     if claimed is None:
-        tick_log(project_id, "no_claim", run=run_id[:8], node=next_node)
+        tick_log(project_id, "no_claim", run=run_id[:8],
+                 node=next_node if next_node is not None
+                 else (sf.get_run(run_id) or {}).get("current_node"))
         _sync_project_status_to_db(project_id)
         return
 
@@ -1381,6 +1410,10 @@ _tick_logger = None
 _tick_last_idle = 0.0
 _TICK_SKIP_HEARTBEAT_S = 60
 _tick_last_skip = 0.0
+# Keyed (outcome, project_id) — a dict, so it needs no `global` to mutate. Two
+# projects can be stuck at once and each deserves its own heartbeat.
+_TICK_STUCK_HEARTBEAT_S = 60
+_tick_last_stuck: dict[tuple, float] = {}
 _tick_last_hold = 0.0
 _tick_last_brief = 0.0
 
@@ -1422,6 +1455,14 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
     `idle`, `quota_hold` and `awaiting_brief` are coalesced to one heartbeat a
     minute: all repeat at tick cadence and carry no new information, and at 5s
     any one of them alone fills the rotation window with lines nobody needs.
+
+    `wedged` and `no_claim` coalesce too, but PER PROJECT. They repeat for the
+    same reason and at the same cadence — a wedge that claiming cannot resolve
+    emits both on every tick, ~34k lines a day, which is more than the flood
+    this heartbeat exists to prevent. Per project rather than globally because,
+    unlike `idle`, two projects can wedge at once and the operator needs to see
+    which; and `no_claim` only became a tick-cadence repeater when the wedge
+    branch below started falling through to Phase B instead of returning.
     """
     global _tick_last_idle, _tick_last_hold, _tick_last_skip, _tick_last_brief
     try:
@@ -1451,6 +1492,12 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             if now - _tick_last_skip < _TICK_SKIP_HEARTBEAT_S:
                 return
             _tick_last_skip = now
+        elif outcome in ("wedged", "no_claim"):
+            now = _time.time()
+            key = (outcome, project_id or "-")
+            if now - _tick_last_stuck.get(key, 0.0) < _TICK_STUCK_HEARTBEAT_S:
+                return
+            _tick_last_stuck[key] = now
         bits = " ".join(f"{k}={v}" for k, v in detail.items() if v not in (None, ""))
         _get_tick_logger().info(
             "project=%s outcome=%s%s", project_id or "-", outcome,

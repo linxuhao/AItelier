@@ -754,3 +754,106 @@ def test_effort_must_map_endpoint_to_string(tmp_path):
         encoding="utf-8")
     with pytest.raises(RuntimeError, match="'effort' must map"):
         model_routes.ModelRoutes(str(routes))
+
+
+# ── context headroom ─────────────────────────────────────────────────────
+#
+# The wall a small endpoint puts up is not the overflow, it is the asymptote.
+# llama.cpp counts only the PROMPT against its context, so a prompt that fits
+# is accepted and the generation is silently clamped to whatever room is left.
+# Measured on a t_impl step: turn 17 came back at prompt 130,940 of a 131,072
+# window and produced 131 tokens, the next attempt got 51, no error ever fired,
+# and the step was re-queued after 846s of discarded work. 22.1% of measured
+# t_impl steps reach a peak prompt leaving less than their 32,768-token output
+# budget; only 9.1% actually exceed the window, so waiting for
+# ContextWindowExceededError misses the larger half.
+
+
+def _resp_with_prompt(prompt_tokens):
+    r = _Resp()
+    r.usage = type("U", (), {
+        "prompt_tokens": prompt_tokens, "completion_tokens": 4,
+        "prompt_cache_hit_tokens": None, "prompt_cache_miss_tokens": None,
+        "prompt_tokens_details": None, "completion_tokens_details": None})()
+    return r
+
+
+def _window_wiring(tmp_path, monkeypatch, alpha_window):
+    providers = tmp_path / "llm_providers.json"
+    provs = json.loads(json.dumps(PROVIDERS))
+    provs["alpha"]["max_input_tokens"] = alpha_window     # beta: undeclared
+    providers.write_text(json.dumps(provs), encoding="utf-8")
+    routes = tmp_path / "model_routes.json"
+    routes.write_text(json.dumps(
+        {"model_a": {"rotate": ["alpha/m-1"], "fallback": ["beta/m-1"]}}),
+        encoding="utf-8")
+    monkeypatch.setenv("ALPHA_KEY", "a")
+    monkeypatch.setenv("BETA_KEY", "b")
+    model_routes.reset_cache()
+    return str(providers), str(routes)
+
+
+def test_a_squeezed_turn_rebinds_before_the_next_one(tmp_path, monkeypatch):
+    w = _window_wiring(tmp_path, monkeypatch, alpha_window=1000)
+    g = gw(w, "model_a", max_output_tokens=200)
+    seen = []
+
+    def fake(**kwargs):
+        seen.append(kwargs["model"])
+        return _resp_with_prompt(900)      # 100 left, budget is 200
+
+    monkeypatch.setattr(litellm, "completion", fake)
+    g.generate_native([{"role": "user", "content": "x"}])
+
+    assert seen == ["openai/m-1"], "the call that succeeded must not be retried"
+    assert g.active_model == "beta/m-1", (
+        "the next turn's prompt is this one plus the answer plus a tool "
+        "result, so 'it fit this time' says nothing about the next")
+
+
+def test_ample_headroom_keeps_the_binding(tmp_path, monkeypatch):
+    """Rebinding costs the per-provider prefix cache; only do it when the
+    endpoint has actually run out of room."""
+    w = _window_wiring(tmp_path, monkeypatch, alpha_window=1000)
+    g = gw(w, "model_a", max_output_tokens=200)
+    monkeypatch.setattr(litellm, "completion",
+                        lambda **k: _resp_with_prompt(500))   # 500 left
+    g.generate_native([{"role": "user", "content": "x"}])
+    assert g.active_model == "alpha/m-1"
+
+
+def test_an_undeclared_window_never_rebinds(tmp_path, monkeypatch):
+    """No declared ceiling = nothing to be out of. Guessing one would move
+    every long step off its bound endpoint for no stated reason."""
+    providers = tmp_path / "llm_providers.json"
+    providers.write_text(json.dumps(PROVIDERS), encoding="utf-8")   # no windows
+    routes = tmp_path / "model_routes.json"
+    routes.write_text(json.dumps(
+        {"model_a": {"rotate": ["alpha/m-1"], "fallback": ["beta/m-1"]}}),
+        encoding="utf-8")
+    monkeypatch.setenv("ALPHA_KEY", "a")
+    monkeypatch.setenv("BETA_KEY", "b")
+    model_routes.reset_cache()
+    g = gw((str(providers), str(routes)), "model_a", max_output_tokens=200)
+    monkeypatch.setattr(litellm, "completion",
+                        lambda **k: _resp_with_prompt(10 ** 9))
+    g.generate_native([{"role": "user", "content": "x"}])
+    assert g.active_model == "alpha/m-1"
+
+
+def test_the_next_turn_actually_goes_to_the_bigger_endpoint(tmp_path, monkeypatch):
+    """The rebind is only worth anything if _build_kwargs picks it up."""
+    w = _window_wiring(tmp_path, monkeypatch, alpha_window=1000)
+    g = gw(w, "model_a", max_output_tokens=200)
+    keys = []
+
+    def fake(**kwargs):
+        keys.append(kwargs.get("api_key"))
+        return _resp_with_prompt(900)
+
+    monkeypatch.setattr(litellm, "completion", fake)
+    g.generate_native([{"role": "user", "content": "x"}])
+    g.generate_native([{"role": "user", "content": "y"}])
+    assert keys == ["a", "b"], (
+        "first turn on alpha, second on beta — one claim, not an `or` over "
+        f"two: got {keys}")

@@ -781,7 +781,8 @@ class AIGateway:
                 # _failover_context. Walk only to a bigger declared window;
                 # when there is none, this is a real request-shaped failure and
                 # raises like any other.
-                if not self._failover_context(e):
+                if not self._failover_context(
+                        f"{type(e).__name__}: {str(e)[:200]}"):
                     raise self._explain_auth(e) from e
                 self._apply_binding(kwargs)
                 continue
@@ -804,6 +805,10 @@ class AIGateway:
                 if self._failovers:
                     usage["failed_over_from"] = [f for f, _ in self._failovers]
             self.last_usage = usage
+            # Pre-emptive, on the SUCCESSFUL path: the next turn's prompt is
+            # this one plus the answer plus a tool result, so "it fit this
+            # time" says nothing about the next.
+            self._rebind_if_out_of_headroom((usage or {}).get("prompt_tokens"))
             # A burst tolerance that never resets is a lifetime counter, not a
             # "did it persist" one: two unrelated blips seventeen turns apart in
             # one step would have spent it, and the second failed over with no
@@ -857,7 +862,7 @@ class AIGateway:
               f"({type(exc).__name__}{held})", flush=True)
         return True
 
-    def _failover_context(self, exc: Exception) -> bool:
+    def _failover_context(self, why: str) -> bool:
         """Advance to a candidate whose declared window is BIGGER. Else False.
 
         An overflow on a small endpoint is a property of the ENDPOINT, not of
@@ -890,13 +895,49 @@ class AIGateway:
                 return False
             self._candidate_ix = i
             nxt = self._candidates[i]
-            self._failovers.append(
-                (failed, f"{type(exc).__name__}: {str(exc)[:200]}"))
+            self._failovers.append((failed, why))
             self._bind(nxt)
             print(f"[ai_router] context-failover {self.internal_model}: "
-                  f"{failed} ({here}) -> {nxt} ({w or 'unbounded'})", flush=True)
+                  f"{failed} ({here}) -> {nxt} ({w or 'unbounded'})  {why}",
+                  flush=True)
             return True
         return False
+
+    def _rebind_if_out_of_headroom(self, prompt_tokens: int | None) -> None:
+        """Move to a bigger endpoint BEFORE the next turn is squeezed.
+
+        The wall is not the overflow, it is the asymptote. llama.cpp counts only
+        the PROMPT against its context — measured: the same request reports the
+        same total whether max_tokens is 512 or 8192 — so a prompt that fits is
+        ACCEPTED and the generation is silently clamped to whatever room is
+        left. Measured on a t_impl step: turn 17 returned at prompt 130,940 of a
+        131,072 window and produced 131 tokens; the next attempt got 51. No
+        error ever fired. The agent could neither call a tool nor finish, and
+        the step was re-queued after 846s of discarded work.
+
+        So the trigger is HEADROOM, not overflow. Of measured t_impl steps,
+        22.1% reach a peak prompt that leaves less than their 32,768-token
+        output budget, and only 9.1% actually exceed the window: waiting for
+        ContextWindowExceededError would miss the larger half of the problem.
+
+        Never fails the call that just succeeded — this only re-points the
+        binding, and `_build_kwargs` applies it on the next turn.
+        """
+        if not prompt_tokens or not self.max_output_tokens:
+            return
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                provs = json.load(f)
+        except (OSError, ValueError):
+            return          # no registry to compare against — do not guess
+        window = _endpoint_window(self.active_model, provs)
+        if window is None:
+            return          # undeclared ceiling: nothing to be out of
+        left = window - prompt_tokens
+        if left >= self.max_output_tokens:
+            return
+        self._failover_context(
+            f"headroom {left} < max_output_tokens {self.max_output_tokens}")
 
     def _apply_binding(self, kwargs: dict) -> dict:
         """(Re)write the keys that depend on WHICH endpoint is bound.

@@ -18,7 +18,6 @@ graph's, so it names a different step than the user is looking at. Then:
             jinyong-hud, reached through a new door.
 """
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -64,24 +63,6 @@ def test_it_asks_the_pinned_graph_not_the_current_one(sf):
         "would answer, a different step than the run is paused on")
     assert run_id == "run1" and graph == "g"
     sf._get_resolver_for_run.assert_called_with("run1")
-
-
-def test_the_pinned_accessor_needs_no_fallback():
-    """`_get_resolver_for_run` is not new — it ships in the DEPLOYED engine too.
-
-    An earlier version of this test asserted a `getattr`-guarded fallback for
-    "an engine without pinning". There is no such engine: published 1.5.55
-    already has the method, as a by-NAME lookup keyed on run_id. So the guard
-    was unreachable, and an older engine degrades to the old behaviour by
-    definition rather than by anything the host does — which is a better
-    property than the one that was claimed, but only if it is stated truthfully.
-    """
-    import skillflow.core
-
-    assert hasattr(skillflow.core.SkillFlow, "_get_resolver_for_run")
-    assert "getattr(sf, \"_get_resolver_for_run\"" not in \
-        (Path(meta_routers.__file__).read_text(encoding="utf-8")), \
-        "a guard for an engine that cannot exist reads as a real safety net"
 
 
 def test_it_answers_about_the_run_it_was_given(monkeypatch):

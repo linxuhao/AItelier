@@ -582,7 +582,6 @@ def _read_rejection_rounds(project_id: str, step_id: str,
             # reachable with no run in hand.
             # by-name-ok: the no-run half
             _r = (sf._get_resolver_for_run(run_id) if run_id
-                  # by-name-ok: the no-run half of the caller-supplied run_id
                   else sf._get_resolver(graph_name))
             node = _r.get_node(step_id)
             target = (node.checkpoint_reject_to or step_id) if node else step_id

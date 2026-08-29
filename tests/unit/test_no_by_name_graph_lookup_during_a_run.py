@@ -56,16 +56,36 @@ def _by_name_lookups(tree) -> list[int]:
     return hits
 
 
-def _marked(src: str) -> set[int]:
-    """Lines exempted by a marker on themselves or the line directly above.
+def _marked(tree, src: str) -> set[int]:
+    """Lines exempted by a marker on the STATEMENT they belong to.
 
-    One line of reach, not three: a wider reach meant one marker covered a
-    neighbouring real lookup with a reason written for something else.
+    Attributed to the enclosing statement rather than to a line offset. A line
+    rule broke twice on wrapped expressions, and for a precise reason: for a
+    ternary, `Call.lineno` is the `else` line, not the statement's first — so a
+    marker above `x = (pinned if run_id\n     else sf._get_resolver(name))`
+    reached line 1 and the hit was on line 2. Both repairs left a marker behind
+    that covered nothing while reading as load-bearing.
+
+    Statement scope also keeps the reason where a reader looks for it: directly
+    above the assignment, not wedged into its middle.
     """
-    out, lines = set(), src.splitlines()
-    for i, line in enumerate(lines, 1):
-        if _MARKER in line:
-            out.update({i, i + 1})
+    marker_lines = {i for i, line in enumerate(src.splitlines(), 1)
+                    if _MARKER in line}
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt):
+            continue
+        if hasattr(node, "body") and node.body:
+            # A compound statement covers only its HEADER — `if base in
+            # sf._graphs:` — never its body. Covering the whole span meant one
+            # marker inside a function exempted the entire function, which a
+            # mutation walked straight through.
+            first, last = node.lineno, node.body[0].lineno - 1
+        else:
+            first = node.lineno
+            last = getattr(node, "end_lineno", node.lineno) or node.lineno
+        if marker_lines & set(range(first - 1, last + 1)):
+            out.update(range(first, last + 1))
     return out
 
 
@@ -80,7 +100,7 @@ def test_no_run_scoped_lookup_resolves_a_graph_by_name():
                 tree = ast.parse(src)
             except SyntaxError:
                 continue
-            marked = _marked(src)
+            marked = _marked(tree, src)
             offenders += [f"{path.relative_to(_ROOT)}:{ln}"
                           for ln in _by_name_lookups(tree) if ln not in marked]
 

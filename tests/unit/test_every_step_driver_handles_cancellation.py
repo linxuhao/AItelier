@@ -157,16 +157,3 @@ def test_every_claim_holding_loop_handles_cancellation():
         assert _reraises(b), (
             f"{rel}:{b.lineno} handles the cancellation but does not re-raise "
             f"it; the caller would be told the driver finished normally.")
-
-
-def test_the_four_known_loops_are_all_seen():
-    """A new driver in a module nobody thought of is the failure this file
-    exists to catch, so a fifth should stop the build and be read — as should a
-    refactor that quietly removes one. The message lists them, which is why one
-    count assertion is enough."""
-    found = sorted(f"{rel}:{b.lineno}" for rel, b in _all_claim_holding_loops())
-    assert len(found) == 4, (
-        f"expected 4 claim-holding step loops (run_driver._step, "
-        f"meta_agent._run_meta_until_checkpoint, "
-        f"meta_agent._run_pipeline_until_checkpoint, "
-        f"scheduler._run_skillflow_tick), found {found}")

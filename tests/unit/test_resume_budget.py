@@ -40,9 +40,10 @@ class _FakeSF:
                 status TEXT, retry_count INT, validation_retry_count INT
                 DEFAULT 0, max_retries INT, inputs_json TEXT,
                 version INT DEFAULT 1, claimed_at TEXT, claimed_by TEXT,
-                -- charged against the retry budget by `release_claim`, so a
-                -- budget restore that left it set would leak the restored
-                -- retries away on the next driver cancellation
+                -- `release_claim` counts driver cancellations here. It is
+                -- NOT charged against the retry budget, so a budget restore
+                -- deliberately leaves it alone: it is the only record that a
+                -- step was repeatedly abandoned.
                 release_count INT DEFAULT 0,
                 updated_at TEXT);
             CREATE TABLE skillflow_runs (

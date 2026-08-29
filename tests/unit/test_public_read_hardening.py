@@ -541,9 +541,18 @@ class TestAnUnknownJwtKidCostsNoNetworkCall:
         from core import cf_access
         assert 0 < cf_access._FETCH_TIMEOUT <= 5
 
-    def test_a_rejected_kid_is_remembered(self):
+    def test_a_rejected_kid_is_remembered(self, monkeypatch):
         import jwt as _jwt
         from core import cf_access
+        # State the config here instead of inheriting it. `verify` returns None
+        # immediately when `is_configured()` is false, so on a machine without
+        # AITELIER_CF_TEAM_DOMAIN / AITELIER_CF_AUD this test passed through the
+        # early return and asserted nothing — and those live in `.env`, which is
+        # gitignored. It was green on the deployment box and red on a clean
+        # clone, which is the wrong way round for a unit test. The constants are
+        # read at import, so the env var is too late; patch what the code reads.
+        monkeypatch.setattr(cf_access, "_TEAM_DOMAIN", "team.example")
+        monkeypatch.setattr(cf_access, "_AUD", "aud-under-test")
         cf_access._bad_kids.clear()
         tok = _jwt.encode({"email": "a@b.c"}, "k", algorithm="HS256",
                           headers={"kid": "made-up-kid"})

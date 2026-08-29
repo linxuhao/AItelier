@@ -215,6 +215,20 @@ RULES: tuple[Rule, ...] = (
          "generally: a template is not a suggestion the maker will sanity-check, "
          "so do not paste an API you are not certain of — describe what the file "
          "must contain and let the maker write it against the error it gets."),
+    Rule("a_tool_gate_declares_that_an_error_is_its_verdict", enforced=False,
+         teaches=(
+         "A TOOL STEP WHOSE RESULT CARRIES `error` FAILS THE STEP AND THE RUN, "
+         "UNLESS THE NODE SAYS `tool_error: \"route\"`. That default is what stops "
+         "a plumbing tool (a repo apply, a git sync) that refused to do anything "
+         "from being recorded `completed` and the run reporting success. But a "
+         "GATE tool step is the opposite case: its `error` is its VERDICT, meant "
+         "to be routed (and injected as `feedback:`) back to the maker. Any tool "
+         "step that can answer `{passed: false, error: <what is wrong>}` — a lint, "
+         "a test, a check, a capture step that reports an unusable input — must "
+         "carry `tool_error: \"route\"` next to its `tool_name`, or its first red "
+         "verdict kills the run instead of looping back. Unenforceable here: "
+         "whether a tool ever sets `error` is a fact about its code, not about the "
+         "graph.")),
     Rule("step_ids_are_legible", enforced=False, teaches=(
          "Name step ids for what they DO (`interview`, `draft`, `validate`, "
          "`package`) — not `A1`/`B2`/`C1`. Step ids are what every surface shows: "

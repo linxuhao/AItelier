@@ -626,23 +626,32 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         # The check is on `project_root` — the code repository — and on nothing
         # else, because that is the only argument that names one.
         #
-        # It used to read `project_root or workspace_root`, which had two ways to
-        # go wrong and the guard only closed one. `Path("").resolve()` is the
-        # process CWD (in the container `/app`, the AItelier checkout — itself a
-        # git repo with ~2000 tests), and `repo.exists()` is true for it, so
-        # nothing downstream would refuse. But a repo-less run does not leave
-        # BOTH roots empty: the engine omits `project_root` and still supplies an
-        # absolute `workspace_root` — the DPS workspace — so the fallback made
-        # the guard pass and pytest then ran over the run's own step-output tree.
-        # Wrong tree, and a `test_report.json` about it either way.
+        # The line this replaces was `Path(project_root or workspace_root)`, and
+        # it has two ways to go wrong that nothing downstream would catch —
+        # `repo.exists()` is true for both:
         #
-        # Reachable because a run that declares no code repository has no project
-        # root to give: skillflow >=1.5.52 omits the argument, earlier releases
-        # (including the 1.5.46 the container installs from PyPI) forward "", and
-        # `tool_creation` grants this tool to pipeline_forge's `t_tool_impl`.
-        # Refusing is the only correct answer — there is no repo to test — and it
-        # is written HERE rather than only in the engine, because the engine that
-        # calls it may be any released version.
+        #   * with both roots empty, `Path("").resolve()` is the process CWD (in
+        #     the container `/app`, the AItelier checkout — itself a git repo
+        #     with ~2000 tests);
+        #   * with `project_root` missing and `workspace_root` supplied, the
+        #     fallback picks the DPS WORKSPACE, so pytest would run over the
+        #     run's own step-output tree.
+        #
+        # Neither has happened. Until this round `get_project_code_path` always
+        # returned a path, so `project_root` was always truthy and the fallback
+        # was dead code. What makes it live is the new answer this round adds: a
+        # run that declares no code repository, for which the engine supplies no
+        # project root at all (skillflow >=1.5.52 omits the argument; earlier
+        # releases, including the 1.5.46 the container installs from PyPI,
+        # forward "") while still supplying an absolute `workspace_root`. That
+        # shape is reachable — `tool_creation` grants this tool to
+        # pipeline_forge's `t_tool_impl`, and pipeline_forge declares
+        # `repo_mode: none`.
+        #
+        # So the check is on `project_root` alone, because that is the only
+        # argument that names a code repository, and refusing is the only correct
+        # answer when there is none. Written HERE rather than only in the engine,
+        # because the engine that calls it may be any released version.
         report.update(
             passed=False,
             summary=f"run_tests: no project repository to test — project_root "

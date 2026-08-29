@@ -159,6 +159,13 @@ overlay:
       - id: "5_vision_judged"
         step_type: "tool"
         tool_name: "vision_human_pass"
+        # NO `tool_error: "route"` — the engine default (fail the step and the
+        # run on a truthy `error`) is what this step wants. Every error it can
+        # return means the human verdict was NOT recorded: no vision_report.json,
+        # an unreadable one, a report that is not blind, or roots that were never
+        # injected. Carrying on would send 5_review a report still saying the
+        # judge could not see, which is the exact "waved through without
+        # evidence" shape this gate exists to prevent.
         tool_params:
           vision_step: "5_vision"
           out_dir: "$STEP_DIR"

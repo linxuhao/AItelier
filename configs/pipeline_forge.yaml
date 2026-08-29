@@ -254,6 +254,11 @@ steps:
   - id: "t_tool_register"
     step_type: "tool"
     tool_name: "register_tool"
+    # A registration failure goes to `t_tool_review`, which reads the result and
+    # sends the tool back to be rebuilt; v_registry catches anything that slips
+    # through as `unknown_tool`. Failing the run here would throw away every tool
+    # the loop already built, so the error is routed, not fatal.
+    tool_error: "route"
     tool_params:
       source_dir: "$CONFIG_DIR/t_tool_impl"
     transitions:
@@ -351,6 +356,7 @@ steps:
   - id: "v_lint"
     step_type: "tool"
     tool_name: "forge_lint"     # wraps skillflow_lint + surfaces issues in `error`
+    tool_error: "route"         # the lint issues ARE this gate's verdict; `passed` routes them
     tool_params:
       path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
       out_dir: "$STEP_DIR"      # gate_error.md — the channel `feedback:` can't provide
@@ -365,6 +371,7 @@ steps:
   - id: "v_registry"
     step_type: "tool"
     tool_name: "forge_registry_check"
+    tool_error: "route"         # a rule violation IS the verdict; `failure_class` routes it
     tool_params:
       graph_path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
       role_table: "$CONFIG_DIR/emit_graph/role_table.yaml"
@@ -393,6 +400,7 @@ steps:
   - id: "v_smoke"
     step_type: "tool"
     tool_name: "forge_dryrun_smoke"
+    tool_error: "route"         # a failed dry run IS the verdict; `passed` routes it
     tool_params:
       graph_path: "$CONFIG_DIR/emit_graph/pipeline.yaml"
       out_dir: "$STEP_DIR"

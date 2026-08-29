@@ -226,6 +226,9 @@ steps:
   - id: "continuity"
     step_type: "tool"
     tool_name: "continuity_check"
+    # 违规清单就是这道门的判决（走 `error` 字段回注给 humanize），不是步骤失败。
+    # skillflow 现在默认把带 `error` 的 tool 步骤判失败，所以这里必须显式声明。
+    tool_error: "route"
     tool_params:
       out_dir: "$STEP_DIR"
     transitions:

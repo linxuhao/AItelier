@@ -110,7 +110,17 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     # and gets a repo-less workspace — no repo_path, no throwaway
     # projects/<id>/.git — so it never surfaces as a "fake repo" on the
     # group-by-repo dashboard.
-    eff_repo_type = "none" if manifest.repo_mode == "none" else repo_type
+    #
+    # ONE effective type, used by every consumer below: `ensure_project`,
+    # `setup_workspace` on both branches, and `_reconcile_repo_type`. The DPE
+    # brief branch used to build the workspace from
+    # `seed_inputs.get("repo_type", repo_type)` while the row was stamped from
+    # `eff_repo_type`, so a caller supplying a differing `seed_inputs["repo_type"]`
+    # got a row describing a repository the workspace was not built as.
+    seed_inputs = seed_inputs or {}
+    requested_repo_type = seed_inputs.get("repo_type") or repo_type
+    eff_repo_type = ("none" if manifest.repo_mode == "none"
+                     else requested_repo_type)
 
     if not db.get_project(project_id):
         # Compute default repo_path for new/clone, same as project_routers.py.
@@ -165,17 +175,21 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         ``against_project`` produces (a repo-less run pointed at a real repo to
         read). So a repo-less run never rewrites the row.
 
-        Called only AFTER ``setup_workspace`` has succeeded, which is what makes
-        the write safe rather than a guess: the repository the new ``repo_type``
-        names exists by then. Being one-way, a write here cannot be undone by
-        this function, so a guard that runs BEFORE the workspace must run before
-        the write too — otherwise a refused ``dpe_default`` launch against a
-        repo-less project id rewrites the row, launches nothing, and leaves every
-        protection the repo-less path provides switched off for that id with
-        nothing to switch it back. Two guards have that shape and both now
-        precede this call: ``missing_cross_config_inputs``, and
-        ``eff_repo_type == "existing"`` with no ``repo_path``, where
-        ``setup_workspace`` itself raises.
+        Called LAST on each branch — after ``setup_workspace`` (so the repository
+        the new ``repo_type`` names exists) and after every path that can still
+        refuse, immediately before the success return. Being one-way, a write
+        here cannot be undone, so a launch that rewrites the row and then bails
+        leaves the repo-less protections switched off for that project id with
+        nothing to switch them back on.
+
+        Ordering by position rather than by an enumeration of guards, because the
+        enumeration was already wrong: this used to sit right after
+        ``setup_workspace`` under a docstring claiming the two refusing guards
+        both preceded it. A THIRD did not — the ``seed_text`` with no
+        ``seed_file`` refusal, further down — and on the DPE brief branch it ran
+        before ``seed_and_trigger``, which refuses a failed project, an
+        already-planned one, and a brief-less one. Last-on-the-branch needs no
+        list to stay true.
         """
         if eff_repo_type == "none":
             return
@@ -194,15 +208,18 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     # DPE (and its addon combos, e.g. dpe_game) keep the proven brief→step-1
     # seeding ritual — keyed on the DPE brief contract (seed_file), not a single
     # config name, so composed game pipelines seed the same way as the base.
-    seed_inputs = seed_inputs or {}
     if manifest.seed_file == "project_brief.md" and isinstance(seed_inputs.get("brief"), dict):
-        ws.setup_workspace(project_id, repo_type=seed_inputs.get("repo_type", repo_type),
+        ws.setup_workspace(project_id, repo_type=eff_repo_type,
                            repo_path=repo_path, repo_url=repo_url)
-        _reconcile_repo_type()
         from core.project_submit import seed_and_trigger
         result = seed_and_trigger(db, ws, project_id, seed_inputs["brief"])
         result.setdefault("config_name", config_name)
         result["scheduler_owned"] = manifest.scheduler_owned
+        # After seed_and_trigger, and only if it did not refuse: it turns away a
+        # failed project, an already-planned one and a brief-less one, and each
+        # of those left the row rewritten by a launch that never happened.
+        if result.get("status") not in ("error", "already_planned"):
+            _reconcile_repo_type()
         return result
 
     sf = get_skillflow()
@@ -243,7 +260,6 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
     ws.setup_workspace(project_id, repo_type=eff_repo_type,
                        repo_path=repo_path, repo_url=repo_url)
-    _reconcile_repo_type()
 
     # Write seeds into the config's seed dir (read by the first step's
     # {from: config} context spec).
@@ -284,6 +300,9 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     run = sf.get_run(run_id)
     if run and run["status"] == "pending":
         sf.start_run(run_id)
+
+    # Last on this branch, past the seed_file refusal above (see the docstring).
+    _reconcile_repo_type()
 
     if manifest.scheduler_owned:
         wake_scheduler(owner_email if owner_email != "cli@local" else None)

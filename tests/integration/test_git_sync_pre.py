@@ -195,20 +195,31 @@ def test_git_sync_pre_diverged_pipeline_fails_with_message(tmp_path):
     sf.start_run(rid)
     sf.advance_run(rid)
 
-    # Check step outputs — the tool should have failed with a clear error
+    # The step FAILED, and the actionable message is its failure — not its
+    # output. skillflow >=1.5.54 fails a tool step whose result carries a truthy
+    # `error` (unless the node declares `tool_error: "route"`), so the run stops
+    # here carrying the tool's own words. Before that the step was recorded
+    # 'completed' with the error sitting in `outputs_json`, and the run died one
+    # step later on "No matching transition" — a message about the graph, for a
+    # problem in the repository.
     step = sf._conn.execute(
-        "SELECT outputs_json FROM skillflow_steps "
+        "SELECT status, last_error FROM skillflow_steps "
         "WHERE run_id = ? AND step_id = 'git_sync_pre' "
         "ORDER BY id DESC LIMIT 1",
         (rid,),
     ).fetchone()
     assert step is not None, "git_sync_pre step was not executed"
+    assert step["status"] == "failed", dict(step)
 
-    import json
-    outputs = json.loads(step["outputs_json"])
-    assert outputs.get("synced") is False, f"Expected synced=False, got: {outputs}"
-    assert "error" in outputs, f"Expected error in outputs: {outputs}"
-    assert "diverged" in outputs["error"].lower(), \
-        f"Expected 'diverged' in error: {outputs['error']}"
-    assert "git pull --rebase" in outputs["error"], \
-        f"Expected actionable fix hint: {outputs['error']}"
+    message = step["last_error"] or ""
+    assert "diverged" in message.lower(), f"Expected 'diverged' in: {message}"
+    assert "git pull --rebase" in message, \
+        f"Expected actionable fix hint: {message}"
+
+    # …and the run says the same thing, so a caller reading only the run knows
+    # what to do.
+    run = sf._conn.execute(
+        "SELECT status, error_reason FROM skillflow_runs WHERE id = ?", (rid,),
+    ).fetchone()
+    assert run["status"] == "failed", dict(run)
+    assert "git pull --rebase" in (run["error_reason"] or ""), dict(run)

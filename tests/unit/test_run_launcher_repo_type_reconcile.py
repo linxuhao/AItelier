@@ -234,3 +234,139 @@ def test_update_project_actually_persists_repo_type_and_path(db_manager):
     info = db_manager.get_repo_info("p")
     assert info["repo_type"] == "new"
     assert info["repo_path"] == "/projects/p"
+
+
+# ── Every refusing path must precede the reconcile, not just the two named ────
+#
+# `_reconcile_repo_type` is one-way, so a launch that rewrites the row and then
+# bails leaves that project id off the repo-less path with nothing to put it
+# back. It used to sit immediately after `setup_workspace`, under a docstring
+# claiming the two guards that can refuse both preceded it. A third did not, and
+# the DPE brief branch ran it before `seed_and_trigger` — which refuses three
+# more ways. The fix is positional: last on each branch.
+
+def test_a_launch_refused_for_seed_text_with_no_seed_file_writes_nothing(
+        monkeypatch):
+    """The THIRD refusing guard, which used to run after the reconcile."""
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    _patch_registry(monkeypatch, _manifest("dpe_default", seed_file=""))
+
+    res = start_config_run(db, ws, "dpe_default", "p", repo_type="new",
+                           seed_text="build me a thing")
+
+    assert res["status"] == "error", res
+    assert _repo_type_writes(db) == [], (
+        "a launch that refused seed_text still rewrote repo_type")
+
+
+def test_a_brief_path_launch_that_seed_and_trigger_refuses_writes_nothing(
+        monkeypatch):
+    """`seed_and_trigger` turns away a failed project (and two more shapes).
+
+    On the brief branch the reconcile ran BEFORE it, so the row flipped for a
+    build that was then told to use POST /retry instead.
+    """
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    _patch_registry(monkeypatch,
+                    _manifest("dpe_default", seed_file="project_brief.md"))
+    import core.project_submit as ps
+    monkeypatch.setattr(ps, "seed_and_trigger",
+                        lambda *a, **k: {"status": "error",
+                                         "message": "project has a failed run"})
+
+    res = start_config_run(db, ws, "dpe_default", "p", repo_type="new",
+                           seed_inputs={"brief": {"goal": "x"}})
+
+    assert res["status"] == "error", res
+    assert _repo_type_writes(db) == [], (
+        "a refused brief submit rewrote repo_type")
+
+
+def test_an_already_planned_brief_submit_writes_nothing(monkeypatch):
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    _patch_registry(monkeypatch,
+                    _manifest("dpe_default", seed_file="project_brief.md"))
+    import core.project_submit as ps
+    monkeypatch.setattr(ps, "seed_and_trigger",
+                        lambda *a, **k: {"status": "already_planned"})
+
+    start_config_run(db, ws, "dpe_default", "p", repo_type="new",
+                     seed_inputs={"brief": {"goal": "x"}})
+
+    assert _repo_type_writes(db) == []
+
+
+# ── One effective repo_type: the workspace and the row must agree ────────────
+
+def test_the_brief_path_builds_the_workspace_as_the_type_it_records(
+        monkeypatch):
+    """`setup_workspace` took `seed_inputs["repo_type"]` while the row was
+    stamped from `eff_repo_type`, so a caller supplying both got a row
+    describing a repository the workspace was not built as."""
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    _patch_registry(monkeypatch,
+                    _manifest("dpe_default", seed_file="project_brief.md"))
+    import core.project_submit as ps
+    monkeypatch.setattr(ps, "seed_and_trigger",
+                        lambda *a, **k: {"status": "submitted"})
+
+    start_config_run(db, ws, "dpe_default", "p", repo_type="new",
+                     repo_path="/repos/theirs",
+                     seed_inputs={"brief": {"goal": "x"},
+                                  "repo_type": "existing"})
+
+    built = ws.setup_workspace.call_args.kwargs["repo_type"]
+    recorded = _repo_type_writes(db)
+    assert built == "existing", built
+    assert recorded == ["existing"], (
+        f"the workspace was built as {built!r} and the row records {recorded!r}")
+
+
+def test_a_new_project_row_records_the_type_the_workspace_is_built_as(
+        monkeypatch):
+    """The same disagreement at CREATION: `ensure_project` used `eff_repo_type`
+    derived from the `repo_type` argument only."""
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = None
+    _patch_registry(monkeypatch,
+                    _manifest("dpe_default", seed_file="project_brief.md"))
+    import core.project_submit as ps
+    monkeypatch.setattr(ps, "seed_and_trigger",
+                        lambda *a, **k: {"status": "submitted"})
+
+    start_config_run(db, ws, "dpe_default", "p", repo_type="new",
+                     repo_path="/repos/theirs",
+                     seed_inputs={"brief": {"goal": "x"},
+                                  "repo_type": "existing"})
+
+    created = db.ensure_project.call_args.kwargs["repo_type"]
+    built = ws.setup_workspace.call_args.kwargs["repo_type"]
+    assert created == built == "existing", (created, built)
+
+
+def test_a_repoless_config_still_overrides_a_caller_supplied_type(monkeypatch):
+    """`repo_mode: none` is the config's declaration and outranks the caller."""
+    db, ws = MagicMock(), MagicMock()
+    db.get_project.return_value = {"project_id": "p"}
+    db.get_repo_info.return_value = {"repo_type": "none", "repo_path": None,
+                                     "repo_url": None}
+    _patch_registry(monkeypatch,
+                    _manifest("pipeline_forge", repo_mode="none"))
+
+    start_config_run(db, ws, "pipeline_forge", "p", repo_type="new",
+                     seed_inputs={"repo_type": "existing"})
+
+    assert ws.setup_workspace.call_args.kwargs["repo_type"] == "none"
+    assert _repo_type_writes(db) == []

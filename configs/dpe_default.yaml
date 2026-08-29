@@ -981,6 +981,10 @@ steps:
   - id: "git_push_post"
     step_type: "tool"
     tool_name: "git_push_post"
+    # A push failure is an outcome here, not a step failure — the paragraph
+    # above is the argument. Says so explicitly, because skillflow now FAILS a
+    # tool step whose result carries an `error` unless the node opts out.
+    tool_error: "route"
     timeout_seconds: 180
     tool_params:
       project_root: "$PROJECT_ROOT"

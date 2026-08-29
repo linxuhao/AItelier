@@ -20,14 +20,16 @@
 # traces reaches ~18k chars (~6k tokens) at p99, which does not fit under 4096.
 
 researcher:
-  # TODO(重启后一起落): 改成 model: "smart"。它是 flash 上唯一要 effort "max" 的
-  # 角色, 而 flash 现在含 localqwen/qwen3 —— 那个 chat template 只认
-  # low/medium/xhigh, 对 "max" 直接 500 (实测 2026-08-29; 失败转移接得住, 但要先
-  # 让 tenacity 把这个注定失败的调用重试三遍)。改这一处必须和 model_routes.json 里
-  # 的 effort 表一起上, 否则 tests/unit/test_ai_router.py 的 TestEffortDelivery
-  # 会拦下来 —— smart 的头号候选 qwen/qwen3.8-max 会静默忽略 "max"、回落到它自己
-  # 的最高档。见那条测试的注释。
-  model: "flash"
+  # smart, 不是 flash。它是 flash 上唯一要 effort "max" 的角色, 而 flash 现在含
+  # localqwen/qwen3 —— 那个 chat template 只认 low/medium/xhigh, 对 "max" 直接
+  # 500 (实测 2026-08-29; 失败转移接得住, 但要先让 tenacity 把这个注定失败的调用
+  # 重试三遍)。一个每个项目只跑一次的调研步, 本来也该花在最深的那一档上。
+  #
+  # smart 的头号候选 qwen/qwen3.8-max 的词汇表里同样没有 "max" —— 但它是静默忽略
+  # 而不是报错, 回落到自己的最高档。所以 model_routes.json 的 smart.effort 里给它
+  # 写了 "xhigh": 同一个意图在它自己的词汇表里的说法。TestEffortDelivery 守着这条
+  # (没有那句声明它就会红)。
+  model: "smart"
   temperature: 0.2
   template: "step1_5_researcher.md"
   tools: ["web_search", "web_fetch", "list_tree"]

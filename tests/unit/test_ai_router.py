@@ -404,8 +404,16 @@ class TestEffortDelivery:
                 if not isinstance(rc, dict) or rc.get("model") not in narrow:
                     continue
                 eff = (rc.get("thinking") or {}).get("effort")
-                if eff not in ok:
-                    offenders.append(f"{f.name}:{role} model={rc['model']} effort={eff}")
+                if eff in ok:
+                    continue
+                # The route may state the string FOR THIS ENDPOINT, in which
+                # case the role's never reaches the wire and the trap cannot
+                # spring. Narrowed, not disarmed: a route that declares nothing
+                # still sends the role's value, which is the case this guard
+                # was written for.
+                if routes.effort_for(rc["model"], "qwen/qwen3.8-max"):
+                    continue
+                offenders.append(f"{f.name}:{role} model={rc['model']} effort={eff}")
         assert not offenders, (
             "these roles can be served by qwen3.8-max with an effort it does "
             "not define; it will be silently ignored and you will get that "

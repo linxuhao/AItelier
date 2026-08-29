@@ -103,7 +103,10 @@ def test_a_finding_is_still_recorded_when_the_engine_has_no_versions():
     made = suggestions.create("gen_foo", "the gate never fires")
     assert made.get("error") is None
     assert made["base_version"] is None
-    assert suggestions.get(made["id"])["stale_base"] is False
+    # UNKNOWN, not False. Reporting "not stale" about a config whose version
+    # nobody could read asserts it is current — the exact claim this field
+    # exists to stop anyone making.
+    assert suggestions.get(made["id"])["stale_base"] is None
 
 
 def test_listing_filters_by_target_and_status():
@@ -166,7 +169,8 @@ def test_an_addon_is_versioned_under_its_composed_alias(monkeypatch):
     monkeypatch.setattr(deps, "get_skillflow", lambda: _SF(), raising=False)
     monkeypatch.setattr(suggestions, "_live_version", _REAL_LIVE_VERSION)
 
-    assert suggestions._graph_name_of("game_harness") == "dpe_game"
+    from core.baseline import graph_name_of
+    assert graph_name_of("game_harness") == "dpe_game"
     assert suggestions.create("game_harness", "overlay targets a bare step id"
                               )["base_version"] == 12
 
@@ -182,5 +186,6 @@ def test_an_unknown_target_keeps_its_own_name(monkeypatch):
     monkeypatch.setattr(deps, "get_skillflow", lambda: _SF(), raising=False)
     monkeypatch.setattr(suggestions, "_live_version", _REAL_LIVE_VERSION)
 
-    assert suggestions._graph_name_of("gen_foo") == "gen_foo"
+    from core.baseline import graph_name_of
+    assert graph_name_of("gen_foo") == "gen_foo"
     assert suggestions.create("gen_foo", "x")["base_version"] == 5

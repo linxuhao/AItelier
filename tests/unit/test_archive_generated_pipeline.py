@@ -32,13 +32,24 @@ class _FakeSF:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("CREATE TABLE skillflow_graphs (name TEXT PRIMARY KEY, "
                            "yaml_text TEXT, version INTEGER)")
+        # The CONTENT history. A purge has to take this too: left behind, the
+        # next pipeline registered under the same name resumes numbering from
+        # the dead one and is reported as having removed every step of a
+        # pipeline that no longer exists.
+        self._conn.execute("CREATE TABLE skillflow_graph_versions ("
+                           "name TEXT, version INTEGER, yaml_text TEXT, "
+                           "digest TEXT, PRIMARY KEY (name, version))")
         for n in names:
             self._conn.execute("INSERT INTO skillflow_graphs VALUES (?,?,1)",
                                (n, json.dumps({"name": n, "steps": []})))
+            self._conn.execute(
+                "INSERT INTO skillflow_graph_versions VALUES (?,1,?,'sha256:x')",
+                (n, json.dumps({"name": n, "steps": []})))
         self._conn.commit()
         self._lock = threading.RLock()
         self._graphs = {n: object() for n in names}
         self._resolvers = {n: object() for n in names}
+        self._pinned_resolvers = {(n, 1): object() for n in names}
 
     def _get_resolver(self, name):
         row = self._conn.execute(
@@ -84,6 +95,13 @@ def test_purge_deletes_the_graph_row(gen_dir):
     sf = _FakeSF(["gen_demo", "dpe_default_v2"])
     out = pr.archive_generated_pipeline(sf, ConfigRegistry(), "gen_demo", purge=True)
     assert out["purged"] is True
+    # The history goes with it, and so does the (name, version)-keyed cache —
+    # a name-keyed pop cannot reach `_pinned_resolvers`.
+    assert sf._conn.execute(
+        "SELECT COUNT(*) FROM skillflow_graph_versions WHERE name='gen_demo'"
+    ).fetchone()[0] == 0
+    assert not [k for k in sf._pinned_resolvers if k[0] == "gen_demo"]
+    assert ("dpe_default_v2", 1) in sf._pinned_resolvers, "purged a sibling"
     assert [g["name"] for g in sf.list_graphs()] == ["dpe_default_v2"]
 
 

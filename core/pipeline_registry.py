@@ -16,9 +16,13 @@ Design (see the chat decision log):
     (e.g. `processor`) with no registered agent config; `register_graph` validates
     those refs and would reject the graph. We register each unknown role as a
     host-mode agent (`model: "host"` → `AITELIER_HOST_AGENT_MODEL`) first.
-  - **Update is native.** `register_graph` overwrites by name + version-bumps, and
+  - **Update is native.** `register_graph` overwrites by name and mints a content
+    version WHEN THE CONTENT CHANGED (re-registering identical content is a
+    no-op, which is what keeps a boot scan from inflating the number), and
     registry manifests read the live graph lazily, so re-generating the same name
-    updates in place and `start_config_run` picks up the new version automatically.
+    updates in place and `start_config_run` picks up the new version
+    automatically. A run ALREADY in flight does not: it stays on the version it
+    started with, and `repin_run` is how it adopts an edit.
 """
 
 import logging
@@ -880,6 +884,15 @@ def archive_generated_pipeline(sf, registry, config_name: str,
             getattr(sf, attr, {}).pop(config_name, None)
         except Exception:
             pass
+    # `_pinned_resolvers` is keyed (name, version), so a name-keyed pop misses
+    # it and an archived graph keeps answering from the pinned cache.
+    try:
+        pinned = getattr(sf, "_pinned_resolvers", None)
+        if pinned is not None:
+            for key in [k for k in pinned if k[0] == config_name]:
+                pinned.pop(key, None)
+    except Exception:
+        pass
 
     purged = False
     if purge:
@@ -887,6 +900,15 @@ def archive_generated_pipeline(sf, registry, config_name: str,
             with sf._lock:
                 sf._conn.execute("DELETE FROM skillflow_graphs WHERE name = ?",
                                  (config_name,))
+                # The CONTENT history too, or a hard delete leaves it behind and
+                # the next pipeline registered under this name resumes numbering
+                # from the dead one's last version — reported to the agent as
+                # having "removed" every step of a pipeline that no longer
+                # exists. `purge` means gone; a version history of nothing is
+                # not history, it is a booby trap.
+                sf._conn.execute(
+                    "DELETE FROM skillflow_graph_versions WHERE name = ?",
+                    (config_name,))
                 sf._conn.commit()
             purged = True
         except Exception as e:

@@ -1178,15 +1178,26 @@ async def _run_skillflow_tick(project_id: str, loop):
     except MaxRetriesExceeded as e:
         sf.fail_step(claimed.token, str(e), retryable=False)
     except asyncio.CancelledError:
-        # ORPHAN-DBG: THE silent path that strands the claim in 'claimed'.
-        # CancelledError is BaseException — NOT caught by `except Exception` below —
-        # so neither confirm_step nor fail_step runs. Log richly + RE-RAISE (no
-        # behavior change: the orphan still happens, then skillflow re-dispatches).
+        # CancelledError is BaseException — NOT caught by `except Exception`
+        # below — so without this neither confirm_step nor fail_step runs and
+        # the claim is stranded in 'claimed'. Nothing recovers it: the reaper
+        # refuses to reclaim a claim whose owner PROCESS is alive, and the owner
+        # here is the server itself.
+        #
+        # This handler used to LOG and re-raise, by an explicit "observe, no fix
+        # yet" decision while the cancellation trigger was still unknown — its
+        # comment said so: "no behavior change: the orphan still happens". The
+        # trigger is known now (an apscheduler shutdown cancels every pending
+        # tick future regardless of `wait`, and `poll_and_execute` gathers all
+        # concurrent ticks, so ONE cancellation strands every in-flight claim),
+        # so the diagnostic stays and the claim goes back.
         import traceback as _tb
         _odbg(f"{_cid} *** CANCELLED *** step={claimed.step_id} "
               f"execute_returned={_executed} elapsed={_time.time() - _t0:.1f}s — "
-              f"claim left status=claimed (ORPHAN). stack:\n"
+              f"releasing the claim. stack:\n"
               + "".join(_tb.format_stack()))
+        from core.run_driver import release_claim_on_cancel
+        release_claim_on_cancel(sf, claimed)
         raise
     except Exception as e:
         from core.llm_quota import is_quota_exhausted

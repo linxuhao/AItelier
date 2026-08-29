@@ -70,12 +70,16 @@ def release_claim_on_cancel(sf, claimed) -> None:
     with the work done and 1105 consecutive `active_claim` ticks behind it.
 
     Uses `release_claim`, NOT `fail_step`. The step did not fail — its executor
-    went away — and `fail_step(retryable=True)` increments `retry_count`, so
-    three cancellations exhaust a healthy step's budget and kill it with an
-    error blaming the step for something the client did. A user refreshing the
-    chat page three times during one run is enough. `release_claim` hands the
-    claim back and counts releases separately, the same way the reaper counts
-    worker deaths in `_stale_recovery_count` rather than spending retries.
+    went away — and `fail_step(retryable=True)` spends `retry_count`, the budget
+    a genuine failure needs. `release_claim` counts releases on their own
+    counter and names the actual cause in `last_error` instead of blaming the
+    step for what the client did.
+
+    It is not unlimited: on the third release of one step instance the engine
+    stops releasing and spends a single retry, so a driver that keeps dying
+    cannot re-run a step forever at full LLM cost. That still costs one retry —
+    the difference is one instead of three, and an error that says what
+    happened.
 
     Best-effort by design: this runs while a cancellation is propagating, and
     raising here would replace the cancellation with a less useful error. The

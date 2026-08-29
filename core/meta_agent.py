@@ -1311,10 +1311,43 @@ CODING_TOOL_DEFINITIONS = [
                     "suggestion_id": {"type": "string"},
                     "status": {"type": "string",
                                "enum": ["applied", "rejected"]},
+                    "result_version": {
+                        "type": "integer",
+                        "description": "For 'applied': the config version that "
+                        "carries the fix, as reported by config_edit or "
+                        "pipeline_versions. Omit and the current version is "
+                        "used."},
                     "note": {"type": "string",
                              "description": "What you changed, or why not."},
                 },
                 "required": ["suggestion_id", "status"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "repin_run",
+            "description": (
+                "Make a run that is ALREADY IN FLIGHT adopt the current version "
+                "of its config. A run executes the graph version it started "
+                "with, so editing a config no longer reaches a running run — "
+                "this is how you hand-patch one to unstick it, which used to "
+                "happen implicitly on any edit. Refused if the current version "
+                "no longer has the step the run is sitting on, because that "
+                "would stop the run advancing with no error at all. Normally "
+                "you do NOT need this: edit the config and start a fresh run."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {"type": "string",
+                               "description": "The run to move."},
+                    "version": {"type": "integer",
+                                "description": "Target version (default: the "
+                                "latest). pipeline_versions lists them."},
+                },
+                "required": ["run_id"],
             },
         },
     },
@@ -4668,12 +4701,19 @@ class MetaAgent:
             return {"error": "this engine has no graph version history — the "
                              "container is running a skillflow older than the "
                              "one that records it."}
+        # An addon is registered under its overlay's alias, so ask by the name
+        # the ENGINE knows. Passing `config_name` straight through made this
+        # answer "no history yet" — a false statement — for a target that
+        # suggest_pipeline_change versions correctly.
+        from core.baseline import graph_name_of
+        name = graph_name_of(name)
         rows = lister(name)
         if not rows:
             return {"config_name": name, "versions": [],
                     "note": "no history yet. A version is recorded the next "
-                            "time this config is registered, which happens on "
-                            "boot and after every config_edit."}
+                            "time this config's CONTENT changes and it is "
+                            "re-registered — a plain restart re-registers it "
+                            "but mints nothing, which is the point."}
 
         want = args.get("version")
         if want is not None:
@@ -4713,6 +4753,25 @@ class MetaAgent:
                            f"number only; pass version=<n> to see one.")
         return res
 
+    async def _tool_repin_run(self, args: dict) -> dict:
+        """Move a run in flight onto the current version of its config."""
+        from api.dependencies import get_skillflow
+
+        run_id = (args.get("run_id") or "").strip()
+        if not run_id:
+            return {"error": "run_id is required."}
+        sf = get_skillflow()
+        fn = getattr(sf, "repin_run", None)
+        if fn is None:
+            return {"error": "this engine cannot re-pin — it predates graph "
+                             "version pinning, which also means an edit still "
+                             "reaches a run in flight on its own."}
+        v = args.get("version")
+        try:
+            return fn(run_id, int(v) if v is not None else None)
+        except Exception as e:                                   # noqa: BLE001
+            return {"error": str(e)}
+
     async def _tool_suggest_pipeline_change(self, args: dict) -> dict:
         from core import suggestions
 
@@ -4749,8 +4808,11 @@ class MetaAgent:
             return {"error": "rejecting needs a note saying why — an unexplained "
                              "rejection is indistinguishable from tidying the "
                              "finding away."}
+        rv = args.get("result_version")
         return suggestions.resolve(
-            (args.get("suggestion_id") or "").strip(), status, note=note or None)
+            (args.get("suggestion_id") or "").strip(), status,
+            result_version=int(rv) if rv is not None else None,
+            note=note or None)
 
     async def _tool_replay_baseline(self, args: dict) -> dict:
         """Replay a generated pipeline or addon against its recorded baseline."""
@@ -5303,6 +5365,8 @@ _CODING_TOOL_HANDLERS = {
     # it belongs with the tools that can change one. Recording and reading them
     # do not, and are butler-visible — see _TOOL_HANDLERS.
     "resolve_pipeline_suggestion": MetaAgent._tool_resolve_pipeline_suggestion,
+    # Mutates a live run's execution target — coding mode, beside config_edit.
+    "repin_run": MetaAgent._tool_repin_run,
     "edit_file": MetaAgent._tool_edit_file,
     "create_file": MetaAgent._tool_create_file,
     "bash": MetaAgent._tool_bash,

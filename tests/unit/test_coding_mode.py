@@ -81,7 +81,10 @@ class TestModePlumbing:
                          # was changed, so it sits with the tools that can
                          # change one. Recording and listing them are
                          # butler-visible (they touch no config, repo, or run).
-                         "resolve_pipeline_suggestion"}
+                         "resolve_pipeline_suggestion",
+                         # changes which graph a LIVE run executes — it belongs
+                         # with config_edit, not with the read-only surface
+                         "repin_run"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
 

@@ -53,24 +53,19 @@ def _db():
         return _cli_db()
 
 
-def _graph_name_of(target: str) -> str:
-    """The name the ENGINE knows this target by.
+def _engine_reports_versions() -> bool:
+    """Can this engine report content versions at all?
 
-    An addon is not registered under its own name — its composed graph is
-    registered under the overlay's `alias` (`game_harness` → `dpe_game`). Asking
-    for the addon's own name returns no versions, which would silently give
-    every addon suggestion `base_version = None` and switch off the stale-base
-    rule for exactly the targets it matters most for: an overlay hangs its ops
-    on the base graph's step ids, so "the base moved on" is its whole risk.
+    Distinct from "this target has no versions". The difference decides whether
+    `applied` may go unversioned: requiring a version an engine cannot supply
+    blocks every resolution and makes the whole loop unusable, which is worse
+    than a lesson closed without one.
     """
     try:
         from api.dependencies import get_skillflow
-        spec = (getattr(get_skillflow(), "_overlays", {}) or {}).get(target)
-        if spec:
-            return spec.get("alias") or target
+        return getattr(get_skillflow(), "list_graph_versions", None) is not None
     except Exception:                                            # noqa: BLE001
-        pass
-    return target
+        return False
 
 
 def _live_version(target: str) -> int | None:
@@ -85,7 +80,8 @@ def _live_version(target: str) -> int | None:
         lister = getattr(get_skillflow(), "list_graph_versions", None)
         if lister is None:
             return None
-        rows = lister(_graph_name_of(target))
+        from core.baseline import graph_name_of
+        rows = lister(graph_name_of(target))
         return rows[0]["version"] if rows else None
     except Exception:                                            # noqa: BLE001
         return None
@@ -123,11 +119,19 @@ def create(target: str, title: str, content: str = "", *,
 def _row_to_dict(row, live: int | None) -> dict:
     d = dict(row)
     base = d.get("base_version")
-    # Only an OPEN suggestion can be stale — a resolved one is a historical
-    # fact and reporting it as stale would invite re-litigating settled work.
-    d["stale_base"] = bool(
-        d.get("status") == OPEN and base is not None and live is not None
-        and base != live)
+    # Three values, not two. Only an OPEN suggestion can be stale — a resolved
+    # one is a historical fact, and reporting it stale would invite
+    # re-litigating settled work — but an open one whose version cannot be read
+    # is UNKNOWN, not fresh. Reporting False there asserts "still current" about
+    # a config nobody looked at, which is the whole failure this field exists to
+    # prevent; it happens for every suggestion whenever the engine has no
+    # version history.
+    if d.get("status") != OPEN:
+        d["stale_base"] = False
+    elif base is None or live is None:
+        d["stale_base"] = None
+    else:
+        d["stale_base"] = base != live
     d["live_version"] = live
     return d
 
@@ -185,13 +189,19 @@ def resolve(suggestion_id: str, status: str, *,
         return {"error": f"suggestion {suggestion_id} is already "
                          f"{existing['status']} — a resolved suggestion stays "
                          f"resolved; record a new one instead."}
-    if status == APPLIED:
-        if result_version is None:
-            result_version = _live_version(existing["target"])
-        if result_version is None:
+    if status == APPLIED and result_version is None:
+        result_version = _live_version(existing["target"])
+        # Require a version only where one is OBTAINABLE. An engine with no
+        # version history cannot supply one for any target, so demanding it
+        # there rejects every `applied` — the loop's closing move — and leaves
+        # the agent to either retry forever or misreport the outcome as
+        # `rejected`. The invariant is worth having where it can be met; where
+        # it cannot, recording the resolution beats losing it.
+        if result_version is None and _engine_reports_versions():
             return {"error": "applied needs result_version — the config version "
-                             "that carries the change. The engine could not "
-                             "supply one, so pass it explicitly."}
+                             "that carries the change. This config has no "
+                             "recorded versions; pass one explicitly, or check "
+                             "the target name with pipeline_versions."}
     # `AND status = OPEN`, not a bare `WHERE id = ?`. The read above and this
     # write are separate transactions, so the check alone is advisory: two
     # callers resolving the same suggestion both see `open`, both pass, and the

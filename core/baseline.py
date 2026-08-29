@@ -314,6 +314,26 @@ def graph_digest(graph: dict) -> str:
     ).hexdigest()[:16]
 
 
+def graph_name_of(target: str) -> str:
+    """The name the ENGINE knows a target by.
+
+    An addon is not registered under its own name — its composed graph is
+    registered under the overlay's `alias` (`game_harness` → `dpe_game`). Lives
+    here, in the module that already owns addon-vs-pipeline resolution, because
+    two callers deriving it independently is how `pipeline_versions` came to
+    answer "no history yet" for a target `suggest_pipeline_change` versioned
+    correctly — two surfaces disagreeing about what a name means.
+    """
+    try:
+        from api.dependencies import get_skillflow
+        spec = (getattr(get_skillflow(), "_overlays", {}) or {}).get(target)
+        if spec:
+            return spec.get("alias") or target
+    except Exception:                                            # noqa: BLE001
+        pass
+    return target
+
+
 def registered_version(kind: str, target: str) -> int | None:
     """The engine's content version of the graph this baseline describes.
 
@@ -331,9 +351,7 @@ def registered_version(kind: str, target: str) -> int | None:
         lister = getattr(get_skillflow(), "list_graph_versions", None)
         if lister is None:
             return None
-        name = (target if kind == KIND_PIPELINE
-                else (_addon_spec(target).get("alias") or target))
-        rows = lister(name)
+        rows = lister(graph_name_of(target))
         return rows[0]["version"] if rows else None
     except Exception:                                            # noqa: BLE001
         return None

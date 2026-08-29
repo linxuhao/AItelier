@@ -38,9 +38,12 @@ def agent(mock_db, mock_ws):
 
 class TestToolDefinitions:
     def test_tool_count(self):
-        # 32 orchestration tools + 8 diagnosis tools (trace/registry/config readers);
+        # 32 orchestration tools + 8 diagnosis tools (trace/registry/config readers)
+        # + 3 config-history/suggestion tools (pipeline_versions,
+        # suggest_pipeline_change, list_pipeline_suggestions — read-only or
+        # proposal-only, so butler-visible);
         # generate_pipeline and config_edit are coding-mode only.
-        assert len(TOOL_DEFINITIONS) == 41
+        assert len(TOOL_DEFINITIONS) == 44
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:

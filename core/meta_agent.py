@@ -1037,6 +1037,87 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "pipeline_versions",
+            "description": (
+                "The edit history of a config: every CONTENT version the engine "
+                "recorded, newest first, with its digest and when it landed. A "
+                "version is minted only when the content actually changed, so "
+                "the count is how many times the config was edited. Use it to "
+                "answer 'what did this run actually execute' (runs are pinned to "
+                "a version) and to name the base version of a suggestion."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "config_name": {"type": "string",
+                                    "description": "Any registered config — "
+                                    "gen_<slug>, a built-in, or a composed addon "
+                                    "alias."},
+                },
+                "required": ["config_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_pipeline_change",
+            "description": (
+                "Record a lesson about a CONFIG so it outlives the run that "
+                "found it. Use it when a drive, a replay, or a review shows the "
+                "pipeline itself is wrong — a step that cannot get the context "
+                "it needs, a gate that never fires, a role prompt that keeps "
+                "producing the same defect. It is recorded against the config's "
+                "current version, so a later reader can tell whether it still "
+                "applies. This does NOT change anything: it is a proposal. Fix "
+                "the config with config_edit, then resolve the suggestion as "
+                "applied. Do not file one for a one-off input problem."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string",
+                               "description": "The config the lesson is about."},
+                    "title": {"type": "string",
+                              "description": "One line naming what should change."},
+                    "content": {"type": "string",
+                                "description": "What went wrong, the evidence "
+                                "(step, error, run), and what would fix it."},
+                    "source_run_id": {"type": "string",
+                                      "description": "The run that surfaced it, "
+                                      "if there is one."},
+                },
+                "required": ["target", "title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_pipeline_suggestions",
+            "description": (
+                "Open lessons recorded against configs. Read this BEFORE editing "
+                "a generated pipeline — someone (or a past run) may already have "
+                "diagnosed what you are about to re-diagnose. A suggestion marked "
+                "stale_base was written against an older version: re-read it "
+                "against the config as it is now before acting on it, because "
+                "the step it complains about may already be gone."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string",
+                               "description": "Limit to one config (default: all)."},
+                    "status": {"type": "string",
+                               "enum": ["open", "applied", "rejected"],
+                               "description": "Default: open."},
+                },
+            },
+        },
+    },
 ]
 
 # ── Coding-mode tool definitions ───────────────────────────────────
@@ -1194,6 +1275,31 @@ CODING_TOOL_DEFINITIONS = [
                                "recorded real-drive evidence is carried over."},
                 },
                 "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resolve_pipeline_suggestion",
+            "description": (
+                "Close a suggestion once you have acted on it. 'applied' names "
+                "the config version that carries the fix — make the edit first, "
+                "then resolve, so the lesson points at the change that answered "
+                "it. 'rejected' needs a note saying why it should not be done; "
+                "use it for a suggestion that no longer applies, not to tidy "
+                "away one you simply did not do."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "suggestion_id": {"type": "string"},
+                    "status": {"type": "string",
+                               "enum": ["applied", "rejected"]},
+                    "note": {"type": "string",
+                             "description": "What you changed, or why not."},
+                },
+                "required": ["suggestion_id", "status"],
             },
         },
     },
@@ -3988,13 +4094,37 @@ class MetaAgent:
                                  "version.")
         else:
             result["reloaded"] = True
+            # A re-registration mints a content version only if the content
+            # actually changed, so this is the version the edit produced.
+            result["graph_version"] = self._config_version(config_name)
             # Only when one was earned: pointing at a baseline that does not exist
             # would read as "you broke something you never verified".
             from core import baseline as bl
             if bl.read(bl.KIND_PIPELINE, config_name) is not None:
                 result["next"] = (f"replay_baseline(target='{config_name}') checks this "
                                   f"edit against the recorded baseline without a run.")
+            # Someone may already have diagnosed what this edit is groping at.
+            try:
+                from core import suggestions
+                n = suggestions.open_count(config_name)
+                if n:
+                    result["open_suggestions"] = n
+                    result["also"] = (
+                        f"{n} open suggestion(s) recorded against this config — "
+                        f"list_pipeline_suggestions(target='{config_name}'). If this "
+                        f"edit answers one, resolve it as applied.")
+            except Exception:                                    # noqa: BLE001
+                pass
         return result
+
+    def _config_version(self, config_name: str) -> int | None:
+        try:
+            from api.dependencies import get_skillflow
+            lister = getattr(get_skillflow(), "list_graph_versions", None)
+            rows = lister(config_name) if lister else None
+            return rows[0]["version"] if rows else None
+        except Exception:                                        # noqa: BLE001
+            return None
 
     def _tool_archive_pipeline(self, args: dict) -> dict:
         """Retire a generated pipeline (reversible unless purge=true)."""
@@ -4420,6 +4550,10 @@ class MetaAgent:
             # Both ids: every run-keyed tool accepts either, but returning only the
             # project id sent the driver to get_pipeline_result(project_id) → "not found".
             "project_id": pid, "run_id": rid,
+            # WHICH content this drive exercised. The config can be edited again
+            # before anyone reads this, so the version is the only durable answer
+            # to "what was actually driven".
+            "graph_version": self._pinned_version(rid),
             "steps": per_step, "first_failure": first_failure,
             "final_outputs": outputs,
             "run_error": run.get("error_reason") or run.get("error"),
@@ -4427,7 +4561,9 @@ class MetaAgent:
                      "step failed or the outputs are wrong, use config_read to see the "
                      "generated graph/roles and config_edit to repair them (it reloads "
                      "the pipeline for you), then drive_pipeline again. "
-                     "trace_list(run, errors_only=true) explains any step failure."),
+                     "trace_list(run, errors_only=true) explains any step failure. "
+                     "If you find a defect you are not fixing now, record it with "
+                     "suggest_pipeline_change rather than leaving it in this chat."),
         }
         # A completed drive is the only thing that can record what this pipeline
         # actually PRODUCES per step; every later edit is replayed against it.
@@ -4435,6 +4571,16 @@ class MetaAgent:
             config_name, rid, pid, test_seed, status,
             update=bool(args.get("update_baseline")))
         return result
+
+    def _pinned_version(self, run_id: str) -> int | None:
+        """Which graph content version a run is pinned to, or None if the engine
+        is older than the version history."""
+        try:
+            from api.dependencies import get_skillflow
+            fn = getattr(get_skillflow(), "graph_version_for_run", None)
+            return fn(run_id)["version"] if fn else None
+        except Exception:                                        # noqa: BLE001
+            return None
 
     def _baseline_after_drive(self, config_name: str, run_id: str, project_id: str,
                               test_seed: str, status: str, *, update: bool) -> dict:
@@ -4471,6 +4617,65 @@ class MetaAgent:
         except Exception as e:                                   # noqa: BLE001
             self._log_error(f"baseline for {config_name} failed: {e}")
             return {"error": str(e)}
+
+    async def _tool_pipeline_versions(self, args: dict) -> dict:
+        """The recorded content history of one config."""
+        from api.dependencies import get_skillflow
+
+        name = (args.get("config_name") or "").strip()
+        if not name:
+            return {"error": "config_name is required."}
+        lister = getattr(get_skillflow(), "list_graph_versions", None)
+        if lister is None:
+            return {"error": "this engine has no graph version history — the "
+                             "container is running a skillflow older than the "
+                             "one that records it."}
+        rows = lister(name)
+        if not rows:
+            return {"config_name": name, "versions": [],
+                    "note": "no history yet. A version is recorded the next "
+                            "time this config is registered, which happens on "
+                            "boot and after every config_edit."}
+        return {"config_name": name, "latest": rows[0]["version"],
+                "versions": rows}
+
+    async def _tool_suggest_pipeline_change(self, args: dict) -> dict:
+        from core import suggestions
+
+        return suggestions.create(
+            args.get("target") or "",
+            args.get("title") or "",
+            args.get("content") or "",
+            origin="agent",
+            created_by=f"session:{self.session_id}" if getattr(
+                self, "session_id", None) else None,
+            source_run_id=(args.get("source_run_id") or "").strip() or None)
+
+    async def _tool_list_pipeline_suggestions(self, args: dict) -> dict:
+        from core import suggestions
+
+        rows = suggestions.list_for(
+            (args.get("target") or "").strip() or None,
+            (args.get("status") or suggestions.OPEN))
+        stale = [r["id"] for r in rows if r.get("stale_base")]
+        out = {"count": len(rows), "suggestions": rows}
+        if stale:
+            out["note"] = (f"{len(stale)} written against an older version "
+                           f"({', '.join(stale)}) — re-read each against the "
+                           f"config as it is now before acting on it.")
+        return out
+
+    async def _tool_resolve_pipeline_suggestion(self, args: dict) -> dict:
+        from core import suggestions
+
+        status = (args.get("status") or "").strip()
+        note = (args.get("note") or "").strip()
+        if status == suggestions.REJECTED and not note:
+            return {"error": "rejecting needs a note saying why — an unexplained "
+                             "rejection is indistinguishable from tidying the "
+                             "finding away."}
+        return suggestions.resolve(
+            (args.get("suggestion_id") or "").strip(), status, note=note or None)
 
     async def _tool_replay_baseline(self, args: dict) -> dict:
         """Replay a generated pipeline or addon against its recorded baseline."""
@@ -4536,13 +4741,20 @@ class MetaAgent:
                     "findings": bl.diff(prior, fresh)}
 
         findings = bl.diff(prior, fresh)
+        # Name the two versions the findings sit between. "These things differ"
+        # is far less actionable than "these differ between v3 and v5", and the
+        # base version is what a suggestion has to be recorded against.
+        versions = {"baseline_version": prior.get("graph_version"),
+                    "current_version": fresh.get("graph_version")}
         return {"target": target, "kind": kind, "regressed": bool(findings),
                 "findings": findings, "smoke": fresh["smoke"]["status"],
-                "checked": checked,
+                "checked": checked, **versions,
                 "graph_changed": prior.get("graph_digest") != fresh.get("graph_digest"),
                 "hint": (("Matches the baseline." if not findings else
                           "Fix these, or accept them with update=true if the change "
-                          "was intended.")
+                          "was intended. If a finding is a real defect in the "
+                          "pipeline rather than an intended edit, record it with "
+                          "suggest_pipeline_change so it survives this session.")
                          + not_run
                          + " Behavior is not checked either way — drive_pipeline is "
                            "still what proves the output is right.")}
@@ -4994,6 +5206,13 @@ _TOOL_HANDLERS = {
     "tool_read": MetaAgent._tool_tool_read,
     "config_read": MetaAgent._tool_config_read,
     "config_search": MetaAgent._tool_config_search,
+    # Read-only, plus one that only records a PROPOSAL: none of them changes a
+    # config, a repo, or a run. Butler-visible on purpose — "this pipeline keeps
+    # doing X" is usually noticed while inspecting, not while editing, and a
+    # lesson that can only be filed from coding mode is a lesson mostly lost.
+    "pipeline_versions": MetaAgent._tool_pipeline_versions,
+    "suggest_pipeline_change": MetaAgent._tool_suggest_pipeline_change,
+    "list_pipeline_suggestions": MetaAgent._tool_list_pipeline_suggestions,
 }
 
 # Coding-mode-only tools — schema-visible and dispatchable only when the
@@ -5005,6 +5224,10 @@ _CODING_TOOL_HANDLERS = {
     "generate_pipeline": MetaAgent._tool_generate_pipeline,
     "drive_pipeline": MetaAgent._tool_drive_pipeline,
     "replay_baseline": MetaAgent._tool_replay_baseline,
+    # Resolving a suggestion as `applied` asserts that a config was changed, so
+    # it belongs with the tools that can change one. Recording and reading them
+    # do not, and are butler-visible — see _TOOL_HANDLERS.
+    "resolve_pipeline_suggestion": MetaAgent._tool_resolve_pipeline_suggestion,
     "edit_file": MetaAgent._tool_edit_file,
     "create_file": MetaAgent._tool_create_file,
     "bash": MetaAgent._tool_bash,

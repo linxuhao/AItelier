@@ -261,6 +261,35 @@ class DBManager:
             except sqlite3.OperationalError:
                 pass
 
+            # A lesson from a real run, aimed at ONE version of ONE config.
+            #
+            # Review findings used to die inside the run that produced them: the
+            # reviewer told the implementer, the loop closed, and nothing carried
+            # "this config is wrong in this way" out to the config itself. The
+            # base_version is what makes a suggestion re-checkable — guidance
+            # written against v3 may already be moot at v5, so it is recorded
+            # rather than applied to whatever is current.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pipeline_suggestions (
+                    id TEXT PRIMARY KEY,
+                    target TEXT NOT NULL,
+                    base_version INTEGER,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    origin TEXT NOT NULL DEFAULT 'agent',
+                    created_by TEXT,
+                    source_run_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    result_version INTEGER,
+                    resolution_note TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at DATETIME
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pipeline_suggestions_target "
+                "ON pipeline_suggestions(target, status)")
+
             conn.commit()
 
     # ── Versioned migration runner ─────────────────────────────────────

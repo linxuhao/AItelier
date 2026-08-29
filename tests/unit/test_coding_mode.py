@@ -76,7 +76,12 @@ class TestModePlumbing:
                          # here; the config_read/search half is butler-visible.
                          "config_edit",
                          # retiring one is destructive — coding-mode only
-                         "archive_pipeline"}
+                         "archive_pipeline",
+                         # resolving a suggestion as `applied` asserts a config
+                         # was changed, so it sits with the tools that can
+                         # change one. Recording and listing them are
+                         # butler-visible (they touch no config, repo, or run).
+                         "resolve_pipeline_suggestion"}
         butler_names = {td["function"]["name"] for td in TOOL_DEFINITIONS}
         assert not names & butler_names
 

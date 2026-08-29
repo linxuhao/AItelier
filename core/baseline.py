@@ -314,6 +314,31 @@ def graph_digest(graph: dict) -> str:
     ).hexdigest()[:16]
 
 
+def registered_version(kind: str, target: str) -> int | None:
+    """The engine's content version of the graph this baseline describes.
+
+    Distinct from `graph_digest`, which is computed here over the COMPOSED graph
+    (an addon has no registered file of its own). This is the number the engine
+    pins runs to, so it is what a report can name: "the baseline was taken at
+    v3, the config is now at v5".
+
+    None when the engine predates the version history — the container can run an
+    older skillflow than the host does. The baseline is still valid then; it
+    just cannot say which version it was taken at.
+    """
+    try:
+        from api.dependencies import get_skillflow
+        lister = getattr(get_skillflow(), "list_graph_versions", None)
+        if lister is None:
+            return None
+        name = (target if kind == KIND_PIPELINE
+                else (_addon_spec(target).get("alias") or target))
+        rows = lister(name)
+        return rows[0]["version"] if rows else None
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
 def capture(kind: str, target: str, *, observed: dict | None = None) -> dict:
     """A full baseline for *target*. Raises on an unresolvable graph."""
     graph = resolve_graph(kind, target)
@@ -322,6 +347,7 @@ def capture(kind: str, target: str, *, observed: dict | None = None) -> dict:
         "kind": kind,
         "target": target,
         "graph_digest": graph_digest(graph),
+        "graph_version": registered_version(kind, target),
         "shape": capture_shape(graph, base_ids=base_ids),
         "smoke": capture_smoke(graph),
     }

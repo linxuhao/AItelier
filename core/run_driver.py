@@ -92,10 +92,30 @@ def release_claim_on_cancel(sf, claimed) -> None:
         if release is not None:
             release(claimed.token, reason)
         else:
-            # An engine older than release_claim (the container tracks PyPI, the
-            # host an editable checkout). Handing the claim back matters more
-            # than handing it back cheaply, so spend a retry rather than leak it.
-            sf.fail_step(claimed.token, reason, retryable=True)
+            # An engine older than `release_claim` — which is every DEPLOYED one
+            # until 1.5.56 is published, while this file is bind-mounted and
+            # live on the next restart.
+            #
+            # This used to call `fail_step(retryable=True)`, and that was the
+            # whole bug on the deployed engine: it charges `retry_count`, so
+            # ONE `docker compose restart` — which cancels every gathered tick
+            # at once — cost every in-flight step a retry, and the fourth
+            # restart failed the run outright with `last_error` blaming a step
+            # that never failed. Adding the scheduler's release widened that
+            # from butler-driven runs to all of DPE.
+            #
+            # So do here exactly what the engine does: hand the claim back.
+            # `WHERE status='claimed'` so a step someone else already resolved
+            # is left alone; `version + 1` matches the engine's other
+            # pending-resets, fencing the dead executor out.
+            with sf._lock, sf._conn:
+                sf._conn.execute(
+                    "UPDATE skillflow_steps SET status = 'pending', "
+                    "version = version + 1, claimed_at = NULL, "
+                    "claimed_by = NULL, last_error = ?, "
+                    "updated_at = datetime('now') "
+                    "WHERE id = ? AND status = 'claimed'",
+                    (reason, claimed.token.step_instance_id))
     except Exception:                                            # noqa: BLE001
         import logging
         logging.getLogger("aitelier").warning(

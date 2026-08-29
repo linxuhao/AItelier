@@ -1237,9 +1237,10 @@ def _register_run_tools(tool):
                             "error": f"run '{run_id}' is paused, but this "
                                      f"project's checkpoint resolver answered "
                                      f"for run '{_rid}' instead — the project "
-                                     f"has more than one live run. Resolve the "
-                                     f"checkpoint from the dashboard, or reject "
-                                     f"the run that is actually paused."}
+                                     f"has more than one live run. The HTTP "
+                                     f"path resolves the same way, so the "
+                                     f"dashboard cannot answer it either: close "
+                                     f"or complete the other run first."}
                 if not step_id:
                     return {**echo,
                             "error": f"run '{run_id}' is paused but no checkpoint "

@@ -42,15 +42,30 @@ def test_the_claim_goes_back_without_spending_a_retry(claimed):
     sf.fail_step.assert_not_called()
 
 
-def test_an_engine_without_release_claim_still_gets_the_claim_back(claimed):
-    """The container tracks PyPI while the host runs an editable checkout, so
-    the engine can be older than this call. Handing the claim back matters more
-    than handing it back cheaply."""
-    sf = MagicMock(spec=["fail_step"])          # no release_claim attribute
+def test_an_engine_without_release_claim_still_spends_no_retry(claimed):
+    """The DEPLOYED engine is this one: `release_claim` ships in 1.5.56, which
+    is unpublished, while this file is bind-mounted and live on the next restart.
+
+    The first version of this test asserted the fallback called
+    `fail_step(retryable=True)` — and so PINNED the bug as correct. That
+    fallback charged a retry per cancellation, and one `docker compose restart`
+    cancels every gathered tick at once, so the fourth restart failed a run
+    outright with `last_error` blaming a step that never failed. A mock with
+    `spec=["fail_step"]` could never see the run die.
+    """
+    conn, lock = MagicMock(), MagicMock()
+    sf = MagicMock(spec=["_conn", "_lock"])
+    sf._conn, sf._lock = conn, lock
+    claimed.token = MagicMock(step_instance_id=42)
+
     release_claim_on_cancel(sf, claimed)
 
-    sf.fail_step.assert_called_once()
-    assert sf.fail_step.call_args.kwargs["retryable"] is True
+    sql, params = conn.execute.call_args.args
+    assert "status = 'pending'" in sql and "version = version + 1" in sql
+    assert "WHERE id = ? AND status = 'claimed'" in sql, \
+        "a step someone else already resolved must be left alone"
+    assert params[1] == 42
+    assert "retry_count" not in sql, "the fallback charged a retry"
 
 
 def test_a_failing_release_is_reported_not_raised(claimed, caplog):

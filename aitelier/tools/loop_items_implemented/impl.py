@@ -132,6 +132,12 @@ def _loop_items(graph_dir: Path, config_name: str) -> list | None:
     step, file, field = "3", "tasks_manifest.json", "execution_order"
     try:
         from api.dependencies import get_skillflow
+        # KNOWN GAP, not a clean exemption: this is a GATE, and a config edited
+        # mid-run can change which loop `source` it reads — a gate reading the
+        # wrong source passes or fails a step silently. It cannot be pinned
+        # because skillflow hands this tool no run_id at all; closing it means
+        # widening the tool-invocation contract.
+        # by-name-ok: gate tool, no run_id available — see KNOWN GAP above
         resolver = get_skillflow()._get_resolver(config_name)
         for node in resolver.graph.steps:
             src = getattr(node, "source", None)

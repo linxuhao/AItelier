@@ -220,6 +220,7 @@ class ConfigRegistry:
         NOT computed here — the manifest reads them from the live graph on access,
         so a re-registered graph is reflected without rebuilding the registry."""
         try:
+            # by-name-ok: catalogue/manifest listing — no run in scope
             sf._get_resolver(name)  # ensure the graph resolves; skip if broken
         except Exception:
             # A broken graph silently vanishing from the registry is hard to
@@ -233,6 +234,7 @@ class ConfigRegistry:
                  **host_hints.get(name, {}), **(hint_overrides or {})}
         return ConfigManifest(
             config_name=name,
+            # by-name-ok: catalogue/manifest listing — no run in scope
             graph_provider=(lambda n=name: sf._get_resolver(n).graph),
             label=hints.get("label") or name,
             has_task_loop=bool(hints.get("has_task_loop")),

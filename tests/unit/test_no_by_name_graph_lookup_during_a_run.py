@@ -1,133 +1,66 @@
 """A live run's decisions come from its PINNED graph, not from the name.
 
-Four review rounds found this same class four times, one site at a time:
-the runner plugin's staging contract, `_get_checkpoint_info` (which decides
-which step a human is answering), the butler's own reject, the retry guard.
-Each fix was a single line; each round found more. Patching them one at a time
-demonstrably does not converge, so this is the inventory.
+Five review rounds found this same class, one site at a time: the runner
+plugin's staging contract, `_get_checkpoint_info` (which decides which step a
+human is answering), the butler's own reject, the retry guard, the baseline
+recorded after a drive. Each fix was a line; each round found more. Patching
+one at a time does not converge, so this is the inventory.
 
-The rule: where a `run_id` is in hand, a graph/resolver/node must be obtained
-through the run's pin — `_get_resolver_for_run` / `_graph_for_run` — because
-`_get_resolver(name)` and `_graphs[name]` return whatever is registered NOW,
-and a config edited mid-run makes those a different graph.
+The rule: `_get_resolver(name)`, `_graphs[name]` and `_resolvers[name]` return
+whatever is registered NOW. A run executes the version it started with, so
+where a `run_id` is in hand they answer about a different graph. Use
+`_get_resolver_for_run` / `_graph_for_run`.
 
-Sites with no run in hand are fine and are listed as such: creation-time
-(`create_run`), catalogue/registry listings, and the `else` half of a
-`pinned if run_id else by-name` fallback are all legitimate.
+Every exception is a `# by-name-ok: <reason>` on the line, or the line above.
+ONE mechanism on purpose. This started with a file-level allowlist as well, and
+that is what let a real bug through: `core/baseline.py` was waived as "shape,
+not execution", which was true of the file when it was written and false of the
+line added to it later. A file-level exemption blankets code that does not
+exist yet.
 """
 
 import ast
 from pathlib import Path
 
-import pytest
-
 _ROOT = Path(__file__).resolve().parents[2]
 _SCAN = ("core", "api", "web_api", "aitelier")
-
-# Lookups that are correct BY NAME, each because no run is in scope there.
-# A new entry needs a reason in this dict, not just a path.
-_ALLOWED = {
-    "core/config_registry.py": "registry/catalogue listing — no run in scope",
-    "core/pipeline_registry.py": "registration and archival — no run in scope",
-    "core/addon_registry.py": "compose/registration — no run in scope",
-    "core/capability_registry.py": "capability definitions are global",
-    "aitelier/tools/forge_dryrun_smoke/impl.py": "stub drive on its own engine",
-    "aitelier/stub_runner.py": "stub drive on its own engine",
-    "core/run_launcher.py": "pre-flight context check BEFORE a run exists",
-    # KNOWN GAP, not an exemption on the merits: this gate resolves the graph
-    # from `config_name` because skillflow never hands it a `run_id` — the tool
-    # signature has none. So a config edited mid-run can change which loop
-    # `source` this gate reads, and a gate reading the wrong source passes or
-    # fails a step silently. Closing it means widening the tool-invocation
-    # contract, which is a larger change than this rule.
-    "aitelier/tools/loop_items_implemented/impl.py":
-        "gate tool; skillflow injects no run_id — see KNOWN GAP above",
-}
-
-
-def _sources():
-    for d in _SCAN:
-        root = _ROOT / d
-        if root.is_dir():
-            for p in sorted(root.rglob("*.py")):
-                if "__pycache__" not in p.parts:
-                    yield p
+_MARKER = "by-name-ok:"
 
 
 def _by_name_lookups(tree) -> list[int]:
-    """Lines calling `_get_resolver(...)` or indexing `_graphs` by name.
+    """Lines that reach a graph by name, in all three syntactic forms.
 
-    A ternary that already prefers the pinned accessor is not a finding — that
-    is the fallback shape used everywhere the engine may be older than the
-    caller, and its by-name half is reached only when pinning is unavailable.
+    Three, because the first version detected only the first: the subscript was
+    named in this file's own rule and never checked, and `getattr(sf,
+    "_graphs", {})` — the form `core/baseline.py` actually uses — was invisible,
+    so the file whose exemption was hiding a bug could not have been caught even
+    without it.
     """
     hits = []
     for n in ast.walk(tree):
-        if isinstance(n, ast.IfExp):
-            continue                      # handled via the parent scan below
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
-                and n.func.attr == "_get_resolver":
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            if n.func.attr == "_get_resolver":
+                hits.append(n.lineno)
+            elif (n.func.attr == "get"
+                  and isinstance(n.func.value, ast.Attribute)
+                  and n.func.value.attr in ("_graphs", "_resolvers")):
+                hits.append(n.lineno)
+        elif (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Attribute)
+              and n.value.attr in ("_graphs", "_resolvers")):
             hits.append(n.lineno)
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
-                and n.func.attr == "get" and isinstance(n.func.value, ast.Attribute) \
-                and n.func.value.attr in ("_graphs", "_resolvers"):
-            hits.append(n.lineno)
-        # `sf._graphs[name]` / `sf._resolvers[name]`. The docstring and the
-        # failure message both named the subscript form as the rule from the
-        # start, and it was never detected — an advertised, unenforced rule is
-        # worse than none, because it is relied on.
-        if isinstance(n, ast.Subscript) and isinstance(n.value, ast.Attribute) \
-                and n.value.attr in ("_graphs", "_resolvers"):
-            hits.append(n.lineno)
-        # `getattr(sf, "_graphs", {}).get(name)` — the defensive form, and the
-        # one `core/baseline.py` actually uses. Attribute matching cannot see it
-        # (the receiver is a Call, not an Attribute), so the detector was blind
-        # to the very file whose blanket exemption was hiding a real bug.
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
-                and n.func.id == "getattr" and len(n.args) >= 2 \
-                and isinstance(n.args[1], ast.Constant) \
-                and n.args[1].value in ("_graphs", "_resolvers"):
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+              and n.func.id == "getattr" and len(n.args) >= 2
+              and isinstance(n.args[1], ast.Constant)
+              and n.args[1].value in ("_graphs", "_resolvers")):
             hits.append(n.lineno)
     return hits
 
 
-def _guarded_lines(src: str) -> set[int]:
-    """Lines that are the by-name HALF of a pinned-preferring expression.
+def _marked(src: str) -> set[int]:
+    """Lines exempted by a marker on themselves or the line directly above.
 
-    Exact, not a text window. The first version exempted any line within ±3 of a
-    mention of `_get_resolver_for_run` — including a mention in a COMMENT — so a
-    real by-name lookup placed just below a correctly-fixed site, or below a
-    `# TODO: use _get_resolver_for_run`, was silently waved through. A guard
-    with a fuzzy exemption is a guard you cannot rely on, which is the failure
-    mode this whole file exists to end.
-    """
-    guarded = set()
-    lines = src.splitlines()
-    for i, line in enumerate(lines, 1):
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            continue                       # a comment never guards anything
-        # The by-name call must sit on the same LOGICAL line as the pinned one:
-        # `x = pinned(run_id) if p else sf._get_resolver(name)`, possibly wrapped.
-        joined = " ".join(lines[max(0, i - 3):i + 1])
-        if ("_get_resolver_for_run" in joined or "_graph_for_run" in joined) \
-                and (" if " in joined or "\n" not in joined):
-            guarded.add(i)
-    return guarded
-
-
-# Per-LINE exemption marker. Preferred over a file entry in `_ALLOWED`, which
-# blankets every lookup in a file that may also contain real run-scoped ones —
-# `core/meta_agent.py` has both.
-_MARKER = "by-name-ok:"
-
-
-def _marked_lines(src: str) -> set[int]:
-    """Lines carrying `# by-name-ok:` on themselves or on the line directly above.
-
-    ONE line, not three. A three-line reach meant a second, real lookup just
-    after a legitimately marked one was exempted by its neighbour's reason — an
-    exemption someone else wrote, for a different line.
+    One line of reach, not three: a wider reach meant one marker covered a
+    neighbouring real lookup with a reason written for something else.
     """
     out, lines = set(), src.splitlines()
     for i, line in enumerate(lines, 1):
@@ -138,34 +71,24 @@ def _marked_lines(src: str) -> set[int]:
 
 def test_no_run_scoped_lookup_resolves_a_graph_by_name():
     offenders = []
-    for path in _sources():
-        rel = str(path.relative_to(_ROOT))
-        if rel in _ALLOWED:
-            continue
-        src = path.read_text(encoding="utf-8")
-        try:
-            tree = ast.parse(src)
-        except SyntaxError:
-            continue
-        guarded = _guarded_lines(src) | _marked_lines(src)
-        offenders += [f"{rel}:{ln}" for ln in _by_name_lookups(tree)
-                      if ln not in guarded]
+    for d in _SCAN:
+        for path in sorted((_ROOT / d).rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            src = path.read_text(encoding="utf-8")
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            marked = _marked(src)
+            offenders += [f"{path.relative_to(_ROOT)}:{ln}"
+                          for ln in _by_name_lookups(tree) if ln not in marked]
 
     assert not offenders, (
-        "these resolve a graph by NAME with a run in scope:\n  "
-        + "\n  ".join(sorted(offenders))
-        + "\n\nA run executes the version it started with, so `_get_resolver("
-        "name)` / `_graphs[name]` answer about a DIFFERENT graph once the "
-        "config is edited. Use `_get_resolver_for_run(run_id)` (or "
-        "`_graph_for_run`), keeping the by-name call as the `else` half so an "
-        "engine without pinning still works. If the site genuinely has no run "
-        "— registration, a catalogue listing, creation time — mark the line "
-        "`# by-name-ok: <reason>`, or add the whole file to _ALLOWED.")
-
-
-@pytest.mark.parametrize("rel,reason", sorted(_ALLOWED.items()))
-def test_every_allowed_file_still_exists(rel, reason):
-    """An allowlist that outlives its files silently stops covering anything."""
-    assert (_ROOT / rel).exists(), (
-        f"{rel} is allow-listed ({reason}) but is gone — drop the entry, or "
-        f"the exemption is protecting nothing while looking like it does.")
+        "these reach a graph by NAME:\n  " + "\n  ".join(sorted(offenders))
+        + "\n\nA run executes the version it started with, so these answer "
+        "about a DIFFERENT graph once the config is edited. Use "
+        "`_get_resolver_for_run(run_id)` or `_graph_for_run(run_id)`. If the "
+        "site genuinely has no run — registration, a catalogue listing, "
+        "creation time, an addon — put `# by-name-ok: <reason>` on the line "
+        "above it.")

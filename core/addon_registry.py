@@ -207,6 +207,7 @@ def register_addon_from_run(sf, registry, run_id: str) -> dict:
 
     # Compose the blessed alias combo when the base is registered, so the addon is
     # runnable by name immediately (not just declared).
+    # by-name-ok: addon compose/registration — no run in scope
     if base in getattr(sf, "_graphs", {}):
         try:
             result["registered_config"] = register_addon_combo(
@@ -235,6 +236,7 @@ def load_generated_addons(sf, registry) -> list[str]:
             nm = spec.get("name", p.stem)
             sf.register_overlay(nm, spec)
             base, alias = spec.get("base"), spec.get("alias")
+            # by-name-ok: addon compose/registration — no run in scope
             if base and base in getattr(sf, "_graphs", {}):
                 try:
                     register_addon_combo(sf, registry, base, [nm], name=alias or None)
@@ -281,6 +283,7 @@ def graph_view(config_name: str) -> dict | None:
     """
     from api.dependencies import get_skillflow
     sf = get_skillflow()
+    # by-name-ok: addon compose/registration — no run in scope
     graph = getattr(sf, "_graphs", {}).get(config_name)
     if graph is None:
         return None
@@ -291,6 +294,7 @@ def graph_view(config_name: str) -> dict | None:
     # per item (see `loop_item` on the step rows).
     loop_of: dict[str, str] = {}
     try:
+        # by-name-ok: addon compose/registration — no run in scope
         resolver = sf._get_resolver(config_name)
         for loop_id, body in resolver.loop_bodies().items():
             for node_id in body:
@@ -309,6 +313,7 @@ def graph_view(config_name: str) -> dict | None:
     base = decomp.get("base") or config_name
     addon_steps: list[str] = []
     if base != config_name:
+        # by-name-ok: addon compose/registration — no run in scope
         base_graph = getattr(sf, "_graphs", {}).get(base)
         if base_graph is not None:
             base_ids = {s.get("id") for s in base_graph.to_dict().get("steps") or []}

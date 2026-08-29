@@ -149,6 +149,7 @@ def checkpoint_reject_target(sf, graph_name: str, step_id: str,
         # callers still work.
         # by-name-ok: the no-run half
         resolver = (sf._get_resolver_for_run(run_id) if run_id
+                    # by-name-ok: the no-run half of the caller-supplied run_id
                     else sf._get_resolver(graph_name))
         node = resolver.get_node(step_id)
     except Exception:

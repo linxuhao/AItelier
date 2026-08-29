@@ -57,6 +57,7 @@ def missing_cross_config_inputs(sf, config_name: str, project_id: str) -> list[d
     from skillflow.context import ContextResolver
     from skillflow.exceptions import RequiredContextMissing
 
+    # by-name-ok: pre-flight context check BEFORE a run exists
     graph = sf._get_resolver(config_name).graph
     resolver = ContextResolver(sf._workspace.get_project_path(project_id))
     missing: list[dict] = []

@@ -179,7 +179,9 @@ def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "ho
 def offering_configs(sf, name: str) -> list[str]:
     """Every registered graph whose offer list names this capability."""
     out = []
+    # by-name-ok: capability definitions are global — no run in scope
     for gname in list(getattr(sf, "_graphs", {})):
+        # by-name-ok: capability definitions are global — no run in scope
         graph = sf._graphs.get(gname)
         if name in (getattr(graph, "capabilities", []) or []):
             out.append(gname)
@@ -269,6 +271,7 @@ def palette(sf, config_name: str = "") -> dict:
     caps = sf.capabilities()
     if not config_name:
         return {"capabilities": [_row(n, c) for n, c in sorted(caps.items())]}
+    # by-name-ok: capability definitions are global — no run in scope
     graph = getattr(sf, "_graphs", {}).get(config_name)
     if graph is None:
         return {"error": f"no pipeline {config_name!r}"}

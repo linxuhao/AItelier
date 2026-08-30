@@ -140,19 +140,33 @@ def test_planner_template_does_not_send_the_planner_to_read_file():
 class TestReadDisciplineSurvivesInBothPlaces:
     """Narrow reads are stated twice on purpose. Do not de-duplicate.
 
-    Measured 2026-08-30 by replaying four real `t_impl` steps (their exact
-    prompts, from `inputs_json`) against localqwen:
+    NUMBERS CORRECTED 2026-08-30, same day. The first version of this docstring
+    claimed 0 scoped calls out of 11 as the baseline. That was measured by
+    replaying four real `t_impl` steps and reading only TURN 1, where a model
+    orients broadly before narrowing — it is not how the step behaves. Across
+    all turns of real production traffic the picture is completely different:
 
-        buried in the role template only ..........  0 scoped calls / 11
-        template wording sharpened ................  3 / 11
-        + restated at the end of the user message ..  5 / 9
+        qwen/qwen3.8-flash ....  730 / 1,010 scoped  72.3%   105 steps
+        localqwen/qwen3 .......  437 /   676         64.6%    73 steps
+        ark/deepseek-v4-flash . 1,284 / 2,509        51.2%   314 steps
+        opencodego/…-v4-flash .  331 /   671         49.3%    94 steps
 
-    The wording bought 3, the POSITION bought the rest — the same recency effect
-    `dpe_pipeline` already documents for the `[Language]` block. The template
-    copy is where the rest of the tool contract lives; the turn-budget copy is
-    the one the model acts on. Deleting either looks like tidying and silently
-    costs context, which is what pushes a step into
-    `_rebind_if_out_of_headroom` and off to a paid endpoint.
+    So localqwen already scopes ~65% of its reads unaided, and the effect of
+    this guidance is UNPROVEN: the one production step after it shipped scored
+    5/5, inside a pre-existing 20-94% per-step range. It is kept because it is
+    a few hundred characters and cannot hurt, not because it is measured to
+    help — and the honest metric is the spill rate (`context-failover` events
+    per t_impl step, 23% at baseline), not counting tool calls.
+
+    Two things the correction does NOT overturn. Position still matters: the
+    guidance existed in the role template all along, 78k chars into the system
+    message as the 6th bullet of a section about WRITING, and restating it at
+    the end of the user message is the same recency effect `dpe_pipeline`
+    already documents for `[Language]`. And the interesting difference is
+    Qwen-vs-DeepSeek (72/65 vs 51/49), not Flash-Next-vs-27B — which points at
+    routing rather than at either the prompt or a bigger GPU.
+
+    Deleting either copy still reads as tidying, so both stay pinned.
     """
 
     def test_the_role_template_names_the_mechanism(self):

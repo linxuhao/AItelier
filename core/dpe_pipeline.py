@@ -1926,14 +1926,19 @@ class PipelineEngine:
                     "your final action must be a tool call (the write tool, then "
                     "finish_step). Do not exhaust all turns on exploration — leave at "
                     "least 1 turn for writing.\n"
-                    # Context, not just turns. The role template already says not to
-                    # read whole files, but it says so as the 6th bullet of a section
-                    # about WRITING, 78k chars into the system message — and measured
-                    # 2026-08-30 across four replayed t_impl steps, localqwen ignored
-                    # it 11 times out of 11. Restating the mechanism HERE, at the end
-                    # of the user message where the language block already earns its
-                    # recency, took it to 10 scoped calls out of 13. Cheap, and the
-                    # context it saves is what keeps a step under the window.
+                    # Context, not just turns. The role template already says not
+                    # to read whole files, but as the 6th bullet of a section about
+                    # WRITING, 78k chars into the system message — so it is restated
+                    # here, at the end of the user message, for the same recency
+                    # reason the [Language] block is placed here.
+                    #
+                    # Its effect is UNPROVEN, and the first version of this comment
+                    # overstated it ("ignored 11/11 -> 10/13"). That was turn-1-only
+                    # replay data; models orient broadly and narrow later. Across all
+                    # turns of production, localqwen already scopes 64.6% of 676 read
+                    # calls unaided (qwen/qwen3.8-flash 72.3%, the DeepSeek endpoints
+                    # ~50%). Kept because it costs a few hundred characters and cannot
+                    # hurt — measure the spill rate, not tool calls.
                     "Read narrowly: `search` with a `glob` and `context_lines` to "
                     "FIND, `read` with `start_line`/`end_line` to read a known "
                     "region. Reading a large file whole spends the context you need "

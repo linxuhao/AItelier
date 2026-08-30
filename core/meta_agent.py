@@ -18,11 +18,13 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
+    retry_if_exception,
 )
 
-from core.ai_router import (AIGateway, RETRYABLE_EXCEPTIONS, _read_secret,
-                            resolve_agent_model)
+from core.ai_router import (AIGateway, FAILOVER_EXCEPTIONS, _read_secret,
+                            _endpoint_available, _note_endpoint_spent,
+                            _retry_llm_error, resolve_agent_model)
+from core.llm_quota import is_quota_exhausted
 
 _DEFAULT_CONFIG_PATH = "dpe_roles_config.yaml"
 _DEFAULT_CONFIG_PATH_V2 = "agent_configs/meta_conversation.yaml"
@@ -1696,9 +1698,10 @@ def _resolve_provider(model_name: str, config_path: str | None = None):
     swallows its exception: a long coding session would simply stop compacting
     and drift into context overflow.
 
-    No failover here, deliberately: this is a single streamed call, not the
-    multi-turn step `AIGateway` is built around. It takes the first candidate
-    that is not in a spent-quota cooldown, so a dead plan is at least skipped.
+    Collapses the route to ONE endpoint — the first not in a spent-quota
+    cooldown — because that is all a caller with a single model field can hold.
+    The failover across the rest of the list lives in `_stream_llm`, which
+    keeps the whole candidate list and walks it.
     """
     api_base = None
     api_key = None
@@ -1744,6 +1747,43 @@ def _resolve_provider(model_name: str, config_path: str | None = None):
             litellm_model = f"openai/{actual_model}"
 
     return litellm_model, api_base, api_key
+
+
+def _provider_candidates(model_name: str) -> list[str]:
+    """Every concrete endpoint that can serve `model_name`, best first.
+
+    `_resolve_provider` collapses this to one; the streaming path needs the
+    whole list so a spent plan costs the next candidate rather than the turn.
+    A concrete `provider/model` is its own only candidate.
+
+    Candidates whose PROVIDER is absent from `llm_providers.json` are dropped —
+    the same call `AIGateway._next_usable` makes, for the same reason. With no
+    base URL to bind, litellm receives a bare `provider/model` it cannot place
+    and raises a client-side BadRequestError, which is deliberately NOT a
+    failover error: one unregistered entry at the head of a route would kill
+    the turn with every healthy candidate still queued behind it. An unreadable
+    registry falls open, and so does a filter that would empty the list.
+    """
+    from core.model_routes import config_or_example
+    try:
+        from core.model_routes import get_routes
+        cands = list(get_routes(config_or_example("model_routes.json"))
+                     .resolve(model_name))
+    except Exception as e:                               # noqa: BLE001
+        # Say it out loud. The fallback cannot serve an INTERNAL name — litellm
+        # has no idea where `pro` lives — so on a malformed routes table (which
+        # `get_routes` re-raises on every call) a silent swallow turns one bad
+        # edit into a butler that fails every turn with nothing naming why.
+        print(f"[meta_agent] model_routes unusable for {model_name!r}: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return [model_name]
+    try:
+        with open(config_or_example("llm_providers.json"),
+                  encoding="utf-8") as f:
+            provs = json.load(f)
+    except (OSError, ValueError):
+        return cands
+    return [c for c in cands if c.split("/", 1)[0] in provs] or cands
 
 
 # ── MetaAgent ──────────────────────────────────────────────────────
@@ -2292,6 +2332,14 @@ class MetaAgent:
             # the final stream chunk (empty choices) when asked.
             "stream_options": {"include_usage": True},
             "temperature": 0.3,
+            # httpx's READ timeout — the maximum GAP between bytes, not a cap
+            # on the generation (see `AIGateway._completion_bounded`, which had
+            # to add a wall-clock cap precisely because this is not one). So it
+            # cannot cut a slow-but-progressing answer; it bounds a socket that
+            # went silent. Untimed, a black-holing endpoint costs litellm's
+            # 6000s default PER ATTEMPT, and the failover walk multiplied that
+            # by three tenacity attempts times every candidate.
+            "timeout": 300.0,
         }
         if self.api_base:
             kwargs["api_base"] = self.api_base
@@ -2324,13 +2372,84 @@ class MetaAgent:
         @retry(
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+            # `_retry_llm_error`, not the bare type: a spent window is
+            # certain not to clear inside three exponential backoffs, so
+            # retrying it here only delays the failover below.
+            retry=retry_if_exception(_retry_llm_error),
             reraise=True,
         )
         async def _open_stream():
             return await litellm.acompletion(**kwargs)
 
-        response = await _open_stream()
+        # FAIL OVER, and REMEMBER. Binding one endpoint at construction and
+        # never moving is what killed two butler launches on 2026-08-30 against
+        # a three-day quota wall. Recording the spent endpoint matters as much
+        # as moving off it: `_resolve_provider` consults this same table, so a
+        # butler that only reads it re-elects the dead plan on the next launch.
+        candidates = _provider_candidates(self._raw_model)
+        # An ORDER, not a filter. A parked endpoint is DEMOTED, never dropped:
+        # parking is parsed out of provider prose, so a mis-read reset instant
+        # must not be able to make the butler unrunnable, and once every
+        # unparked candidate has failed, a plan that may have quietly reopened
+        # is strictly better than giving up. That is the same call
+        # `AIGateway._next_usable` makes when it degrades to `first_keyed`.
+        # (The table is process-wide, so a park any agent step recorded is
+        # visible here too — one more reason it must not be an exclusion.)
+        #
+        # Deduplicated because a route may name one endpoint twice on purpose:
+        # the duplicate `localqwen/qwen3` in `flash.rotate` buys the local box
+        # a 2-in-5 share of the ROTATION head, and this walk does not rotate
+        # (`resolve` without `rotate=True`), so the second occurrence is only a
+        # call already known to have failed — the waste `bad5f5b` measured.
+        uniq = list(dict.fromkeys(candidates))
+        order = ([c for c in uniq if _endpoint_available(c)]
+                 + [c for c in uniq if not _endpoint_available(c)])
+        response, last_err = None, None
+        for cand in order:
+            model, base, key = _resolve_provider(cand)
+            kwargs["model"] = model
+            kwargs.pop("api_base", None)
+            kwargs.pop("api_key", None)
+            if base:
+                kwargs["api_base"] = base
+            if key:
+                kwargs["api_key"] = key
+            try:
+                response = await _open_stream()
+            except FAILOVER_EXCEPTIONS as e:
+                # Every failure another endpoint might not have — dead key,
+                # spent plan, 429, 5xx, a box that is simply DOWN. Narrowing
+                # this to quota exhaustion (as the first cut did) left out the
+                # case `bad5f5b` was measured against: the local endpoint
+                # switched off is not quota-exhausted, and the turn died on it.
+                # Request-shaped errors are NOT in this tuple, so a context
+                # overflow or a bad request still raises here instead of being
+                # replayed at every candidate.
+                last_err = e
+                if is_quota_exhausted(e):
+                    # Remembered, unlike a transient error: `_resolve_provider`
+                    # reads this table, so a butler that only skipped in-walk
+                    # would re-elect the dead plan on the next launch.
+                    _note_endpoint_spent(cand, e)
+                self._log_error(
+                    f"failing over off {cand}: {type(e).__name__}: {e}")
+                continue
+            # Keep the binding aligned with whoever answered, for
+            # `_count_tokens`: it tokenizes against `self.litellm_model`, and a
+            # tokenizer from the endpoint that did NOT serve mis-measures the
+            # transcript the compaction threshold is read off. It does not save
+            # the next turn any work — that turn rebuilds `order` from scratch
+            # and starts at the best available candidate again.
+            self.litellm_model, self.api_base, self.api_key = model, base, key
+            break
+        if response is None:
+            # Raise the LAST provider error rather than a summary of our own,
+            # so the caller still sees a real one. (`AIGateway._explain_auth`
+            # would name a missing secret file here; it is a gateway method and
+            # this path does not go through the gateway, so the raw provider
+            # message is what `chat()` turns into `llm_interrupted`.)
+            raise last_err or RuntimeError(
+                f"no endpoint available for {self._raw_model!r}: {candidates}")
 
         full_text = ""
         tool_calls_map: dict[int, dict] = {}

@@ -966,6 +966,266 @@ class TestRealUsageTelemetry:
             "cache_hit_tokens": 800, "cache_miss_tokens": 200,
             "hit_ratio": 0.8}
 
+    async def test_stream_llm_fails_over_off_a_spent_quota(
+            self, coding_agent, monkeypatch):
+        """A spent weekly plan costs the next candidate, not the turn.
+
+        Live 2026-08-30: two jinyong-panels launches died as `llm_interrupted`
+        on `token-plan 1-week quota has been exhausted` — a three-day wall —
+        while `flash` resolved to six endpoints and a free local one was up.
+        The butler bound one endpoint at construction and had nowhere to go.
+        """
+        from types import SimpleNamespace
+        import litellm
+        import core.meta_agent as ma
+        from core.ai_router import endpoint_cooldowns, reset_endpoint_cooldowns
+
+        reset_endpoint_cooldowns()
+        monkeypatch.setattr(
+            ma, "_provider_candidates",
+            lambda _m: ["qwen/spent-model", "localqwen/live-model"])
+        monkeypatch.setattr(
+            ma, "_resolve_provider",
+            lambda name: ("openai/" + name.split("/", 1)[1],
+                          "http://" + name.split("/", 1)[0], "k"))
+
+        tried = []
+
+        async def fake_acompletion(**kwargs):
+            tried.append(kwargs["model"])
+            if kwargs["model"] == "openai/spent-model":
+                raise litellm.RateLimitError(
+                    "Your token-plan 1-week quota has been exhausted. "
+                    "The quota will reset at 09-02 09:40:00 UTC.",
+                    llm_provider="openai", model="spent-model")
+
+            async def gen():
+                yield SimpleNamespace(usage=None, choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="ok", tool_calls=None))])
+            return gen()
+
+        monkeypatch.setattr(ma.litellm, "acompletion", fake_acompletion)
+
+        events = [e async for e in coding_agent._stream_llm(
+            [{"role": "user", "content": "hi"}])]
+
+        assert tried == ["openai/spent-model", "openai/live-model"], tried
+        assert events[-1]["text"] == "ok"
+        # REMEMBERED, so the next launch does not re-elect the same corpse —
+        # `_resolve_provider` reads this table and the butler used to only read
+        # it, which is why the failure repeated identically twice in a row.
+        assert "qwen/spent-model" in endpoint_cooldowns()
+        # and the winner is kept, so the next turn does not redo the search
+        assert coding_agent.litellm_model == "openai/live-model"
+        reset_endpoint_cooldowns()
+
+    @staticmethod
+    def _wire(monkeypatch, candidates, raiser):
+        """Point `_stream_llm` at `candidates`; `raiser(model)` -> exc or None.
+
+        Returns the list of kwargs the fake provider was called with, so a test
+        asserts the WALK — which endpoints were actually called, in order —
+        rather than only its outcome. The two are different: a walk that
+        reaches a live endpoint after paying for calls it could have skipped
+        still ends "ok".
+        """
+        from types import SimpleNamespace
+        import core.meta_agent as ma
+
+        monkeypatch.setattr(ma, "_provider_candidates",
+                            lambda _m: list(candidates))
+        monkeypatch.setattr(
+            ma, "_resolve_provider",
+            lambda name: ("openai/" + name.split("/", 1)[1],
+                          "http://" + name.split("/", 1)[0], "k"))
+        calls = []
+
+        async def fake_acompletion(**kwargs):
+            calls.append(dict(kwargs))
+            exc = raiser(kwargs["model"])
+            if exc is not None:
+                raise exc
+
+            async def gen():
+                yield SimpleNamespace(usage=None, choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="ok", tool_calls=None))])
+            return gen()
+
+        monkeypatch.setattr(ma.litellm, "acompletion", fake_acompletion)
+        return calls
+
+    async def test_a_box_that_is_merely_down_also_costs_the_next_candidate(
+            self, coding_agent, monkeypatch):
+        """Failing over only on a spent quota left out the measured case.
+
+        `bad5f5b` was benchmarked against the local endpoint switched OFF. A
+        box that is down is not quota-exhausted, so the first cut of this
+        failover re-raised on it and the turn died with five live candidates
+        behind it. The predicate is `FAILOVER_EXCEPTIONS` — every failure
+        another endpoint might not have.
+        """
+        import litellm
+        from core.ai_router import endpoint_cooldowns, reset_endpoint_cooldowns
+
+        reset_endpoint_cooldowns()
+        calls = self._wire(
+            monkeypatch, ["localqwen/down", "ark/live"],
+            lambda m: litellm.InternalServerError(
+                "connection refused", llm_provider="openai", model="down")
+            if m == "openai/down" else None)
+
+        events = [e async for e in coding_agent._stream_llm(
+            [{"role": "user", "content": "hi"}])]
+
+        assert [c["model"] for c in calls] == ["openai/down", "openai/live"]
+        # Bounded, because the walk multiplies whatever this is by three
+        # tenacity attempts per candidate; litellm's default is 6000s.
+        assert calls[0]["timeout"] == 300.0
+        assert events[-1]["text"] == "ok"
+        # NOT parked: a down box comes back on its own schedule, and parking it
+        # for 300s would keep the rotation off it long after it returned.
+        # Only a spent window is remembered.
+        assert endpoint_cooldowns() == {}
+
+    async def test_a_request_shaped_error_is_not_replayed_at_every_candidate(
+            self, coding_agent, monkeypatch):
+        """The guard on the fix above: broadening must not become `except
+        Exception`.
+
+        A context overflow or a malformed request is a property of the REQUEST,
+        so every candidate rejects it identically — walking the list turns one
+        clear error into N and spends the quota the walk exists to conserve.
+        `FAILOVER_EXCEPTIONS` deliberately excludes them.
+        """
+        import litellm
+        from core.ai_router import reset_endpoint_cooldowns
+
+        reset_endpoint_cooldowns()
+        calls = self._wire(
+            monkeypatch, ["ark/a", "qwen/b"],
+            lambda m: litellm.BadRequestError(
+                "Prompt must contain at least one message",
+                model="a", llm_provider="openai"))
+
+        with pytest.raises(litellm.BadRequestError):
+            [e async for e in coding_agent._stream_llm(
+                [{"role": "user", "content": "hi"}])]
+
+        assert [c["model"] for c in calls] == ["openai/a"]
+
+    async def test_a_parked_endpoint_is_demoted_not_excluded(
+            self, coding_agent, monkeypatch):
+        """Both halves of the ordering, in one walk.
+
+        DEMOTED: the parked endpoint leads the route and is tried second.
+        NOT EXCLUDED: once the unparked one has failed, it is tried at all.
+
+        Filtering parked endpoints out (the first cut) is wrong in both
+        directions of the same scenario. Parking is parsed out of provider
+        PROSE and the table is process-wide, so a mis-read reset instant — or a
+        park some unrelated agent step recorded — would make the butler refuse
+        while an endpoint that had quietly reopened sat right there. Every
+        route ends in a pay-as-you-go tail for exactly this reason.
+        """
+        import litellm
+        from core.ai_router import (_note_endpoint_spent,
+                                    reset_endpoint_cooldowns)
+
+        reset_endpoint_cooldowns()
+        _note_endpoint_spent(
+            "qwen/parked",
+            litellm.RateLimitError(
+                "Your token-plan 1-week quota has been exhausted.",
+                llm_provider="openai", model="x"))
+
+        calls = self._wire(
+            monkeypatch, ["qwen/parked", "ark/live"],
+            lambda m: litellm.InternalServerError(
+                "down", llm_provider="openai", model=m)
+            if m == "openai/live" else None)
+        events = [e async for e in coding_agent._stream_llm(
+            [{"role": "user", "content": "hi"}])]
+
+        assert [c["model"] for c in calls] == ["openai/live", "openai/parked"]
+        assert events[-1]["text"] == "ok"
+        reset_endpoint_cooldowns()
+
+    async def test_a_duplicated_candidate_is_called_once(
+            self, coding_agent, monkeypatch):
+        """`flash.rotate` names `localqwen/qwen3` twice on purpose (a 2-in-5
+        share of the rotation head). This walk is a single forward pass, so the
+        second occurrence would be a call already known to have failed —
+        precisely the waste `bad5f5b` measured on the gateway side, which
+        broadening the failover above would otherwise have imported here.
+        """
+        import litellm
+        from core.ai_router import reset_endpoint_cooldowns
+
+        reset_endpoint_cooldowns()
+        calls = self._wire(
+            monkeypatch, ["localqwen/q", "ark/a", "localqwen/q", "ark/live"],
+            lambda m: litellm.InternalServerError(
+                "down", llm_provider="openai", model=m)
+            if m in ("openai/q", "openai/a") else None)
+
+        events = [e async for e in coding_agent._stream_llm(
+            [{"role": "user", "content": "hi"}])]
+
+        assert [c["model"] for c in calls] == [
+            "openai/q", "openai/a", "openai/live"]
+        assert events[-1]["text"] == "ok"
+
+    @staticmethod
+    def _routes(monkeypatch, tmp_path, candidates, providers):
+        """Real `_provider_candidates` over a fake route table + registry."""
+        import json as _json
+        from types import SimpleNamespace
+        import core.model_routes as mr
+
+        provs = tmp_path / "llm_providers.json"
+        provs.write_text(_json.dumps(providers), encoding="utf-8")
+        monkeypatch.setattr(
+            mr, "config_or_example",
+            lambda n: str(provs) if "providers" in n else "routes.json")
+        monkeypatch.setattr(
+            mr, "get_routes",
+            lambda _p: SimpleNamespace(resolve=lambda _m: list(candidates)))
+
+    def test_an_unregistered_provider_is_dropped_before_the_walk(
+            self, monkeypatch, tmp_path):
+        """It cannot fail over off one, so it must never reach one.
+
+        With no entry in `llm_providers.json` there is no base URL to bind, and
+        litellm gets a bare `provider/model` it cannot place: a client-side
+        `BadRequestError`, which is deliberately absent from
+        `FAILOVER_EXCEPTIONS` because every candidate would reject the request
+        identically. So an unregistered entry at the HEAD of a route does not
+        cost one call — it kills the turn with every healthy candidate still
+        queued. `AIGateway._next_usable` skips them for this exact reason;
+        agent steps kept working while butler turns died.
+        """
+        import core.meta_agent as ma
+
+        self._routes(monkeypatch, tmp_path, ["newvendor/x", "ark/a"],
+                     {"ark": {"base_url": "http://ark", "api_key_env": "K"}})
+        assert ma._provider_candidates("pro") == ["ark/a"]
+
+    def test_an_unreadable_registry_falls_open(self, monkeypatch, tmp_path):
+        """Failing OPEN, like `_next_usable` with `provs=None`.
+
+        A registry we cannot read is not evidence that a candidate is bad, and
+        a filter that can empty the list would convert a missing file into a
+        butler that refuses to talk to anything.
+        """
+        import core.meta_agent as ma
+
+        self._routes(monkeypatch, tmp_path, ["a/x", "b/y"], {})
+        (tmp_path / "llm_providers.json").unlink()
+        assert ma._provider_candidates("pro") == ["a/x", "b/y"]
+
+        self._routes(monkeypatch, tmp_path, ["a/x", "b/y"], {"c": {}})
+        assert ma._provider_candidates("pro") == ["a/x", "b/y"]
+
     async def test_usage_accumulates_across_turns(self, db_manager, mock_ws):
         agent = MetaAgent(db_manager, mock_ws, owner_email="test@local",
                           session_id="sess-usage", mode="coding")

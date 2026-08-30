@@ -53,25 +53,19 @@ import json
 import os
 import re
 import struct
-import http.client
-import socket
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 # ── The judges ────────────────────────────────────────────────────────────────
 # WHO judges is config, not code. This used to be three hardcoded env vars
 # (GODOT_VISION_URL / _MODEL / _FALLBACK_*), which meant the one step that picks
 # a model by hand was the one step you could not see in `model_routes.json`.
-# It now resolves the internal model name `vision` through the same two layers
-# every agent step uses: model_routes.json for the ordered candidates,
-# llm_providers.json for each one's base_url and key name.
+# It names the internal model `vision` and hands it to AIGateway — the same
+# gateway, the same two tables (model_routes.json, llm_providers.json) and the
+# same failover, quota parking and traced `served_by` every agent step gets.
 #
-# Order (see model_routes.json): the self-hosted vLLM first — free, and the box
-# is already paid for — then the qwen plan, then DeepSeek pay-as-you-go last.
-# That GPU box is shared and gets restarted for other work, which is exactly the
-# outage this list absorbs.
+# Order (see model_routes.json): the self-hosted box first — free, and already
+# paid for — then the qwen plan, then DeepSeek pay-as-you-go last. That GPU box
+# is shared and gets restarted for other work, which is the outage this absorbs.
 _ROUTE = os.environ.get("GODOT_VISION_ROUTE", "vision")
 
 # Read off the vLLM startup log / GET /v1/models (max_model_len), not a flag.
@@ -87,116 +81,72 @@ _CONTEXT_TOKENS = int(os.environ.get("GODOT_VISION_CONTEXT_TOKENS", "12288"))
 # still leaves 12288 - 6144 - 600 = 5544 for images, comfortably above the 2652
 # a four-frame batch costs, so batches do not shrink.
 _MAX_TOKENS = int(os.environ.get("GODOT_VISION_MAX_TOKENS", "6144"))
-# Every judge AFTER the first needs its OWN, still larger budget — measured for
-# a hosted reasoning model: measured 2026-08-25, three runs at 2048 all came back
-# finish_reason="length" with reasoning_tokens=2048 (the WHOLE budget) and an
-# EMPTY content — the model spends everything thinking and never writes the
-# answers. At 6144 it finishes: reasoning 3146 / 3537, content 341 / 288 chars.
-# 8192 leaves headroom above the observed worst case. A shared budget sized for
-# one backend silently blinds the other, and it does so as "unparseable".
-_MAX_TOKENS_FALLBACK = int(
-    os.environ.get("GODOT_VISION_FALLBACK_MAX_TOKENS", "8192"))
-_TIMEOUT = int(os.environ.get("GODOT_VISION_TIMEOUT", "300"))
-# "0" forces the FIRST judge only — the way to PROVE the GPU box is serving,
-# which a silent fallback would otherwise hide.
-_FALLBACK_ENABLED = os.environ.get("GODOT_VISION_FALLBACK", "1") != "0"
-
-# The whole 2048 -> 4096 -> 6144 escalation recorded above was fighting a
-# SYMPTOM. This gate asks for six YES/NO lines and the model was answering with
-# an essay: measured 2026-08-30 on jinyong-touch's own frames, one four-frame
-# call spent 769 completion tokens, 2,444 characters of which were
-# `reasoning_content`, to produce a 339-character answer. `reasoning_effort` is
-# NOT the lever — low gives 769 tokens and medium 593, barely moving it. Turning
-# thinking off gives 101 tokens and the SAME SIX VERDICTS, word-for-word on the
-# YES/NO, differing only in how the one-line reasons are phrased. Server-side
-# that is 9.93s -> 1.42s per call, and this gate makes one call per scenario:
-# the run that motivated this made 59 of them and took 2,373 seconds.
+# Thinking is OFF for this gate, and the GATEWAY is what makes that mean
+# something on the wire. Measured 2026-08-30 on jinyong-touch's own frames:
+# left to the model's own default (Qwen3.8's chat template = xhigh) one
+# four-frame call spent 769 completion tokens, 2,444 characters of them
+# `reasoning_content`, to write a 339-character answer; with thinking off, 101
+# tokens and the SAME SIX VERDICTS word-for-word on the YES/NO. Server-side
+# 9.93s -> 1.42s, and this gate makes one call per scenario — the run that
+# prompted this made 59 and took 2,373 seconds.
 #
-# It also removes both blind modes at their root, which are the same event seen
-# at two moments: the reply is cut off at max_tokens. `judge_budget_exhausted`
-# is the cut landing while the model is still thinking (empty content);
-# `unparseable_response` is it landing mid-answer — jinyong-touch's raw reply
-# ends literally at "Q3: NO -" after 39.6 minutes of work. Nine calls in the
-# server's log hit exactly 6144 tokens, ~90 seconds of decode each, all wasted.
-#
-# `chat_template_kwargs` is a llama.cpp/vLLM extension, not OpenAI's; `_post`
-# downgrades once on a 400 so adding a strict hosted judge to the route cannot
-# blind the gate. "0" keeps thinking on.
-_NO_THINK = os.environ.get("GODOT_VISION_NO_THINK", "1") != "0"
+# It also removes both blind modes at their root. They are one event seen at
+# two moments — the reply cut off at the output cap: still inside the reasoning
+# (empty content) reads as judge_budget_exhausted, past the first answer reads
+# as unparseable_response, and jinyong-touch's raw reply ends literally at
+# "Q3: NO -". At 101 tokens the 6144 cap is two orders of magnitude away, so
+# the 2048 -> 4096 -> 6144 escalation recorded above stops being a symptom to
+# chase.
+
+def _candidates() -> list[str]:
+    """The judge panel as `provider/model` strings, best first — for the REPORT.
+    Which one is actually called, and what happens when it is down, is the
+    gateway's business now."""
+    from core.model_routes import get_routes
+
+    # No explicit path: `default_routes_file` warns that pinning one freezes the
+    # answer on a checkout that starts with only the example. And NO rotation —
+    # `resolve(rotate=True)` advances the pool head, which is the gateway's to
+    # do once per step; doing it here too would advance it twice. Which endpoint
+    # was actually bound is read off the gateway, not guessed from this list.
+    return list(get_routes().resolve(_ROUTE))
 
 
-class _Judge:
-    """One candidate: where to POST, as what, with which key, how much room."""
+def _gateway():
+    """ONE gateway for the whole gate run.
 
-    __slots__ = ("label", "url", "model", "api_key", "max_tokens")
+    Everything this file used to hand-roll — resolving the route, holding an
+    ordered panel, falling through on transport failure, retrying a mid-flight
+    break, escalating a starved budget — is what AIGateway already does for
+    every agent step. Handing it over also buys the parts the gate never had:
+    an endpoint whose quota is spent gets PARKED instead of re-tried once per
+    scenario, `served_by` / `failed_over_from` reach the traced usage, and the
+    progress hook ticks, so a gate making 71 calls stops looking hung.
 
-    def __init__(self, label, url, model, api_key, max_tokens):
-        self.label = label            # "provider/model", as the report records it
-        self.url = url
-        self.model = model
-        self.api_key = api_key
-        self.max_tokens = max_tokens
+    Sticky for the whole run, deliberately. The old code rebuilt its panel per
+    call and so re-paid a dead judge's timeout once per scenario — ~47 times in
+    the run that made someone notice. One gateway means the first fall-through
+    is also the last.
 
-    def __repr__(self):
-        return f"_Judge({self.label!r})"
-
-
-def _judges() -> list["_Judge"]:
-    """Resolve the `vision` route into POSTable endpoints, best first.
-
-    Rebuilt per call, not cached at import: a key that arrives after the process
-    started (a secret remounted, a plan topped up) has to be picked up without a
-    restart, and this runs once per gate — the cost is a JSON read.
-
-    A candidate whose provider is unknown is SKIPPED with a warning rather than
-    failing the gate: the remaining judges can still see, and a gate that goes
-    blind over a typo in a fallback entry is worse than one that says so.
+    The gate's own contract is unchanged and still comes from the gateway: only
+    an ENDPOINT failure moves to the next candidate. A judge that answers 200
+    with a wrong answer is never second-guessed, or the report would carry a
+    verdict nobody could attribute.
     """
-    from core.ai_router import _read_secret
-    from core.model_routes import config_or_example, get_routes
+    from core.ai_router import AIGateway
 
-    root = Path(__file__).resolve().parents[3]
-    try:
-        providers = json.loads(
-            Path(config_or_example("llm_providers.json")).read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError) as e:                   # noqa: BLE001
-        raise RuntimeError(f"vision judge: llm_providers.json unreadable: {e}") from e
-
-    out: list[_Judge] = []
-    for position, candidate in enumerate(
-            get_routes(config_or_example("model_routes.json")).resolve(_ROUTE)):
-        provider, _, model = candidate.partition("/")
-        cfg = providers.get(provider)
-        if not cfg:
-            print(f"[godot_vision] skipping {candidate}: provider "
-                  f"'{provider}' is not in llm_providers.json", flush=True)
-            continue
-        base = (cfg.get("base_url") or "").rstrip("/")
-        key_env = cfg.get("api_key_env")
-        api_key = (_read_secret(key_env) or "") if key_env else ""
-        out.append(_Judge(
-            label=candidate,
-            url=f"{base}/chat/completions",
-            model=model,
-            api_key=api_key,
-            # Keyed on the position in the ROUTE, not on `not out` (position in
-            # the surviving list). The small budget belongs to the local vLLM
-            # itself, and if it were merely "whoever ended up first" then
-            # dropping `localqwen` from llm_providers.json — the normal state on
-            # any host without reach to that GPU box — would hand a hosted
-            # reasoner the 2048 budget that is measured to starve it: three runs
-            # at 2048 all returned finish_reason="length" with the whole budget
-            # spent thinking and empty content. It would then starve, escalate
-            # once to 4096, starve again, and fall through to the pay-as-you-go
-            # judge — two wasted calls per scenario and nothing in the report
-            # saying why.
-            max_tokens=_MAX_TOKENS if position == 0 else _MAX_TOKENS_FALLBACK,
-        ))
-    if not out:
-        raise RuntimeError(
-            f"vision judge: route '{_ROUTE}' resolved to no usable endpoint — "
-            f"check model_routes.json and llm_providers.json")
-    return out if _FALLBACK_ENABLED else out[:1]
+    gw = AIGateway(_ROUTE, enable_thinking=False, temperature=0.0,
+                   max_output_tokens=_MAX_TOKENS)
+    # Shorten the per-call wall cap from the gateway's 900s default. The old
+    # hand-rolled transport deliberately never RETRIED a timeout, because each
+    # attempt costs the full cap against a judge that is not answering; the
+    # gateway does retry (3x), so keeping 900 would take the worst case for one
+    # wedged box from 300s to 45 minutes — against a step whose own budget is
+    # 3600s and a healthy 69-scenario run that already takes ~770s. 300s x 3 is
+    # the same order as before and still leaves the gate time to go blind, say
+    # so, and route to the human checkpoint.
+    gw._WALL_CAP_S = 300.0
+    return gw
 
 
 _PROMPT_RESERVE = 600
@@ -396,79 +346,6 @@ class ReasoningStarved(RuntimeError):
     budget instead of at the parser."""
 
 
-# A connection that was ESTABLISHED and then broke mid-flight. One retry fixes
-# these; nothing else does. Deliberately excluded:
-#   connection refused   deterministic — the box is not serving, and the caller's
-#                        job is to fall back immediately, not to sit and wait
-#   4xx                  a wrong model name is wrong the second time too
-#   ReasoningStarved     already retried, with a bigger budget (see _ask)
-# This gate walks 47 scenarios in ~50 calls, so a per-call failure probability
-# that looks negligible is a coin flip across a run — and ONE such failure
-# blinded the whole verdict: 2026-08-26 died on `IncompleteRead(1 bytes read)`
-# at scenario 5 of 47, throwing away 4 batches that had already been judged and
-# never looking at the other 43.
-# A break in a connection that was ESTABLISHED and then failed mid-body: the
-# judge was there, so asking again is worth it.
-#
-# A TIMEOUT is NOT here, and that is the point. It reads as "temporarily
-# unavailable" — the same class as connection-refused, which this predicate has
-# always treated as deterministic — and retrying it is uniquely expensive
-# because each attempt costs the FULL _TIMEOUT (300s) before it gives up. The
-# first `vision` candidate is a Tailscale address on a shared GPU box, so on any
-# host that cannot reach it every batch burned 3 x 300s + backoff ~= 15 minutes
-# before falling through to the next judge, and `_judges()` is rebuilt per call
-# with no memory of a judge that never answered — so the gate re-paid that for
-# each of ~47 scenarios. Falling through immediately costs one timeout and hands
-# the work to a judge that is actually up.
-_TRANSIENT_TRANSPORT = (http.client.IncompleteRead,
-                        http.client.RemoteDisconnected,
-                        ConnectionResetError)
-_POST_ATTEMPTS = 3
-_POST_BACKOFF_S = 2.0
-
-
-def _retryable(exc: BaseException) -> bool:
-    if isinstance(exc, urllib.error.HTTPError):
-        return exc.code >= 500          # the server, not the request
-    if isinstance(exc, urllib.error.URLError):
-        return isinstance(exc.reason, _TRANSIENT_TRANSPORT)
-    return isinstance(exc, _TRANSIENT_TRANSPORT)
-
-
-def _post(url: str, model: str, api_key: str,
-          files: list[Path], questions: list[dict],
-          max_tokens: int = 0, no_think: bool | None = None) -> str:
-    """Retrying wrapper around one call. See _retryable for what is retried."""
-    last: BaseException | None = None
-    if no_think is None:
-        no_think = _NO_THINK
-    for attempt in range(1, _POST_ATTEMPTS + 1):
-        try:
-            return _post_once(url, model, api_key, files, questions, max_tokens,
-                              no_think=no_think)
-        except Exception as e:                           # noqa: BLE001
-            # `chat_template_kwargs` is a llama.cpp/vLLM extension, not
-            # OpenAI's. A strict gateway rejects the unknown field outright and
-            # a 400 is not retryable — so without this the gate would go blind
-            # for the whole run the moment such a judge entered the route. Drop
-            # the field and let that judge think: slow beats blind. The retry
-            # gets its own full attempt budget, and cannot recurse again
-            # because the downgraded call passes no_think=False.
-            if (no_think and isinstance(e, urllib.error.HTTPError)
-                    and e.code == 400):
-                print(f"[godot_vision] {url} rejected chat_template_kwargs "
-                      f"(400) — retrying with thinking enabled: {e}", flush=True)
-                return _post(url, model, api_key, files, questions, max_tokens,
-                             no_think=False)
-            if not _retryable(e) or attempt == _POST_ATTEMPTS:
-                raise
-            last = e
-            print(f"[godot_vision] {type(e).__name__} on attempt {attempt}/"
-                  f"{_POST_ATTEMPTS} to {url} — retrying in "
-                  f"{_POST_BACKOFF_S * attempt:.0f}s: {e}", flush=True)
-            time.sleep(_POST_BACKOFF_S * attempt)
-    raise last                                            # unreachable
-
 
 # Palette-reduce a frame for the wire. NOT resized, NOT re-encoded lossily:
 # every question this gate asks is about an EDGE — the tile grid lines, the
@@ -509,101 +386,44 @@ def _wire_bytes(f: Path) -> bytes:
         return raw
 
 
-def _post_once(url: str, model: str, api_key: str,
-          files: list[Path], questions: list[dict],
-          max_tokens: int = 0, no_think: bool = True) -> str:
-    """One chat/completions call with the frames inline as base64 data URLs.
-    Raises on transport failure / non-200 / unreadable envelope, and raises
-    ReasoningStarved when the model burned its budget thinking."""
+def _ask(gw, files: list[Path], questions: list[dict]) -> tuple[str, str]:
+    """One call through `gw`; return ``(answer_text, served_by)``.
+
+    Raises ``ReasoningStarved`` when a judge answered but wrote no verdict
+    (caller: judge_budget_exhausted), and whatever the gateway raises when no
+    candidate could answer at all (caller: endpoint_unreachable). The two name
+    different repairs, which is why the TYPE still carries which.
+    """
     content = [{"type": "text",
                 "text": _build_prompt(questions, len(files))}]
     for f in files:
         b64 = base64.b64encode(_wire_bytes(f)).decode("ascii")
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    payload = {"model": model, "max_tokens": max_tokens or _MAX_TOKENS,
-               "temperature": 0.0,
-               "messages": [{"role": "user", "content": content}]}
-    if no_think:
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        code = getattr(resp, "status", None) or resp.getcode()
-        if code != 200:
-            raise urllib.error.HTTPError(url, code, "non-200", {}, None)
-        payload = json.loads(resp.read())
-    choice = (payload.get("choices") or [{}])[0]
-    message = choice.get("message") or {}
-    text = message.get("content") or ""
-    if not text.strip():
-        usage = payload.get("usage") or {}
-        detail = usage.get("completion_tokens_details") or {}
+    messages = [{"role": "user", "content": content}]
+
+    turn = gw.generate_native(messages)
+    if not turn.text.strip():
+        # Guessing a budget that fits every scenario does not work: how long a
+        # judge thinks scales with the frames it is shown. Escalate ONCE and
+        # actually retry — an escalation that only logs is how the planner
+        # starved nine times in a row while announcing a retry it could never
+        # take (a3846df). The gateway owns the cap, so the raise sticks for the
+        # rest of the run instead of being re-argued per scenario.
+        bigger = gw.escalate_output_cap()
+        if bigger:
+            print(f"[godot_vision] {gw.active_model} wrote no verdict "
+                  f"(reasoning {len(turn.reasoning_content)} chars); retrying "
+                  f"once at max_tokens={bigger}", flush=True)
+            turn = gw.generate_native(messages)
+    if not turn.text.strip():
         raise ReasoningStarved(
-            "%s answered 200 but wrote no answer text "
-            "(finish_reason=%s, completion_tokens=%s, reasoning_tokens=%s, "
-            "budget=%s). Raise the budget for this backend."
-            % (model, choice.get("finish_reason"),
-               usage.get("completion_tokens"), detail.get("reasoning_tokens"),
-               max_tokens or _MAX_TOKENS))
-    return text
-
-
-def _ask(files: list[Path], questions: list[dict]) -> tuple[str, str]:
-    """Ask each judge in turn; return ``(answer_text, label)`` of the one that
-    answered. Raises only when EVERY judge is unusable, and the exception TYPE
-    carries which kind: ``ReasoningStarved`` when every judge answered but ran
-    out of completion budget (caller: judge_budget_exhausted), ``RuntimeError``
-    otherwise (caller: endpoint_unreachable).
-
-    Only transport-level failure moves on: refused / timed out / non-200 /
-    unreadable envelope. A judge that answers 200 with a WRONG answer must NOT
-    fall through — that would silently swap judges to paper over a real
-    regression in the model or the prompt, and the report would carry a verdict
-    nobody could attribute.
-    """
-    judges = _judges()
-    failures: list[str] = []
-    starved_only = True
-    for judge in judges:
-        try:
-            try:
-                return _post(judge.url, judge.model, judge.api_key, files,
-                             questions, max_tokens=judge.max_tokens), judge.label
-            except ReasoningStarved as starved:
-                # Guessing a budget that fits every scenario does not work: how
-                # long this model thinks scales with the frames it is shown, and
-                # a fixed number is either wasteful or blinding. Escalate ONCE
-                # and actually retry — an escalation that only logs is how the
-                # planner starved nine times in a row while announcing a retry
-                # it could never take (a3846df).
-                bigger = judge.max_tokens * 2
-                print(f"[godot_vision] {judge.label} starved ({starved}); "
-                      f"retrying once at max_tokens={bigger}", flush=True)
-                return _post(judge.url, judge.model, judge.api_key, files,
-                             questions, max_tokens=bigger), judge.label
-        except Exception as exc:                         # noqa: BLE001
-            failures.append(f"{judge.label} ({judge.url}): {exc}")
-            starved_only = starved_only and isinstance(exc, ReasoningStarved)
-            continue
-    # WHICH way it failed survives, because the two point at different repairs.
-    # Live, jinyong-facility 2026-08-29: localqwen answered 200 twice, then
-    # starved on the third scenario (2048 -> escalated to 4096 -> starved
-    # again), and the report came back `blind_reason: "endpoint_unreachable"`
-    # with `endpoint_unreachable: true`. That name sends the operator to check
-    # a GPU box that was serving fine the whole time, while the tool's own
-    # message ("Raise the budget for this backend") had the answer. A blind
-    # gate that misnames its own cause is the same defect as a verdict over
-    # evidence it never saw — the report is read, and it was wrong.
-    if starved_only and failures:
-        raise ReasoningStarved(
-            "every vision judge ran out of completion budget — "
-            + "; ".join(failures))
-    raise RuntimeError(
-        "no vision judge could answer — " + "; ".join(failures))
+            f"{gw.active_model} answered but wrote no answer text "
+            f"(truncated={turn.truncated}, reasoning "
+            f"{len(turn.reasoning_content)} chars, cap "
+            f"{gw.max_output_tokens}). Raise the budget for this backend.")
+    return turn.text, ((gw.last_usage or {}).get("served_by")
+                       or gw.active_model or "")
 
 
 # ── The gate ──────────────────────────────────────────────────────────────────
@@ -630,11 +450,12 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
 
     Writes vision_report.json and returns {written, passed, summary}."""
     repo = Path(project_root or workspace_root or ".").resolve()
-    # Resolved once for the report header; `_ask` re-resolves per call so a key
-    # that arrives mid-run is picked up. A route that resolves to nothing is a
-    # config error, and the gate must go BLIND about it rather than pass.
+    # The panel is read once, for the report header only. A route that resolves
+    # to nothing is a config error, and the gate must go BLIND about it rather
+    # than pass — the gateway would raise on the first call anyway, but this
+    # names the cause before a single frame is uploaded.
     try:
-        _panel = _judges()
+        _panel = _candidates()
     except Exception as e:                              # noqa: BLE001
         _panel = []
         _panel_error = str(e)
@@ -642,9 +463,8 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         _panel_error = ""
     report: dict = {"passed": True, "blind": False, "blind_reason": "",
                     "route": _ROUTE,
-                    "judges": [j.label for j in _panel],
-                    "endpoint": _panel[0].url if _panel else "",
-                    "model": _panel[0].model if _panel else "",
+                    "judges": list(_panel),
+                    "model": _panel[0] if _panel else "",
                     "from_step": from_step,
                     # Which judge actually answered. A gate that can silently
                     # swap models is a gate whose verdict cannot be interpreted:
@@ -653,7 +473,7 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
                     # provider/model; `backend` keeps the coarse
                     # primary/fallback/mixed reading the report has always had.
                     "backend": "", "served_by": "", "fallback_used": False,
-                    "fallback_model": _panel[1].label if len(_panel) > 1 else "",
+                    "fallback_model": _panel[1] if len(_panel) > 1 else "",
                     "scenarios": 0, "frames_checked": 0, "calls": 0,
                     "questions": [], "failures": [], "batches": [],
                     "summary": ""}
@@ -747,6 +567,30 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
     report["frames_checked"] = len(frames)
 
     tally = {q["id"]: {"good": 0, "bad": 0, "n/a": 0} for q in _QUESTIONS}
+    # Built once, AFTER the cheap refusals above, so a run that is going to be
+    # blind about its own frames does not first bind an endpoint. Sticky from
+    # here: see `_gateway`.
+    #
+    # Guarded because construction READS CONFIG: AIGateway.__init__ resolves the
+    # route and `_bind` json.loads llm_providers.json with no handler of its
+    # own, so a malformed registry raised straight out of this function and NO
+    # vision_report.json was written at all. That is worse than it sounds — the
+    # graph routes to the human checkpoint on `from_file: vision_report.json,
+    # field: blind`, so a missing file cannot match and the run FAILS instead of
+    # pausing for a person. `_judges()` used to wrap exactly this read. Every
+    # way of not seeing is a named blind report; none of them is a traceback.
+    try:
+        gw = _gateway()
+    except Exception as e:                              # noqa: BLE001
+        return _write(_blind(
+            report, "endpoint_unreachable",
+            f"The vision judge for route '{_ROUTE}' could not be built: {e}. "
+            f"Check model_routes.json and llm_providers.json. The frames were "
+            f"NOT judged. Vision gate NOT run."), out_dir, repo)
+    # What it actually bound, asked of the gateway rather than inferred from
+    # `_panel[0]`: on a rotating route the two differ, and `backend` would then
+    # say "fallback" about a run the primary judge served.
+    primary = gw.active_model or ""
     for scen, batch in batches:
         # A one-frame batch can only be a scenario that captured one frame;
         # asking it to compare frames would manufacture a NO. Ask the
@@ -758,16 +602,17 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         # asking it separately would double the vision spend per scenario.
         asked = [_GATE] + asked
         try:
-            raw, served_by = _ask([f["path"] for f in batch], asked)
+            raw, served_by = _ask(gw, [f["path"] for f in batch], asked)
         except ReasoningStarved as e:
             return _write(_blind(
                 report, "judge_budget_exhausted",
                 f"Every judge on route '{_ROUTE}' answered but wrote no "
                 f"verdict for scenario '{scen}', after "
                 f"{report['calls']} successful call(s): {e}. The endpoint is "
-                f"SERVING — raise the judge's max_tokens (it escalates once "
-                f"on its own, so the base is too low by more than 2x) or ask "
-                f"fewer questions per call. The frames were NOT judged. "
+                f"SERVING — raise the judge's max_tokens (the gate already "
+                f"escalated it once and the judge still wrote nothing, so the "
+                f"base is too low by more than 2x) or ask fewer questions "
+                f"per call. The frames were NOT judged. "
                 f"Vision gate NOT run."),
                 out_dir, repo)
         except Exception as e:                          # noqa: BLE001
@@ -781,7 +626,7 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         # Record the judge per call, not just once: a run that starts on the
         # primary and finishes on the fallback has TWO judges in one verdict,
         # and that is exactly the thing a reader needs told.
-        backend = "primary" if served_by == _panel[0].label else "fallback"
+        backend = "primary" if served_by == primary else "fallback"
         if backend == "fallback":
             report["fallback_used"] = True
         prev = report.get("backend") or ""

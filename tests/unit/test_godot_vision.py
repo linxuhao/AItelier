@@ -80,26 +80,45 @@ def _run(tmp_path, **over):
     return json.loads((tmp_path / "out" / "vision_report.json").read_text())
 
 
-def _reply(text, status=200):
-    class _Resp:
-        def __init__(self):
-            self.status = status
-            self._b = json.dumps(
-                {"choices": [{"message": {"content": text}}]}).encode()
+class _FakeGateway:
+    """Stand-in for AIGateway at the seam the tool now uses.
 
-        def read(self):
-            return self._b
+    The gate tests are about the GATE — parsing, batching, the tally, every way
+    of going blind. They used to reach that by faking `urllib.request.urlopen`,
+    because the tool carried its own HTTP. It does not any more, so the seam
+    moved up one layer; the tests themselves did not have to change, which is
+    the point of there being a seam at all.
+    """
 
-        def getcode(self):
-            return status
+    def __init__(self, text, status=200, calls=None):
+        self._text = text
+        self._status = status
+        self._calls = calls
+        self.active_model = "local/v"
+        self.max_output_tokens = 6144
+        self.last_usage = {"served_by": "local/v"}
+        self.escalated = 0
 
-        def __enter__(self):
-            return self
+    def generate_native(self, messages, **_):
+        if self._calls is not None:
+            self._calls.append(messages)
+        if self._status != 200:
+            raise RuntimeError(f"vision endpoint answered {self._status}")
+        n = len(self._calls) if self._calls is not None else 1
+        body = self._text(n) if callable(self._text) else self._text
+        return _turn(body)
 
-        def __exit__(self, *a):
-            return False
+    def escalate_output_cap(self):
+        self.escalated += 1
+        self.max_output_tokens *= 2
+        return self.max_output_tokens
 
-    return _Resp()
+
+def _turn(text, reasoning="", truncated=False):
+    from core.ai_router import NativeTurn
+
+    return NativeTurn(text=text, tool_calls=[],
+                      reasoning_content=reasoning, truncated=truncated)
 
 
 def _sheet(**overrides):
@@ -114,20 +133,16 @@ def _sheet(**overrides):
 
 
 def _serve(monkeypatch, text, status=200, calls=None):
-    def _fake(req, timeout=0):
-        if calls is not None:
-            calls.append(req)
-        body = text(len(calls)) if callable(text) else text
-        return _reply(body, status)
-
-    monkeypatch.setattr(urllib.request, "urlopen", _fake)
+    gw = _FakeGateway(text, status, calls)
+    monkeypatch.setattr(vision_impl, "_gateway", lambda: gw)
+    return gw
 
 
 def _never_called(monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("the vision endpoint must not be called here")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    monkeypatch.setattr(vision_impl, "_gateway", _boom)
 
 
 def _assert_blind(rep, reason):
@@ -203,20 +218,26 @@ def test_a_truncated_png_counts_as_a_missing_frame(tmp_path, monkeypatch):
 
 
 def test_an_unreachable_endpoint_fails_loudly(tmp_path, monkeypatch):
-    def _down(req, timeout=0):
+    """The gateway raises once every candidate is spent; the gate must go
+    blind and NAME it, not pass."""
+    def _down(messages, **_):
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _down)
+    gw = _FakeGateway("")
+    gw.generate_native = _down
+    monkeypatch.setattr(vision_impl, "_gateway", lambda: gw)
     rep = _run(tmp_path)
     _assert_blind(rep, "endpoint_unreachable")
     assert "NOT judged" in rep["summary"]
 
 
 def test_a_timeout_fails_loudly(tmp_path, monkeypatch):
-    def _slow(req, timeout=0):
+    def _slow(messages, **_):
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _slow)
+    gw = _FakeGateway("")
+    gw.generate_native = _slow
+    monkeypatch.setattr(vision_impl, "_gateway", lambda: gw)
     _assert_blind(_run(tmp_path), "endpoint_unreachable")
 
 
@@ -511,230 +532,146 @@ def test_a_per_frame_question_still_needs_a_majority(tmp_path, monkeypatch):
 # The primary endpoint is a GPU box shared with other experiments, so "the judge
 # is offline" is an expected operating state, not an incident.
 
-class TestVisionFallback:
-    """`_ask` walks the `vision` route, falls through ONLY on transport failure,
-    and says who answered.
+class TestTheGateStillOwnsItsBudget:
+    """What survived the move to AIGateway.
 
-    The panel is stubbed rather than resolved from the real tables: these are
-    assertions about the walk, and binding them to whatever model_routes.json
-    happens to list today would make an unrelated route edit fail them.
+    Resolving the route, walking an ordered panel, retrying a mid-flight break,
+    parking a spent endpoint — all of that is the gateway's, tested in
+    tests/unit/test_ai_router.py, and testing it again through a fake here
+    would only pin a copy of it. What is still THIS tool's: it makes exactly
+    one call per batch, it escalates the output cap once when a judge writes no
+    verdict, and it refuses to call an unanswered batch a verdict.
     """
 
-    def _mod(self):
-        import aitelier.tools.godot_vision.impl as m
-        return m
+    def _gw(self, texts):
+        gw = _FakeGateway("")
+        seq = list(texts)
+        gw.seen = []
 
-    def _panel(self, m, monkeypatch):
-        judges = [
-            m._Judge("local/v", "http://local/chat/completions", "v", "", 2048),
-            m._Judge("plan/big", "http://plan/chat/completions", "big", "k1", 8192),
-            m._Judge("payg/eyes", "http://payg/chat/completions", "eyes", "k2", 8192),
-        ]
-        monkeypatch.setattr(m, "_judges", lambda: list(judges))
-        return judges
+        def _gen(messages, **_):
+            gw.seen.append(messages)
+            return _turn(seq.pop(0) if seq else "")
 
-    def test_first_judge_answering_never_touches_the_rest(self, monkeypatch):
-        m = self._mod()
-        panel = self._panel(m, monkeypatch)
-        calls = []
+        gw.generate_native = _gen
+        return gw
 
-        def fake_post(url, model, api_key, files, questions, max_tokens=0):
-            calls.append(url)
-            return "1: YES - fine"
+    def test_one_call_per_batch_no_second_opinion(self):
+        """A judge that answers is never asked twice. Re-asking would silently
+        swap the verdict's author and paper over a real regression."""
+        gw = self._gw(["Q0: YES - fine"])
+        text, served_by = vision_impl._ask(gw, [], [{"id": "Q0", "text": "q"}])
+        assert text == "Q0: YES - fine"
+        assert served_by == "local/v"
+        assert len(gw.seen) == 1
 
-        monkeypatch.setattr(m, "_post", fake_post)
-        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
-        assert served_by == panel[0].label
-        assert calls == [panel[0].url]
+    def test_served_by_comes_from_the_usage_not_a_guess(self):
+        """The report's attribution must be what actually answered — after a
+        failover inside the gateway that is NOT the first candidate."""
+        gw = self._gw(["Q0: YES - fine"])
+        gw.last_usage = {"served_by": "payg/eyes"}
+        assert vision_impl._ask(gw, [], [{"id": "Q0", "text": "q"}])[1] == "payg/eyes"
 
-    def test_transport_failure_moves_to_the_next_judge_and_reports_it(self, monkeypatch):
-        m = self._mod()
-        panel = self._panel(m, monkeypatch)
-        seen = []
+    def test_a_starved_judge_escalates_and_actually_retries(self):
+        """An escalation that only logs is how the planner starved nine times
+        in a row while announcing a retry it could never take (a3846df)."""
+        gw = self._gw(["", "Q0: YES - fine"])
+        text, _ = vision_impl._ask(gw, [], [{"id": "Q0", "text": "q"}])
+        assert text == "Q0: YES - fine"
+        assert gw.escalated == 1
+        assert len(gw.seen) == 2
 
-        def fake_post(url, model, api_key, files, questions, max_tokens=0):
-            seen.append((url, model, api_key, max_tokens))
-            if url == panel[0].url:
-                raise OSError("connection refused")
-            return "1: YES - fine"
+    def test_a_judge_that_stays_starved_is_not_a_verdict(self):
+        """Two empties must raise ReasoningStarved — the TYPE is what sends the
+        report at the budget instead of at a GPU box that was serving fine."""
+        gw = self._gw(["", ""])
+        with pytest.raises(vision_impl.ReasoningStarved):
+            vision_impl._ask(gw, [], [{"id": "Q0", "text": "q"}])
+        assert gw.escalated == 1
 
-        monkeypatch.setattr(m, "_post", fake_post)
-        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
-        assert served_by == panel[1].label
-        assert seen[0][0] == panel[0].url
-        assert seen[1][0] == panel[1].url
-        assert seen[1][1] == panel[1].model
-        assert seen[1][2] == "k1"                     # the key is actually sent
-        # Each judge gets its OWN budget. 2048 fits the local vLLM and starves a
-        # hosted reasoning model, which spends the WHOLE budget thinking and
-        # returns empty content — measured 3/3 at 2048. A shared budget sized
-        # for one backend silently blinds the other.
-        assert seen[0][3] == panel[0].max_tokens
-        assert seen[1][3] == panel[1].max_tokens
-        assert panel[1].max_tokens > panel[0].max_tokens
+    def test_a_cap_already_at_the_ceiling_still_raises(self):
+        """escalate_output_cap() returns None at the ceiling. The retry is then
+        impossible, and the gate must say starved rather than loop or pass."""
+        gw = self._gw([""])
+        gw.escalate_output_cap = lambda: None
+        with pytest.raises(vision_impl.ReasoningStarved):
+            vision_impl._ask(gw, [], [{"id": "Q0", "text": "q"}])
+        assert len(gw.seen) == 1
 
-    def test_the_route_supplies_the_budget_split(self):
-        """The real panel must keep giving the first judge the small budget and
-        everything after it the large one — the split is the point."""
-        m = self._mod()
-        assert m._MAX_TOKENS_FALLBACK > m._MAX_TOKENS
-
-    def test_a_starved_judge_escalates_and_actually_retries(self, monkeypatch):
-        """Starving on reasoning must escalate the budget AND take the retry.
-
-        An escalation that only logs is how the planner starved nine times in a
-        row while announcing a retry it could never take (a3846df).
-        """
-        m = self._mod()
-        panel = self._panel(m, monkeypatch)
-        budgets = []
-
-        def fake_post(url, model, api_key, files, questions, max_tokens=0):
-            if url == panel[0].url:
-                raise OSError("connection refused")
-            budgets.append(max_tokens)
-            if len(budgets) == 1:
-                raise m.ReasoningStarved("spent it all thinking")
-            return "1: YES - fine"
-
-        monkeypatch.setattr(m, "_post", fake_post)
-        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
-        assert served_by == panel[1].label
-        assert text == "1: YES - fine"           # the RETRY's answer, not a raise
-        assert len(budgets) == 2                 # it really retried
-        assert budgets[1] > budgets[0]           # and with a bigger budget
-
-    def test_a_judge_that_stays_starved_is_not_a_verdict(self, monkeypatch):
-        """A judge that answered nothing is not a judge that answered NO.
-
-        It moves on to the next one; when none is left it RAISES.
-        """
-        m = self._mod()
-        panel = self._panel(m, monkeypatch)
-
-        def fake_post(url, model, api_key, files, questions, max_tokens=0):
-            raise m.ReasoningStarved("spent it all thinking")
-
-        monkeypatch.setattr(m, "_post", fake_post)
-        with pytest.raises(RuntimeError) as exc:
-            m._ask([], [{"id": 1, "text": "q"}])
-        assert "spent it all thinking" in str(exc.value)
-        for j in panel:
-            assert j.label in str(exc.value)
-
-    def test_a_wrong_answer_is_not_a_reason_to_switch_judges(self, monkeypatch):
-        """A judge that ANSWERS must never be second-guessed by the next one.
-
-        Falling through on a bad answer would silently swap judges to paper over
-        a real regression in the model or the prompt, and the report would carry
-        a verdict nobody could attribute. Only "not serving" is a reason.
-        """
-        m = self._mod()
-        panel = self._panel(m, monkeypatch)
-        urls = []
-
-        def fake_post(url, model, api_key, files, questions, max_tokens=0):
-            urls.append(url)
-            return "complete nonsense, no answers at all"
-
-        monkeypatch.setattr(m, "_post", fake_post)
-        text, served_by = m._ask([], [{"id": 1, "text": "q"}])
-        assert served_by == panel[0].label
-        assert urls == [panel[0].url]          # the others were never called
-
-    def test_every_judge_down_raises_and_names_them_all(self, monkeypatch):
-        """Never a silent pass, and the message must be actionable: which
-        endpoints were tried, and what each one said."""
-        m = self._mod()
-        panel = self._panel(m, monkeypatch)
-        monkeypatch.setattr(
-            m, "_post",
-            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-        with pytest.raises(Exception) as ei:
-            m._ask([], [{"id": 1, "text": "q"}])
-        msg = str(ei.value)
-        for j in panel:
-            assert j.label in msg and j.url in msg
-
-    def test_fallback_can_be_disabled_to_prove_the_gpu_box_is_serving(
-            self, monkeypatch):
-        """A silent fallback hides an unserving primary; this is how you prove
-        it. GODOT_VISION_FALLBACK=0 must leave exactly one judge."""
-        m = self._mod()
-        monkeypatch.setattr(m, "_FALLBACK_ENABLED", False)
-        monkeypatch.setenv("QWEN_API_KEY", "k")
-        panel = m._judges()
-        assert len(panel) == 1
+    def test_every_frame_reaches_the_judge_as_its_own_image(self, tmp_path):
+        """Frames are batched, never sampled down: N frames must produce N
+        image parts in the one message, plus exactly one text part."""
+        files = []
+        for i in range(4):
+            f = tmp_path / f"f{i}.png"
+            f.write_bytes(_png())
+            files.append(f)
+        gw = self._gw(["Q0: YES - fine"])
+        vision_impl._ask(gw, files, [{"id": "Q0", "text": "q"}])
+        content = gw.seen[0][0]["content"]
+        assert sum(c["type"] == "image_url" for c in content) == 4
+        assert sum(c["type"] == "text" for c in content) == 1
+        assert all(c["image_url"]["url"].startswith("data:image/png;base64,")
+                   for c in content if c["type"] == "image_url")
 
 
 class TestVisionJudgeResolution:
-    """`_judges()` reads the same two tables every agent step reads."""
-
-    def _mod(self):
-        import aitelier.tools.godot_vision.impl as m
-        return m
+    """The panel still comes from the route table, and the report still says so."""
 
     def test_the_panel_comes_from_the_route_not_from_hardcoded_urls(self):
-        m = self._mod()
-        labels = [j.label for j in m._judges()]
-        assert labels, "the vision route must resolve to at least one judge"
-        # Every judge is a provider/model from the tables, not a bare URL.
-        for label in labels:
-            assert "/" in label
-        assert all(j.url.endswith("/chat/completions") for j in m._judges())
+        panel = vision_impl._candidates()
+        assert panel, "the vision route must resolve to at least one candidate"
+        assert all("/" in c for c in panel), panel
 
-    def test_a_candidate_with_no_provider_entry_is_skipped_not_fatal(
-            self, monkeypatch, tmp_path, capsys):
-        """A typo in a FALLBACK entry must not blind the gate — the judges that
-        do resolve can still see."""
-        import json
+    def test_the_gateway_is_built_on_that_route_with_thinking_off(self, monkeypatch):
+        """Thinking off is the whole reason a 71-call gate is minutes not hours,
+        and the route name is what keeps the judge visible in model_routes.json."""
+        seen = {}
 
-        from core import model_routes
-        m = self._mod()
-        routes = tmp_path / "model_routes.json"
-        routes.write_text(json.dumps(
-            {"vision": ["nosuchprovider/x", "deepseek/eyes"]}), encoding="utf-8")
-        real_get = model_routes.get_routes
-        monkeypatch.setattr(model_routes, "get_routes",
-                            lambda _p=None: real_get(str(routes)))
-        model_routes.reset_cache()
-        try:
-            panel = m._judges()
-        finally:
-            model_routes.reset_cache()
-        assert [j.label for j in panel] == ["deepseek/eyes"]
-        assert "nosuchprovider" in capsys.readouterr().out
+        class _Spy:
+            def __init__(self, model, **kw):
+                seen["model"] = model
+                seen.update(kw)
+
+        import core.ai_router as router
+        monkeypatch.setattr(router, "AIGateway", _Spy)
+        vision_impl._gateway()
+        assert seen["model"] == vision_impl._ROUTE
+        assert seen["enable_thinking"] is False
+        assert seen["max_output_tokens"] == vision_impl._MAX_TOKENS
+        assert seen["temperature"] == 0.0
 
 
-def test_the_small_budget_follows_the_local_box_not_the_list_head(
-        monkeypatch, tmp_path, capsys):
-    """Skipping the first candidate must not hand its budget to the next one.
+def test_a_broken_registry_goes_blind_rather_than_crashing(tmp_path, monkeypatch):
+    """Building the judge READS CONFIG, and that read used to be unguarded.
 
-    2048 is calibrated for the self-hosted vLLM and is measured to STARVE a
-    hosted reasoning model. Keying the small budget on "first in the surviving
-    list" meant that removing `localqwen` from llm_providers.json — the normal
-    state on any host that cannot reach that GPU box — silently gave
-    qwen3.8-max the starving budget.
+    `AIGateway.__init__` resolves the route and `_bind` json.loads
+    llm_providers.json with no handler of its own, so a malformed registry
+    raised straight out of `godot_vision` and no vision_report.json was written
+    at all. The graph routes to the human checkpoint on
+    `from_file: vision_report.json, field: blind` — with no file the match
+    cannot fire and the run FAILS instead of pausing for a person, which is the
+    opposite of this gate's whole contract.
     """
-    import json
+    def _boom():
+        raise ValueError("llm_providers.json: Expecting value: line 1 column 1")
 
-    from core import model_routes
-    import aitelier.tools.godot_vision.impl as m
+    monkeypatch.setattr(vision_impl, "_gateway", _boom)
+    rep = _run(tmp_path)
+    _assert_blind(rep, "endpoint_unreachable")
+    assert "could not be built" in rep["summary"]
+    assert "NOT judged" in rep["summary"]
 
-    routes = tmp_path / "model_routes.json"
-    routes.write_text(json.dumps(
-        {"vision": ["nosuchprovider/local", "deepseek/hosted"]}), encoding="utf-8")
-    real_get = model_routes.get_routes
-    monkeypatch.setattr(model_routes, "get_routes",
-                        lambda _p=None: real_get(str(routes)))
-    model_routes.reset_cache()
-    try:
-        panel = m._judges()
-    finally:
-        model_routes.reset_cache()
 
-    assert [j.label for j in panel] == ["deepseek/hosted"]
-    assert panel[0].max_tokens == m._MAX_TOKENS_FALLBACK, (
-        "the survivor was position 1 in the route, so it must get the hosted "
-        "budget — not the local box's 2048")
-    assert "nosuchprovider" in capsys.readouterr().out
+def test_the_gate_reports_the_judge_the_gateway_actually_bound(tmp_path, monkeypatch):
+    """Attribution must come from the gateway, not from a list this tool
+    resolved separately: a rotating route makes the two disagree, and the
+    report would then say `fallback` about a run the primary judge served."""
+    gw = _FakeGateway(_sheet())
+    gw.active_model = "second/judge"
+    gw.last_usage = {"served_by": "second/judge"}
+    monkeypatch.setattr(vision_impl, "_gateway", lambda: gw)
+    rep = _run(tmp_path)
+    assert rep["served_by"] == "second/judge"
+    assert rep["backend"] == "primary", (
+        "the endpoint the gateway bound IS the primary for this run")
+    assert rep["fallback_used"] is False

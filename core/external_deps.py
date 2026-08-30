@@ -97,8 +97,9 @@ DEPS: tuple[Dep, ...] = (
             "self-hosted vLLM -> qwen token plan -> DeepSeek pay-as-you-go) "
             "through llm_providers.json, like every agent step. Edit the route "
             "to change judges; GODOT_VISION_CONTEXT_TOKENS still sets the "
-            "frame-batching budget, and GODOT_VISION_FALLBACK=0 pins it to the "
-            "first judge to prove that one is serving",
+            "frame-batching budget, which deliberately does NOT follow "
+            "whichever judge answered. Which judge DID answer is in the "
+            "report's `served_by`",
         without="the gate reports itself BLIND rather than passing a game "
                 "nobody looked at"),
 )

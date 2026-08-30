@@ -99,7 +99,13 @@ overlay:
       - id: "5_vision"
         step_type: "tool"
         tool_name: "godot_vision"
-        timeout_seconds: 900
+        # One call per SCENARIO, so the budget scales with the play-test spec,
+        # not with the gate. A healthy 69-scenario run measured 770s on
+        # 2026-08-30 — 86% of the old 900s — and the step must survive long
+        # enough to WRITE its report: the blind branch below routes on
+        # `from_file: vision_report.json`, and a step killed mid-run leaves no
+        # file for that match to read, so the run fails instead of pausing.
+        timeout_seconds: 3600
         tool_params:
           from_step: "5_compile"
           out_dir: "$STEP_DIR"

@@ -624,3 +624,60 @@ class TestTheThinkingOffKeysCannotKillAStep:
             gw._complete_prebuilt(
                 gw._build_kwargs([{"role": "user", "content": "x"}]))
         assert len(seen) == 1, "a thinking-ON role must not get the retry"
+
+
+class TestFailoverNeverRevisitsADeadEndpoint:
+    """A route may name one endpoint twice on purpose.
+
+    The duplicate `localqwen/qwen3` in `flash.rotate` is what gives the local
+    box a 2-in-5 share of the rotation head. The failover walk is a single
+    forward pass over the resolved list, so that duplicate used to be tried
+    twice. Measured 2026-08-30 while the box was down: localqwen -> qwen (429,
+    parked) -> localqwen (still down) -> opencodego. Three hops, the middle one
+    certain to fail.
+
+    Parking does not cover it — that needs `is_quota_exhausted`, and a box that
+    is DOWN is not quota-exhausted.
+    """
+
+    def _gw(self, candidates):
+        from core.ai_router import AIGateway
+        gw = AIGateway.__new__(AIGateway)          # no route table, no binding
+        gw._candidates = list(candidates)
+        gw._candidate_ix = 0
+        gw._failovers = []
+        gw._burst_hits = 0
+        gw.internal_model = "flash"
+        gw.active_model = candidates[0]
+        gw._next_usable = lambda start: start      # nothing parked in this test
+        gw._bind = lambda m: setattr(gw, "active_model", m)
+        return gw
+
+    def _walk(self, gw):
+        """Fail over until exhausted; return the endpoints actually bound."""
+        seen = [gw.active_model]
+        while gw._failover(RuntimeError("endpoint down")):
+            seen.append(gw.active_model)
+        return seen
+
+    def test_a_duplicate_is_not_tried_twice(self):
+        gw = self._gw(["local/q", "plan/a", "local/q", "payg/b", "ark/c"])
+        assert self._walk(gw) == ["local/q", "plan/a", "payg/b", "ark/c"], (
+            "index 2 repeats local/q, which already failed at index 0")
+
+    def test_the_walk_still_reaches_every_distinct_endpoint(self):
+        """Skipping must not cut the list short — the whole point of a fallback
+        list is that the LAST entry still gets its turn."""
+        gw = self._gw(["a/1", "b/2", "a/1", "b/2", "c/3"])
+        assert self._walk(gw) == ["a/1", "b/2", "c/3"]
+
+    def test_exhaustion_is_reported_not_looped(self):
+        """When only duplicates remain, `_failover` must return False so the
+        caller raises the real provider error — never spin."""
+        gw = self._gw(["a/1", "a/1", "a/1"])
+        assert self._walk(gw) == ["a/1"]
+        assert gw._failover(RuntimeError("down")) is False
+
+    def test_a_route_with_no_duplicates_is_unchanged(self):
+        gw = self._gw(["a/1", "b/2", "c/3"])
+        assert self._walk(gw) == ["a/1", "b/2", "c/3"]

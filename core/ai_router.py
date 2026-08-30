@@ -900,7 +900,29 @@ class AIGateway:
             if until:
                 held = f", parked {until - _t.time():.0f}s"
 
+        # Never walk back onto an endpoint this gateway has already failed on.
+        # A route may name the same `provider/model` twice on purpose — the
+        # duplicate `localqwen/qwen3` in `flash.rotate` is what gives the local
+        # box a 2-in-5 share of the rotation head — and the walk is a single
+        # forward pass over that list, so a duplicate got tried twice. Measured
+        # 2026-08-30 while the box was down for a benchmark:
+        #
+        #   failover flash: localqwen/qwen3 -> qwen/qwen3.8-flash  (MidStream…)
+        #   failover flash: qwen/qwen3.8-flash -> localqwen/qwen3  (RateLimit, parked)
+        #   failover flash: localqwen/qwen3 -> opencodego/…-flash  (InternalServer…)
+        #
+        # Three hops to reach a live endpoint, the middle one certain to fail.
+        # Parking does not cover this: it needs `is_quota_exhausted`, and a box
+        # that is simply DOWN is not quota-exhausted. Nor is this the transient
+        # case — tenacity has already retried, and a burst 429 is retried in
+        # place above — so by the time we are here, that endpoint is spent for
+        # this call. Skipping keeps the rotation share and drops the wasted call.
+        tried = {f for f, _ in self._failovers}
+        tried.add(failed)
         nxt_ix = self._next_usable(self._candidate_ix + 1)
+        while (self._candidate_ix < nxt_ix < len(self._candidates)
+               and self._candidates[nxt_ix] in tried):
+            nxt_ix = self._next_usable(nxt_ix + 1)
         if nxt_ix <= self._candidate_ix or nxt_ix >= len(self._candidates):
             return False
         self._candidate_ix = nxt_ix

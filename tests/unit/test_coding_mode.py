@@ -1226,6 +1226,75 @@ class TestRealUsageTelemetry:
         self._routes(monkeypatch, tmp_path, ["a/x", "b/y"], {"c": {}})
         assert ma._provider_candidates("pro") == ["a/x", "b/y"]
 
+    async def test_the_compacter_fails_over_too(
+            self, coding_agent, monkeypatch):
+        """The second endpoint-binding caller, and it fails SOFTLY.
+
+        `_summarize_chunk` turns any failure into `None`, which
+        `_maybe_compact` reads as "leave the transcript alone" — so one
+        unreachable endpoint meant the session silently stopped compacting and
+        drifted into the context overflow the whole mechanism exists to
+        prevent. No exception, no pause, nothing in the chat: the failure mode
+        is a session that just gets slower and then dies. The compacter runs on
+        `flash`, whose first candidate is the local box.
+        """
+        from types import SimpleNamespace
+        import litellm
+        import core.meta_agent as ma
+        from core.ai_router import reset_endpoint_cooldowns
+
+        reset_endpoint_cooldowns()
+        monkeypatch.setattr(ma, "_provider_candidates",
+                            lambda _m: ["localqwen/off", "ark/live"])
+        monkeypatch.setattr(
+            ma, "_resolve_provider",
+            lambda name: ("openai/" + name.split("/", 1)[1],
+                          "http://" + name.split("/", 1)[0], "k"))
+        tried = []
+
+        async def fake_acompletion(**kwargs):
+            tried.append(kwargs["model"])
+            if kwargs["model"] == "openai/off":
+                raise litellm.InternalServerError(
+                    "connection refused", llm_provider="openai", model="off")
+            return SimpleNamespace(usage=None, choices=[SimpleNamespace(
+                message=SimpleNamespace(content="  a summary  "))])
+
+        monkeypatch.setattr(ma.litellm, "acompletion", fake_acompletion)
+
+        assert await coding_agent._summarize_chunk("[user] hi") == "a summary"
+        assert tried == ["openai/off", "openai/live"], tried
+
+    def test_the_compaction_threshold_follows_the_endpoint_down(
+            self, coding_agent, monkeypatch):
+        """A small endpoint must move the threshold, or the resume loops.
+
+        `ContextWindowExceededError` is correctly not a failover error, and
+        this path has no walk to a bigger window, so an overflow escapes as
+        `llm_interrupted` -> "reply continue" -> the identical overflow. The
+        threshold is the only thing that can prevent it, and it is a static
+        number from the role config that nothing re-measured.
+
+        Recomputed, not latched: a hop onto the local box must not shrink the
+        session's context for the rest of its life, because compaction is lossy.
+        """
+        import core.meta_agent as ma
+
+        coding_agent.token_window = 1_000_000
+        coding_agent.compact_at_tokens = 700_000
+        monkeypatch.setattr(
+            ma, "_providers",
+            lambda: {"localqwen": {"max_input_tokens": 131_072},
+                     "ark": {}})
+
+        coding_agent._follow_window("localqwen/qwen3")
+        assert coding_agent.compact_at_tokens == int(131_072 * 0.7)
+
+        # An ABSENT ceiling means "unbounded", never permission to raise the
+        # limit the role set — and the shrink does not stick.
+        coding_agent._follow_window("ark/deepseek-v4-flash")
+        assert coding_agent.compact_at_tokens == 700_000
+
     async def test_usage_accumulates_across_turns(self, db_manager, mock_ws):
         agent = MetaAgent(db_manager, mock_ws, owner_email="test@local",
                           session_id="sess-usage", mode="coding")

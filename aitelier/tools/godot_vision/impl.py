@@ -101,6 +101,29 @@ _TIMEOUT = int(os.environ.get("GODOT_VISION_TIMEOUT", "300"))
 # which a silent fallback would otherwise hide.
 _FALLBACK_ENABLED = os.environ.get("GODOT_VISION_FALLBACK", "1") != "0"
 
+# The whole 2048 -> 4096 -> 6144 escalation recorded above was fighting a
+# SYMPTOM. This gate asks for six YES/NO lines and the model was answering with
+# an essay: measured 2026-08-30 on jinyong-touch's own frames, one four-frame
+# call spent 769 completion tokens, 2,444 characters of which were
+# `reasoning_content`, to produce a 339-character answer. `reasoning_effort` is
+# NOT the lever — low gives 769 tokens and medium 593, barely moving it. Turning
+# thinking off gives 101 tokens and the SAME SIX VERDICTS, word-for-word on the
+# YES/NO, differing only in how the one-line reasons are phrased. Server-side
+# that is 9.93s -> 1.42s per call, and this gate makes one call per scenario:
+# the run that motivated this made 59 of them and took 2,373 seconds.
+#
+# It also removes both blind modes at their root, which are the same event seen
+# at two moments: the reply is cut off at max_tokens. `judge_budget_exhausted`
+# is the cut landing while the model is still thinking (empty content);
+# `unparseable_response` is it landing mid-answer — jinyong-touch's raw reply
+# ends literally at "Q3: NO -" after 39.6 minutes of work. Nine calls in the
+# server's log hit exactly 6144 tokens, ~90 seconds of decode each, all wasted.
+#
+# `chat_template_kwargs` is a llama.cpp/vLLM extension, not OpenAI's; `_post`
+# downgrades once on a 400 so adding a strict hosted judge to the route cannot
+# blind the gate. "0" keeps thinking on.
+_NO_THINK = os.environ.get("GODOT_VISION_NO_THINK", "1") != "0"
+
 
 class _Judge:
     """One candidate: where to POST, as what, with which key, how much room."""
@@ -414,13 +437,29 @@ def _retryable(exc: BaseException) -> bool:
 
 def _post(url: str, model: str, api_key: str,
           files: list[Path], questions: list[dict],
-          max_tokens: int = 0) -> str:
+          max_tokens: int = 0, no_think: bool | None = None) -> str:
     """Retrying wrapper around one call. See _retryable for what is retried."""
     last: BaseException | None = None
+    if no_think is None:
+        no_think = _NO_THINK
     for attempt in range(1, _POST_ATTEMPTS + 1):
         try:
-            return _post_once(url, model, api_key, files, questions, max_tokens)
+            return _post_once(url, model, api_key, files, questions, max_tokens,
+                              no_think=no_think)
         except Exception as e:                           # noqa: BLE001
+            # `chat_template_kwargs` is a llama.cpp/vLLM extension, not
+            # OpenAI's. A strict gateway rejects the unknown field outright and
+            # a 400 is not retryable — so without this the gate would go blind
+            # for the whole run the moment such a judge entered the route. Drop
+            # the field and let that judge think: slow beats blind. The retry
+            # gets its own full attempt budget, and cannot recurse again
+            # because the downgraded call passes no_think=False.
+            if (no_think and isinstance(e, urllib.error.HTTPError)
+                    and e.code == 400):
+                print(f"[godot_vision] {url} rejected chat_template_kwargs "
+                      f"(400) — retrying with thinking enabled: {e}", flush=True)
+                return _post(url, model, api_key, files, questions, max_tokens,
+                             no_think=False)
             if not _retryable(e) or attempt == _POST_ATTEMPTS:
                 raise
             last = e
@@ -472,7 +511,7 @@ def _wire_bytes(f: Path) -> bytes:
 
 def _post_once(url: str, model: str, api_key: str,
           files: list[Path], questions: list[dict],
-          max_tokens: int = 0) -> str:
+          max_tokens: int = 0, no_think: bool = True) -> str:
     """One chat/completions call with the frames inline as base64 data URLs.
     Raises on transport failure / non-200 / unreadable envelope, and raises
     ReasoningStarved when the model burned its budget thinking."""
@@ -482,10 +521,12 @@ def _post_once(url: str, model: str, api_key: str,
         b64 = base64.b64encode(_wire_bytes(f)).decode("ascii")
         content.append({"type": "image_url",
                         "image_url": {"url": f"data:image/png;base64,{b64}"}})
-    body = json.dumps({"model": model, "max_tokens": max_tokens or _MAX_TOKENS,
-                       "temperature": 0.0,
-                       "messages": [{"role": "user", "content": content}]}
-                      ).encode("utf-8")
+    payload = {"model": model, "max_tokens": max_tokens or _MAX_TOKENS,
+               "temperature": 0.0,
+               "messages": [{"role": "user", "content": content}]}
+    if no_think:
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

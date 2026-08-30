@@ -473,18 +473,68 @@ class TestThinkingDialect:
                 f"ark/deepseek ignores it. See this class's docstring.")
 
     def test_we_never_send_a_disable_that_one_endpoint_rejects(self):
-        """`ark/glm-5.3` answers 400 to thinking.type `disabled`.
+        """Written when nothing turned thinking off; the mode it anticipated
+        now exists, so this guards a LIVE path.
 
-        Latent today because nothing turns thinking off, so this guards the
-        assumption rather than a live path: if a 'thinking off' mode is ever
-        added, it cannot be done with this key on that endpoint.
-        """
+        The withholding is broader than the measurement ON PURPOSE, and
+        `qwen/glm-5.2` below is the case where the two differ: the table above
+        records it HONOURING thinking:{disabled}, and it is withheld anyway.
+        Sending the key where it is refused is a 400 that is neither failed
+        over nor retried; withholding it only leaves a model thinking. The safe
+        error is the broad one, and it costs nothing while no role pairs `glm`
+        with thinking off. See `_rejects_thinking_disabled`."""
         from core.ai_router import AIGateway
-        gw = AIGateway("ark/glm-5.3", enable_thinking=False)
-        kwargs = gw._build_kwargs([{"role": "user", "content": "x"}])
-        assert "extra_body" not in kwargs, (
-            "thinking disabled must send NO thinking key at all, never "
-            "thinking:{type:disabled} — ark/glm-5.3 rejects that with a 400")
+        for model in ("ark/glm-5.3", "ark/glm-5.3-flash",
+                      "opencodego/glm-5.3-flash", "qwen/glm-5.2"):
+            gw = AIGateway(model, enable_thinking=False)
+            eb = gw._build_kwargs([{"role": "user", "content": "x"}])["extra_body"]
+            assert "thinking" not in eb, (
+                f"{model}: never thinking:{{type:disabled}} — it 400s there")
+
+
+class TestThinkingOffMeansOff:
+    """`enable_thinking=False` must instruct, not merely stay silent.
+
+    Sending nothing leaves the endpoint's own default in charge, and Qwen3.8's
+    chat template defaults to xhigh. `compacter` — a role whose entire job is
+    to shrink a transcript — therefore reasoned at the highest setting on the
+    2-in-5 `flash` steps that bind localqwen, exactly contradicting its config.
+
+    One assertion per claim: an `or` across them stays green with half the
+    branch deleted.
+    """
+
+    def _eb(self, model):
+        from core.ai_router import AIGateway
+        return AIGateway(model, enable_thinking=False)._build_kwargs(
+            [{"role": "user", "content": "x"}]).get("extra_body", {})
+
+    def test_the_qwen_template_is_told_not_to_think(self):
+        """The only key measured to work on localqwen: 22 reasoning tokens -> 0."""
+        assert self._eb("localqwen/qwen3")["chat_template_kwargs"] == {
+            "enable_thinking": False}
+
+    def test_deepseek_is_told_too(self):
+        """`chat_template_kwargs` is ignored on DeepSeek; `thinking` is what
+        takes it to 0 there. Both keys ship, or one family stays unsuppressed."""
+        eb = self._eb("deepseek/deepseek-v4-flash")
+        assert eb["thinking"] == {"type": "disabled"}
+        assert eb["chat_template_kwargs"] == {"enable_thinking": False}
+
+    def test_glm_still_gets_the_portable_key(self):
+        """Dropping `thinking` for GLM must not drop the other one with it —
+        it measured 80 reasoning tokens -> 29 on opencodego/glm-5.3-flash."""
+        assert self._eb("ark/glm-5.3-flash")["chat_template_kwargs"] == {
+            "enable_thinking": False}
+
+    def test_thinking_on_is_untouched(self):
+        """The enable path must not acquire a disable key."""
+        from core.ai_router import AIGateway
+        eb = AIGateway("deepseek/deepseek-v4-flash",
+                       enable_thinking=True)._build_kwargs(
+            [{"role": "user", "content": "x"}])["extra_body"]
+        assert eb["thinking"] == {"type": "enabled"}
+        assert "chat_template_kwargs" not in eb
 
 
 def test_litellm_globals_are_actually_applied():
@@ -505,3 +555,72 @@ def test_litellm_globals_are_actually_applied():
     AIGateway("deepseek/deepseek-v4-flash")
     assert litellm.telemetry is False
     assert litellm.drop_params is True
+
+
+class TestTheThinkingOffKeysCannotKillAStep:
+    """The suppressors are vendor extensions, and a 400 is fatal here.
+
+    `litellm.BadRequestError` is in neither FAILOVER_EXCEPTIONS nor
+    RETRYABLE_EXCEPTIONS, so an endpoint that refuses `chat_template_kwargs` or
+    `thinking:{"type":"disabled"}` would end the step. Measured 2026-08-30 none
+    of the routed endpoints refuses the pair — but qwen/*, the rotation head of
+    four routes, answers 429 until 09-02 and could not be measured, and
+    suppressing thinking is an optimisation. It must degrade, not kill.
+    """
+
+    def _gw(self, **kw):
+        from core.ai_router import AIGateway
+        return AIGateway("deepseek/deepseek-v4-flash", **kw)
+
+    def _fail_once(self, gw, exc):
+        """Make the first completion raise `exc`, the second succeed; return
+        the extra_body each attempt actually carried."""
+        seen = []
+
+        def _bounded(kwargs):
+            seen.append(dict(kwargs.get("extra_body") or {}))
+            if len(seen) == 1:
+                raise exc
+            return _Resp()
+
+        class _Resp:
+            choices = [type("C", (), {"message": type("M", (), {
+                "content": "ok", "tool_calls": None})()})()]
+            usage = None
+
+        gw._completion_bounded = _bounded
+        gw._extract_usage = lambda r: {}
+        return seen
+
+    def test_a_rejected_suppressor_degrades_instead_of_killing_the_step(self):
+        import litellm
+        gw = self._gw(enable_thinking=False)
+        seen = self._fail_once(gw, litellm.exceptions.BadRequestError(
+            "unknown field chat_template_kwargs", "m", "p"))
+        gw._complete_prebuilt(gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert len(seen) == 2, "it must retry, not raise"
+        assert "chat_template_kwargs" in seen[0]
+        assert seen[1] == {}, "the retry must carry no suppressor at all"
+
+    def test_the_downgrade_sticks_for_the_rest_of_the_gateway(self):
+        """One rejection, one extra call — not one per turn forever."""
+        import litellm
+        gw = self._gw(enable_thinking=False)
+        self._fail_once(gw, litellm.exceptions.BadRequestError("nope", "m", "p"))
+        gw._complete_prebuilt(gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert gw._suppress_thinking is False
+        later = gw._build_kwargs([{"role": "user", "content": "y"}])
+        assert "extra_body" not in later
+
+    def test_a_role_that_WANTS_thinking_is_never_downgraded(self):
+        """The retry must not strip a reasoning role's own switch — that would
+        silently turn a reviewer into a non-reasoning one on any bad request."""
+        import litellm
+        import pytest as _pytest
+        gw = self._gw(enable_thinking=True, thinking_effort="low")
+        seen = self._fail_once(gw, litellm.exceptions.BadRequestError(
+            "something else entirely", "m", "p"))
+        with _pytest.raises(Exception):
+            gw._complete_prebuilt(
+                gw._build_kwargs([{"role": "user", "content": "x"}]))
+        assert len(seen) == 1, "a thinking-ON role must not get the retry"

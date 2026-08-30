@@ -264,6 +264,33 @@ class NativeTurn:
 OUTPUT_CAP_CEILING = 65536
 
 
+def _rejects_thinking_disabled(model: str) -> bool:
+    """Withhold `thinking: {"type": "disabled"}` from the GLM family.
+
+    It is not a clean family property, and this is deliberately BROADER than
+    the measurement:
+
+        ark/glm-5.3            400   (2026-08-26, TestThinkingDialect)
+        ark/glm-5.3-flash      400   (2026-08-30)
+        opencodego/glm-5.3…    400   (2026-08-30)
+        qwen/glm-5.2           honoured (2026-08-26)
+
+    So the true rule is per provider AND model — the "matrix that goes stale
+    every time a vendor ships" that TestThinkingDialect argues against. The two
+    directions of error are not symmetric: withholding it costs nothing but a
+    model that keeps thinking, while sending it where it is refused is a 400,
+    and a 400 is neither failed over nor retried. Withholding from the whole
+    family is therefore the safe error, and it is free today — `qwen/glm-5.2`
+    is the only endpoint it gives up on, and no role pairs `glm` with thinking
+    off. `_complete_prebuilt`'s one-shot downgrade catches whatever this misses.
+
+    Matched on the model string, not the provider: a provider entry is a
+    (base_url, key) pair and one vendor may be registered under several names
+    (an API-key pool), so the model is what identifies the family.
+    """
+    return "glm" in model.lower()
+
+
 def resolve_agent_model(model_name: str) -> str:
     """Apply the single-model pin, if one is set, to an already-resolved model.
 
@@ -317,6 +344,9 @@ class AIGateway:
         self._routes_path = routes_path
         self._candidates = get_routes(routes_path).resolve(model_name, rotate=True)
         self._failovers: list[tuple[str, str]] = []   # (from_model, why)
+        # Cleared for good the first time an endpoint rejects the thinking-off
+        # keys — see `_apply_binding`'s else branch and `_complete_prebuilt`.
+        self._suppress_thinking = True
         self._burst_hits = 0
         # Start at the first candidate whose usage window is not already known
         # to be spent, so a fresh gateway does not re-discover the same
@@ -789,6 +819,27 @@ class AIGateway:
             except Exception as e:
                 # Request-shaped failure (bad params, unsupported args): every
                 # candidate would reject it identically.
+                #
+                # Unless WE put the bad param there. The thinking-off keys are
+                # vendor extensions, and an endpoint that refuses one answers
+                # 400 — which is in neither FAILOVER_EXCEPTIONS nor
+                # RETRYABLE_EXCEPTIONS, so it would kill the step outright.
+                # Measured 2026-08-30 no endpoint on any route rejects the pair
+                # this sends, but the rotation head of four routes (qwen/*)
+                # could not be measured — its plan answers 429 until 09-02 — and
+                # suppressing thinking is an OPTIMISATION. It is never worth a
+                # dead step, so drop it and let that endpoint think: slow beats
+                # dead, the same trade the vision gate made for itself before
+                # the gateway took this over. Once per gateway, and only for a
+                # role that asked for thinking off.
+                if self._suppress_thinking and not self.enable_thinking:
+                    self._suppress_thinking = False
+                    print(f"[ai_router] {self.active_model} rejected the "
+                          f"thinking-off keys ({type(e).__name__}); retrying "
+                          f"once without them: {str(e)[:160]}", flush=True)
+                    kwargs.pop("extra_body", None)
+                    self._apply_binding(kwargs)
+                    continue
                 raise self._explain_auth(e) from e
             # Stamp WHICH endpoint answered onto the usage record. That record
             # is traced per turn (dpe_pipeline: category="usage"), and without
@@ -1025,6 +1076,38 @@ class AIGateway:
                 # extra_body is forwarded verbatim, which sidesteps both.
                 extra_body["reasoning_effort"] = effort
             kwargs["extra_body"] = extra_body
+        else:
+            # `enable_thinking=False` used to send NOTHING, and nothing is not
+            # the same as "do not think". A chat template that reasons by
+            # DEFAULT then does the opposite of what the role asked for:
+            # Qwen3.8's defaults to xhigh, so `compacter` — whose whole job is
+            # to shrink a transcript — reasoned at the highest setting on the
+            # 2-in-5 `flash` steps that bind localqwen. The effort table cannot
+            # fix that either: it is read inside the branch above, so a role
+            # with thinking off never reaches it.
+            #
+            # It takes BOTH keys because neither works everywhere. Measured
+            # 2026-08-30, reasoning tokens on a fixed one-line prompt:
+            #
+            #   endpoint                    bare   ctk   thinking:disabled
+            #   localqwen/qwen3               22     0     22  (ignored)
+            #   ark|deepseek/…-v4-flash    12/21  13/27      0
+            #   ark|deepseek/…-v4-pro      23/23  21/10      0
+            #   opencodego/…-v4-flash         24    26     12  (reseller; partial)
+            #   opencodego|ark/glm-5.3…    80/29  29/29    400  <-- rejects it
+            #
+            # `chat_template_kwargs` is silently ignored wherever it is not
+            # understood — no 400 on any of the nine endpoints — so it is
+            # unconditional. `thinking` is the same key the enable branch
+            # above sends, and GLM accepts `enabled` while rejecting
+            # `disabled`; that asymmetry is a vendor bug with no portable way
+            # around it, so it gets the one guard below rather than a table of
+            # who-gets-what.
+            if self._suppress_thinking:
+                extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+                if not _rejects_thinking_disabled(self.active_model or ""):
+                    extra_body["thinking"] = {"type": "disabled"}
+                kwargs["extra_body"] = extra_body
         return kwargs
 
     def _build_kwargs(self, messages: list[dict], **extra) -> dict:

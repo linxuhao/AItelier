@@ -135,3 +135,46 @@ def test_planner_template_does_not_send_the_planner_to_read_file():
     """`read_file` is registry-gated and task_planner has web/list_tree only."""
     text = (TEMPLATES / "task_plan.md").read_text(encoding="utf-8")
     assert "read_file" not in text
+
+
+class TestReadDisciplineSurvivesInBothPlaces:
+    """Narrow reads are stated twice on purpose. Do not de-duplicate.
+
+    Measured 2026-08-30 by replaying four real `t_impl` steps (their exact
+    prompts, from `inputs_json`) against localqwen:
+
+        buried in the role template only ..........  0 scoped calls / 11
+        template wording sharpened ................  3 / 11
+        + restated at the end of the user message ..  5 / 9
+
+    The wording bought 3, the POSITION bought the rest — the same recency effect
+    `dpe_pipeline` already documents for the `[Language]` block. The template
+    copy is where the rest of the tool contract lives; the turn-budget copy is
+    the one the model acts on. Deleting either looks like tidying and silently
+    costs context, which is what pushes a step into
+    `_rebind_if_out_of_headroom` and off to a paid endpoint.
+    """
+
+    def test_the_role_template_names_the_mechanism(self):
+        """'read the part you need' was already there and was ignored 11/11.
+        Naming the actual parameters is what changed anything."""
+        t = (ROOT / "templates" / "task_implementer.md").read_text(encoding="utf-8")
+        assert "start_line" in t and "end_line" in t, (
+            "the template must name the ranged-read parameters, not merely "
+            "advise against reading whole files")
+        assert "context_lines" in t and "glob" in t, (
+            "the template must name search's narrowing parameters")
+
+    def test_the_turn_budget_block_restates_it(self):
+        """The end of the user message is the position that actually landed."""
+        src = (ROOT / "core" / "dpe_pipeline.py").read_text(encoding="utf-8")
+        # There are TWO turn-budget blocks: the JSON-mode one ("{remaining}
+        # remaining") and the native one. `t_impl` is native, and native is
+        # where the 0/11 -> 5/9 was measured, so pin that one specifically —
+        # matching the first occurrence tested the wrong code path.
+        i = src.find("turns total, then forced output")
+        assert i > 0, "the NATIVE turn-budget block moved or was renamed"
+        block = src[i:i + 3000]
+        assert "start_line" in block and "context_lines" in block, (
+            "read-discipline was dropped from the turn-budget block — measured "
+            "worth 7 of 10 scoped tool calls; see this class's docstring")

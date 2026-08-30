@@ -1925,7 +1925,19 @@ class PipelineEngine:
                     "a turn with a plain-text 'done' / 'written successfully' note; "
                     "your final action must be a tool call (the write tool, then "
                     "finish_step). Do not exhaust all turns on exploration — leave at "
-                    "least 1 turn for writing."
+                    "least 1 turn for writing.\n"
+                    # Context, not just turns. The role template already says not to
+                    # read whole files, but it says so as the 6th bullet of a section
+                    # about WRITING, 78k chars into the system message — and measured
+                    # 2026-08-30 across four replayed t_impl steps, localqwen ignored
+                    # it 11 times out of 11. Restating the mechanism HERE, at the end
+                    # of the user message where the language block already earns its
+                    # recency, took it to 10 scoped calls out of 13. Cheap, and the
+                    # context it saves is what keeps a step under the window.
+                    "Read narrowly: `search` with a `glob` and `context_lines` to "
+                    "FIND, `read` with `start_line`/`end_line` to read a known "
+                    "region. Reading a large file whole spends the context you need "
+                    "for the edit itself."
                 )
 
                 # [Language] — injected ONCE, here, as the absolute last block of

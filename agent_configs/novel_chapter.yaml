@@ -5,7 +5,7 @@
 #   flash = 章纲审查（结构化对照）/细纲审查/记账分录提取（信息抽取）。
 
 novel_outliner:
-  model: "pro"
+  model: "smart"
   template: "novel_outline.md"
   # Web tools: pull current 梗/时事 or sample a "写得像《X》/像作者Y" style ref while
   # planning. Used ON DEMAND only (see template) — most chapters need zero searches.
@@ -27,7 +27,7 @@ novel_outline_reviewer:
     enable: true
 
 novel_writer:
-  model: "pro"
+  model: "smart"
   template: "novel_draft.md"
   tools: []
   max_tool_turns: 40   # full chapter prose (2000-4500字) in one write
@@ -37,7 +37,7 @@ novel_writer:
     enable: true
 
 novel_humanizer:
-  model: "pro"
+  model: "smart"
   template: "novel_humanize.md"
   tools: []
   max_tool_turns: 40   # rewrites full chapter prose in one write
@@ -47,7 +47,7 @@ novel_humanizer:
     enable: true
 
 novel_chapter_reviewer:
-  model: "pro"
+  model: "smart"
   template: "novel_draft_review.md"
   tools: []
   native_tool_calling: true

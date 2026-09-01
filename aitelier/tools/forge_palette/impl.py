@@ -206,8 +206,6 @@ def _repo_root() -> Path:
 _MODEL_GUIDANCE = {
     "flash": "the default. Cheap and fast; every maker/reviewer role unless "
              "you can say why not.",
-    "pro":   "a stronger generalist. For a role whose output the rest of the "
-             "run is built on — a plan, a task breakdown.",
     "glm":   "an alternative strong generalist. Long-form authored documents.",
     "smart": "strongest at one-shot reasoning and algorithmic code, and WEAK "
              "at long agentic tool loops. Good for a judge or an architect; "

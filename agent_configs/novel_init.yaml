@@ -2,7 +2,7 @@
 # 初始化是一次性的慢变层（错了污染全书），三个角色全部用 pro。
 
 novel_brainstormer:
-  model: "pro"
+  model: "smart"
   template: "novel_brainstorm.md"
   tools: []
   native_tool_calling: true
@@ -11,7 +11,7 @@ novel_brainstormer:
     enable: true
 
 novel_designer:
-  model: "pro"
+  model: "smart"
   template: "novel_design.md"
   tools: []
   # bible_seed.json is a large single-file write; native tool-calling needs
@@ -24,7 +24,7 @@ novel_designer:
     enable: true
 
 novel_design_reviewer:
-  model: "pro"
+  model: "smart"
   template: "novel_design_review.md"
   tools: []
   native_tool_calling: true

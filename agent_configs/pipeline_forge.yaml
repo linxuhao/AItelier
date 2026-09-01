@@ -5,7 +5,7 @@
 # parameters live here.
 
 research_designer:
-  model: "pro"
+  model: "smart"
   temperature: 0.2
   template: "forge_survey.md"
   tools: ["read_file", "list_tree", "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read"]

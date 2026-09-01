@@ -59,8 +59,19 @@ def usage_stats(totals: dict | None) -> dict:
     if not prompt:
         return {}
     hit = t.get("cache_hit_tokens", 0)
-    billed = t.get("cache_miss_tokens", 0) + hit / 10 + t.get("completion_tokens", 0)
-    return {"hit_ratio": round(hit / prompt, 4), "billed_tokens": int(billed)}
+    miss = t.get("cache_miss_tokens", 0)
+    # Prompt tokens the provider never classified (AIGateway._extract_usage
+    # records a silent provider as unknown, not as a full miss, so those turns
+    # add to prompt_tokens while adding to neither counter). The two halves
+    # pull opposite ways on purpose: bill them at the full miss rate, because
+    # under-billing an unmeasured turn is the expensive mistake — but keep them
+    # OUT of the ratio's denominator, so a session served entirely by a silent
+    # provider reports an undefined ratio instead of a fabricated 0%.
+    unknown = max(prompt - hit - miss, 0)
+    billed = miss + unknown + hit / 10 + t.get("completion_tokens", 0)
+    known = hit + miss
+    return {"hit_ratio": round(hit / known, 4) if known else None,
+            "billed_tokens": int(billed)}
 
 # ── System Prompt ──────────────────────────────────────────────────
 

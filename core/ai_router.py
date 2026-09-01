@@ -484,6 +484,7 @@ class AIGateway:
         Normalizes across providers:
           - DeepSeek: usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
           - OpenAI-style: usage.prompt_tokens_details.cached_tokens
+          - neither (Ollama Cloud): cache fields are None = UNKNOWN, not zero
         Cache-hit tokens on DeepSeek bill at ~1/10th, so hit_ratio is the
         key cost lever this telemetry measures. Returns {} if no usage.
         """
@@ -520,15 +521,32 @@ class AIGateway:
             if not prompt_tokens and hit is None:
                 return {}
 
-            hit = hit or 0
-            miss = miss if miss is not None else (prompt_tokens - hit)
-            hit_ratio = (hit / prompt_tokens) if prompt_tokens else 0.0
+            if hit is None and miss is None:
+                # The provider said NOTHING about caching. `hit = 0, miss =
+                # prompt_tokens` would record that as "the entire prompt missed
+                # cache" — a positive claim, and a measurably false one: on
+                # 2026-09-01 Ollama Cloud (ollamacloud/* in model_routes) was
+                # observed returning a usage object holding only prompt/
+                # completion/total tokens — no details object under any name —
+                # while a controlled warm/cold latency A/B showed it genuinely
+                # does prefix-cache (~2x prefill speedup). Silence is UNKNOWN,
+                # so it is recorded as None: an unknown turn must stay out of
+                # BOTH sides of every aggregate ratio rather than being summed
+                # in as a miss and dragging the ratio down. None is the
+                # vocabulary the aggregation sites already use for an undefined
+                # ratio, so it carries all the way to the UI.
+                hit_ratio = None
+            else:
+                hit = hit or 0
+                miss = miss if miss is not None else (prompt_tokens - hit)
+                miss = max(miss, 0)
+                hit_ratio = round((hit / prompt_tokens) if prompt_tokens else 0.0, 4)
             out = {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "cache_hit_tokens": hit,
-                "cache_miss_tokens": max(miss, 0),
-                "hit_ratio": round(hit_ratio, 4),
+                "cache_miss_tokens": miss,
+                "hit_ratio": hit_ratio,
             }
             if reasoning_tokens is not None:
                 out["reasoning_tokens"] = reasoning_tokens

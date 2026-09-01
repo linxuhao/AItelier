@@ -134,7 +134,9 @@
   let tokenMode = $state('butler');
   // Cumulative real API usage (provider-reported): cache hit ratio and
   // billed-equivalent tokens (cache_miss + cache_hit/10 + completion).
-  let hitRatio = $state(0);
+  // null = the provider reported no cache info at all (unknown), which must
+  // render as "—" rather than a fabricated 0%.
+  let hitRatio = $state<number | null>(0);
   let billedTokens = $state(0);
 
   function _formatTokens(n: number): string {
@@ -229,7 +231,9 @@
           totalTokens = response.total_tokens;
         }
       }
-      if (typeof response.hit_ratio === 'number') hitRatio = response.hit_ratio;
+      if (typeof response.hit_ratio === 'number' || response.hit_ratio === null) {
+        hitRatio = response.hit_ratio as number | null;
+      }
       if (typeof response.billed_tokens === 'number') billedTokens = response.billed_tokens;
 
       // Build dedup key set from existing history
@@ -648,7 +652,7 @@
         const total = event.total_tokens as number | undefined;
         const limit = event.limit as number | undefined;
         const mode = event.mode as string | undefined;
-        const ratio = event.hit_ratio as number | undefined;
+        const ratio = event.hit_ratio as number | null | undefined;
         const billed = event.billed_tokens as number | undefined;
         if (tokens !== undefined) tokenCount = tokens;
         if (total !== undefined) totalTokens = total;
@@ -1122,7 +1126,7 @@
         {/if}
         {#if billedTokens > 0}
           <span class="token-sep">·</span>
-          <span class="token-stat">cache {Math.round(hitRatio * 100)}%</span>
+          <span class="token-stat">cache {hitRatio == null ? '—' : Math.round(hitRatio * 100) + '%'}</span>
           <span class="token-sep">·</span>
           <span class="token-stat">billed {_formatTokens(billedTokens)}</span>
         {/if}

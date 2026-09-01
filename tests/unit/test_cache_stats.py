@@ -3,6 +3,9 @@
 Tests that a single run's failure in compute_cache_stats_per_step does not
 crash the entire batch — it logs a warning and continues with remaining runs.
 """
+import json
+import sqlite3
+from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import patch
 
@@ -150,3 +153,80 @@ class TestComputeCacheStatsBatch:
             r.message for r in caplog.records if r.levelname == "WARNING"
         ]
         assert any("run-value-error" in msg for msg in warning_messages)
+
+
+class TestUnknownCacheRowsStayOutOfTheRatio:
+    """A turn whose provider reported no cache info must not be counted a miss.
+
+    End-to-end over the real path: AIGateway._extract_usage builds the payload,
+    it is stored as JSON exactly as dpe_pipeline traces it, and the real SQL
+    (COALESCE over json_extract) aggregates it. That is the whole chain in
+    which an unmeasured turn either stays out of the denominator or silently
+    becomes a full miss.
+    """
+
+    @staticmethod
+    def _usage(prompt, completion, **cache_fields):
+        """One traced turn, as the gateway would record it."""
+        from core.ai_router import AIGateway
+        return AIGateway._extract_usage(SimpleNamespace(usage=SimpleNamespace(
+            prompt_tokens=prompt, completion_tokens=completion, **cache_fields)))
+
+    @staticmethod
+    def _fake_skillflow(rows):
+        """rows: list of (step_id, usage payload) for a single run 'run-x'."""
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE skillflow_trace (run_id TEXT, step_id TEXT, "
+            "category TEXT, event TEXT, payload_json TEXT)"
+        )
+        for step_id, payload in rows:
+            conn.execute(
+                "INSERT INTO skillflow_trace VALUES (?, ?, 'usage', "
+                "'token_usage', ?)",
+                ("run-x", step_id, json.dumps(payload)),
+            )
+        conn.commit()
+
+        class _SF:
+            def trace_query(self, run_id, sql, params):
+                return conn.execute(sql, params).fetchall()
+
+        return _SF()
+
+    def _stats(self, rows):
+        sf = self._fake_skillflow(rows)
+        with patch("api.dependencies.get_skillflow", return_value=sf):
+            return compute_cache_stats_batch(["run-x"])["run-x"]
+
+    def test_mixed_known_and_unknown_uses_known_rows_only(self):
+        """A silent-provider turn adds nothing to either side of the ratio."""
+        stats = self._stats([
+            ("1", self._usage(1000, 50, prompt_cache_hit_tokens=800,
+                              prompt_cache_miss_tokens=200)),
+            ("2", self._usage(9000, 60)),   # Ollama Cloud shape: says nothing
+        ])
+        assert stats["cache_hit_tokens"] == 800
+        assert stats["cache_miss_tokens"] == 200
+        # Counting the unmeasured 9000 as a miss would give 800/10000 = 0.08.
+        assert stats["hit_ratio"] == 0.8
+        assert stats["total_tokens"] == 1000
+
+    def test_all_unknown_reports_undefined_not_zero(self):
+        """No measured tokens at all -> undefined ratio, never a 0% claim."""
+        stats = self._stats([
+            ("1", self._usage(4000, 30)),
+            ("2", self._usage(6000, 40)),
+        ])
+        assert stats["hit_ratio"] is None
+        assert stats["total_tokens"] == 0
+
+    def test_all_measured_zero_hit_reports_a_real_zero(self):
+        """A provider that DID report cached_tokens=0 aggregates to a real 0.0,
+        which is what "undefined" above must stay distinguishable from."""
+        stats = self._stats([
+            ("1", self._usage(4000, 30,
+                              prompt_tokens_details=SimpleNamespace(cached_tokens=0))),
+        ])
+        assert stats["hit_ratio"] == 0.0
+        assert stats["total_tokens"] == 4000

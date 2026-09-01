@@ -137,10 +137,33 @@ def test_extract_usage_openai_cached_tokens():
     assert u["hit_ratio"] == 0.6
 
 
-def test_extract_usage_no_cache_fields():
-    """No cache info → hit=0, miss=all prompt tokens."""
+def test_extract_usage_no_cache_fields_is_unknown_not_zero():
+    """A silent provider is UNKNOWN, never "the whole prompt missed".
+
+    Ollama Cloud returns usage with only prompt/completion/total tokens yet
+    demonstrably prefix-caches (2026-09-01 warm/cold A/B). Recording that as a
+    full miss is a false positive claim, so the counters must be None.
+    """
     resp = SimpleNamespace(usage=SimpleNamespace(
         prompt_tokens=500, completion_tokens=20))
+    u = AIGateway._extract_usage(resp)
+    assert u["prompt_tokens"] == 500          # token counts are still real
+    assert u["completion_tokens"] == 20
+    assert u["cache_hit_tokens"] is None
+    assert u["cache_miss_tokens"] is None
+    assert u["hit_ratio"] is None
+
+
+def test_extract_usage_reported_zero_hit_is_not_unknown():
+    """A provider that DOES report cached_tokens=0 measured a real 0% miss.
+
+    This is the whole point of the fix: "measured 0" and "never said" must not
+    collapse onto the same record, or a genuine cold prompt becomes
+    indistinguishable from an unmeasured one.
+    """
+    resp = SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=500, completion_tokens=20,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=0)))
     u = AIGateway._extract_usage(resp)
     assert u["cache_hit_tokens"] == 0
     assert u["cache_miss_tokens"] == 500

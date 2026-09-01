@@ -14,7 +14,12 @@ from core.meta_agent import (
 
 @pytest.fixture
 def mock_db():
-    return MagicMock()
+    db = MagicMock()
+    # usage_stats does real arithmetic on these counters, so the session-usage
+    # reader must hand back the dict the real DBManager returns, not a bare
+    # MagicMock (which cannot be subtracted or compared).
+    db.get_session_usage.return_value = {}
+    return db
 
 
 @pytest.fixture
@@ -1346,6 +1351,21 @@ class TestRealUsageTelemetry:
         stats = usage_stats({"prompt_tokens": 1000, "completion_tokens": 50,
                              "cache_hit_tokens": 800, "cache_miss_tokens": 200})
         assert stats == {"hit_ratio": 0.8, "billed_tokens": 330}
+
+    def test_usage_stats_unknown_cache_is_billed_but_not_rated(self):
+        """A session served only by a silent provider: undefined ratio, but the
+        unclassified prompt tokens still bill at the full miss rate."""
+        stats = usage_stats({"prompt_tokens": 1000, "completion_tokens": 50,
+                             "cache_hit_tokens": 0, "cache_miss_tokens": 0})
+        assert stats["hit_ratio"] is None
+        assert stats["billed_tokens"] == 1000 + 50
+
+    def test_usage_stats_mixed_rates_only_the_measured_half(self):
+        """600 measured (480 hit) + 400 unclassified → 0.8, not 0.48."""
+        stats = usage_stats({"prompt_tokens": 1000, "completion_tokens": 50,
+                             "cache_hit_tokens": 480, "cache_miss_tokens": 120})
+        assert stats["hit_ratio"] == 0.8
+        assert stats["billed_tokens"] == 120 + 400 + 48 + 50
 
     async def test_compacter_call_usage_accumulates(self, db_manager, mock_ws,
                                                     monkeypatch):

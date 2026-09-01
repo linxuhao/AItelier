@@ -225,6 +225,47 @@ describe('Chat cache-usage stats', () => {
     });
   });
 
+  it('renders a null hit_ratio as unknown, not as 0%', async () => {
+    // The provider reported no cache info at all (Ollama Cloud shape). "0%"
+    // would be a claim the trace never measured.
+    fetchSpy.mockResolvedValue(sseResponse([
+      { type: 'token_usage', tokens: 500, total_tokens: 500, limit: 1000,
+        mode: 'coding', hit_ratio: null, billed_tokens: 141000 },
+      { type: 'done', message: { role: 'assistant', content: 'ok' } },
+    ]));
+    const { container } = render(Chat, { props: { params: {} } });
+    await waitFor(() => {
+      expect(container.querySelector('#chat-input-field')).toBeTruthy();
+    });
+
+    await sendMessage(container, 'hello');
+    await waitFor(() => {
+      const label = container.querySelector('.token-bar-label');
+      expect(label?.textContent).toContain('billed 141.0k');
+    });
+    const label = container.querySelector('.token-bar-label');
+    expect(label?.textContent).toContain('cache \u2014');
+    expect(label?.textContent).not.toContain('cache 0%');
+  });
+
+  it('restores a null hit_ratio from chat history as unknown, not 0%', async () => {
+    window.localStorage.setItem('aitelier.chat.sessionId', 'sess-9');
+    mockApi.getChatHistory.mockResolvedValue({
+      session_id: 'sess-9', mode: 'butler',
+      messages: [{ role: 'user', content: 'earlier' }],
+      token_count: 0, token_limit: 200000, total_tokens: 0,
+      hit_ratio: null, billed_tokens: 33000,
+    });
+    const { container } = render(Chat, { props: { params: {} } });
+    await waitFor(() => {
+      const label = container.querySelector('.token-bar-label');
+      expect(label?.textContent).toContain('billed 33.0k');
+    });
+    const label = container.querySelector('.token-bar-label');
+    expect(label?.textContent).toContain('cache \u2014');
+    expect(label?.textContent).not.toContain('cache 0%');
+  });
+
   it('bar omits cache stats when no usage recorded', async () => {
     fetchSpy.mockResolvedValue(sseResponse([
       { type: 'token_usage', tokens: 500, total_tokens: 500, limit: 1000,

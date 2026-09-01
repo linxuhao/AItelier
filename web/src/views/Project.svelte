@@ -786,7 +786,7 @@
                       <span class="step-progress">
                         {run.completed_steps as number || 0}/{(run.step_count as number) || (run.steps as any[])?.length || 0}
                       </span>
-                      {#if run.cache_stats && (run.cache_stats as Record<string, number>).total_tokens != null}
+                      {#if run.cache_stats && ((run.cache_stats as Record<string, number>).total_tokens ?? 0) > 0}
                         {@const rcs = run.cache_stats as Record<string, number>}
                         <span class="cache-inline-badge {cacheBadgeClass(rcs.hit_ratio)}">
                           {formatTokens(rcs.total_tokens)}{rcs.hit_ratio != null ? ' · ' + Math.round(rcs.hit_ratio * 100) + '%' : ''}

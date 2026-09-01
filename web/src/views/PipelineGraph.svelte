@@ -362,7 +362,7 @@
           <strong>{nodeLabel(openNode)}</strong>
           {#if nodeLabel(openNode) !== openNode}<code class="node-real-id">{openNode}</code>{/if}
           <span class="status-pill {st.status}">{t('pipeline.status.' + st.status)}</span>
-          {#if cacheByStep?.[openNode]?.total_tokens != null}
+          {#if (cacheByStep?.[openNode]?.total_tokens ?? 0) > 0}
             {@const cs = cacheByStep[openNode]}
             <span class="cache-inline-badge">
               {formatTokens(cs.total_tokens)}{cs.hit_ratio != null

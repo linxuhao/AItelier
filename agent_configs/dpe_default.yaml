@@ -77,8 +77,8 @@ architect_reviewer:
     effort: "low"
 
 pm:
-  # moved off `smart` 2026-09-01: it was 62% of that route's volume, and ark
-  # prices deepseek-v4-pro ~10x what the glm-5.3-flash endpoints cost.
+  # 2026-09-01: measured 62% of the pro-class route's volume, and ark prices
+  # deepseek-v4-pro ~10x what the glm-5.3-flash endpoints cost.
   model: "glm"
   temperature: 0.2
   template: "step3_pm.md"

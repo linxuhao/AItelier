@@ -117,3 +117,49 @@ describe('PipelineGraph — current node and its trace', () => {
     expect(container.querySelectorAll('.node.is-current').length).toBe(0);
   });
 });
+
+/**
+ * `cache_stats.total_tokens` counts only the tokens the cache accounting
+ * COVERS, which is 0 for a provider that reports no cache fields at all
+ * (Ollama Cloud). The badge used to be gated on `!= null`, so such a step
+ * rendered a badge reading "0" — understating a step that had really
+ * processed hundreds of thousands of tokens. Absence of accounting is not a
+ * measurement of zero: hide the badge instead of printing a false count.
+ */
+describe('PipelineGraph — cache badge', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockApi.pipelineGraph.mockResolvedValue(GRAPH);
+    mockApi.getTrace.mockResolvedValue({
+      traces: [], has_more: false, next_seq: 0, order: 'desc',
+    });
+  });
+
+  async function mountWithCache(cacheByStep: Record<string, unknown>) {
+    const PipelineGraph = (await import('../../views/PipelineGraph.svelte')).default;
+    return render(PipelineGraph, {
+      props: { config: 'dpe_game', runSteps: STEPS, runId: 'run-1', cacheByStep },
+    });
+  }
+
+  it('shows the badge when the cache accounting covered real tokens', async () => {
+    const { container } = await mountWithCache({
+      b: { cache_hit_tokens: 8000, cache_miss_tokens: 2000, hit_ratio: 0.8, total_tokens: 10000 },
+    });
+    await waitFor(() => {
+      expect(container.querySelector('.cache-inline-badge')).not.toBeNull();
+    });
+    expect(container.querySelector('.cache-inline-badge')?.textContent).toContain('80% cache');
+  });
+
+  it('hides the badge when the provider reported no cache accounting at all', async () => {
+    const { container } = await mountWithCache({
+      b: { cache_hit_tokens: 0, cache_miss_tokens: 0, hit_ratio: null, total_tokens: 0 },
+    });
+    await waitFor(() => {
+      expect(container.querySelectorAll('.node').length).toBe(3);
+    });
+    // Not "0" — the step really processed tokens, they were just never classified.
+    expect(container.querySelector('.cache-inline-badge')).toBeNull();
+  });
+});

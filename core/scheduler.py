@@ -387,9 +387,18 @@ def _sync_task_manifest_to_db(project_id: str):
         if tasks_dir.exists():
             for tf in sorted(tasks_dir.glob("*.json")):
                 try:
-                    manifest["tasks"].append(_json.loads(tf.read_text(encoding="utf-8")))
+                    card = _json.loads(tf.read_text(encoding="utf-8"))
                 except Exception:
-                    pass
+                    continue
+                # A card's identity is its FILENAME; the body may omit "id".
+                # Without this, sync_tasks_from_manifest falls back to the
+                # literal "task" for every card: completion (matched by
+                # manifest_key) can never be written back, and the dependency
+                # id_map collapses to one entry. Measured on jinyong-loop
+                # 2026-09-01 — 13 rows, all keyed "task", all stuck pending.
+                if isinstance(card, dict) and not card.get("id"):
+                    card["id"] = tf.stem
+                manifest["tasks"].append(card)
         # Fallback: if no card files exist, use manifest's lightweight tasks array
         if not manifest["tasks"]:
             manifest["tasks"] = manifest_data.get("tasks", [])

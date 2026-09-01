@@ -1,3 +1,4 @@
+import pathlib
 # tests/unit/test_db_manager.py
 
 import json
@@ -784,3 +785,47 @@ def test_sanitize_drops_orphan_tool_and_empties():
     out = DBManager._sanitize_transcript(msgs)
     _assert_valid(out)
     assert out == [{"role": "user", "content": "real"}]
+
+
+def test_card_files_without_id_key_are_keyed_by_filename(tmp_path, monkeypatch):
+    """A card file's identity is its filename; the body may omit "id".
+
+    Regression: jinyong-loop 2026-09-01 wrote 13 cards with no "id" key, so
+    every tasks row got manifest_key="task". Completion is matched by
+    manifest_key, so no card could ever be marked done (the dashboard showed 13
+    pending while the run had finished them), and sync's id_map collapsed to a
+    single entry so dependency ids resolved to the last-inserted card.
+    """
+    import json as _json
+    from core import scheduler as sched
+
+    tasks_dir = tmp_path / "3" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    (tmp_path / "3" / "tasks_manifest.json").write_text(
+        _json.dumps({"execution_order": [["alpha_card"], ["beta_card"]]}),
+        encoding="utf-8",
+    )
+    for name, deps in (("alpha_card", []), ("beta_card", ["alpha_card"])):
+        (tasks_dir / f"{name}.json").write_text(
+            _json.dumps({"description": name, "detailed_requirements": "x",
+                         "dependencies": deps, "task_type": "normal"}),
+            encoding="utf-8",
+        )
+
+    cards = []
+    for tf in sorted(tasks_dir.glob("*.json")):
+        card = _json.loads(tf.read_text(encoding="utf-8"))
+        if isinstance(card, dict) and not card.get("id"):
+            card["id"] = tf.stem
+        cards.append(card)
+
+    assert [c["id"] for c in cards] == ["alpha_card", "beta_card"], (
+        "the filename must supply the id the body omitted"
+    )
+    assert "task" not in {c["id"] for c in cards}, (
+        "no card may fall back to the literal 'task' key"
+    )
+    src = pathlib.Path(sched.__file__).read_text(encoding="utf-8")
+    assert 'card["id"] = tf.stem' in src, (
+        "scheduler must inject the filename as the card id at read time"
+    )

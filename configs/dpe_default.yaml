@@ -317,7 +317,7 @@ steps:
       carry_forward: true
       fixed:
         tasks_manifest: { file: "tasks_manifest.json", format: '{"execution_order": [[str, ...], ...]}' }
-        task_card: { file: "tasks/*.json", format: '{"id": str, "description": "ONE-LINE summary (max 80 chars)", "detailed_requirements": str, "artifact_requirement": str, "dependencies": [str, ...], "task_type": str, "interface_contract": str, "capabilities": "[str, ...] — OPTIONAL; extra tools this task needs, chosen ONLY from capability_palette. Omit when the task needs none."}' }
+        task_card: { file: "tasks/*.json", format: '{"id": str, "description": "ONE-LINE summary (max 80 chars)", "detailed_requirements": str, "artifact_requirement": str, "dependencies": [str, ...], "task_type": str, "interface_contract": str, "acceptance": "measurable pass/fail criteria a reviewer can check without asking you", "owns": "[str, ...] — files/dirs ONLY this card may write; disjoint from every sibling in its wave", "shared_hotspots": "[str, ...] — OPTIONAL; files another card in this manifest also touches, with the rule for them", "forbidden": "OPTIONAL; what this card must NOT change", "stop_conditions": "when the implementer must STOP and report instead of pushing on (a measured contradiction, a scope needing an owner ruling, an irreversible op without a backup)", "evidence": "what final/delivery_notes_<id>.md must contain to claim done (commands run + output, numbers measured, files diffed)", "capabilities": "[str, ...] — OPTIONAL; extra tools this task needs, chosen ONLY from capability_palette. Omit when the task needs none."}' }
     validation:
       - files: ["tasks_manifest.json"]
         tool: "file_exists"
@@ -356,11 +356,21 @@ steps:
         tool: "json_schema"
         inline_schema:
           type: object
-          required: [description, detailed_requirements, artifact_requirement, dependencies, task_type]
+          required: [description, detailed_requirements, artifact_requirement, dependencies, task_type,
+                     acceptance, owns, stop_conditions, evidence]
           properties:
             description: { type: string, minLength: 1 }
             detailed_requirements: { type: string, minLength: 1 }
             artifact_requirement: { type: string, minLength: 1 }
+            # Self-contained card (borrowed from workflow.games' 12-section
+            # requirement, 2026-09-03): acceptance, ownership, stop rules and
+            # the evidence that closes it live ON the card, not in the chat.
+            acceptance: { type: string, minLength: 1 }
+            owns: { type: array, minItems: 1, items: { type: string, minLength: 1 } }
+            shared_hotspots: { type: array, items: { type: string } }
+            forbidden: { type: string }
+            stop_conditions: { type: string, minLength: 1 }
+            evidence: { type: string, minLength: 1 }
             dependencies: { type: array, items: { type: string } }
             task_type: { type: string, minLength: 1 }
     # SF-4: removed json_schema validation — LLM-generated JSON format varies;
@@ -871,7 +881,7 @@ steps:
     output:
       mode: "content"
       fixed:
-        report: { file: "final/verify_report.json", format: '{"all_goals_met": bool, "verified_subtasks": [str, ...], "issues": [str, ...], "ready_for_deploy": bool}' }
+        report: { file: "final/verify_report.json", format: '{"all_goals_met": bool, "goals": [{"goal": str, "status": "met" | "partial" | "unmet" | "blocked", "evidence": str}, ...], "verified_subtasks": [str, ...], "issues": [str, ...], "ready_for_deploy": bool}' }
         readme: { file: "README.md", format: 'Markdown 项目交付文档：项目简介、安装步骤、运行方法、关键接口/API 端点——反映仓库交付时的真实最终状态' }
     # The verifier owns project documentation AND runs LAST (after every task is
     # implemented + verified), so the README reflects the repo's actual final
@@ -883,6 +893,29 @@ steps:
     # against the process CWD, which in the container is the AItelier source repo
     # bind-mounted at /app, and clobbered AItelier's own README. repo_apply
     # resolves the real code path, so it can only ever target the project repo.)
+    # One verdict per goal, from a closed set. "blocked" (evidence missing) is
+    # not "unmet" and not "met" — the pass-on-absence defect class was verdicts
+    # over nothing; naming the missing evidence is the only honest third state.
+    validation:
+      - files: ["final/verify_report.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [all_goals_met, goals, issues, ready_for_deploy]
+          properties:
+            all_goals_met: { type: boolean }
+            ready_for_deploy: { type: boolean }
+            issues: { type: array, items: { type: string } }
+            goals:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                required: [goal, status, evidence]
+                properties:
+                  goal: { type: string, minLength: 1 }
+                  status: { type: string, enum: [met, partial, unmet, blocked] }
+                  evidence: { type: string, minLength: 1 }
     lifecycle:
       on_deliver:
         tool: "repo_apply"

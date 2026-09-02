@@ -19,6 +19,7 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 ### 2. 裁定质量
 - `verify_report.json` 是否如实、完整地反映了项目状态？
 - `verified_subtasks` / `issues` 是否与实际代码一致（没有漏报或虚报）？
+- `goals[].status` 每条是否有 `evidence` 撑着？`met` 的证据是不是亲自跑/读到的（不是「代码看起来对」）；`blocked` 有没有点名缺的证据；把该判 `blocked` 的写成 `met` 或把 `unmet` 写成 `blocked` 逃责，都判 `passed: false`。
 - `all_goals_met` / `ready_for_deploy` 的结论是否有依据？
 
 ### 3. 可部署性（评估，非编写文档）

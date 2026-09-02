@@ -62,6 +62,15 @@
 | `dependencies` | 是 | 该任务依赖的任务 ID 列表（可以为空 `[]`） |
 | `task_type` | 是 | `"tool"`（创建可复用模块）或 `"normal"`（应用程序代码） |
 | `interface_contract` | 推荐 | 该任务为其他任务暴露的 API/接口 |
+| `acceptance` | 是 | **可测的**通过/失败标准：审稿人不用问你就能核。「功能正常」不算；「`pytest tests/test_x.py` 0 红、`wc -l README.md` ≤ 200」才算 |
+| `owns` | 是 | 只有这张卡能写的文件/目录列表；**同一 wave 里各卡的 `owns` 必须两两不相交**（并行的前提） |
+| `shared_hotspots` | 可选 | 本清单里别的卡也会碰的文件，以及规则（谁先写、只追加、只改哪一段） |
+| `forbidden` | 可选 | 这张卡明确**不许**动的东西（锁死的数值、别人的接口、生产数据） |
+| `stop_conditions` | 是 | 实现者应当**停下来报告而不是硬推**的情形：量到的矛盾、需要 owner 裁决的范围、没备份的不可逆操作 |
+| `evidence` | 是 | 交回时 `final/delivery_notes_<id>.md` 必须含什么：跑过的命令与输出、量到的数字、diff 过的文件。**没回写证据等于没做完** |
+
+每张卡都是**自包含的提示词**：三天后的另一个 agent、没看过这段对话的同事，拿着这张卡也能干、也能验。
+**真值优先级**（写进卡里，冲突时按此裁）：owner 的 feedback / 裁决 > `design/90_decisions.md` 现行裁决 > 本轮 brief > 其他设计文档 > 代码里的注释。
 
 ## 项目文档（README）—— 不是你的职责
 你**不**负责编写 `README.md`。项目文档由**最终验证者（step 5）**在所有任务实现并验证完成后统一创建/更新，这样 README 能反映仓库的最终真实状态。你只需专注任务分解。
@@ -83,3 +92,4 @@
 - [ ] 所有架构组件是否都已分配给某个任务？
 - [ ] 每个任务的 `artifact_requirement` 和 `detailed_requirements` 是否足够具体，可供实现者使用？
 - [ ] 每个任务的 `interface_contract` 是否清晰描述了它所暴露的接口？
+- [ ] 每个任务的 `acceptance` 能不能被审稿人**不问你**就核出真假？`owns` 在同一 wave 内是否两两不相交？`stop_conditions` 有没有写清「什么情况下停」？

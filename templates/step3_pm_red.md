@@ -12,6 +12,7 @@ Step 3 产出的 `tasks_manifest.json` 和各 `tasks/{id}.json` 子任务卡片�
 ### 0. 目标循环修复轮 —— 硬性门槛（仅当上下文存在 `5_review` 的 `review_verdict.json` 且 `passed: false` 时）
 这是上一轮最终验证失败后的**修复轮**，PM 必须为验证反馈里的每条问题新建修复任务。逐条核对：
 - **每条 `feedback` 里的问题，是否都有一个对应的"新任务"在处理它？** 缺了就判 `passed: false`，指出哪条问题没有修复任务。
+- **卡片自包含**：`acceptance` 必须是可核的通过/失败条件（能写成命令或数字）；同一 wave 内各卡 `owns` 两两不相交，相交的文件必须出现在 `shared_hotspots` 并写明规则；`stop_conditions` 与 `evidence` 不能是空话（「遇到问题就停」「附上证据」不算）。任一缺失或空泛，判 `passed: false` 并点名是哪张卡。
 - **⚠️ 修复任务必须用全新的 id**：若 PM 把某个**已完成的旧任务 id 原样再列一遍**当作修复手段，判 `passed: false`——引擎会按 `completed_items` 把同名 id **直接跳过、永不重跑**，该"修复"会被静默丢弃。要求 PM 改用新 id（如 `fix_<问题>`）、`artifact_requirement` 指向要改的现有文件。
 - 修复任务的 `detailed_requirements` 是否具体引用了失败根因（文件/行/测试/期望），让实现者无需猜测？
 

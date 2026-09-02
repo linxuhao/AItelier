@@ -130,6 +130,42 @@ def test_repo_delete_git_rms_commits_and_clears(tmp_path):
     assert "delete" in log and "1 file(s)" in log
 
 
+def test_repo_delete_skips_a_path_the_step_delivered(tmp_path):
+    """R3b: the implementer queued a scenario for deletion to get `create` past
+    "already exists", kept editing it, and delivery wrote it then erased it.
+    A path present in the delivered step dir must never be git rm'd."""
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "playtest").mkdir()
+    (repo / "playtest" / "route.yaml").write_text("name: route\n")
+    (repo / "old.txt").write_text("old\n")
+    _commit_all(repo)
+
+    step = tmp_path / "step"
+    (step / "playtest").mkdir(parents=True)
+    (step / "playtest" / "route.yaml").write_text("name: route\nrewritten: true\n")
+    (step / "_deletions.json").write_text(json.dumps(["playtest/route.yaml", "old.txt"]))
+
+    r = repo_delete(source_dir=str(step), project_root=str(repo),
+                    step_id="t_impl", project_id="proj1")
+
+    assert r["deleted"] == ["old.txt"]
+    assert (repo / "playtest" / "route.yaml").exists()
+    assert [x["path"] for x in r["skipped"]] == ["playtest/route.yaml"]
+    assert "delivered in this step" in r["skipped"][0]["reason"]
+
+
+def test_repo_remove_file_refuses_a_path_present_in_staging(tmp_path):
+    ws = _FakeWS(tmp_path / "ws")
+    draft = ws._draft_dir("proj1", "t_impl")
+    (draft / "playtest").mkdir(parents=True)
+    (draft / "playtest" / "route.yaml").write_text("name: route\n")
+    with patch("api.dependencies.get_skillflow", return_value=_FakeSF({"project_id": "proj1"})), \
+         patch("api.dependencies.get_workspace_manager", return_value=ws):
+        r = repo_remove_file("playtest/route.yaml", run_id="run1", step_id="t_impl")
+    assert "staging output" in r["error"]
+    assert not (draft / "_deletions.json").exists()
+
+
 def test_repo_delete_noop_when_no_manifest(tmp_path):
     repo = _git_repo(tmp_path / "repo")
     step = tmp_path / "step"

@@ -62,12 +62,34 @@ def task_budget_check(*, out_dir: str = "", config_name: str = "",
     if n == 0:
         return _pass(out_dir, reason="task manifest lists no tasks — budget not checked")
 
+    # Stale ids: a goal-loop re-plan that re-lists ids the task loop has ALREADY
+    # dispatched runs nothing — skillflow keeps completed_items across re-entry
+    # and skips them. R3b (2026-09-02) re-emitted all six of its iteration-2 ids
+    # and 3_review passed it (its template forbids this, but it has no view of
+    # completed_items). This gate does.
+    stale = [t for t in tasks
+             if t in _completed_loop_items(kwargs.get("project_id", ""))]
+    if stale and len(stale) == n:
+        return _write(out_dir, {
+            "within_budget": False, "task_count": n, "stale_ids": stale,
+            "reason": (
+                f"Every task id in the manifest ({', '.join(stale)}) has ALREADY "
+                f"been dispatched by this run's task loop (completed_items). The "
+                f"engine skips a completed id and never re-runs it, so this "
+                f"breakdown would run NOTHING and the run would go straight to "
+                f"the final verifier. A fix must be a NEW card with a NEW id "
+                f"(e.g. fix_<defect>_2); an old id in execution_order is skipped."
+            ),
+        })
+
     budget = shape["budget"]
     required = _required_steps(shape, n)
     if required <= budget:
+        note = (f"; {len(stale)} already-dispatched id(s) will be skipped: "
+                f"{', '.join(stale)}") if stale else ""
         return _pass(out_dir, task_count=n, required_steps=required,
-                     max_total_steps=budget, max_tasks=n,
-                     reason=f"{n} tasks need {required} steps of the {budget} budgeted")
+                     max_total_steps=budget, max_tasks=n, stale_ids=stale,
+                     reason=f"{n} tasks need {required} steps of the {budget} budgeted{note}")
 
     fits = _largest_fitting_count(shape, budget, n)
     return _write(out_dir, {
@@ -90,6 +112,34 @@ def task_budget_check(*, out_dir: str = "", config_name: str = "",
 
 
 # ── Graph shape ────────────────────────────────────────────────────────────
+
+def _completed_loop_items(project_id: str) -> set[str]:
+    """Ids the project's live run has already dispatched through any loop.
+
+    A tool node receives project_id, not run_id, so the run is found through
+    the runs table (non-terminal status). Any failure reads as "nothing
+    completed" — the gate can only pass on error, never fail spuriously.
+    """
+    if not project_id:
+        return set()
+    try:
+        from api.dependencies import get_skillflow
+        conn = get_skillflow()._conn
+        rows = conn.execute(
+            "SELECT ls.completed_items FROM skillflow_loop_state ls "
+            "JOIN skillflow_runs r ON r.id = ls.run_id "
+            "WHERE r.project_id = ? AND r.status NOT IN ('completed', 'failed')",
+            (project_id,)).fetchall()
+    except Exception:
+        return set()
+    done: set[str] = set()
+    for row in rows:
+        try:
+            done.update(x for x in json.loads(row[0] or "[]") if isinstance(x, str))
+        except Exception:
+            pass
+    return done
+
 
 def _graph_shape(config_name: str) -> dict | None:
     """Step accounting derived from the live graph, not hardcoded.

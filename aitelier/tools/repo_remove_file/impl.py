@@ -76,6 +76,13 @@ def repo_remove_file(name: str, *, run_id: str = "", step_id: str = "",
         graph_name = run.get("graph_name")
         draft = (ws._draft_dir(project_id, step_id, graph_name) if graph_name
                  else ws._draft_dir(project_id, step_id))
+        if (draft / rel).exists():
+            return {"error": (f"{rel} is in this step's staging output. A delivered "
+                              "file always wins over a queued deletion, so queueing it "
+                              "would be a silent no-op at delivery (and `create` refuses "
+                              "a path that exists in staging or the repo, so delete+create "
+                              "is not a rewrite path). To change its content use `edit`; "
+                              "to remove it, stop writing it in this step.")}
         pending = _append_deletion(draft, rel)
         return {"queued_for_deletion": rel, "pending_deletions": pending}
     except Exception as e:

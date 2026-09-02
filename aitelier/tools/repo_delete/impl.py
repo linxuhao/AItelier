@@ -62,6 +62,13 @@ def repo_delete(source_dir: str = "", *, project_root: str = "",
         if safe is None:
             skipped.append({"path": rel, "reason": "unsafe path"})
             continue
+        if (src / safe).exists():
+            # The step delivered this very path (repo_apply just committed it).
+            # A written file always wins over a queued deletion: the agent that
+            # queues a delete and then keeps editing the file meant "rewrite",
+            # not "erase" (R3b lost a 692-line scenario this way).
+            skipped.append({"path": rel, "reason": "delivered in this step — a written file wins over a queued deletion"})
+            continue
         target = (repo / safe).resolve()
         if repo != target and repo not in target.parents:
             skipped.append({"path": rel, "reason": "escapes repo"})

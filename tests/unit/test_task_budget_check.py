@@ -245,3 +245,46 @@ def test_the_rejection_reaches_the_pm_as_feedback():
     node = _resolver().get_node("3_budget")
     reject = next(t for t in node.transitions if t.to == "3")
     assert reject.feedback is True
+
+
+# ── stale ids: a re-plan made only of already-dispatched ids runs nothing ──────
+
+def test_a_manifest_of_only_already_dispatched_ids_is_rejected(tmp_path, live, monkeypatch):
+    import aitelier.tools.task_budget_check.impl as impl
+    monkeypatch.setattr(impl, "_completed_loop_items", lambda pid: {"t0", "t1"})
+    out = _workspace(tmp_path, _tasks(2))
+    r = task_budget_check(out_dir=str(out), config_name=GRAPH, project_id="p")
+    assert r["within_budget"] is False
+    assert r["stale_ids"] == ["t0", "t1"]
+    assert "NEW id" in r["reason"]
+
+
+def test_a_manifest_with_one_new_id_passes_and_names_the_skipped(tmp_path, live, monkeypatch):
+    import aitelier.tools.task_budget_check.impl as impl
+    monkeypatch.setattr(impl, "_completed_loop_items", lambda pid: {"t0"})
+    out = _workspace(tmp_path, _tasks(2))
+    r = task_budget_check(out_dir=str(out), config_name=GRAPH, project_id="p")
+    assert r["within_budget"] is True
+    assert r["stale_ids"] == ["t0"]
+    assert "skipped: t0" in r["reason"]
+
+
+def test_completed_loop_items_reads_the_live_run_by_project(monkeypatch):
+    import sqlite3
+    from unittest.mock import patch
+    from aitelier.tools.task_budget_check.impl import _completed_loop_items
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE skillflow_runs (id TEXT, project_id TEXT, status TEXT)")
+    conn.execute("CREATE TABLE skillflow_loop_state (run_id TEXT, loop_step_id TEXT, completed_items TEXT)")
+    conn.execute("INSERT INTO skillflow_runs VALUES ('live', 'p', 'paused')")
+    conn.execute("INSERT INTO skillflow_runs VALUES ('old', 'p', 'completed')")
+    conn.execute("INSERT INTO skillflow_loop_state VALUES ('live', 'task_loop', '[\"a\", \"b\"]')")
+    conn.execute("INSERT INTO skillflow_loop_state VALUES ('old', 'task_loop', '[\"z\"]')")
+
+    class _SF:
+        _conn = conn
+
+    with patch("api.dependencies.get_skillflow", return_value=_SF()):
+        assert _completed_loop_items("p") == {"a", "b"}
+        assert _completed_loop_items("other") == set()
+    assert _completed_loop_items("") == set()

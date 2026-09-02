@@ -45,6 +45,11 @@ class MaxRetriesExceeded(Exception):
     pass
 
 
+# How many turns before the cap the agent is warned. One turn is too
+# late to finish anything; the existing final-turn nudge already covers
+# the nothing-written cliff.
+_LOW_TURN_BUDGET = 3
+
 class PipelineEngine:
     def __init__(self, log_callback=None,
                  repo_type: str = "new", event_bus=None, *, registry=None,
@@ -68,6 +73,7 @@ class PipelineEngine:
         self._step_start = None
         self._repo_type = repo_type
         self._resolved_context: dict | None = None
+        self._validation_error: str | None = None
         self._user_lang = user_lang
         # See _note_feedback: how many times each distinct failure message has
         # been handed to a step.
@@ -1881,6 +1887,11 @@ class PipelineEngine:
         if use_preamble:
             resolved_ctx = self.assembler.drop_preamble_steps(
                 resolved_ctx, preamble_steps)
+        # skillflow ALSO puts the validation error in _resolved_context under its
+        # own label. It is rendered as an instruction below, so drop the context
+        # copy — matched by VALUE, never by the label string, which is a private
+        # skillflow constant that would silently stop matching if reworded.
+        resolved_ctx = self._drop_context_value(resolved_ctx, self._validation_error)
 
         for attempt in range(1, max_retries + 1):
             self._emit("step_attempt", {
@@ -1911,6 +1922,14 @@ class PipelineEngine:
                 # NOTE: appended AFTER assemble()'s volatile tail (resolved
                 # context / tree / feedback), past the cache-prefix boundary —
                 # editing it does NOT perturb prefix caching. Kept native-only.
+                # THE LAST ATTEMPT'S VALIDATION FAILURE IS AN INSTRUCTION,
+                # NOT BACKGROUND. Delivered via _resolved_context it rendered as
+                # the final `### <label>` entry of [Pre-resolved Context] —
+                # measured at line 1517/1519, right behind a 1484-line clipped
+                # design bundle. Same words, same prompt, no salience. Put it in
+                # the recency slot instead, where the turn budget and language
+                # override already live.
+                user_prompt += self._validation_error_block(self._validation_error)
                 user_prompt += (
                     f"\n\n[Turn Budget: {max_turns} turns total, then forced output]\n"
                     "You are a workflow automation step, not a chat assistant: your "
@@ -2010,8 +2029,47 @@ class PipelineEngine:
             while True:
                 turn_count += 1
                 if turn_count >= current_max_turns:
+                    # Ending AT the cap and ending because the work is done are
+                    # two different outcomes, and they used to leave identical
+                    # traces. Downstream (validation, the reviewer, the human at
+                    # the checkpoint) then reads an incomplete deliverable with
+                    # no hint that it was cut off mid-flight rather than judged
+                    # complete by its author.
+                    self._trace("step", "turn_budget_exhausted", {
+                        "step_id": step_id, "turns": turn_count,
+                        "max_turns": current_max_turns,
+                        "written_files": sorted(written_files or []),
+                    })
+                    self._emit("turn_budget_exhausted", {
+                        "step_id": step_id, "turns": turn_count,
+                        "preview": f"Step {step_id} stopped at its {turn_count}-turn cap",
+                    })
                     break
                 remaining = current_max_turns - turn_count
+                # A LOW BUDGET IS NEWS EVEN WHEN OUTPUT EXISTS.
+                # The nudge below fires only when NOTHING is written, so a step
+                # that has produced SOME of what it owes looks identical to one
+                # that is finished: the loop just breaks at the cap, silently.
+                # Live, jinyong-numbers 2026-09-01 step "3": the PM declared 9
+                # task cards in tasks_manifest.json, wrote 5, and hit turn 20
+                # twice (its reasoning had already eaten the whole 32768-token
+                # output cap on turn 12, so several turns produced no tool call
+                # at all). It was never told it was running out, and the
+                # incomplete breakdown was then promoted and put to a human for
+                # approval. Announce the remaining budget once, early enough to
+                # act on, so "finish what you owe" is a decision the agent can
+                # make instead of a cliff it walks off.
+                if self._should_warn_low_budget(remaining, current_max_turns):
+                    messages.append({
+                        "role": "user",
+                        "content": self._low_budget_message(
+                            remaining, current_max_turns),
+                    })
+                    self._trace("step", "turn_budget_low", {
+                        "step_id": step_id, "remaining": remaining,
+                        "max_turns": current_max_turns,
+                        "written_files": sorted(written_files or []),
+                    })
                 if remaining > 1:
                     tool_choice = "auto"
                 elif not written_files and write_tool_names:
@@ -2410,10 +2468,76 @@ class PipelineEngine:
 
     # ── Dispatch ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _should_warn_low_budget(remaining: int, max_turns: int) -> bool:
+        """Warn once, `_LOW_TURN_BUDGET` turns before the cap.
+
+        Deliberately independent of whether anything has been written: the
+        final-turn nudge already covers the nothing-written cliff, and the case
+        it does NOT cover is the expensive one — a step that has produced SOME
+        of what it owes looks finished to the loop and is cut off mid-flight.
+        Silent on a budget that never had room to warn (cap <= the threshold),
+        where every turn is already the last few.
+        """
+        return remaining == _LOW_TURN_BUDGET and max_turns > _LOW_TURN_BUDGET
+
+    @staticmethod
+    def _low_budget_message(remaining: int, max_turns: int) -> str:
+        """The warning. Names the count, the obligation, and the honest way out.
+
+        The third sentence matters as much as the first: without it the agent's
+        only options are to finish or to be cut off, and being cut off is
+        indistinguishable from finishing. Saying "I could not fit them all" is
+        a deliverable; silently missing items is not.
+        """
+        return (
+            f"[Turn Budget: {remaining} of {max_turns} turns remain] Stop "
+            "exploring. Finish EVERY output this step owes — if you declared a "
+            "manifest, index or list, every item it names must exist before you "
+            "call finish_step. If the remaining budget cannot cover them all, "
+            "say so explicitly in the output you do write rather than leaving "
+            "items silently missing."
+        )
+
+    @staticmethod
+    def _validation_error_block(validation_error: str | None) -> str:
+        """The previous attempt's validation failure, as an INSTRUCTION.
+
+        Empty string when there is none, so the caller appends unconditionally.
+        skillflow also exposes this through _resolved_context, where it renders
+        as the last `### <label>` entry among the graph's context sources —
+        measured at line 1517 of 1519, behind a 1484-line clipped design bundle
+        (jinyong-numbers 2026-09-01, step "3"). Same words, no salience.
+        """
+        if not validation_error:
+            return ""
+        return (
+            "\n\n[Previous Attempt Failed Validation — MUST FIX]\n"
+            f"{validation_error}\n"
+            "This is not background context: the step you are running now IS "
+            "that retry. Fix exactly this before producing anything else, and "
+            "re-emit every file the step owes — a file you do not write this "
+            "attempt is not carried over."
+        )
+
+    @staticmethod
+    def _drop_context_value(resolved_ctx: dict | None, value) -> dict:
+        """Drop entries whose CONTENT equals ``value`` (not whose label matches).
+
+        Used to de-duplicate the validation error, which the host renders as its
+        own instruction block. Matching skillflow's label string would be the
+        obvious way and the wrong one: it is a private constant, so a rewording
+        there would silently reinstate the duplicate with nothing failing.
+        """
+        if not resolved_ctx or value is None:
+            return resolved_ctx or {}
+        return {k: v for k, v in resolved_ctx.items() if v != value}
+
     def run_step(self, task_id: int, step_id: str, workspace: Any,
                  project_id: str = "default", subtask_id: str | None = None,
                  agent_config_name: str = "",
                  resolved_context: dict | None = None,
+                 validation_error: str | None = None,
                  tool_schemas: dict | None = None,
                  output_dir: str = "",
                  max_tool_turns: int = 0,
@@ -2430,6 +2554,7 @@ class PipelineEngine:
         """
         self._project_id = project_id
         self._resolved_context = resolved_context
+        self._validation_error = validation_error
         self._tool_schemas = tool_schemas or {}
         self._output_dir = output_dir
         self._max_tool_turns = max_tool_turns

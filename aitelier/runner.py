@@ -97,9 +97,17 @@ class AgentStepRunner:
         )
 
         # skillflow surfaces reject/loop-back feedback and validation errors
-        # into _resolved_context itself (inside claim_next_step), so the host
-        # renders them for free — no special-casing needed here.
+        # into _resolved_context, AND as dedicated ClaimedStep fields. Rendering
+        # them "for free" out of _resolved_context is not enough: they land as
+        # one more `### <label>` entry among the graph's context sources, and
+        # the label is appended LAST, so it renders after every other source.
+        # Measured on jinyong-numbers 2026-09-01 step "3": the validation error
+        # was real and verbatim in the prompt — at line 1517 of 1519, directly
+        # behind a 1484-line clipped design bundle — while the assembler's own
+        # high-salience [Previous Feedback — MUST FIX] section sat unused. Pass
+        # the explicit field so the host can render it as an instruction.
         resolved_context = step.inputs.get("_resolved_context")
+        validation_error = getattr(step, "validation_error", None)
         # Addon prompt fragments (skillflow add_template stores their paths in the
         # step's opaque config): merge them into the resolved context so they reach
         # the prompt ONLY when the addon that added them is applied — the base
@@ -140,6 +148,7 @@ class AgentStepRunner:
                         project_id=project_id,
                         agent_config_name=agent_name,
                         resolved_context=resolved_context,
+                        validation_error=validation_error,
                         tool_schemas=tool_schemas,
                         output_dir=output_dir,
                         max_tool_turns=max_tool_turns,

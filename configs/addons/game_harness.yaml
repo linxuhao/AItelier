@@ -355,7 +355,11 @@ overlay:
     source:
       from: "repository"
       path: "design/"
-      mode: "inline"
+      # index, not inline (skillflow >=1.5.60): names + sizes + headings only.
+      # Measured 2026-09-02: this bundle was 368 KB, ~120K tokens on EVERY
+      # planner/architect turn (of a 160K-token prompt). The reader gets the
+      # list in priority order and reads what it needs with its read tool.
+      mode: "index"
       order: &design_order
         - "00_roadmap.md"
         - "90_decisions.md"
@@ -368,7 +372,7 @@ overlay:
     source:
       from: "repository"
       path: "design/"
-      mode: "inline"
+      mode: "index"
       order: *design_order
 
   # 6. The design keeper. Runs AFTER the gates and BEFORE the final review.

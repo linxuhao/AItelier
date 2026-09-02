@@ -295,8 +295,13 @@ class TestDesignBundlePriority:
         content = list(ContextResolver(
             tmp_path / "ws", code_root=tmp_path / "repo").resolve(
                 [_normalize_context_spec(src)], current_config="dpe_game").values())[0]
-        names = [l[len("### FILE: "):].strip() for l in content.splitlines()
-                 if l.startswith("### FILE: ")]
+        # The planners get an INDEX (skillflow >=1.5.60): one "- name  (N bytes)"
+        # line per file, in priority order, no bodies. Measured 2026-09-02: the
+        # inline bundle was 368 KB, ~120K tokens on every PM/architect turn.
+        assert content.startswith("[index:")
+        assert "body 90_decisions.md" not in content
+        names = [l[2:].split("  (")[0] for l in content.splitlines()
+                 if l.startswith("- ")]
         assert names.index("90_decisions.md") < names.index("20_content.md")
         # the history journal is nobody's planning input: it must not be pulled up
         assert names.index("99_changelog.md") > names.index("90_decisions.md")
@@ -313,7 +318,7 @@ class TestDesignBundlePriority:
             tmp_path / "ws", code_root=tmp_path / "repo").resolve(
                 [_normalize_context_spec(self._design_source("@pm"))],
                 current_config="dpe_game").values())[0]
-        assert "still here" in content
+        assert "- renamed_everything.md  (" in content   # indexed, not inlined
 
 
 def test_the_design_order_survives_addon_composition(sf_with_addons):

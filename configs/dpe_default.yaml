@@ -187,6 +187,9 @@ steps:
     step_type: "agent"
     agent_config: "architect"
     timeout_seconds: 300
+    # 20 (agent default is 10): design/ arrives as an index, the architect
+    # reads the files it needs with its read tool.
+    max_tool_turns: 20
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "1" }
@@ -272,7 +275,9 @@ steps:
     agent_config: "pm"
     timeout_seconds: 300
     max_retries: 3
-    max_tool_turns: 20
+    # 30, not 20: design/ arrives as an index (game_harness addon), so the PM
+    # spends turns READING the files it needs instead of receiving them inline.
+    max_tool_turns: 30
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "1" }

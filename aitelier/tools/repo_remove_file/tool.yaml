@@ -1,4 +1,4 @@
-name: delete_file
+name: repo_remove_file
 description: >
   Queue a repo-relative file for REMOVAL from the delivered project repo at this
   step's delivery time (git rm + commit, applied by the repo_delete hook right

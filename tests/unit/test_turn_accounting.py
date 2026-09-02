@@ -20,7 +20,7 @@ is_write = PipelineEngine._is_mutation_tool
 
 # What skillflow actually grants a `mode: write` step without allow_full_write.
 # Verified live against dpe_default's t_impl, which gets exactly:
-#   create, delete_file, edit, finish_step, list, list_tree, read,
+#   create, repo_remove_file, edit, finish_step, list, list_tree, read,
 #   read_test_written, search, test_write
 # There is NO `write` — that needs allow_full_write.
 MODE_WRITE = {"create": {}, "edit": {}, "finish_step": {}, "read": {},

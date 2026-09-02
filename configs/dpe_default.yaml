@@ -689,7 +689,7 @@ steps:
       # adds/updates the step's files (ignoring the deletions manifest, so it
       # never reaches the repo); repo_delete then reads _deletions.json from
       # $STEP_DIR and git-rm's + commits the files the agent queued via
-      # delete_file. No-op when nothing was queued.
+      # repo_remove_file. No-op when nothing was queued.
       # (repo_delete cannot live in after_deliver: that path runs through
       # StepValidator, which neither resolves $STEP_DIR nor unwraps `params`.)
       on_deliver:

@@ -8,7 +8,7 @@ subagent_worker:
   temperature: 0.2
   template: "subagent_work.md"
   # create/edit derived from output.mode: write.
-  tools: ["list_tree", "test_write", "read_test_written", "delete_file"]
+  tools: ["list_tree", "test_write", "read_test_written", "repo_remove_file"]
   max_output_tokens: 32768
   max_tool_turns: 50
   native_tool_calling: true

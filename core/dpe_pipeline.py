@@ -1286,7 +1286,7 @@ class PipelineEngine:
                         # C3: Cache all exploration results
                         cached_exploration.append(entry)
                         # A granted tool that CHANGED something counts as output
-                        # even though it left no file in staging (delete_file, a
+                        # even though it left no file in staging (repo_remove_file, a
                         # durable state write). See _effect_name.
                         wf = self._written_name(result)
                         if wf:
@@ -1606,7 +1606,7 @@ class PipelineEngine:
                         # C3: Cache all exploration results
                         cached_exploration.append(entry)
                         # A granted tool that CHANGED something counts as output
-                        # even though it left no file in staging (delete_file, a
+                        # even though it left no file in staging (repo_remove_file, a
                         # durable state write). See _effect_name.
                         wf = self._written_name(result)
                         if wf:
@@ -1786,7 +1786,7 @@ class PipelineEngine:
         """What this tool changed, if it changed something but wrote no file.
 
         Separate from `_written_name` on purpose: a step's staging can be empty
-        and the step still have done its job. `t_impl` is granted `delete_file`,
+        and the step still have done its job. `t_impl` is granted `repo_remove_file`,
         whose success is `{"queued_for_deletion": …}` — no file, a real effect.
         """
         if not isinstance(result, dict) or result.get("error"):

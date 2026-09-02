@@ -675,23 +675,23 @@ class TestAStepThatOnlyChangedStateStillCounts:
         engine.factory.is_native.return_value = False
         engine._exec_tool = MagicMock(side_effect=lambda a: (
             {"queued_for_deletion": "old.py", "pending_deletions": 1}
-            if a["tool"] == "delete_file" else {"output": "..."}))
+            if a["tool"] == "repo_remove_file" else {"output": "..."}))
 
         mg = MagicMock()
         mg.gateway.litellm_model = "mock-model"
         mg.run.return_value = json.dumps({
             "thoughts": "this task is a deletion",
-            "actions": [{"tool": "delete_file", "params": {"name": "old.py"}},
+            "actions": [{"tool": "repo_remove_file", "params": {"name": "old.py"}},
                         {"tool": "finish_step", "params": {}}]})
         engine.factory.get_agent.return_value = mg
         engine._emit = lambda t, d: None
 
-        schemas = dict(TS_MODE_WRITE, delete_file={})
+        schemas = dict(TS_MODE_WRITE, repo_remove_file={})
         result = engine.run_step(task_id=1, step_id="C1", workspace=ws,
                                  project_id="default", agent_config_name="maker",
                                  tool_schemas=schemas)
         assert result is True
-        assert engine._exec_tool.call_args_list[0].args[0]["tool"] == "delete_file"
+        assert engine._exec_tool.call_args_list[0].args[0]["tool"] == "repo_remove_file"
 
     def test_a_turn_that_did_nothing_at_all_still_fails(self, engine):
         """The relaxation must not swallow a genuine no-op."""

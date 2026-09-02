@@ -170,7 +170,7 @@ task_implementer:
   # shown the tool and then refused when it called it. 1.5.39 merges
   # extra_tools into the allowlist (skillflow a3eaff2), so the grant is whole
   # and the addon owns it again.
-  tools: ["list_tree", "test_write", "read_test_written", "delete_file",
+  tools: ["list_tree", "test_write", "read_test_written", "repo_remove_file",
           "capabilities_available"]
   # Stays at 32768 — deliberately BELOW core.ai_router.OUTPUT_CAP_CEILING (65536)
   # so a starved turn still has one doubling left. Raising it to the ceiling

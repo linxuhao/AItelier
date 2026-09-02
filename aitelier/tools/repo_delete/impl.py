@@ -9,7 +9,7 @@ rolled back and the manifest is kept so a retry re-attempts cleanly.
 No-op / no commit when the manifest is absent or empty.
 
 The agent never runs the destructive op — it only declared intent via
-``delete_file``; this deterministic hook performs and commits the removal, so it
+``repo_remove_file``; this deterministic hook performs and commits the removal, so it
 is reviewable and git-recoverable.
 """
 

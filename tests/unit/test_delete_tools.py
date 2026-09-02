@@ -1,5 +1,5 @@
 """Unit tests for the file-deletion tooling:
-  delete_file  — agent tool: validate + queue a repo path into _deletions.json
+  repo_remove_file  — agent tool: validate + queue a repo path into _deletions.json
   repo_delete  — deliver hook: git rm the queued paths + commit + clear manifest
 """
 
@@ -10,13 +10,13 @@ from unittest.mock import patch
 
 import pytest
 
-from aitelier.tools.delete_file.impl import (
-    delete_file, _validate_rel, _append_deletion,
+from aitelier.tools.repo_remove_file.impl import (
+    repo_remove_file, _validate_rel, _append_deletion,
 )
 from aitelier.tools.repo_delete.impl import repo_delete
 
 
-# ── delete_file: the path jail ──────────────────────────────────────────────
+# ── repo_remove_file: the path jail ──────────────────────────────────────────────
 
 class TestValidateRel:
     def test_normalizes_clean_paths(self):
@@ -46,7 +46,7 @@ class TestAppendDeletion:
         assert (nested / "_deletions.json").exists()
 
 
-# ── delete_file: end-to-end with mocked host singletons ─────────────────────
+# ── repo_remove_file: end-to-end with mocked host singletons ─────────────────────
 
 class _FakeWS:
     def __init__(self, root):
@@ -64,29 +64,29 @@ class _FakeSF:
         return self._run
 
 
-def test_delete_file_queues_into_resolved_draft(tmp_path):
+def test_repo_remove_file_queues_into_resolved_draft(tmp_path):
     ws = _FakeWS(tmp_path)
     sf = _FakeSF({"project_id": "proj1", "graph_name": "dpe_default_v2"})
     with patch("api.dependencies.get_skillflow", return_value=sf), \
          patch("api.dependencies.get_workspace_manager", return_value=ws):
-        r1 = delete_file("web/js/api.js", run_id="rid", step_id="t_impl")
-        r2 = delete_file("web/js/sse.js", run_id="rid", step_id="t_impl")
+        r1 = repo_remove_file("web/js/api.js", run_id="rid", step_id="t_impl")
+        r2 = repo_remove_file("web/js/sse.js", run_id="rid", step_id="t_impl")
     assert r1["queued_for_deletion"] == "web/js/api.js"
     assert r2["pending_deletions"] == 2
     manifest = ws._draft_dir("proj1", "t_impl", "dpe_default_v2") / "_deletions.json"
     assert json.loads(manifest.read_text()) == ["web/js/api.js", "web/js/sse.js"]
 
 
-def test_delete_file_rejects_unsafe_before_touching_host(tmp_path):
+def test_repo_remove_file_rejects_unsafe_before_touching_host(tmp_path):
     # Jail rejection must happen before any singleton access — no patches needed.
-    r = delete_file("../../etc/passwd", run_id="rid", step_id="t_impl")
+    r = repo_remove_file("../../etc/passwd", run_id="rid", step_id="t_impl")
     assert "error" in r and "queued_for_deletion" not in r
 
 
-def test_delete_file_errors_when_project_unresolved(tmp_path):
+def test_repo_remove_file_errors_when_project_unresolved(tmp_path):
     with patch("api.dependencies.get_skillflow", return_value=_FakeSF(None)), \
          patch("api.dependencies.get_workspace_manager", return_value=_FakeWS(tmp_path)):
-        r = delete_file("a.js", run_id="missing", step_id="t_impl")
+        r = repo_remove_file("a.js", run_id="missing", step_id="t_impl")
     assert "error" in r
 
 
@@ -204,3 +204,33 @@ def test_repo_delete_rolls_back_and_keeps_manifest_on_commit_failure(tmp_path):
     assert r2["committed"] is True
     assert not (repo / "web" / "old.js").exists()
     assert not (step / "_deletions.json").exists()
+
+
+# ── the reserved-prefix jail ────────────────────────────────────────────────
+# Why this test exists (measured 2026-08-31, jinyong-wuxia round):
+# skillflow's step-tool dispatcher (core.py, "Write/create/edit tools" block)
+# routes on the tool NAME PREFIX alone — any call whose name starts with
+# write_/create_/edit_/delete_ is handed to write_tools.execute_*, with the
+# text after the first underscore taken as an output SLOT, and it never falls
+# through to host-tool dispatch. A host tool named `delete_file` was therefore
+# unreachable from every agent step for its whole life: each call became
+# execute_delete(slot="file"), which found no such slot and answered
+#   "'file' is a single required output () — it cannot be deleted, only rewritten."
+# The empty parens are the tell — that is the missing pattern of a phantom slot.
+# Cost: zero `_deletions.json` manifests ever written since the tool was added,
+# and an implementer that burned 5 attempts and then wrote the WRONG root cause
+# ("the config declares this file as a required output") into a design record.
+# Host tools must stay off those four prefixes.
+RESERVED_TOOL_PREFIXES = ("write_", "create_", "edit_", "delete_")
+
+
+def test_no_host_tool_uses_a_skillflow_reserved_prefix():
+    import pathlib
+    tools_dir = pathlib.Path(__file__).resolve().parents[2] / "aitelier" / "tools"
+    offenders = [d.name for d in tools_dir.iterdir()
+                 if (d / "tool.yaml").exists()
+                 and d.name.startswith(RESERVED_TOOL_PREFIXES)]
+    assert offenders == [], (
+        f"host tools shadowed by skillflow's write-tool dispatcher: {offenders} — "
+        f"every call is routed to write_tools.execute_* and never reaches the impl"
+    )

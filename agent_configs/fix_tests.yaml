@@ -7,7 +7,7 @@ fix_worker:
   model: "flash"
   temperature: 0.2
   template: "fix_tests.md"
-  tools: ["list_tree", "test_write", "read_test_written", "delete_file"]
+  tools: ["list_tree", "test_write", "read_test_written", "repo_remove_file"]
   max_output_tokens: 32768
   max_tool_turns: 20
   native_tool_calling: true

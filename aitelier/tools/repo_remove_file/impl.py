@@ -1,4 +1,4 @@
-"""delete_file — queue a repo file for removal at this step's delivery time.
+"""repo_remove_file — queue a repo file for removal at this step's delivery time.
 
 Migration/refactor gap: the implementer can create and edit files but has no way
 to REMOVE the old ones its new files supersede, so it falls back to fragile
@@ -58,7 +58,7 @@ def _append_deletion(draft_dir: Path, rel: str) -> int:
     return len(queued)
 
 
-def delete_file(name: str, *, run_id: str = "", step_id: str = "",
+def repo_remove_file(name: str, *, run_id: str = "", step_id: str = "",
                 **kwargs) -> dict:
     """Queue a repo-relative file for deletion at this step's delivery time."""
     try:

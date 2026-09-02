@@ -6,6 +6,7 @@
 # Wakeup: submit_project/submit_task call wake_scheduler() to trigger
 # an immediate tick instead of waiting for the next interval.
 
+import logging
 import asyncio
 import json
 import threading

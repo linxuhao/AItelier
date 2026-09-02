@@ -18,6 +18,7 @@ whether to park BEFORE it claims a step, and pulling the whole gateway in for a
 string test is a cost paid on every tick.
 """
 
+import datetime
 import re
 
 # "It will reset at 2026-08-26 09:18:28 +0800 CST" — the offset is optional

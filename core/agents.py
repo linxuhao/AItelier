@@ -4,6 +4,7 @@
 # (model, template, tools list, thinking, etc.). No JSON schemas hardcoded.
 # v3: native tool calling support via DPEAgentNative.
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -61,6 +62,24 @@ class DPEAgentNative:
         )
 
 
+
+# Output caps a role has been observed to need, keyed by agent-config name.
+# Process-wide and deliberately not persisted: it is a within-run optimisation,
+# and a config edit must win on the next restart.
+_LEARNED_OUTPUT_CAPS: dict[str, int] = {}
+
+
+def remember_output_cap(agent_config_name: str, cap: int) -> None:
+    """Record that this role needed `cap`, so its next claim starts there.
+
+    Called from the escalation site. Monotonic: only ever raises.
+    """
+    if not agent_config_name or not cap:
+        return
+    if cap > _LEARNED_OUTPUT_CAPS.get(agent_config_name, 0):
+        _LEARNED_OUTPUT_CAPS[agent_config_name] = int(cap)
+
+
 class AgentFactory:
     """Creates DPEAgent / DPEAgentNative instances from skillflow's AgentRegistry.
 
@@ -102,6 +121,24 @@ class AgentFactory:
         thinking_effort = thinking.get("effort") if enable_thinking else None
         temperature = cfg_inner.get("temperature", 0.2)
         max_output_tokens = cfg_inner.get("max_output_tokens", 8192)
+        # THE LADDER IS CLIMBED ONCE, NOT ONCE PER CLAIM.
+        # A gateway is rebuilt for every claim, so a role whose reasoning
+        # reliably exceeds its configured cap re-discovers that the same way
+        # every time: one turn producing reasoning only, no tool call, then an
+        # escalation. Measured on jinyong-r3b 2026-09-02 — 18 such turns in one
+        # round, 9 of them `t_impl`, whose 24-turn budget was already the
+        # binding constraint (12 of 28 instances hit `turn_budget_exhausted`).
+        # Every starvation had reasoning_tokens ≈ the cap: the model was cut off
+        # mid-thought, not being wasteful. So carry the learned cap forward for
+        # the life of the process — never above the config value's own ceiling
+        # logic (escalate_output_cap clamps to OUTPUT_CAP_CEILING), never
+        # lowering a config that is already higher.
+        learned = _LEARNED_OUTPUT_CAPS.get(name, 0)
+        if learned > max_output_tokens:
+            logging.getLogger("aitelier.agents").info(
+                "role %r starting at learned output cap %d (config %d)",
+                name, learned, max_output_tokens)
+            max_output_tokens = learned
 
         gateway = AIGateway(
             model_name=model,

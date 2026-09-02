@@ -6,6 +6,7 @@
 #        DPE 在审查通过后回写 project/。
 #        重构为三路分发：content-only / read+content / full tool，基于 StepProfile。
 
+import logging
 import os
 import json
 import threading
@@ -2212,6 +2213,14 @@ class PipelineEngine:
                     detail = {**starved, "previous_cap": previous_cap,
                               "new_cap": escalated}
                     if escalated:
+                        # Carry it into the next claim of this role, so the
+                        # ladder is climbed once per process, not once per card.
+                        try:
+                            from core.agents import remember_output_cap
+                            remember_output_cap(agent_config_name, escalated)
+                        except Exception:  # noqa: BLE001 — telemetry must not break a turn
+                            logging.getLogger("aitelier.pipeline").warning(
+                                "could not remember output cap", exc_info=True)
                         self._emit("output_cap_escalated", {
                             **detail, "level": "warning",
                             "preview": (f"{role_label} turn {turn_count + 1}: raising "

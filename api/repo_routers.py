@@ -8,7 +8,7 @@ from api import _read_cache
 from core.db_manager import DBManager
 
 # Imported lazily to avoid circular imports at module level.
-# get_skillflow and compute_cache_stats_batch are used in _build_repo_groups.
+# get_skillflow, compute_cache_stats_batch and merge_stats are used in _build_repo_groups.
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
 
@@ -101,7 +101,7 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
 
     # Batch-fetch cache stats for all projects across all groups.
     from api.dependencies import get_skillflow
-    from api._cache_stats import compute_cache_stats_batch
+    from api._cache_stats import compute_cache_stats_batch, merge_stats
     sf = get_skillflow()
     pid_to_uuids: dict[str, list[str]] = {}
     for g in groups:
@@ -122,14 +122,7 @@ def _build_repo_groups(db: DBManager, repo_path: str | None = None) -> list[dict
                     s = batch_stats.get(uid)
                     if s is None:
                         continue
-                    if merged is None:
-                        merged = {"cache_hit_tokens": 0, "cache_miss_tokens": 0}
-                    merged["cache_hit_tokens"] += s["cache_hit_tokens"]
-                    merged["cache_miss_tokens"] += s["cache_miss_tokens"]
-                if merged is not None:
-                    total = merged["cache_hit_tokens"] + merged["cache_miss_tokens"]
-                    merged["total_tokens"] = total
-                    merged["hit_ratio"] = round(merged["cache_hit_tokens"] / total, 4) if total > 0 else None
+                    merged = merge_stats(merged, s)
                 p["cache_stats"] = merged  # None if no token data
     else:
         for g in groups:

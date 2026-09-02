@@ -364,7 +364,8 @@
           <span class="status-pill {st.status}">{t('pipeline.status.' + st.status)}</span>
           {#if (cacheByStep?.[openNode]?.total_tokens ?? 0) > 0}
             {@const cs = cacheByStep[openNode]}
-            <span class="cache-inline-badge">
+            <span class="cache-inline-badge"
+                  title={cs.hit_ratio != null ? formatTokens(cs.covered_tokens ?? 0) + ' covered by cache accounting' : 'provider reported no cache accounting'}>
               {formatTokens(cs.total_tokens)}{cs.hit_ratio != null
                 ? ' · ' + Math.round(cs.hit_ratio * 100) + '% cache' : ''}
             </span>

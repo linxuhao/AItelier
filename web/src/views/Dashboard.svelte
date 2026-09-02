@@ -350,13 +350,18 @@
                 {:else}
                   <span class="status-badge">—</span>
                 {/if}
-                {#if project.cache_stats && (project.cache_stats as Record<string, number>).hit_ratio != null}
+                {#if project.cache_stats && ((project.cache_stats as Record<string, number>).total_tokens ?? 0) > 0}
                   {@const cs = project.cache_stats as Record<string, number>}
+                  <!-- total_tokens is what was PROCESSED (every turn); hit_ratio is
+                       over the covered subset and is null when no provider reported
+                       cache fields. Show the volume whenever there is one; show the
+                       ratio only when it exists — never gate the badge on the ratio,
+                       or a silent-provider project vanishes from the board. -->
                   <span
                     class="cache-inline-badge {cacheBadgeClass(cs.hit_ratio)}"
-                    title={t('chat.cacheHitRatio')}
+                    title={cs.hit_ratio != null ? t('chat.cacheHitRatio') + ' (' + formatTokens(cs.covered_tokens ?? 0) + ' covered)' : t('chat.cacheHitRatio')}
                   >
-                    Cache {(cs.hit_ratio * 100).toFixed(1)}%{cs.total_tokens != null ? ' · ' + formatTokens(cs.total_tokens) : ''}
+                    {formatTokens(cs.total_tokens)}{cs.hit_ratio != null ? ' · ' + (cs.hit_ratio * 100).toFixed(1) + '% cache' : ''}
                   </span>
                 {/if}
               </td>

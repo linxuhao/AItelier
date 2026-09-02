@@ -13,7 +13,7 @@ from api.dependencies import (
 from api.auth import CurrentUser, get_optional_user, creator_email
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
-from api._cache_stats import compute_cache_stats_per_step, compute_cache_stats_batch
+from api._cache_stats import compute_cache_stats_per_step, compute_cache_stats_batch, merge_stats
 
 router = APIRouter(prefix="/api", tags=["Runs & Traces"])
 
@@ -138,14 +138,7 @@ def _list_all_runs_uncached(owner, db, registry):
                 s = batch_stats.get(uid)
                 if s is None:
                     continue
-                if merged is None:
-                    merged = dict(s)
-                else:
-                    merged["cache_hit_tokens"] += s["cache_hit_tokens"]
-                    merged["cache_miss_tokens"] += s["cache_miss_tokens"]
-                    total = merged["cache_hit_tokens"] + merged["cache_miss_tokens"]
-                    merged["total_tokens"] = total
-                    merged["hit_ratio"] = round(merged["cache_hit_tokens"] / total, 4) if total > 0 else None
+                merged = merge_stats(merged, s)
             r["cache_stats"] = merged  # None if no token data across any run
     else:
         for r in out:

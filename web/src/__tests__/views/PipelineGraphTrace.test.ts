@@ -152,14 +152,48 @@ describe('PipelineGraph — cache badge', () => {
     expect(container.querySelector('.cache-inline-badge')?.textContent).toContain('80% cache');
   });
 
-  it('hides the badge when the provider reported no cache accounting at all', async () => {
+  it('shows the volume without a ratio when the provider reported no cache accounting', async () => {
+    // total_tokens is what was PROCESSED; covered_tokens is what the cache
+    // accounting can speak for. A silent provider (Ollama Cloud) leaves the
+    // second at 0 and the ratio null — but the step still did the work.
+    // Measured 2026-09-02: step "3" had processed 12.8M tokens and showed
+    // nothing, because total_tokens then meant the covered subset.
     const { container } = await mountWithCache({
-      b: { cache_hit_tokens: 0, cache_miss_tokens: 0, hit_ratio: null, total_tokens: 0 },
+      b: { cache_hit_tokens: 0, cache_miss_tokens: 0, hit_ratio: null,
+           covered_tokens: 0, prompt_tokens: 12_800_000, completion_tokens: 400_000,
+           total_tokens: 13_200_000 },
+    });
+    await waitFor(() => {
+      expect(container.querySelector('.cache-inline-badge')).not.toBeNull();
+    });
+    const text = container.querySelector('.cache-inline-badge')?.textContent ?? '';
+    expect(text).toMatch(/13\.2M|13,200,000|13200000/);
+    expect(text).not.toContain('%');
+  });
+
+  it('still hides the badge when the step processed nothing', async () => {
+    const { container } = await mountWithCache({
+      b: { cache_hit_tokens: 0, cache_miss_tokens: 0, hit_ratio: null,
+           covered_tokens: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     });
     await waitFor(() => {
       expect(container.querySelectorAll('.node').length).toBe(3);
     });
-    // Not "0" — the step really processed tokens, they were just never classified.
     expect(container.querySelector('.cache-inline-badge')).toBeNull();
+  });
+
+  it('the ratio is over the covered subset, the volume is the whole', async () => {
+    const { container } = await mountWithCache({
+      b: { cache_hit_tokens: 8000, cache_miss_tokens: 2000, hit_ratio: 0.8,
+           covered_tokens: 10_000, prompt_tokens: 100_000, completion_tokens: 5_000,
+           total_tokens: 105_000 },
+    });
+    await waitFor(() => {
+      expect(container.querySelector('.cache-inline-badge')).not.toBeNull();
+    });
+    const text = container.querySelector('.cache-inline-badge')?.textContent ?? '';
+    expect(text).toContain('80% cache');
+    expect(text).toMatch(/105/);          // the whole, not the 10K subset
+    expect(text).not.toMatch(/\b10(\.0)?K\b/);
   });
 });

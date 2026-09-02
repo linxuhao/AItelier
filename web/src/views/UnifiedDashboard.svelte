@@ -683,14 +683,13 @@
                       {:else}
                         <span class="status-badge">—</span>
                       {/if}
-                      {#if project.cache_stats && (project.cache_stats as Record<string, number>).hit_ratio != null}
+                      {#if project.cache_stats && ((project.cache_stats as Record<string, number>).total_tokens ?? 0) > 0}
                         {@const cs = project.cache_stats as Record<string, number>}
                         <span
                           class="cache-inline-badge {cacheBadgeClass(cs.hit_ratio)}"
                           title={t('chat.cacheHitRatio')}
                         >
-                          Cache {(cs.hit_ratio * 100).toFixed(1)}%
-                          {cs.total_tokens != null ? ' · ' + formatTokens(cs.total_tokens) : ''}
+                          {formatTokens(cs.total_tokens)}{cs.hit_ratio != null ? ' · ' + (cs.hit_ratio * 100).toFixed(1) + '% cache' : ''}
                         </span>
                       {/if}
                     </td>
@@ -786,14 +785,13 @@
                       {:else}
                         <span class="status-badge">—</span>
                       {/if}
-                      {#if project.cache_stats && (project.cache_stats as Record<string, number>).hit_ratio != null}
+                      {#if project.cache_stats && ((project.cache_stats as Record<string, number>).total_tokens ?? 0) > 0}
                         {@const cs = project.cache_stats as Record<string, number>}
                         <span
                           class="cache-inline-badge {cacheBadgeClass(cs.hit_ratio)}"
                           title={t('chat.cacheHitRatio')}
                         >
-                          Cache {(cs.hit_ratio * 100).toFixed(1)}%
-                          {cs.total_tokens != null ? ' · ' + formatTokens(cs.total_tokens) : ''}
+                          {formatTokens(cs.total_tokens)}{cs.hit_ratio != null ? ' · ' + (cs.hit_ratio * 100).toFixed(1) + '% cache' : ''}
                         </span>
                       {/if}
                     </td>

@@ -14,16 +14,10 @@ import pytest
 from api._cache_stats import compute_cache_stats_batch
 
 
-def _mock_stats(hit: int, miss: int) -> Dict[str, Any]:
+def _mock_stats(hit: int, miss: int, prompt: int = 0, completion: int = 0) -> Dict[str, Any]:
     """Helper: build a per-step stats dict matching _build_stats_dict output."""
-    total = hit + miss
-    hit_ratio = round(hit / total, 4) if total > 0 else None
-    return {
-        "cache_hit_tokens": hit,
-        "cache_miss_tokens": miss,
-        "hit_ratio": hit_ratio,
-        "total_tokens": total,
-    }
+    from api._cache_stats import _build_stats_dict
+    return _build_stats_dict(hit, miss, prompt, completion)
 
 
 class TestComputeCacheStatsBatch:
@@ -210,7 +204,14 @@ class TestUnknownCacheRowsStayOutOfTheRatio:
         assert stats["cache_miss_tokens"] == 200
         # Counting the unmeasured 9000 as a miss would give 800/10000 = 0.08.
         assert stats["hit_ratio"] == 0.8
-        assert stats["total_tokens"] == 1000
+        # …but keeping it out of the RATIO must not keep it out of the TOTAL.
+        # This line used to read `total_tokens == 1000`, pinning the subset as
+        # the total; measured on jinyong-numbers 2026-09-02 that showed 3.4M
+        # for a run that had processed 78.8M.
+        assert stats["covered_tokens"] == 1000
+        assert stats["prompt_tokens"] == 10000
+        assert stats["completion_tokens"] == 110
+        assert stats["total_tokens"] == 10110
 
     def test_all_unknown_reports_undefined_not_zero(self):
         """No measured tokens at all -> undefined ratio, never a 0% claim."""
@@ -219,7 +220,9 @@ class TestUnknownCacheRowsStayOutOfTheRatio:
             ("2", self._usage(6000, 40)),
         ])
         assert stats["hit_ratio"] is None
-        assert stats["total_tokens"] == 0
+        assert stats["covered_tokens"] == 0
+        # Unknown cache accounting is not zero work: the tokens were processed.
+        assert stats["total_tokens"] == 10070
 
     def test_all_measured_zero_hit_reports_a_real_zero(self):
         """A provider that DID report cached_tokens=0 aggregates to a real 0.0,
@@ -229,4 +232,34 @@ class TestUnknownCacheRowsStayOutOfTheRatio:
                               prompt_tokens_details=SimpleNamespace(cached_tokens=0))),
         ])
         assert stats["hit_ratio"] == 0.0
-        assert stats["total_tokens"] == 4000
+        assert stats["covered_tokens"] == 4000
+        assert stats["total_tokens"] == 4030
+
+
+class TestMergeStatsIsTheOnlyMerge:
+    """run_routers and repo_routers each re-derived total/ratio inline; now
+    there is one merge and it must carry every field."""
+
+    def test_merge_from_none_copies(self):
+        from api._cache_stats import merge_stats, _build_stats_dict
+        s = _build_stats_dict(8, 2, 100, 10)
+        assert merge_stats(None, s) == s
+
+    def test_merge_sums_all_four_and_rederives(self):
+        from api._cache_stats import merge_stats, _build_stats_dict
+        a = _build_stats_dict(8, 2, 100, 10)
+        b = _build_stats_dict(0, 0, 9000, 60)   # a silent-provider step
+        m = merge_stats(a, b)
+        assert m["cache_hit_tokens"] == 8 and m["cache_miss_tokens"] == 2
+        assert m["covered_tokens"] == 10
+        assert m["hit_ratio"] == 0.8            # silent step stays out of the ratio
+        assert m["prompt_tokens"] == 9100
+        assert m["completion_tokens"] == 70
+        assert m["total_tokens"] == 9170        # …and inside the total
+
+    def test_the_routers_use_it(self):
+        import inspect, api.run_routers, api.repo_routers
+        for mod in (api.run_routers, api.repo_routers):
+            src = inspect.getsource(mod)
+            assert "merge_stats(" in src, mod.__name__
+            assert 'merged["cache_hit_tokens"] +=' not in src, mod.__name__

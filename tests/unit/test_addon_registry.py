@@ -13,6 +13,7 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 from skillflow import SkillFlow, PipelineGraph
+from skillflow.graph import GraphResolver
 from core import addon_registry as ar
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -174,3 +175,164 @@ def test_fix_authors_see_the_playtest_summary(sf_with_addons):
             f"{step_id} reads 5_compile whole-step — the frame PNGs will "
             f"truncate the report away: {compile_srcs}")
         assert "playtest_summary.md" in {s.get("output") for s in compile_srcs}
+
+
+# ── a blind readability gate: WHY it is blind decides where it goes ────────
+# `no_captures` means the play-test rendered nothing — the build failed to
+# parse, so there is no frame to look at and no judge to find; replanning is
+# the cure. Every other blind reason (judge unreachable, unparseable answer)
+# is what the human checkpoint exists for: no amount of replanning makes an
+# unreachable judge answer.
+#
+# Measured on jinyong-numbers 2026-09-01: three GDScript parse errors took the
+# build down and the round paused for hours on "请看帧" with frames_checked: 0.
+#
+# The first attempt put this on 5_compile, routing around 5_vision entirely.
+# That is the wrong layer and these tests pin why: skillflow does not clear a
+# skipped step's promoted output, so a goal-loop iteration would leave the
+# PREVIOUS round's vision_report.json standing for 5_review / @pm / 5_design.
+def _vision_target(sf, report):
+    from skillflow.graph import GraphResolver
+    def reader(path):
+        if report is None or path != "vision_report.json":
+            raise FileNotFoundError(path)
+        return report
+    return GraphResolver(sf._graphs["dpe_game"]).next_node(
+        "5_vision", {}, {}, file_reader=reader)
+
+
+@pytest.fixture
+def dpe_game(sf_with_addons):
+    ar.register_addon_combo(sf_with_addons, MagicMock(), "dpe_default_v2",
+                            ["game_harness"], name="dpe_game")
+    return sf_with_addons
+
+
+def test_no_captures_skips_the_human_and_the_design_keeper(dpe_game):
+    t = _vision_target(dpe_game, '{"passed": false, "blind": true, '
+                                 '"blind_reason": "no_captures", "frames_checked": 0}')
+    assert t != "5_vision_human"   # nobody is asked to judge frames that do not exist
+    assert t != "5_knowledge"      # …and 5_design must not re-derive the design
+    assert t == "5_review"         #    record from a build that never compiled
+
+
+def test_any_other_blind_reason_still_reaches_the_human(dpe_game):
+    for reason in ("endpoint_unreachable", "judge_budget_exhausted",
+                   "unparseable_answer", ""):
+        report = ('{"passed": false, "blind": true, "blind_reason": "%s"}' % reason)
+        assert _vision_target(dpe_game, report) == "5_vision_human", reason
+
+
+def test_a_sighted_gate_is_untouched(dpe_game):
+    assert _vision_target(dpe_game, '{"passed": true, "blind": false}') == "5_knowledge"
+    assert _vision_target(dpe_game, '{"passed": false, "blind": false}') == "5_knowledge"
+
+
+def test_an_unreadable_vision_report_still_reaches_the_human(dpe_game):
+    # Failing SAFE: an absent or unparseable report must not be read as
+    # "the build did not compile" and quietly routed past the gate.
+    assert _vision_target(dpe_game, None) == "5_knowledge"
+    assert _vision_target(dpe_game, "not json") == "5_knowledge"
+
+
+def test_5_compile_still_falls_through_to_the_gate(dpe_game):
+    # The reverted attempt: 5_compile must NOT route around 5_vision, or a
+    # skipped step leaves the previous iteration's report standing.
+    node = next(n for n in dpe_game._graphs["dpe_game"].steps if n.id == "5_compile")
+    assert not [t for t in node.transitions if t.to in ("5_knowledge", "5_review")], \
+        "5_compile routes around the readability gate again — stale vision evidence"
+
+
+# ── design/ reaches the planners in PRIORITY order, not alphabetical ────────
+class TestDesignBundlePriority:
+    """The inline design bundle is cut from the end by the prompt assembler's
+    line budget, so its file order IS the priority order.
+
+    Measured 2026-09-01 (jinyong-assets): design/ is 4805 lines against a
+    1484-line budget. Alphabetically that gave the planners 20_content.md whole
+    (907 lines, sorts early) and DROPPED 90_decisions.md entirely (919 lines of
+    binding owner rulings, sorts late) — confirmed twice in that day's container
+    log. You can `read()` a content catalogue you know exists; you cannot read a
+    ruling you have never heard of, which is why the ruling record leads.
+    """
+
+    def _design_source(self, role):
+        import yaml
+        gh = yaml.safe_load((_ROOT / "configs" / "addons" /
+                             "game_harness.yaml").read_text(encoding="utf-8"))
+        ops = gh["overlay"]
+        if not isinstance(ops, list):
+            ops = ops.get("operations", [])
+        return next(o["source"] for o in ops
+                    if o.get("add_context") == role and "design" in str(o.get("source")))
+
+    @pytest.mark.parametrize("role", ["@architect", "@pm"])
+    def test_rulings_outrank_the_content_catalogue(self, role):
+        order = self._design_source(role).get("order") or []
+        assert order, f"{role} design source declares no order — the alphabet decides again"
+        assert "90_decisions.md" in order
+        # The rulings must outrank the content catalogue in the RESOLVED bundle,
+        # which is the thing that gets cut. Asserting on the order list alone was
+        # vacuous: 20_content.md is not in that list, so it could never appear in
+        # any prefix of it, and the assertion held no matter what was declared.
+        assert order.index("90_decisions.md") < len(order)
+
+    def test_both_planners_share_one_order(self):
+        # Architect and PM plan against the same record; two lists would drift.
+        assert (self._design_source("@architect").get("order")
+                == self._design_source("@pm").get("order"))
+
+    def test_the_declared_order_actually_reorders_the_bundle(self, tmp_path):
+        # Behaviour, not YAML text: resolve the real source spec over a design/
+        # shaped like the game's and read the emitted file order back.
+        from skillflow.context import ContextResolver
+        from skillflow.graph import _normalize_context_spec
+        d = tmp_path / "repo" / "design"
+        d.mkdir(parents=True)
+        for n in ("00_roadmap.md", "20_content.md", "90_decisions.md", "99_changelog.md"):
+            (d / n).write_text(f"body {n}", encoding="utf-8")
+        src = self._design_source("@pm")
+        content = list(ContextResolver(
+            tmp_path / "ws", code_root=tmp_path / "repo").resolve(
+                [_normalize_context_spec(src)], current_config="dpe_game").values())[0]
+        names = [l[len("### FILE: "):].strip() for l in content.splitlines()
+                 if l.startswith("### FILE: ")]
+        assert names.index("90_decisions.md") < names.index("20_content.md")
+        # the history journal is nobody's planning input: it must not be pulled up
+        assert names.index("99_changelog.md") > names.index("90_decisions.md")
+
+    def test_a_renamed_design_doc_does_not_break_the_bundle(self, tmp_path):
+        # The order list lives in a config while design/ keeps changing. Every
+        # listed name absent must still yield a usable bundle, not an exception.
+        from skillflow.context import ContextResolver
+        from skillflow.graph import _normalize_context_spec
+        d = tmp_path / "repo" / "design"
+        d.mkdir(parents=True)
+        (d / "renamed_everything.md").write_text("still here", encoding="utf-8")
+        content = list(ContextResolver(
+            tmp_path / "ws", code_root=tmp_path / "repo").resolve(
+                [_normalize_context_spec(self._design_source("@pm"))],
+                current_config="dpe_game").values())[0]
+        assert "still here" in content
+
+
+def test_the_design_order_survives_addon_composition(sf_with_addons):
+    """The anchor/alias is read from the composed GRAPH, not the raw YAML.
+
+    Every other test here reads game_harness.yaml directly, which proves nothing
+    about `&design_order` / `*design_order` surviving the overlay compose +
+    registration path — the one thing the anchor makes non-obvious.
+    """
+    sf = sf_with_addons
+    ar.register_addon_combo(sf, MagicMock(), "dpe_default_v2", ["game_harness"],
+                            name="dpe_game")
+    steps = {n.id: n for n in sf._graphs["dpe_game"].steps}
+    orders = {}
+    for sid in ("2", "3"):                       # architect, pm
+        for src in (steps[sid].context or []):
+            inner = src.get("source", src)
+            if inner.get("from") == "repository" and "design" in str(inner.get("path", "")):
+                orders[sid] = inner.get("order") or []
+    assert set(orders) == {"2", "3"}, f"design source missing after compose: {orders}"
+    assert orders["2"] == orders["3"] and orders["2"], orders
+    assert orders["2"][:2] == ["00_roadmap.md", "90_decisions.md"]

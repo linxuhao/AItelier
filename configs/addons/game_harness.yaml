@@ -68,7 +68,10 @@ overlay:
           out_dir: "$STEP_DIR"
         # No transitions: a step LIST wires sequentially, so this falls through
         # to 5_vision below, and 5_vision inherits 5_test's original target.
-
+        # A red compile is NOT routed around the readability gate — see the
+        # blind-branch discrimination on 5_vision, which is the right layer:
+        # godot_vision's own report is fresh and honest either way, and skipping
+        # the step left the PREVIOUS iteration's vision_report.json standing.
       # 2b. THE READABILITY GATE. 5_compile asserts STATE; this asserts that
       #     a player can SEE the state. jinyong-turn, 2026-08-22: scenario
       #     `two_phase_skill_unlock_and_hp_gate` passed 20/20 asserting
@@ -133,7 +136,38 @@ overlay:
         #     reject   "I looked. Here is what is wrong."  → back to the PM
         # There is deliberately no "proceed without looking": a gate that can
         # be waved through is the precise defect this gate exists to catch.
+        #
+        # ── AND `blind` HAS TWO CAUSES, WHICH ALSO DIVERGE ────────────────
+        # `no_captures` means the PLAY-TEST RENDERED NOTHING — in practice the
+        # build failed to parse, so godot_compile skipped the play-test and the
+        # report carries frames: 0. There is no judge to find and no frame to
+        # look at; the cure is replanning, which is 5_review's job.
+        # Live, jinyong-numbers 2026-09-01: three GDScript parse errors in
+        # tests/ took the build down and the round then paused for hours on
+        # "请看帧,按六问裁决" with frames_checked: 0 — a person asked to answer
+        # six questions about frames that do not exist.
+        #
+        # Every OTHER blind reason (judge unreachable, unparseable answer,
+        # batch over budget) is the case the checkpoint below was built for.
+        #
+        # This discrimination lives HERE and not on 5_compile. Routing around
+        # 5_vision was tried first and is wrong: skillflow does not clear a
+        # skipped step's promoted output, so on a goal-loop iteration
+        # (5_review → "3" → rebuild) the PREVIOUS round's vision_report.json
+        # would still be standing, and 5_review / @pm / 5_design would read
+        # `passed: true, frames_checked: 12` next to a red compile report with
+        # nothing marking it stale. Letting the step RUN keeps the report fresh
+        # and honest; only where it goes afterwards changes.
+        #
+        # It goes to 5_review, not to 5_knowledge: 5_design sits in between and
+        # rewrites the durable design record, which must not be re-derived from
+        # a build that never compiled.
         transitions:
+          - to: "5_review"
+            match:
+              from_file: "vision_report.json"
+              field: "blind_reason"
+              value: "no_captures"
           - to: "5_vision_human"
             match: { from_file: "vision_report.json", field: "blind", value: true }
           - to: "5_knowledge"
@@ -292,10 +326,50 @@ overlay:
   #      * the architect and PM get it INLINE in their prompt — a contract they
   #        cannot forget to read, not a tool they might not call,
   #      * 5_design edits it after the run passes.
+  #
+  #    `order:` decides WHO SURVIVES. The bundle is cut from the end by the
+  #    prompt assembler's line budget, so the file order is the priority order,
+  #    and it used to be the alphabet. Measured 2026-09-01: design/ is 4805
+  #    lines against a 1484-line budget, so 20_content.md (907 lines) arrived
+  #    whole because it sorts early, while 90_decisions.md (919 lines, every
+  #    binding owner ruling) and 40_progression.md (743) were DROPPED WHOLE
+  #    because they sort late — the latter while a progression round was being
+  #    planned. Confirmed in that day's container log, twice.
+  #
+  #    The order below is what a PLANNER needs, not what a reader browses:
+  #      * roadmap — the order of work, and where we are in it
+  #      * decisions — bindings a plan may not contradict; you cannot `read()`
+  #        a ruling you do not know exists, which is exactly why it goes first
+  #        while the content catalogue does not
+  #      * ux_backlog — the rows this round is allowed to close
+  #      * overview / systems — the shape of the thing
+  #    Everything unlisted follows in the usual sorted order and is reached with
+  #    `read()`; the manifest names it either way. 99_changelog.md is deliberately
+  #    last-by-omission: it is a history journal (141KB, +4KB a round), the one
+  #    file nobody plans FROM.
+  #
+  #    A name here that no longer exists is ignored, not an error (skillflow
+  #    1.5.57) — this list lives in a config while design/ keeps changing, and a
+  #    renamed doc must never fail a round. It is logged.
   - add_context: "@architect"
-    source: { from: "repository", path: "design/", mode: "inline" }
+    source:
+      from: "repository"
+      path: "design/"
+      mode: "inline"
+      order: &design_order
+        - "00_roadmap.md"
+        - "90_decisions.md"
+        - "40_ux_backlog.md"
+        - "00_overview.md"
+        - "10_systems.md"
+        - "40_progression.md"
+        - "30_presentation.md"
   - add_context: "@pm"
-    source: { from: "repository", path: "design/", mode: "inline" }
+    source:
+      from: "repository"
+      path: "design/"
+      mode: "inline"
+      order: *design_order
 
   # 6. The design keeper. Runs AFTER the gates and BEFORE the final review.
   #

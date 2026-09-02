@@ -287,7 +287,10 @@ steps:
       # test failures. Without 5_review the PM can't see WHAT failed, so it can't
       # author a targeted fix-task — it just re-lists completed tasks (skipped).
       - source: { step: "3" }
-      - source: { step: "5" }
+      # Only the verdict file: step 5 also promotes the project README, which
+      # the verifier appends a round section to every round (119 KB / 1712
+      # lines on jinyong-r3b) — half the PM prompt was that README.
+      - source: { step: "5", file: "final/verify_report.json" }
       - source: { step: "5_review" }
       - source: { step: "5_test" }
       # What this pipeline can grant a task. Without it the PM either declares

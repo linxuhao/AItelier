@@ -285,6 +285,12 @@ stable, so the log greps cleanly:
 | `no_claim` | nothing claimable at `node` |
 | `executed` | step ran; carries step id, confirmed, elapsed |
 | `reclaimed` | the 30s supervisor reaped a silent claim back to pending |
+| `no_run` | `_get_or_create_skillflow_run` returned None — no run to advance |
+| `awaiting_brief` | held deliberately: `meta_state=drafting`, or a cross-config input is still missing (carries which) |
+| `quota_hold` | a quota wall is being served out; not claiming, because claiming a step we cannot execute is what spends the retry budget |
+| `quota_exhausted` | the step hit the wall mid-execution; parked and released, exactly one retry spent |
+| `claim_terminal` | `RequiredContextMissing` — not retryable, the run was failed |
+| `wedged` | `advance_run` had nothing to say while the run is still RUNNING. NOT an ending and NOT a stall by itself: the tick falls through to the claim phase, so a claimable step un-wedges the run on the same tick and one lone `wedged` line is self-healing. It is only a symptom when a following `no_claim`/`claim_failed` repeats with it |
 
 ```bash
 grep 'outcome=claim_failed' ~/.AItelier/logs/scheduler_ticks.log   # why a run is stuck

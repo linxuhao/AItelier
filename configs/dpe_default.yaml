@@ -332,6 +332,29 @@ steps:
       # role_model_known, one namespace over.
       - files: ["tasks/*.json"]
         tool: "capability_declarations_known"
+      # A card's SHAPE is a contract with the implementer, not a suggestion.
+      # `artifact_requirement` is the field task_implementer.md tells the agent
+      # to take its write paths from; step3_pm.md marks it 必填. Yet nothing
+      # checked it: on jinyong-numbers 2026-09-02 (round 3 of the PM re-plan,
+      # squeezed by its turn budget) the PM dropped it from all nine cards and
+      # the step validated clean — the only card checks were "manifest exists",
+      # "every manifest name has a file" and "capabilities are known". The two
+      # cards that would actually run were about to reach t_impl with no
+      # declared target files. `id` is deliberately NOT required here: the
+      # filename is the identity (scheduler fix 2f3656f). `interface_contract`
+      # and `capabilities` stay optional — a pure-test card can lack the first,
+      # and over-gating manufactures its own defects.
+      - files: ["tasks/*.json"]
+        tool: "json_schema"
+        inline_schema:
+          type: object
+          required: [description, detailed_requirements, artifact_requirement, dependencies, task_type]
+          properties:
+            description: { type: string, minLength: 1 }
+            detailed_requirements: { type: string, minLength: 1 }
+            artifact_requirement: { type: string, minLength: 1 }
+            dependencies: { type: array, items: { type: string } }
+            task_type: { type: string, minLength: 1 }
     # SF-4: removed json_schema validation — LLM-generated JSON format varies;
     # strict schema causes infinite retry loops when validation fails on each
     # attempt. The two checks above are shape-free: one file must exist, and the

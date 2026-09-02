@@ -947,7 +947,8 @@ class PromptAssembler:
 
         ONE entry is not always ONE file. `{from: repository, path: "design/"}`
         concatenates a whole directory into a single entry, each file behind its
-        own "### FILE: <relpath>" header, in ALPHABETICAL order — so which files
+        own "### FILE: <relpath>" header, in the SOURCE'S order — sorted by name unless the source declares
+        `order:` (skillflow >=1.5.58), which puts the named files first — so which files
         survive a cut is decided by their names. Live, 2026-08-26: the game's
         design/ bundle ran 1862 lines against a 1500 budget and the tail —
         40_ux_backlog.md, 90_decisions.md, 99_changelog.md, README.md — was

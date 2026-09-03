@@ -148,6 +148,25 @@ services:
   # (Godot 4 headless behind a tiny HTTP service). Reached only by game projects
   # at http://godot-builder:8080. ~250MB image (no editor, no account, no
   # license) — built lazily; skipped for non-game deployments that never start it.
+  # zvec-grep sidecar — semantic + lexical code search for the agents
+  # (aitelier/tools/semantic_search). It shares aitelier's network namespace:
+  # zg only listens on loopback, so 127.0.0.1:7999 inside aitelier is this
+  # daemon and nothing outside the pair can reach it. Index a repo once:
+  #   docker exec aitelier-zg zg index <abs repo path> --embedding local/potion-code-16m-v2
+  zvec-grep:
+    build:
+      context: .
+      dockerfile: docker/zvec-grep.Dockerfile
+    image: aitelier-zg:latest
+    container_name: aitelier-zg
+    user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
+    network_mode: "service:aitelier"
+    depends_on:
+      - aitelier
+    volumes:
+      - ${HOME}/.AItelier:${HOME}/.AItelier
+    restart: unless-stopped
+
   godot-builder:
     build:
       context: .

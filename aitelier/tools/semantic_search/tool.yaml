@@ -1,0 +1,27 @@
+name: semantic_search
+description: >
+  Find code or docs by MEANING when you do not know the exact words or the
+  file: hybrid semantic + lexical search over the indexed repository (zvec-grep
+  sidecar). Returns ranked, source-linked snippets grouped by file with line
+  numbers — at most `limit` items (default 8, max 50), NOT an exhaustive
+  occurrence list. Use it to locate the region, then `read` that range.
+  For an exact identifier, quotation, regex or every occurrence, use `search`.
+  Errors (index missing, sidecar down) come back as {error, hint}; fall back
+  to `search`/`read` — never treat an error as "nothing exists".
+parameters:
+  query:
+    type: string
+    description: "Natural-language or mixed query (what the code does, a concept, a relationship)."
+    required: true
+  limit:
+    type: integer
+    description: "Max ranked items (default 8, max 50)."
+    required: false
+  globs:
+    type: array
+    description: "Optional path rules, e.g. [\"scripts/**\", \"!scripts/generated/**\"]."
+    required: false
+  fts:
+    type: array
+    description: "Optional exact identifiers to anchor the ranking (ranked, not exhaustive)."
+    required: false

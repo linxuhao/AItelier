@@ -767,6 +767,9 @@ steps:
     agent_config: "task_implementer_reviewer"
     context:
       - source: { from: "repository", mode: "tool" }
+      # What the card just delivered (commits, files, +/- lines, protected
+      # paths) and the review depth it implies — standard or deep, never skip.
+      - source: { tool: "closeout_gate" }
       # KEEP THIS BARE. `output:` here is not an improvement — it is a
       # REGRESSION, and the earlier version of this comment argued for it from
       # the wrong artifact. Both halves, so neither gets re-"fixed":

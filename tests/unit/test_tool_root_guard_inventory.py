@@ -44,6 +44,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[2] / "aitelier" / "tools"
 # resolves to None. It never reaches the process CWD.
 GUARDED = {
     "apply_state",              # raises unless BOTH roots are absolute
+    "closeout_gate",            # refuses a non-absolute project_root (depth: deep)
     "emit_project_artifacts",   # refuses a non-absolute workspace_root
     "gen_audio_asset",          # _target_root: `if cand and Path(cand).is_dir()`
     "gen_image_asset",          # same

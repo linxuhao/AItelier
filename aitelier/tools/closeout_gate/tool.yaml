@@ -1,0 +1,13 @@
+name: closeout_gate
+description: >
+  Context source for t_impl_review: the FACTS of what the implementer just
+  delivered (commits at HEAD, files with +/- lines, protected paths touched)
+  and the review DEPTH they imply — standard or deep. Never "skip": a review
+  over nothing is the pass-on-absence defect. Borrowed from LumioAgentSpec's
+  closeout-gate (2026-09-03), which looks at the diff to decide how deep to
+  review; here the reviewer always reviews, the gate decides how hard.
+parameters:
+  project_root:
+    type: string
+    description: "Absolute path of the delivered code repository (injected)."
+    required: false

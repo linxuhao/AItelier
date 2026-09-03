@@ -282,6 +282,13 @@ steps:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "1" }
       - source: { step: "2" }
+      # The owner's checkpoint notes on steps 1 and 2. Without these, an
+      # "approve with an addition" at the architecture checkpoint reached
+      # nobody: feedback_of is read only by the step that re-runs, and an
+      # approved step does not re-run (R5, 2026-09-03: owner card 0b was
+      # spelled out at step 2 and absent from the breakdown).
+      - source: { feedback_of: "1" }
+      - source: { feedback_of: "2" }
       - source: { step: "3_review" }
       # 同 step 2 那条:2_review 通过时(实测 15/15)它的建议没有任何读者。架构评审
       # 对 PM 说的话只有走这一条才到得了 PM。

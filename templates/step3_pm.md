@@ -51,6 +51,9 @@
 ## 输入
 来自前序步骤的所有上下文（目标、SOTA、架构）已在上述任务卡片中提供。
 
+## 上游 checkpoint 的 owner 注记
+上下文里若有 Step 1 / Step 2 的 checkpoint 反馈(owner 在批准或驳回时写的),其中每一条「加卡 / 加要求 / 裁决」都是**必须**落进拆解的:加的卡按 owner 给的位置排进 execution_order,裁决写进相关卡的 `detailed_requirements`。漏掉一条 = 审查判红。
+
 ## 任务卡片字段
 
 | 字段 | 是否必需 | 描述 |

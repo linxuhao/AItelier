@@ -48,3 +48,33 @@ def test_a_real_mismatch_still_fails(plan):
     r = tasks_manifest_complete(["tasks_manifest.json"], workspace_root=str(plan))
     assert r["passed"] is False
     assert "b" in r["missing"]
+
+
+# ── stale ids are caught HERE, before the owner's step-3 checkpoint ───────────
+
+def test_a_manifest_of_only_dispatched_ids_fails_validation(plan, monkeypatch):
+    import aitelier.tools.tasks_manifest_complete.impl as impl
+    monkeypatch.setattr(impl, "_project_id_of", lambda root: "p")
+    monkeypatch.setattr("aitelier.tools.task_budget_check.impl._completed_loop_items",
+                        lambda pid: {"a", "b"})
+    r = tasks_manifest_complete(workspace_root=str(plan))
+    assert r["passed"] is False
+    assert r["stale_ids"] == ["a", "b"]
+    assert "NEW id" in r["error"]
+
+
+def test_a_manifest_with_one_new_id_still_passes(plan, monkeypatch):
+    import aitelier.tools.tasks_manifest_complete.impl as impl
+    monkeypatch.setattr(impl, "_project_id_of", lambda root: "p")
+    monkeypatch.setattr("aitelier.tools.task_budget_check.impl._completed_loop_items",
+                        lambda pid: {"a"})
+    assert tasks_manifest_complete(workspace_root=str(plan))["passed"] is True
+
+
+def test_project_id_is_read_from_the_workspace_layout(tmp_path, monkeypatch):
+    from aitelier.tools.tasks_manifest_complete.impl import _project_id_of
+    monkeypatch.setattr("core.datadir.workspaces_dir", lambda: tmp_path / "ws")
+    staging = tmp_path / "ws" / "jinyong-r3b" / "dpe_game" / "3.tmp"
+    staging.mkdir(parents=True)
+    assert _project_id_of(staging) == "jinyong-r3b"
+    assert _project_id_of(tmp_path / "elsewhere") == ""

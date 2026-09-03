@@ -424,6 +424,14 @@ def cmd_await(args):
                 continue
             if ev.get("project_id") != pid:
                 continue
+            # The stream REPLAYS recent events on connect. A project that just
+            # finished its meta_conversation run replays that run's
+            # `run_completed`, and a watcher armed for the dpe_game run that
+            # started seconds later exits on it (R4 and R5, 2026-09-03). With
+            # `--run`, only that run's events count; events that carry no
+            # run_id are kept, so an older server still works.
+            if args.run and ev.get("run_id") and ev.get("run_id") != args.run:
+                continue
             kind = ev.get("type", "")
             if kind not in want:
                 continue
@@ -631,6 +639,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("project_id")
     s.add_argument("--url", default="http://localhost:4444", help="API base URL")
     s.add_argument("--timeout", type=int, default=3600, help="Give up after N seconds (exit 2)")
+    s.add_argument("--run", default="", help="only react to events of this run_id "
+                   "(the stream replays a finished sibling run's events on connect)")
     s.add_argument("--follow", action="store_true",
                    help="Keep watching past each checkpoint; exit only on a "
                         "terminal state (one line per event)")

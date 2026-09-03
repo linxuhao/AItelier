@@ -7,7 +7,8 @@ description: >
   occurrence list. Use it to locate the region, then `read` that range.
   For an exact identifier, quotation, regex or every occurrence, use `search`.
   Errors (index missing, sidecar down) come back as {error, hint}; fall back
-  to `search`/`read` — never treat an error as "nothing exists".
+  to `search`/`read` — never treat an error as "nothing exists". A new
+  project's index is built automatically within about a minute of creation.
 parameters:
   query:
     type: string

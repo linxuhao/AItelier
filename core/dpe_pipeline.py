@@ -51,6 +51,20 @@ class MaxRetriesExceeded(Exception):
 # the nothing-written cliff.
 _LOW_TURN_BUDGET = 3
 
+# Argument names an agent may never set on a tool call: the host injects them.
+_AGENT_RESERVED_ARGS = ("project_root", "workspace_root", "step_dir", "out_dir")
+
+
+def _strip_agent_roots(params) -> dict:
+    """Drop host-owned root arguments from an agent-supplied tool call."""
+    if not isinstance(params, dict):
+        return {}
+    dropped = [k for k in params if k in _AGENT_RESERVED_ARGS]
+    if dropped:
+        logging.getLogger("aitelier.dpe").warning(
+            "tool call supplied host-owned argument(s) %s — ignored", dropped)
+    return {k: v for k, v in params.items() if k not in _AGENT_RESERVED_ARGS}
+
 class PipelineEngine:
     def __init__(self, log_callback=None,
                  repo_type: str = "new", event_bus=None, *, registry=None,
@@ -452,8 +466,14 @@ class PipelineEngine:
             return {"status": "granted", "turns": action.get("params", {}).get("turns", 3)}
         from api.dependencies import get_skillflow
         sf = get_skillflow()
+        # The roots are the HOST's to inject, never the agent's to choose.
+        # skillflow's call site does `kwargs.setdefault("project_root", …)`, so
+        # an agent that passes `project_root` in its arguments would win over
+        # the injected one and point a root-resolving tool (semantic_search,
+        # run_tests, …) at any path the container can see. Strip them here.
+        params = _strip_agent_roots(action.get("params", {}))
         return sf.execute_tool(
-            tool_name, action.get("params", {}),
+            tool_name, params,
             run_id=getattr(self, '_run_id', ''),
             step_id=self._current_step or '',
             step_instance_id=getattr(self, '_step_instance_id', None),

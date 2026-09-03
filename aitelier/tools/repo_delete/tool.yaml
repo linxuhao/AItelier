@@ -3,10 +3,17 @@ description: >
   Apply a step's queued file deletions to the project repo. Reads the
   _deletions.json manifest from the step dir (written by the repo_remove_file tool),
   git-rm's each listed repo-relative path from the project repo, commits, and
-  clears the manifest. No-op when the manifest is absent or empty. Intended as an
-  after_deliver lifecycle hook running right after repo_apply.
+  clears the manifest. No-op ({deleted:[], committed:false}) when source_dir is
+  empty or the manifest is absent/empty. A queued path the step ALSO delivered
+  (present in source_dir) is skipped — a written file wins over a queued
+  deletion. Unsafe, escaping or untracked paths are skipped with a reason. The
+  manifest is cleared after a successful commit (or when nothing was removed);
+  on commit failure the staged removals are rolled back, the manifest is KEPT
+  for retry and the result is passed:false. Result: {deleted, committed,
+  skipped?[{path, reason}], error?, passed?}. Intended as an after_deliver
+  lifecycle hook running right after repo_apply.
 parameters:
   source_dir:
     type: string
-    description: "Step directory holding the _deletions.json manifest (e.g. $STEP_DIR)."
-    required: true
+    description: "Step directory holding the _deletions.json manifest (e.g. $STEP_DIR). Empty = no-op."
+    required: false

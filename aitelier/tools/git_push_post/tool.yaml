@@ -8,12 +8,20 @@ description: >
   over a missing remote would be the tail wagging the dog. A real push FAILURE
   is reported loudly in the result and the trace, but still lets the run finish
   — the work is already committed locally, and failing the run would not undo
-  a single commit, it would only hide that the round passed.
+  a single commit, it would only hide that the round passed. The repo is
+  resolved through the host's code-path resolver keyed on the injected
+  `project_id` first (right for repo_type: existing); `project_root` is the
+  fallback. Every git call has a 120 s timeout, shaped as a failed call
+  (skip/error in the result, never a raised exception).
 parameters:
   project_root:
     type: string
-    description: "The git repo to push (pass $PROJECT_ROOT)."
-    required: true
+    description: "Fallback git repo to push (pass $PROJECT_ROOT); used only when the host resolver has no path for project_id."
+    required: false
+  project_id:
+    type: string
+    description: "Auto-injected; keys the host's code-path resolver."
+    required: false
   remote:
     type: string
     description: "Remote name. Defaults to origin."

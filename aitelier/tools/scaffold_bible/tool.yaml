@@ -1,11 +1,16 @@
 name: scaffold_bible
 description: >
-  Terminal tool of the novel_init graph. Reads the design step's approved
-  bible_seed.json and deterministically scaffolds the novel state tree
-  (novel/bible/, plans/, chapters/, state/), then freezes a genesis snapshot
-  of the bible for later reconcile replays. Pure transform, no LLM — the
-  approved design survives un-summarized. Fails loud if the seed is missing
-  or invalid (it is the sole producer of the novel state).
+  Terminal tool of the novel_init graph. Reads the bible files the design step
+  already wrote INTO THE CODE REPO — novel/bible/{overview.md, compass.md,
+  characters.yaml, threads.yaml, arcs.yaml} — and normalizes them into the
+  runtime layout: splits characters.yaml into per-character files (then DELETES
+  characters.yaml), fills mechanical defaults, creates chapters/, rebuilds
+  state/index.yaml, git-commits the tree and tags it `novel-genesis` as the
+  reconcile baseline. Pure transform, no LLM. Fails loud (raises) when
+  overview.md / compass.md / characters.yaml are missing or invalid, when an arc
+  has no plot nodes, or when state/index.yaml already exists (runs once per
+  novel). Returns {scaffolded, characters, threads, arcs, committed,
+  genesis_tagged}. There is no bible_seed.json input.
 parameters:
   project_root:
     type: string
@@ -13,9 +18,9 @@ parameters:
     required: false
   workspace_root:
     type: string
-    description: "Skillflow workspace root (auto-injected); holds the design step output."
+    description: "Skillflow workspace root (auto-injected); fallback root when project_root is empty (tests)."
     required: false
   seed_step_dir:
     type: string
-    description: "Dir containing bible_seed.json (defaults to novel_init/design under the workspace)"
+    description: "IGNORED. Kept only so callers that still pass it do not break; the bible is read from the repo, never from a seed file."
     required: false

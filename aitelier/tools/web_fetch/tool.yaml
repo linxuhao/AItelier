@@ -1,9 +1,9 @@
 name: web_fetch
 description: >
   Fetch content from a URL and extract text. Long pages are returned in
-  windows: a truncated result names the next offset — call again with that
-  offset to continue reading. A #fragment in the URL positions the first
-  window at that section.
+  windows of 10000 characters (default; WEB_FETCH_MAX_CHARS): a truncated
+  result names the next offset — call again with that offset to continue
+  reading. A #fragment in the URL positions the first window at that section.
 parameters:
   url:
     type: string

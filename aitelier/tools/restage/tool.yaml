@@ -8,7 +8,9 @@ description: >
   Generic, deterministic, no LLM. Used by novel_init's design_gate to show the
   Red-approved bible (from the repo — the cumulative artifact) + the reviewer
   verdict (from its step dir) for final human sign-off. Reusable by any
-  "maker → reviewer → human checkpoint" ordering (e.g. DPE architect).
+  "maker → reviewer → human checkpoint" ordering (e.g. DPE architect). At least
+  one of from_repo / from_steps / from_step is required; raises when none is
+  given and when nothing was copied.
 parameters:
   from_repo:
     type: array

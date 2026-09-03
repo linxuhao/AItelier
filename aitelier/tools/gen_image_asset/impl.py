@@ -19,8 +19,9 @@ is asked whether the image depicts the requested subject and its verdict rides
 back in `warning` — semantics are a question for a vision model, not for an
 alpha histogram.
 
-Writes into the repo working tree like scaffold/knowledge_sync; a later
-repo_apply commits it.
+Writes into the step's STAGING dir when there is one (see `_target_root`), and
+reaches the repo through promotion + repo_apply; only a tool node with no
+staging dir writes straight into the working tree like scaffold/knowledge_sync.
 """
 
 from pathlib import Path

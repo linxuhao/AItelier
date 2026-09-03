@@ -18,3 +18,7 @@ parameters:
     type: string
     description: "Root for file resolution (injected by StepValidator: the step's staging dir)"
     required: false
+  timeout:
+    type: integer
+    description: "Seconds allowed per builder request (default 180)."
+    required: false

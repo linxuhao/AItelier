@@ -2,9 +2,12 @@ name: scaffold
 description: >
   Copy an addon's static asset files (configs/addons/<addon>/assets/) into the
   project repo working tree — the mechanical channel for guaranteed deliverables
-  like a Godot .gitignore, independent of what the LLM writes. Never clobbers an
-  existing file. Convention: an asset named `dot_<x>` lands as `.<x>`. Always
-  succeeds as a step; a later repo_apply commits what it wrote.
+  like a Godot .gitignore, independent of what the LLM writes. An existing file
+  is never overwritten: an existing `*ignore` file is MERGED in place (missing
+  non-comment lines appended), any other existing file is skipped; binary
+  (non-UTF-8) assets are skipped. Convention: an asset named `dot_<x>` lands as
+  `.<x>`. Always succeeds as a step; a later repo_apply commits what it wrote.
+  Returns {written, merged, skipped, addon}.
 parameters:
   addon:
     type: string

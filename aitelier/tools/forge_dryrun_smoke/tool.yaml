@@ -1,11 +1,15 @@
 name: forge_dryrun_smoke
 description: >
   Gate (c) of pipeline_forge validation. Boots a generated skillflow graph once in
-  an ephemeral in-memory engine with a stub (no-LLM) StepRunner: real tool/gate/loop
-  nodes execute and transitions evaluate, while agent steps return canned verdicts.
-  Asserts the graph loads, every tool/role constructs (no ImportError), a path
-  reaches the loop-external `done` terminal, and it terminates within the step
-  bound. Returns {passed, status, steps_run, unresolved_tools, trail, error_reason,
+  an ephemeral in-memory engine with a stub (no-LLM) StepRunner: agent steps
+  return canned verdicts and every `step_type: tool` node is REPLACED by a stub
+  agent returning the success flag — tool I/O never runs. Gates keep their
+  transitions, so graph shape, reachability and termination are exercised; the
+  tools those nodes name are only import-checked (load_fn). Asserts the graph
+  loads, every tool/role constructs (no ImportError), a path reaches the
+  loop-external `done` terminal, and it terminates within the step bound. A pass
+  does NOT prove any tool works at runtime — only a real drive does. Returns
+  {passed, status, steps_run, unresolved_tools, trail, error_reason,
   error} — on failure `error` quotes skillflow's own reason (e.g. "No matching
   transition from 'X' with flags {...}"), which names what to fix.
 parameters:

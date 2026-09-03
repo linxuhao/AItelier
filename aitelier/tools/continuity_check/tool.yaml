@@ -1,12 +1,17 @@
 name: continuity_check
 description: >
   Cheap MECHANICAL hard gate between humanize and the Red review — only checks
-  that need no reading comprehension: prose present, word count within the
-  pacing bounds, no meta markers ([说明]/TODO) in prose, and a crude known-AI-ism
-  density scan (hard over threshold, advisory otherwise). Semantic consistency
-  (dead characters, OOC, power, timeline, hook strength) is the Red reviewer's
-  job, not string matching. On failure the returned `error` is feedback-injected
-  into the draft step's retry; the full report is written for the reviewer.
+  that need no reading comprehension. Hard violations (passed:false): prose
+  missing, word count BELOW the pacing lower bound (the upper bound is advisory
+  only), meta markers ([说明]/TODO) in prose, known-AI-ism density over
+  threshold, and humanize fidelity vs the approved draft — title line unchanged,
+  length within ±10 %, paragraph count within ±15 %. Over-length and ending
+  shape are advisories. RAISES (no passed:false) when the draft itself is
+  missing: a broken precondition, not a bad chapter. A pass proves nothing
+  semantic — dead characters, OOC, power, timeline, hook strength are the Red
+  reviewer's job, not string matching. On failure the returned `error` is
+  feedback-injected into the draft step's retry; the full report
+  (continuity_report.json) is written for the reviewer.
 parameters:
   project_root:
     type: string

@@ -5,7 +5,9 @@ guaranteed file in every project it applies to (e.g. a Godot `.gitignore`) ships
 it under configs/addons/<addon>/assets/, and injects a scaffold tool step. Unlike
 a prompt instruction, this doesn't depend on the LLM remembering — the file is
 always there. Writes into the repo working tree (like knowledge_sync); a later
-repo_apply commits it. Never clobbers an existing file.
+repo_apply commits it. Never overwrites an existing file: a `*ignore` file is
+merged in place (missing lines appended), anything else existing is skipped, and
+binary assets are skipped. Result: {written, merged, skipped, addon}.
 
 Convention: an asset named `dot_<x>` is written as `.<x>` in the repo, so a
 literal `.gitignore` in the addon's own asset dir doesn't act as a real ignore

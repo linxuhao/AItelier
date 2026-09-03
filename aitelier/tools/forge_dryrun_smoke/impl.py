@@ -1,9 +1,11 @@
 """forge_dryrun_smoke — boot a generated graph with a stub runner (gate c).
 
 Registers the generated graph in a throwaway in-memory SkillFlow (sharing the LIVE
-ToolLoader so real + just-built tools resolve), drives it through the real
-claim/advance loop with a no-LLM StubStepRunner, and asserts it reaches a
-loop-external terminal within a step bound. See design/pipeline_forge.md §5c.
+ToolLoader so real + just-built tools resolve), rewrites every tool node into a
+stub agent (tool I/O never runs; the named tools are only import-checked via
+load_fn), drives it through the real claim/advance loop with a no-LLM
+StubStepRunner, and asserts it reaches a loop-external terminal within a step
+bound. See design/pipeline_forge.md §5c.
 """
 from __future__ import annotations
 

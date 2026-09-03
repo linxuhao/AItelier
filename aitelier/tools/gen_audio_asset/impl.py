@@ -8,8 +8,12 @@ The audio half of the asset channel, split by what the two jobs actually need:
   kind="bgm"  -> generate_music (Stable Audio). Fine for a background bed, and
                  the ONLY option for one, but it caps at 47s, is mono, and gives
                  no loop point — so a seamless loop is not something you get here.
+  kind="voice" -> actor_tts against an actor cast once from `voice`, so a
+                 character's lines keep one timbre across calls.
 
-Writes into the repo working tree; a later repo_apply commits it.
+Writes into the step's STAGING dir when there is one (see `_target_root`) and
+reaches the repo through promotion + repo_apply; only a tool node with no
+staging dir writes straight into the working tree.
 """
 
 from pathlib import Path

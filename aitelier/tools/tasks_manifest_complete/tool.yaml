@@ -8,13 +8,20 @@ description: >
   manifest alone. Live, 2026-08-26: a re-plan wrote 2 of 9 cards, promotion
   deleted the other 8 (git-confirmed), validation passed, and the break would
   not have surfaced until the task loop reached the first missing card — by
-  which time the deleted cards were gone from the step dir.
+  which time the deleted cards were gone from the step dir. Also fails when
+  EVERY manifest id is already in the live task loop's completed_items (a
+  re-plan made only of dispatched ids would run nothing); the result then
+  carries stale_ids. Returns {passed, error?, stale_ids?}.
 parameters:
+  workspace_root:
+    type: string
+    description: "Directory holding tasks_manifest.json and tasks/ — what StepValidator injects (the step's staging dir)."
+    required: false
   step_dir:
     type: string
-    description: "Directory holding tasks_manifest.json and tasks/ (auto-injected as the step's staging dir)."
+    description: "Fallback when workspace_root is not injected (ordinary tool-step use)."
     required: false
   out_dir:
     type: string
-    description: "Fallback when step_dir is not injected."
+    description: "Fallback when neither workspace_root nor step_dir is set."
     required: false

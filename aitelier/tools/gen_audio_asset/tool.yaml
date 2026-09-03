@@ -1,6 +1,6 @@
 name: gen_audio_asset
 description: >
-  Generate a REAL sound asset and write it into the project repo, so the game
+  Generate a REAL sound asset and write it into this step's staging dir, so the game
   ships audio instead of silence. Two kinds, and the choice matters:
   kind="sfx" synthesises a game effect procedurally (sfxr-style) from one of the
   presets jump/coin/hit/explosion/powerup/laser/select/hurt — instant,
@@ -12,8 +12,10 @@ description: >
   text, not of the seed, so the same character's lines come back as different
   people. Casting the actor once from `voice` records a reference clip and every
   later line is spoken against it; casting is idempotent, so a re-run keeps the
-  voice already in the repo. Returns {written, source_url}.
-  Writes into the working tree; a later repo_apply commits it.
+  voice already in the repo. Returns {written, source_url} or {written:[], error}.
+  Written into the step's staging dir ($STEP_TMP_DIR) whenever one exists — it
+  reaches the repo through promotion + repo_apply; only a tool node with no
+  staging dir writes straight into the repo working tree.
 parameters:
   dest:
     type: string
@@ -21,11 +23,11 @@ parameters:
     required: true
   kind:
     type: string
-    description: "'sfx' (default, procedural effect) or 'bgm' (generated music bed)"
+    description: "'sfx' (default, procedural effect), 'bgm' (generated music bed) or 'voice' (one cast NPC line)"
     required: false
   preset:
     type: string
-    description: "kind='sfx' only: jump | coin | hit | explosion | powerup | laser | select | hurt"
+    description: "REQUIRED for kind='sfx' (error otherwise): jump | coin | hit | explosion | powerup | laser | select | hurt"
     required: false
   prompt:
     type: string
@@ -57,7 +59,7 @@ parameters:
     required: false
   text:
     type: string
-    description: "kind='voice' only: the line to speak, max ~200 characters (~45s); longer is truncated"
+    description: "kind='voice' only (required with `actor`): the line to speak. Passed through untruncated — keep it to one line (~200 characters) so the clip stays short"
     required: false
   speaking_rate:
     type: number

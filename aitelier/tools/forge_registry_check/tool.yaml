@@ -5,7 +5,11 @@ description: >
   registry: every tool_name exists in list_tools(), every agent_config is defined,
   every context source resolves; plus convention linters (loop-external done gate,
   no hand-rolled counters, reviewer-is-an-agent). Catches hallucinated tools the
-  linter cannot. Returns {passed, violations, unknown_tools, unknown_roles}.
+  linter cannot. Returns {passed, error, violations, unknown_tools, unknown_roles,
+  failure_class, notes}. `failure_class` is what the graph routes on:
+  "unknown_tool" (a named tool does not exist — tools must be (re)built, the run
+  rewinds to the plan), "emit_fixable" (a defect in the emitted files, repairable
+  in place) or "" on pass.
 parameters:
   graph_path:
     type: string

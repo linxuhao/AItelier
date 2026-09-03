@@ -508,10 +508,13 @@ steps:
   - id: "t_plan"
     step_type: "agent"
     agent_config: "task_planner"
-    # 14 (agent default 10): reads are now capped at ~24K chars per window
-    # (skillflow >=1.5.61), so a big file costs a page or two of turns
-    # instead of 25K tokens on every later turn.
-    max_tool_turns: 14
+    # 30. Measured on jinyong-nav (R5, 2026-09-03) under 14: 15 of 18
+    # implementer instances exhausted the budget, median exactly 14 turns,
+    # ~23 read-type calls per exhausted instance and 0.4 test runs — the
+    # 24K-char read window (skillflow >=1.5.61) turned one big read into
+    # several, and every exhausted instance is re-run from scratch (2.2
+    # t_impl commits per card). Turns are cheap now; re-runs are not.
+    max_tool_turns: 30
     # Bound a stuck/conflicting loop-body claim so it times out cleanly instead
     # of churning (defense-in-depth for the loop-progression fix).
     timeout_seconds: 300
@@ -639,10 +642,13 @@ steps:
   - id: "t_impl"
     step_type: "agent"
     agent_config: "task_implementer"
-    # 14 (agent default 10): reads are now capped at ~24K chars per window
-    # (skillflow >=1.5.61), so a big file costs a page or two of turns
-    # instead of 25K tokens on every later turn.
-    max_tool_turns: 14
+    # 30. Measured on jinyong-nav (R5, 2026-09-03) under 14: 15 of 18
+    # implementer instances exhausted the budget, median exactly 14 turns,
+    # ~23 read-type calls per exhausted instance and 0.4 test runs — the
+    # 24K-char read window (skillflow >=1.5.61) turned one big read into
+    # several, and every exhausted instance is re-run from scratch (2.2
+    # t_impl commits per card). Turns are cheap now; re-runs are not.
+    max_tool_turns: 30
     # Per-TASK toolset. The PM writes `capabilities: [...]` on a task card; the
     # framework grants those tools and injects each capability's briefing, and
     # nothing else carries them. Measured before this existed: the two asset

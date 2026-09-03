@@ -50,6 +50,12 @@ class MaxRetriesExceeded(Exception):
 # late to finish anything; the existing final-turn nudge already covers
 # the nothing-written cliff.
 _LOW_TURN_BUDGET = 3
+# ask_more_turns: how many grants one step may take and how long each may be.
+# Unbounded before 2026-09-04; bounded now so a step that keeps asking cannot
+# loop forever, and named in the low-budget warning so a step with real work
+# left asks instead of being cut off (R5: 15 exhaustions, 0 asks).
+_MAX_TURN_GRANTS = 2
+_GRANT_TURNS_MAX = 6
 
 # Argument names an agent may never set on a tool call: the host injects them.
 _AGENT_RESERVED_ARGS = ("project_root", "workspace_root", "step_dir", "out_dir")
@@ -1004,6 +1010,7 @@ class PipelineEngine:
             written_files = []
             effects: list[str] = []   # non-file output: see _effect_name
             current_max_turns = max_turns
+            turn_grants = 0
             tool_turn = 0
             ended_early = False
 
@@ -1397,14 +1404,19 @@ class PipelineEngine:
                 # Apply ask_more_turns budget extension after all tool calls in
                 # this turn have been processed (deferred from detection above).
                 if ask_more_call:
-                    extra = int(ask_more_call.get("params", {}).get("turns", 3))
+                    extra = min(int(ask_more_call.get("params", {}).get("turns", 3)), _GRANT_TURNS_MAX)
                     reason = ask_more_call.get("params", {}).get("reason", "")
-                    current_max_turns += extra
-                    turn_entry = (
-                        f"ask_more_turns: +{extra} turns granted. "
-                        f"Reason: {reason}. Remaining: {current_max_turns - tool_turn - 1}"
-                    )
-                    tool_results.append(turn_entry)
+                    if turn_grants >= _MAX_TURN_GRANTS:
+                        tool_results.append(
+                            f"ask_more_turns: DENIED — {_MAX_TURN_GRANTS} grants already used "
+                            f"this step. Finish now: deliver what exists and list what is "
+                            f"missing in the delivery notes.")
+                    else:
+                        turn_grants += 1
+                        current_max_turns += extra
+                        tool_results.append(
+                            f"ask_more_turns: +{extra} turns granted ({turn_grants}/{_MAX_TURN_GRANTS}). "
+                            f"Reason: {reason}. Remaining: {current_max_turns - tool_turn - 1}")
 
                 tool_turn += 1
                 self._emit("exploration", {"turn": tool_turn, "preview": f"Exploration turn {tool_turn}"})
@@ -2046,6 +2058,7 @@ class PipelineEngine:
             # actually re-reads. `continue` appears throughout this body, so the
             # counter is incremented at the TOP: exactly range()'s semantics.
             current_max_turns = max_turns
+            turn_grants = 0
             turn_count = -1
             while True:
                 turn_count += 1
@@ -2523,9 +2536,11 @@ class PipelineEngine:
             f"[Turn Budget: {remaining} of {max_turns} turns remain] Stop "
             "exploring. Finish EVERY output this step owes — if you declared a "
             "manifest, index or list, every item it names must exist before you "
-            "call finish_step. If the remaining budget cannot cover them all, "
-            "say so explicitly in the output you do write rather than leaving "
-            "items silently missing."
+            "call finish_step. If real work remains (files or scenarios you have "
+            "not written yet), call ask_more_turns(turns=N, reason=\"what remains\") "
+            f"NOW — at most {_MAX_TURN_GRANTS} grants of up to {_GRANT_TURNS_MAX} "
+            "turns per step. Only when that is exhausted, say so explicitly in "
+            "the output you do write rather than leaving items silently missing."
         )
 
     @staticmethod

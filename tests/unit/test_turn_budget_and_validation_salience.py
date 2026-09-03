@@ -69,6 +69,18 @@ class TestTheWarningSaysTheThingThatMatters:
         assert "silently" in msg
 
 
+class TestTheWarningNamesTheEscapeHatch:
+    def test_it_tells_the_agent_to_ask_for_turns_when_work_remains(self):
+        # R5 (2026-09-03): 15 of 18 implementer instances hit the cap and none
+        # asked — the warning said "stop" and never named ask_more_turns.
+        msg = PipelineEngine._low_budget_message(3, 30)
+        assert "ask_more_turns" in msg
+
+    def test_grants_are_bounded(self):
+        from core.dpe_pipeline import _MAX_TURN_GRANTS, _GRANT_TURNS_MAX
+        assert 1 <= _MAX_TURN_GRANTS <= 3 and 3 <= _GRANT_TURNS_MAX <= 10
+
+
 class TestAValidationFailureIsAnInstruction:
     def test_absent_error_adds_nothing(self):
         assert PipelineEngine._validation_error_block(None) == ""

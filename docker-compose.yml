@@ -152,7 +152,11 @@ services:
   # (aitelier/tools/semantic_search). It shares aitelier's network namespace:
   # zg only listens on loopback, so 127.0.0.1:7999 inside aitelier is this
   # daemon and nothing outside the pair can reach it. Index a repo once:
-  #   docker exec aitelier-zg zg index <abs repo path> --embedding local/potion-code-16m-v2
+  # The MCP surface is the AGENT toolset (search only): index/drop/status are
+  # not reachable from inside aitelier, even by an agent with bash. Index a repo
+  # from the host, in direct mode (no daemon round-trip):
+  #   docker exec aitelier-zg zg index <abs repo path> --embedding local/potion-code-16m-v2 --mode direct
+  # and add `.zvec-grep/` to that repo's .git/info/exclude (repo_apply is git add -A).
   zvec-grep:
     build:
       context: .

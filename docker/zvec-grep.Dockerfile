@@ -8,4 +8,4 @@ FROM node:22-bookworm-slim
 RUN npm install -g @zvec/zvec-grep@0.2.0 && npm cache clean --force
 ENV ZVEC_GREP_HOME=/home/linxuhao/.AItelier/zvec-grep-home \
     HOME=/home/linxuhao/.AItelier/zvec-grep-home
-CMD ["zg", "server", "run", "--listen", "127.0.0.1:7999", "--mcp-toolset", "full"]
+CMD ["zg", "server", "run", "--listen", "127.0.0.1:7999", "--mcp-toolset", "agent"]

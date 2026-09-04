@@ -45,6 +45,9 @@ TOOLS_DIR = Path(__file__).resolve().parents[2] / "aitelier" / "tools"
 GUARDED = {
     "apply_state",              # raises unless BOTH roots are absolute
     "closeout_gate",            # refuses a non-absolute project_root (depth: deep)
+    "completed_cards",          # _project_id: relative_to() outside the workspaces
+                                # dir raises -> "" -> no query, empty list. A bad
+                                # root can never become a path it reads.
     "semantic_search",          # refuses a non-absolute project_root (error + hint)
     "emit_project_artifacts",   # refuses a non-absolute workspace_root
     "gen_audio_asset",          # _target_root: `if cand and Path(cand).is_dir()`

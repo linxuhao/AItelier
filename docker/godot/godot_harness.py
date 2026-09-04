@@ -36,6 +36,7 @@ import subprocess
 import time
 import sys
 import tempfile
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1602,6 +1603,23 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "not found"})
 
+    # ── ONE RENDER AT A TIME ────────────────────────────────────────────
+    # ThreadingHTTPServer answers concurrent requests, and the render routes
+    # (/playtest, /script, /x11_input_smoke) each start their own Xvfb and
+    # drive Godot on software GL. Two of them on one box do not fail — they
+    # SLOW EACH OTHER DOWN, and a timing-sensitive scenario then reports a
+    # red that has nothing to do with the game.
+    #
+    # Measured 2026-09-04 on one unchanged tree: 118 scenarios / 0 red with
+    # the machine to itself; 6 red + 2 runtime errors while a second sweep
+    # ran; and the two runs' red sets were DISJOINT. A gate that answers
+    # differently depending on who else is on the box is not a gate.
+    #
+    # So the render routes serialise. /compile and /checkgd stay concurrent:
+    # they are CPU-cheap, headless, and nothing about them is timed.
+    _RENDER_LOCK = threading.Lock()
+    _RENDER_ROUTES = ("/playtest", "/script", "/x11_input_smoke")
+
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         try:
@@ -1609,6 +1627,17 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._send(400, {"error": "bad json"})
         proj = req.get("project_dir", "")
+        # Queue behind any render in flight. No timeout: a caller that waited
+        # is strictly better off than a caller that got a fast wrong answer,
+        # and the tool side already carries its own HTTP timeout.
+        held = self.path in self._RENDER_ROUTES
+        if held:
+            waited = time.time()
+            self._RENDER_LOCK.acquire()
+            delay = time.time() - waited
+            if delay > 1.0:
+                print(f"[harness] {self.path} waited {delay:.0f}s for the render lock",
+                      flush=True)
         try:
             if self.path == "/compile":
                 self._send(200, compile_project(proj))
@@ -1631,6 +1660,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(404, {"error": "not found"})
         except Exception as e:  # never crash the service on one bad project
             self._send(500, {"error": str(e)})
+        finally:
+            if held:
+                self._RENDER_LOCK.release()
 
 
 def _serve():

@@ -107,3 +107,15 @@ def test_deltas_from_two_attempts_are_one_conversation():
     assert [p["attempt"] for e, p in rows] == [1, 1, 1, 1, 2]
     r = PipelineEngine._rebuild_from_deltas(rows, 30)
     assert r["messages"] == msgs and r["turns"] == 1
+
+
+def test_none_content_round_trips_as_none_not_the_string_null():
+    # DeepSeek tool-call turns carry content=None; the string "null" is not the same message
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+            _tool(json.dumps({"created": "a.gd"}))]
+    rows = _deltas_from(msgs)
+    assert rows[2][1]["content_null"] is True and rows[2][1]["content"] == ""
+    r = PipelineEngine._rebuild_from_deltas(rows, 30)
+    assert r["messages"][2]["content"] is None
+    assert r["messages"] == msgs

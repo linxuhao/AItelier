@@ -474,7 +474,8 @@ class PipelineEngine:
             idx = payload.get("index")
             if not isinstance(idx, int) or idx in by_index:
                 continue
-            m: dict = {"role": payload.get("role", ""), "content": payload.get("content", "")}
+            m: dict = {"role": payload.get("role", ""),
+                       "content": None if payload.get("content_null") else payload.get("content", "")}
             for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
                 v = payload.get(k)
                 if v is None:
@@ -566,11 +567,16 @@ class PipelineEngine:
         for i in range(start, len(messages)):
             m = messages[i] if isinstance(messages[i], dict) else {}
             content = m.get("content")
-            if not isinstance(content, str):
+            content_null = content is None
+            if content_null:
+                content = ""
+            elif not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, default=str)
             payload = {"turn": turn, "index": i, "role": m.get("role", ""),
                        "content": content,
                        "attempt": getattr(self, "_delta_attempt", 1)}
+            if content_null:
+                payload["content_null"] = True    # an assistant tool-call turn: content None
             for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
                 if m.get(k) is not None:
                     v = m[k]
@@ -2242,10 +2248,23 @@ class PipelineEngine:
             current_max_turns = max_turns
             turn_grants = 0
             turn_count = -1
+            resume_nudges_left = 0
             if attempt == 1 and _resumed:
                 current_max_turns = _resumed["current_max_turns"]
                 turn_grants = _resumed["turn_grants"]
                 turn_count = _resumed["turns"] - 1
+                # DeepSeek thinking+tools wants reasoning_content on the next
+                # assistant turn; carry the last one the trace holds.
+                for _m in reversed(_resumed["messages"]):
+                    if _m.get("role") == "assistant" and _m.get("reasoning_content"):
+                        last_reasoning = _m["reasoning_content"]
+                        break
+                # Live, jinyong-nav 2026-09-04 14:36Z: the first reply after a
+                # resume was EMPTY (2 completion tokens, no tool call) and the
+                # loop read it as "done" — a half-finished card was delivered.
+                # One empty reply right after a resume is a hiccup, not a
+                # verdict: nudge once, then trust the next one.
+                resume_nudges_left = 1
             while True:
                 turn_count += 1
                 if turn_count >= current_max_turns:
@@ -2497,6 +2516,18 @@ class PipelineEngine:
                         "preview": result.text[:200],
                     })
 
+                if not result.tool_calls and resume_nudges_left and not (result.text or "").strip():
+                    resume_nudges_left -= 1
+                    messages.append({"role": "assistant", "content": None})
+                    messages.append({
+                        "role": "user",
+                        "content": ("[Empty reply after the resume] Nothing was produced. "
+                                    "Continue with your next tool call, or call finish_step "
+                                    "if the card is complete."),
+                    })
+                    self._trace_prompt_deltas(messages, turn_count + 1)
+                    self._trace("step", "resume_empty_reply_nudged", {"turn": turn_count + 1})
+                    continue
                 if not result.tool_calls:
                     # A reply with no tool call produces no output. This is the
                     # only "the agent is done / has nothing more" signal, and is

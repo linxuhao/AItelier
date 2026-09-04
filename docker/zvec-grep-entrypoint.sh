@@ -16,6 +16,15 @@ EMBED="${ZVEC_GREP_EMBEDDING:-local/potion-code-16m-v2}"
 # ("already running with PID 8"). Nothing else can hold it in this
 # container, so clear it.
 rm -f /home/linxuhao/.AItelier/zvec-grep-home/daemon/instance.lock
+rm -f /home/linxuhao/.AItelier/zvec-grep-home/daemon/instance.lock
+# Same story one level down: each project index carries locks/daemon.json
+# naming the daemon that owns its writes by (pid, hostname, token). A
+# recreated sidecar gets the SAME hostname and pid 9 again, so the new daemon
+# reads the dead one's lease as "another daemon" and every search fails with
+# INDEX_BUSY. Only this sidecar ever writes project indexes, so any lease
+# present at boot is a corpse.
+rm -f "$PROJECTS"/*/.zvec-grep/locks/daemon.json
+
 zg server run --listen 127.0.0.1:7999 --mcp-toolset agent &
 SERVER=$!
 

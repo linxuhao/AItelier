@@ -786,6 +786,10 @@ steps:
   - id: "t_impl_review"
     step_type: "agent"
     agent_config: "task_implementer_reviewer"
+    # Deep closeout on a 20-file card exhausted the 10-turn default twice in
+    # R5 (verdict written on the last turn). 20 lets a deep review read every
+    # delivered file before it rules.
+    max_tool_turns: 20
     context:
       - source: { from: "repository", mode: "tool" }
       # What the card just delivered (commits, files, +/- lines, protected

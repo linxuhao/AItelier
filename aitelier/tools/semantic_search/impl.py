@@ -6,7 +6,7 @@ turn 3). zg's paired benchmark (BrowseComp-Plus) cut input tokens 37.6% and
 tool calls 43.5% at equal accuracy. This tool is the read side of that bet.
 
 Transport: MCP Streamable HTTP at ZVEC_GREP_SERVER_URL (default
-http://127.0.0.1:7999/mcp — the sidecar shares our network namespace). The
+http://127.0.0.1:7999/mcp; docker-compose sets http://zvec-grep:7999/mcp). The
 session is initialized once per process and re-initialized on a 4xx.
 The `root` sent to zg is the injected project_root; no root → error (never CWD).
 """

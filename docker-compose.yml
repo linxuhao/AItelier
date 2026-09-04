@@ -29,6 +29,9 @@ services:
     init: true
     # Run as the host user → files written into ~/.AItelier keep host ownership.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
+    depends_on:
+      zvec-grep:
+        condition: service_healthy
     environment:
       # Path.home() resolves from HOME on POSIX → keep it == the host home dir.
       HOME: ${HOME}
@@ -48,6 +51,7 @@ services:
       # path here for a license-free parse-check + headless play-test. Non-game
       # (Python/web) projects never call it.
       GODOT_BUILDER_URL: "http://godot-builder:8080"
+      ZVEC_GREP_SERVER_URL: "http://zvec-grep:7999/mcp"
       # The readability gate (godot_vision) shows the frames the play-test
       # already rendered to a vision model and fails when the game is
       # unreadable despite green assertions. Reached over Tailscale, so the
@@ -149,9 +153,8 @@ services:
   # at http://godot-builder:8080. ~250MB image (no editor, no account, no
   # license) — built lazily; skipped for non-game deployments that never start it.
   # zvec-grep sidecar — semantic + lexical code search for the agents
-  # (aitelier/tools/semantic_search). It shares aitelier's network namespace:
-  # zg only listens on loopback, so 127.0.0.1:7999 inside aitelier is this
-  # daemon and nothing outside the pair can reach it. Index a repo once:
+  # (aitelier/tools/semantic_search), reached at http://zvec-grep:7999/mcp on
+  # the private network only (not on `edge`). Index a repo once:
   # The MCP surface is the AGENT toolset (search only): index/drop/status are
   # not reachable from inside aitelier, even by an agent with bash. The
   # entrypoint's indexer loop (docker/zvec-grep-entrypoint.sh) indexes every
@@ -166,12 +169,30 @@ services:
     image: aitelier-zg:latest
     container_name: aitelier-zg
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
-    network_mode: "service:aitelier"
-    depends_on:
-      - aitelier
+    # Own network namespace on the private network: aitelier reaches it as
+    # http://zvec-grep:7999/mcp (ZVEC_GREP_SERVER_URL). It used to share
+    # aitelier's namespace (network_mode: service:aitelier) so zg could bind
+    # loopback — but then every `compose restart aitelier` tore the sidecar's
+    # namespace away, compose does not restart dependents, and the daemon
+    # came back dead (stale instance.lock + index lease). The agent toolset
+    # is search-only, so being reachable from the private network is fine.
+    networks:
+      - default
     volumes:
       - ${HOME}/.AItelier:${HOME}/.AItelier
     restart: unless-stopped
+    # sh is PID 1 in the entrypoint; it traps TERM and forwards it to zg so
+    # the daemon unlinks its lock + leases. Give it time before the KILL.
+    stop_grace_period: 20s
+    healthcheck:
+      # No curl in the node image; an empty POST to /mcp answers 400 when the
+      # daemon is up (anything <500), connection refused when it is not.
+      test: ["CMD", "node", "-e",
+             "fetch('http://127.0.0.1:7999/mcp',{method:'POST'}).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   godot-builder:
     build:

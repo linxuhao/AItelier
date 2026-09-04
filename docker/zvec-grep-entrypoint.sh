@@ -24,8 +24,13 @@ rm -f /home/linxuhao/.AItelier/zvec-grep-home/daemon/instance.lock
 # present at boot is a corpse.
 rm -f "$PROJECTS"/*/.zvec-grep/locks/daemon.json
 
-zg server run --listen 127.0.0.1:7999 --mcp-toolset agent &
+# 0.0.0.0: we no longer share aitelier's namespace; the container is only on
+# the compose-private network. Forward TERM so zg exits cleanly (unlinks its
+# instance.lock and index leases) instead of being KILLed as an orphan of
+# PID 1.
+zg server run --listen 0.0.0.0:7999 --mcp-toolset agent &
 SERVER=$!
+trap 'kill -TERM "$SERVER" 2>/dev/null; wait "$SERVER"; exit 0' TERM INT
 
 index_new_repos() {
   for repo in "$PROJECTS"/*/; do
@@ -44,6 +49,7 @@ index_new_repos() {
 sleep 5
 while kill -0 "$SERVER" 2>/dev/null; do
   index_new_repos
-  sleep 60
+  sleep 60 &
+  wait $!   # a plain `sleep` would hold the trap off for up to a minute
 done
 wait "$SERVER"

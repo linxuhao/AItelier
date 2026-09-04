@@ -60,7 +60,13 @@ RUN set -eux; \
     mkdir -p "$dir"; \
     mv /tmp/tpl/templates/* "$dir/"; \
     rm -rf /tmp/tpl /tmp/tpl.tpz; \
-    chmod -R a+rX /tmp/godot-home; \
+    # a+rwX, not a+rX: HOME=/tmp/godot-home is where Godot writes its
+    # import cache, and the container runs as an arbitrary host uid. The
+    # first version of this line left the directory root-owned and
+    # read-only, which did not fail the container — it made the play-test
+    # BLIND: sweeps returned their scenario count with ZERO assertions and
+    # ZERO captures, and `passed: true` on top (2026-09-04 23:08-23:12).
+    chmod -R a+rwX /tmp/godot-home; \
     ls "$dir"
 
 # Godot writes editor/import metadata under $HOME/.config|.cache — give it a

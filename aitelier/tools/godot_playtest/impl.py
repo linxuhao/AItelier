@@ -330,6 +330,31 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
                     f"recreate the container (a restart is not enough). "
                     f"Play-test gate NOT run.")
 
+    # A run that evaluated NOTHING is not a pass. The scenario COUNT comes from
+    # the spec we sent; only the assertions and the captures come from the game.
+    # Live 2026-09-04 23:08-23:12: a builder image change left $HOME root-owned,
+    # Godot could not write its user data, and every sweep came back with the
+    # full scenario count, ZERO assertions, ZERO captures — and `passed: true`.
+    # Three trees in a row "passed" while measuring nothing, and a base-tree
+    # sweep read as 95/95 failing. Same family as the `no_project` blindness
+    # above: the builder answered, it just could not see.
+    _behavior = report.get("behavior") or {}
+    _scn = _behavior.get("scenarios") or []
+    _items = _scn if isinstance(_scn, list) else list(_scn.values())
+    if report.get("spec_used") and _items:
+        _asserts = sum(len(s.get("asserts") or []) for s in _items
+                       if isinstance(s, dict))
+        if _asserts == 0:
+            report["passed"] = False
+            report["blind_builder"] = True
+            report["summary"] = (
+                f"Play-test ran {len(_items)} scenario(s) and evaluated ZERO "
+                f"assertions ({len(report.get('captures') or [])} captures). The "
+                f"count comes from the spec, not from the game — the build never "
+                f"reported state, so nothing here was verified. Check the builder "
+                f"(a writable HOME for Godot's user data) and re-run. "
+                f"|| " + str(report.get("summary", "")))
+
     report["spec_source"] = info["source"]
     if info["notes"]:
         # Rides on `summary` because that is the line the play-test summary puts

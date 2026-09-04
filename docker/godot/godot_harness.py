@@ -1096,10 +1096,26 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
         # the tutorial, which is otherwise a 27-file rewrite, and this repo has
         # already lost assertions to one of those.
         sc_scene = str(sc.get("scene") or scene)
-        probe, errs, timed_out = _run_probe(
-            dst, state_path, sframes, timeout,
-            {"AITELIER_PROBE_SPEC": str(spec_path)}, scene=sc_scene,
-            capture_at=_capture_frames(sframes, timeline))
+        # ── EVERY SCENARIO GETS ITS OWN user:// ────────────────────────────
+        # Godot derives user:// from $HOME, and $HOME was the container's, so
+        # every scenario in every sweep on every tree shared one save
+        # directory: app_userdata/<project>/{save_1.json, settings.cfg, ...}.
+        # A scenario that saves therefore changed what the NEXT one booted
+        # into — and what the next SWEEP booted into.
+        #
+        # That is the "flake" (measured 2026-09-04): the same unchanged tree
+        # gave 0 red, then 1 red, then 6 red, with disjoint red sets, and
+        # `menu_load_continues` failed its `load_available: changed` assert
+        # with baseline true / current true — the frame-0 baseline had a save
+        # left over from an earlier scenario. Order-dependence, not chance.
+        sc_home = tempfile.mkdtemp(prefix="godot_home_")
+        try:
+            probe, errs, timed_out = _run_probe(
+                dst, state_path, sframes, timeout,
+                {"AITELIER_PROBE_SPEC": str(spec_path), "HOME": sc_home},
+                scene=sc_scene, capture_at=_capture_frames(sframes, timeline))
+        finally:
+            shutil.rmtree(sc_home, ignore_errors=True)
         ran = bool(probe) or not timed_out
         ran_any = ran_any or ran
         if errs:

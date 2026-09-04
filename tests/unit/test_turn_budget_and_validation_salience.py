@@ -80,6 +80,37 @@ class TestTheWarningNamesTheEscapeHatch:
         from core.dpe_pipeline import _MAX_TURN_GRANTS, _GRANT_TURNS_MAX
         assert 1 <= _MAX_TURN_GRANTS <= 3 and 3 <= _GRANT_TURNS_MAX <= 10
 
+    def test_one_decision_function_serves_both_loops(self):
+        # The native tool-calling loop applied the raw request (30 -> 54 in
+        # four asks, R5 instance 3598). Both loops must go through _grant_turns.
+        import inspect
+        from core import dpe_pipeline
+        src = inspect.getsource(dpe_pipeline)
+        assert src.count("_grant_turns(") >= 3   # def + 2 call sites
+
+    def test_a_grant_is_clamped_and_counted(self):
+        from core.dpe_pipeline import _grant_turns, _GRANT_TURNS_MAX
+        extra, n, msg = _grant_turns(0, 24)
+        assert extra == _GRANT_TURNS_MAX and n == 1 and "granted" in msg
+
+    def test_after_the_cap_every_ask_is_denied(self):
+        from core.dpe_pipeline import _grant_turns, _MAX_TURN_GRANTS
+        n = 0
+        for _ in range(_MAX_TURN_GRANTS):
+            extra, n, _m = _grant_turns(n, 6)
+            assert extra > 0
+        extra, n2, msg = _grant_turns(n, 6)
+        assert extra == 0 and n2 == n and "DENIED" in msg
+
+    def test_native_loop_rewrites_the_tool_result(self):
+        # The model reads the tool result, not the trace: a denial the result
+        # still calls "granted" is a lie the agent will act on.
+        import inspect
+        from core.dpe_pipeline import PipelineEngine
+        src = inspect.getsource(PipelineEngine)
+        i = src.index('if tool_name == "ask_more_turns":\n                        # _exec_tool answers')
+        assert '"denied"' in src[i:i + 900]
+
 
 class TestAValidationFailureIsAnInstruction:
     def test_absent_error_adds_nothing(self):

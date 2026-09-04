@@ -57,6 +57,26 @@ _LOW_TURN_BUDGET = 3
 _MAX_TURN_GRANTS = 2
 _GRANT_TURNS_MAX = 6
 
+
+def _grant_turns(turn_grants: int, asked: int) -> tuple[int, int, str]:
+    """Decide one ask_more_turns call: (extra, new_turn_grants, message).
+
+    ONE place for both turn loops. The JSON-actions loop capped grants at
+    4d4638d; the native tool-calling loop — the one every real run takes —
+    kept applying the raw request, so a t_impl went 30 -> 54 turns in four
+    asks (R5, instance 3598) while the warning text promised "at most 2 grants
+    of up to 6 turns".
+    """
+    if turn_grants >= _MAX_TURN_GRANTS:
+        return 0, turn_grants, (
+            f"ask_more_turns: DENIED — {_MAX_TURN_GRANTS} grants already used "
+            f"this step. Finish now: deliver what exists and list what is "
+            f"missing in the delivery notes.")
+    extra = max(0, min(int(asked), _GRANT_TURNS_MAX))
+    turn_grants += 1
+    return extra, turn_grants, (
+        f"ask_more_turns: +{extra} turns granted ({turn_grants}/{_MAX_TURN_GRANTS}).")
+
 # Argument names an agent may never set on a tool call: the host injects them.
 _AGENT_RESERVED_ARGS = ("project_root", "workspace_root", "step_dir", "out_dir")
 
@@ -1404,19 +1424,12 @@ class PipelineEngine:
                 # Apply ask_more_turns budget extension after all tool calls in
                 # this turn have been processed (deferred from detection above).
                 if ask_more_call:
-                    extra = min(int(ask_more_call.get("params", {}).get("turns", 3)), _GRANT_TURNS_MAX)
                     reason = ask_more_call.get("params", {}).get("reason", "")
-                    if turn_grants >= _MAX_TURN_GRANTS:
-                        tool_results.append(
-                            f"ask_more_turns: DENIED — {_MAX_TURN_GRANTS} grants already used "
-                            f"this step. Finish now: deliver what exists and list what is "
-                            f"missing in the delivery notes.")
-                    else:
-                        turn_grants += 1
-                        current_max_turns += extra
-                        tool_results.append(
-                            f"ask_more_turns: +{extra} turns granted ({turn_grants}/{_MAX_TURN_GRANTS}). "
-                            f"Reason: {reason}. Remaining: {current_max_turns - tool_turn - 1}")
+                    extra, turn_grants, msg = _grant_turns(
+                        turn_grants, ask_more_call.get("params", {}).get("turns", 3))
+                    current_max_turns += extra
+                    tool_results.append(
+                        f"{msg} Reason: {reason}. Remaining: {current_max_turns - tool_turn - 1}")
 
                 tool_turn += 1
                 self._emit("exploration", {"turn": tool_turn, "preview": f"Exploration turn {tool_turn}"})
@@ -2409,6 +2422,13 @@ class PipelineEngine:
                         tool_result = self._exec_tool({"tool": tool_name, "params": params})
                     finally:
                         self._note_phase("tool_done", tool_name)
+                    if tool_name == "ask_more_turns":
+                        # _exec_tool answers "granted" unconditionally; the
+                        # budget decision is the loop's. Overwrite the result
+                        # so the model reads the real grant (or the denial).
+                        ask_more_extra, turn_grants, grant_msg = _grant_turns(turn_grants, ask_more_extra)
+                        tool_result = {"status": "granted" if ask_more_extra else "denied",
+                                       "turns": ask_more_extra, "note": grant_msg}
                     result_str = json.dumps(tool_result, ensure_ascii=False)
 
                     messages.append({

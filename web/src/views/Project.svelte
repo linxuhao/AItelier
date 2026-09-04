@@ -30,6 +30,7 @@
     escapeHtml,
     truncate,
     cacheBadgeClass,
+    soleInProgressRunId,
   } from '../lib/format';
   import { t } from '../lib/i18n.svelte';
 
@@ -65,6 +66,11 @@
   let pollTimer = $state<ReturnType<typeof setInterval> | null>(null);
   let isRefreshing = $state(false);
   let expandedSteps = $state<Record<string, boolean>>({});
+  // The auto-opened graph is a DEFAULT, not a cage: once the reader closes
+  // the run detail, this stays true for the rest of the visit so the next
+  // refresh (SSE event or safety-net poll) does not re-open what they just
+  // closed. Reset when the route moves to another project.
+  let runDetailClosedByUser = $state(false);
   let actionLoading = $state<Record<string, boolean>>({});
 
   // ── LLM liveness ──
@@ -181,6 +187,7 @@
       error = null;
       selectedRunId = null;
       runDetail = null;
+      runDetailClosedByUser = false;
       checkpoint = null;
       expandedSteps = {};
       activeTab = 'runs';
@@ -225,6 +232,7 @@
       // minutes earlier. A finished run is static, so only an active one is
       // re-fetched.
       await refreshRunDetail();
+      await maybeAutoOpenRun();
       // A different checkpoint (or none) invalidates an open reject box: its
       // text was written about the one that just went away.
       if (checkpointRejectMode && checkpointKeyOf(checkpoint) !== checkpointRejectKey) {
@@ -253,8 +261,7 @@
   async function loadRunDetail(runId: string): Promise<void> {
     if (selectedRunId === runId && runDetail) {
       // Deselect
-      selectedRunId = null;
-      runDetail = null;
+      closeRunDetail();
       return;
     }
     selectedRunId = runId;
@@ -286,6 +293,24 @@
       // is genuinely down, and blanking the graph on one dropped poll would
       // throw away the reader's open node.
     }
+  }
+
+  /** Close the run detail panel, and remember that the READER closed it. */
+  function closeRunDetail(): void {
+    selectedRunId = null;
+    runDetail = null;
+    runDetailClosedByUser = true;
+  }
+
+  /**
+   * Open the run graph on arrival when the project has exactly one run still
+   * in progress — the click a reader coming to watch a live run always makes.
+   * Not a guess: several live runs, or none, leave the page exactly as before.
+   */
+  async function maybeAutoOpenRun(): Promise<void> {
+    if (runDetailClosedByUser || selectedRunId) return;
+    const runId = soleInProgressRunId(runs);
+    if (runId) await loadRunDetail(runId);
   }
 
   // ── Action handlers ──
@@ -818,7 +843,7 @@
             <section class="run-detail-panel">
               <header class="flex-between">
                 <h4>Run Detail</h4>
-                <button class="outline small" onclick={() => { selectedRunId = null; runDetail = null; }}>
+                <button class="outline small" onclick={closeRunDetail}>
                   ✕
                 </button>
               </header>

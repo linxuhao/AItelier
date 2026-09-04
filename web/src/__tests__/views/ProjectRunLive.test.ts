@@ -9,7 +9,7 @@
  * is terminal so a finished run is not re-read forever.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, waitFor, fireEvent } from '@testing-library/svelte';
+import { render, waitFor } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { connectionStore } from '../../stores/connection';
 
@@ -68,7 +68,11 @@ async function openRun() {
   const view = render(await import('../../views/Project.svelte'),
     { props: { params: { id: 'p1' } } });
   await view.findByText('P One');
-  await fireEvent.click(view.container.querySelector('.run-row')!);
+  // The sole in-progress run's graph opens by itself now (see
+  // ProjectAutoOpenGraph.test.ts) — clicking its row here would TOGGLE it shut.
+  // How the panel got open is not what this file is about; that it keeps
+  // moving once open is.
+  await waitFor(() => expect(view.container.querySelector('.run-detail-panel')).not.toBeNull());
   return view;
 }
 

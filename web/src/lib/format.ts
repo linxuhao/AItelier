@@ -355,3 +355,32 @@ export function repoTypeLabel(repoType: string | null | undefined): string {
     default:         return repoType;
   }
 }
+
+/**
+ * The one run a project view should open on its own, or null.
+ *
+ * Only a SOLE in-progress run qualifies. Zero means there is nothing live to
+ * watch; two or more means picking one would be a guess, and guessing wrong
+ * costs the reader the click it was meant to save. Terminal is the closed set
+ * completed/failed/cancelled — every other base status (running, paused,
+ * checkpoint:*, queued, ...) is still moving, so an unknown status errs toward
+ * "live", which is the harmless direction here.
+ *
+ * @param runs — run rows as /api/projects/{id}/runs returns them
+ * @returns the run's id, or null when it is not exactly one
+ */
+export function soleInProgressRunId(
+  runs: Record<string, unknown>[] | null | undefined,
+): string | null {
+  if (!Array.isArray(runs)) return null;
+  const live = runs.filter((run) => {
+    const status = String(run?.status ?? '');
+    const colonIdx = status.indexOf(':');
+    const base = colonIdx >= 0 ? status.slice(0, colonIdx) : status;
+    if (!base) return false;
+    return base !== 'completed' && base !== 'failed' && base !== 'cancelled';
+  });
+  if (live.length !== 1) return null;
+  const only = live[0];
+  return (only.id as string) || (only.run_id as string) || null;
+}

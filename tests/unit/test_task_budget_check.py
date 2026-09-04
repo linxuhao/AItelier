@@ -58,6 +58,19 @@ def _tasks(n, prefix="t"):
     return [[f"{prefix}{i}" for i in range(n)]]
 
 
+GRAPH_BUDGET = _graph_shape(GRAPH)["budget"]
+
+
+def _first_overflowing_count() -> int:
+    """The smallest task count the CURRENT cap cannot carry through one fix
+    round. Derived, so raising or lowering the cap moves the test with it."""
+    shape = _graph_shape(GRAPH)
+    n = 1
+    while _required_steps(shape, n) <= shape["budget"]:
+        n += 1
+    return n
+
+
 # ── Step accounting ────────────────────────────────────────────────────────
 
 def test_shape_is_derived_from_the_real_graph(live):
@@ -69,16 +82,22 @@ def test_shape_is_derived_from_the_real_graph(live):
     # 14 since git_push_post joined the chain (2026-08-27): a finished round
     # pushes to its remote branch before `done`.
     assert shape["linear"] == 14
-    assert shape["budget"] == 200
+    # Read, never pinned: the cap is an operational knob (200 -> 300 on
+    # 2026-09-04, when a legitimate 21-card round died at step 204 inside the
+    # final verification chain). A test that pins the number turns every future
+    # adjustment into a red test that says nothing about the gate.
+    assert shape["budget"] == GRAPH_BUDGET
     assert shape["source"] == {"step": "3", "file": "tasks_manifest.json",
                                "field": "execution_order"}
 
 
 def test_the_boltons_list_is_the_one_that_did_not_fit(live):
-    """33 tasks: 146 steps for a clean pass, 248 with one fix round, cap 200."""
+    """The boltons shape: a clean pass is linear + 4 per task; one fix round
+    is what overflows. 33 tasks measured 146 clean / 248 with the fix round
+    against the cap of 200 that was in force then."""
     shape = _graph_shape(GRAPH)
     assert shape["linear"] + shape["body"] * 33 == 146
-    assert _required_steps(shape, 33) == 248 > shape["budget"]
+    assert _required_steps(shape, 33) == 248
 
 
 # ── The verdict ────────────────────────────────────────────────────────────
@@ -89,27 +108,29 @@ def test_a_list_that_fits_passes(tmp_path, live):
     assert result["within_budget"] is True
     assert result["task_count"] == 10
     assert result["required_steps"] == _required_steps(_graph_shape(GRAPH), 10)
-    assert result["max_total_steps"] == 200
+    assert result["max_total_steps"] == GRAPH_BUDGET
 
 
 def test_a_list_that_does_not_fit_is_rejected_with_the_numbers(tmp_path, live):
-    out = _workspace(tmp_path, _tasks(33))
+    n = _first_overflowing_count()
+    out = _workspace(tmp_path, _tasks(n))
     result = _call(out)
     assert result["within_budget"] is False
-    assert result["task_count"] == 33
-    assert result["required_steps"] == 248
-    assert result["max_total_steps"] == 200
-    assert result["max_tasks"] == 25
+    assert result["task_count"] == n
+    assert result["required_steps"] == _required_steps(_graph_shape(GRAPH), n)
+    assert result["max_total_steps"] == GRAPH_BUDGET
+    assert result["max_tasks"] == n - 1
     # The PM only ever sees `reason` (it rides the feedback banner), so the
     # numbers have to be in it.
-    for fragment in ("33", "248", "200", "25"):
+    for fragment in (str(n), str(result["required_steps"]),
+                     str(GRAPH_BUDGET), str(result["max_tasks"])):
         assert fragment in result["reason"]
 
 
 def test_the_recommended_count_actually_fits(tmp_path, live):
     """A recommendation that overshoots would just re-run the same death."""
     shape = _graph_shape(GRAPH)
-    result = _call(_workspace(tmp_path, _tasks(33)))
+    result = _call(_workspace(tmp_path, _tasks(_first_overflowing_count())))
     k = result["max_tasks"]
     assert _required_steps(shape, k) <= shape["budget"]
     assert _required_steps(shape, k + 1) > shape["budget"]

@@ -73,7 +73,15 @@ end_conditions:
       node: "done"
       result: "completed"
     - type: max_total_steps
-      limit: 200
+      # 300, from 200. This guard exists to stop a RUNAWAY, and a runaway is
+      # already bounded more tightly by max_loop (5_review→3 at 4, t_plan/t_impl
+      # review loops at 3): what the 200 actually caught was a legitimate round.
+      # Live, jinyong-nav (R5) 2026-09-04: 21 task cards over 3 goal-loop
+      # iterations, every gate green or honestly red, and the run FAILED at step
+      # 204 — on `5_test`, the first step of the final verification chain, after
+      # the last fix card had already landed. The cost of a too-low limit is the
+      # worst kind: all the work done, none of it verified.
+      limit: 300
     # No wall-clock run cap: AItelier is single-instance and human-in-the-loop,
     # so a run may sit paused on a checkpoint indefinitely. max_run_duration_seconds
     # counted approval-wait time (started_at is stamped once and never adjusted for

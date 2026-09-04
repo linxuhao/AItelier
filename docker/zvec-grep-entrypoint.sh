@@ -11,6 +11,11 @@ set -u
 PROJECTS="${AITELIER_PROJECTS_DIR:-/home/linxuhao/.AItelier/projects}"
 EMBED="${ZVEC_GREP_EMBEDDING:-local/potion-code-16m-v2}"
 
+# A container restart (SIGKILL on `docker compose restart`) leaves the
+# daemon's instance.lock behind and the next boot refuses to start
+# ("already running with PID 8"). Nothing else can hold it in this
+# container, so clear it.
+rm -f /home/linxuhao/.AItelier/zvec-grep-home/daemon/instance.lock
 zg server run --listen 127.0.0.1:7999 --mcp-toolset agent &
 SERVER=$!
 

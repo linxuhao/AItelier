@@ -16,7 +16,6 @@ EMBED="${ZVEC_GREP_EMBEDDING:-local/potion-code-16m-v2}"
 # ("already running with PID 8"). Nothing else can hold it in this
 # container, so clear it.
 rm -f /home/linxuhao/.AItelier/zvec-grep-home/daemon/instance.lock
-rm -f /home/linxuhao/.AItelier/zvec-grep-home/daemon/instance.lock
 # Same story one level down: each project index carries locks/daemon.json
 # naming the daemon that owns its writes by (pid, hostname, token). A
 # recreated sidecar gets the SAME hostname and pid 9 again, so the new daemon

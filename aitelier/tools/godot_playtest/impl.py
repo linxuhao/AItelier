@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from aitelier.gate_skip_log import log_gate_skip
 from core import external_deps
 
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
@@ -258,6 +259,14 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                         f"suite outgrew the budget (raise it) or a scenario "
                         f"hangs (the sidecar caps each one at 120s, so a whole "
                         f"suite over the wall means the count grew).")}
+        # skillflow's validator reads `passed` and drops every other key, so
+        # the flag beside it reaches nobody. Land the fact where it survives
+        # the run — see aitelier/gate_skip_log.py. Live 2026-09-04 23:08: a
+        # sweep taken while the builder was being recreated answered
+        # passed:true / gate_skipped:true / spec_used:false / frames:0, and
+        # nothing anywhere recorded that the suite never ran.
+        log_gate_skip("godot_playtest", "godot-builder unreachable",
+                      url=_BUILDER_URL, error=type(e).__name__)
         return {"passed": True, "frames": 0, "errors": [], "state": {},
                 "behavior": None, "spec_used": False, "gate_skipped": True,
                 "summary": (

@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from aitelier.gate_skip_log import log_gate_skip
 from core import external_deps
 
 _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
@@ -175,6 +176,8 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
             # LOUDLY: this branch only runs when the repo IS a Godot project, so a
             # skip here means real GDScript shipped UNVERIFIED. gate_skipped lets
             # 5_review surface that instead of reading a bare passed:true as clean.
+            log_gate_skip("godot_compile", "godot-builder unreachable",
+                          url=_BUILDER_URL, error=type(e).__name__)
             report["gate_skipped"] = True
             report["summary"] = (
                 external_deps.unreachable("GODOT_BUILDER_URL", _BUILDER_URL, e)

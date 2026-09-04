@@ -45,6 +45,24 @@ RUN wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERS
     && chmod +x /usr/local/bin/godot \
     && rm /tmp/godot.zip
 
+
+# ── Web export templates (web only, ~40MB of the ~800MB .tpz) ───────────────
+# The demo is published by exporting HERE and pushing the artifacts to the
+# public repo: the source moved to a private repo on 2026-09-05 and free-plan
+# Pages can only publish from a public one. Only the `web_*` templates are
+# kept — every other platform in the archive is dead weight in this image.
+RUN set -eux; \
+    base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}"; \
+    wget -q "${base}/Godot_v${GODOT_VERSION}_export_templates.tpz" -O /tmp/tpl.tpz; \
+    mkdir -p /tmp/tpl "/tmp/godot-home/.local/share/godot/export_templates"; \
+    unzip -q -o /tmp/tpl.tpz -d /tmp/tpl "templates/web_*" "templates/version.txt"; \
+    dir="/tmp/godot-home/.local/share/godot/export_templates/$(echo ${GODOT_VERSION} | tr '-' '.')"; \
+    mkdir -p "$dir"; \
+    mv /tmp/tpl/templates/* "$dir/"; \
+    rm -rf /tmp/tpl /tmp/tpl.tpz; \
+    chmod -R a+rX /tmp/godot-home; \
+    ls "$dir"
+
 # Godot writes editor/import metadata under $HOME/.config|.cache — give it a
 # writable home so it works when run as an arbitrary host uid (compose `user:`).
 ENV GODOT_BIN=/usr/local/bin/godot \

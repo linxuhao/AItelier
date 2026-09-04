@@ -18,6 +18,8 @@ Blocking command (do NOT poll for a checkpoint — this pushes):
 """
 
 import argparse
+from pathlib import Path
+import json
 import os
 import re
 import subprocess
@@ -464,6 +466,51 @@ def cmd_await(args):
             sys.exit(4)
 
 
+def cmd_replay(args):
+    """prompt(turn n) == concat of prompt_delta events with turn <= n, in seq order.
+
+    The host traces each appended message once (core/dpe_pipeline.py
+    _trace_prompt_deltas); skillflow keeps those events unclipped up to 256K
+    per field. So the conversation any turn saw is reproducible without the
+    trace storing the whole history once per turn.
+    """
+    import sqlite3
+    from core.datadir import workspaces_dir
+    db = Path(workspaces_dir()) / args.project_id / "trace.db"
+    if not db.exists():
+        print(f"no trace.db for {args.project_id}"); return 1
+    conn = sqlite3.connect(db)
+    rows = conn.execute(
+        "SELECT payload_json FROM skillflow_trace WHERE step_instance_id=? "
+        "AND event='prompt_delta' ORDER BY seq", (args.instance,)).fetchall()
+    if not rows:
+        print(f"instance {args.instance}: no prompt_delta events (older run, or a "
+              f"non-native step) — fall back to `trace`"); return 1
+    msgs = []
+    last_turn = 0
+    for (pj,) in rows:
+        p = json.loads(pj)
+        if args.turn and p.get("turn", 0) > args.turn:
+            break
+        last_turn = max(last_turn, p.get("turn", 0))
+        m = {"role": p.get("role", "")}
+        m["content"] = p.get("content", "")
+        for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
+            if k in p:
+                m[k] = p[k]
+        msgs.append(m)
+    if args.json:
+        print(json.dumps(msgs, ensure_ascii=False, indent=1)); return 0
+    print(f"# instance {args.instance} — {len(msgs)} messages through turn {last_turn}")
+    for i, m in enumerate(msgs):
+        extra = f" tool_call_id={m['tool_call_id']}" if m.get("tool_call_id") else ""
+        print(f"\n=== [{i}] {m['role']}{extra} ({len(m['content'])} chars) ===")
+        print(m["content"])
+        if m.get("tool_calls"):
+            print(f"--- tool_calls: {m['tool_calls']}")
+    return 0
+
+
 def cmd_trace(args):
     """Dump the durable skillflow run trace chronologically.
 
@@ -647,6 +694,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_await)
 
     # ── trace ──
+    s = sub.add_parser("replay", help="Rebuild the exact messages a step instance sent at turn N from prompt_delta events")
+    s.add_argument("project_id")
+    s.add_argument("--instance", type=int, required=True, help="step_instance_id (see `trace`)")
+    s.add_argument("--turn", type=int, default=0, help="turn to reconstruct (default: last)")
+    s.add_argument("--json", action="store_true", help="emit the messages list as JSON")
+    s.set_defaults(func=cmd_replay)
+
     s = sub.add_parser("trace", help="Dump durable skillflow run trace (events/prompts/actions)")
     s.add_argument("project_id")
     s.add_argument("--run-id", default="", help="Specific run id (default: latest for project)")

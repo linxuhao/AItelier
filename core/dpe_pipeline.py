@@ -454,6 +454,35 @@ class PipelineEngine:
         tag = f" {preview}" if preview else ""
         print(f"[DPE Debug] {event_type}{tag}")
 
+    def _trace_prompt_deltas(self, messages: list, turn: int) -> None:
+        """Trace every message appended since the last call, in FULL.
+
+        The native loop's conversation only ever grows by appending (the
+        turn-1 system+user pair, then per turn: the assistant message, one
+        tool message per call, and the host's injected nudges — budget
+        warnings, retry/salvage prompts). Tracing the appended slice once per
+        turn stores each message exactly once, so `prompt(turn n)` is
+        reproducible as the concatenation of all `prompt_delta` events with
+        turn <= n, without storing the whole history n times. skillflow keeps
+        `prompt_delta` unclipped up to 256K per field (`_TRACE_FULL_EVENTS`).
+        `_delta_traced` is reset where a new `messages` list is built; a retry
+        attempt continues the same list and therefore the same cursor.
+        """
+        start = getattr(self, "_delta_traced", 0)
+        for i in range(start, len(messages)):
+            m = messages[i] if isinstance(messages[i], dict) else {}
+            content = m.get("content")
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False, default=str)
+            payload = {"turn": turn, "index": i, "role": m.get("role", ""),
+                       "content": content}
+            for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
+                if m.get(k) is not None:
+                    v = m[k]
+                    payload[k] = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+            self._trace("prompt", "prompt_delta", payload)
+        self._delta_traced = len(messages)
+
     def _trace(self, category: str, event: str, payload: dict | None = None):
         """Append to skillflow's durable run trace (full prompts/responses).
 
@@ -2031,6 +2060,7 @@ class PipelineEngine:
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": user_prompt},
                 ]
+                self._delta_traced = 0
                 self._trace("prompt", "user_prompt", {
                     "attempt": attempt, "mode": "native",
                     # Trace the ACTUAL system message sent (incl. the shared
@@ -2150,6 +2180,7 @@ class PipelineEngine:
                 t0 = time.time()
 
                 try:
+                    self._trace_prompt_deltas(messages, turn_count + 1)
                     result = agent.turn(
                         messages=messages, tools=native_tools,
                         tool_choice=tool_choice,

@@ -444,6 +444,13 @@ steps:
     context:
       - source: { from: "repository", mode: "tool" }
       - source: { step: "3" }
+      # Which ids the task loop has ALREADY completed on this goal-loop
+      # iteration. The PM re-emits every card file (the manifest gate demands
+      # a card on disk per id), so a completed card looks pending on disk.
+      # Live, jinyong-nav 2026-09-04: the reviewer BLOCKED the plan because two
+      # completed cards' premises were "stale" — they were done — and the PM
+      # spent a 20-minute cycle re-emitting the same plan.
+      - source: { tool: "completed_cards" }
       # …and what the USER demanded about that output at its checkpoint.
       #
       # Without this the reviewer enforces a hard gate ("every blocking issue

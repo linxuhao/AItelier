@@ -1,0 +1,15 @@
+name: completed_cards
+description: >
+  Context source for 3_review on a goal-loop iteration: the card ids this
+  run's task loop has ALREADY dispatched and completed. The PM re-emits every
+  card file (the manifest gate requires it), so a completed card looks exactly
+  like a pending one on disk; the engine skips completed ids and never
+  re-runs them. A reviewer who does not know the list rejects a breakdown for
+  "re-doing committed work" (jinyong-nav 2026-09-04: two completed cards
+  BLOCKED the plan and cost a PM cycle). Returns {"completed": [...],
+  "content": "<one line for the prompt>"}; on any failure "completed": [].
+parameters:
+  workspace_root:
+    type: string
+    description: "The run's workspace root <workspaces>/<project_id> (injected)."
+    required: false

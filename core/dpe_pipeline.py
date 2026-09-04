@@ -454,6 +454,100 @@ class PipelineEngine:
         tag = f" {preview}" if preview else ""
         print(f"[DPE Debug] {event_type}{tag}")
 
+    @staticmethod
+    def _rebuild_from_deltas(rows: list, max_turns: int) -> dict | None:
+        """Rebuild a native step's conversation from its `prompt_delta` trace.
+
+        `rows` = [(event, payload_dict), …] for ONE step instance in seq order.
+        Returns None when there is nothing to resume (no deltas). Otherwise:
+        the messages (each stored once, by index), the number of COMPLETE
+        turns, the files written so far, and the turn budget as it stood
+        (base + every grant the trace shows). A trailing INCOMPLETE turn — an
+        assistant message whose tool calls do not all have their tool result
+        traced — is dropped: the host cannot tell which of those tools ran,
+        so the model re-decides from the last complete turn.
+        """
+        by_index: dict[int, dict] = {}
+        for event, payload in rows:
+            if event != "prompt_delta" or not isinstance(payload, dict):
+                continue
+            idx = payload.get("index")
+            if not isinstance(idx, int) or idx in by_index:
+                continue
+            m: dict = {"role": payload.get("role", ""), "content": payload.get("content", "")}
+            for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
+                v = payload.get(k)
+                if v is None:
+                    continue
+                if k == "tool_calls" and isinstance(v, str):
+                    try:
+                        v = json.loads(v)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                m[k] = v
+            by_index[idx] = m
+        if not by_index:
+            return None
+        messages = [by_index[i] for i in sorted(by_index)]
+        dropped = 0
+        # trailing incomplete turn
+        last_a = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=-1)
+        if last_a >= 0:
+            calls = messages[last_a].get("tool_calls") or []
+            got = sum(1 for m in messages[last_a + 1:] if m["role"] == "tool")
+            if not calls or got < len(calls):
+                dropped = len(messages) - last_a
+                messages = messages[:last_a]
+        turns = sum(1 for m in messages if m["role"] == "assistant")
+        written: list[str] = []
+        grants = 0
+        extra_total = 0
+        for m in messages:
+            if m["role"] != "tool":
+                continue
+            try:
+                res = json.loads(m["content"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(res, dict):
+                continue
+            wf = PipelineEngine._written_name(res)
+            if wf:
+                written.append(wf)
+            note = str(res.get("note", ""))
+            if note.startswith("ask_more_turns: +") and res.get("status") == "granted":
+                grants += 1
+                extra_total += int(res.get("turns", 0) or 0)
+        return {"messages": messages, "turns": turns, "written_files": written,
+                "turn_grants": grants, "current_max_turns": max_turns + extra_total,
+                "dropped_tail": dropped}
+
+    def _resume_from_trace(self, project_id: str, max_turns: int) -> dict | None:
+        """Read this instance's `prompt_delta` rows and rebuild; None if none.
+
+        The instance id is the one skillflow re-claimed after the host
+        restart — the same row, so the same trace key. A step that already
+        completed is never re-claimed, so no completion check is needed here.
+        """
+        iid = getattr(self, "_step_instance_id", None)
+        if not iid:
+            return None
+        try:
+            from api.dependencies import get_skillflow
+            sf = get_skillflow()
+            conn = sf._get_trace_conn(project_id) if project_id else None
+            conn = conn or sf._conn
+            cur = conn.execute(
+                "SELECT event, payload_json FROM skillflow_trace "
+                "WHERE step_instance_id = ? ORDER BY seq", (iid,))
+            rows = [(e, json.loads(pj or "{}")) for e, pj in cur.fetchall()]
+        except Exception:
+            return None
+        try:
+            return self._rebuild_from_deltas(rows, max_turns)
+        except Exception:
+            return None
+
     def _trace_prompt_deltas(self, messages: list, turn: int) -> None:
         """Trace every message appended since the last call, in FULL.
 
@@ -475,7 +569,8 @@ class PipelineEngine:
             if not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False, default=str)
             payload = {"turn": turn, "index": i, "role": m.get("role", ""),
-                       "content": content}
+                       "content": content,
+                       "attempt": getattr(self, "_delta_attempt", 1)}
             for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
                 if m.get(k) is not None:
                     v = m[k]
@@ -1894,7 +1989,32 @@ class PipelineEngine:
         # never-cleared {step_id}.tmp would otherwise carry forward and commit
         # wholesale. In-attempt retries stay inside the loop below and do NOT
         # re-clear, so they keep staging consistent with the inherited history.
-        workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
+        # RESUME AFTER A HOST RESTART: the trace holds every message this
+        # instance sent (prompt_delta, one row per message) and the staging
+        # dir still holds every file it wrote. Rebuild the conversation from
+        # the last COMPLETE turn instead of starting the step over; keep the
+        # staging dir only if every traced write is really there.
+        resume = self._resume_from_trace(project_id, self._max_tool_turns
+                                         or self.factory.get_max_tool_turns(step_id))
+        if resume:
+            draft = workspace._draft_dir(project_id, step_id, self._draft_graph_name())
+            missing = [f for f in resume["written_files"] if not (draft / f).exists()]
+            if missing or resume["turns"] < 1:
+                self._trace("step", "resume_refused", {
+                    "step_id": step_id, "turns": resume["turns"],
+                    "missing_staged_files": missing[:20]})
+                resume = None
+        if resume:
+            self._trace("step", "resumed_from_trace", {
+                "step_id": step_id, "turns": resume["turns"],
+                "dropped_tail": resume["dropped_tail"],
+                "written_files": sorted(set(resume["written_files"])),
+                "current_max_turns": resume["current_max_turns"]})
+            self._emit("step_resumed", {
+                "step_id": step_id, "turns": resume["turns"],
+                "preview": f"Step {step_id} resumed at turn {resume['turns']} from the trace"})
+        else:
+            workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
 
         feedback = ""
         # Carryover across attempts (parity with JSON mode) done the cache-optimal
@@ -1968,6 +2088,7 @@ class PipelineEngine:
         # skillflow constant that would silently stop matching if reworded.
         resolved_ctx = self._drop_context_value(resolved_ctx, self._validation_error)
 
+        _resumed = dict(resume) if resume else {}
         for attempt in range(1, max_retries + 1):
             self._emit("step_attempt", {
                 "step_id": step_id, "attempt": attempt,
@@ -1976,7 +2097,24 @@ class PipelineEngine:
                 "preview": f"Step {step_id} Attempt {attempt}/{max_retries} (native)",
             })
 
-            if attempt == 1:
+            if attempt == 1 and resume:
+                messages = resume["messages"]
+                self._delta_traced = len(messages)     # already in the trace
+                self._delta_attempt = attempt
+                staged = ", ".join(sorted(set(resume["written_files"]))) or "none"
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[Resumed after a host restart at turn {resume['turns']}] "
+                        f"The conversation above is exactly what you had; every "
+                        f"file you wrote is still staged ({staged}). Continue from "
+                        f"here — do not re-read or redo what is above. If your "
+                        f"last tool calls are missing their results, they were "
+                        f"lost in the restart: re-issue only those."),
+                })
+                resume = None    # a retry attempt must not re-enter this branch
+            elif attempt == 1:
+                self._delta_attempt = attempt
                 # Build initial messages. F1: project-global stable content
                 # (workspace layout + brief [+ design when F2]) goes in a
                 # byte-identical system preamble so the provider KV cache reuses
@@ -2081,12 +2219,13 @@ class PipelineEngine:
                     "above. Your VERY NEXT action MUST be write_/create_ tool "
                     "call(s) to produce the required file(s), then finish_step."
                 )
+                self._delta_attempt = attempt
                 messages.append({"role": "user", "content": nudge})
                 self._trace("prompt", "user_prompt", {
                     "attempt": attempt, "mode": "native", "user": nudge,
                 })
 
-            written_files: list[str] = []
+            written_files: list[str] = list(_resumed.get("written_files", [])) if attempt == 1 else []
             turn_count = 0
             # Set when the agent explicitly calls finish_step — its "I am done"
             # signal. Used below to distinguish a deliberate no-op completion
@@ -2103,6 +2242,10 @@ class PipelineEngine:
             current_max_turns = max_turns
             turn_grants = 0
             turn_count = -1
+            if attempt == 1 and _resumed:
+                current_max_turns = _resumed["current_max_turns"]
+                turn_grants = _resumed["turn_grants"]
+                turn_count = _resumed["turns"] - 1
             while True:
                 turn_count += 1
                 if turn_count >= current_max_turns:
@@ -2422,6 +2565,10 @@ class PipelineEngine:
                 if last_reasoning:
                     assistant_msg["reasoning_content"] = last_reasoning
                 messages.append(assistant_msg)
+                # Eager: a restart between here and the next model call must
+                # find this turn's messages in the trace (resume drops an
+                # incomplete turn, so the tool results below are traced too).
+                self._trace_prompt_deltas(messages, turn_count + 1)
 
                 called_finish = False
                 ask_more_extra = 0
@@ -2474,6 +2621,8 @@ class PipelineEngine:
                     if wf:
                         written_files.append(wf)
 
+
+                self._trace_prompt_deltas(messages, turn_count + 1)
 
                 # Apply ask_more_turns budget extension after all tool calls
                 # in this turn have been processed.

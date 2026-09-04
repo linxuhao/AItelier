@@ -51,7 +51,7 @@ services:
       # path here for a license-free parse-check + headless play-test. Non-game
       # (Python/web) projects never call it.
       GODOT_BUILDER_URL: "http://godot-builder:8080"
-      ZVEC_GREP_SERVER_URL: "http://zvec-grep:7999/mcp"
+      ZVEC_GREP_SERVER_URL: "http://zvec-grep:7998/mcp"
       # The readability gate (godot_vision) shows the frames the play-test
       # already rendered to a vision model and fails when the game is
       # unreadable despite green assertions. Reached over Tailscale, so the
@@ -153,7 +153,7 @@ services:
   # at http://godot-builder:8080. ~250MB image (no editor, no account, no
   # license) — built lazily; skipped for non-game deployments that never start it.
   # zvec-grep sidecar — semantic + lexical code search for the agents
-  # (aitelier/tools/semantic_search), reached at http://zvec-grep:7999/mcp on
+  # (aitelier/tools/semantic_search), reached at http://zvec-grep:7998/mcp on
   # the private network only (not on `edge`). Index a repo once:
   # The MCP surface is the AGENT toolset (search only): index/drop/status are
   # not reachable from inside aitelier, even by an agent with bash. The
@@ -170,7 +170,8 @@ services:
     container_name: aitelier-zg
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
     # Own network namespace on the private network: aitelier reaches it as
-    # http://zvec-grep:7999/mcp (ZVEC_GREP_SERVER_URL). It used to share
+    # http://zvec-grep:7998/mcp (ZVEC_GREP_SERVER_URL; zvec-grep-proxy.js fronts
+    # the loopback-only daemon, which refuses to listen anywhere else). It used to share
     # aitelier's namespace (network_mode: service:aitelier) so zg could bind
     # loopback — but then every `compose restart aitelier` tore the sidecar's
     # namespace away, compose does not restart dependents, and the daemon
@@ -185,10 +186,10 @@ services:
     # the daemon unlinks its lock + leases. Give it time before the KILL.
     stop_grace_period: 20s
     healthcheck:
-      # No curl in the node image; an empty POST to /mcp answers 400 when the
-      # daemon is up (anything <500), connection refused when it is not.
+      # No curl in the node image; an empty POST through the proxy answers 400
+      # when the daemon is up (anything <500), 502/refused when it is not.
       test: ["CMD", "node", "-e",
-             "fetch('http://127.0.0.1:7999/mcp',{method:'POST'}).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+             "fetch('http://127.0.0.1:7998/mcp',{method:'POST'}).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 3

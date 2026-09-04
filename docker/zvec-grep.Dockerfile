@@ -9,5 +9,6 @@ RUN npm install -g @zvec/zvec-grep@0.2.0 && npm cache clean --force
 ENV ZVEC_GREP_HOME=/home/linxuhao/.AItelier/zvec-grep-home \
     HOME=/home/linxuhao/.AItelier/zvec-grep-home
 COPY docker/zvec-grep-entrypoint.sh /usr/local/bin/zvec-grep-entrypoint.sh
+COPY docker/zvec-grep-proxy.js /usr/local/lib/zvec-grep-proxy.js
 RUN chmod +x /usr/local/bin/zvec-grep-entrypoint.sh
 CMD ["/usr/local/bin/zvec-grep-entrypoint.sh"]

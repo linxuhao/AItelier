@@ -4427,23 +4427,46 @@ class MetaAgent:
         outcome = report.get("outcome") or "stopped"
         closed = report.get("steps_closed") or []
         admitted = report.get("admitted_operations") or []
+        owner_state = report.get("admitted_owner_state") or {}
+        needs_recovery = bool(report.get("recovery_required"))
         if outcome == "already_terminal":
             msg = "Run had already ended; nothing to stop."
         elif outcome == "draining":
-            msg = ("Stop REQUESTED, not yet complete. No new step or tool will "
-                   f"start, but {len(admitted)} operation(s) were already "
-                   f"admitted and cannot be called off: {', '.join(admitted)}. "
-                   "They run to completion (promotion, repo_apply) and the run "
+            msg = ("Stop REQUESTED, not yet complete. No new operation will be "
+                   f"admitted, but {len(admitted)} were admitted before the stop "
+                   f"and cannot be called off: {', '.join(admitted)}. The run "
                    "ends when the last one finishes — check the repository "
                    "before assuming nothing changed.")
+            if needs_recovery:
+                lost = [op for op, s in owner_state.items() if s != "alive"]
+                msg += (f" ATTENTION: the owner of {', '.join(lost)} is "
+                        f"{'/'.join(sorted({owner_state[o] for o in lost}))}, so "
+                        f"this stop will NOT complete on its own. An owner that "
+                        f"is gone does not prove its effects stopped (repo_apply "
+                        f"spawns git), so nothing is retired automatically; it "
+                        f"needs an operator release with evidence that the "
+                        f"effects have ended.")
+                if report.get("recovery_hint"):
+                    msg += " " + report["recovery_hint"]
         else:
-            msg = "Pipeline stopped; no further steps or tools will start."
+            msg = "Pipeline stopped; no further operation will be admitted."
             if closed:
                 msg += (f" In-flight step(s) {', '.join(closed)} were closed "
                         f"before delivery: nothing was promoted or committed.")
-        return {"status": "stopped", "outcome": outcome, "run_id": run_id,
+        # `status` MUST agree with `outcome`. It said "stopped" for a draining
+        # run — a contradictory payload, and the one field the chat formatter
+        # renders (web/src/views/Chat.svelte:496-498 shows `<tool>: <status>`),
+        # so a stop that had not finished was summarised as if it had. The
+        # completed case keeps its historical value; only the truthful cases are
+        # new.
+        status = {"draining": "draining",
+                  "already_terminal": "already_terminal"}.get(outcome, "stopped")
+        return {"status": status, "outcome": outcome, "run_id": run_id,
                 "message": msg, "steps_closed": closed,
-                "admitted_operations": admitted}
+                "admitted_operations": admitted,
+                "admitted_owner_state": owner_state,
+                "recovery_required": needs_recovery,
+                "recovery_hint": report.get("recovery_hint") or ""}
 
     def _tool_get_pipeline_result(self, args: dict) -> dict:
         """Compact terminal result of a finished run (parsed JSON where possible)."""

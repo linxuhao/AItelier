@@ -1644,10 +1644,33 @@ def _register_lifecycle_tools(tool):
             return {**echo, "run_id": run["id"], "status": run["status"],
                     "message": f"already {run['status']}; nothing to stop"}
         try:
-            sf.fail_run(run["id"], reason or "stopped via the MCP endpoint")
+            report = sf.stop_run(run["id"],
+                                 reason or "stopped via the MCP endpoint")
         except Exception as e:
             return {**echo, "error": f"could not stop it: {e}"}
-        return {**echo, "run_id": run["id"], "status": "stopped"}
+        # This hard-coded {"status": "stopped"} and threw the report away. It is
+        # the path the production driver actually uses (~/.AItelier/bin/mcp.py
+        # stop_pipeline), and on 2026-09-05 it answered "stopped" over a step
+        # that committed forty seconds later. A stop has two outcomes:
+        #   stopped   the run is terminal, nothing is admitted, nothing further
+        #             can be — no new effect starts;
+        #   draining  operations admitted before the stop cannot be called off;
+        #             the run ends when the last retires. NOT complete.
+        # `recovery_required` means it will not end on its own: an admitted
+        # operation's owner is gone or unobservable, which does NOT prove its
+        # effects stopped, so nothing is retired automatically.
+        report = report if isinstance(report, dict) else {}
+        outcome = report.get("outcome") or "stopped"
+        return {**echo, "run_id": run["id"],
+                "status": {"draining": "draining",
+                           "already_terminal": "already_terminal"}.get(
+                               outcome, "stopped"),
+                "outcome": outcome,
+                "steps_closed": report.get("steps_closed") or [],
+                "admitted_operations": report.get("admitted_operations") or [],
+                "admitted_owner_state": report.get("admitted_owner_state") or {},
+                "recovery_required": bool(report.get("recovery_required")),
+                "recovery_hint": report.get("recovery_hint") or ""}
 
     @tool("archive_pipeline", "write",
           "Retire a generated pipeline. A generate → drive → fix loop leaves failed "

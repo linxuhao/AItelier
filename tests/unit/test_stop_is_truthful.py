@@ -47,9 +47,13 @@ def test_a_terminal_stop_promises_that_nothing_new_starts(monkeypatch):
                               "admitted_operations": []})
     assert out["outcome"] == "stopped"
     assert out["steps_closed"] == ["implement"]
-    assert "no further steps or tools will start" in out["message"]
+    assert "no further operation will be admitted" in out["message"]
     assert "nothing was promoted or committed" in out["message"]
-    assert "admitted" not in out["message"]
+    # A completed stop names no operation it could not prevent, and asks for no
+    # attention: there is nothing left running.
+    assert "ATTENTION" not in out["message"]
+    assert "not yet complete" not in out["message"]
+    assert out["admitted_operations"] == [] and out["recovery_required"] is False
 
 
 def test_a_draining_stop_is_not_reported_as_complete(monkeypatch):
@@ -62,7 +66,9 @@ def test_a_draining_stop_is_not_reported_as_complete(monkeypatch):
     """
     out = _stop(monkeypatch, {"run_id": "r1", "outcome": "draining",
                               "status": "running", "steps_closed": [],
-                              "admitted_operations": ["delivery:implement"]})
+                              "admitted_operations": ["delivery:implement"],
+                              "admitted_owner_state": {"delivery:implement": "alive"},
+                              "recovery_required": False})
     assert out["outcome"] == "draining"
     assert out["admitted_operations"] == ["delivery:implement"]
     assert "REQUESTED, not yet complete" in out["message"]
@@ -71,12 +77,61 @@ def test_a_draining_stop_is_not_reported_as_complete(monkeypatch):
     assert "delivery:implement" in out["message"]
 
 
+def test_the_status_field_agrees_with_the_outcome(monkeypatch):
+    """`status` said "stopped" for a draining run — a contradictory payload, and
+    `status` is the ONE field the chat summary renders
+    (web/src/views/Chat.svelte:496-498 formats `<tool>: <status>`), so a stop
+    that had not finished was summarised as if it had.
+    """
+    draining = _stop(monkeypatch, {"run_id": "r1", "outcome": "draining",
+                                   "status": "running", "steps_closed": [],
+                                   "admitted_operations": ["delivery:implement"],
+                                   "recovery_required": False})
+    assert draining["status"] == "draining" != "stopped"
+
+    ended = _stop(monkeypatch, {"run_id": "r1", "outcome": "stopped",
+                                "status": "failed", "steps_closed": ["implement"],
+                                "admitted_operations": [],
+                                "recovery_required": False})
+    assert ended["status"] == "stopped", "the completed case must keep its value"
+
+
+def test_a_stop_that_cannot_complete_on_its_own_says_so_and_forwards_the_state(
+        monkeypatch):
+    """A lost owner does not prove its effects stopped, so nothing is retired
+    automatically and the run will not end by itself. The caller has to be told,
+    and told what would resolve it."""
+    out = _stop(monkeypatch, {
+        "run_id": "r1", "outcome": "draining", "status": "running",
+        "steps_closed": [], "admitted_operations": ["delivery:implement"],
+        "admitted_owner_state": {"delivery:implement": "dead"},
+        "recovery_required": True,
+        "recovery_hint": "release_operation requires evidence that the "
+                         "operation's EFFECTS have stopped"})
+    assert out["status"] == "draining"
+    assert out["recovery_required"] is True
+    assert out["admitted_owner_state"] == {"delivery:implement": "dead"}
+    assert "ATTENTION" in out["message"]
+    assert "will NOT complete on its own" in out["message"]
+    assert "EFFECTS have stopped" in out["message"]
+
+
+def test_an_unobservable_owner_is_forwarded_too(monkeypatch):
+    out = _stop(monkeypatch, {
+        "run_id": "r1", "outcome": "draining", "status": "running",
+        "steps_closed": [], "admitted_operations": ["tool:create"],
+        "admitted_owner_state": {"tool:create": "unknown"},
+        "recovery_required": True, "recovery_hint": "…"})
+    assert out["recovery_required"] is True
+    assert "unknown" in out["message"]
+
+
 def test_a_stop_between_steps_claims_nothing_more_and_nothing_less(monkeypatch):
     out = _stop(monkeypatch, {"run_id": "r1", "outcome": "stopped",
                               "status": "failed",
                               "steps_closed": [], "admitted_operations": []})
-    assert out["message"] == ("Pipeline stopped; no further steps or tools "
-                              "will start.")
+    assert out["message"] == ("Pipeline stopped; no further operation will "
+                              "be admitted.")
 
 
 def test_an_already_ended_run_says_so(monkeypatch):
@@ -92,6 +147,7 @@ def test_an_older_skillflow_returning_none_does_not_break_the_butler(monkeypatch
     out = _stop(monkeypatch, None)
     assert out["status"] == "stopped"
     assert out["steps_closed"] == [] and out["admitted_operations"] == []
+    assert out["status"] == "stopped" and out["recovery_required"] is False
 
 
 def test_an_already_terminal_run_is_still_refused_early(monkeypatch):

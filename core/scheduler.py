@@ -779,26 +779,35 @@ async def _check_hung_claims():
             reclaimed = []
             logger.warning("stale-claim reclaim failed: %s", e)
 
-        # Orphaned side-effect operations, on the same independent cadence and
-        # for a sharper reason: a requested cancellation forbids claiming, so the
-        # re-claim that used to clean up after a crashed executor cannot happen
-        # while a run drains. Without a path that does not depend on claiming, a
-        # run whose executor died mid-operation drains forever.
+        # Admitted side-effect operations whose owner is gone. This OBSERVES and
+        # REPORTS; it retires nothing and completes no cancellation.
         #
-        # Retires ONLY records whose owner process is observably dead. An owner
-        # that cannot be probed is reported, never assumed gone — a timeout must
-        # never become a successful stop.
+        # The reason it must not is the whole point: the owner's death proves the
+        # owner PROCESS ended, and the contract is about EFFECTS. `repo_apply`
+        # runs `git add` / `git commit` through subprocess, and a child can
+        # outlive its parent — so retiring the last record on owner death would
+        # terminalise the run and report `stopped`, which means *no remaining
+        # effects*, while a commit could still be landing. A lost owner needs an
+        # operator (`SkillFlow.release_operation`, with evidence that the effects
+        # have stopped), and saying so is the truthful answer.
+        #
+        # It runs here, on this loop's own 30 s cadence, because a requested
+        # cancellation forbids claiming — a path that depended on claiming could
+        # never run when it matters. Independence is not evidence; visibility is
+        # all this provides.
         try:
-            _orphans = sf.recover_orphan_ops()
-            if _orphans.get("recovered"):
-                logger.warning("retired orphaned operation(s) whose owner is "
-                               "gone: %s", ", ".join(_orphans["recovered"]))
-            if _orphans.get("unknown"):
-                logger.warning("operation(s) with an unobservable owner remain "
-                               "admitted (recovery required, not assumed): %s",
-                               ", ".join(_orphans["unknown"]))
+            _ops = sf.audit_operation_owners()
+            if _ops.get("lost"):
+                logger.warning("admitted operation(s) whose owner is GONE remain "
+                               "recorded and still block the cancellation — "
+                               "operator release required: %s",
+                               ", ".join(_ops["lost"]))
+            if _ops.get("unknown"):
+                logger.warning("admitted operation(s) with an unobservable owner "
+                               "remain recorded (not assumed gone): %s",
+                               ", ".join(_ops["unknown"]))
         except Exception as e:                                   # noqa: BLE001
-            logger.warning("orphan-operation recovery failed: %s", e)
+            logger.warning("operation-owner audit failed: %s", e)
         for _rid in reclaimed:
             try:
                 _pid = (sf.get_run(_rid) or {}).get("project_id") or "unknown"

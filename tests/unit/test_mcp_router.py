@@ -1389,3 +1389,62 @@ def test_an_unreadable_run_after_a_raise_is_reported_as_the_failure_it_was(
 
     assert "cannot commit" in out["error"]
     assert "warning" not in out
+
+
+# ── stop_pipeline tells the truth about what the stop achieved ──────────────
+
+def _stop_tool(monkeypatch, report):
+    """The MCP `stop_pipeline` bound to a skillflow whose stop_run answers
+    `report`. This is the path the production driver uses
+    (~/.AItelier/bin/mcp.py stop_pipeline)."""
+    sf = _WaitSF(); sf.status = "running"
+    sf.stop_run = lambda rid, reason: report
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+    captured = {}
+
+    def tool(name, kind, description):
+        def deco(fn):
+            captured[name] = fn
+            return fn
+        return deco
+    mcp_router._register_lifecycle_tools(tool)
+    return captured["stop_pipeline"]("r1", "operator stop")
+
+
+def test_stop_pipeline_reports_draining_as_draining(monkeypatch):
+    """It hard-coded {"status": "stopped"} and threw the report away. On
+    2026-09-05 that answered "stopped" over a step that committed 40 s later."""
+    out = _stop_tool(monkeypatch, {
+        "run_id": "r1", "outcome": "draining", "status": "running",
+        "steps_closed": [], "admitted_operations": ["delivery:implement"],
+        "admitted_owner_state": {"delivery:implement": "alive"},
+        "recovery_required": False, "recovery_hint": ""})
+    assert out["status"] == "draining" != "stopped"
+    assert out["outcome"] == "draining"
+    assert out["admitted_operations"] == ["delivery:implement"]
+
+
+def test_stop_pipeline_forwards_the_need_for_recovery(monkeypatch):
+    """A lost owner does not prove its effects stopped, so the run will not end
+    on its own. Dropping that field left the operator believing it would."""
+    out = _stop_tool(monkeypatch, {
+        "run_id": "r1", "outcome": "draining", "status": "running",
+        "steps_closed": [], "admitted_operations": ["delivery:implement"],
+        "admitted_owner_state": {"delivery:implement": "dead"},
+        "recovery_required": True, "recovery_hint": "needs evidence"})
+    assert out["recovery_required"] is True
+    assert out["admitted_owner_state"] == {"delivery:implement": "dead"}
+    assert out["recovery_hint"] == "needs evidence"
+
+
+def test_stop_pipeline_keeps_reporting_a_completed_stop_as_stopped(monkeypatch):
+    """Compatibility where it is truthful: a stop that really finished keeps its
+    historical status value."""
+    out = _stop_tool(monkeypatch, {
+        "run_id": "r1", "outcome": "stopped", "status": "failed",
+        "steps_closed": ["implement"], "admitted_operations": [],
+        "admitted_owner_state": {}, "recovery_required": False})
+    assert out["status"] == "stopped"
+    assert out["steps_closed"] == ["implement"]
+    assert out["recovery_required"] is False

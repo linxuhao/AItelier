@@ -1,0 +1,46 @@
+name: git_history
+description: >
+  READ the repository's git history — the one kind of evidence neither the diff
+  nor the current file contents can supply. Four modes. `log`: recent commits
+  touching `path` (subject, author, date, sha). `search`: the pickaxe — commits
+  that ADDED or REMOVED `query` anywhere in the tree, which is how you find out
+  whether a change is reintroducing something a past commit deliberately removed.
+  `blame`: for `path` plus `start_line`/`end_line`, the commit that last touched
+  each line, so "why is this line like this" has an answer. `show`: one commit's
+  message and diff by `sha` (get the sha from `log`, `search` or `blame` first).
+  Read-only: it never writes, checks out, or changes any repository state.
+  Requires a repository — a run given none (a diff-only review, any `repo_mode:
+  none` run without `against_project`) gets a clear error, never a fallback root.
+parameters:
+  mode:
+    type: string
+    description: "One of: log | search | blame | show."
+    required: true
+  path:
+    type: string
+    description: "Repo-relative file or directory. Required for blame; optional filter for log."
+    required: false
+  query:
+    type: string
+    description: "For mode=search: the literal code string whose add/remove commits you want."
+    required: false
+  sha:
+    type: string
+    description: "For mode=show: the commit to display, as reported by log/search/blame."
+    required: false
+  start_line:
+    type: integer
+    description: "For mode=blame: first line, 1-based (default 1)."
+    required: false
+  end_line:
+    type: integer
+    description: "For mode=blame: last line, inclusive (default start_line + 40)."
+    required: false
+  max_count:
+    type: integer
+    description: "For log/search: how many commits to return (default 20, cap 100)."
+    required: false
+  project_root:
+    type: string
+    description: "Path to the repository (auto-injected by the engine)"
+    required: false

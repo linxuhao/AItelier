@@ -18,11 +18,26 @@ x-aitelier:
   scheduler_owned: false          # driven inline by the butler
   seed_file: "review_request.md"
   output_step: "review"
+  # This config PRODUCES no code, so it is handed no repository of its own.
+  # Left at the default `code`, every run was stamped repo_type="new" and
+  # git-init'd a throwaway repo under ~/.AItelier/projects/<run_id>; since the
+  # dashboard groups by repo_path, each review then showed up as its own
+  # standalone repository (25 of them before this was declared).
+  #
+  # `none` bounds what this config OWNS, not what it can read: a run launched
+  # with `against_project` keeps the caller's repo_path and the repository
+  # context source below resolves against it. Emitting no code and reading a
+  # real repo are separate axes, and this is the one that says "emits none".
+  repo_mode: none
   input_hint: >-
     seed_text = a one-line task summary followed by the VERBATIM `git diff`
     output — the raw diff hunks, NOT a description or summary of the changes
     (the reviewer rejects a request with no actual diff). Driven inline: the
     verdict (passed / feedback / findings) returns in the tool result.
+    Add against_project=<project_id> to ALSO hand the reviewer the codebase:
+    it can then check whether callers were updated and whether a test covers
+    the change, neither of which a diff can show. Without it the review is
+    diff-only and says so in its feedback.
 
 begin: "review"
 
@@ -40,6 +55,18 @@ steps:
     agent_config: "diff_reviewer"
     context:
       - source: { config: "code_review", output: "review_request.md" }
+      # Optional codebase access, which is what makes ONE config serve both
+      # usages. With `against_project` the run is handed a real `repo_path`
+      # (kept even under `repo_mode: none`) and this resolves to a `repo` read
+      # layer; without it `code_root` is None, skillflow returns no roots rather
+      # than failing, and the reviewer falls back to judging the diff alone.
+      #
+      # It closes a real blind spot: the template asks for "callers not updated"
+      # and "no test covers this", neither of which a diff can answer — a diff
+      # shows changed lines, never who calls them or what else tests them.
+      # `mode: tool` and not `both`: a whole repository must never be inlined
+      # into the prompt.
+      - source: { from: "repository", mode: "tool" }
     output:
       mode: "content"
       fixed:

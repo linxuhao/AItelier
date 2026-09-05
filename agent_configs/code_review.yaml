@@ -10,7 +10,13 @@ diff_reviewer:
   model: "glm"
   temperature: 0.1
   template: "code_review_diff.md"
-  tools: []
+  # The repo READ tools (read/search/list) are not listed here — they are
+  # generated from the step's context sources, and appear only when the run was
+  # given a repository. `git_history` is a host tool and must be named, so it is
+  # always offered; with no repository it answers with an error saying so, which
+  # the template pre-empts by telling the reviewer to check for the `repo`
+  # source before reaching for either.
+  tools: ["git_history"]
   max_output_tokens: 8192
   native_tool_calling: true
   fallback_to_json_mode: true

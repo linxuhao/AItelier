@@ -113,7 +113,20 @@ def _list_all_runs_uncached(owner, db, registry):
         # Repo-less runs (authoring converters, generated pipelines that never
         # touch code) have no repo to group under — the dashboard lists them in
         # the same non-code section rather than the orphan project list.
-        r["repo_less"] = bool(m and m.repo_mode == "none")
+        #
+        # BOTH halves are load-bearing, because `repo_mode` is a property of the
+        # CONFIG while having a repository is a property of the RUN, and
+        # `against_project` is exactly where the two disagree: a `repo_mode:
+        # none` config pointed at a real repo keeps the caller's `repo_path`
+        # (run_launcher stamps 'none' but never clears the path — the documented
+        # "emits no code, reads a real repo" shape). Judged on the manifest
+        # alone, such a run claimed to be repo-less while `/api/repos` grouped
+        # it under its very real path, so it rendered in the non-code section
+        # AND under its repository. Judged on `repo_path` alone, a repo-less run
+        # that a code-producing config once created a throwaway repo for would
+        # be dragged back into the repo list. It is repo-less only when the
+        # config declares none AND this run was handed no repository.
+        r["repo_less"] = bool(m and m.repo_mode == "none") and not r.get("repo_path")
         out.append(r)
 
     # Attach cache hit ratio stats per run (batch query).

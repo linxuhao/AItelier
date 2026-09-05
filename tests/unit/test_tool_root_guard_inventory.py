@@ -52,6 +52,8 @@ GUARDED = {
     "emit_project_artifacts",   # refuses a non-absolute workspace_root
     "gen_audio_asset",          # _target_root: `if cand and Path(cand).is_dir()`
     "gen_image_asset",          # same
+    "git_history",              # _repo() raises on an empty/blank root, and the
+                                # error names against_project as the fix
     "git_push_post",            # `Path(project_root) … if project_root else None`
     "knowledge_sync",           # `… if project_root else None`
     "loop_items_implemented",   # _graph_dir: every branch is `if <root> and …`

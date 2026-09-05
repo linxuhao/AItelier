@@ -253,6 +253,12 @@ the **verbatim** diff as `seed_text`. It's `[inline]`, so its verdict (`passed`,
 `feedback`, `findings`) returns straight in the tool result — fix real findings,
 re-run the tests, then report done.
 
+**Pass `against_project` whenever you are working inside a project.** The diff
+alone cannot show whether callers were updated or whether a test covers the
+change, so a diff-only verdict is silent on exactly the two failure modes that
+cost the most; with the repository the reviewer checks both. Omit it only when
+there is no project to point at — reviewing a patch from elsewhere, say.
+
 ## Git
 
 Work happens directly in the repo. Use bash for git: check `git status` /

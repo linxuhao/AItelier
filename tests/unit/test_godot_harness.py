@@ -773,3 +773,116 @@ def test_an_unexpected_error_surfaces_and_leaves_no_home_behind(monkeypatch, tmp
         gh.run_script(str(tmp_path), [], timeout=30)
 
     assert len(seen) == 1 and not seen[0]["home"].exists()
+
+
+# ── the no-input CONTROL pass is a run too ──────────────────────────────────
+#
+# Each scenario got its own throwaway user:// (2026-09-04); the control pass
+# that decides `input_dead` did not, so every control in every request shared
+# the container's HOME. Measured on the wuxia tree 2026-09-05: the game's
+# user:// logs appeared in the sidecar's shared home at the END of each
+# play-test request — the control passes, and nothing else. A control that
+# boots into what an earlier control saved is not a no-input BASELINE.
+
+def _spec(names_pressed, at=5):
+    """A spec whose scenarios all PRESS input, so each one earns a control pass."""
+    return {"scenarios": [
+        {"name": n, "timeline": [{"at": at, "press": "ui_accept"},
+                                 {"at": at, "assert": [{"node": "N", "expr": "x > 0"}]}]}
+        for n in names_pressed]}
+
+
+def _home_recording_probe(monkeypatch, seen, control_nodes=None, on_control=None):
+    """Record the HOME each probe run receives, and what it finds already there.
+
+    The sentinel is the point: a control that can see the previous run's file is
+    a control that inherited its user://.
+    """
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+        home = env.get("HOME")
+        is_control = "AITELIER_PROBE_SPEC" in env and capture_at is None
+        rec = {"home": home, "is_control": is_control, "existed": False, "found": []}
+        if home:
+            hp = Path(home)
+            rec["existed"] = hp.is_dir()
+            rec["found"] = sorted(p.name for p in hp.iterdir()) if hp.is_dir() else []
+            (hp / "save_1.json").write_text("{}")
+        seen.append(rec)
+        if is_control:
+            if on_control is not None:
+                return on_control()
+            return ({"frames": frames, "asserts": [], "nodes": control_nodes or {}}, [], False)
+        return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
+                 "nodes": {"Bird": {"vars": {"x": 1}}}}, [], False)
+
+    monkeypatch.setattr(gh, "_run_probe", fake)
+    return seen
+
+
+def test_the_control_pass_runs_in_its_own_home_and_leaves_none_behind(monkeypatch, tmp_path):
+    seen = _home_recording_probe(monkeypatch, [])
+    r = gh._playtest_spec(tmp_path / "proj", _spec(["a", "b"]), 60, 120)
+
+    controls = [s for s in seen if s["is_control"]]
+    assert len(seen) == 3 and len(controls) == 1        # 2 scenarios + 1 control
+    homes = [s["home"] for s in seen]
+    assert all(h for h in homes), "every probe run must be handed a HOME"
+    assert len(set(homes)) == 3                          # scenarios AND control differ
+    assert all(s["existed"] and s["found"] == [] for s in seen)   # each one fresh
+    assert not any(Path(h).exists() for h in homes)      # and all removed
+    assert r["passed"] is True                           # nodes differ -> input alive
+
+
+def test_a_second_request_does_not_hand_the_control_an_old_home(monkeypatch, tmp_path):
+    seen = _home_recording_probe(monkeypatch, [])
+    gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)
+    gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)
+
+    controls = [s for s in seen if s["is_control"]]
+    assert len(controls) == 2
+    assert controls[0]["home"] != controls[1]["home"]
+    assert controls[1]["found"] == []                    # request 1 left nothing
+    assert not Path(controls[0]["home"]).exists()
+
+
+def test_a_dead_input_is_still_called_dead_from_a_fresh_control(monkeypatch, tmp_path):
+    """Isolating the control must not soften the verdict it exists to deliver.
+
+    The scenario presses a key and ends in EXACTLY the control's state; that is
+    still a HARD failure, and the control that proved it still ran in its own
+    home.
+    """
+    same = {"Bird": {"vars": {"x": 1}}}
+    seen = _home_recording_probe(monkeypatch, [], control_nodes=same)
+    r = gh._playtest_spec(tmp_path / "proj", _spec(["ghost_press"]), 60, 120)
+
+    assert r["passed"] is False
+    assert "input" in r["summary"] and "ghost_press" in r["summary"]
+    assert r["behavior"]["scenarios"][0]["input_dead"] is True
+    control = [s for s in seen if s["is_control"]][0]
+    assert control["home"] and control["found"] == []
+    assert not Path(control["home"]).exists()
+
+
+def test_a_control_that_timed_out_accuses_nobody_and_still_cleans_up(monkeypatch, tmp_path):
+    """No control evidence => no input_dead claim (the pre-existing rule), and
+    the home goes anyway."""
+    seen = _home_recording_probe(monkeypatch, [], on_control=lambda: ({}, [], True))
+    r = gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)
+
+    assert r["behavior"]["scenarios"][0]["input_dead"] is False
+    assert r["passed"] is True
+    control = [s for s in seen if s["is_control"]][0]
+    assert not Path(control["home"]).exists()
+
+
+def test_an_unexpected_control_error_surfaces_and_leaves_no_home(monkeypatch, tmp_path):
+    def boom():
+        raise OSError("cannot fork")
+
+    seen = _home_recording_probe(monkeypatch, [], on_control=boom)
+    with pytest.raises(OSError, match="cannot fork"):
+        gh._playtest_spec(tmp_path / "proj", _spec(["a"]), 60, 120)
+
+    control = [s for s in seen if s["is_control"]][0]
+    assert control["home"] and not Path(control["home"]).exists()

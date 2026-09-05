@@ -1149,9 +1149,21 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
             n = scen_frames[i]
             if n not in controls:
                 spec_path.write_text(json.dumps({"frames": n, "timeline": []}))
-                ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
-                                          {"AITELIER_PROBE_SPEC": str(spec_path)},
-                                          scene=scene)
+                # The control is a RUN, so it needs the same throwaway user://
+                # every scenario gets. It was the one probe call still on the
+                # container's HOME: measured 2026-09-05 on the wuxia tree, the
+                # game's user:// logs landed in the sidecar's shared home at the
+                # end of each request, and only the control passes were there.
+                # A control that boots into a save an earlier control left is
+                # not the no-input baseline this comparison claims to be.
+                ctrl_home = tempfile.mkdtemp(prefix="godot_home_")
+                try:
+                    ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
+                                              {"AITELIER_PROBE_SPEC": str(spec_path),
+                                               "HOME": ctrl_home},
+                                              scene=scene)
+                finally:
+                    shutil.rmtree(ctrl_home, ignore_errors=True)
                 controls[n] = _digest(ctrl.get("nodes", {}))
             # An empty control means the control pass itself failed to report --
             # stay quiet rather than accuse the game on missing evidence.

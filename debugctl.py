@@ -363,7 +363,7 @@ def _run_snapshot(base_url: str, run_id: str, timeout: float = 10.0):
         return None
 
 
-def _terminal_verdict(run, run_id: str):
+def _terminal_verdict(run, run_id: str, project_id: str = ""):
     """(message, exit_code) if `run` proves THIS run ended, else None.
 
     The id check is load-bearing, not defensive noise. `GET /api/runs/{id}`
@@ -376,6 +376,11 @@ def _terminal_verdict(run, run_id: str):
     if not isinstance(run, dict):
         return None
     if not run_id or run.get("id") != run_id:
+        return None
+    # BOTH handles must agree when the caller gave both. A run that belongs to
+    # a different project means the two handles were not describing the same
+    # thing — a wrong handle, not a finished run.
+    if project_id and run.get("project_id") != project_id:
         return None
     status = run.get("status")
     if status not in _RUN_TERMINAL_STATUSES:
@@ -445,6 +450,9 @@ def cmd_await(args):
     deadline = time.time() + args.timeout
     want = {"checkpoint_paused", "run_completed", "run_failed", "pipeline_failed"}
     mismatch_warned = False
+    # What the LAST status read established, so a timeout can say whether the
+    # run was verified to be alive or merely not proven finished.
+    last_read = {"outcome": "never", "status": None}
 
     def _reconcile(when: str):
         """One bounded status read; exit if THIS run has ALREADY ended.
@@ -460,17 +468,26 @@ def cmd_await(args):
         if not args.run:
             return
         run = _run_snapshot(args.url, args.run)
-        if run is None:
-            print(f"STATUS UNKNOWN at {when}: could not read run {args.run}; "
-                  f"still watching {pid}", flush=True)
+        # A body that PARSED is not necessarily a run. A JSON list or scalar
+        # reaching `.get` was an AttributeError — a traceback and exit 1, the
+        # code that means THE RUN FAILED. A shape we do not recognise is
+        # UNKNOWN, which is a reason to keep watching and nothing else.
+        if not isinstance(run, dict):
+            last_read.update(outcome="unknown", status=None)
+            why = "no response" if run is None else f"unexpected body shape {type(run).__name__}"
+            print(f"STATUS UNKNOWN at {when}: could not read run {args.run} "
+                  f"({why}); still watching {pid}", flush=True)
             return
-        if run.get("id") != args.run:
+        if run.get("id") != args.run or run.get("project_id") != pid:
+            last_read.update(outcome="ignored", status=run.get("status"))
             if not mismatch_warned:
                 mismatch_warned = True
                 print(f"STATUS IGNORED at {when}: /api/runs/{args.run} resolved to run "
-                      f"{run.get('id')!r}, which is not the run being watched", flush=True)
+                      f"{run.get('id')!r} of project {run.get('project_id')!r}, "
+                      f"not run {args.run} of {pid}", flush=True)
             return
-        verdict = _terminal_verdict(run, args.run)
+        last_read.update(outcome="read", status=run.get("status"))
+        verdict = _terminal_verdict(run, args.run, pid)
         if verdict is None:
             return
         msg, code = verdict
@@ -510,7 +527,20 @@ def cmd_await(args):
         the same thing is worse than no watcher, because the driver acts on it.
         """
         _reconcile("timeout")
-        print(f"TIMEOUT after {args.timeout}s waiting on {pid}", flush=True)
+        # Exit 2 means THE DEADLINE WAS EXCEEDED. On its own it does not mean
+        # the run was still going: if the last status read failed, was refused
+        # for a mismatched handle, or never happened, liveness is unverified and
+        # the line has to say so rather than let the reader assume it.
+        outcome = last_read["outcome"]
+        if outcome == "read":
+            tail = f" (run status={last_read['status']!r} at the last read)"
+        elif outcome == "never":
+            tail = " — run state NOT VERIFIED (no exact --run to reconcile against)"
+        elif outcome == "ignored":
+            tail = " — run state NOT VERIFIED (the status read named a different run/project)"
+        else:
+            tail = " — run state NOT VERIFIED (the status could not be read)"
+        print(f"TIMEOUT after {args.timeout}s waiting on {pid}{tail}", flush=True)
         sys.exit(2)
 
     # The stream is REOPENED on close instead of ending the watch. `--follow`
@@ -546,13 +576,20 @@ def cmd_await(args):
         return False
 
     if not _reopen():
-        _die(f"cannot open the event stream at {url}")
+        # Exit 4, not 1. `_die` exits 1, which is the code that means THE RUN
+        # FAILED — for a server that is simply not there. 4 already means
+        # "stopped watching for a transport reason", as it does for exhausted
+        # reconnects below.
+        print(f"STREAM UNREACHABLE at {url}: could not open the event stream, "
+              f"NOT WATCHING {pid}", file=sys.stderr, flush=True)
+        sys.exit(4)
 
     while True:
         # Each connection is a NEW subscription, so each one re-arms the
         # handshake and earns its own reconciliation: a reconnect leaves a gap,
         # and the run can have ended inside it.
         subscribed = False
+        unattributed_checked = False
         for raw in _lines(resp):
             if not subscribed:
                 # OPENING THE CONNECTION IS NOT SUBSCRIBING. `urlopen` returns
@@ -585,16 +622,31 @@ def cmd_await(args):
                 continue
             if ev.get("project_id") != pid:
                 continue
+            kind = ev.get("type", "")
+            if kind not in want:
+                continue
             # The stream REPLAYS recent events on connect. A project that just
             # finished its meta_conversation run replays that run's
             # `run_completed`, and a watcher armed for the dpe_game run that
             # started seconds later exits on it (R4 and R5, 2026-09-03). With
-            # `--run`, only that run's events count; events that carry no
-            # run_id are kept, so an older server still works.
-            if args.run and ev.get("run_id") and ev.get("run_id") != args.run:
-                continue
-            kind = ev.get("type", "")
-            if kind not in want:
+            # `--run`, only that run's events count.
+            if args.run and ev.get("run_id") != args.run:
+                if ev.get("run_id"):
+                    continue                      # plainly someone else's run
+                # An event carrying NO run_id cannot be attributed to anything,
+                # so under an exact `--run` it may not authorise an outcome —
+                # the previous filter short-circuited on the missing id and let
+                # it through, which is an ending attributed by nobody.
+                # `pipeline_failed` has no run_id at all today
+                # (api/mcp_router.py:1376), so this is a live shape, not a
+                # hypothetical one. It is still a reason to LOOK: reconcile
+                # against the exact run, once per connection — reconciling per
+                # event would turn a chatty stream into a poll loop.
+                print(f"UNATTRIBUTED {kind} (no run_id); it cannot speak for "
+                      f"{args.run}", flush=True)
+                if not unattributed_checked:
+                    unattributed_checked = True
+                    _reconcile("unattributed-event")
                 continue
             if kind == "checkpoint_paused":
                 print(f"CHECKPOINT {pid} step={ev.get('step_id')} "

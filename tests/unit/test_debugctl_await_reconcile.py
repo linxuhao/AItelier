@@ -311,3 +311,125 @@ def test_a_run_that_ends_while_disconnected_is_caught_on_reconnect(monkeypatch, 
     assert "reconciled at connect" in out
     assert order.count("stream-open") == 2, order
     assert order.count("status-read") == 2, order
+
+
+# ── an event that names no run cannot speak for an exact run ──────────────
+
+def _unattributed(kind="run_completed"):
+    """A wanted event carrying this project but NO run_id.
+
+    `pipeline_failed` has none at all today (api/mcp_router.py:1376), and the
+    old filter — `if args.run and ev.get("run_id") and ev.get(...) != args.run`
+    — short-circuited on the missing id and let the event through. Under an
+    exact `--run` that is an ending attributed by nothing.
+    """
+    ev = {"type": kind, "project_id": PID, "reason": "Node 'done' reached"}
+    return _sse(ev)
+
+
+def test_a_terminal_event_without_a_run_id_cannot_complete_an_exact_run(
+        monkeypatch, capsys):
+    _install(monkeypatch, lines=[PRESENCE, _unattributed()], run_row=_row("running"))
+    code = _run_await(_args())
+    out = capsys.readouterr().out
+    assert code == 2, f"an unattributed event ended an exact-run watch: {out!r}"
+    assert "COMPLETED" not in out
+    assert "UNATTRIBUTED" in out
+
+
+def test_a_checkpoint_without_a_run_id_cannot_end_an_exact_run_watch(
+        monkeypatch, capsys):
+    _install(monkeypatch, lines=[PRESENCE, _unattributed("checkpoint_paused")],
+             run_row=_row("running"))
+    code = _run_await(_args(follow=False))
+    out = capsys.readouterr().out
+    assert code == 2, f"an unattributed checkpoint ended the watch: {out!r}"
+    assert "CHECKPOINT" not in out
+
+
+def test_an_unattributed_event_is_reconciled_against_the_exact_run(
+        monkeypatch, capsys):
+    """It may not authorise the result, but it is a reason to LOOK."""
+    order = _install(monkeypatch, lines=[PRESENCE, _unattributed()],
+                     run_rows=[_row("running"), _row("completed")])
+    code = _run_await(_args())
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "COMPLETED" in out
+    assert "reconciled at unattributed-event" in out
+    assert order.count("status-read") == 2, order
+
+
+def test_an_unattributed_event_reads_the_status_at_most_once_per_connection(
+        monkeypatch, capsys):
+    """Reconciling per event would turn a chatty stream into a poll loop."""
+    order = _install(monkeypatch,
+                     lines=[PRESENCE] + [_unattributed()] * 5,
+                     run_row=_row("running"))
+    code = _run_await(_args())
+    assert code == 2
+    # connect + ONE for the five unattributed events + the pre-timeout read.
+    assert order.count("status-read") == 3, order
+
+
+# ── a status read must be shape-checked and handle-checked ────────────────
+
+@pytest.mark.parametrize("body", [[], ["completed"], "completed", 7, None])
+def test_a_malformed_status_body_is_unknown_not_a_crash(monkeypatch, capsys, body):
+    """`_run_snapshot` returns whatever JSON the body held. A list or a scalar
+    reaching `.get` was an AttributeError — a traceback and exit 1, the code
+    that means THE RUN FAILED."""
+    _install(monkeypatch, lines=[PRESENCE], run_row=body)
+    code = _run_await(_args())
+    out = capsys.readouterr().out
+    assert code == 2, f"malformed status body produced {code}: {out!r}"
+    assert "STATUS UNKNOWN" in out
+
+
+def test_a_status_for_another_project_cannot_complete_this_watch(
+        monkeypatch, capsys):
+    """The run id matching is not enough: the caller also named a project, and
+    a mismatched pair means the handles are wrong, not that the run is done."""
+    _install(monkeypatch, lines=[PRESENCE],
+             run_row=_row("completed", project_id="some-other-project"))
+    code = _run_await(_args())
+    out = capsys.readouterr().out
+    assert code == 2, f"a foreign project's status ended the watch: {out!r}"
+    assert "STATUS IGNORED" in out
+    assert "COMPLETED" not in out
+
+
+# ── transport, again ──────────────────────────────────────────────────────
+
+def test_a_stream_that_never_opens_is_transport_not_a_run_failure(
+        monkeypatch, capsys):
+    """`_die` exits 1 — the run-failure code — for a server that is simply not
+    there. Exit 4 already means 'stopped watching for a transport reason'."""
+    _install(monkeypatch, streams=[], run_row=_row("running"),
+             stream_error=OSError("connection refused"))
+    code = _run_await(_args(timeout=30))
+    assert code == 4, f"an unopenable stream reported as {code}"
+
+
+# ── a timeout may not assert what it did not verify ───────────────────────
+
+def test_a_timeout_after_an_unreadable_status_does_not_claim_the_run_is_running(
+        monkeypatch, capsys):
+    """Exit 2 keeps meaning 'deadline exceeded'. It must not be read as 'and the
+    run was still going' when the last status read failed."""
+    _install(monkeypatch, lines=[PRESENCE], run_row=OSError("connection refused"))
+    code = _run_await(_args())
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "TIMEOUT" in out
+    assert "NOT VERIFIED" in out
+
+
+def test_a_timeout_after_a_verified_running_status_says_so(monkeypatch, capsys):
+    _install(monkeypatch, lines=[PRESENCE], run_row=_row("running"))
+    code = _run_await(_args())
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "TIMEOUT" in out
+    assert "NOT VERIFIED" not in out
+    assert "running" in out

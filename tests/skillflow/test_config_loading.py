@@ -167,7 +167,7 @@ class TestTerminalGateNoLatch:
     its completed row latched node_reached and the run terminated on the next
     loop iteration before re-verifying the fixed code — a live dpe_game run
     shipped a game with playtest passed:false as `completed`. The fix routes
-    5_review passed:true → `done` (a gate: no completed row, fires at most once).
+    5_review passed:true → git_push_post → `done` (a gate: no completed row, fires at most once).
     """
 
     def _graph(self):
@@ -187,12 +187,15 @@ class TestTerminalGateNoLatch:
         assert "done" in nodes, "end condition must fire on `done`"
         assert "5_review" not in nodes, "end must NOT fire on in-loop `5_review` (premature-latch trap)"
 
-    def test_review_pass_routes_to_done_fail_loops(self):
+    def test_review_pass_pushes_then_reaches_done_fail_loops(self):
         g = self._graph()
         review = next(n for n in g.steps if n.id == "5_review")
         pass_edge = next(t for t in review.transitions
                          if t.match and t.match.get("value") is True)
         fail_edge = next(t for t in review.transitions
                          if t.match and t.match.get("value") is False)
-        assert pass_edge.to == "done", "passed:true must route to the done gate"
+        assert pass_edge.to == "git_push_post"
+        push = next(n for n in g.steps if n.id == pass_edge.to)
+        assert push.tool_name == "git_push_post"
+        assert [(t.to, t.match) for t in push.transitions] == [("done", None)]
         assert fail_edge.to == "3", "passed:false must loop back (not terminate)"

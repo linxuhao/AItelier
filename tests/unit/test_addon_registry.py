@@ -462,3 +462,39 @@ def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expec
             sf.confirm_step(claim.token, StepResult(flags={}))
     assert observed == [True, not break_design], json.dumps(run)
     assert reached == expected
+
+
+@pytest.mark.parametrize("has_final_report", [False, True])
+def test_pm_claim_assembles_context_before_and_after_final_tests(
+        dpe_game, tmp_path, has_final_report):
+    import copy
+    import json
+
+    graph = copy.deepcopy(dpe_game._graphs["dpe_game"])
+    pm = next(n for n in graph.steps if n.id == "3")
+    # Keep the composed PM context intact and actually claim it. First-pass
+    # missing future reports must not raise RequiredContextMissing or discard
+    # the research context; a repair pass must receive the fresh failed report.
+    graph.steps = [pm]
+    pm.transitions = []
+    graph.begin = "3"
+    graph.end_conditions.conditions = []
+    sf = SkillFlow(str(tmp_path / "engine.db"),
+                   workspace_base=str(tmp_path / "ws"),
+                   projects_base=str(tmp_path / "repo"))
+    sf.register_agent_config_from_dict("pm", {"model": "test"})
+    sf.register_graph(graph)
+    root = tmp_path / "ws" / "p" / graph.name
+    (root / "1").mkdir(parents=True)
+    (root / "1" / "research.md").write_text("FIRST_PASS_RESEARCH")
+    if has_final_report:
+        (root / "5_final_test").mkdir()
+        (root / "5_final_test" / "test_report.json").write_text(
+            '{"passed": false, "summary": "FINAL_TREE_FAILURE"}')
+    run_id = sf.create_run(graph.name, {"project_id": "p"})
+    sf.start_run(run_id)
+    claimed = sf.claim_next_step(run_id)
+    assert claimed is not None and claimed.step_id == "3"
+    context = json.dumps(claimed.inputs["_resolved_context"])
+    assert "FIRST_PASS_RESEARCH" in context
+    assert ("FINAL_TREE_FAILURE" in context) == has_final_report

@@ -581,3 +581,46 @@ def test_probe_reads_the_value_back_only_when_the_assert_failed():
         encoding="utf-8")
     assert 'if not res["passed"] and a.has("attr"):' in src
     assert 'res["observed"] = _jsonable(_read_attr(target, str(a["attr"])))' in src
+
+
+@pytest.mark.parametrize("times_out", [False, True])
+def test_script_long_logs_keep_first_error_and_summary(monkeypatch, tmp_path, times_out):
+    import subprocess
+
+    (tmp_path / "project.godot").write_text("[application]\n")
+    work = tmp_path / "work" / "proj"
+    work.mkdir(parents=True)
+    monkeypatch.setattr(gh, "_copy_project", lambda proj: work)
+    monkeypatch.setattr(gh, "_import_resources", lambda dst, timeout=0: None)
+    stdout = "FIRST TEST STARTED\n" + "progress noise\n" * 1000 + "FINAL TEST SUMMARY\n"
+    stderr = ('SCRIPT ERROR: Parse Error: First diagnostic.\n'
+              '          at: GDScript::reload (res://first.gd:7)\n'
+              + "engine noise\n" * 500
+              + 'SCRIPT ERROR: Parse Error: Middle diagnostic.\n'
+                '          at: GDScript::reload (res://middle.gd:9)\n'
+              + "engine noise\n" * 500 + "FINAL ERROR SUMMARY\n")
+
+    def run(*args, **kwargs):
+        if times_out:
+            raise subprocess.TimeoutExpired("godot", 140, output=stdout.encode(),
+                                            stderr=stderr.encode())
+        return subprocess.CompletedProcess("godot", 1, stdout, stderr)
+
+    monkeypatch.setattr(gh, "_run", run)
+    result = gh.run_script(str(tmp_path), ["res://tests/run.gd"], timeout=140)["results"][0]
+    assert result["passed"] is False
+    assert result["stdout"].startswith("FIRST TEST STARTED")
+    assert result["stdout"].endswith("FINAL TEST SUMMARY\n")
+    assert "first.gd:7" in result["stderr"]
+    assert "FINAL ERROR SUMMARY" in result["stderr"]
+    for stream in ("stdout", "stderr"):
+        assert result[stream + "_truncated"] is True
+        assert "[middle truncated]" in result[stream]
+        assert len(result[stream]) <= 4000
+    # Error parsing must still see the unabridged stream, including a diagnostic
+    # omitted from the display excerpt. The timeout suffix must also survive.
+    assert "middle.gd:9" not in result["stderr"]
+    assert any(e["file"] == "res://middle.gd" for e in result["errors"])
+    if times_out:
+        assert result["returncode"] == 124
+        assert result["stderr"].endswith("timed out after 140s")

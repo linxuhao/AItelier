@@ -1338,6 +1338,16 @@ def _discover_entry_points(proj: Path) -> list:
     return found
 
 
+def _script_log_excerpt(text: str) -> str:
+    """Keep the first diagnostic and final summary within the 4000-char budget."""
+    if len(text) <= 4000:
+        return text
+    marker = "\n... [middle truncated] ...\n"
+    remaining = 4000 - len(marker)
+    head = remaining // 2
+    return text[:head] + marker + text[-(remaining - head):]
+
+
 def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
     """Run ``godot --headless --path <proj> -s <res://...>`` for each script.
 
@@ -1386,7 +1396,10 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
                 err = (_s(e.stderr) + "\ntimed out after %ss" % timeout).lstrip()
             failed = rc != 0 or _has_failure_marker(out, err)
             results.append({"script": rel, "returncode": rc, "passed": not failed,
-                            "stdout": out[-4000:], "stderr": err[-4000:],
+                            "stdout": _script_log_excerpt(out),
+                            "stderr": _script_log_excerpt(err),
+                            "stdout_truncated": len(out) > 4000,
+                            "stderr_truncated": len(err) > 4000,
                             "errors": _parse_errors(err)})
         ok = all(r["passed"] for r in results)
         bad = [r["script"] for r in results if not r["passed"]]

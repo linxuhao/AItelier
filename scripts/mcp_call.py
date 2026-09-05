@@ -2,7 +2,7 @@
 """Call the running AItelier server: mcp.py TOOL [JSON | @JSON_FILE].
 
 All execution and authorization stay in the server. This production helper
-requires human checkpoints for run_pipeline and never starts the service.
+requires explicit checkpoint review for run_pipeline and never starts the service.
 """
 import argparse
 import json

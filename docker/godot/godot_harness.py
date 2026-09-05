@@ -107,6 +107,102 @@ def _parse_errors(stderr: str) -> list[dict]:
     return out
 
 
+# ── native (engine-side) errors ────────────────────────────────────────────
+# `_parse_errors` drops every plain ERROR line that is not a user push_error,
+# because engine internals are not the game's business. That blanket drop hid a
+# real, actionable defect for a whole wave. Measured on the wave-4 script sweep
+# (director/reports/m1-runtime-wave3/raw/scripts-wave4-22d9b64-script.json):
+# `res://tests/test_encounter.gd` exited 0, printed no FAIL marker and was
+# reported `passed: true`, while its stderr held
+#     ERROR: Error calling deferred method: 'Node2D(battlefield.gd)::_wire_hud':
+#            Cannot convert argument 2 from Array to Array.
+#        at: _call_function (core/object/message_queue.cpp:222)
+# — a call the game makes that never ran. The engine said so; the harness threw
+# it away; the report vouched for the run.
+#
+# The fix is NOT "fail on every ERROR", and the same sweep shows why: the unit
+# suite's test_user_storage DELIBERATELY feeds malformed JSON, a truncated
+# ConfigFile and an impossible copy, and the engine prints one ERROR per
+# negative case. Those lines are the test working. So every native ERROR is
+# CLASSIFIED and REPORTED (`native_errors[]`), and only the classes that mean
+# "the game asked the engine for something it cannot do" decide pass/fail:
+#
+#   class           blocking  observed evidence
+#   deferred_call   yes       Error calling deferred method / message_queue.cpp
+#   type_conversion yes       "Cannot convert argument N from X to Y"
+#   image_format    yes       Condition "format != p_src->format" @ image.cpp
+#                             blit_rect — the atlas-format errors, also missed
+#   io_input        no        json.cpp / config_file.cpp / dir_access.cpp: the
+#                             engine reporting bad INPUT, which is exactly what
+#                             a negative test hands it
+#   exit_leak       no        "... at exit" — resources still in use, leaked
+#                             RIDs; long-standing debt, recorded not gated
+#   unclassified    no        everything else: VISIBLE debt, never dropped
+#
+# Non-blocking is not "exempt": every entry rides home in the report with its
+# repeat count, so a leak or an unclassified line can never be read as absent.
+_IO_INPUT_SRC = ("core/io/json.cpp", "core/io/config_file.cpp",
+                 "core/io/dir_access.cpp")
+_BLOCKING_NATIVE = ("deferred_call", "type_conversion", "image_format")
+
+
+def _classify_native(msg: str, at_func: str, at_src: str) -> str:
+    """Bucket one native ERROR line. See the table above for the evidence."""
+    if "Error calling deferred method" in msg or at_src == "core/object/message_queue.cpp":
+        return "deferred_call"
+    if "Cannot convert argument" in msg:
+        return "type_conversion"
+    if at_src == "core/io/image.cpp" and ("format" in msg or at_func in ("blit_rect", "blend_rect")):
+        return "image_format"
+    if "at exit" in msg:
+        return "exit_leak"
+    if at_src in _IO_INPUT_SRC:
+        return "io_input"
+    return "unclassified"
+
+
+def _native_errors(stderr: str) -> list[dict]:
+    """Classify the engine-side ERROR lines `_parse_errors` deliberately drops.
+
+    One entry per DISTINCT (class, message, location) with a `count`: the
+    wave-4 encounter run printed the same blit_rect line eight times, and a
+    report that repeats it eight times is a report nobody finishes reading.
+    Lines already claimed by `_parse_errors` (push_error, failed script load,
+    anything located in res://) are left to it, so no diagnostic is counted
+    twice and the existing `errors[]` keeps its meaning exactly.
+    """
+    lines = stderr.splitlines()
+    out: list[dict] = []
+    seen: dict[tuple, dict] = {}
+    i = 0
+    while i < len(lines):
+        m = _USER_ERR.match(lines[i])
+        if not m or _FAILED_LOAD.match(lines[i]):
+            i += 1
+            continue
+        msg = m.group(1).strip()
+        at = _AT.match(lines[i + 1]) if i + 1 < len(lines) else None
+        at_func, at_src = (at.group(1).strip(), at.group(2)) if at else ("", "")
+        if at:
+            i += 1
+        if at_func == "push_error" or at_src.startswith("res://"):
+            i += 1
+            continue
+        cls = _classify_native(msg, at_func, at_src)
+        key = (cls, msg, at_func, at_src)
+        if key in seen:
+            seen[key]["count"] += 1
+        else:
+            entry = {"kind": "native", "native_class": cls,
+                     "blocking": cls in _BLOCKING_NATIVE, "msg": msg,
+                     "at": "%s (%s:%s)" % (at_func, at_src, at.group(3)) if at else None,
+                     "file": None, "line": None, "count": 1}
+            seen[key] = entry
+            out.append(entry)
+        i += 1
+    return out
+
+
 def _run(args: list[str], timeout: int, extra_env: dict | None = None,
          render: bool = False) -> subprocess.CompletedProcess:
     env = dict(os.environ)
@@ -822,12 +918,20 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
             raise
         stderr, timed_out = str(e), False
     errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
+    # A deferred call that never ran, or an atlas blit the engine refused, is a
+    # runtime error of the game's own making — it just has no res:// frame. It
+    # gates here exactly like a SCRIPT ERROR does; the non-gating classes stay
+    # attached to the report so they cannot be read as absent.
+    natives = _native_errors(stderr)
+    errs += [e for e in natives if e["blocking"]]
     probe = {}
     if state_path.is_file():
         try:
             probe = json.loads(state_path.read_text())
         except json.JSONDecodeError:
             probe = {}
+    if probe:
+        probe["native_debt"] = [e for e in natives if not e["blocking"]]
     return probe, errs, timed_out
 
 
@@ -894,6 +998,7 @@ def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) ->
     else:
         summary = "Playtest surfaced %d runtime error(s)." % len(errs)
     return {"passed": passed, "frames": probe.get("frames", frames), "errors": errs,
+            "native_debt": probe.get("native_debt", []),
             "state": probe.get("nodes", {}), "behavior": None,
             "captures": probe.get("captures", []),
             "render_mode": probe.get("render_mode", "headless"),
@@ -1124,6 +1229,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
         asserts = probe.get("asserts", [])
         scen_passed = ran and not errs and bool(asserts) and all(a.get("passed") for a in asserts)
         scen_results.append({"name": name, "ran": ran, "errors": errs,
+                             "native_debt": probe.get("native_debt", []),
                              "asserts": asserts, "passed": scen_passed,
                              "pressed": any(e.get("press") for e in timeline),
                              "input_dead": False})
@@ -1420,19 +1526,40 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
                 # Pass, fail, timeout or an error nobody predicted: the home
                 # goes, or the "throwaway" one accumulates in the sidecar.
                 shutil.rmtree(sc_home, ignore_errors=True)
-            failed = rc != 0 or _has_failure_marker(out, err)
+            # rc and the FAIL marker are what the SUITE says about itself.
+            # They are silent about what the ENGINE said: test_encounter exited
+            # 0, printed PASS, and left a deferred call that never ran in its
+            # stderr. Classified native errors close that hole — and only the
+            # blocking classes do, so a negative suite that provokes malformed
+            # JSON on purpose stays green with its errors on the record.
+            natives = _native_errors(err)
+            blocking = [e for e in natives if e["blocking"]]
+            failed = rc != 0 or _has_failure_marker(out, err) or bool(blocking)
             results.append({"script": rel, "returncode": rc, "passed": not failed,
                             "stdout": _script_log_excerpt(out),
                             "stderr": _script_log_excerpt(err),
                             "stdout_truncated": len(out) > 4000,
                             "stderr_truncated": len(err) > 4000,
-                            "errors": _parse_errors(err)})
+                            "errors": _parse_errors(err),
+                            "native_errors": natives,
+                            "native_blocking": sorted({e["native_class"] for e in blocking})})
         ok = all(r["passed"] for r in results)
         bad = [r["script"] for r in results if not r["passed"]]
+        summary = ("%d script(s) ran, all passed." % len(results) if ok
+                   else "%d/%d script(s) failed: %s"
+                        % (len(bad), len(results), ", ".join(bad)))
+        blocked = ["%s (%s)" % (r["script"], ", ".join(r["native_blocking"]))
+                   for r in results if r["native_blocking"]]
+        if blocked:
+            summary += ("  Native engine error(s) the game caused: %s."
+                        % "; ".join(blocked))
+        debt = sorted({e["native_class"] for r in results
+                       for e in r["native_errors"] if not e["blocking"]})
+        if debt:
+            summary += ("  Recorded, not gating: %s (see native_errors[])."
+                        % ", ".join(debt))
         return {"passed": ok, "results": results, "discovered": scripts,
-                "summary": ("%d script(s) ran, all passed." % len(results) if ok
-                            else "%d/%d script(s) failed: %s"
-                                 % (len(bad), len(results), ", ".join(bad)))}
+                "summary": summary}
     finally:
         shutil.rmtree(dst.parent, ignore_errors=True)
 

@@ -1,0 +1,23 @@
+ERROR: Parse JSON failed. Error at line 0: Expected key
+   at: parse_string (core/io/json.cpp:582)
+ERROR: ConfigFile parse error at /tmp/godot_home_XXXX/.local/share/game/.test_user_storage/corrupt/legacy/settings.cfg:0: Unexpected EOF while parsing simple tag.
+   at: _parse (core/io/config_file.cpp:303)
+ERROR: Failed to open '/tmp/godot_home_XXXX/.local/share/game/.test_user_storage/failcopy/target/save_2.json.import-tmp'.
+   at: copy (core/io/dir_access.cpp:425)
+ERROR: Parse JSON failed. Error at line 0: Expected key
+   at: parse_string (core/io/json.cpp:582)
+WARNING: Enemy texture not found for character: Enemy
+     at: push_warning (core/variant/variant_utility.cpp:1118)
+WARNING: Enemy texture not found for character: Enemy
+     at: push_warning (core/variant/variant_utility.cpp:1118)
+WARNING: Enemy texture not found for character: Enemy
+     at: push_warning (core/variant/variant_utility.cpp:1118)
+WARNING: 139 RIDs of type "CanvasItem" were leaked.
+     at: _free_rids (servers/rendering/renderer_canvas_cull.cpp:2679)
+ERROR: 4 RID allocations of type 'PN13RendererDummy14TextureStorage12DummyTextureE' were leaked at exit.
+ERROR: 168 RID allocations of type 'PN18TextServerAdvanced22ShapedTextDataAdvancedE' were leaked at exit.
+ERROR: 1 RID allocations of type 'PN18TextServerAdvanced12FontAdvancedE' were leaked at exit.
+WARNING: ObjectDB instances leaked at exit (run with --verbose for details).
+     at: cleanup (core/object/object.cpp:2378)
+ERROR: 14 resources still in use at exit (run with --verbose for details).
+   at: clear (core/io/resource.cpp:614)

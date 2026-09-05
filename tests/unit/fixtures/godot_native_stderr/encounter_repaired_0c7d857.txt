@@ -1,0 +1,28 @@
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+WARNING: Enemy texture not found for character: Enemy
+     at: push_warning (core/variant/variant_utility.cpp:1118)
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+WARNING: Enemy texture not found for character: Enemy
+     at: push_warning (core/variant/variant_utility.cpp:1118)
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+WARNING: Enemy texture not found for character: Enemy
+     at: push_warning (core/variant/variant_utility.cpp:1118)
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+ERROR: Condition "format != p_src->format" is true.
+   at: blit_rect (core/io/image.cpp:2865)
+WARNING: Enemy texture not found for character: Enemy
+     at: push_warning (core/variant/variant_utility.cpp:1118)
+WARNING: ObjectDB instances leaked at exit (run with --verbose for details).
+     at: cleanup (core/object/object.cpp:2378)
+ERROR: 1 resources still in use at exit (run with --verbose for details).
+   at: clear (core/io/resource.cpp:614)

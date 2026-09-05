@@ -112,3 +112,105 @@ def test_the_global_safe_loader_is_not_mutated():
     # Stock behaviour, untouched: last one wins, no exception.
     assert yaml.safe_load("a: 1\na: 2\n") == {"a": 2}
     assert yaml.load("a: 1\na: 2\n", Loader=yaml.SafeLoader) == {"a": 2}
+
+
+# -- merge/alias graphs the first cut got wrong ----------------------------
+# REGRESSION, measured by the director on e8f80a9: the first cut scanned
+# node.value at construction time and called that "the authored mapping". It is
+# not. SafeConstructor.flatten_mapping resolves `<<` by editing the merged
+# mapping IN PLACE, so a shared anchored node reached later through an alias
+# already carries the keys merged into it, and legal YAML was rejected. The
+# detection now reads a snapshot taken while the document is composed, before
+# any constructor runs.
+
+_NESTED_MERGE = """base: &a {x: 1}
+consumer:
+  <<: &b {<<: *a, x: 2}
+reused: *b
+"""
+
+
+def test_a_shared_anchor_merged_then_reused_is_not_a_duplicate():
+    """The exact reproducer. `&b` is flattened in place while `consumer` is
+    built, so `reused: *b` reaches a node carrying x twice — authored once."""
+    assert load_yaml_strict(_NESTED_MERGE, "repro.yaml") == yaml.safe_load(_NESTED_MERGE)
+
+
+def test_the_reused_merge_anchor_is_also_legal_from_inside_a_sequence():
+    """Same trigger, reached through a list: the anchor is first CONSTRUCTED
+    only after another mapping already flattened it."""
+    text = ("consumer:\n  <<: &b {<<: &a {x: 1}, x: 2}\n"
+            "items:\n  - *b\n  - <<: *b\n    y: 9\n")
+    assert load_yaml_strict(text, "t.yaml") == yaml.safe_load(text)
+
+
+def test_a_shared_timeline_frame_reused_by_a_second_scenario_is_legal():
+    """The contract-shaped version of the same graph: one authored frame merged
+    into scenario a and reused verbatim by scenario b."""
+    text = ("scenarios:\n  - name: a\n    timeline:\n"
+            "      - <<: &frame {<<: &base {at: 1}, at: 2}\n"
+            "  - name: b\n    timeline:\n      - *frame\n")
+    assert load_yaml_strict(text, "t.yaml") == yaml.safe_load(text)
+
+
+def test_a_sequence_merge_reused_later_is_legal():
+    """flatten_mapping has a second branch for `<<: [*a, *b]`; it must stay
+    legal too, reused or not."""
+    text = ("a: &a {x: 1}\nb: &b {x: 2}\n"
+            "use:\n  <<: &m [*a, *b]\n  x: 3\nagain: *m\n")
+    assert load_yaml_strict(text, "t.yaml") == yaml.safe_load(text)
+
+
+def test_one_anchor_merged_into_two_mappings_and_also_used_as_a_value():
+    text = ("base: &a {x: 1, y: 1}\n"
+            "one:\n  <<: *a\n  x: 2\n"
+            "two:\n  <<: *a\n  y: 3\n"
+            "plain: *a\n")
+    assert load_yaml_strict(text, "t.yaml") == yaml.safe_load(text)
+
+
+def test_a_merge_chain_through_several_shared_anchors():
+    text = ("a: &a {x: 1}\n"
+            "b: &b {<<: *a, y: 2}\n"
+            "c: &c {<<: *b, z: 3}\n"
+            "use:\n  <<: *c\n  x: 9\n"
+            "again: *b\n"
+            "yet_again: *c\n")
+    assert load_yaml_strict(text, "t.yaml") == yaml.safe_load(text)
+
+
+def test_a_real_duplicate_beside_a_reused_merge_anchor_is_still_rejected():
+    """The fix must not become "anything near a merge key is forgiven"."""
+    text = ("base: &a {x: 1}\n"
+            "consumer:\n  <<: &b {<<: *a, x: 2}\n  y: 1\n  y: 2\n"
+            "reused: *b\n")
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict(text, "t.yaml")
+    assert "'y'" in str(exc.value)
+
+
+def test_a_duplicate_inside_the_shared_anchored_mapping_is_still_rejected():
+    text = "consumer:\n  <<: &b {x: 1, x: 2}\nreused: *b\n"
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict(text, "t.yaml")
+    assert "'x'" in str(exc.value)
+
+
+def test_a_duplicate_in_a_mapping_that_also_dereferences_an_alias():
+    text = "base: &a {x: 1}\nuse:\n  plain: *a\n  at: 1\n  at: 2\n"
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict(text, "t.yaml")
+    assert "'at'" in str(exc.value)
+
+
+def test_a_cyclic_alias_graph_loads_without_recursing():
+    """A mapping that contains itself is legal YAML and PyYAML builds it with a
+    two-phase constructor. The duplicate scan must not recurse into it."""
+    doc = load_yaml_strict("a: &a\n  self: *a\n", "cyc.yaml")
+    assert doc["a"]["self"] is doc["a"]
+
+
+def test_a_duplicate_in_a_cyclic_mapping_is_still_rejected():
+    with pytest.raises(DuplicateKeyError):
+        load_yaml_strict("a: &a\n  self: *a\n  k: 1\n  k: 2\n", "cyc.yaml")
+

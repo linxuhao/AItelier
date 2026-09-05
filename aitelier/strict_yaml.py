@@ -13,9 +13,9 @@ Scope of the strictness, deliberately narrow:
 * The loader subclasses SafeLoader FOR THIS CALL ONLY. yaml.SafeLoader is never
   mutated, so every other yaml user in the process keeps stock behaviour.
 * Anchors, aliases and ``<<`` merge keys keep their legal semantics. Duplicates
-  are detected on the authored mapping BEFORE merge flattening, so an explicit
-  key that legally overrides a merged one is not reported, and a mapping may
-  legally carry more than one merge key.
+  are judged on the mapping AS AUTHORED, captured while the document is composed,
+  so an explicit key that legally overrides a merged one is not reported and a
+  mapping may legally carry more than one merge key.
 * Nothing else about parsing changes: valid input loads exactly as before.
 """
 
@@ -36,9 +36,33 @@ class _StrictLoader(yaml.SafeLoader):
     # Overwritten per call; only used to name the input in the error message.
     aitelier_source = "<yaml>"
 
+    def __init__(self, stream):
+        super().__init__(stream)
+        # Authored key nodes per mapping node, captured at COMPOSE time.
+        #
+        # The node graph cannot be read at construction time and still be called
+        # "authored": SafeConstructor.flatten_mapping resolves `<<` by editing the
+        # merged mapping IN PLACE, so a shared anchored node reached later through
+        # an alias already carries the keys merged into it. That produced a false
+        # duplicate for the legal
+        #     base: &a {x: 1}
+        #     consumer:
+        #       <<: &b {<<: *a, x: 2}
+        #     reused: *b
+        # where `&b` was flattened to [x: 1, x: 2] while building `consumer`, and
+        # `reused: *b` then read that mutated node. Composition of the whole
+        # document finishes before any construction starts, so this snapshot is
+        # what the author actually wrote.
+        self._authored: dict = {}
+
+    def compose_mapping_node(self, anchor):
+        node = super().compose_mapping_node(anchor)
+        self._authored[node] = list(node.value)
+        return node
+
     def construct_mapping(self, node, deep=False):
         seen: dict = {}
-        for key_node, _value_node in node.value:
+        for key_node, _value_node in self._authored.get(node, node.value):
             if key_node.tag == "tag:yaml.org,2002:merge":
                 # << is a directive, not data: repeats and overrides are legal.
                 continue

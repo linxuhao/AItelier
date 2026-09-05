@@ -1,3 +1,6 @@
+# Director handoff — 2026-09-05
+For 武虾传奇 game tasks, read AGENTS.md here and the game repository AGENTS.md. Codex directs; Claude may implement assigned gameplay in an isolated worktree. The old pipeline-only workflow and old R6 queue are superseded. Do not start AItelier or publish without director assignment.
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.

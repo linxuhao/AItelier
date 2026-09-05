@@ -505,3 +505,138 @@ def test_the_operator_guard_fails_closed_when_it_cannot_check(db, home,
         ws.repo_commit("gg", "operator commit while the lease is unknowable")
     assert "lease" in str(e.value).lower()
     assert _git(src, "status", "--porcelain") != "", "it committed anyway"
+
+
+# ── H3: the push decision comes from the DECLARED mode ───────────────
+# `.git` being a gitfile means "a linked worktree", which is not the same
+# statement as "this run was isolated into one". The director works out of
+# worktrees routinely, and a project whose repo_path IS a worktree, run in
+# explicit direct mode, had its intentional private push silently skipped.
+
+def _linked_worktree_project(db, tmp_path, pid, *, mode):
+    """A project whose repo_path is itself a linked worktree, with a remote."""
+    origin = tmp_path / f"origin-{pid}.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    upstream = tmp_path / f"upstream-{pid}"
+    base = _init_repo(upstream)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)],
+                   cwd=upstream, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=upstream,
+                   check=True)
+    wt = tmp_path / f"wt-{pid}"
+    subprocess.run(["git", "worktree", "add", "-q", "-b", f"feature/{pid}",
+                    str(wt), base], cwd=upstream, check=True)
+    (wt / "work.txt").write_text("work\n")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "work"], cwd=wt, check=True)
+    db.ensure_project(pid, name=pid, repo_type="existing", repo_path=str(wt))
+    rec = ri.ensure_for_run(db, run_id=f"run-{pid}", project_id=pid,
+                            config_name="coding_impl", repo_mode="code",
+                            requested_mode=mode)
+    return origin, wt, rec
+
+
+def _spy_git(monkeypatch):
+    import aitelier.tools.git_push_post.impl as impl
+    calls = []
+    real = subprocess.run
+
+    def spy(args, **kw):
+        calls.append(list(args))
+        return real(args, **kw)
+
+    monkeypatch.setattr(impl.subprocess, "run", spy)
+    return impl, calls
+
+
+def test_an_explicit_direct_run_in_a_linked_worktree_still_pushes(db, home,
+                                                                  tmp_path,
+                                                                  monkeypatch):
+    """Declared direct. The tree happens to be a linked worktree, which the old
+    heuristic read as "isolated" and refused."""
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "db_instance", db)
+    origin, wt, rec = _linked_worktree_project(db, tmp_path, "dw",
+                                               mode=ri.MODE_DIRECT)
+    assert rec["mode"] == ri.MODE_DIRECT
+    assert (wt / ".git").is_file(), "fixture is not a linked worktree"
+
+    impl, calls = _spy_git(monkeypatch)
+    res = impl.git_push_post(project_root=str(wt), project_id="dw",
+                             run_id="run-dw")
+    assert res["pushed"] is True, res
+    assert any("push" in c for c in calls), "no git push was invoked"
+    assert "feature/dw" in _git(origin, "branch", "--list")
+
+
+def test_an_isolated_run_in_the_same_shape_still_pushes_nothing(db, home,
+                                                                tmp_path,
+                                                                monkeypatch):
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "db_instance", db)
+    origin, _, rec = _linked_worktree_project(db, tmp_path, "iw",
+                                              mode=ri.MODE_WORKTREE)
+    assert rec["mode"] == ri.MODE_WORKTREE
+    impl, calls = _spy_git(monkeypatch)
+    res = impl.git_push_post(project_root=rec["worktree_path"],
+                             project_id="iw", run_id="run-iw")
+    assert res["pushed"] is False and res["action"] == "skip"
+    assert not any("push" in c for c in calls), f"it pushed anyway: {calls}"
+    assert _git(origin, "branch", "--list") == ""
+
+
+def test_an_isolated_run_pushes_its_declared_branch_on_request(db, home,
+                                                               tmp_path,
+                                                               monkeypatch):
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "db_instance", db)
+    origin, _, rec = _linked_worktree_project(db, tmp_path, "rb",
+                                              mode=ri.MODE_WORKTREE)
+    impl, calls = _spy_git(monkeypatch)
+    res = impl.git_push_post(project_root=rec["worktree_path"],
+                             project_id="rb", run_id="run-rb",
+                             policy="run_branch")
+    assert res["pushed"] is True, res
+    assert any("push" in c for c in calls)
+    assert "codex/run/run-rb" in _git(origin, "branch", "--list")
+
+
+def test_a_known_run_with_no_record_refuses_rather_than_guessing(db, home,
+                                                                 tmp_path,
+                                                                 monkeypatch):
+    """A run id was supplied and the record is not there. The filesystem shape
+    is not an answer to what that run declared."""
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "db_instance", db)
+    origin, wt, _ = _linked_worktree_project(db, tmp_path, "nr",
+                                             mode=ri.MODE_DIRECT)
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM run_isolation WHERE run_id = ?", ("run-nr",))
+        conn.commit()
+    impl, calls = _spy_git(monkeypatch)
+    res = impl.git_push_post(project_root=str(wt), project_id="nr",
+                             run_id="run-nr")
+    assert res["pushed"] is False
+    assert not any("push" in c for c in calls)
+    assert "declare" in res.get("detail", "").lower() or \
+        "record" in res.get("detail", "").lower(), res
+
+
+def test_an_invocation_with_no_run_id_keeps_the_old_contract(db, home, tmp_path,
+                                                             monkeypatch):
+    """The legacy boundary, preserved deliberately: no run was named, so there
+    is no declaration to consult and the tool does what it always did."""
+    import api.dependencies as deps
+    monkeypatch.setattr(deps, "db_instance", db)
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    src = tmp_path / "plain"
+    _init_repo(src)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=src,
+                   check=True)
+    db.ensure_project("lg", name="lg", repo_type="existing", repo_path=str(src))
+    impl, calls = _spy_git(monkeypatch)
+    res = impl.git_push_post(project_root=str(src), project_id="lg")
+    assert res["pushed"] is True, res
+    assert "main" in _git(origin, "branch", "--list")

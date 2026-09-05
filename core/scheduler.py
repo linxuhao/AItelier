@@ -1244,12 +1244,20 @@ async def _run_skillflow_tick(project_id: str, loop):
     _cur = asyncio.current_task()
     _odbg(f"{_cid} tick execute BEGIN step={claimed.step_id} project={project_id} "
           f"task={_cur.get_name() if _cur else '?'}")
+    # TWO different facts, and the log used to print one under the other's
+    # name. `_executed` means the runner returned; `_confirmed` means
+    # `confirm_step` actually accepted the work. On the cancellation path the
+    # runner returns and the confirm is REFUSED, so `confirmed=True` described a
+    # step whose delivery had just been fenced.
     _executed = False
+    _confirmed = False
+    _fenced = False
     try:
         result = await runner.execute(claimed)
         _executed = True
         _odbg(f"{_cid} execute returned; confirm BEGIN step={claimed.step_id}")
         sf.confirm_step(claimed.token, result)
+        _confirmed = True
         _odbg(f"{_cid} confirm OK step={claimed.step_id}")
 
         # Sync task manifest to DB when the PM step or its review completes.
@@ -1258,6 +1266,7 @@ async def _run_skillflow_tick(project_id: str, loop):
         if claimed.step_id in ("3", "3_review"):
             _sync_task_manifest_to_db(project_id)
     except TerminalRunFenced as e:
+        _fenced = True
         # The run was stopped while this step was executing. skillflow refused
         # the delivery before any lifecycle hook, so nothing was promoted and
         # nothing was committed — there is no failure to record, and recording
@@ -1306,9 +1315,14 @@ async def _run_skillflow_tick(project_id: str, loop):
 
     # Sync project status to DB after each tick
     _sync_project_status_to_db(project_id)
-    tick_log(project_id, "executed", run=run_id[:8], step=claimed.step_id,
-             confirmed=_executed, elapsed=f"{_time.time() - _t0:.1f}s")
-    _odbg(f"{_cid} tick END step={claimed.step_id} confirmed={_executed}")
+    # A fenced tick already said `cancelled_mid_step`, with the reason. Adding
+    # `executed confirmed=True` after it is not extra detail, it is a second
+    # line contradicting the first.
+    if not _fenced:
+        tick_log(project_id, "executed", run=run_id[:8], step=claimed.step_id,
+                 confirmed=_confirmed, elapsed=f"{_time.time() - _t0:.1f}s")
+    _odbg(f"{_cid} tick END step={claimed.step_id} executed={_executed} "
+          f"confirmed={_confirmed}")
 
 
 def _emit_checkpoint_sse(project_id: str, run_id: str, step_id: str, label: str):

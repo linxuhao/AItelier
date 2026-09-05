@@ -15,6 +15,9 @@ Composite commands (save tool calls):
 Blocking command (do NOT poll for a checkpoint — this pushes):
   await <pid>      — block on the server's SSE stream until the run pauses at a
                      checkpoint, fails, or completes; print one line and exit.
+                     With --run <id> the stream is reconciled against that run's
+                     status at connect / reconnect / before timeout, so a late
+                     attach reports the real ending instead of a false timeout.
 """
 
 import argparse
@@ -333,6 +336,61 @@ def _run_id_for_project(conn, pid: str):
     return row[0] if row else None
 
 
+# A run that ENDED. `paused` is deliberately absent: a paused run is waiting
+# for a human, and `--follow` promises to keep watching past that. Mirrors
+# api/mcp_router.py's `_SETTLED_STATUSES` minus the pause, for the same reason
+# `wait_for_run` distinguishes them.
+_RUN_TERMINAL_STATUSES = frozenset({"completed", "failed"})
+
+
+def _run_snapshot(base_url: str, run_id: str, timeout: float = 10.0):
+    """ONE bounded read of a single run's row. Never a loop, never a poll.
+
+    Returns the decoded run dict, or None when the state could not be
+    established (server unreachable, 404, malformed body). None means UNKNOWN
+    and must never be reported as an outcome: "I could not read the status" and
+    "the run is still going" are different facts, and only the second one
+    justifies continuing to wait in silence.
+    """
+    import json as _json
+    import urllib.request
+    url = f"{base_url.rstrip('/')}/api/runs/{run_id}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+        return _json.loads(body)
+    except Exception:
+        return None
+
+
+def _terminal_verdict(run, run_id: str):
+    """(message, exit_code) if `run` proves THIS run ended, else None.
+
+    The id check is load-bearing, not defensive noise. `GET /api/runs/{id}`
+    resolves a PROJECT id as well as a run UUID (api/run_routers.py
+    `get_run_detail`), and a project resolves to its most recent run — so a
+    caller who passed the wrong kind of handle, or who watches a project whose
+    previous run finished, would otherwise be handed someone else's ending and
+    told their run completed. Only an exact id match may authorise an outcome.
+    """
+    if not isinstance(run, dict):
+        return None
+    if not run_id or run.get("id") != run_id:
+        return None
+    status = run.get("status")
+    if status not in _RUN_TERMINAL_STATUSES:
+        return None
+    pid = run.get("project_id") or ""
+    if status == "completed":
+        return (f"COMPLETED {pid}".rstrip(), 0)
+    reason = (run.get("error_reason") or "").strip()
+    # A cancelled run is reported as cancelled, not as a plain failure: the
+    # operator who stopped it should not have to guess whether the run died on
+    # its own. It still exits 1 — it did not complete.
+    word = "CANCELLED" if run.get("cancel_requested_at") else "FAILED"
+    return (f"{word} {pid} {reason}".rstrip(), 1)
+
+
 def cmd_await(args):
     """Block until a run reaches a checkpoint / terminal state, then exit.
 
@@ -342,7 +400,19 @@ def cmd_await(args):
     still reports the pause late; this blocks on the stream and returns the
     instant it fires.
 
-    Exits 0 on a checkpoint, 0 on completion, 1 on run failure, 2 on timeout —
+    With an exact `--run`, the stream is RECONCILED against the run's own
+    status: once the subscription is live (first byte of the body, not the
+    response headers), on every reconnect, and once more before declaring a
+    timeout, this reads `GET /api/runs/{run_id}` a single time and exits if the
+    run has already ended. Three bounded reads at boundaries, never a poll loop.
+    Without it, a watcher that attaches after the terminal event was pushed
+    waits out its whole deadline and reports a timeout for a finished run —
+    observed live on 2026-09-05, 17ms late. A pre-attach CHECKPOINT is still not
+    reconciled (only terminal states are), which is harmless under `--follow`
+    since it would not exit there anyway.
+
+    Exits 0 on a checkpoint, 0 on completion, 1 on run failure or cancellation,
+    2 on timeout —
     so a caller can `debugctl.py await <pid> && do-the-next-thing`, and an agent
     can run it in the background and be woken by its exit.
 
@@ -374,6 +444,74 @@ def cmd_await(args):
     url = args.url.rstrip("/") + "/api/events/stream"
     deadline = time.time() + args.timeout
     want = {"checkpoint_paused", "run_completed", "run_failed", "pipeline_failed"}
+    mismatch_warned = False
+
+    def _reconcile(when: str):
+        """One bounded status read; exit if THIS run has ALREADY ended.
+
+        Only with an exact `--run`. Without it there is nothing to reconcile
+        AGAINST: the positional argument is a project, a project can have had
+        several runs, and the newest one having finished says nothing about the
+        run the caller means. Guessing there would manufacture exactly the false
+        completion this command exists to prevent, so the watch simply stays on
+        the stream.
+        """
+        nonlocal mismatch_warned
+        if not args.run:
+            return
+        run = _run_snapshot(args.url, args.run)
+        if run is None:
+            print(f"STATUS UNKNOWN at {when}: could not read run {args.run}; "
+                  f"still watching {pid}", flush=True)
+            return
+        if run.get("id") != args.run:
+            if not mismatch_warned:
+                mismatch_warned = True
+                print(f"STATUS IGNORED at {when}: /api/runs/{args.run} resolved to run "
+                      f"{run.get('id')!r}, which is not the run being watched", flush=True)
+            return
+        verdict = _terminal_verdict(run, args.run)
+        if verdict is None:
+            return
+        msg, code = verdict
+        # Say where the verdict came from. A reconciled ending is as true as a
+        # pushed one, but a reader comparing logs deserves to know that no
+        # terminal event was witnessed on this connection.
+        print(f"{msg} [reconciled at {when}: run status="
+              f"{run.get('status')!r}; no terminal event seen on the stream]", flush=True)
+        sys.exit(code)
+
+    def _lines(stream):
+        """Yield raw lines, turning a TRANSPORT read error into end-of-stream.
+
+        `urlopen` is given a socket timeout, so a stream that goes quiet longer
+        than that raises TimeoutError out of the iteration. Unhandled, that
+        escaped as a traceback and exit 1 — the code that means THE RUN FAILED.
+        A watcher that reports a dead run because its own socket stalled is the
+        worst possible lie, and it fires on any `--timeout` below the server's
+        15s heartbeat. Falling out of the loop instead lands on the existing
+        reconnect path, which re-subscribes and reconciles.
+        """
+        import http.client
+        try:
+            for raw in stream:
+                yield raw
+        except (OSError, http.client.HTTPException) as e:
+            print(f"STREAM READ ERROR ({type(e).__name__}: {e}); treating as a "
+                  f"closed stream, still watching {pid}", flush=True)
+
+    def _timeout():
+        """Give up — but read the run's own state once first.
+
+        Live, smoke D on 2026-09-05: the run completed 17ms BEFORE this watcher
+        subscribed, so the push went out to the already-connected consumers and
+        there was nothing buffered to replay. `await` then reported TIMEOUT for a
+        run that had succeeded. A watcher whose silence and whose deadline mean
+        the same thing is worse than no watcher, because the driver acts on it.
+        """
+        _reconcile("timeout")
+        print(f"TIMEOUT after {args.timeout}s waiting on {pid}", flush=True)
+        sys.exit(2)
 
     # The stream is REOPENED on close instead of ending the watch. `--follow`
     # promises to witness the run to a terminal state, and an SSE connection
@@ -411,10 +549,31 @@ def cmd_await(args):
         _die(f"cannot open the event stream at {url}")
 
     while True:
-        for raw in resp:
+        # Each connection is a NEW subscription, so each one re-arms the
+        # handshake and earns its own reconciliation: a reconnect leaves a gap,
+        # and the run can have ended inside it.
+        subscribed = False
+        for raw in _lines(resp):
+            if not subscribed:
+                # OPENING THE CONNECTION IS NOT SUBSCRIBING. `urlopen` returns
+                # when the response HEADERS arrive, and Starlette sends those
+                # before it starts iterating the body generator — and the queue
+                # is registered INSIDE that generator
+                # (api/sse_manager.py:event_generator). Reading the status on
+                # urlopen alone would leave a hole one connection-setup wide,
+                # which is the same hole in a smaller size.
+                #
+                # The first byte of the body proves the generator is running,
+                # therefore the queue exists, therefore nothing published from
+                # here on can be missed. It arrives immediately: registering the
+                # queue pushes a `presence` event to __global__, and the
+                # heartbeat comment bounds the wait at 15s even on a server that
+                # does not. Same ordering as `wait_for_run` (subscribe, THEN
+                # read the status), for the same reason.
+                subscribed = True
+                _reconcile("connect")
             if time.time() > deadline:
-                print(f"TIMEOUT after {args.timeout}s waiting on {pid}")
-                sys.exit(2)
+                _timeout()
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue
@@ -457,10 +616,15 @@ def cmd_await(args):
         # Fell out of the read loop: the server closed the stream. The run is
         # almost certainly still alive, so reconnect and keep watching.
         if time.time() >= deadline:
-            print(f"TIMEOUT after {args.timeout}s waiting on {pid}", flush=True)
-            sys.exit(2)
+            _timeout()
         print(f"STREAM CLOSED, reconnecting (still watching {pid})", flush=True)
         if not _reopen():
+            # Reconcile before giving up: reconnects can be exhausted precisely
+            # BECAUSE the run ended. Exit 4 still means "stopped watching for a
+            # transport reason" and stays distinct from 2 ("waited out a run
+            # that was still going") — a distinction this command already paid
+            # for once.
+            _reconcile("stream-lost")
             print(f"STREAM LOST for {pid}: reconnects exhausted, NOT WATCHING ANY MORE",
                   flush=True)
             sys.exit(4)

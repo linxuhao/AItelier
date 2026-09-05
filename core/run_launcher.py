@@ -22,7 +22,8 @@ import uuid
 
 from skillflow.exceptions import SkillFlowError
 
-from core.seed_publication import publish_seeds, seed_dir
+from core.seed_publication import (SeedAlreadyPublished, publish_seeds,
+                                   seed_dir)
 
 
 def slugify(text: str, *, sep: str = "-", maxlen: int = 40,
@@ -309,7 +310,17 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         # launcher that dies here leave a started run the poller then refuses to
         # drive, which is a worse failure than the one being fixed. Before means
         # the worst case is a fully-seeded project the poller picks up itself.
-        publish_seeds(seed_dir(sf, project_id, config_name), files)
+        try:
+            publish_seeds(seed_dir(sf, project_id, config_name), files)
+        except SeedAlreadyPublished as e:
+            # Published seed content is immutable, so this launch is asking for
+            # something the system will not do: replace the seed a live or past
+            # run of this (project, config) resolves its context from, one path
+            # at a time. Refuse at the API with the remedy, rather than mutating
+            # under a reader — the same shape as the cross-config precondition
+            # refusal above.
+            return {"status": "error", "project_id": project_id,
+                    "config_name": config_name, "message": str(e)}
 
     run_id = sf.get_or_create_run(config_name, project_id, {"project_id": project_id})
     run = sf.get_run(run_id)

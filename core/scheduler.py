@@ -778,6 +778,27 @@ async def _check_hung_claims():
         except Exception as e:
             reclaimed = []
             logger.warning("stale-claim reclaim failed: %s", e)
+
+        # Orphaned side-effect operations, on the same independent cadence and
+        # for a sharper reason: a requested cancellation forbids claiming, so the
+        # re-claim that used to clean up after a crashed executor cannot happen
+        # while a run drains. Without a path that does not depend on claiming, a
+        # run whose executor died mid-operation drains forever.
+        #
+        # Retires ONLY records whose owner process is observably dead. An owner
+        # that cannot be probed is reported, never assumed gone — a timeout must
+        # never become a successful stop.
+        try:
+            _orphans = sf.recover_orphan_ops()
+            if _orphans.get("recovered"):
+                logger.warning("retired orphaned operation(s) whose owner is "
+                               "gone: %s", ", ".join(_orphans["recovered"]))
+            if _orphans.get("unknown"):
+                logger.warning("operation(s) with an unobservable owner remain "
+                               "admitted (recovery required, not assumed): %s",
+                               ", ".join(_orphans["unknown"]))
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning("orphan-operation recovery failed: %s", e)
         for _rid in reclaimed:
             try:
                 _pid = (sf.get_run(_rid) or {}).get("project_id") or "unknown"

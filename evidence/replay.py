@@ -134,11 +134,26 @@ def f1():
 
 
 def f2():
+    """Two acceptable answers, and one unacceptable one.
+
+    A tree may REFUSE to replace published content (immutability — a reader
+    resolving several sources by path cannot then be handed two generations), or
+    it may replace it without ever exposing a mixture. Exposing a mixture is the
+    failure.
+    """
     with tempfile.TemporaryDirectory() as t:
         d = Path(t) / "_seed"
         seeds.publish_seeds(d, {"plan.md": "old-plan", "extra.md": "old-extra"})
-        seen = _observe_during_publication(
-            d, {"plan.md": "new-plan", "extra.md": "new-extra"})
+        try:
+            seen = _observe_during_publication(
+                d, {"plan.md": "new-plan", "extra.md": "new-extra"})
+        except Exception:                                     # noqa: BLE001
+            # Refused. The published set must be untouched.
+            assert (d / "plan.md").read_text() == "old-plan", "refused, then mutated"
+            assert (d / "extra.md").read_text() == "old-extra", "refused, then mutated"
+            ok, why = seeds.seed_is_published(d, "plan.md")
+            assert ok, f"refusal left the seed unpublished: {why}"
+            return
         mixed = [o for o in seen
                  if o["gate"] and {o["plan"], o["extra"]} == {"new-plan", "old-extra"}]
         assert not mixed, f"mixed generation admitted: {json.dumps(mixed)}"

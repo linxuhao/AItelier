@@ -30,7 +30,7 @@ from skillflow.core import StepResult
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-def _wire(tmp_path, test_results):
+def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None):
     """Real coding_impl graph with a scripted run_tests (`test_results` is the
     per-invocation `passed` sequence; the last value repeats) and a stubbed
     repo_apply. Returns (sf, run_id, calls)."""
@@ -46,19 +46,26 @@ def _wire(tmp_path, test_results):
     seq = list(test_results)
 
     def _run_tests(*args, out_dir="", **kwargs):
-        passed = seq[min(calls["run_tests"], len(seq) - 1)]
+        outcome = seq[min(calls["run_tests"], len(seq) - 1)]
         calls["run_tests"] += 1
-        # Mirror the real tool: write test_report.json so the loop-back feedback
-        # (implement's `{ step: test }` context) has a report to carry.
-        if out_dir:
-            Path(out_dir).mkdir(parents=True, exist_ok=True)
-            (Path(out_dir) / "test_report.json").write_text(json.dumps({
-                "passed": passed, "returncode": 0 if passed else 1,
-                "summary": "ok" if passed else "FAILED tests/test_ops.py::test_sub",
-                "failures": [] if passed else
+        if isinstance(outcome, bool):
+            report = {
+                "passed": outcome, "returncode": 0 if outcome else 1,
+                "summary": "ok" if outcome else "FAILED tests/test_ops.py::test_sub",
+                "failures": [] if outcome else
                             ["FAILED tests/test_ops.py::test_sub - NameError: name 'sub'"],
-            }), encoding="utf-8")
-        return {"written": "test_report.json", "passed": passed}
+            }
+        else:
+            report = outcome
+        if out_dir and report is not None:
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            (Path(out_dir) / "test_report.json").write_text(
+                report if isinstance(report, str) else json.dumps(report),
+                encoding="utf-8")
+        # Deliberately optimistic return: artifact validation must be decisive.
+        passed = outcome if isinstance(outcome, bool) else True
+        return tool_result if tool_result is not None else {
+            "written": "test_report.json", "passed": passed}
 
     def _repo_apply(*args, **kwargs):
         calls["repo_apply"] += 1
@@ -68,6 +75,25 @@ def _wire(tmp_path, test_results):
     # (delegate_tools_to_agent=False, the default) runs tool nodes inline.
     loader.register_dynamic_tool("run_tests", {}, _run_tests)
     loader.register_dynamic_tool("repo_apply", {}, _repo_apply)
+    if schema_failure is not None:
+        real_schema = loader.load_fn("json_schema")
+        schema_calls = 0
+
+        def _schema(**kwargs):
+            nonlocal schema_calls
+            schema_calls += 1
+            # Shape check succeeds, then verdict tool errors with stale success
+            # flags/artifact still available from the preceding step.
+            if schema_calls >= 2:
+                if isinstance(schema_failure, Exception):
+                    raise schema_failure
+                return schema_failure
+            # Use the real native validator for the earlier successful check.
+            import inspect
+            return real_schema(**{k: v for k, v in kwargs.items()
+                                  if k in inspect.signature(real_schema).parameters})
+        loader.register_dynamic_tool("json_schema", {}, _schema)
+
 
     # register_graph validates agent_config references — provide the real ones.
     for name, cfg in (yaml.safe_load(
@@ -146,6 +172,91 @@ def test_never_passing_fails_run_bounded(tmp_path):
     # 4 test runs (initial + 3 retries) then the edge exhausts → run fails.
     assert calls["run_tests"] == 4
     assert implement_runs == 4
+    assert "test_evidence_missing" not in str(sf.get_run(run_id).get("error_reason"))
 
     # The decisive regression assertion: a failing suite never yields success.
     assert status != "completed"
+
+
+@pytest.mark.parametrize("report", [
+    None,
+    "",
+    "not JSON",
+    '{"passed":true',
+    '{"passed":false}{"passed":true,"summary":"ok","failures":[]}',
+    [],
+    {},
+    {"passed": True, "summary": "npm unavailable", "failures": [],
+     "node": {"passed": True, "skipped": True}},
+    {"passed": True},
+    {"passed": "true", "summary": "ok", "failures": []},
+    {"passed": True, "summary": "runner absent", "failures": [], "skipped": True},
+    {"passed": False, "summary": "runner absent", "failures": [], "skipped": True},
+    {"passed": True, "summary": "nothing collected", "failures": [],
+     "no_tests_collected": True},
+    {"passed": False, "summary": "nothing collected", "failures": [],
+     "no_tests_collected": True},
+])
+def test_invalid_or_absent_evidence_fails_without_implementation_retry(tmp_path, report):
+    sf, run_id, calls = _wire(tmp_path, [report])
+    status, implement_runs = _drive(sf, run_id)
+    assert status == "failed"
+    assert implement_runs == calls["run_tests"] == calls["repo_apply"] == 1
+    assert "test_evidence_missing" in str(sf.get_run(run_id))
+
+
+@pytest.mark.parametrize("extras", [
+    {},
+    {"skipped": False, "no_tests_collected": False},
+    {"node": {"passed": True, "checks": {"build": {"passed": True}}}},
+])
+def test_valid_report_does_not_require_optional_pytest_fields(tmp_path, extras):
+    report = {"passed": True, "summary": "checks passed", "failures": [], **extras}
+    sf, run_id, calls = _wire(tmp_path, [report])
+    assert _drive(sf, run_id) == ("completed", 1)
+    assert calls["run_tests"] == 1
+
+
+def test_report_failure_overrides_optimistic_return_flag(tmp_path):
+    report = {"passed": False, "summary": "real failing test", "failures": ["assertion"]}
+    sf, run_id, calls = _wire(tmp_path, [report, True])
+    assert _drive(sf, run_id) == ("completed", 2)
+    assert calls["run_tests"] == 2
+
+
+def test_failed_tool_return_cannot_consume_existing_passing_artifact(tmp_path):
+    sf, run_id, calls = _wire(tmp_path, [True], tool_result={
+        "written": None, "passed": False, "error": "report could not be written",
+    })
+    assert _drive(sf, run_id) == ("failed", 1)
+    assert calls["run_tests"] == 1
+    assert "report could not be written" in str(sf.get_run(run_id))
+
+
+@pytest.mark.parametrize("failure", [
+    {"_error": True, "all_passed": True},
+    {"error": "validator unavailable", "all_passed": True},
+    RuntimeError("validator unavailable"),
+])
+def test_validator_error_cannot_reuse_prior_success(tmp_path, failure):
+    sf, run_id, calls = _wire(tmp_path, [True], schema_failure=failure)
+    # An execution exception can be raised to the host before the framework's
+    # bounded tool retries reach terminal failure. Continue the SAME run only.
+    for _ in range(5):
+        try:
+            status, _ = _drive(sf, run_id)
+            break
+        except RuntimeError as exc:
+            assert str(exc) == "validator unavailable"
+    else:
+        pytest.fail("validator error never reached bounded terminal failure")
+    assert status == "failed"
+    assert calls["run_tests"] == calls["repo_apply"] == 1
+
+
+def test_error_flag_wins_over_written_report(tmp_path):
+    sf, run_id, calls = _wire(tmp_path, [True], tool_result={
+        "_error": True, "written": "test_report.json", "passed": True,
+    })
+    assert _drive(sf, run_id) == ("failed", 1)
+    assert calls["run_tests"] == 1

@@ -87,54 +87,54 @@ class TestV2ConfigLoading:
         assert graph.validate() == []
 
     def test_coding_impl_test_step_gates_on_run_tests(self):
-        """The `test` step must route on the run_tests `passed` flag — pass →
-        `done`, fail → loop back to `implement` with a max_loop guard — NOT
-        transition to null unconditionally (the bug: a failing suite didn't
-        block completion)."""
-        path = ROOT / "configs" / "coding_impl.yaml"
-        graph = PipelineGraph.from_yaml(path)
+        """Only a written report enters validation; evidence and verdict are separate."""
+        graph = PipelineGraph.from_yaml(ROOT / "configs" / "coding_impl.yaml")
         test = next(s for s in graph.steps if s.id == "test")
-
-        pass_edges = [t for t in test.transitions
-                      if t.match and t.match.get("passed") is True]
-        fail_edges = [t for t in test.transitions
-                      if t.match and t.match.get("passed") is False]
-        assert len(pass_edges) == 1 and pass_edges[0].to == "done"
-        assert len(fail_edges) == 1 and fail_edges[0].to == "implement"
-        # Bounded loop — no infinite churn when the suite never passes.
-        assert fail_edges[0].max_loop is not None
-        # No unconditional escape hatch that would let a failing test through.
-        assert not any(t.to is None and not t.match for t in test.transitions)
+        assert test.tool_name == "run_tests"
+        assert [(t.to, t.match) for t in test.transitions] == [
+            ("test_evidence_missing", {"_error": True}),
+            ("test_evidence", {"written": "test_report.json"}),
+            ("test_evidence_missing", None),
+        ]
+        evidence = next(s for s in graph.steps if s.id == "test_evidence")
+        assert evidence.tool_name == "json_schema"
+        assert evidence.tool_params["workspace_root"] == "$CONFIG_DIR/test"
+        assert evidence.tool_params["files"] == ["test_report.json"]
+        assert [(t.to, t.match) for t in evidence.transitions] == [
+            ("test_evidence_missing", {"_error": True}),
+            ("test_outcome", {"all_passed": True}),
+            ("test_evidence_missing", None),
+        ]
+        outcome = next(s for s in graph.steps if s.id == "test_outcome")
+        assert outcome.tool_name == "json_schema"
+        assert outcome.tool_params["workspace_root"] == "$CONFIG_DIR/test"
+        assert outcome.tool_params["files"] == ["test_report.json"]
+        assert [(t.to, t.match) for t in outcome.transitions] == [
+            ("test_evidence_missing", {"_error": True}),
+            ("done", {"all_passed": True}),
+            ("implement", {"all_passed": False}),
+        ]
 
     def test_coding_impl_end_condition_is_outside_the_loop(self):
-        """The terminating `node_reached` must fire on `done` (a loop-external
-        terminal gate), never on `test`. `test` sits inside the implement↔test
-        loop, so on a loop-back the graph re-enters it while a stale `completed`
-        `test` row exists — a `node_reached: test` end-condition would then
-        complete the run as SUCCESS before the retried test runs."""
-        path = ROOT / "configs" / "coding_impl.yaml"
-        graph = PipelineGraph.from_yaml(path)
-        node_reached = [c for c in graph.end_conditions.conditions
-                        if c.type == "node_reached"]
-        assert node_reached, "coding_impl lost its node_reached end-condition"
-        for c in node_reached:
-            assert c.node == "done", f"end-condition on '{c.node}', must be 'done'"
-        done = next(s for s in graph.steps if s.id == "done")
-        assert done.step_type == "gate"
-        assert [t.to for t in done.transitions] == [None]  # terminal
+        """Success and evidence failure have distinct loop-external terminals."""
+        graph = PipelineGraph.from_yaml(ROOT / "configs" / "coding_impl.yaml")
+        conditions = graph.end_conditions.conditions
+        assert [(c.type, c.node, c.result) for c in conditions] == [
+            ("node_reached", "done", "completed"),
+            ("node_reached", "test_evidence_missing", "failed"),
+        ]
+        for terminal in ("done", "test_evidence_missing"):
+            node = next(s for s in graph.steps if s.id == terminal)
+            assert node.step_type == "gate"
+            assert [t.to for t in node.transitions] == [None]
 
     def test_coding_impl_loop_is_bounded(self):
-        """The implement↔test loop must be bounded so a never-passing suite
-        fails instead of looping forever. The bound is `max_loop` on the
-        test → implement edge (enforced on tool-step edges since skillflow-py
-        1.5.2)."""
-        path = ROOT / "configs" / "coding_impl.yaml"
-        graph = PipelineGraph.from_yaml(path)
-        test = next(s for s in graph.steps if s.id == "test")
-        fail_edge = next(t for t in test.transitions
-                         if t.match and t.match.get("passed") is False)
-        assert fail_edge.max_loop and fail_edge.max_loop > 0, \
-            "coding_impl loop is unbounded (test → implement has no max_loop)"
+        """Evidence-free runs stop; genuine failures retain three repair attempts."""
+        graph = PipelineGraph.from_yaml(ROOT / "configs" / "coding_impl.yaml")
+        outcome = next(s for s in graph.steps if s.id == "test_outcome")
+        fail_edge = next(t for t in outcome.transitions if t.to == "implement")
+        assert fail_edge.match == {"all_passed": False}
+        assert fail_edge.max_loop == 3
 
     def test_coding_impl_implement_receives_test_feedback(self):
         """On loop-back, implement must see the prior run's test report so it

@@ -29,8 +29,8 @@ begin: "implement"
 end_conditions:
   combinator: or
   conditions:
-    # Terminate ONLY at the dedicated `done` node, which is reached exclusively
-    # when the tests pass (test → done). `done` sits OUTSIDE the implement↔test
+    # Complete successfully ONLY at the dedicated `done` node, which is reached exclusively
+    # when the tests pass (test_outcome → done). `done` sits OUTSIDE the implement↔test
     # loop, so it is entered at most once.
     #
     # This node MUST NOT be `test`: `test` is inside the loop, so on a
@@ -40,12 +40,15 @@ end_conditions:
     # even runs*, reporting green on unverified code (the exact failure we are
     # fixing). `done` is a gate (no completed step row), so `require_completed`
     # is intentionally omitted.
-    # The never-passes loop is bounded by `max_loop: 3` on test → implement
+    # The never-passes loop is bounded by `max_loop: 3` on test_outcome → implement
     # below (enforced on tool-step edges since skillflow-py 1.5.2): once the edge
     # is exhausted the run fails with CycleLimitExceeded.
     - type: node_reached
       node: "done"
       result: "completed"
+    - type: node_reached
+      node: "test_evidence_missing"
+      result: "failed"
 
 steps:
   - id: "implement"
@@ -88,21 +91,69 @@ steps:
     timeout_seconds: 1200
     tool_params:
       out_dir: "$STEP_DIR"
-    # GATE on the test outcome. run_tests returns a `passed` flag (and writes
-    # test_report.json). On pass → `done` (terminates). On failure → loop back
-    # to `implement`, which reads test_report.json (its `{ step: test }` context)
-    # and fixes the failure. (run_tests SKIPS = passed:true when no runner is
-    # available, so a missing test toolchain never spins this loop.)
-    #
-    # `max_loop: 3` bounds the retries: 4 test runs total (initial + 3), then the
-    # edge is exhausted and the run fails. Enforced on this tool-step edge since
-    # skillflow-py 1.5.2 (before that, tool-originated edges weren't counted).
+    # A failed tool invocation must not consume a report from a prior attempt.
     transitions:
+      - to: "test_evidence_missing"
+        match: { _error: true }
+      - to: "test_evidence"
+        match: { written: "test_report.json" }
+      - to: "test_evidence_missing"
+
+  - id: "test_evidence"
+    step_type: "tool"
+    tool_name: "json_schema"
+    tool_params:
+      workspace_root: "$CONFIG_DIR/test"
+      files: ["test_report.json"]
+      # Validate the actual artifact before routing. Missing runners and zero
+      # collected tests are not code defects for the implementer to repair.
+      # Requires jsonschema installed (verified in the production image); the
+      # native tool has a reduced fallback that cannot enforce these constraints.
+      inline_schema:
+        type: object
+        required: [passed, summary, failures]
+        properties:
+          passed: { type: boolean }
+          summary: { type: string, minLength: 1 }
+          failures: { type: array, items: { type: string } }
+          skipped: { const: false }
+          no_tests_collected: { const: false }
+          node:
+            type: object
+            properties:
+              skipped: { const: false }
+    transitions:
+      - to: "test_evidence_missing"
+        match: { _error: true }
+      - to: "test_outcome"
+        match: { all_passed: true }
+      - to: "test_evidence_missing"
+
+  - id: "test_outcome"
+    step_type: "tool"
+    tool_name: "json_schema"
+    tool_params:
+      workspace_root: "$CONFIG_DIR/test"
+      files: ["test_report.json"]
+      inline_schema:
+        type: object
+        required: [passed]
+        properties:
+          passed: { const: true }
+    transitions:
+      - to: "test_evidence_missing"
+        match: { _error: true }
       - to: "done"
-        match: { passed: true }
+        match: { all_passed: true }
       - to: "implement"
-        match: { passed: false }
+        match: { all_passed: false }
+        # Initial test plus three repair attempts; never complete on exhaustion.
         max_loop: 3
+
+  - id: "test_evidence_missing"
+    step_type: "gate"
+    transitions:
+      - to: null
 
   # Terminal no-op gate: reached only after the tests pass. Its sole purpose is
   # to be the loop-external node the end-condition fires on (see end_conditions).

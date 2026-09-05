@@ -353,6 +353,7 @@ def test_design_delivery_always_retests(dpe_game, flags):
     ('{"passed": true}', "5_review"),
     ('{"passed": false, "summary": "design contract broken"}', "5_final_test_replan"),
     ('{"passed": true, "skipped": true}', "5_final_test_replan"),
+    ('{"passed": true, "no_tests_collected": true}', "5_final_test_replan"),
     ('{}', "5_final_test_replan"),
     ('invalid json', "5_final_test_replan"),
     (None, "5_final_test_replan"),
@@ -498,3 +499,24 @@ def test_pm_claim_assembles_context_before_and_after_final_tests(
     context = json.dumps(claimed.inputs["_resolved_context"])
     assert "FIRST_PASS_RESEARCH" in context
     assert ("FINAL_TREE_FAILURE" in context) == has_final_report
+
+
+def test_real_empty_godot_suite_cannot_pass_final_tree_gate(dpe_game, tmp_path):
+    import json
+    from aitelier.tools.run_tests.impl import run_tests
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.gd").write_text("extends Node\n")
+    output = tmp_path / "report"
+    result = run_tests(project_root=str(repo), out_dir=str(output))
+    report_path = output / "test_report.json"
+    report = json.loads(report_path.read_text())
+    # The general tool treats pytest as inapplicable to this repository. That
+    # must not certify the final tree after a writer changed it.
+    assert result["passed"] is True
+    assert report["returncode"] == 5 and report["no_tests_collected"] is True
+    resolver = GraphResolver(dpe_game._graphs["dpe_game"])
+    target = resolver.next_node("5_final_test", result, {},
+                                file_reader=lambda path: (output / path).read_text())
+    assert target == "5_final_test_replan"

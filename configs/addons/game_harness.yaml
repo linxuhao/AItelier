@@ -454,10 +454,14 @@ overlay:
         tool_params:
           out_dir: "$STEP_DIR"
         # Read the report, not inherited flags. Missing/invalid evidence and
-        # skipped runners cannot release the final reviewer or the push step.
+        # skipped runners or zero collected tests cannot release review/push.
+        # Even a pure Godot project needs checks of the final tree here: its
+        # earlier compile/playtest report predates the design writer.
         transitions:
           - to: "5_final_test_replan"
             match: { from_file: "test_report.json", field: "skipped", value: true }
+          - to: "5_final_test_replan"
+            match: { from_file: "test_report.json", field: "no_tests_collected", value: true }
           - to: "5_review"
             match: { from_file: "test_report.json", field: "passed", value: true }
           - to: "5_final_test_replan"

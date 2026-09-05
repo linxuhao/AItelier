@@ -159,11 +159,11 @@ overlay:
         # nothing marking it stale. Letting the step RUN keeps the report fresh
         # and honest; only where it goes afterwards changes.
         #
-        # It goes to 5_review, not to 5_knowledge: 5_design sits in between and
+        # It goes through final tests to 5_review, skipping 5_knowledge: 5_design
         # rewrites the durable design record, which must not be re-derived from
         # a build that never compiled.
         transitions:
-          - to: "5_review"
+          - to: "5_final_test"
             match:
               from_file: "vision_report.json"
               field: "blind_reason"
@@ -412,9 +412,6 @@ overlay:
   #    quietly loses accumulated decisions the first time a model reorganises
   #    while regenerating.
   #
-  #    Both transitions go to `done`, including the error branch: a failed design
-  #    update must never sink an otherwise-green run. The cost is a stale record
-  #    — visible in the run's step log, and recoverable, because it is in git.
   - insert_after: "5_knowledge"
     steps:
       - id: "5_design"
@@ -444,11 +441,36 @@ overlay:
               params:
                 source_dir: "$STEP_DIR"
               on_failure: "skip"
-        # Both edges go to the REVIEWER now, not to `done`. The error branch
-        # included: a failed design update must never sink an otherwise-green
-        # run, and it must not skip the review either — a round whose record
-        # could not be written is exactly the round a reviewer should see.
+        # Re-test after repo_apply, even when the design step reports an error.
         transitions:
-          - to: "5_review"
+          - to: "5_final_test"
             match: { _error: true }
+          - to: "5_final_test"
+
+      - id: "5_final_test"
+        step_type: "tool"
+        tool_name: "run_tests"
+        timeout_seconds: 1200
+        tool_params:
+          out_dir: "$STEP_DIR"
+        # Read the report, not inherited flags. Missing/invalid evidence and
+        # skipped runners cannot release the final reviewer or the push step.
+        transitions:
+          - to: "5_final_test_replan"
+            match: { from_file: "test_report.json", field: "skipped", value: true }
           - to: "5_review"
+            match: { from_file: "test_report.json", field: "passed", value: true }
+          - to: "5_final_test_replan"
+
+      - id: "5_final_test_replan"
+        step_type: "gate"
+        transitions:
+          - to: "3"
+            max_loop: 4
+
+  # Both consumers receive the report from the final repository tree. The
+  # earlier 5_test report remains available as pre-design diagnostic evidence.
+  - add_context: "@verifier_review"
+    source: { step: "5_final_test", output: "test_report.json" }
+  - add_context: "@pm"
+    source: { step: "5_final_test", output: "test_report.json" }

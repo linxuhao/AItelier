@@ -1,5 +1,10 @@
 ## Godot 游戏项目验收（本项目是 Godot 游戏）
 
+最终单测结果以 `Step 5_final_test` 的 `test_report.json` 为准：它在
+`5_design` 的仓库写入之后执行。`Step 5_test` 只说明设计更新前的状态，
+不能用它覆盖最终报告。最终报告缺失、跳过或失败均不得通过验收。
+编译、运行时与可读性报告仍分别审查，最终单测不替代这些闸门。
+
 你的上下文里有两份客观闸门报告（`Step 5_compile` 章节）：
 - 解析报告 `compile_report.json`（`passed` / `errors`（每条含 `kind` / res:// `file` / `line` / `msg`）/ `summary` / `gate_skipped`）—— **真实 headless 导入解析了脚本**。
 - 运行时冒烟报告 `playtest_report.json`（`passed`（**硬门槛：崩溃 / 主场景跑不起来 / spec 有非法键 / 输入没进游戏**）/ `spec_errors[]`/ `frames` / `errors`（运行时异常，含 res:// file+line）/ **`state`（运行若干帧后场景树各节点的脚本变量+位置快照）** / `behavior`（**行为断言结果，建议性**）/ `spec_used` / `summary`）—— **真实无头 Godot 运行了主场景**。

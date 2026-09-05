@@ -213,7 +213,7 @@ def test_no_captures_skips_the_human_and_the_design_keeper(dpe_game):
                                  '"blind_reason": "no_captures", "frames_checked": 0}')
     assert t != "5_vision_human"   # nobody is asked to judge frames that do not exist
     assert t != "5_knowledge"      # …and 5_design must not re-derive the design
-    assert t == "5_review"         #    record from a build that never compiled
+    assert t == "5_final_test"     #    record from a build that never compiled
 
 
 def test_any_other_blind_reason_still_reaches_the_human(dpe_game):
@@ -341,3 +341,124 @@ def test_the_design_order_survives_addon_composition(sf_with_addons):
     assert set(orders) == {"2", "3"}, f"design source missing after compose: {orders}"
     assert orders["2"] == orders["3"] and orders["2"], orders
     assert orders["2"][:2] == ["00_roadmap.md", "90_decisions.md"]
+
+
+@pytest.mark.parametrize("flags", [{}, {"_error": True}])
+def test_design_delivery_always_retests(dpe_game, flags):
+    resolver = GraphResolver(dpe_game._graphs["dpe_game"])
+    assert resolver.next_node("5_design", flags, {}) == "5_final_test"
+
+
+@pytest.mark.parametrize("report, expected", [
+    ('{"passed": true}', "5_review"),
+    ('{"passed": false, "summary": "design contract broken"}', "5_final_test_replan"),
+    ('{"passed": true, "skipped": true}', "5_final_test_replan"),
+    ('{}', "5_final_test_replan"),
+    ('invalid json', "5_final_test_replan"),
+    (None, "5_final_test_replan"),
+])
+def test_final_tree_report_controls_release(dpe_game, report, expected):
+    def reader(path):
+        assert path == "test_report.json"
+        if report is None:
+            raise FileNotFoundError(path)
+        return report
+    resolver = GraphResolver(dpe_game._graphs["dpe_game"])
+    # An earlier passing flag must never mask the final report's failure.
+    assert resolver.next_node("5_final_test", {"passed": True}, {},
+                              file_reader=reader) == expected
+
+
+def test_final_report_is_resolved_for_review_and_replanning(dpe_game, tmp_path):
+    from skillflow.context import ContextResolver
+    from skillflow.graph import _normalize_context_spec
+    graph = dpe_game._graphs["dpe_game"]
+    for step, body in [("5_test", '{"passed": true, "summary": "BEFORE_DESIGN"}'),
+                       ("5_final_test", '{"passed": false, "summary": "AFTER_DESIGN_BROKEN"}')]:
+        directory = tmp_path / "dpe_game" / step
+        directory.mkdir(parents=True)
+        (directory / "test_report.json").write_text(body)
+    for step in ("5_review", "3"):
+        node = next(n for n in graph.steps if n.id == step)
+        specs = [s for s in node.context
+                 if s.get("source", s).get("step") in ("5_test", "5_final_test")]
+        result = ContextResolver(tmp_path).resolve(
+            [_normalize_context_spec(s) for s in specs], current_config="dpe_game")
+        assert any("AFTER_DESIGN_BROKEN" in value for value in result.values())
+        assert any("BEFORE_DESIGN" in value for value in result.values())
+    final = next(n for n in graph.steps if n.id == "5_final_test")
+    assert final.tool_name == "run_tests"
+    assert final.tool_params == {"out_dir": "$STEP_DIR"}
+    replan = next(n for n in graph.steps if n.id == "5_final_test_replan")
+    assert [(t.to, t.max_loop) for t in replan.transitions] == [("3", 4)]
+
+
+@pytest.mark.parametrize("break_design, expected", [(True, "3"), (False, "5_review")])
+def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expected):
+    import copy
+    import json
+    import skillflow
+    from skillflow.compose import compose_graph
+    from skillflow.core import StepResult
+    from skillflow.tool_loader import ToolLoader
+
+    composed = compose_graph(
+        yaml.safe_load((_CONFIGS / "dpe_default.yaml").read_text()),
+        [yaml.safe_load((_CONFIGS / "addons/game_harness.yaml").read_text())])
+    nodes = {node["id"]: copy.deepcopy(node) for node in composed["steps"]}
+    # Exercise the real final-test node and design on_deliver hook in isolation
+    # from expensive research, compilation and LLM calls.
+    initial = nodes["5_test"]
+    initial["transitions"] = [{"to": "5_design"}]
+    design = nodes["5_design"]
+    design["context"] = []
+    graph = PipelineGraph._from_dict({
+        "name": "final_tree_regression", "begin": "5_test",
+        "steps": [initial, design, nodes["5_final_test"], nodes["5_final_test_replan"],
+                  {"id": "3", "step_type": "agent", "agent_config": "game_designer", "transitions": []},
+                  {"id": "5_review", "step_type": "agent", "agent_config": "game_designer", "transitions": []}],
+    })
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    record = repo / "design.md"
+    record.write_text("valid")
+    observed = []
+    loader = ToolLoader(Path(skillflow.__file__).parent / "tools")
+    loader.add_tools_dir(_ROOT / "aitelier/tools")
+
+    def run_tests(*args, out_dir="", **kwargs):
+        passed = record.read_text() == "valid"
+        observed.append(passed)
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        (Path(out_dir) / "test_report.json").write_text(json.dumps({"passed": passed}))
+        return {"passed": passed}
+
+    def apply_design(*args, **kwargs):
+        record.write_text("broken" if break_design else "valid")
+        return {"applied": True}
+
+    sf = SkillFlow(str(tmp_path / "engine.db"), tool_loader=loader,
+                   workspace_base=str(tmp_path / "ws"),
+                   projects_base=str(tmp_path / "projects"))
+    loader.register_dynamic_tool("run_tests", {}, run_tests)
+    loader.register_dynamic_tool("repo_apply", {}, apply_design)
+    sf.register_agent_config_from_dict("game_designer", {"model": "test"})
+    sf.register_graph(graph)
+    run_id = sf.create_run(graph.name, {"project_id": "p"})
+    sf.start_run(run_id)
+    reached = None
+    for _ in range(12):
+        sf.advance_run(run_id)
+        run = sf.get_run(run_id)
+        if run["current_node"] in ("3", "5_review"):
+            reached = run["current_node"]
+            break
+        claim = sf.claim_next_step(run_id)
+        if claim is not None:
+            assert claim.step_id == "5_design"
+            staging = Path(sf._workspace.get_step_tmp_dir("p", graph.name, "5_design"))
+            staging.mkdir(parents=True, exist_ok=True)
+            (staging / "design.md").write_text("design update")
+            sf.confirm_step(claim.token, StepResult(flags={}))
+    assert observed == [True, not break_design], json.dumps(run)
+    assert reached == expected

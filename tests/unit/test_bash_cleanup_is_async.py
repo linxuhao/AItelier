@@ -208,35 +208,32 @@ def test_a_timed_out_command_keeps_the_loop_responsive(live):
 
 # ── F2 · a cancellation during the reap is not a result ──────────────
 
-def test_a_cancellation_during_the_reap_is_not_reported_as_success(live,
-                                                                   monkeypatch):
-    """WHITE-BOX, and labelled: the window is real — a client disconnect can
-    land in any await — but far too narrow to hit by timing. So `proc.wait()`
-    is made to raise exactly what a cancellation arriving there raises, on a
-    command that has ALREADY COMPLETED normally. Returning its output would be
-    reporting a cancelled call as a success."""
+def test_a_cancellation_during_cleanup_is_not_reported_as_success(live,
+                                                                  monkeypatch):
+    """WHITE-BOX, and labelled: the window is real — a client disconnect lands
+    in whatever await is running — but far too narrow to hit by timing, so the
+    cancellation is raised where cleanup actually awaits.
+
+    The command has ALREADY COMPLETED normally, which is the case the review
+    found: `cancel_exc` was still None, the swallowing `except` hid the
+    cancellation, and the tool returned its output as if nothing had happened.
+
+    The injection point moved from `proc.wait()` to the group wait because the
+    fix made the old one unreachable on this path: after a normal completion the
+    child is already reaped, so cleanup skips the reap entirely. The property is
+    the same one — a cancellation observed anywhere in cleanup is not a result.
+    """
     agent = live["agent"]
-    real_create = asyncio.create_subprocess_shell
+    real_wait_gone = ma._await_owned_group_gone
+    state = {"n": 0}
 
-    async def _create(*args, **kwargs):
-        proc = await real_create(*args, **kwargs)
-        real_wait = proc.wait
-        state = {"n": 0}
+    async def _cancel_once(pgid, seconds):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise asyncio.CancelledError()
+        return await real_wait_gone(pgid, seconds)
 
-        async def _wait():
-            # Call 1 is `communicate()`'s own internal wait — that path is
-            # already covered. The REAP is the next one, and that is the window
-            # the review found: a cancellation there was swallowed and the call
-            # returned output as if nothing had happened.
-            state["n"] += 1
-            if state["n"] == 2:
-                raise asyncio.CancelledError()
-            return await real_wait()
-
-        proc.wait = _wait
-        return proc
-
-    monkeypatch.setattr(ma.asyncio, "create_subprocess_shell", _create)
+    monkeypatch.setattr(ma, "_await_owned_group_gone", _cancel_once)
 
     async def drive():
         with pytest.raises(asyncio.CancelledError):
@@ -244,6 +241,10 @@ def test_a_cancellation_during_the_reap_is_not_reported_as_success(live,
                                     "timeout": 30})
 
     asyncio.run(drive())
+    # Unconfirmed cleanup retains — the safe direction — and says why.
+    held = ri.write_admissions(live["db"])
+    assert held, "a cancellation during cleanup must not retire on a guess"
+    assert "PENDING" in " ".join(str(r) for r in held).upper()
 
 
 def test_a_real_second_cancellation_during_cleanup_still_raises(live):

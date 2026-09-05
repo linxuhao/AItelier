@@ -1428,7 +1428,13 @@ CODING_TOOL_DEFINITIONS = [
                 "Run a shell command in the project repo (cwd = repo root). Use for "
                 "running tests, git operations, ls/grep, builds. Output is capped — "
                 "prefer targeted commands over dumping large files (use read_code_file "
-                "for that). Long-running commands are killed at 'timeout' seconds."
+                "for that). Long-running commands are killed at 'timeout' seconds. "
+                "The command runs in its own process group, and THAT GROUP IS ENDED "
+                "when the call ends — on completion, timeout or cancellation — so "
+                "anything you background with `&` dies with the call. A process that "
+                "detaches itself (setsid, nohup+setsid, a daemon that forks into a "
+                "new session) leaves that group and is neither ended nor tracked: it "
+                "will keep running and this tool cannot see it."
             ),
             "parameters": {
                 "type": "object",
@@ -1949,15 +1955,26 @@ def _declare_isolation(db, run_id: str, project_id: str, config_name: str) -> No
 # aitelier/tools/run_tests/impl.py, whose comment says why: killing the direct
 # child leaves the grandchildren running.
 #
-# Scope, honestly: a process that calls `setsid` for itself leaves this group
-# and is no longer ours to end. That is not an OS-wide tracker and does not
-# pretend to be one — when the group cannot be confirmed empty the admission is
-# RETAINED and an operator is told, which is the same answer a crashed writer
-# already gets.
+# Scope, honestly, and this sentence was WRONG in the previous round: a process
+# that calls `setsid` for itself LEAVES this group. The group then reads as
+# EMPTY — the strongest confirmation there is — and the admission is retired.
+# Such a process is not detected, not retained and not surfaced; it is simply
+# outside what one owned process group can see. The earlier claim that an escape
+# is "detected as cannot confirm" was the opposite of the behaviour, and an
+# operator clearing a retained admission would have been misled by it.
+#
+# What retention DOES cover: a group that is still present after SIGTERM and
+# SIGKILL, and a cancellation that landed before the handle was ours. Those are
+# real and are surfaced. This is not an OS-wide tracker and does not pretend to
+# be one; making it one is a scope decision nobody has asked for.
 _BASH_TERM_GRACE_S = 2.0     # after SIGTERM, before SIGKILL
 _BASH_KILL_WAIT_S = 3.0      # after SIGKILL, before giving up on confirmation
 _BASH_REAP_TIMEOUT_S = 2.0   # bounded: an orphan holding the pipes must not
                              # make this wait forever
+_BASH_CLEANUP_AWAIT_ATTEMPTS = 64   # re-awaits of the owned cleanup task under
+                             # repeated cancellation; the task is itself bounded,
+                             # so this only stops a pathological cancel storm
+                             # from spinning
 
 
 def _owned_group_is_gone(pgid) -> bool:
@@ -1966,6 +1983,15 @@ def _owned_group_is_gone(pgid) -> bool:
     `killpg(pgid, 0)` is the question, and `ProcessLookupError` is the only
     answer that means yes. `PermissionError` means somebody else's processes
     are in it — which is not a group we own and not a confirmation.
+
+    Two things this answer does NOT mean, both worth knowing before trusting it:
+
+    * a process that called `setsid` has left this group, so "empty" can be true
+      while that process is still running and still writing. It is unseen here,
+      by scope, and no wording in this module should suggest otherwise;
+    * a process that has died but not been reaped is a ZOMBIE, and a zombie
+      still answers. The direct child of a `bash` call is ours to reap, which is
+      why cleanup reaps before it believes this function.
     """
     if not pgid:
         return False
@@ -1990,29 +2016,70 @@ def _signal_owned_group(pgid, sig) -> None:
         pass
 
 
-def _wait_for_owned_group(pgid, seconds: float) -> bool:
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+async def _await_owned_group_gone(pgid, seconds: float) -> bool:
+    """Poll for the group to empty, yielding the loop between looks.
+
+    `await asyncio.sleep`, never `time.sleep`: this runs inside an ASGI process,
+    and the previous synchronous version stopped SSE heartbeats, the scheduler
+    tick and every other request for up to five seconds on every cancelled or
+    timed-out command.
+    """
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
         if _owned_group_is_gone(pgid):
             return True
-        time.sleep(0.05)
-    return _owned_group_is_gone(pgid)
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.02)
 
 
-def _end_owned_group(pgid) -> bool:
-    """SIGTERM, then SIGKILL, both bounded. True only if the group is GONE.
+async def _reap_owned_child(proc, seconds: float) -> None:
+    """Reap the direct child, bounded. Its zombie answers `killpg` until we do.
 
-    Synchronous on purpose: this runs on paths that are already being
-    cancelled, and a second cancellation must not be able to interrupt the part
-    that actually ends the writers.
+    `wait()`, not `communicate()`: an orphan holding the pipes must not be able
+    to make cleanup hang. A `CancelledError` raised in here is NOT swallowed —
+    it ends this cleanup task, and the caller records that a cancellation was
+    observed rather than returning a result.
     """
-    if _owned_group_is_gone(pgid):
-        return True
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=max(0.0, seconds))
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
+
+
+async def _end_owned_group_async(proc, pgid) -> bool:
+    """SIGTERM, reap, escalate to SIGKILL — bounded, and off the loop's back.
+
+    True only if the group is GONE. Two things the previous version got wrong:
+
+    * it slept synchronously, so the process stopped serving while it waited;
+    * it reaped LAST. The direct child of this call becomes a zombie the moment
+      it dies, a zombie still answers `killpg(pgid, 0)`, and so an ordinary
+      `sleep` that died on the very first SIGTERM still burned the whole budget
+      before the reap that would have settled it. Reaping first is what makes
+      the group check tell the truth.
+
+    A `setsid` escapee has left this group and is not covered — see
+    `_owned_group_is_gone`. This returns True in that case, because the group
+    really is empty; the escapee is unseen, by scope.
+
+    This coroutine is run as ONE task the caller owns and keeps awaiting under a
+    shield. It is bounded, so "keep awaiting" terminates; nothing here is left
+    running after the caller has decided about the admission.
+    """
+    if not pgid:
+        return False
+    deadline = time.monotonic() + _BASH_TERM_GRACE_S + _BASH_KILL_WAIT_S
     _signal_owned_group(pgid, signal.SIGTERM)
-    if _wait_for_owned_group(pgid, _BASH_TERM_GRACE_S):
+    await _reap_owned_child(proc, _BASH_TERM_GRACE_S)
+    if await _await_owned_group_gone(
+            pgid, min(_BASH_TERM_GRACE_S, deadline - time.monotonic())):
         return True
     _signal_owned_group(pgid, signal.SIGKILL)
-    return _wait_for_owned_group(pgid, _BASH_KILL_WAIT_S)
+    await _reap_owned_child(proc, _BASH_REAP_TIMEOUT_S)
+    return await _await_owned_group_gone(pgid, deadline - time.monotonic())
 
 
 class MetaAgent:
@@ -3598,20 +3665,37 @@ class MetaAgent:
             spawn_error = e
 
         # ── end the writers, THEN decide about the admission ──────────
-        ended = _end_owned_group(pgid) if pgid else False
-        if proc is not None:
-            # Bounded, and shielded so a second cancellation cannot abandon the
-            # child handle. An orphan holding the pipes must not make this wait
-            # forever, which is why it is `wait()` and not `communicate()`.
-            try:
-                await asyncio.shield(
-                    asyncio.wait_for(proc.wait(), timeout=_BASH_REAP_TIMEOUT_S))
-            except (asyncio.TimeoutError, asyncio.CancelledError, GeneratorExit,
-                    ProcessLookupError, Exception):
-                pass
-            ended = _owned_group_is_gone(pgid) or ended
+        # ONE task, owned here, awaited under a shield until it finishes. The
+        # shield is what makes a second cancellation unable to abandon the
+        # cleanup; re-awaiting is what makes it stay OURS rather than becoming a
+        # detached task that finishes after the admission has been released.
+        # Each cancellation seen is recorded and re-raised at the end — a
+        # cancelled call never returns a result, on any phase.
+        ended = False
         if pgid:
-            ended = _owned_group_is_gone(pgid)
+            cleanup = asyncio.ensure_future(_end_owned_group_async(proc, pgid))
+            for _ in range(_BASH_CLEANUP_AWAIT_ATTEMPTS):
+                try:
+                    ended = await asyncio.shield(cleanup)
+                    break
+                except (asyncio.CancelledError, GeneratorExit) as e:
+                    cancel_exc = cancel_exc or e
+                    if cleanup.done():
+                        # The cleanup itself ended on a cancellation (a reap
+                        # cancelled from underneath it). Nothing is left running
+                        # and nothing is confirmed.
+                        ended = False
+                        break
+                    continue
+                except Exception:
+                    ended = False
+                    break
+            else:
+                # Cancelled again and again without ever letting us observe the
+                # end. Do not leave the task unowned: end it, and treat the
+                # group as unconfirmed, which retains.
+                cleanup.cancel()
+                ended = False
 
         if proc is None and cancel_exc is not None:
             confirmed, why = False, ("cancelled during spawn: the command "

@@ -268,6 +268,29 @@ def write_admission(db, path, *, kind: str, detail: str = ""):
         retire_write(db, adm["id"])
 
 
+def mark_write_admission_pending(db, admission_id: int, evidence: str) -> None:
+    """Keep an admission BECAUSE its writers could not be confirmed ended.
+
+    The row is not retired and does not expire. What changes is that it now
+    carries why: the refusal a direct run gets prints `detail`, so the operator
+    who has to decide reads the reason there rather than in a log they would
+    have to know to look for.
+
+    Appended, not replaced — the original command is what identifies the writer.
+    """
+    if not admission_id:
+        return
+    note = f" | PENDING WRITERS: {evidence}"[:800]
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE checkout_write_admissions SET detail = substr(COALESCE(detail,'') "
+            "|| ?, 1, 2000) WHERE id = ?", (note, admission_id))
+        conn.commit()
+    import logging
+    logging.getLogger("aitelier.isolation").warning(
+        "write admission %s RETAINED: %s", admission_id, evidence[:2000])
+
+
 def write_admissions(db, canonical: str | None = None) -> list[dict]:
     """In-flight writes, for an operator and for the refusal messages."""
     with db.get_connection() as conn:

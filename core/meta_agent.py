@@ -9,6 +9,8 @@ from contextlib import contextmanager
 
 from core.run_isolation import CheckoutLeased
 import os
+import time
+import signal
 from core import env_scrub as _env_scrub
 import re
 import traceback
@@ -1939,6 +1941,80 @@ def _declare_isolation(db, run_id: str, project_id: str, config_name: str) -> No
                                  config_name=config_name, repo_mode=repo_mode)
 
 
+
+# ── owned process-group lifetime (the `bash` tool) ───────────────────
+# A tool call owns the SESSION it starts, and nothing else. `start_new_session`
+# puts the shell in its own process group, so the whole tree the command builds
+# can be signalled with one `killpg` — the pattern this repo already uses in
+# aitelier/tools/run_tests/impl.py, whose comment says why: killing the direct
+# child leaves the grandchildren running.
+#
+# Scope, honestly: a process that calls `setsid` for itself leaves this group
+# and is no longer ours to end. That is not an OS-wide tracker and does not
+# pretend to be one — when the group cannot be confirmed empty the admission is
+# RETAINED and an operator is told, which is the same answer a crashed writer
+# already gets.
+_BASH_TERM_GRACE_S = 2.0     # after SIGTERM, before SIGKILL
+_BASH_KILL_WAIT_S = 3.0      # after SIGKILL, before giving up on confirmation
+_BASH_REAP_TIMEOUT_S = 2.0   # bounded: an orphan holding the pipes must not
+                             # make this wait forever
+
+
+def _owned_group_is_gone(pgid) -> bool:
+    """Is the process group this call started empty?
+
+    `killpg(pgid, 0)` is the question, and `ProcessLookupError` is the only
+    answer that means yes. `PermissionError` means somebody else's processes
+    are in it — which is not a group we own and not a confirmation.
+    """
+    if not pgid:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+    return False
+
+
+def _signal_owned_group(pgid, sig) -> None:
+    """Signal ONLY the group we started. Never a broader target."""
+    if not pgid:
+        return
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _wait_for_owned_group(pgid, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if _owned_group_is_gone(pgid):
+            return True
+        time.sleep(0.05)
+    return _owned_group_is_gone(pgid)
+
+
+def _end_owned_group(pgid) -> bool:
+    """SIGTERM, then SIGKILL, both bounded. True only if the group is GONE.
+
+    Synchronous on purpose: this runs on paths that are already being
+    cancelled, and a second cancellation must not be able to interrupt the part
+    that actually ends the writers.
+    """
+    if _owned_group_is_gone(pgid):
+        return True
+    _signal_owned_group(pgid, signal.SIGTERM)
+    if _wait_for_owned_group(pgid, _BASH_TERM_GRACE_S):
+        return True
+    _signal_owned_group(pgid, signal.SIGKILL)
+    return _wait_for_owned_group(pgid, _BASH_KILL_WAIT_S)
+
+
 class MetaAgent:
     """Backend meta agent: tool-use loop over LiteLLM with streaming."""
 
@@ -3465,30 +3541,109 @@ class MetaAgent:
         env = {k: v for k, v in os.environ.items()
                if not self._ENV_SECRET_RE.search(k)}
 
-        # The admission is held for the WHOLE command, not checked before it.
-        # A long build is exactly the case the point check could not cover: it
-        # kept running while a direct run took the checkout out from under it.
-        # No database transaction is held here — the admission is a committed
-        # row, and it is retired in `finally` even on a timeout.
+        # The admission is held for the WHOLE WRITE — not for the coroutine
+        # that started it, which is what the `with` block used to mean. A
+        # client disconnect raises CancelledError in a mid-tool await (see
+        # `chat`), and the old `finally` retired the admission there while the
+        # command kept running: a direct run could then take the checkout while
+        # an orphan was still writing into it. Same hole one level down on
+        # timeout, where `proc.kill()` ends /bin/sh and nothing else.
+        #
+        # So: no context manager here. The row is retired only after the
+        # process group this call owns has been ENDED and confirmed gone, and
+        # if it cannot be confirmed the admission is RETAINED with the reason
+        # attached — the same answer a crashed writer already gets, and never
+        # an expiry.
+        from core import run_isolation as _ri
+        from api.dependencies import get_db_manager as _gdb
         try:
-            with self._write_admission(base, "bash", command[:200]):
+            _db = _gdb()
+            adm = _ri.admit_write(_db, base, kind="bash", detail=command[:200])
+        except CheckoutLeased as e:
+            return {"error": f"CheckoutLeased: {e}"}
+
+        proc = None
+        pgid = None
+        out_bytes = b""
+        cancel_exc = None
+        timed_out = False
+        spawn_error = None
+        try:
+            try:
                 proc = await asyncio.create_subprocess_shell(
                     command,
                     cwd=str(base),
                     env=env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    # Its own session: one `killpg` can end the whole tree the
+                    # command builds, which `proc.kill()` cannot.
+                    start_new_session=True,
                 )
+            except (asyncio.CancelledError, GeneratorExit) as e:
+                # The fork may already have happened. We do not have the handle,
+                # so we cannot say whether a writer exists — and "cannot say" is
+                # not "no". Fall through to cleanup, which will retain.
+                cancel_exc = e
+            if proc is not None and cancel_exc is None:
+                pgid = proc.pid          # start_new_session ⇒ pgid == pid
                 try:
                     out_bytes, _ = await asyncio.wait_for(
                         proc.communicate(), timeout=timeout)
                 except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.communicate()
-                    return {"error": f"bash: command timed out after {timeout}s",
-                            "command": command}
-        except CheckoutLeased as e:
-            return {"error": f"CheckoutLeased: {e}"}
+                    timed_out = True
+                except (asyncio.CancelledError, GeneratorExit) as e:
+                    cancel_exc = e
+        except Exception as e:                       # spawn refused, cwd gone…
+            spawn_error = e
+
+        # ── end the writers, THEN decide about the admission ──────────
+        ended = _end_owned_group(pgid) if pgid else False
+        if proc is not None:
+            # Bounded, and shielded so a second cancellation cannot abandon the
+            # child handle. An orphan holding the pipes must not make this wait
+            # forever, which is why it is `wait()` and not `communicate()`.
+            try:
+                await asyncio.shield(
+                    asyncio.wait_for(proc.wait(), timeout=_BASH_REAP_TIMEOUT_S))
+            except (asyncio.TimeoutError, asyncio.CancelledError, GeneratorExit,
+                    ProcessLookupError, Exception):
+                pass
+            ended = _owned_group_is_gone(pgid) or ended
+        if pgid:
+            ended = _owned_group_is_gone(pgid)
+
+        if proc is None and cancel_exc is not None:
+            confirmed, why = False, ("cancelled during spawn: the command "
+                                     "handle was never ours, so whether a "
+                                     "process exists cannot be established")
+        elif proc is None:
+            confirmed, why = True, ""
+        elif ended:
+            confirmed, why = True, ""
+        else:
+            confirmed, why = False, (
+                f"the process group {pgid} started by this command was still "
+                f"present after SIGTERM and SIGKILL; command: {command[:160]!r}")
+
+        if confirmed:
+            _ri.retire_write(_db, adm["id"])
+        else:
+            _ri.mark_write_admission_pending(_db, adm["id"], why)
+
+        if cancel_exc is not None:
+            # A cancellation is not a result. Re-raised only after the writers
+            # have been dealt with.
+            raise cancel_exc
+        if spawn_error is not None:
+            return {"error": f"bash: could not start the command: {spawn_error}",
+                    "command": command}
+        if timed_out:
+            res = {"error": f"bash: command timed out after {timeout}s",
+                   "command": command}
+            if not confirmed:
+                res["pending_writers"] = why
+            return res
 
         output = out_bytes.decode("utf-8", errors="replace")
         truncated = False
@@ -3498,11 +3653,17 @@ class MetaAgent:
                       + f"\n... [{len(output) - limit} chars truncated] ...\n"
                       + output[-self._BASH_TAIL_CHARS:])
             truncated = True
-        return {
+        res = {
             "exit_code": proc.returncode,
             "output": output,
             "truncated": truncated,
         }
+        if not confirmed:
+            # Exit code 0 says the shell ended. It says nothing about what the
+            # shell started with `&` and stdout redirected away, so the caller
+            # is told rather than left to infer it from a code.
+            res["pending_writers"] = why
+        return res
 
     # ── Runner-mode pipelines (plan-gated coding_task & friends) ───
     # The butler drives runner-mode graphs through skillflow's RunnerService —

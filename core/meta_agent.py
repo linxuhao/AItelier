@@ -4408,10 +4408,30 @@ class MetaAgent:
             return {"status": run["status"], "run_id": run_id,
                     "message": f"Run already {run['status']}; nothing to stop."}
         try:
-            sf.fail_run(run_id, args.get("reason") or "stopped via butler")
+            report = sf.fail_run(run_id, args.get("reason") or "stopped via butler")
         except Exception as e:
             return {"error": f"Failed to stop run: {e}"}
-        return {"status": "stopped", "run_id": run_id, "message": "Pipeline stopped."}
+        # "Pipeline stopped." was unconditional, and on 2026-09-05 it was said
+        # over a step that went on to commit ac5237b forty seconds later. A stop
+        # does two different things and the caller has to know which it got: it
+        # always prevents further steps, and it prevents an in-flight step's
+        # delivery ONLY if it committed before that step reached its lifecycle
+        # hooks. A hook already executing is never preempted — `repo_apply` is a
+        # git commit and there is no honest way to un-start one.
+        report = report if isinstance(report, dict) else {}
+        closed = report.get("steps_closed") or []
+        in_flight = report.get("deliveries_in_flight") or []
+        msg = "Pipeline stopped; no further steps will be claimed."
+        if closed:
+            msg += (f" In-flight step(s) {', '.join(closed)} were stopped before "
+                    f"delivery: nothing was promoted or committed.")
+        if in_flight:
+            msg += (f" WARNING: step(s) {', '.join(in_flight)} had already been "
+                    f"authorised to deliver when the stop landed. Their "
+                    f"lifecycle hooks (promotion, repo_apply) were NOT preempted "
+                    f"- check the repository before assuming nothing changed.")
+        return {"status": "stopped", "run_id": run_id, "message": msg,
+                "steps_closed": closed, "deliveries_in_flight": in_flight}
 
     def _tool_get_pipeline_result(self, args: dict) -> dict:
         """Compact terminal result of a finished run (parsed JSON where possible)."""

@@ -57,7 +57,18 @@ steps:
     timeout_seconds: 600
     context:
       - source: { from: "repository", mode: "tool" }        # repo read tools
-      - source: { config: "coding_impl", output: "plan.md" }  # the approved plan
+      # `required` is the RUNTIME backstop, and it is second, not first: the
+      # poller now refuses to create a run for this config until the seed is
+      # published (core/seed_publication.py), so a healthy launch never reaches
+      # this. It fires only if something creates a run with no plan anyway —
+      # and then ContextResolver raises RequiredContextMissing at the first
+      # claim, which the scheduler turns into a terminal run with a named
+      # reason, instead of spawning an implementer with no scope at all.
+      #
+      # Without it the source resolved to EMPTY and the step claimed cleanly:
+      # that is how a plan-less agent got 95 s and a `repo_apply` on
+      # 2026-09-05.
+      - source: { config: "coding_impl", output: "plan.md", required: true }  # the approved plan
       # On a test-failure loop-back this carries the previous run's
       # test_report.json (failures[] + summary) so the agent fixes the actual
       # breakage instead of re-guessing. Empty on the first pass (test hasn't

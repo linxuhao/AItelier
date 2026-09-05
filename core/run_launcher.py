@@ -20,6 +20,10 @@ import json
 import re
 import uuid
 
+from skillflow.exceptions import SkillFlowError
+
+from core.seed_publication import publish_seeds, seed_dir
+
 
 def slugify(text: str, *, sep: str = "-", maxlen: int = 40,
             fallback: str = "project") -> str:
@@ -294,15 +298,36 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
     for fname, content in seed_inputs.items():
         files[fname] = content if isinstance(content, str) else json.dumps(content)
     if files:
-        seed_dir = sf._workspace.get_config_path(project_id, config_name) / "_seed"
-        seed_dir.mkdir(parents=True, exist_ok=True)
-        for fname, content in files.items():
-            (seed_dir / fname).write_text(content, encoding="utf-8")
+        # Written atomically, and PUBLISHED (marker last) before the run exists.
+        # The order is the whole point: the poller refuses to create a run for a
+        # seed-reading config until the marker is there, so it cannot start one
+        # over a half-written seed set — and once the marker is there the seed is
+        # complete, so a poller that adopts the project in the microseconds
+        # before the next line is doing exactly the right thing.
+        #
+        # Publishing BEFORE the run, not after, is deliberate. After would let a
+        # launcher that dies here leave a started run the poller then refuses to
+        # drive, which is a worse failure than the one being fixed. Before means
+        # the worst case is a fully-seeded project the poller picks up itself.
+        publish_seeds(seed_dir(sf, project_id, config_name), files)
 
     run_id = sf.get_or_create_run(config_name, project_id, {"project_id": project_id})
     run = sf.get_run(run_id)
     if run and run["status"] == "pending":
-        sf.start_run(run_id)
+        # CHECK-THEN-ACT, and the poller is the other actor: it can start this
+        # very run between the read above and the call below, and `start_run`
+        # raises on a row that is no longer 'pending'. That exception left
+        # `start_config_run` by the front door — the caller was told the launch
+        # failed while a perfectly good run was under way.
+        #
+        # Idempotent by intent instead: what was wanted is a running run, and if
+        # somebody else got there first, that is the wanted state. Only a run
+        # that is genuinely NOT running re-raises.
+        try:
+            sf.start_run(run_id)
+        except SkillFlowError:
+            if (sf.get_run(run_id) or {}).get("status") not in ("running", "paused"):
+                raise
 
     # Last on this branch, past the seed_file refusal above (see the docstring).
     _reconcile_repo_type()

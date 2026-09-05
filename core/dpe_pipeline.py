@@ -611,6 +611,37 @@ class PipelineEngine:
         """
         return workspace.get_code_path(project_id)
 
+    def _refuse_if_run_cancelled(self, step_id: str, attempt: int) -> None:
+        """Stop spending on a run somebody stopped. Cooperative, at the cheapest
+        boundary the host owns.
+
+        skillflow fences the WRITES — `execute_tool` refuses within a turn and
+        `confirm_step` refuses the delivery outright — and those are the
+        correctness boundary; this is not, and must never be treated as a
+        substitute for them. What it buys is the money.
+
+        Live 2026-09-05: a run stopped at 09:09:00 exhausted its 26-turn budget
+        at 09:09:35 and the runner then began a COMPLETE FRESH ATTEMPT — a new
+        model call, 35 s after the operator was told the pipeline had stopped.
+        Nothing in the host asked, because "no new steps are claimed" was read as
+        "nothing new starts", and an attempt is not a step.
+        """
+        run_id = getattr(self, "_run_id", "") or ""
+        if not run_id:
+            return
+        try:
+            from api.dependencies import get_skillflow
+            sf = get_skillflow()
+            status = (sf.get_run(run_id) or {}).get("status")
+            terminal = getattr(sf, "TERMINAL_RUN_STATUSES", ("failed", "completed"))
+        except Exception:
+            return          # never let the check itself break a healthy step
+        if status in terminal:
+            from skillflow.exceptions import TerminalRunFenced
+            raise TerminalRunFenced(
+                f"Run '{run_id}' is {status}; attempt {attempt} of step "
+                f"'{step_id}' was not started.")
+
     def _exec_tool(self, action: dict) -> dict:
         """Execute a tool action via skillflow. All tool execution is delegated.
 
@@ -1137,6 +1168,7 @@ class PipelineEngine:
         self._step_start = time.time()
         max_retries = self.factory.get_max_retries(step_id)
         for attempt in range(1, max_retries + 1):
+            self._refuse_if_run_cancelled(step_id, attempt)
     # Priority: step config > agent config > default. Resolve by
             # agent_config_name (role) — the registry is keyed by role, not
             # step_id, so passing step_id silently fell back to DEFAULT.
@@ -1619,6 +1651,7 @@ class PipelineEngine:
         MAX_MESSAGES_PER_STEP = 3
 
         for attempt in range(1, max_retries + 1):
+            self._refuse_if_run_cancelled(step_id, attempt)
             # Resolve budget by role (agent_config_name); step_id is not a
             # registry key so it silently fell back to DEFAULT_MAX_TOOL_TURNS.
             max_turns = self._max_tool_turns or self.factory.get_max_tool_turns(agent_config_name)
@@ -2107,6 +2140,7 @@ class PipelineEngine:
 
         _resumed = dict(resume) if resume else {}
         for attempt in range(1, max_retries + 1):
+            self._refuse_if_run_cancelled(step_id, attempt)
             self._emit("step_attempt", {
                 "step_id": step_id, "attempt": attempt,
                 "max_attempts": max_retries,

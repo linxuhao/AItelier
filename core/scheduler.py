@@ -13,7 +13,7 @@ import threading
 import time as _time
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from skillflow.exceptions import RequiredContextMissing
+from skillflow.exceptions import RequiredContextMissing, TerminalRunFenced
 from skillflow.identity import owner_is_dead
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow
 from core.dpe_pipeline import PipelineEngine, MaxRetriesExceeded
@@ -514,6 +514,48 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
                  reason="; ".join(f"{m['output']} from config '{m['config']}'"
                                   for m in missing))
         return None
+
+    # …and the same question for the seed this config feeds ITSELF, which the
+    # guard above cannot ask: `missing_cross_config_inputs` skips same-config
+    # sources by an explicit decision ("those are the run's own seed/step
+    # output"), correct for a step output and wrong for the seed, which no step
+    # of this graph will ever write. Only a launcher writes it.
+    #
+    # Live 2026-09-05, wuxia-m1-original-map: `POST /api/projects` registered an
+    # existing repo with config_name=coding_impl at 09:08:04 and this function
+    # created + started a run at 09:08:05, before the driver could write the
+    # approved plan. `coding_impl` declares `seed_file: plan.md`, its implement
+    # step reads `{config: coding_impl, output: plan.md}`, and that source was
+    # not `required`, so ContextResolver resolved it to empty rather than raising
+    # and the step claimed cleanly. An agent with no plan then spent 95 s
+    # deciding what to do to a worktree no maker was allowed to touch.
+    #
+    # WAIT, do not fail. Registration and launch are legitimately separate
+    # operations, so "not seeded yet" is a normal intermediate state, not an
+    # error — and waiting also covers the launcher's own window, where a tick
+    # landing mid-`start_config_run` backs off and the next one proceeds.
+    try:
+        from api.dependencies import get_config_registry
+        from core.seed_publication import (reads_own_seed, seed_dir,
+                                           seed_is_published)
+        _manifest = get_config_registry().get(config_name)
+        _seed_file = getattr(_manifest, "seed_file", "") if _manifest else ""
+        # This decides whether to CREATE the run, so there is no run to
+        # resolve by yet — and the question ("does this config read its own
+        # seed?") is about the config as registered now, which is the graph the
+        # run about to be created is pinned to.
+        # by-name-ok: no run exists yet; creation time
+        _gated = bool(_seed_file) and reads_own_seed(
+            sf._get_resolver(config_name).graph, config_name, _seed_file)
+    except Exception:
+        _gated, _seed_file = False, ""    # never let the guard itself stop a run
+    if _gated:
+        _ok, _why = seed_is_published(seed_dir(sf, project_id, config_name),
+                                      _seed_file)
+        if not _ok:
+            tick_log(project_id, "awaiting_seed", config=config_name,
+                     seed=_seed_file, reason=_why)
+            return None
 
     run_id = sf.get_or_create_run(config_name, project_id, {
         "project_id": project_id,
@@ -1185,6 +1227,17 @@ async def _run_skillflow_tick(project_id: str, loop):
         # DB even if the new manifest is produced before the next 3_review.
         if claimed.step_id in ("3", "3_review"):
             _sync_task_manifest_to_db(project_id)
+    except TerminalRunFenced as e:
+        # The run was stopped while this step was executing. skillflow refused
+        # the delivery before any lifecycle hook, so nothing was promoted and
+        # nothing was committed — there is no failure to record, and recording
+        # one would only re-open the claim `fail_run` just closed (which is why
+        # `fail_step` no-ops on a terminal run too). Say what happened; the run
+        # is already terminal and `_sync_project_status_to_db` below carries it.
+        _odbg(f"{_cid} fenced by cancellation step={claimed.step_id}: {e}")
+        tick_log(project_id, "cancelled_mid_step", run=run_id[:8],
+                 step=claimed.step_id, elapsed=f"{_time.time() - _t0:.1f}s",
+                 reason=str(e)[:160])
     except MaxRetriesExceeded as e:
         sf.fail_step(claimed.token, str(e), retryable=False)
     except asyncio.CancelledError:

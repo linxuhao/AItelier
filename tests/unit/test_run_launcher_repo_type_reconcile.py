@@ -14,6 +14,8 @@ at exactly the path the row refuses to name.
 
 The reconciliation is ONE-WAY on purpose; the second half of this file pins that.
 """
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from core.run_launcher import start_config_run
@@ -37,6 +39,14 @@ def _patch_registry(monkeypatch, manifest):
     sf = MagicMock()
     sf.get_or_create_run.return_value = "run-1"
     sf.get_run.return_value = {"status": "running"}
+    # A REAL directory for the seed. The whole skillflow is a MagicMock here,
+    # so `sf._workspace.get_config_path(...)` used to answer with a mock whose
+    # `.mkdir()` and `.write_text()` silently did nothing — the seed write was
+    # never actually exercised by this file and never meant to be. Publication
+    # is atomic now (tempfile + os.replace in the target directory), which needs
+    # a directory that exists. Nothing here asserts on its contents.
+    sf._workspace.get_config_path.return_value = Path(
+        tempfile.mkdtemp(prefix="reconcile-seed-"))
     monkeypatch.setattr(deps, "get_skillflow", lambda: sf, raising=False)
     import core.scheduler as sched
     monkeypatch.setattr(sched, "wake_scheduler", lambda *a, **k: None,

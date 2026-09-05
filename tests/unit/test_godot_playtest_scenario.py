@@ -330,3 +330,20 @@ def test_both_scenario_and_inline_is_refused(tmp_path, monkeypatch):
     out = godot_playtest_scenario(project_root=str(repo), scenario="alpha",
                                   inline_scenario="timeline: []\n")
     assert "not both" in out.get("error", ""), out
+
+
+def test_inline_scenario_with_a_repeated_key_is_refused_before_the_builder(
+        tmp_path, monkeypatch):
+    """An inline probe repeating `assert:` would otherwise run its LAST block
+    only, and report that as the whole probe."""
+    repo = _make_repo(tmp_path / "repo")
+    captured = {}
+    _fake_builder(monkeypatch, captured)
+    out = godot_playtest_scenario(
+        project_root=str(repo),
+        inline_scenario=("timeline:\n- at: 7\n  assert:\n    Foo.bar: bar == -1\n"
+                         "  assert:\n    Foo.bar: bar == bar\n"))
+    assert "duplicate key" in out.get("error", ""), out
+    assert "assert" in out["error"] and "inline_scenario" in out["error"]
+    assert "body" not in captured, "the sidecar must not be asked to run it"
+

@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 from core import datadir
@@ -178,23 +179,176 @@ def require_no_foreign_lease(db, path, run_id: str | None = None) -> None:
             f"Refusing to mutate a checkout another run is working in.")
 
 
-def _acquire_lease(db, canonical: str, run_id: str, config_name: str) -> None:
+def _worker_identity(kind: str) -> str:
+    """Who is holding this, in a form an operator can check.
+
+    skillflow's own identity (pid + boot id) when available, because the point
+    of naming an owner is that somebody can ask whether it still exists.
+    """
+    try:
+        from skillflow.identity import worker_identity
+        return worker_identity(kind)
+    except Exception:
+        return f"pid:{os.getpid()}"
+
+
+def _owner_state(owner: str) -> str:
+    try:
+        from skillflow.identity import owner_is_dead
+        dead = owner_is_dead(owner)
+    except Exception:
+        return "unknown"
+    return "dead" if dead is True else "unknown" if dead is None else "alive"
+
+
+def admit_write(db, path, *, kind: str, detail: str = "") -> dict:
+    """Admit ONE write to a checkout, or refuse it. Returns the admission.
+
+    This is the arbitration half of the exclusion, and it is why the guard it
+    replaces was not enough: checking for a lease and then writing is two
+    operations, and a direct run can take the checkout between them. Admission
+    and the lease acquisition below share ONE `BEGIN IMMEDIATE` transaction on
+    the same database, so whichever reaches it first wins and the other is
+    refused — in both orders, which is the whole property.
+
+    The transaction is short by construction: two statements, no I/O, and it is
+    committed before the caller does any work. What outlives it is a ROW, and
+    that is deliberate — the guard has to cover a `bash` that runs for minutes
+    or an editor between read and write, and no transaction may be held across
+    a subprocess, an engine call or a model call.
+
+    A row that outlives its writer (a crash) BLOCKS, and it is not expired by
+    time or by the death of its owner: neither says the write's effects ended.
+    `clear_write_admission` is the operator's way out, with evidence, and the
+    refusal says so.
+    """
+    canonical = canonical_checkout(path)
+    owner = _worker_identity(kind)
     with db.get_connection() as conn:
-        row = conn.execute(
-            "SELECT run_id, config_name, acquired_at FROM checkout_leases "
-            "WHERE canonical_checkout = ?", (canonical,)).fetchone()
-        if row and row["run_id"] != run_id:
-            raise CheckoutLeased(
-                f"{canonical} is held by run {row['run_id']} "
-                f"(config {row['config_name']}, since {row['acquired_at']}); "
-                f"run {run_id} cannot work in it at the same time.")
-        conn.execute(
-            "INSERT OR REPLACE INTO checkout_leases "
-            "(canonical_checkout, run_id, config_name, acquired_at) "
-            "VALUES (?, ?, ?, COALESCE((SELECT acquired_at FROM checkout_leases "
-            "WHERE canonical_checkout = ?), datetime('now')))",
-            (canonical, run_id, config_name, canonical))
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            lease = conn.execute(
+                "SELECT run_id, config_name, acquired_at FROM checkout_leases "
+                "WHERE canonical_checkout = ?", (canonical,)).fetchone()
+            if lease:
+                raise CheckoutLeased(
+                    f"{canonical} is held by run {lease['run_id']} "
+                    f"(config {lease['config_name']}, since "
+                    f"{lease['acquired_at']}); refusing {kind} {detail!r}.")
+            cur = conn.execute(
+                "INSERT INTO checkout_write_admissions "
+                "(canonical_checkout, owner, kind, detail, admitted_at) "
+                "VALUES (?, ?, ?, ?, datetime('now'))",
+                (canonical, owner, kind, detail))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return {"id": cur.lastrowid, "canonical_checkout": canonical,
+            "owner": owner, "kind": kind, "detail": detail}
+
+
+def retire_write(db, admission_id: int) -> None:
+    """Retire ONE admission — this caller's own, by id, never a sweep."""
+    if not admission_id:
+        return
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM checkout_write_admissions WHERE id = ?",
+                     (admission_id,))
         conn.commit()
+
+
+@contextmanager
+def write_admission(db, path, *, kind: str, detail: str = ""):
+    """Admit, do the work, retire in `finally`. The supported write surface."""
+    adm = admit_write(db, path, kind=kind, detail=detail)
+    try:
+        yield adm
+    finally:
+        retire_write(db, adm["id"])
+
+
+def write_admissions(db, canonical: str | None = None) -> list[dict]:
+    """In-flight writes, for an operator and for the refusal messages."""
+    with db.get_connection() as conn:
+        if canonical:
+            rows = conn.execute(
+                "SELECT * FROM checkout_write_admissions WHERE "
+                "canonical_checkout = ? ORDER BY id", (canonical,)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM checkout_write_admissions "
+                                "ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+
+def clear_write_admission(db, admission_id: int, *, evidence: str) -> dict:
+    """Release an admission whose owner is gone — on EVIDENCE, never on time.
+
+    Same standard skillflow sets for an admitted operation: the owner's death
+    proves nothing about a subprocess it started, so what is required is a
+    statement that the write's effects have ended. Recorded in the log with the
+    row it released.
+    """
+    if not (evidence or "").strip():
+        raise ValueError(
+            "clear_write_admission requires evidence that the write has ENDED "
+            "(not that its owner died or that time passed): what was checked, "
+            "and by whom.")
+    rows = [r for r in write_admissions(db) if r["id"] == admission_id]
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM checkout_write_admissions WHERE id = ?",
+                     (admission_id,))
+        conn.commit()
+    import logging
+    logging.getLogger("aitelier.isolation").warning(
+        "write admission %s cleared by an operator: %s (row: %s)",
+        admission_id, evidence[:2000], rows[0] if rows else "already gone")
+    return {"cleared": bool(rows), "evidence": evidence[:2000],
+            "admission": rows[0] if rows else None}
+
+
+def _acquire_lease(db, canonical: str, run_id: str, config_name: str) -> None:
+    """Take the checkout for a direct-mode run — if nothing is writing in it.
+
+    The in-flight write check is inside the same `BEGIN IMMEDIATE` as the lease
+    insert, which is what makes this a mutex with `admit_write` rather than two
+    guards that happen to look at each other.
+    """
+    with db.get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            inflight = conn.execute(
+                "SELECT id, owner, kind, detail, admitted_at FROM "
+                "checkout_write_admissions WHERE canonical_checkout = ? "
+                "ORDER BY id", (canonical,)).fetchall()
+            if inflight:
+                w = inflight[0]
+                raise CheckoutLeased(
+                    f"{canonical} has {len(inflight)} write(s) in flight; run "
+                    f"{run_id} cannot take it. First: {w['kind']} {w['detail']!r} "
+                    f"admitted {w['admitted_at']} by {w['owner']} "
+                    f"(owner looks {_owner_state(w['owner'])}). If that writer "
+                    f"is gone, an operator releases it with "
+                    f"clear_write_admission(db, {w['id']}, evidence=...) — it "
+                    f"does not expire on its own.")
+            row = conn.execute(
+                "SELECT run_id, config_name, acquired_at FROM checkout_leases "
+                "WHERE canonical_checkout = ?", (canonical,)).fetchone()
+            if row and row["run_id"] != run_id:
+                raise CheckoutLeased(
+                    f"{canonical} is held by run {row['run_id']} "
+                    f"(config {row['config_name']}, since {row['acquired_at']}); "
+                    f"run {run_id} cannot work in it at the same time.")
+            conn.execute(
+                "INSERT OR REPLACE INTO checkout_leases "
+                "(canonical_checkout, run_id, config_name, acquired_at) "
+                "VALUES (?, ?, ?, COALESCE((SELECT acquired_at FROM checkout_leases "
+                "WHERE canonical_checkout = ?), datetime('now')))",
+                (canonical, run_id, config_name, canonical))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 def _write_record(db, **kw) -> dict:

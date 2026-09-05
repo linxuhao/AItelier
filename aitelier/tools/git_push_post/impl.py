@@ -91,6 +91,28 @@ def git_push_post(*, project_root: str = "", remote: str = "origin",
                 "error": f"{type(e).__name__}: {e}"[:400]}
 
 
+def _declared_mode(project_id: str, run_id: str):
+    """What the RUN declared, and how confidently we know it.
+
+    Returns ``(mode, source)`` where source is ``"record"`` (the run declared
+    it), ``"no-run"`` (no run id was supplied — the legacy invocation, whose
+    contract is deliberately preserved), ``"missing"`` (a run was named and has
+    no record) or a lookup error. Only the first two are answers.
+    """
+    if not run_id:
+        return None, "no-run"
+    try:
+        from api.dependencies import get_db_manager
+        from core import run_isolation
+        rec = run_isolation.record(get_db_manager(), run_id)
+    except Exception as e:
+        return None, f"its isolation record could not be read " \
+                     f"({type(e).__name__}: {e})"
+    if rec is None:
+        return None, "no isolation record exists for it"
+    return (rec.get("mode") or ""), "record"
+
+
 def _git_push_post(*, project_root: str, remote: str, project_id: str,
                    run_id: str = "", policy: str = "direct_only") -> dict:
     root = _code_path(project_id, project_root, run_id)
@@ -106,14 +128,27 @@ def _git_push_post(*, project_root: str, remote: str, project_id: str,
     # arrived here as a side effect of a routing fix — exactly what must not
     # happen. Default is no push at all; `policy: "run_branch"` opts in.
     #
-    # Structural test (a linked worktree's `.git` is a gitfile), not a path
-    # convention. Direct mode is unaffected and keeps the contract it had: a
-    # configured private push of the checkout's own branch still happens.
-    if (root / ".git").is_file() and policy != "run_branch":
+    # WHICH runs those are is read from the run's DECLARED record, not from the
+    # shape of the directory. `.git` being a gitfile says "a linked worktree",
+    # which is a different statement from "this run was isolated into one": a
+    # project whose repo_path is itself a worktree — routine for anyone working
+    # out of worktrees — run in explicit direct mode had its intentional
+    # private push silently skipped, and the refusal misdescribed it.
+    mode, source = _declared_mode(project_id, run_id)
+    if source not in ("record", "no-run"):
+        # A run was named and its declaration cannot be read. The filesystem is
+        # not an answer to what that run declared, so nothing is pushed and the
+        # reason says which of the two it was.
         return _skip(
-            f"isolated run worktree at {root}: no automatic push. Its branch is "
-            f"per-run, and pushing one remote branch per run is a delivery "
-            f"policy, not a consequence of where the run works. Set "
+            f"run {run_id} did not declare where it works ({source}): refusing "
+            f"to decide a push from the shape of {root}. Provision the run's "
+            f"isolation record, or invoke without a run id for the legacy "
+            f"contract.")
+    if mode in ("worktree", "read_snapshot") and policy != "run_branch":
+        return _skip(
+            f"run {run_id} is declared {mode} at {root}: no automatic push. Its "
+            f"branch is per-run, and pushing one remote branch per run is a "
+            f"delivery policy, not a consequence of where the run works. Set "
             f"policy: \"run_branch\" on the step to push it.")
 
     if not (root / ".git").exists():

@@ -583,7 +583,8 @@ def test_an_isolated_run_in_the_same_shape_still_pushes_nothing(db, home,
                              project_id="iw", run_id="run-iw")
     assert res["pushed"] is False and res["action"] == "skip"
     assert not any("push" in c for c in calls), f"it pushed anyway: {calls}"
-    assert _git(origin, "branch", "--list") == ""
+    # `main` is the fixture's own upstream; what must NOT appear is a run branch.
+    assert "codex/run/" not in _git(origin, "branch", "--list")
 
 
 def test_an_isolated_run_pushes_its_declared_branch_on_request(db, home,

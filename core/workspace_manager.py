@@ -11,6 +11,8 @@ import os
 import os
 import shutil
 import subprocess
+import functools
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -45,6 +47,22 @@ FINAL_STEP = "5"
 
 # Default DPE graph name — matches the config name in configs/dpe_default.yaml
 DPE_GRAPH_NAME = "dpe_default_v2"
+
+def _guarded_mutation(kind: str):
+    """Hold a write admission around one whole operator mutation.
+
+    A decorator rather than six rewritten bodies: the operations already begin
+    by resolving through `_mutation_target`, and that resolution now happens
+    inside the admission this wrapper is holding.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self, project_id, *args, **kwargs):
+            with self._mutation(project_id, kind):
+                return fn(self, project_id, *args, **kwargs)
+        return wrapper
+    return deco
+
 
 class WorkspaceManager:
     """
@@ -365,6 +383,24 @@ class WorkspaceManager:
             )
         return res.stdout.strip()
 
+    @contextmanager
+    def _mutation(self, project_id: str, kind: str):
+        """Resolve, admit, and hold the admission for the whole operation.
+
+        `_mutation_target` still validates (database reachable, a git repo, no
+        foreign lease) — and then the admission makes it a mutex: a direct run
+        cannot take this checkout between the check and the `git commit`, and
+        the row is retired in `finally`. Each decorated method re-runs
+        `_mutation_target` as its first line, and that call happens INSIDE the
+        admission, so what the operation uses is what arbitration granted.
+        """
+        code_path = self._mutation_target(project_id)
+        from core import run_isolation
+        from api.dependencies import get_db_manager
+        with run_isolation.write_admission(get_db_manager(), code_path,
+                                           kind=kind, detail=project_id):
+            yield code_path
+
     def _mutation_target(self, project_id: str):
         """Resolve the repository for a MUTATION, or refuse.
 
@@ -431,6 +467,7 @@ class WorkspaceManager:
             raise RuntimeError("Not a git repository")
         return code_path
 
+    @_guarded_mutation("repo_set_remote")
     def repo_set_remote(self, project_id: str, url: str,
                         name: str = "origin") -> dict:
         """Add the remote, or update its URL if it already exists."""
@@ -447,6 +484,7 @@ class WorkspaceManager:
             action = "added"
         return {"remote": name, "url": url, "action": action}
 
+    @_guarded_mutation("repo_commit")
     def repo_commit(self, project_id: str, message: str) -> dict:
         """Stage all changes and commit. No-op (not an error) when clean."""
         code_path = self._mutation_target(project_id)
@@ -460,6 +498,7 @@ class WorkspaceManager:
         self._run_git_checked(code_path, "commit", "-m", message)
         return {"committed": True, "hash": self._get_git_hash(code_path)}
 
+    @_guarded_mutation("repo_push")
     def repo_push(self, project_id: str, branch: str | None = None,
                   set_upstream: bool = True) -> dict:
         """Push a branch to origin (sets upstream by default)."""
@@ -474,6 +513,7 @@ class WorkspaceManager:
         out = self._run_git_checked(code_path, *args)
         return {"pushed": True, "branch": branch, "detail": out}
 
+    @_guarded_mutation("repo_push_head")
     def repo_push_head(self, project_id: str, branch: str,
                        set_upstream: bool = True) -> dict:
         """Push the current HEAD to origin/<branch>, creating that remote branch.
@@ -490,6 +530,7 @@ class WorkspaceManager:
         out = self._run_git_checked(code_path, *args)
         return {"pushed": True, "branch": branch, "detail": out}
 
+    @_guarded_mutation("repo_pull")
     def repo_pull(self, project_id: str) -> dict:
         """Fast-forward pull from the tracked upstream (no merge commits).
 
@@ -500,6 +541,7 @@ class WorkspaceManager:
         out = self._run_git_checked(code_path, "pull", "--ff-only")
         return {"pulled": True, "detail": out}
 
+    @_guarded_mutation("repo_force_sync")
     def repo_force_sync(self, project_id: str, branch: str,
                         backup: bool = True) -> dict:
         """Destructive: fetch origin and hard-reset the working tree to

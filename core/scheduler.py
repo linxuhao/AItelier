@@ -2100,6 +2100,57 @@ def _sync_task_statuses(project_id: str, run: dict, sf):
 # turn a queue of projects into a burst of concurrent model requests.
 MAX_CONCURRENT_PROJECTS = int(_os.getenv("AITELIER_MAX_CONCURRENT_PROJECTS", "4"))
 
+# How often the poller re-asks whether a held checkout lease can be released.
+# A lease is released on the tick where its run goes terminal — but a run that
+# ends while DRAINING is still holding admitted operations then, so the answer
+# that tick is "retain", and `get_active_projects` never selects that project
+# again (it builds its candidate set from running/paused runs only). Without a
+# retry the checkout stays leased until the process restarts, which is the
+# blocking case the independent review found.
+#
+# It runs on EVERY entry, not on the idle path: a busy queue is never idle, and
+# the lease would then wait for a restart precisely on the hosts that have the
+# most runs. Bounded by an interval so it is not per-tick work: the query is two
+# small selects per held lease, and there are normally zero.
+_LEASE_SWEEP_INTERVAL_S = float(_os.getenv("AITELIER_LEASE_SWEEP_SECONDS", "60"))
+_last_lease_sweep = 0.0
+_lease_sweep_reported: dict = {}
+
+
+def _sweep_ended_leases() -> None:
+    """Ask every held lease whether its run is over and quiet. Retain on doubt.
+
+    Deliberately NOT a new worker, timer or automation: it is one maintenance
+    call on a path the scheduler already runs. It cannot release anything the
+    reconciler would not — terminal AND drained, verified against the engine —
+    so the failure mode of calling it too often is wasted queries, and the
+    failure mode of a bug in it is a retained lease.
+    """
+    global _last_lease_sweep
+    import time as _time
+    now = _time.monotonic()
+    if (now - _last_lease_sweep) < _LEASE_SWEEP_INTERVAL_S:
+        return
+    _last_lease_sweep = now
+    try:
+        from api.dependencies import get_skillflow
+        report = run_isolation.reconcile_all_leases(db, get_skillflow())
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.scheduler").warning(
+            "lease sweep failed", exc_info=True)
+        return
+    for rid in report.get("released", []):
+        _lease_sweep_reported.pop(rid, None)
+        tick_log("", "lease_released", run=rid[:8], reason="sweep")
+    # Coalesced: a retained lease repeats its reason every sweep and would fill
+    # the rotation window with a line nobody needs. Logged when it CHANGES.
+    for r in report.get("retained", []):
+        rid, reason = r["run_id"], (r["reason"] or "")[:200]
+        if _lease_sweep_reported.get(rid) != reason:
+            _lease_sweep_reported[rid] = reason
+            tick_log("", "lease_retained", run=rid[:8], reason=reason)
+
 
 async def poll_and_execute():
     """Advance up to MAX_CONCURRENT_PROJECTS different projects, one step each.
@@ -2116,6 +2167,8 @@ async def poll_and_execute():
     """
     import asyncio
     loop = asyncio.get_running_loop()
+
+    _sweep_ended_leases()
 
     projects = db.get_active_projects(limit=MAX_CONCURRENT_PROJECTS)
     if not projects:
@@ -2137,6 +2190,8 @@ async def poll_and_execute_demo():
     import asyncio
     loop = asyncio.get_running_loop()
 
+    _sweep_ended_leases()
+
     project = db.get_next_active_project(fifo=True)
     if not project:
         return
@@ -2147,6 +2202,8 @@ async def poll_and_execute_owner(owner_email: str):
     """Same as poll_and_execute but scoped to a single user's projects."""
     import asyncio
     loop = asyncio.get_running_loop()
+
+    _sweep_ended_leases()
 
     project = db.get_next_active_project(owner_email=owner_email)
     if not project:

@@ -154,6 +154,18 @@ class DBManager:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS checkout_write_admissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_checkout TEXT NOT NULL,
+                    owner TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    detail TEXT DEFAULT '',
+                    admitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_write_admissions_checkout "
+                         "ON checkout_write_admissions(canonical_checkout)")
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS run_isolation_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL

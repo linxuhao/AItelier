@@ -83,12 +83,16 @@ def _direct_run(live, pid="p1"):
     return rid
 
 
-def _mcp_stop(run_id: str, reason: str = "stopped in a test"):
+async def _mcp_stop_async(run_id: str, reason: str = "stopped in a test"):
     """The registered MCP tool, reached the way the endpoint reaches it."""
     from api.mcp_router import build_mcp
     fn = build_mcp()._tool_manager.get_tool("stop_pipeline").fn
     res = fn(run_id=run_id, reason=reason)
-    return asyncio.run(res) if asyncio.iscoroutine(res) else res
+    return await res if asyncio.iscoroutine(res) else res
+
+
+def _mcp_stop(run_id: str, reason: str = "stopped in a test"):
+    return asyncio.run(_mcp_stop_async(run_id, reason))
 
 
 def _admit_real_operation(sf_path: Path, run_id: str, kind="delivery") -> int:
@@ -152,7 +156,7 @@ async def test_a_lease_survives_the_drain_and_is_released_by_a_later_tick(live,
     canonical = ri.canonical_checkout(live["src"])
     op_id = _admit_real_operation(live["sf_path"], rid)
 
-    _mcp_stop(rid, "cancelled mid-flight")
+    await _mcp_stop_async(rid, "cancelled mid-flight")
     assert ri.lease_holder(live["db"], canonical)["run_id"] == rid, \
         "a draining run must keep its checkout"
 
@@ -184,7 +188,7 @@ async def test_the_sweep_runs_while_other_projects_are_busy(live, monkeypatch):
 
     rid = _direct_run(live)
     canonical = ri.canonical_checkout(live["src"])
-    _mcp_stop(rid, "done")
+    await _mcp_stop_async(rid, "done")
     ri._acquire_lease(live["db"], canonical, rid, "serial")   # re-hold, as a
     # crash between "terminal" and "released" would leave it
 
@@ -236,7 +240,7 @@ async def test_every_scheduler_entry_sweeps(live, monkeypatch, entry):
 
     rid = _direct_run(live)
     canonical = ri.canonical_checkout(live["src"])
-    _mcp_stop(rid, "done")
+    await _mcp_stop_async(rid, "done")
     ri._acquire_lease(live["db"], canonical, rid, "serial")
 
     fn = getattr(sc, entry)
@@ -311,7 +315,7 @@ def test_an_in_flight_interactive_write_excludes_a_direct_acquisition(live,
     try to take the checkout for a direct run from inside that window."""
     from core.meta_agent import MetaAgent
     from core.workspace_manager import WorkspaceManager
-    import core.meta_agent as ma
+    import skillflow.write_tools as wt
 
     src = live["src"]
     (src / "file.txt").write_text("original\n")
@@ -321,7 +325,9 @@ def test_an_in_flight_interactive_write_excludes_a_direct_acquisition(live,
     agent._files_read.add(("p1", str((src / "file.txt").resolve())))
 
     seen = {}
-    real_replace = ma._unique_replace
+    # The barrier sits where the tool does its surgical replace — inside the
+    # admission and before the file is written.
+    real_replace = wt._unique_replace
 
     def _barrier(*args, **kwargs):
         # Inside the admission, before the file is written.
@@ -332,7 +338,7 @@ def test_an_in_flight_interactive_write_excludes_a_direct_acquisition(live,
             seen["refused"] = str(e)
         return real_replace(*args, **kwargs)
 
-    monkeypatch.setattr(ma, "_unique_replace", _barrier)
+    monkeypatch.setattr(wt, "_unique_replace", _barrier)
     out = agent._tool_edit_file({"project_id": "p1", "path": "file.txt",
                                  "old_str": "original", "new_str": "changed"})
 

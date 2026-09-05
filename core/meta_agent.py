@@ -5,6 +5,9 @@
 
 import asyncio
 import json
+from contextlib import contextmanager
+
+from core.run_isolation import CheckoutLeased
 import os
 from core import env_scrub as _env_scrub
 import re
@@ -3322,25 +3325,33 @@ class MetaAgent:
     # (same jail as read_code_file — no staging dir, no AT-9 'project/' strip,
     # which would mangle repos that really have a project/ directory).
 
-    def _refuse_if_leased(self, base):
-        """A checkout a run is holding is not the butler's to write in.
+    @contextmanager
+    def _write_admission(self, base, kind: str, detail: str = ""):
+        """Hold an ADMISSION for the whole of an interactive write.
 
         `edit_file`, `create_file` and `bash` are the interactive write surface,
         and an interactive write is MORE of an operator action than
-        `repo_commit` is — which already refuses. Same guard, same canonical
-        checkout identity; returns the tool-shaped error rather than raising,
-        because these are tools.
+        `repo_commit` is — which already refuses. What changed since the last
+        round is that this is no longer a check followed by a write: the
+        admission and a direct run's lease acquisition arbitrate in one short
+        database transaction, so a run cannot take the checkout in the window
+        between the guard and the file being written, and a `bash` already
+        running keeps the checkout excluded until it exits.
+
+        The row is durable and is retired in `finally` — including on an
+        exception. A crash leaves it, and it blocks until an operator clears it
+        with evidence; nothing expires it by time.
 
         What it does not cover, and cannot: a shell somebody runs outside this
-        application. `bash` here is refused wholesale on a leased checkout — the
-        refusal is about the TREE, not about parsing the command to guess
-        whether it writes.
+        application. `bash` HERE is an AItelier tool being refused on a checkout
+        somebody else holds — the refusal is about the TREE, not about parsing
+        the command to guess whether it writes, and it is not an OS-wide jail.
         """
-        try:
-            self.ws._require_no_foreign_lease(base)
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {e}"}
-        return None
+        from core import run_isolation
+        from api.dependencies import get_db_manager
+        with run_isolation.write_admission(get_db_manager(), base, kind=kind,
+                                           detail=detail):
+            yield
 
     def _resolve_code_target(self, pid: str, path: str):
         """Resolve a repo-relative path inside the project's code jail.
@@ -3377,20 +3388,21 @@ class MetaAgent:
         base, target, err = self._resolve_code_target(pid, path)
         if err:
             return err
-        leased = self._refuse_if_leased(base)
-        if leased:
-            return leased
         if not target.is_file():
             return {"error": f"edit_file: '{path}' does not exist — use create_file for new files"}
         if (pid, str(target)) not in self._files_read:
             return {"error": (f"edit_file: read '{path}' with read_code_file before "
                               f"editing it — you must see the current content first.")}
-        content = target.read_text(encoding="utf-8")
-        updated, uerr = _unique_replace(content, old_str, new_str,
-                                        tool="edit_file", name=path)
-        if uerr:
-            return uerr
-        target.write_text(updated, encoding="utf-8")
+        try:
+            with self._write_admission(base, "edit_file", path):
+                content = target.read_text(encoding="utf-8")
+                updated, uerr = _unique_replace(content, old_str, new_str,
+                                                tool="edit_file", name=path)
+                if uerr:
+                    return uerr
+                target.write_text(updated, encoding="utf-8")
+        except CheckoutLeased as e:
+            return {"error": f"CheckoutLeased: {e}"}
         return {"edited": path}
 
     def _tool_create_file(self, args: dict) -> dict:
@@ -3399,17 +3411,18 @@ class MetaAgent:
         base, target, err = self._resolve_code_target(pid, path)
         if err:
             return err
-        leased = self._refuse_if_leased(base)
-        if leased:
-            return leased
         if target.exists():
             return {"error": (f"create_file: '{path}' already exists — use edit_file "
                               f"to change an existing file.")}
         content = args.get("content", "")
         if not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=False)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        try:
+            with self._write_admission(base, "create_file", path):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+        except CheckoutLeased as e:
+            return {"error": f"CheckoutLeased: {e}"}
         # A file we just authored is by definition "seen" — allow edits.
         self._files_read.add((pid, str(target)))
         return {"created": path, "size": len(content)}
@@ -3446,28 +3459,36 @@ class MetaAgent:
         if base is None:
             return {"error": f"Project '{pid}' declares no code repository"}
         base = base.resolve()
-        leased = self._refuse_if_leased(base)
-        if leased:
-            return leased
         if not base.is_dir():
             return {"error": f"No code directory for project '{pid}'"}
 
         env = {k: v for k, v in os.environ.items()
                if not self._ENV_SECRET_RE.search(k)}
 
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=str(base),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
+        # The admission is held for the WHOLE command, not checked before it.
+        # A long build is exactly the case the point check could not cover: it
+        # kept running while a direct run took the checkout out from under it.
+        # No database transaction is held here — the admission is a committed
+        # row, and it is retired in `finally` even on a timeout.
         try:
-            out_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return {"error": f"bash: command timed out after {timeout}s", "command": command}
+            with self._write_admission(base, "bash", command[:200]):
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    cwd=str(base),
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                try:
+                    out_bytes, _ = await asyncio.wait_for(
+                        proc.communicate(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.communicate()
+                    return {"error": f"bash: command timed out after {timeout}s",
+                            "command": command}
+        except CheckoutLeased as e:
+            return {"error": f"CheckoutLeased: {e}"}
 
         output = out_bytes.decode("utf-8", errors="replace")
         truncated = False

@@ -4408,30 +4408,42 @@ class MetaAgent:
             return {"status": run["status"], "run_id": run_id,
                     "message": f"Run already {run['status']}; nothing to stop."}
         try:
-            report = sf.fail_run(run_id, args.get("reason") or "stopped via butler")
+            report = sf.stop_run(run_id, args.get("reason") or "stopped via butler")
         except Exception as e:
             return {"error": f"Failed to stop run: {e}"}
         # "Pipeline stopped." was unconditional, and on 2026-09-05 it was said
         # over a step that went on to commit ac5237b forty seconds later. A stop
-        # does two different things and the caller has to know which it got: it
-        # always prevents further steps, and it prevents an in-flight step's
-        # delivery ONLY if it committed before that step reached its lifecycle
-        # hooks. A hook already executing is never preempted — `repo_apply` is a
-        # git commit and there is no honest way to un-start one.
+        # has two genuinely different results and the caller has to be told which
+        # one it got.
+        #
+        # `stopped`  — terminal now. Nothing is admitted, nothing further can be,
+        #              no new effect starts. That is a guarantee.
+        # `draining` — operations were admitted before the stop and cannot be
+        #              called off. They finish; the run terminalises after. This
+        #              is reported as ADMITTED, not as "already running": an
+        #              admitted operation may not have produced its effect yet,
+        #              and the previous wording claimed otherwise.
         report = report if isinstance(report, dict) else {}
+        outcome = report.get("outcome") or "stopped"
         closed = report.get("steps_closed") or []
-        in_flight = report.get("deliveries_in_flight") or []
-        msg = "Pipeline stopped; no further steps will be claimed."
-        if closed:
-            msg += (f" In-flight step(s) {', '.join(closed)} were stopped before "
-                    f"delivery: nothing was promoted or committed.")
-        if in_flight:
-            msg += (f" WARNING: step(s) {', '.join(in_flight)} had already been "
-                    f"authorised to deliver when the stop landed. Their "
-                    f"lifecycle hooks (promotion, repo_apply) were NOT preempted "
-                    f"- check the repository before assuming nothing changed.")
-        return {"status": "stopped", "run_id": run_id, "message": msg,
-                "steps_closed": closed, "deliveries_in_flight": in_flight}
+        admitted = report.get("admitted_operations") or []
+        if outcome == "already_terminal":
+            msg = "Run had already ended; nothing to stop."
+        elif outcome == "draining":
+            msg = ("Stop REQUESTED, not yet complete. No new step or tool will "
+                   f"start, but {len(admitted)} operation(s) were already "
+                   f"admitted and cannot be called off: {', '.join(admitted)}. "
+                   "They run to completion (promotion, repo_apply) and the run "
+                   "ends when the last one finishes — check the repository "
+                   "before assuming nothing changed.")
+        else:
+            msg = "Pipeline stopped; no further steps or tools will start."
+            if closed:
+                msg += (f" In-flight step(s) {', '.join(closed)} were closed "
+                        f"before delivery: nothing was promoted or committed.")
+        return {"status": "stopped", "outcome": outcome, "run_id": run_id,
+                "message": msg, "steps_closed": closed,
+                "admitted_operations": admitted}
 
     def _tool_get_pipeline_result(self, args: dict) -> dict:
         """Compact terminal result of a finished run (parsed JSON where possible)."""

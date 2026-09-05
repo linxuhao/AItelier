@@ -470,14 +470,22 @@ class TestLayer3PipelineTools:
             # missing arg → error
             assert "required" in agent._tool_describe_pipeline({})["error"]
 
-    def test_stop_pipeline_fails_run(self, mock_db, mock_ws):
+    def test_stop_pipeline_stops_the_run(self, mock_db, mock_ws):
+        """The butler now calls `stop_run`, the explicit cancellation entry
+        point, and surfaces its outcome. `fail_run` still exists and delegates
+        to it, so callers that were not updated keep the safe behaviour — that
+        delegation is pinned in skillflow's own suite."""
         agent = self._agent(mock_db, mock_ws)
         sf = MagicMock()
         sf.get_run.return_value = {"id": "r1", "status": "running"}
+        sf.stop_run.return_value = {"run_id": "r1", "outcome": "stopped",
+                                    "status": "failed", "steps_closed": [],
+                                    "admitted_operations": []}
         with patch("api.dependencies.get_skillflow", return_value=sf):
             out = agent._tool_stop_pipeline({"run_id": "r1"})
         assert out["status"] == "stopped"
-        sf.fail_run.assert_called_once()
+        assert out["outcome"] == "stopped"
+        sf.stop_run.assert_called_once()
 
     def test_stop_pipeline_noop_when_finished(self, mock_db, mock_ws):
         agent = self._agent(mock_db, mock_ws)

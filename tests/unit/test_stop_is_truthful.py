@@ -9,7 +9,7 @@ A stop now does three separable things and the caller is told which it got:
 no further steps are claimed (always); an in-flight step that had not reached
 its lifecycle hooks is closed before delivering (reported in `steps_closed`);
 and one that HAD reached them is not preempted at all (reported in
-`deliveries_in_flight`, with a warning to go and look at the repository).
+`admitted_operations`, with a warning to go and look at the repository).
 """
 
 from unittest.mock import MagicMock
@@ -33,47 +33,65 @@ class _Butler:
 
 def _stop(monkeypatch, report, status="running"):
     sf = MagicMock()
-    sf.fail_run.return_value = report
+    sf.stop_run.return_value = report
     import api.dependencies as deps
     monkeypatch.setattr(deps, "get_skillflow", lambda: sf, raising=False)
     b = _Butler({"id": "r1", "status": status})
     return b._tool_stop_pipeline({"run_id": "r1", "reason": "operator stop"})
 
 
-def test_a_stop_that_prevented_the_delivery_says_so(monkeypatch):
-    out = _stop(monkeypatch, {"run_id": "r1", "status": "failed",
+def test_a_terminal_stop_promises_that_nothing_new_starts(monkeypatch):
+    out = _stop(monkeypatch, {"run_id": "r1", "outcome": "stopped",
+                              "status": "failed",
                               "steps_closed": ["implement"],
-                              "deliveries_in_flight": []})
-    assert out["status"] == "stopped"
+                              "admitted_operations": []})
+    assert out["outcome"] == "stopped"
     assert out["steps_closed"] == ["implement"]
-    assert "no further steps" in out["message"]
+    assert "no further steps or tools will start" in out["message"]
     assert "nothing was promoted or committed" in out["message"]
-    assert "WARNING" not in out["message"]
+    assert "admitted" not in out["message"]
 
 
-def test_a_stop_that_arrived_too_late_warns_about_the_repository(monkeypatch):
-    """The incident's shape. The one message that must never read as clean."""
-    out = _stop(monkeypatch, {"run_id": "r1", "status": "failed",
-                              "steps_closed": [],
-                              "deliveries_in_flight": ["implement"]})
-    assert out["deliveries_in_flight"] == ["implement"]
-    assert "WARNING" in out["message"]
-    assert "not preempted" in out["message"].lower()
+def test_a_draining_stop_is_not_reported_as_complete(monkeypatch):
+    """The incident's shape, and the wording an independent reviewer rejected.
+
+    The previous message said "Pipeline stopped." and then described the
+    un-preempted work as already in flight. It is ADMITTED — allowed to proceed
+    and no longer callable off — which is not the same claim, and the stop is
+    not complete.
+    """
+    out = _stop(monkeypatch, {"run_id": "r1", "outcome": "draining",
+                              "status": "running", "steps_closed": [],
+                              "admitted_operations": ["delivery:implement"]})
+    assert out["outcome"] == "draining"
+    assert out["admitted_operations"] == ["delivery:implement"]
+    assert "REQUESTED, not yet complete" in out["message"]
+    assert "cannot be called off" in out["message"]
     assert "check the repository" in out["message"]
+    assert "delivery:implement" in out["message"]
 
 
 def test_a_stop_between_steps_claims_nothing_more_and_nothing_less(monkeypatch):
-    out = _stop(monkeypatch, {"run_id": "r1", "status": "failed",
-                              "steps_closed": [], "deliveries_in_flight": []})
-    assert out["message"] == ("Pipeline stopped; no further steps will be "
-                              "claimed.")
+    out = _stop(monkeypatch, {"run_id": "r1", "outcome": "stopped",
+                              "status": "failed",
+                              "steps_closed": [], "admitted_operations": []})
+    assert out["message"] == ("Pipeline stopped; no further steps or tools "
+                              "will start.")
+
+
+def test_an_already_ended_run_says_so(monkeypatch):
+    out = _stop(monkeypatch, {"run_id": "r1", "outcome": "already_terminal",
+                              "status": "failed", "steps_closed": [],
+                              "admitted_operations": []})
+    assert out["outcome"] == "already_terminal"
+    assert "already ended" in out["message"]
 
 
 def test_an_older_skillflow_returning_none_does_not_break_the_butler(monkeypatch):
-    """`fail_run` returned None before this change; the host must not assume."""
+    """`fail_run` returned None before any of this; the host must not assume."""
     out = _stop(monkeypatch, None)
     assert out["status"] == "stopped"
-    assert out["steps_closed"] == [] and out["deliveries_in_flight"] == []
+    assert out["steps_closed"] == [] and out["admitted_operations"] == []
 
 
 def test_an_already_terminal_run_is_still_refused_early(monkeypatch):

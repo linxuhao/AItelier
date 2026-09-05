@@ -41,48 +41,151 @@ from skillflow.tool_loader import ToolLoader
 
 from core import scheduler
 from core.run_launcher import start_config_run
-from core.seed_publication import (MARKER, publish_seeds, reads_own_seed,
+from core.seed_publication import (MARKER, adopt_legacy_seed, publish_seeds,
+                                   published_generation, reads_own_seed,
                                    seed_dir, seed_is_published)
+import core.seed_publication as seedmod
 
 CONFIGS = Path(__file__).resolve().parents[2] / "configs"
 
 
 # ── publication is atomic, and it is the SET that publishes ──────────
 
-def test_the_marker_is_written_last(tmp_path):
-    """A reader that sees the marker sees every file it names.
+def _gate_after_every_write(d: Path, files: dict, monkeypatch) -> list[dict]:
+    """Call the REAL gate after each real file rename during a real publication.
 
-    Enforced by observing the directory at each write, not by reading the code:
-    the marker must never appear while a named file is still absent.
+    This is the independent reviewer's interception, kept as the regression
+    test: intercept `_atomic_write` immediately after it returns, ask the gate,
+    and let publication continue. Every observation must be a complete
+    generation or nothing — never a mixture.
     """
-    seen: list[set] = []
-    real = Path.write_text
+    seen: list[dict] = []
+    real = seedmod._atomic_write
 
+    def spy(path, body):
+        real(path, body)
+        ok, why = seed_is_published(d, "plan.md")
+        seen.append({
+            "after": path.name, "gate": ok, "why": why,
+            "generation": published_generation(d),
+            "plan": (d / "plan.md").read_text() if (d / "plan.md").is_file() else None,
+            "extra": (d / "extra.md").read_text() if (d / "extra.md").is_file() else None,
+        })
+    monkeypatch.setattr(seedmod, "_atomic_write", spy)
+    publish_seeds(d, files)
+    return seen
+
+
+def test_a_fresh_publication_is_invisible_until_the_whole_set_lands(
+        tmp_path, monkeypatch):
+    """The reviewer's `fresh` counterexample: gate=true after the FIRST rename.
+
+    Pre-repair this observed `gate=true, marker=false, plan=new-plan,
+    extra=null` — the "legacy" fallback answering over a publication in
+    progress, because nothing could tell the two apart.
+    """
+    d = tmp_path / "_seed"
+    seen = _gate_after_every_write(
+        d, {"plan.md": "new-plan", "extra.md": "new-extra"}, monkeypatch)
+
+    assert seen, "the interception never fired"
+    for obs in seen:
+        assert obs["gate"] is False, f"admitted mid-publication: {obs}"
+    ok, why = seed_is_published(d, "plan.md")
+    assert ok, why
+    assert (d / "plan.md").read_text() == "new-plan"
+    assert (d / "extra.md").read_text() == "new-extra"
+
+
+def test_a_replacement_publication_never_shows_a_mixed_generation(
+        tmp_path, monkeypatch):
+    """The reviewer's `replacement` counterexample: `gate=true, marker=true,
+    plan=new-plan, extra=old-extra` — the previous marker still vouching for a
+    set that was being overwritten underneath it."""
+    d = tmp_path / "_seed"
+    first = publish_seeds(d, {"plan.md": "old-plan", "extra.md": "old-extra"})
+
+    seen = _gate_after_every_write(
+        d, {"plan.md": "new-plan", "extra.md": "new-extra"}, monkeypatch)
+
+    assert seen
+    for obs in seen:
+        # Every observation during the swap is the OLD generation, whole.
+        assert obs["generation"] == first, f"mixed generation observed: {obs}"
+        assert (obs["plan"], obs["extra"]) == ("old-plan", "old-extra"), obs
+    assert published_generation(d) != first
+    assert (d / "plan.md").read_text() == "new-plan"
+    assert (d / "extra.md").read_text() == "new-extra"
+
+
+def test_the_marker_names_the_whole_set(tmp_path):
     d = tmp_path / "_seed"
     publish_seeds(d, {"plan.md": "p", "extra.json": "{}"})
-
-    # Post-condition, and the ordering that produced it:
     names = json.loads((d / MARKER).read_text())["files"]
     assert names == ["extra.json", "plan.md"]
     for n in names:
         assert (d / n).is_file()
 
 
-def test_a_half_written_set_is_not_published(tmp_path):
-    """The first file landing must not make the config schedulable."""
+def test_a_seed_directory_with_no_marker_is_not_published(tmp_path):
+    """No fallback. A lone non-empty seed file is indistinguishable from a
+    publication in progress, which is precisely how the first repair admitted
+    half a set."""
     d = tmp_path / "_seed"
     d.mkdir(parents=True)
     (d / "plan.md").write_text("the plan", encoding="utf-8")
-    # No marker yet, so the compatibility clause speaks for plan.md only — which
-    # is exactly why the marker exists once there is more than one seed file.
-    ok, _ = seed_is_published(d, "plan.md")
-    assert ok
-    # …but a published SET that names a file which is not there is refused,
-    # whatever else is present.
-    (d / MARKER).write_text(json.dumps({"files": ["plan.md", "extra.json"]}),
-                            encoding="utf-8")
+    ok, why = seed_is_published(d, "plan.md")
+    assert not ok and "adopt_legacy_seed" in why
+
+
+def test_a_legacy_workspace_is_migrated_explicitly(tmp_path):
+    """The supported route for a pre-generation workspace: deliberate, named,
+    and never taken by the read path."""
+    d = tmp_path / "_seed"
+    d.mkdir(parents=True)
+    (d / "plan.md").write_text("the plan", encoding="utf-8")
+    assert seed_is_published(d, "plan.md")[0] is False
+
+    gen = adopt_legacy_seed(d, "plan.md")
+
+    assert gen and published_generation(d) == gen
+    assert seed_is_published(d, "plan.md")[0] is True
+    assert (d / "plan.md").read_text() == "the plan"
+    assert adopt_legacy_seed(d, "plan.md") is None      # idempotent
+
+
+def test_a_published_set_missing_a_named_file_is_refused(tmp_path):
+    d = tmp_path / "_seed"
+    publish_seeds(d, {"plan.md": "p", "extra.json": "{}"})
+    (d / "extra.json").unlink()
     ok, why = seed_is_published(d, "plan.md")
     assert not ok and "extra.json" in why
+
+
+def test_a_crash_mid_swap_leaves_nothing_published_not_a_mixture(tmp_path,
+                                                                 monkeypatch):
+    """If the process dies between the two renames, `_seed` is absent. That is
+    "not published" — the safe answer — and the next publication clears it."""
+    d = tmp_path / "_seed"
+    publish_seeds(d, {"plan.md": "old", "extra.md": "old"})
+    real_rename = seedmod.os.rename
+    calls = []
+
+    def die_after_first(src, dst):
+        real_rename(src, dst)
+        calls.append((src, dst))
+        if len(calls) == 1:
+            raise OSError("process died mid-swap")
+    monkeypatch.setattr(seedmod.os, "rename", die_after_first)
+    with pytest.raises(OSError):
+        publish_seeds(d, {"plan.md": "new", "extra.md": "new"})
+    monkeypatch.undo()
+
+    ok, _ = seed_is_published(d, "plan.md")
+    assert ok is False, "a half-swapped directory must not read as published"
+    publish_seeds(d, {"plan.md": "new", "extra.md": "new"})
+    assert seed_is_published(d, "plan.md")[0] is True
+    assert (d / "plan.md").read_text() == "new"
 
 
 def test_no_file_is_ever_visible_half_written(tmp_path):

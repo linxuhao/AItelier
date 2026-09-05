@@ -417,6 +417,13 @@ def live(tmp_path, monkeypatch):
     db.get_project.return_value = {"project_id": "p1", "config_name": "coding_impl",
                                    "meta_state": None, "brief": ""}
     monkeypatch.setattr(scheduler, "db", db)
+    # This file is about the SEED gate, and its project double has no
+    # repository. A code-producing run without one is refused by design — the
+    # property is tested in tests/unit/test_run_isolation_review_fixes.py — so
+    # provisioning is stubbed here rather than handed a fixture it would only
+    # pretend to use.
+    monkeypatch.setattr(scheduler.run_isolation, "ensure_for_run",
+                        lambda *a, **k: {"mode": "direct"})
     monkeypatch.setattr(scheduler, "get_skillflow", lambda: sf)
     import api.dependencies as deps
     monkeypatch.setattr(deps, "get_skillflow", lambda: sf)

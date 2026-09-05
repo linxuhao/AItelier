@@ -41,6 +41,9 @@ def _launch(tmp_path, *, seed_file, **kwargs):
     registry = MagicMock()
     registry.get.return_value = _manifest("code_review", seed_file)
     sf = MagicMock()
+    # A real run id: it becomes a directory name and a branch name downstream,
+    # and a MagicMock is neither.
+    sf.get_or_create_run.return_value = "run-" + tmp_path.name[:40]
     sf._get_resolver.return_value = GraphResolver(_graph())
     sf._workspace.get_project_path.return_value = tmp_path
     sf._workspace.get_config_path.return_value = tmp_path / "code_review"

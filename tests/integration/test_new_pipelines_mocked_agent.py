@@ -89,6 +89,14 @@ def _build(tmp_path, config_name, seeds):
     # here is not a workaround for the test: it is the line production runs.
     from core import run_isolation as _ri
     from api.dependencies import get_db_manager as _gdb
+    from core import datadir as _dd
+    # Register the project the way a launch does, so the ordinary workspace
+    # bootstrap creates its repository: a code-producing run whose project has
+    # no repository is refused, and that refusal is the point of
+    # tests/unit/test_run_isolation_review_fixes.py. A harness that wants a
+    # code run has to have somewhere for the code to go.
+    _gdb().ensure_project("p", name="p", repo_type="new",
+                          repo_path=str(_dd.projects_dir() / "p"))
     _ri.ensure_for_run(_gdb(), run_id=run_id, project_id="p",
                        config_name=graph.name, repo_mode="code")
 

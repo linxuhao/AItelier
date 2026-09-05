@@ -365,6 +365,35 @@ class WorkspaceManager:
             )
         return res.stdout.strip()
 
+    def _mutation_target(self, project_id: str):
+        """Resolve the repository for a MUTATION, or refuse.
+
+        Ordering is the whole point, and the independent review found it wrong.
+        `get_code_path` deliberately treats an unreachable database as "use the
+        default layout" — reasonable for a read, and for a WRITE it means a
+        database hiccup silently retargets `repo_commit` at
+        `projects_base/<project_id>`, which for a `repo_type: new` project is a
+        real git repository the operator never named. The lease guard never even
+        ran: an earlier resolution had already degraded.
+
+        So a mutation asks for the database FIRST and refuses when it cannot
+        have it, then resolves, then checks the lease. Three steps, and nothing
+        can skip one of them.
+        """
+        try:
+            from api.dependencies import get_db_manager
+            get_db_manager()
+        except Exception as e:
+            from core import run_isolation
+            raise run_isolation.CheckoutLeased(
+                f"the checkout lease for project {project_id!r} could not be "
+                f"verified ({type(e).__name__}: {e}) — refusing to mutate a "
+                f"repository while it is unknown who holds it, and refusing to "
+                f"resolve one through a degraded lookup") from e
+        code_path = self._require_git_repo(project_id)
+        self._require_no_foreign_lease(code_path)
+        return code_path
+
     def _require_no_foreign_lease(self, code_path) -> None:
         """An operator mutation is a write to the same tree a run is using.
 
@@ -374,12 +403,20 @@ class WorkspaceManager:
         outside what any of this can reach, and saying so is more useful than
         implying otherwise.
         """
+        from core import run_isolation
         try:
-            from core import run_isolation
             from api.dependencies import get_db_manager
             db = get_db_manager()
-        except Exception:
-            return
+        except Exception as e:
+            # FAIL CLOSED. This used to `return` here, so a database the guard
+            # could not open turned into a mutation that went ahead unchecked —
+            # the exact inversion of the resolution path, which refuses when it
+            # cannot tell. A guard that answers "probably fine" when it cannot
+            # look is not a guard.
+            raise run_isolation.CheckoutLeased(
+                f"the checkout lease for {code_path} could not be verified "
+                f"({type(e).__name__}: {e}); refusing the mutation rather than "
+                f"assuming nobody holds it") from e
         run_isolation.require_no_foreign_lease(db, code_path)
 
     def _require_git_repo(self, project_id: str) -> Path:
@@ -397,8 +434,7 @@ class WorkspaceManager:
     def repo_set_remote(self, project_id: str, url: str,
                         name: str = "origin") -> dict:
         """Add the remote, or update its URL if it already exists."""
-        code_path = self._require_git_repo(project_id)
-        self._require_no_foreign_lease(code_path)
+        code_path = self._mutation_target(project_id)
         existing = subprocess.run(
             ["git", "remote"], cwd=code_path, capture_output=True, text=True,
             env=_GIT_ENV,
@@ -413,8 +449,7 @@ class WorkspaceManager:
 
     def repo_commit(self, project_id: str, message: str) -> dict:
         """Stage all changes and commit. No-op (not an error) when clean."""
-        code_path = self._require_git_repo(project_id)
-        self._require_no_foreign_lease(code_path)
+        code_path = self._mutation_target(project_id)
         self._run_git_checked(code_path, "add", "-A")
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -428,8 +463,7 @@ class WorkspaceManager:
     def repo_push(self, project_id: str, branch: str | None = None,
                   set_upstream: bool = True) -> dict:
         """Push a branch to origin (sets upstream by default)."""
-        code_path = self._require_git_repo(project_id)
-        self._require_no_foreign_lease(code_path)
+        code_path = self._mutation_target(project_id)
         if not branch:
             branch = self._run_git_checked(
                 code_path, "rev-parse", "--abbrev-ref", "HEAD")
@@ -448,8 +482,7 @@ class WorkspaceManager:
         current working tree's HEAD onto a possibly-new remote branch name — the
         "push current work to a feature branch, then open a PR" flow.
         """
-        code_path = self._require_git_repo(project_id)
-        self._require_no_foreign_lease(code_path)
+        code_path = self._mutation_target(project_id)
         args = ["push"]
         if set_upstream:
             args += ["--set-upstream"]
@@ -463,8 +496,7 @@ class WorkspaceManager:
         Refuses (RuntimeError) rather than creating a merge if the branches have
         diverged — the user should use force-sync deliberately in that case.
         """
-        code_path = self._require_git_repo(project_id)
-        self._require_no_foreign_lease(code_path)
+        code_path = self._mutation_target(project_id)
         out = self._run_git_checked(code_path, "pull", "--ff-only")
         return {"pulled": True, "detail": out}
 
@@ -474,8 +506,7 @@ class WorkspaceManager:
         origin/<branch>. A timestamped backup branch is created first (default)
         so the discarded state is recoverable.
         """
-        code_path = self._require_git_repo(project_id)
-        self._require_no_foreign_lease(code_path)
+        code_path = self._mutation_target(project_id)
         backup_ref = None
         if backup:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

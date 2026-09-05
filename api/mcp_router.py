@@ -1648,6 +1648,14 @@ def _register_lifecycle_tools(tool):
                                  reason or "stopped via the MCP endpoint")
         except Exception as e:
             return {**echo, "error": f"could not stop it: {e}"}
+        # Same as the butler stop path: a run that ended releases its checkout,
+        # a run that is draining keeps it, and the reconciler decides which by
+        # re-reading the engine rather than by trusting the outcome above.
+        try:
+            from core.meta_agent import _reconcile_lease_after_stop
+            _reconcile_lease_after_stop(None, run["id"])
+        except Exception:
+            pass
         # This hard-coded {"status": "stopped"} and threw the report away. It is
         # the path the production driver actually uses (~/.AItelier/bin/mcp.py
         # stop_pipeline), and on 2026-09-05 it answered "stopped" over a step

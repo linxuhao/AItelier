@@ -323,21 +323,6 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
                     "config_name": config_name, "message": str(e)}
 
     run_id = sf.get_or_create_run(config_name, project_id, {"project_id": project_id})
-
-    # Same decision as the poller makes for scheduler-owned runs, made here for
-    # the ones the butler drives inline (code_review, coding_task, the
-    # converters). A review launched `against_project` lands on read_snapshot:
-    # it owns no repository and reads a real one, and the snapshot is what makes
-    # "reads a real one" mean a tree that cannot move under it.
-    try:
-        from core import run_isolation
-        run_isolation.ensure_for_run(
-            db, run_id=run_id, project_id=project_id, config_name=config_name,
-            repo_mode=manifest.repo_mode)
-    except Exception as e:
-        return {"status": "error",
-                "message": f"could not isolate run {run_id}: "
-                           f"{type(e).__name__}: {e}"}
     run = sf.get_run(run_id)
     if run and run["status"] == "pending":
         # CHECK-THEN-ACT, and the poller is the other actor: it can start this
@@ -357,6 +342,27 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
 
     # Last on this branch, past the seed_file refusal above (see the docstring).
     _reconcile_repo_type()
+
+    # Isolation is decided LAST, and after the reconcile on purpose. It reads
+    # the project row to find the checkout, and `_reconcile_repo_type` is what
+    # repairs a row still stamped `repo_type='none'` from an earlier repo-less
+    # config — deciding before it would refuse a launch whose repository the
+    # very next line was about to name. Nothing between here and the return can
+    # drive the run, so "last" is still "before it can claim a step"; the poller
+    # makes the same decision for scheduler-owned runs and finds this one done.
+    #
+    # A review launched `against_project` lands on read_snapshot: it owns no
+    # repository and reads a real one, and the snapshot is what makes "reads a
+    # real one" mean a tree that cannot move under it.
+    try:
+        from core import run_isolation
+        run_isolation.ensure_for_run(
+            db, run_id=run_id, project_id=project_id, config_name=config_name,
+            repo_mode=manifest.repo_mode)
+    except Exception as e:
+        return {"status": "error", "project_id": project_id, "run_id": run_id,
+                "message": f"could not isolate run {run_id}: "
+                           f"{type(e).__name__}: {e}"}
 
     if manifest.scheduler_owned:
         wake_scheduler(owner_email if owner_email != "cli@local" else None)

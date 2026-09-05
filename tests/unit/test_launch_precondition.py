@@ -17,6 +17,7 @@ minutes. These pin the same refusal on the generic path, generically: any
 required input a config imports from ANOTHER config's run.
 """
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -60,10 +61,26 @@ def _launch(config_name: str, graph: PipelineGraph, workspace_root: Path,
     rooted at *workspace_root*. Returns (result, skillflow stub, workspace stub)."""
     db = MagicMock()
     db.get_project.return_value = None
+    # A code-producing launch is isolated into a worktree of the project's
+    # repository, and a run with no repository is refused. The doubles here are
+    # about the cross-config precondition, so give them the thing every real
+    # launch of a code config has: a repository.
+    repo = workspace_root / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "seed.txt").write_text("seed\n")
+    for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
+                ["git", "config", "user.name", "t"], ["git", "add", "-A"],
+                ["git", "commit", "-qm", "seed"]):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+    db.get_repo_info.return_value = {"repo_type": "existing",
+                                     "repo_path": str(repo), "repo_url": None}
     ws = MagicMock()
     registry = MagicMock()
     registry.get.return_value = manifest or _manifest(config_name)
     sf = MagicMock()
+    # A distinct run per launch, as the engine gives: the isolation record is
+    # keyed by run id and shared across this session's data root.
+    sf.get_or_create_run.return_value = "run-" + workspace_root.name[:40]
     sf._get_resolver.return_value = GraphResolver(graph)
     sf._workspace.get_project_path.return_value = workspace_root
     sf.get_run.return_value = {"status": "running"}

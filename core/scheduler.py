@@ -587,6 +587,27 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
     return run_id
 
 
+def _reconcile_lease(project_id: str, run_id: str) -> None:
+    """Best-effort release of a finished run's checkout lease.
+
+    Best-effort is safe in ONE direction only, and that is the direction this
+    has: the reconciler retains the lease whenever it cannot verify that the run
+    is terminal and drained, so a failure here leaves a checkout held (an
+    operator can release it) rather than released early (two writers).
+    """
+    try:
+        from api.dependencies import get_skillflow
+        released, why = run_isolation.reconcile_run_lease(
+            db, get_skillflow(), run_id)
+        if released:
+            tick_log(project_id, "lease_released", run=run_id[:8],
+                     reason=why[:200])
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.scheduler").warning(
+            "lease reconciliation failed for run %s", run_id, exc_info=True)
+
+
 def _repo_mode_of(config_name: str) -> str:
     """What the CONFIG declares about producing code — never inferred."""
     try:
@@ -595,6 +616,30 @@ def _repo_mode_of(config_name: str) -> str:
         return getattr(manifest, "repo_mode", "code") or "code"
     except Exception:
         return "code"
+
+
+def recover_leases_on_startup():
+    """Release the leases of runs that ended while the process was gone.
+
+    A lease is a row, so it survives the crash that stranded it; nothing else
+    would ever revisit it, and what the operator sees is a checkout nobody is
+    using with every write refusing. Each one is still verified individually —
+    terminal AND drained — so a run that was mid-drain when the process died
+    keeps its checkout, which is the case this must not get wrong.
+    """
+    try:
+        from api.dependencies import get_skillflow
+        report = run_isolation.reconcile_all_leases(db, get_skillflow())
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.scheduler").warning(
+            "startup lease reconciliation failed", exc_info=True)
+        return
+    for rid in report.get("released", []):
+        tick_log("", "lease_released", run=rid[:8], reason="startup")
+    for r in report.get("retained", []):
+        tick_log("", "lease_retained", run=r["run_id"][:8],
+                 reason=r["reason"][:200])
 
 
 def recover_claims_on_startup():
@@ -1185,6 +1230,12 @@ async def _run_skillflow_tick(project_id: str, loop):
             # skillflow notification bus emits checkpoint_paused / run_completed /
             # run_failed; we just sync the AItelier DB status.
             _sync_project_status_to_db(project_id)
+            # A direct-mode run holds its checkout until it is over AND quiet.
+            # This is the completion/failure path; cancel goes through stop_run
+            # (butler + MCP) and a crash is caught by startup reconciliation.
+            # The reconciler verifies both conditions itself and retains on any
+            # doubt, so calling it here cannot release early.
+            _reconcile_lease(project_id, run_id)
             return
 
         # NOT terminal: advance_run produced no next node while the run is still

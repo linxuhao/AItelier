@@ -1894,6 +1894,29 @@ def _endpoint_order(raw_model: str) -> list[str]:
 # ── MetaAgent ──────────────────────────────────────────────────────
 
 
+def _reconcile_lease_after_stop(db, run_id: str) -> None:
+    """Cancel is a supported end of a run, so it is a supported end of a lease.
+
+    Retains on anything unverifiable, including the draining case, where the
+    admitted operations are precisely what must keep the checkout held.
+
+    `db=None` resolves the host database itself: the two callers are the butler
+    tool (whose object shape varies) and the MCP endpoint (which holds no db),
+    and neither difference should decide whether a checkout is freed.
+    """
+    try:
+        from api.dependencies import get_skillflow, get_db_manager
+        from core import run_isolation
+        run_isolation.reconcile_run_lease(db if db is not None else
+                                          get_db_manager(),
+                                          get_skillflow(), run_id)
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.meta").warning(
+            "lease reconciliation after stop failed for %s", run_id,
+            exc_info=True)
+
+
 def _declare_isolation(db, run_id: str, project_id: str, config_name: str) -> None:
     """Record what this run works in, at the moment it is created.
 
@@ -3299,6 +3322,26 @@ class MetaAgent:
     # (same jail as read_code_file — no staging dir, no AT-9 'project/' strip,
     # which would mangle repos that really have a project/ directory).
 
+    def _refuse_if_leased(self, base):
+        """A checkout a run is holding is not the butler's to write in.
+
+        `edit_file`, `create_file` and `bash` are the interactive write surface,
+        and an interactive write is MORE of an operator action than
+        `repo_commit` is — which already refuses. Same guard, same canonical
+        checkout identity; returns the tool-shaped error rather than raising,
+        because these are tools.
+
+        What it does not cover, and cannot: a shell somebody runs outside this
+        application. `bash` here is refused wholesale on a leased checkout — the
+        refusal is about the TREE, not about parsing the command to guess
+        whether it writes.
+        """
+        try:
+            self.ws._require_no_foreign_lease(base)
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
+        return None
+
     def _resolve_code_target(self, pid: str, path: str):
         """Resolve a repo-relative path inside the project's code jail.
 
@@ -3334,6 +3377,9 @@ class MetaAgent:
         base, target, err = self._resolve_code_target(pid, path)
         if err:
             return err
+        leased = self._refuse_if_leased(base)
+        if leased:
+            return leased
         if not target.is_file():
             return {"error": f"edit_file: '{path}' does not exist — use create_file for new files"}
         if (pid, str(target)) not in self._files_read:
@@ -3353,6 +3399,9 @@ class MetaAgent:
         base, target, err = self._resolve_code_target(pid, path)
         if err:
             return err
+        leased = self._refuse_if_leased(base)
+        if leased:
+            return leased
         if target.exists():
             return {"error": (f"create_file: '{path}' already exists — use edit_file "
                               f"to change an existing file.")}
@@ -3397,6 +3446,9 @@ class MetaAgent:
         if base is None:
             return {"error": f"Project '{pid}' declares no code repository"}
         base = base.resolve()
+        leased = self._refuse_if_leased(base)
+        if leased:
+            return leased
         if not base.is_dir():
             return {"error": f"No code directory for project '{pid}'"}
 
@@ -3521,7 +3573,10 @@ class MetaAgent:
                 # `Path("").resolve()` is the process CWD. The tools this proxy
                 # can reach refuse a non-absolute root themselves; see
                 # `core/dpe_pipeline.py:_exec_tool` for the same reasoning.
-                project_root = str(self.ws.get_code_path(pid) or "")
+                # …of THIS run: a runner step writes through this proxy, so
+                # resolving by project would put it in the shared checkout while
+                # its own run works in a worktree.
+                project_root = str(self.ws.get_code_path(pid, run_id=run_id) or "")
         except Exception:
             pass
         return self._runner_service().execute_step_tool(
@@ -4432,6 +4487,11 @@ class MetaAgent:
             report = sf.stop_run(run_id, args.get("reason") or "stopped via butler")
         except Exception as e:
             return {"error": f"Failed to stop run: {e}"}
+        # A stop that actually ENDED the run frees its checkout; a stop that is
+        # draining does not, and the reconciler is what tells the two apart —
+        # it re-reads the run and the admitted operations rather than trusting
+        # the outcome string.
+        _reconcile_lease_after_stop(getattr(self, "db", None), run_id)
         # "Pipeline stopped." was unconditional, and on 2026-09-05 it was said
         # over a step that went on to commit ac5237b forty seconds later. A stop
         # has two genuinely different results and the caller has to be told which

@@ -1110,6 +1110,13 @@ steps:
     timeout_seconds: 180
     tool_params:
       project_root: "$PROJECT_ROOT"
+      # Stated, like the sync policy above. An isolated run works on
+      # codex/run/<run_id>, so pushing "the branch this tree is on" would
+      # create one remote branch per run, automatically. That is a delivery
+      # decision and this config does not make it: "direct_only" pushes an
+      # intentionally configured direct-mode checkout exactly as before, and
+      # pushes nothing for a run worktree. "run_branch" opts in.
+      policy: "direct_only"
     transitions:
       - to: "done"
 

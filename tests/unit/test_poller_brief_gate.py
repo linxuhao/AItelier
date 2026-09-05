@@ -34,7 +34,14 @@ def _tick(project, missing, existing_run=None):
     db = MagicMock()
     db.get_project.return_value = project
     logged = []
+    # This file is about the BRIEF gate. Its doubles have no repository and no
+    # filesystem, and a code-producing run without a repository is refused (by
+    # design — tests/unit/test_run_isolation_review_fixes.py is where that
+    # property is tested). Provisioning is stubbed here rather than handed a
+    # fixture it would only pretend to use.
     with patch.object(scheduler, "get_skillflow", return_value=sf), \
+         patch.object(scheduler.run_isolation, "ensure_for_run",
+                      lambda *a, **k: {"mode": "direct"}), \
          patch.object(scheduler, "db", db), \
          patch("core.run_launcher.missing_cross_config_inputs", return_value=missing), \
          patch.object(scheduler, "tick_log", lambda pid, outcome, **kw: logged.append((outcome, kw))):
@@ -87,7 +94,14 @@ def test_a_broken_guard_never_blocks_a_healthy_project():
     sf.get_run.return_value = {"status": "pending"}
     db = MagicMock()
     db.get_project.return_value = _project()
+    # This file is about the BRIEF gate. Its doubles have no repository and no
+    # filesystem, and a code-producing run without a repository is refused (by
+    # design — tests/unit/test_run_isolation_review_fixes.py is where that
+    # property is tested). Provisioning is stubbed here rather than handed a
+    # fixture it would only pretend to use.
     with patch.object(scheduler, "get_skillflow", return_value=sf), \
+         patch.object(scheduler.run_isolation, "ensure_for_run",
+                      lambda *a, **k: {"mode": "direct"}), \
          patch.object(scheduler, "db", db), \
          patch("core.run_launcher.missing_cross_config_inputs",
                side_effect=RuntimeError("resolver exploded")), \

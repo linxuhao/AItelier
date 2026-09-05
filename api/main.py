@@ -217,8 +217,14 @@ async def lifespan(app: FastAPI):
 
     # Recover any claimed steps left by a previous (crashed/killed) process.
     # Server is singleton — any claim at startup is definitively stale.
-    from core.scheduler import recover_claims_on_startup
+    from core.scheduler import (recover_claims_on_startup,
+                            recover_leases_on_startup)
     recover_claims_on_startup()
+    # Leases outlive the process that took them: a crash between "the run
+    # ended" and "the lease was released" leaves a checkout that nothing else
+    # would ever revisit. Each is re-verified individually (terminal AND
+    # drained), so a run that was mid-drain keeps its checkout.
+    recover_leases_on_startup()
 
     app.state.scheduler = start_scheduler()
     print("DPE APScheduler started. skillflow NotificationBus → SSE bridge active.")

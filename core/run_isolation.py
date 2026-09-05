@@ -32,6 +32,7 @@ wrong reap is somebody's unmerged delivery.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -218,11 +219,35 @@ def _source_repo_for(db, project_id: str) -> str | None:
     except Exception:
         info = {}
     path = info.get("repo_path")
-    if path:
-        return str(path)
+    # A non-string is not a path. Guards against a caller (or a test double)
+    # handing back something path-shaped only by accident; str() of it would be
+    # an absolute-looking string no filesystem knows.
+    if isinstance(path, str) and path.strip():
+        return path
     if (info.get("repo_type") or "") == "none":
         return None
     return str(datadir.projects_dir() / project_id)
+
+
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _require_usable_run_id(run_id) -> str:
+    """A run id becomes a directory name and a branch name. Check it is one.
+
+    `worktrees_dir() / run_id` with a `..` in it leaves the worktree root, and
+    `codex/run/<run_id>` with a space in it is not a branch git will create —
+    the second is how this was noticed (a caller handing through a placeholder
+    produced `fatal: not a valid branch name` from deep inside provisioning).
+    Refusing here names the actual problem, and refusing at all is what keeps
+    the first case from being interesting.
+    """
+    if not isinstance(run_id, str) or not _SAFE_RUN_ID.match(run_id):
+        raise IsolationUnavailable(
+            f"{run_id!r} is not a usable run id: it becomes a directory under "
+            f"the worktree root and a branch name, so it must be a short "
+            f"string of letters, digits, dot, dash or underscore.")
+    return run_id
 
 
 def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
@@ -240,6 +265,7 @@ def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
     against, as a read snapshot. Owning and reading are separate axes and
     conflating them is what took the codebase away from on-repo review.
     """
+    _require_usable_run_id(run_id)
     existing = record(db, run_id)
     if existing:
         if existing["mode"] == MODE_DIRECT and existing["source_repo"]:
@@ -277,23 +303,68 @@ def ensure_for_run(db, *, run_id: str, project_id: str, config_name: str,
                              source_repo=source)
     if mode != MODE_WORKTREE:
         raise IsolationUnavailable(f"unknown isolation mode {mode!r}")
+    if source and not _is_git_repo(source):
+        # A project whose repository has not been created YET is a normal state
+        # (registration and launch are separate operations), and the ordinary
+        # workspace bootstrap is what creates it. Run that first — the same
+        # setup a launch performs, not a git init invented here — and then ask
+        # again.
+        source = _bootstrap_source(db, project_id, source)
     if not source or not _is_git_repo(source):
-        # There is no repository to isolate FROM. Recorded as direct with the
-        # reason attached, rather than refused, because the two failure modes
-        # are not equal: this run cannot cross-stage into anything (repo_apply
-        # commits through git and will fail loudly on the first delivery), while
-        # refusing here would turn "your project points at a path that is not a
-        # repository" into a run that never starts and says so only in a tick
-        # log. It is a DECISION with its reason on the row — not the silent
-        # fallback that a resolvable-but-broken worktree gets, which raises.
-        return _write_record(
-            db, run_id=run_id, project_id=project_id, config_name=config_name,
-            mode=MODE_DIRECT, source_repo=source,
-            note=f"no git repository at {source!r} when the run was created; "
-                 f"nothing to cut a worktree from")
+        # FAIL CLOSED. This used to record direct mode with the reason attached,
+        # and the independent review showed why that was wrong: the fallback
+        # took no lease, so two code runs on the same non-repository path both
+        # resolved to it with nothing refusing either, and `repo_apply` copies
+        # its step output into the tree BEFORE it runs `git add` — so the
+        # "it will fail loudly at the commit" argument protected the history and
+        # not the files. If the path is git-inited later, the full cross-staging
+        # hazard returns on a pair of runs holding no lease at all.
+        #
+        # No record is written. A row saying a run is working somewhere it is
+        # not is worse than no row: resolution refuses a record-less run of this
+        # deployment, so the run cannot be handed a root — and a copy needs a
+        # root.
+        raise IsolationUnavailable(
+            f"run {run_id} produces code and its project {project_id!r} has no "
+            f"git repository at {source!r} (bootstrap did not produce one). "
+            f"Refusing to run it in a directory nothing owns; create the "
+            f"repository, or launch this run in explicit direct mode, which "
+            f"leases the checkout.")
     return _provision_tree(db, run_id=run_id, project_id=project_id,
                            config_name=config_name, source=source,
                            mode=MODE_WORKTREE)
+
+
+def _bootstrap_source(db, project_id: str, source: str) -> str:
+    """Let the ordinary workspace setup create the repository, then re-answer.
+
+    Isolation must not invent a repository layout of its own: `setup_workspace`
+    is what a launch calls, it knows what `new` / `clone` / `existing` mean, and
+    it refuses the cases it should refuse (an `existing` path that is not a git
+    repository stays a refusal, which is the correct answer for a project that
+    was told the repository already exists).
+
+    Best effort by design: a failure here is not the decision. It leaves the
+    source exactly as it was and the caller fails closed on the next line.
+    """
+    try:
+        info = db.get_repo_info(project_id) or {}
+    except Exception:
+        return source
+    repo_type = (info.get("repo_type") or "").strip()
+    if repo_type not in ("new", "clone"):
+        return source
+    try:
+        from api.dependencies import get_workspace_manager
+        get_workspace_manager().setup_workspace(
+            project_id, repo_type=repo_type, repo_path=info.get("repo_path"),
+            repo_url=info.get("repo_url"))
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.isolation").warning(
+            "workspace bootstrap failed for %s before isolation", project_id,
+            exc_info=True)
+    return source
 
 
 def _provision_tree(db, *, run_id, project_id, config_name, source, mode) -> dict:
@@ -426,6 +497,91 @@ def release(db, run_id: str, disposition: str) -> dict | None:
         conn.execute("DELETE FROM checkout_leases WHERE run_id = ?", (run_id,))
         conn.commit()
     return record(db, run_id) if rec else None
+
+
+TERMINAL_RUN_STATUSES = ("completed", "failed")
+
+
+def reconcile_run_lease(db, sf, run_id: str) -> tuple[bool, str]:
+    """Release this run's lease if — and only if — the run is over and quiet.
+
+    Two conditions, both verified against the engine, neither inferred:
+
+    * the run is **terminal** (`completed`/`failed`). `paused` is a run waiting
+      for a person and `running` is a run; a lease released under either hands
+      the checkout to somebody else while the holder is still working in it;
+    * **no admitted operation remains**. Terminal status is not quiescence:
+      skillflow admits an operation before it can be called off, so a cancelled
+      run can be `failed` while a `git commit` its child process started is
+      still landing. A lost owner counts as admitted here, deliberately — the
+      cancellation contract says a dead owner establishes nothing about the
+      effects of the operation it started.
+
+    Anything it cannot verify — a run the engine does not know, a query that
+    raised — RETAINS the lease and says why. The cost of retaining wrongly is a
+    checkout an operator must release by hand; the cost of releasing wrongly is
+    two writers in one tree, which is the defect this whole mechanism exists to
+    remove.
+
+    No skillflow call happens inside an AItelier transaction and no AItelier
+    connection is open across one: the engine is read first, the row is written
+    after. Idempotent — a run with no lease is a no-op, so completion, cancel
+    and startup reconciliation can all call it for the same run.
+    """
+    with db.get_connection() as conn:
+        held = conn.execute(
+            "SELECT canonical_checkout FROM checkout_leases WHERE run_id = ?",
+            (run_id,)).fetchone()
+    if held is None:
+        return False, f"no lease is held by run {run_id}"
+
+    try:
+        row = sf.get_run(run_id)
+    except Exception as e:
+        return False, (f"could not read run {run_id} from the engine "
+                       f"({type(e).__name__}: {e}); lease retained")
+    if row is None:
+        return False, (f"run {run_id} is unknown to the engine; lease retained "
+                       f"— an unknown run is not a finished one")
+    status = (row.get("status") if isinstance(row, dict) else row["status"]) or ""
+    if status not in TERMINAL_RUN_STATUSES:
+        return False, (f"run {run_id} is {status!r}, not terminal "
+                       f"(paused is a run waiting for a person); lease retained")
+
+    try:
+        audit = sf.audit_operation_owners(run_id) or {}
+    except Exception as e:
+        return False, (f"could not count admitted operations for {run_id} "
+                       f"({type(e).__name__}: {e}); lease retained")
+    admitted = (len(audit.get("lost") or []) + len(audit.get("unknown") or [])
+                + int(audit.get("alive") or 0))
+    if admitted:
+        return False, (f"{admitted} admitted operation(s) for run {run_id} have "
+                       f"not retired; effects may still be landing, lease "
+                       f"retained")
+
+    release(db, run_id, disposition="auto_released_terminal_quiet")
+    return True, (f"run {run_id} is {status} with no admitted operation; "
+                  f"lease on {held['canonical_checkout']} released")
+
+
+def reconcile_all_leases(db, sf) -> dict:
+    """Every held lease, asked the same question. For startup.
+
+    Needed as its own entry point because a lease outlives the process: a crash
+    between "terminal" and "released" leaves a row that nothing else will ever
+    revisit, and the operator sees a checkout nobody is using and everything
+    refusing to touch it.
+    """
+    with db.get_connection() as conn:
+        run_ids = [r["run_id"] for r in conn.execute(
+            "SELECT run_id FROM checkout_leases ORDER BY acquired_at").fetchall()]
+    released, retained = [], []
+    for rid in run_ids:
+        ok, why = reconcile_run_lease(db, sf, rid)
+        (released.append(rid) if ok
+         else retained.append({"run_id": rid, "reason": why}))
+    return {"released": released, "retained": retained}
 
 
 def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,

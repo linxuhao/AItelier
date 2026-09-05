@@ -295,15 +295,19 @@ def test_a_refused_run_can_never_be_handed_a_root(db, home, tmp_path):
         ri.resolve_for_resolver(db, "run-ng2", run_created_at="9999-01-01 00:00:00")
 
 
-def test_a_new_project_is_bootstrapped_before_it_is_isolated(db, home, tmp_path):
+def test_a_new_project_is_bootstrapped_before_it_is_isolated(db, home, tmp_path,
+                                                            monkeypatch):
     """A `repo_type: new` project whose repository has not been created yet is
     set up through the ordinary workspace bootstrap, then isolated — rather
     than refused for not being what nobody had created."""
     import api.dependencies as deps
     from core.workspace_manager import WorkspaceManager
-    monkey_ws = WorkspaceManager(str(tmp_path / "ws"),
-                                 projects_base=str(datadir.projects_dir()))
-    deps.ws_instance = monkey_ws
+    # monkeypatch, not assignment: `ws_instance` is a module-level singleton and
+    # leaving this test's copy behind pointed every later bootstrap at a data
+    # root that only exists inside this test.
+    monkeypatch.setattr(deps, "ws_instance",
+                        WorkspaceManager(str(tmp_path / "ws"),
+                                         projects_base=str(datadir.projects_dir())))
     db.ensure_project("fresh", name="fresh", repo_type="new",
                       repo_path=str(datadir.projects_dir() / "fresh"))
     assert not (datadir.projects_dir() / "fresh" / ".git").exists()

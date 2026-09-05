@@ -96,6 +96,49 @@ def test_budget_resolved_by_role_not_step_id(engine):
     assert "t_impl" not in called
 
 
+def test_the_resume_budget_is_the_role_budget_not_the_default(engine, monkeypatch):
+    """The value, not just the call — this is where the wrong lookup did harm.
+
+    `_rebuild_from_deltas` returns `max_turns + granted extras` and a resume
+    REPLACES `current_max_turns` with it, so a base resolved by step_id put a
+    step resumed after a host restart on DEFAULT_MAX_TOOL_TURNS plus its grants
+    while the same step run fresh got its configured budget. t_impl is
+    configured at 6 against a default of 10, and the budget is measured: runs
+    that reached the 10-turn ceiling produced complete output 24% of the time
+    against 54% for shorter ones. So a resume silently bought four turns that
+    make the output worse.
+
+    The sibling test above asserts the call ARGUMENT and would stay green if the
+    argument were right and the value discarded; this one reads what
+    `_resume_from_trace` was actually handed.
+    """
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.side_effect = [_turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
+                            _turn(tool_calls=[_tc("finish_step")])]
+
+    # The role's configured budget and the registry's default must differ, or
+    # the wrong lookup and the right one return the same number and nothing is
+    # being tested.
+    ROLE_BUDGET, DEFAULT_BUDGET = 6, 10
+    engine.factory.get_max_tool_turns.side_effect = (
+        lambda key: ROLE_BUDGET if key == "task_implementer" else DEFAULT_BUDGET)
+
+    seen = []
+    monkeypatch.setattr(PipelineEngine, "_resume_from_trace",
+                        lambda self, pid, max_turns: seen.append(max_turns))
+
+    assert _run(engine, ws) is True
+
+    assert seen, "the resume path never ran, so this test proves nothing"
+    assert seen[0] == ROLE_BUDGET, (
+        f"the resumed step's base budget was {seen[0]}, not the role's "
+        f"{ROLE_BUDGET} — resolved by step_id, it falls back to the default "
+        f"{DEFAULT_BUDGET} and the resumed step runs on a ceiling it was never "
+        f"configured for")
+
+
 def test_no_tool_reply_is_salvaged_then_writes(engine):
     """Feature B: a prose-only reply nudges the agent to write instead of
     ending the step empty (the inst-975 failure mode)."""

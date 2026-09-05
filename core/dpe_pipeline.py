@@ -2000,8 +2000,19 @@ class PipelineEngine:
         # dir still holds every file it wrote. Rebuild the conversation from
         # the last COMPLETE turn instead of starting the step over; keep the
         # staging dir only if every traced write is really there.
+        # By ROLE, not step_id — the same lookup rule as `max_turns` below, and
+        # for the same reason: the agent-config registry is keyed by role, so a
+        # step_id resolves to nothing and silently returns DEFAULT_MAX_TOOL_TURNS.
+        # This one was missed when that fix was applied, and it is the worse
+        # half: the base budget rebuilt here REPLACES `current_max_turns` on a
+        # resume, so a step resumed after a host restart ran on the default
+        # ceiling plus its granted extras, while the same step run fresh got its
+        # configured budget. t_impl is configured at 6 against a default of 10,
+        # and that gap is not free — the budget is measured, and instances that
+        # reached the 10-turn ceiling produced complete output 24% of the time
+        # against 54% for shorter ones.
         resume = self._resume_from_trace(project_id, self._max_tool_turns
-                                         or self.factory.get_max_tool_turns(step_id))
+                                         or self.factory.get_max_tool_turns(agent_config_name))
         if resume:
             draft = workspace._draft_dir(project_id, step_id, self._draft_graph_name())
             missing = [f for f in resume["written_files"] if not (draft / f).exists()]

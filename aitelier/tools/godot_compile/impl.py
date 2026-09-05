@@ -79,6 +79,18 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
         lines.append("- none")
     lines.append("")
 
+    debt = pt.get("native_debt") or []
+    if debt:
+        # Recorded, never gated — and printed here because a report field the
+        # summary omits is evidence nobody reads. It says nothing about whether
+        # these lines were expected.
+        lines.append("## Native engine errors (recorded, not gating)")
+        for e in debt[:20]:
+            lines.append("- `%s` x%s  %s  %s"
+                         % (e.get("native_class"), e.get("count", 1),
+                            e.get("msg", ""), e.get("at") or ""))
+        lines.append("")
+
     if scenarios:
         failed = [s for s in scenarios if not s.get("passed")]
         lines.append(f"## Scenarios — {len(failed)}/{len(scenarios)} with failing "

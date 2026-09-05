@@ -132,15 +132,23 @@ def _parse_errors(stderr: str) -> list[dict]:
 #   type_conversion yes       "Cannot convert argument N from X to Y"
 #   image_format    yes       Condition "format != p_src->format" @ image.cpp
 #                             blit_rect — the atlas-format errors, also missed
-#   io_input        no        json.cpp / config_file.cpp / dir_access.cpp: the
-#                             engine reporting bad INPUT, which is exactly what
-#                             a negative test hands it
+#   io_input        no        json.cpp / config_file.cpp / dir_access.cpp —
+#                             the engine rejecting INPUT it was handed. A
+#                             negative test provokes exactly this, but THE
+#                             SOURCE FILE CANNOT PROVE IT WAS MEANT TO: an
+#                             io_input line is REVIEWED DEBT, never "expected",
+#                             never evidence the run was clean
 #   exit_leak       no        "... at exit" — resources still in use, leaked
-#                             RIDs; long-standing debt, recorded not gated
+#                             RIDs; long-standing debt, recorded not gated,
+#                             and never a claim the leak is gone or harmless
 #   unclassified    no        everything else: VISIBLE debt, never dropped
 #
-# Non-blocking is not "exempt": every entry rides home in the report with its
-# repeat count, so a leak or an unclassified line can never be read as absent.
+# Non-blocking is not "exempt" and this is not a core/io exemption: image.cpp
+# and resource.cpp are core/io too and are classified on their own evidence.
+# Every entry rides home in the report with its repeat count, so a leak, an
+# io_input line or an unclassified one can never be read as absent — and a
+# report with none of the three blocking classes is not a release-readiness
+# claim about anything.
 _IO_INPUT_SRC = ("core/io/json.cpp", "core/io/config_file.cpp",
                  "core/io/dir_access.cpp")
 _BLOCKING_NATIVE = ("deferred_call", "type_conversion", "image_format")
@@ -167,9 +175,16 @@ def _native_errors(stderr: str) -> list[dict]:
     One entry per DISTINCT (class, message, location) with a `count`: the
     wave-4 encounter run printed the same blit_rect line eight times, and a
     report that repeats it eight times is a report nobody finishes reading.
-    Lines already claimed by `_parse_errors` (push_error, failed script load,
-    anything located in res://) are left to it, so no diagnostic is counted
-    twice and the existing `errors[]` keeps its meaning exactly.
+    Lines already claimed by `_parse_errors` are left to it, so no diagnostic
+    is counted twice and the existing `errors[]` keeps its meaning exactly.
+    What it claims is exactly: SCRIPT ERROR lines, `Failed to load script`, and
+    an ERROR whose location is a `push_error` frame. A res:// location is NOT
+    one of those tests — it only decorates a diagnostic the parser already kept
+    — so a plain ERROR pointing INTO user code belongs here, with its file and
+    line. Treating res:// as "owned" dropped that shape from both fields; no
+    stored report shows one (1254 report files scanned 2026-09-05, zero hits),
+    which makes it a latent hole rather than a measured loss, and a lossless
+    union has to hold by construction rather than by luck.
     """
     lines = stderr.splitlines()
     out: list[dict] = []
@@ -185,9 +200,10 @@ def _native_errors(stderr: str) -> list[dict]:
         at_func, at_src = (at.group(1).strip(), at.group(2)) if at else ("", "")
         if at:
             i += 1
-        if at_func == "push_error" or at_src.startswith("res://"):
+        if at_func.startswith("push_error"):     # `_parse_errors` kept it
             i += 1
             continue
+        in_user_code = at_src.startswith("res://")
         cls = _classify_native(msg, at_func, at_src)
         key = (cls, msg, at_func, at_src)
         if key in seen:
@@ -196,11 +212,30 @@ def _native_errors(stderr: str) -> list[dict]:
             entry = {"kind": "native", "native_class": cls,
                      "blocking": cls in _BLOCKING_NATIVE, "msg": msg,
                      "at": "%s (%s:%s)" % (at_func, at_src, at.group(3)) if at else None,
-                     "file": None, "line": None, "count": 1}
+                     "file": at_src if in_user_code else None,
+                     "line": int(at.group(3)) if in_user_code else None,
+                     "count": 1}
             seen[key] = entry
             out.append(entry)
         i += 1
     return out
+
+
+def _split_diagnostics(errs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split diagnostics into (gating, debt). Everything is KEPT; only the
+    verdict is scoped. Entries without a `blocking` key are the pre-existing
+    kinds and gate exactly as they always did.
+
+    This runs in the CALLER, not at the probe, on purpose. stderr exists
+    whether or not the run produced a snapshot, and the first version of this
+    hung the debt off the snapshot dict: a timed-out scenario then reported
+    "scene did not run" and threw the engine's account of that run away with
+    the empty probe. Splitting here keeps the evidence on the failing path,
+    where it is worth most.
+    """
+    gating = [e for e in errs if e.get("blocking", True)]
+    debt = [e for e in errs if not e.get("blocking", True)]
+    return gating, debt
 
 
 def _run(args: list[str], timeout: int, extra_env: dict | None = None,
@@ -920,18 +955,16 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
     errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
     # A deferred call that never ran, or an atlas blit the engine refused, is a
     # runtime error of the game's own making — it just has no res:// frame. It
-    # gates here exactly like a SCRIPT ERROR does; the non-gating classes stay
-    # attached to the report so they cannot be read as absent.
-    natives = _native_errors(stderr)
-    errs += [e for e in natives if e["blocking"]]
+    # comes back with the rest; `_split_diagnostics` in the caller decides which
+    # ones gate. Nothing is dropped here, so an empty or unparseable snapshot
+    # cannot take the evidence down with it.
+    errs += _native_errors(stderr)
     probe = {}
     if state_path.is_file():
         try:
             probe = json.loads(state_path.read_text())
         except json.JSONDecodeError:
             probe = {}
-    if probe:
-        probe["native_debt"] = [e for e in natives if not e["blocking"]]
     return probe, errs, timed_out
 
 
@@ -989,6 +1022,7 @@ def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) ->
     probe, errs, timed_out = _run_probe(
         dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action},
         capture_at=_capture_frames(frames))
+    errs, debt = _split_diagnostics(errs)
     ran = bool(probe) or not timed_out
     passed = not errs and ran
     if not ran:
@@ -998,7 +1032,7 @@ def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) ->
     else:
         summary = "Playtest surfaced %d runtime error(s)." % len(errs)
     return {"passed": passed, "frames": probe.get("frames", frames), "errors": errs,
-            "native_debt": probe.get("native_debt", []),
+            "native_debt": debt,
             "state": probe.get("nodes", {}), "behavior": None,
             "captures": probe.get("captures", []),
             "render_mode": probe.get("render_mode", "headless"),
@@ -1158,6 +1192,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     spec_path = dst.parent / "scenario_spec.json"
 
     scen_results, all_errors, captures, spec_errors = [], [], [], []
+    all_debt: list[dict] = []
     scen_nodes: list[dict] = []
     scen_frames: list[int] = []
     ran_any = crashed = False
@@ -1221,15 +1256,17 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
                 scene=sc_scene, capture_at=_capture_frames(sframes, timeline))
         finally:
             shutil.rmtree(sc_home, ignore_errors=True)
+        errs, debt = _split_diagnostics(errs)
         ran = bool(probe) or not timed_out
         ran_any = ran_any or ran
         if errs:
             crashed = True
         all_errors.extend({**e, "scenario": name} for e in errs)
+        all_debt.extend({**e, "scenario": name} for e in debt)
         asserts = probe.get("asserts", [])
         scen_passed = ran and not errs and bool(asserts) and all(a.get("passed") for a in asserts)
         scen_results.append({"name": name, "ran": ran, "errors": errs,
-                             "native_debt": probe.get("native_debt", []),
+                             "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
                              "pressed": any(e.get("press") for e in timeline),
                              "input_dead": False})
@@ -1300,6 +1337,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
         summary = ("Playtest ran clean but %d/%d scenario(s) failed assertions (advisory)."
                    % (n_fail, len(scen_results)))
     return {"passed": hard_passed, "frames": default_frames, "errors": all_errors,
+            "native_debt": all_debt,
             "state": last_state, "spec_used": True, "spec_errors": spec_errors,
             "captures": captures, "render_mode": render_mode,
             "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
@@ -1530,8 +1568,9 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
             # They are silent about what the ENGINE said: test_encounter exited
             # 0, printed PASS, and left a deferred call that never ran in its
             # stderr. Classified native errors close that hole — and only the
-            # blocking classes do, so a negative suite that provokes malformed
-            # JSON on purpose stays green with its errors on the record.
+            # blocking classes do, so a suite whose malformed JSON is the
+            # POINT stays green — with those lines on the record as debt, not
+            # as a finding that the input was meant to be malformed.
             natives = _native_errors(err)
             blocking = [e for e in natives if e["blocking"]]
             failed = rc != 0 or _has_failure_marker(out, err) or bool(blocking)
@@ -1556,7 +1595,8 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
         debt = sorted({e["native_class"] for r in results
                        for e in r["native_errors"] if not e["blocking"]})
         if debt:
-            summary += ("  Recorded, not gating: %s (see native_errors[])."
+            summary += ("  Native engine errors recorded, NOT gating (reviewed "
+                        "debt, not proof of intent): %s (see native_errors[])."
                         % ", ".join(debt))
         return {"passed": ok, "results": results, "discovered": scripts,
                 "summary": summary}

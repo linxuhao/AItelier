@@ -117,7 +117,7 @@ def test_a_suite_that_provokes_engine_errors_on_purpose_still_passes(monkeypatch
                                                   "(core/io/config_file.cpp:303)",
                                                   "(core/io/dir_access.cpp:425)"}
     assert all(e["blocking"] is False for e in io)
-    assert "Recorded, not gating: exit_leak, io_input" in report["summary"]
+    assert "recorded, NOT gating (reviewed debt, not proof of intent): exit_leak, io_input" in report["summary"]
 
 
 def test_the_exit_leaks_stay_observable_instead_of_reading_as_absent(monkeypatch, tmp_path):
@@ -142,7 +142,7 @@ def test_an_engine_error_nobody_classified_stays_visible_as_unclassified_debt(mo
     assert gh._parse_errors(noise) == []          # the old contract is untouched
     assert _classes(result) == ["unclassified"]
     assert result["passed"] is True
-    assert "Recorded, not gating: unclassified" in report["summary"]
+    assert "recorded, NOT gating (reviewed debt, not proof of intent): unclassified" in report["summary"]
 
 
 def test_a_push_error_stays_a_push_error_and_is_never_counted_twice(monkeypatch, tmp_path):
@@ -184,10 +184,13 @@ def test_the_playtest_probe_gates_on_the_same_classes(monkeypatch, tmp_path):
     monkeypatch.setattr(gh, "_run", fake_run)
     probe, errs, timed_out = gh._probe_once(["--path", str(tmp_path)], {}, state, 60, False)
 
-    assert sorted(e["native_class"] for e in errs) == ["deferred_call", "image_format"]
-    assert all(e["kind"] == "native" for e in errs)
-    # non-gating classes are not thrown away either — they ride in the report
-    assert [e["native_class"] for e in probe["native_debt"]] == ["exit_leak"]
+    gating, debt = gh._split_diagnostics(errs)
+    assert sorted(e["native_class"] for e in gating) == ["deferred_call", "image_format"]
+    assert all(e["kind"] == "native" for e in gating)
+    # non-gating classes are not thrown away either — they come back with the
+    # rest, and the CALLER scopes the verdict, so they survive an empty snapshot
+    assert [e["native_class"] for e in debt] == ["exit_leak"]
+    assert "native_debt" not in probe
 
 
 def test_a_blocking_native_error_hard_fails_a_scenario_playtest(monkeypatch, tmp_path):
@@ -203,3 +206,158 @@ def test_a_blocking_native_error_hard_fails_a_scenario_playtest(monkeypatch, tmp
 
     assert r["passed"] is False
     assert any(e["native_class"] == "deferred_call" for e in r["errors"])
+
+
+# ── ownership: what `_parse_errors` actually claims ────────────────────────
+#
+# `_parse_errors` keeps a diagnostic when the line is a SCRIPT ERROR, a failed
+# script load, or an ERROR located at a `push_error` frame. A res:// location on
+# a plain ERROR is NOT one of those tests — it only decorates a diagnostic the
+# parser already decided to keep. The first version of `_native_errors` skipped
+# every res://-located line "because `_parse_errors` owns it", so a plain ERROR
+# with a res:// frame fell out of BOTH fields.
+#
+# No stored report exhibits that shape (1254 report files scanned 2026-09-05,
+# zero hits), so this is a latent hole, not a measured loss. It is still a hole:
+# the union of the two structured fields has to be lossless by construction, not
+# by luck.
+
+def _union(result):
+    return result["errors"] + result["native_errors"]
+
+
+def test_a_plain_engine_error_located_in_user_code_survives_in_the_union(monkeypatch, tmp_path):
+    stderr = ("ERROR: Cannot convert argument 2 from Array to Array.\n"
+              "   at: _wire_hud (res://scripts/battle/battlefield.gd:41)\n")
+    result = _script_report(monkeypatch, tmp_path, stderr)["results"][0]
+
+    kept = [e for e in _union(result) if "Cannot convert argument" in e["msg"]]
+    assert len(kept) == 1                                   # once, not zero, not twice
+    assert kept[0]["kind"] == "native"
+    assert kept[0]["native_class"] == "type_conversion" and kept[0]["blocking"] is True
+    assert kept[0]["file"] == "res://scripts/battle/battlefield.gd"
+    assert kept[0]["line"] == 41                            # the location is kept too
+    assert result["passed"] is False
+
+
+def test_an_unknown_engine_error_located_in_user_code_survives_as_debt(monkeypatch, tmp_path):
+    stderr = ('ERROR: Condition "!is_inside_tree()" is true.\n'
+              "   at: _ready (res://scripts/ui/hud.gd:12)\n")
+    result = _script_report(monkeypatch, tmp_path, stderr)["results"][0]
+
+    kept = [e for e in _union(result) if "is_inside_tree" in e["msg"]]
+    assert len(kept) == 1
+    assert kept[0]["native_class"] == "unclassified" and kept[0]["blocking"] is False
+    assert kept[0]["file"] == "res://scripts/ui/hud.gd" and kept[0]["line"] == 12
+    assert result["passed"] is True                         # unknown is debt, not a verdict
+
+
+def test_the_lines_parse_errors_really_owns_are_never_counted_twice(monkeypatch, tmp_path):
+    """Old counts must not move: a push_error, a failed load and a SCRIPT ERROR
+    stay exactly one `errors[]` entry each and produce no native twin."""
+    stderr = ("ERROR: deliberate game error\n"
+              "   at: push_error (core/variant/variant_utility.cpp:1098)\n"
+              'ERROR: Failed to load script "res://scripts/broken.gd"\n'
+              "   at: push_error (core/variant/variant_utility.cpp:1098)\n"
+              "SCRIPT ERROR: Parse Error: Identifier \"foo\" not declared.\n"
+              "          at: GDScript::reload (res://scripts/broken.gd:7)\n")
+    result = _script_report(monkeypatch, tmp_path, stderr)["results"][0]
+
+    assert [e["kind"] for e in result["errors"]] == ["push_error", "load", "parse"]
+    assert result["native_errors"] == []
+    assert len(_union(result)) == 3
+
+
+# ── evidence retention when the run produced no snapshot ───────────────────
+#
+# The probe used to hang the non-gating classes off the snapshot dict, so a
+# timed-out or malformed run reported "scene did not run" and threw the
+# accompanying evidence away with the empty probe. stderr exists whether or not
+# a snapshot does; the split now happens in the caller, on the diagnostics.
+
+def _spec_run(monkeypatch, tmp_path, fixture, *, timeout=False, snapshot=None):
+    """Drive `_playtest_spec` for real down to `_run`, controlling the snapshot."""
+    state = tmp_path / "probe_state.json"
+
+    def fake_run(args, timeout_=0, extra_env=None, render=False, **kw):
+        if snapshot is not None:
+            state.write_text(snapshot)
+        if timeout:
+            raise subprocess.TimeoutExpired("godot", 10, output=b"", stderr=_stderr(fixture).encode())
+        return subprocess.CompletedProcess("godot", 0, "", _stderr(fixture))
+
+    monkeypatch.setattr(gh, "_run", lambda args, timeout=0, extra_env=None, render=False:
+                        fake_run(args, timeout, extra_env, render))
+    spec = {"scenarios": [{"name": "s", "timeline": [{"at": 8, "assert": []}]}]}
+    return gh._playtest_spec(tmp_path / "proj", spec, 30, 10)
+
+
+def test_a_run_with_no_snapshot_fails_and_keeps_every_diagnostic(monkeypatch, tmp_path):
+    """Timed out, no probe file: HARD fail, and the evidence still arrives."""
+    r = _spec_run(monkeypatch, tmp_path, "encounter_wave4.txt", timeout=True)
+
+    assert r["passed"] is False
+    assert r["behavior"]["scenarios"][0]["ran"] is False       # empty probe is NOT "ran"
+    assert sorted({e["native_class"] for e in r["errors"]
+                   if e["kind"] == "native"}) == ["deferred_call", "image_format"]
+    assert [e["native_class"] for e in r["native_debt"]] == ["exit_leak"]
+    assert r["native_debt"][0]["scenario"] == "s"
+    assert [e["native_class"] for e in
+            r["behavior"]["scenarios"][0]["native_debt"]] == ["exit_leak"]
+
+
+def test_a_malformed_snapshot_fails_and_keeps_every_diagnostic(monkeypatch, tmp_path):
+    """Unparseable probe JSON: no asserts, so nothing passes — and the engine's
+    own account of the run is still in the report."""
+    r = _spec_run(monkeypatch, tmp_path, "encounter_wave4.txt", snapshot="{not json")
+
+    assert r["passed"] is False                                # blocking natives
+    assert r["behavior"]["all_passed"] is False                # no asserts evaluated
+    assert r["behavior"]["scenarios"][0]["asserts"] == []
+    assert any(e["native_class"] == "deferred_call" for e in r["errors"])
+    assert [e["native_class"] for e in r["native_debt"]] == ["exit_leak"]
+
+
+def test_debt_only_output_with_no_snapshot_is_still_recorded_and_still_not_green(monkeypatch, tmp_path):
+    """Nothing blocking in stderr, no usable snapshot: the io_input/exit_leak
+    evidence is retained and the scenario does not pass on empty assertions."""
+    r = _spec_run(monkeypatch, tmp_path, "negative_user_storage.txt", snapshot="{}")
+
+    assert r["behavior"]["scenarios"][0]["passed"] is False
+    assert r["behavior"]["all_passed"] is False
+    assert sorted({e["native_class"] for e in r["native_debt"]}) == ["exit_leak", "io_input"]
+    assert r["errors"] == []                                   # debt never gates
+
+
+def test_the_legacy_playtest_keeps_the_debt_when_the_probe_is_empty(monkeypatch, tmp_path):
+    debt = {"kind": "native", "native_class": "exit_leak", "blocking": False,
+            "msg": "1 resources still in use at exit", "at": None,
+            "file": None, "line": None, "count": 1}
+    monkeypatch.setattr(gh, "_run_probe", lambda *a, **k: ({}, [debt], True))
+    r = gh._playtest_legacy(tmp_path / "proj", 30, "ui_accept", 10)
+
+    assert r["passed"] is False and "could not run" in r["summary"]
+    assert r["errors"] == []
+    assert [e["native_class"] for e in r["native_debt"]] == ["exit_leak"]
+
+
+def test_the_playtest_summary_names_the_debt_it_is_not_gating_on():
+    """The distilled summary is what an agent reads; a report field it never
+    prints is evidence nobody sees."""
+    from aitelier.tools.godot_compile.impl import _write_playtest_summary
+    import tempfile
+
+    pt = {"passed": True, "spec_used": True, "frames": 30, "errors": [],
+          "summary": "ran clean",
+          "native_debt": [{"kind": "native", "native_class": "exit_leak",
+                           "blocking": False, "count": 2,
+                           "msg": "1 resources still in use at exit",
+                           "at": "clear (core/io/resource.cpp:614)",
+                           "file": None, "line": None, "scenario": "s"}],
+          "behavior": {"all_passed": True, "scenarios": []}}
+    with tempfile.TemporaryDirectory() as d:
+        _write_playtest_summary(Path(d), pt)
+        md = (Path(d) / "playtest_summary.md").read_text(encoding="utf-8")
+
+    assert "Native engine errors (recorded, not gating)" in md
+    assert "exit_leak" in md and "resources still in use at exit" in md

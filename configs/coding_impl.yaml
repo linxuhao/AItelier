@@ -107,8 +107,8 @@ steps:
       files: ["test_report.json"]
       # Validate the actual artifact before routing. Missing runners and zero
       # collected tests are not code defects for the implementer to repair.
-      # Requires jsonschema installed (verified in the production image); the
-      # native tool has a reduced fallback that cannot enforce these constraints.
+      # jsonschema is a direct runtime dependency: the native tool fallback
+      # cannot enforce these constraints when that package is absent.
       inline_schema:
         type: object
         required: [passed, summary, failures]

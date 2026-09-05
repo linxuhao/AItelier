@@ -20,6 +20,10 @@ dependencies = [
     # which installs from PyPI while the dev box runs an editable checkout, so
     # no test on this machine can see it.
     "skillflow-py>=1.5.63",
+    # coding_impl requires the native json_schema tool's full validator; its
+    # import fallback checks only required fields and cannot enforce const.
+    # 3.0 adds Draft 6/7; 3.0.2 fixes boolean-versus-number const comparisons.
+    "jsonschema>=3.0.2",
     "fastapi>=0.136",
     "typer>=0.24",
     "litellm>=1.85",

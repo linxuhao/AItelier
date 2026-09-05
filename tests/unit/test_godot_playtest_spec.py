@@ -45,13 +45,21 @@ def test_read_spec_valid(tmp_path):
 def test_read_spec_no_scenarios_is_none(tmp_path):
     # A spec with no scenarios can't drive anything → treat as absent (legacy path).
     (tmp_path / "playtest_spec.yaml").write_text("scene: res://main.tscn\n")
-    assert read_spec(tmp_path)[0] is None
+    spec, info = read_spec(tmp_path)
+    assert spec is None
+    # EMPTY is not MALFORMED: no contract to run is the legacy path, not an error.
+    assert info["errors"] == []
 
 
-def test_read_spec_malformed_is_none(tmp_path):
-    # A broken monolith must never crash the gate.
+def test_a_malformed_monolith_is_a_hard_error_not_a_silent_downgrade(tmp_path):
+    """It used to return None, which made the gate run the legacy canned smoke
+    test and report a pass — for a contract that was authored and never read.
+    An unreadable contract is named instead."""
     (tmp_path / "playtest_spec.yaml").write_text("::: not yaml :::\n[unterminated")
-    assert read_spec(tmp_path)[0] is None
+    spec, info = read_spec(tmp_path)
+    assert spec is None
+    assert any("playtest_spec.yaml" in e for e in info["errors"])
+    assert info["source"] == "playtest_spec.yaml"
 
 
 # ── the split form ────────────────────────────────────────────────────────
@@ -244,3 +252,102 @@ def test_playtest_non_godot_skips(tmp_path):
     # No project.godot → not a game → pass without touching the builder.
     out = godot_playtest(project_root=str(tmp_path), out_dir=str(tmp_path))
     assert out["passed"] is True
+
+
+# -- duplicate mapping keys ------------------------------------------------
+# yaml.safe_load keeps the LAST value for a repeated key, so a timeline entry
+# with two `assert:` blocks loaded as the second block alone and the gate
+# counted "N/N passed" over the survivor. Measured 2026-09-05 on the game repo:
+# 18 scenario files, ~30 assertions discarded before the suite started.
+
+_DUP_SCENARIO = """name: dup
+timeline:
+- at: 10
+  assert:
+    Player.health: health == -999
+  assert:
+    Player.health: health == health
+"""
+
+
+def test_a_repeated_assert_key_is_refused_before_the_builder_is_asked(
+        tmp_path, monkeypatch):
+    """The exact live shape: the FIRST assert block would fail, the SECOND
+    passes, and last-one-wins made the run green over a discarded assertion.
+    It must hard-fail, and it must not reach the sidecar."""
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    _write_split(tmp_path, {"scene": "res://main.tscn"},
+                 [{"name": "alpha", "timeline": []}])
+    (tmp_path / "playtest" / "dup.yaml").write_text(_DUP_SCENARIO)
+    called = {"n": 0}
+
+    def fake_urlopen(req, timeout=0):
+        called["n"] += 1
+        return _FakeResp({"passed": True})
+
+    monkeypatch.setattr(
+        "aitelier.tools.godot_playtest.impl.urllib.request.urlopen", fake_urlopen)
+    out = godot_playtest(project_root=str(tmp_path), out_dir=str(tmp_path))
+    assert out["passed"] is False
+    assert called["n"] == 0, "a contract with a discarded assertion must not run"
+    errs = " ".join(json.loads(
+        (tmp_path / "playtest_report.json").read_text())["spec_load_errors"])
+    assert "dup.yaml" in errs and "assert" in errs and "line" in errs
+
+
+def test_a_duplicate_key_in_common_is_refused(tmp_path):
+    d = tmp_path / "playtest"
+    d.mkdir()
+    (d / "_common.yaml").write_text(
+        "scene: res://main.tscn\nsurface:\n  Player: [health]\nsurface:\n"
+        "  Player: [mana]\n")
+    (d / "alpha.yaml").write_text("name: alpha\ntimeline: []\n")
+    _spec, info = read_spec(tmp_path)
+    joined = " ".join(info["errors"])
+    assert "_common.yaml" in joined and "surface" in joined
+
+
+def test_a_duplicate_key_in_the_monolith_is_refused(tmp_path, monkeypatch):
+    (tmp_path / "project.godot").write_text("config_version=5\n")
+    (tmp_path / "playtest_spec.yaml").write_text(
+        "scenarios:\n  - name: s\n    timeline:\n      - at: 1\n"
+        "        assert: {A.b: b == 1}\n        assert: {A.c: c == 2}\n")
+    called = {"n": 0}
+
+    def fake_urlopen(req, timeout=0):
+        called["n"] += 1
+        return _FakeResp({"passed": True})
+
+    monkeypatch.setattr(
+        "aitelier.tools.godot_playtest.impl.urllib.request.urlopen", fake_urlopen)
+    out = godot_playtest(project_root=str(tmp_path), out_dir=str(tmp_path))
+    assert out["passed"] is False
+    assert called["n"] == 0, "the canned smoke test must not stand in for it"
+    errs = " ".join(json.loads(
+        (tmp_path / "playtest_report.json").read_text())["spec_load_errors"])
+    assert "assert" in errs and "playtest_spec.yaml" in errs
+
+
+def test_a_nested_duplicate_inside_a_timeline_entry_is_refused(tmp_path):
+    _write_split(tmp_path, {}, [{"name": "alpha", "timeline": []}])
+    (tmp_path / "playtest" / "nested.yaml").write_text(
+        "name: nested\ntimeline:\n- at: 3\n  actions: [ui_accept]\n"
+        "  actions: [ui_cancel]\n")
+    _spec, info = read_spec(tmp_path)
+    assert any("nested.yaml" in e and "actions" in e for e in info["errors"])
+
+
+def test_anchors_and_merge_keys_in_the_contract_still_load(tmp_path):
+    """Legal YAML must keep working: the strictness is about repeated keys, not
+    about anchors, and a contract that merges a shared block is not a duplicate."""
+    d = tmp_path / "playtest"
+    d.mkdir()
+    (d / "_common.yaml").write_text(
+        "defaults: &d\n  scene: res://main.tscn\n"
+        "scene: res://main.tscn\nsurface:\n  Player: [health]\n")
+    (d / "alpha.yaml").write_text(
+        "name: alpha\nbase: &b {at: 1}\ntimeline:\n- <<: *b\n  assert: {A.b: b == 1}\n")
+    spec, info = read_spec(tmp_path)
+    assert info["errors"] == []
+    assert spec["scenarios"][0]["timeline"][0]["at"] == 1
+

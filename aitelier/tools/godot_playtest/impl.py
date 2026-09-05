@@ -55,25 +55,40 @@ SPEC_FILE = "playtest_spec.yaml"
 # a HARD failure, never skipped. A play-test that quietly evaluates 25 of 26
 # scenarios and reports "all assertions passed" is a green light over an
 # absence — the very defect the split exists to remove.
+#
+# Same rule one level down: a REPEATED MAPPING KEY is a parse error here, not
+# last-one-wins. A timeline entry with two `assert:` blocks used to load as the
+# second block alone, so the first never ran and the gate still counted "N/N
+# passed". Measured 2026-09-05 on the game repo: 18 scenario files with
+# duplicates, ~30 authored assertions discarded before the suite started. The
+# reader is aitelier/strict_yaml.py.
 
 
 def _load_yaml(path: Path):
-    import yaml
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    # Strict on duplicate mapping keys; identical to safe_load otherwise.
+    from aitelier.strict_yaml import load_yaml_file_strict
+    return load_yaml_file_strict(path)
 
 
-def _read_monolith(repo: Path) -> dict | None:
-    """The single-file contract at the repo root. Best-effort: a malformed
-    monolith degrades to the legacy canned smoke test, which is the behaviour
-    every pre-split project already had."""
+def _read_monolith(repo: Path) -> tuple[dict | None, list[str]]:
+    """The single-file contract at the repo root. Returns ``(spec, errors)``.
+
+    ABSENT is not an error: a project that never authored one runs the legacy
+    canned smoke test, exactly as before. MALFORMED is an error. Degrading an
+    authored-but-unreadable contract to the canned smoke test reports a pass
+    for a suite that never ran — the same pass-on-absence shape the split
+    loader already refuses.
+    """
     p = repo / SPEC_FILE
     if not p.is_file():
-        return None
+        return None, []
     try:
         spec = _load_yaml(p)
-    except Exception:
-        return None
-    return spec if isinstance(spec, dict) and spec.get("scenarios") else None
+    except Exception as e:
+        return None, [f"{SPEC_FILE} unreadable: {type(e).__name__}: {e}"]
+    if isinstance(spec, dict) and spec.get("scenarios"):
+        return spec, []
+    return None, []
 
 
 def _read_split(repo: Path) -> tuple[dict | None, list[str]]:
@@ -164,7 +179,14 @@ def read_spec(repo: Path) -> tuple[dict | None, dict]:
                 f"both {SPEC_DIR}/ and {SPEC_FILE} exist — {SPEC_DIR}/ was used "
                 f"and {SPEC_FILE} was IGNORED. Fold it in or delete it.")
         return split, info
-    mono = _read_monolith(repo)
+    mono, mono_errors = _read_monolith(repo)
+    if mono_errors:
+        # Authored and unreadable: name it and hard-fail. Never fall through to
+        # the canned smoke test — that reports a pass for a contract that was
+        # written and never evaluated.
+        info["source"] = SPEC_FILE
+        info["errors"] = errors + mono_errors
+        return None, info
     if mono is not None:
         info["source"] = SPEC_FILE
         return mono, info

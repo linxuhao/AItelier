@@ -127,9 +127,11 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
     names = [n.strip() for n in str(scenario).split(",") if n.strip()]
     inline_doc = None
     if str(inline_scenario).strip():
-        import yaml as _yaml
+        # Strict on duplicate mapping keys: an inline probe that repeats
+        # `assert:` would otherwise run only its last block, silently.
+        from aitelier.strict_yaml import load_yaml_strict
         try:
-            doc = _yaml.safe_load(inline_scenario)
+            doc = load_yaml_strict(inline_scenario, source="inline_scenario")
         except Exception as exc:
             return {"error": f"inline_scenario is not valid YAML: {exc}"}
         if isinstance(doc, dict) and isinstance(doc.get("scenarios"), list):

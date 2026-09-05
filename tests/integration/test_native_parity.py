@@ -27,7 +27,7 @@ class _WS:
     def _get_secure_path(self, project_id):
         return self.base_path / project_id
 
-    def get_code_path(self, project_id):
+    def get_code_path(self, project_id, run_id=None):
         p = self.projects_base / project_id
         p.mkdir(parents=True, exist_ok=True)
         return p

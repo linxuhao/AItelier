@@ -118,6 +118,15 @@ def test_a_run_that_cannot_be_isolated_is_not_started(wired, monkeypatch):
                         lambda pid, outcome, **d: logged.update(
                             {"pid": pid, "outcome": outcome, **d}))
     monkeypatch.setattr(sched, "db", wired["db"])
+    # The two gates that stand between a picked project and a created run, and
+    # that this test is not about: a missing cross-config input and an
+    # unpublished seed. Both already have their own tests and both return
+    # BEFORE the run exists, so leaving them in place would have this test pass
+    # on the wrong refusal.
+    monkeypatch.setattr("core.run_launcher.missing_cross_config_inputs",
+                        lambda *a, **k: [])
+    monkeypatch.setattr("core.seed_publication.seed_is_published",
+                        lambda *a, **k: (True, ""))
     monkeypatch.setattr(sched.run_isolation, "ensure_for_run",
                         lambda *a, **k: (_ for _ in ()).throw(
                             IsolationUnavailable("worktree add failed: disk full")))

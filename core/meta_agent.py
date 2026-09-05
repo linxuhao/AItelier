@@ -1893,6 +1893,26 @@ def _endpoint_order(raw_model: str) -> list[str]:
 
 # ── MetaAgent ──────────────────────────────────────────────────────
 
+
+def _declare_isolation(db, run_id: str, project_id: str, config_name: str) -> None:
+    """Record what this run works in, at the moment it is created.
+
+    Every host path that creates a run declares one, including the repo-less
+    ones: resolution treats a run of this deployment with NO record as a
+    declaration that lost its record and refuses it, which is only a safe rule
+    if every creation path writes one.
+    """
+    from core import run_isolation
+    try:
+        from api.dependencies import get_config_registry
+        manifest = get_config_registry().get(config_name)
+        repo_mode = getattr(manifest, "repo_mode", "code") or "code"
+    except Exception:
+        repo_mode = "code"
+    run_isolation.ensure_for_run(db, run_id=run_id, project_id=project_id,
+                                 config_name=config_name, repo_mode=repo_mode)
+
+
 class MetaAgent:
     """Backend meta agent: tool-use loop over LiteLLM with streaming."""
 
@@ -2918,6 +2938,7 @@ class MetaAgent:
 
         try:
             run_id = sf.get_or_create_run(META_GRAPH, pid, {"project_id": pid})
+            _declare_isolation(self.db, run_id, pid, META_GRAPH)
         except Exception as e:
             self._log_error(f"get_or_create_run failed for {pid}: {e}")
             return {"status": "error", "project_id": pid,
@@ -4577,6 +4598,11 @@ class MetaAgent:
             "project_id": project_id,
             "brief": project.get("brief", ""),
         })
+        try:
+            _declare_isolation(self.db, run_id, project_id, config)
+        except Exception as e:
+            return {"error": f"could not isolate run {run_id}: "
+                             f"{type(e).__name__}: {e}"}
 
         run = sf.get_run(run_id)
         if run and run["status"] == "pending":

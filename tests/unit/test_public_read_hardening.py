@@ -40,7 +40,7 @@ class _Ws:
     def __init__(self, base: Path):
         self._base = base
 
-    def get_code_path(self, project_id):
+    def get_code_path(self, project_id, run_id=None):
         return self._base
 
     def _get_secure_path(self, project_id):

@@ -33,7 +33,8 @@ def get_workspace_manager() -> WorkspaceManager:
     return ws_instance
 
 
-def _existing_repo_code_path(project_id: str) -> str | bool | None:
+def _existing_repo_code_path(project_id: str,
+                             run_id: str | None = None) -> str | bool | None:
     """Code-path resolver handed to skillflow.
 
     skillflow's default layout keys the code repo by project_id
@@ -43,6 +44,13 @@ def _existing_repo_code_path(project_id: str) -> str | bool | None:
     (repo_apply commits the fix into the real repo), `from: repository` context,
     and project-level lint all target that repo. Returns None for new/clone
     projects so skillflow keeps its default projects_base/<id> location.
+
+    `run_id` is the isolation question and it is asked FIRST, because the
+    project-keyed answer is the shared checkout: a run in its own worktree, a
+    review reading an immutable snapshot and a run holding the checkout by lease
+    are three different roots for one `repo_path`. A run that predates isolation
+    (or one working directly in the checkout) answers "no opinion" and falls
+    through to exactly the logic below, unchanged.
 
     `repo_type='none'` answers **False** — "this run owns no code repository" —
     which is a different statement from None's "no opinion, use your default".
@@ -62,6 +70,15 @@ def _existing_repo_code_path(project_id: str) -> str | bool | None:
     positive statement about where the code IS; `repo_type='none'` only says this
     run produces none.
     """
+    if run_id:
+        # The RUN is asked first, and its answer is final when it has one. A
+        # missing worktree raises out of here rather than falling through to
+        # the project-keyed path below — which would hand the run the shared
+        # checkout it was isolated from, silently, which is the whole defect.
+        from core import run_isolation
+        answer = run_isolation.resolve_for_resolver(db_instance, run_id)
+        if answer is not None:
+            return answer
     try:
         info = db_instance.get_repo_info(project_id)
         path = info.get("repo_path") or None

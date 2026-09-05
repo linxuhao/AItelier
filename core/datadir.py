@@ -40,6 +40,18 @@ def projects_dir() -> Path:
     return Path(os.getenv("DPE_PROJECTS_PATH") or aitelier_home() / "projects")
 
 
+def worktrees_dir() -> Path:
+    """Per-run git worktrees. OUTSIDE every source checkout, deliberately.
+
+    A run tree inside the repository it was cut from would be seen by that
+    repository's own tooling (and by `git add -A`), which is the failure this
+    whole mechanism exists to remove. Under the data root, so it is on the
+    mounted volume and resolves to the same absolute path on host and in the
+    container.
+    """
+    return aitelier_home() / "worktrees"
+
+
 def configs_dir() -> Path:
     return aitelier_home() / "configs"
 

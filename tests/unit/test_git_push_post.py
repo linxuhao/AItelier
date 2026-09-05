@@ -168,7 +168,7 @@ def test_the_host_resolver_wins_over_the_default_token(tmp_path, monkeypatch):
     real = _repo(tmp_path / "actual-code")
     import aitelier.tools.git_push_post.impl as impl
     import api.dependencies as deps
-    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: str(real))
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid, run_id=None: str(real))
 
     assert impl._code_path("proj", str(tmp_path / "wrong")) == real
 
@@ -178,7 +178,7 @@ def test_it_falls_back_to_the_token_when_the_resolver_has_no_answer(tmp_path, mo
     # where the default token IS the code path.
     import aitelier.tools.git_push_post.impl as impl
     import api.dependencies as deps
-    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: None)
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid, run_id=None: None)
 
     assert impl._code_path("proj", str(tmp_path)) == tmp_path.resolve()
 
@@ -186,7 +186,7 @@ def test_it_falls_back_to_the_token_when_the_resolver_has_no_answer(tmp_path, mo
 def test_no_path_from_either_source_skips(monkeypatch):
     import aitelier.tools.git_push_post.impl as impl
     import api.dependencies as deps
-    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: None)
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid, run_id=None: None)
 
     r = git_push_post(project_id="proj", project_root="")
     assert r["action"] == "skip" and "no code path" in r["detail"]
@@ -197,7 +197,7 @@ def test_the_not_a_repo_skip_names_the_path(tmp_path, monkeypatch):
     # a misresolved path — which is why the same message on git_sync_pre went
     # unnoticed across every existing-repo run.
     import api.dependencies as deps
-    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: None)
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid, run_id=None: None)
 
     r = git_push_post(project_id="proj", project_root=str(tmp_path))
     assert r["action"] == "skip"
@@ -211,7 +211,7 @@ def test_it_pushes_the_resolved_repo_not_the_token_one(tmp_path, monkeypatch):
     _git(real, "remote", "add", "origin", str(bare))
     decoy = _repo(tmp_path / "decoy")          # no remote: would skip if used
     import api.dependencies as deps
-    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: str(real))
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid, run_id=None: str(real))
 
     r = git_push_post(project_id="proj", project_root=str(decoy))
 
@@ -231,7 +231,7 @@ def test_a_repoless_run_is_skipped_and_the_token_does_not_step_in(tmp_path,
     """
     import aitelier.tools.git_push_post.impl as impl
     import api.dependencies as deps
-    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid: False)
+    monkeypatch.setattr(deps, "_existing_repo_code_path", lambda pid, run_id=None: False)
 
     real = _repo(tmp_path / "not-ours")
     assert impl._code_path("proj", str(real)) is None

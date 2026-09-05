@@ -176,7 +176,9 @@ def test_git_sync_pre_diverged_pipeline_fails_with_message(tmp_path):
         id="git_sync_pre",
         step_type="tool",
         tool_name="git_sync_pre",
-        tool_params={"project_root": str(local)},
+        # `policy: "pull"` — this test's subject IS the fetch/pull, which is
+        # now opted into by name (default: no network).
+        tool_params={"project_root": str(local), "policy": "pull"},
         transitions=[
             Transition(to="next_step", match={"synced": True}),
         ],

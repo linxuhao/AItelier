@@ -41,7 +41,8 @@ def _skip(detail: str) -> dict:
     return {"pushed": False, "action": "skip", "detail": detail}
 
 
-def _code_path(project_id: str, project_root: str) -> Path | None:
+def _code_path(project_id: str, project_root: str,
+                run_id: str = "") -> Path | None:
     """Where this project's code actually lives.
 
     `$PROJECT_ROOT` expands to skillflow's DEFAULT layout — `projects_base/<id>`
@@ -59,7 +60,7 @@ def _code_path(project_id: str, project_root: str) -> Path | None:
     if project_id:
         try:
             from api.dependencies import _existing_repo_code_path
-            resolved = _existing_repo_code_path(project_id)
+            resolved = _existing_repo_code_path(project_id, run_id or None)
         except Exception:
             resolved = None
         if resolved is False:
@@ -74,7 +75,7 @@ def _code_path(project_id: str, project_root: str) -> Path | None:
 
 
 def git_push_post(*, project_root: str = "", remote: str = "origin",
-                  project_id: str = "", **_ignored) -> dict:
+                  project_id: str = "", run_id: str = "", **_ignored) -> dict:
     # The whole contract in one wrapper: NOTHING that goes wrong in a push may
     # take down (or wedge) a run that already passed review. The Timeout shim
     # covers one class; a raised OSError (git binary missing, fork failure)
@@ -82,14 +83,15 @@ def git_push_post(*, project_root: str = "", remote: str = "origin",
     # run never fails, it just never reaches done.
     try:
         return _git_push_post(project_root=project_root, remote=remote,
-                              project_id=project_id)
+                              project_id=project_id, run_id=run_id)
     except Exception as e:
         return {"pushed": False, "action": "error",
                 "error": f"{type(e).__name__}: {e}"[:400]}
 
 
-def _git_push_post(*, project_root: str, remote: str, project_id: str) -> dict:
-    root = _code_path(project_id, project_root)
+def _git_push_post(*, project_root: str, remote: str, project_id: str,
+                   run_id: str = "") -> dict:
+    root = _code_path(project_id, project_root, run_id)
     if root is None:
         return _skip("no code path: neither the host resolver nor "
                      "$PROJECT_ROOT gave one")

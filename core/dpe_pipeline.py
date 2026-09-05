@@ -608,8 +608,16 @@ class PipelineEngine:
         the prompt assembler, so the host must not invent one here: skillflow's
         own code-path resolver answers the same question and the two have to
         agree about the same run.
+
+        And the run is now part of the question. This value OUTRANKS the
+        engine's own resolution on the agent-tool path (`_exec_tool` passes it
+        as `project_root`), so a project-keyed answer here would put every
+        agent-invoked tool in the shared checkout while the hooks wrote to the
+        run worktree — the two halves of one step disagreeing about which tree
+        they are in.
         """
-        return workspace.get_code_path(project_id)
+        return workspace.get_code_path(
+            project_id, run_id=getattr(self, "_run_id", "") or None)
 
     def _refuse_if_run_cancelled(self, step_id: str, attempt: int) -> None:
         """Stop spending on a run somebody stopped. Cooperative, at the cheapest

@@ -99,6 +99,16 @@ steps:
     tool_name: "git_sync_pre"
     tool_params:
       project_root: "$PROJECT_ROOT"
+      # Stated, not inherited. Until per-run isolation, `$PROJECT_ROOT`
+      # expanded to projects_base/<project_id> without asking the code-path
+      # resolver — which for an existing-repo project is not the repository, so
+      # this step has been taking its "not a git repository" skip and doing
+      # nothing at all. Now that the token resolves the real tree, leaving the
+      # policy implicit would turn a routing fix into a new fetch and pull of
+      # somebody's repository. A run worktree refuses to sync whatever this
+      # says (it is pinned to its base commit); set "pull" to restore the
+      # syncing behaviour for a direct-mode checkout that wants it.
+      policy: "skip"
     transitions:
       - to: "1"
         match: { synced: true }

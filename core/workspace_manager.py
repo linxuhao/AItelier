@@ -365,6 +365,23 @@ class WorkspaceManager:
             )
         return res.stdout.strip()
 
+    def _require_no_foreign_lease(self, code_path) -> None:
+        """An operator mutation is a write to the same tree a run is using.
+
+        The lease exists to make direct mode exclusive for the WHOLE run, not
+        just for the seconds `repo_apply` is committing — so these host APIs
+        honour it too. A shell running `git` in that directory by hand is
+        outside what any of this can reach, and saying so is more useful than
+        implying otherwise.
+        """
+        try:
+            from core import run_isolation
+            from api.dependencies import get_db_manager
+            db = get_db_manager()
+        except Exception:
+            return
+        run_isolation.require_no_foreign_lease(db, code_path)
+
     def _require_git_repo(self, project_id: str) -> Path:
         code_path = self.get_code_path(project_id)
         if code_path is None:
@@ -381,6 +398,7 @@ class WorkspaceManager:
                         name: str = "origin") -> dict:
         """Add the remote, or update its URL if it already exists."""
         code_path = self._require_git_repo(project_id)
+        self._require_no_foreign_lease(code_path)
         existing = subprocess.run(
             ["git", "remote"], cwd=code_path, capture_output=True, text=True,
             env=_GIT_ENV,
@@ -396,6 +414,7 @@ class WorkspaceManager:
     def repo_commit(self, project_id: str, message: str) -> dict:
         """Stage all changes and commit. No-op (not an error) when clean."""
         code_path = self._require_git_repo(project_id)
+        self._require_no_foreign_lease(code_path)
         self._run_git_checked(code_path, "add", "-A")
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -410,6 +429,7 @@ class WorkspaceManager:
                   set_upstream: bool = True) -> dict:
         """Push a branch to origin (sets upstream by default)."""
         code_path = self._require_git_repo(project_id)
+        self._require_no_foreign_lease(code_path)
         if not branch:
             branch = self._run_git_checked(
                 code_path, "rev-parse", "--abbrev-ref", "HEAD")
@@ -429,6 +449,7 @@ class WorkspaceManager:
         "push current work to a feature branch, then open a PR" flow.
         """
         code_path = self._require_git_repo(project_id)
+        self._require_no_foreign_lease(code_path)
         args = ["push"]
         if set_upstream:
             args += ["--set-upstream"]
@@ -443,6 +464,7 @@ class WorkspaceManager:
         diverged — the user should use force-sync deliberately in that case.
         """
         code_path = self._require_git_repo(project_id)
+        self._require_no_foreign_lease(code_path)
         out = self._run_git_checked(code_path, "pull", "--ff-only")
         return {"pulled": True, "detail": out}
 
@@ -453,6 +475,7 @@ class WorkspaceManager:
         so the discarded state is recoverable.
         """
         code_path = self._require_git_repo(project_id)
+        self._require_no_foreign_lease(code_path)
         backup_ref = None
         if backup:
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -476,7 +499,8 @@ class WorkspaceManager:
         """获取 project 代码仓库路径。"""
         return self.get_code_path(project_id)
 
-    def get_code_path(self, project_id: str) -> Path | None:
+    def get_code_path(self, project_id: str,
+                      run_id: str | None = None) -> Path | None:
         """The project's code repository, or None if it DECLARES it has none.
 
         从 DB 读取 repo_path, 如未设置则默认为 ~/.AItelier/projects/{project_id}/。
@@ -500,6 +524,18 @@ class WorkspaceManager:
         `against_project` shape, a run that emits no code but reads a real repo.
         """
         default = self.projects_base / project_id
+        if run_id:
+            # Same question, same order, same failure mode as
+            # api.dependencies._existing_repo_code_path — they must not
+            # disagree about one run, and this one feeds the prompt and the
+            # host tool path while that one feeds the engine.
+            from core import run_isolation
+            from api.dependencies import get_db_manager as _gdb
+            answer = run_isolation.resolve_for_resolver(_gdb(), run_id)
+            if answer is False:
+                return None
+            if answer:
+                return Path(answer)
         try:
             from api.dependencies import get_db_manager
             db = get_db_manager()

@@ -17,7 +17,7 @@ import pytest
 
 from core import datadir, run_isolation as ri
 from core.db_manager import DBManager
-from core.exceptions_isolation import CheckoutLeased
+from core.run_isolation import CheckoutLeased
 from skillflow.exceptions import IsolationUnavailable
 
 

@@ -323,6 +323,21 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
                     "config_name": config_name, "message": str(e)}
 
     run_id = sf.get_or_create_run(config_name, project_id, {"project_id": project_id})
+
+    # Same decision as the poller makes for scheduler-owned runs, made here for
+    # the ones the butler drives inline (code_review, coding_task, the
+    # converters). A review launched `against_project` lands on read_snapshot:
+    # it owns no repository and reads a real one, and the snapshot is what makes
+    # "reads a real one" mean a tree that cannot move under it.
+    try:
+        from core import run_isolation
+        run_isolation.ensure_for_run(
+            db, run_id=run_id, project_id=project_id, config_name=config_name,
+            repo_mode=manifest.repo_mode)
+    except Exception as e:
+        return {"status": "error",
+                "message": f"could not isolate run {run_id}: "
+                           f"{type(e).__name__}: {e}"}
     run = sf.get_run(run_id)
     if run and run["status"] == "pending":
         # CHECK-THEN-ACT, and the poller is the other actor: it can start this

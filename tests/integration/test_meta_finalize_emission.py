@@ -133,6 +133,17 @@ def _build_meta_run(tmp_path):
     db.ensure_project("p", name="Meta E2E")
     ws = WorkspaceManager(base_path=str(ws_base))
     run_id = sf.create_run(graph.name, {"project_id": "p"})
+    # Declare this run's isolation exactly as a launch does. These harnesses
+    # patch `get_skillflow` to their own engine, so from the host's point of
+    # view the run below IS a run of this deployment — and a run of this
+    # deployment with no isolation record is refused, deliberately, because
+    # that is the shape of a declaration that lost its record. Provisioning
+    # here is not a workaround for the test: it is the line production runs.
+    from core import run_isolation as _ri
+    from api.dependencies import get_db_manager as _gdb
+    _ri.ensure_for_run(_gdb(), run_id=run_id, project_id="p",
+                       config_name=graph.name, repo_mode="code")
+
     sf.start_run(run_id)
     return sf, db, ws, run_id
 

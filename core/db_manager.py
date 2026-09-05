@@ -130,12 +130,44 @@ class DBManager:
             """)
 
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS run_isolation (
+                    run_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    config_name TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    source_repo TEXT DEFAULT NULL,
+                    worktree_path TEXT DEFAULT NULL,
+                    branch TEXT DEFAULT NULL,
+                    base_sha TEXT DEFAULT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    released_at DATETIME DEFAULT NULL,
+                    disposition TEXT DEFAULT NULL,
+                    note TEXT DEFAULT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS checkout_leases (
+                    canonical_checkout TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    config_name TEXT NOT NULL,
+                    acquired_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS run_isolation_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+            self._stamp_run_isolation_since(conn)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     email TEXT PRIMARY KEY,
@@ -1498,6 +1530,20 @@ class DBManager:
             return [dict(r) for r in rows]
 
     # ── Settings ──
+
+    def _stamp_run_isolation_since(self, conn) -> None:
+        """Record WHEN this database started carrying isolation decisions.
+
+        Without it, "this run has no isolation record" is ambiguous between a
+        run that predates the feature (whose only answer was ever the
+        project-keyed one) and a run that was declared isolated and lost its
+        record (which must fail closed, not quietly work in the shared
+        checkout). INSERT OR IGNORE: written once, never moved, because moving
+        it would retroactively make old runs look new.
+        """
+        conn.execute(
+            "INSERT OR IGNORE INTO run_isolation_meta (key, value) "
+            "VALUES ('since', datetime('now'))")
 
     def get_scheduler_settings(self) -> dict:
         """Get all scheduler settings as a dict."""

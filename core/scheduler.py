@@ -168,6 +168,8 @@ _user_scheduler_map: dict[str, AsyncIOScheduler] = {}
 # the loop AND threads; acquire(False) returns False for the same loop-thread
 # (re-entrant tick during an await) and for any worker thread. Per project (not
 # global) so multi-tenant ticks on DIFFERENT runs still proceed concurrently.
+from core import run_isolation
+
 _tick_locks: dict[str, threading.Lock] = {}
 _tick_locks_meta = threading.Lock()
 
@@ -561,10 +563,38 @@ def _get_or_create_skillflow_run(project_id: str) -> str | None:
         "project_id": project_id,
         "brief": project.get("brief", ""),
     })
+
+    # Decide and provision what this run works in, BEFORE it can claim a step.
+    # Idempotent, so a resume returns the same tree and touches no git; and it
+    # is the last thing that can refuse, because everything after this point
+    # writes somewhere.
+    #
+    # Fail CLOSED and say so in the tick log. The alternative — start the run
+    # anyway — is a run advancing against the shared checkout, which is the
+    # defect isolation exists to remove, and it would be invisible.
+    try:
+        run_isolation.ensure_for_run(
+            db, run_id=run_id, project_id=project_id, config_name=config_name,
+            repo_mode=_repo_mode_of(config_name))
+    except Exception as e:
+        tick_log(project_id, "isolation_failed", run=run_id[:8],
+                 reason=f"{type(e).__name__}: {e}"[:300])
+        return None
+
     run = sf.get_run(run_id)
     if run and run["status"] == "pending":
         sf.start_run(run_id)
     return run_id
+
+
+def _repo_mode_of(config_name: str) -> str:
+    """What the CONFIG declares about producing code — never inferred."""
+    try:
+        from api.dependencies import get_config_registry
+        manifest = get_config_registry().get(config_name)
+        return getattr(manifest, "repo_mode", "code") or "code"
+    except Exception:
+        return "code"
 
 
 def recover_claims_on_startup():

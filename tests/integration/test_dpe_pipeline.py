@@ -45,7 +45,7 @@ class MockWorkspace:
     def _get_secure_path(self, project_id: str) -> Path:
         return self.base_path / project_id
 
-    def get_code_path(self, project_id: str) -> Path:
+    def get_code_path(self, project_id: str, run_id: str | None = None) -> Path:
         code_path = self.projects_base / project_id
         code_path.mkdir(parents=True, exist_ok=True)
         return code_path

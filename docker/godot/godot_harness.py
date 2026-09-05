@@ -1375,8 +1375,18 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
         _import_resources(dst, timeout=min(timeout, 300))
         results = []
         for rel in scripts:
+            # ── EVERY ENTRY POINT GETS ITS OWN user:// ────────────────────
+            # Godot derives user:// from $HOME, and $HOME was the container's,
+            # so every entry point in every request wrote its saves and
+            # settings into one app_userdata/<project>/: a suite that saves
+            # changed what the NEXT suite booted into, and — because the
+            # container outlives a request — what the next REQUEST booted
+            # into. Same order-dependence the play-test fixed per scenario
+            # above; the fix is the same, one throwaway HOME per invocation.
+            sc_home = tempfile.mkdtemp(prefix="godot_home_")
             try:
-                cp = _run(["--path", str(dst), "-s", rel], timeout=timeout)
+                cp = _run(["--path", str(dst), "-s", rel], timeout=timeout,
+                          extra_env={"HOME": sc_home})
                 rc, out, err = cp.returncode, cp.stdout, cp.stderr
             except subprocess.TimeoutExpired as e:
                 # TimeoutExpired CARRIES the output produced before the kill —
@@ -1394,6 +1404,10 @@ def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
                 rc = 124
                 out = _s(e.stdout)
                 err = (_s(e.stderr) + "\ntimed out after %ss" % timeout).lstrip()
+            finally:
+                # Pass, fail, timeout or an error nobody predicted: the home
+                # goes, or the "throwaway" one accumulates in the sidecar.
+                shutil.rmtree(sc_home, ignore_errors=True)
             failed = rc != 0 or _has_failure_marker(out, err)
             results.append({"script": rel, "returncode": rc, "passed": not failed,
                             "stdout": _script_log_excerpt(out),

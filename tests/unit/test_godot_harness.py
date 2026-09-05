@@ -624,3 +624,152 @@ def test_script_long_logs_keep_first_error_and_summary(monkeypatch, tmp_path, ti
     if times_out:
         assert result["returncode"] == 124
         assert result["stderr"].endswith("timed out after 140s")
+
+
+# ── per-invocation user:// isolation (script gate) ─────────────────────────
+#
+# Godot derives user:// from $HOME. The script gate ran every entry point with
+# the container's HOME, so all of them — and every later request, since the
+# sidecar container outlives one — shared one app_userdata/<project>/. A suite
+# that saves therefore decided what the next suite booted into. That is the
+# order-dependence the play-test already fixed per scenario; these tests hold
+# the script gate to the same property, with subprocess stubbed (no Godot).
+
+def _script_project(tmp_path, monkeypatch, entries=("t_a.gd", "t_b.gd")):
+    """A project whose entry points are discovered, with the copy step stubbed.
+
+    `_copy_project` hands back a dir NESTED in tmp_path so run_script's closing
+    `rmtree(dst.parent)` stays inside it — returning the project itself would
+    delete the whole pytest run directory (learned the hard way in 62a5a27).
+
+    HOME is redirected for the same reason: these tests are meaningful only if
+    they can be run against an UNFIXED harness, and an unfixed harness hands
+    the run the ambient HOME — the developer's own, whose user:// the fake
+    would then write its sentinel into.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "container_home"))
+    (tmp_path / "container_home").mkdir()
+    (tmp_path / "project.godot").write_text("[application]\n")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for name in entries:
+        (tests / name).write_text("extends SceneTree\n")
+    work = tmp_path / "work" / "proj"
+    work.mkdir(parents=True)
+    monkeypatch.setattr(gh, "_copy_project", lambda proj: work)
+    monkeypatch.setattr(gh, "_import_resources", lambda dst, timeout=0: None)
+    return work
+
+
+def _record_homes(monkeypatch, seen, behaviour=None):
+    """Stub `subprocess.run` — NOT `_run` — so the real env assembly is tested.
+
+    Each fake invocation writes the save file a suite that saves would leave in
+    user://, and records what it found there on entry: the sentinel is how a
+    later invocation would betray that it inherited an earlier one's HOME.
+    """
+    import subprocess
+
+    def fake_run(cmd, **kw):
+        env = kw["env"]
+        home = Path(env["HOME"])
+        seen.append({"home": home,
+                     "found": sorted(p.name for p in home.iterdir()),
+                     "token": env.get("AITELIER_HARNESS_TOKEN"),
+                     "existed": home.is_dir()})
+        (home / "save_1.json").write_text('{"gold": 1}')
+        if behaviour is not None:
+            return behaviour(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "PASS all\n", "")
+
+    monkeypatch.setattr(gh.subprocess, "run", fake_run)
+    return seen
+
+
+def test_each_script_entry_point_runs_in_its_own_home(monkeypatch, tmp_path):
+    _script_project(tmp_path, monkeypatch)
+    container_home = tmp_path / "container_home"
+    monkeypatch.setenv("AITELIER_HARNESS_TOKEN", "inherited")
+    seen = _record_homes(monkeypatch, [])
+
+    r = gh.run_script(str(tmp_path), [], timeout=30)
+
+    assert r["passed"] is True
+    assert [x["script"] for x in r["results"]] == ["res://tests/t_a.gd",
+                                                   "res://tests/t_b.gd"]
+    assert len(seen) == 2
+    first, second = seen
+    # Distinct homes, neither of them the container's.
+    assert first["home"] != second["home"]
+    assert container_home not in (first["home"], second["home"])
+    assert container_home not in first["home"].parents
+    # The sentinel the first suite saved is invisible to the second: it did not
+    # start in a directory anyone else had written to.
+    assert first["found"] == [] and second["found"] == []
+    assert (container_home / "save_1.json").exists() is False
+    # Every other inherited variable still reaches the run.
+    assert first["token"] == second["token"] == "inherited"
+    # Nothing left behind on the happy path.
+    assert not first["home"].exists() and not second["home"].exists()
+
+
+def test_a_second_request_does_not_inherit_the_first_requests_home(monkeypatch, tmp_path):
+    """The sidecar container outlives a request, so cross-REQUEST leakage was
+    the same defect one call further out."""
+    _script_project(tmp_path, monkeypatch, entries=("t_only.gd",))
+    seen = _record_homes(monkeypatch, [])
+
+    gh.run_script(str(tmp_path), [], timeout=30)
+    gh.run_script(str(tmp_path), [], timeout=30)
+
+    assert len(seen) == 2
+    assert seen[0]["home"] != seen[1]["home"]
+    assert seen[1]["found"] == []           # the first request's save is gone
+    assert not seen[0]["home"].exists()
+
+
+@pytest.mark.parametrize("outcome", ["failed", "timeout"])
+def test_a_red_script_still_reports_and_still_cleans_its_home(monkeypatch, tmp_path, outcome):
+    """Cleanup must not cost the gate its evidence: a red run keeps its own
+    account of the failure, and its home goes anyway."""
+    import subprocess
+    _script_project(tmp_path, monkeypatch, entries=("t_red.gd",))
+    stdout = "PASS test_a\nFAILED: test_b\n"
+    stderr = ('SCRIPT ERROR: Invalid access to property "hp"\n'
+              "          at: _run (res://tests/t_red.gd:12)\n")
+
+    def behaviour(cmd):
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 30, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(cmd, 1, stdout, stderr)
+
+    seen = _record_homes(monkeypatch, [], behaviour)
+
+    r = gh.run_script(str(tmp_path), [], timeout=30)
+
+    res = r["results"][0]
+    assert r["passed"] is False and res["passed"] is False
+    assert res["returncode"] == (124 if outcome == "timeout" else 1)
+    assert "FAILED: test_b" in res["stdout"]            # the run's own account
+    assert "t_red.gd:12" in res["stderr"]               # ...and where it died
+    assert any(e["file"] == "res://tests/t_red.gd" for e in res["errors"])
+    if outcome == "timeout":
+        assert res["stderr"].endswith("timed out after 30s")
+    assert len(seen) == 1 and not seen[0]["home"].exists()
+
+
+def test_an_unexpected_error_surfaces_and_leaves_no_home_behind(monkeypatch, tmp_path):
+    """An error nobody predicted must still reach the caller — swallowing it
+    here would turn a broken sidecar into a silent pass — and must not leak the
+    home it was holding."""
+    _script_project(tmp_path, monkeypatch, entries=("t_boom.gd",))
+
+    def behaviour(cmd):
+        raise OSError("cannot fork")
+
+    seen = _record_homes(monkeypatch, [], behaviour)
+
+    with pytest.raises(OSError, match="cannot fork"):
+        gh.run_script(str(tmp_path), [], timeout=30)
+
+    assert len(seen) == 1 and not seen[0]["home"].exists()

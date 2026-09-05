@@ -12,6 +12,8 @@ Scope of the strictness, deliberately narrow:
 
 * The loader subclasses SafeLoader FOR THIS CALL ONLY. yaml.SafeLoader is never
   mutated, so every other yaml user in the process keeps stock behaviour.
+* EVERY mapping the document composes is checked, including one that exists
+  only as a ``<<`` value and is therefore never constructed at all.
 * Anchors, aliases and ``<<`` merge keys keep their legal semantics. Duplicates
   are judged on the mapping AS AUTHORED, captured while the document is composed,
   so an explicit key that legally overrides a merged one is not reported and a
@@ -38,39 +40,47 @@ class _StrictLoader(yaml.SafeLoader):
 
     def __init__(self, stream):
         super().__init__(stream)
-        # Authored key nodes per mapping node, captured at COMPOSE time.
-        #
-        # The node graph cannot be read at construction time and still be called
-        # "authored": SafeConstructor.flatten_mapping resolves `<<` by editing the
-        # merged mapping IN PLACE, so a shared anchored node reached later through
-        # an alias already carries the keys merged into it. That produced a false
-        # duplicate for the legal
-        #     base: &a {x: 1}
-        #     consumer:
-        #       <<: &b {<<: *a, x: 2}
-        #     reused: *b
-        # where `&b` was flattened to [x: 1, x: 2] while building `consumer`, and
-        # `reused: *b` then read that mutated node. Composition of the whole
-        # document finishes before any construction starts, so this snapshot is
-        # what the author actually wrote.
-        self._authored: dict = {}
+        # The key/value pairs of every mapping this document composes, AS
+        # AUTHORED, in compose order.
+        self._authored: list = []
 
     def compose_mapping_node(self, anchor):
         node = super().compose_mapping_node(anchor)
-        self._authored[node] = list(node.value)
+        self._authored.append(list(node.value))
         return node
 
-    def construct_mapping(self, node, deep=False):
+    def construct_document(self, node):
+        """Check every authored mapping before anything can consume one.
+
+        The check cannot live in construct_mapping, for two reasons that both
+        end in a silently discarded key:
+
+        * A mapping used ONLY as a ``<<`` value is never constructed.
+          flatten_mapping splices its pairs into the consumer, so
+          ``consumer: {<<: {a: 1, a: 2}}`` loaded as ``{a: 2}`` with nothing
+          reported. Constructed-node coverage is not authored-node coverage.
+        * flatten_mapping edits a merged mapping IN PLACE, so a shared node
+          reached later through an alias no longer shows what was written.
+
+        Composition of the whole document finishes before construction starts,
+        so ``_authored`` is every mapping, exactly as it was authored.
+        """
+        for pairs in self._authored:
+            self._reject_duplicate_keys(pairs)
+        self._authored.clear()
+        return super().construct_document(node)
+
+    def _reject_duplicate_keys(self, pairs) -> None:
         seen: dict = {}
-        for key_node, _value_node in self._authored.get(node, node.value):
+        for key_node, _value_node in pairs:
             if key_node.tag == "tag:yaml.org,2002:merge":
                 # << is a directive, not data: repeats and overrides are legal.
                 continue
-            key = self.construct_object(key_node, deep=deep)
+            key = self.construct_object(key_node)
             try:
                 first = seen.get(key)
             except TypeError:
-                # Unhashable key. SafeConstructor reports that itself, below.
+                # Unhashable key. SafeConstructor reports that itself, later.
                 continue
             if first is not None:
                 raise DuplicateKeyError(
@@ -81,7 +91,6 @@ class _StrictLoader(yaml.SafeLoader):
                     % (key, self.aitelier_source, key_node.start_mark.line + 1,
                        first.line + 1))
             seen[key] = key_node.start_mark
-        return super().construct_mapping(node, deep=deep)
 
 
 def load_yaml_strict(text: str, source: str = "<yaml>"):

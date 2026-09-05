@@ -214,3 +214,61 @@ def test_a_duplicate_in_a_cyclic_mapping_is_still_rejected():
     with pytest.raises(DuplicateKeyError):
         load_yaml_strict("a: &a\n  self: *a\n  k: 1\n  k: 2\n", "cyc.yaml")
 
+
+# -- mappings that are only ever MERGED, never constructed ------------------
+# REGRESSION, measured by the director on f52cf0e: the check ran inside
+# construct_mapping, so it only ever saw mappings SafeLoader constructs. A
+# mapping used only as a `<<` value is never constructed — flatten_mapping
+# splices its pairs into the consumer — so `consumer: {<<: {a: 1, a: 2}}`
+# loaded as {a: 2} and the authored `a: 1` was discarded with nothing reported.
+# Constructed-node coverage was mistaken for authored-node coverage. Every
+# composed mapping is now checked before any of them can be consumed.
+
+
+def test_a_duplicate_in_an_anonymous_merge_only_mapping_is_rejected():
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict("consumer: {<<: {a: 1, a: 2}}\n", "t.yaml")
+    assert "'a'" in str(exc.value)
+
+
+def test_a_duplicate_in_an_anchored_merge_only_mapping_is_rejected():
+    """No later alias reuse is required: the mapping is authored here, so it is
+    checked here."""
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict("consumer: {<<: &b {a: 1, a: 2}}\n", "t.yaml")
+    assert "'a'" in str(exc.value)
+
+
+def test_a_duplicate_inside_a_sequence_merge_member_is_rejected():
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict("consumer: {<<: [{a: 1, a: 2}, {b: 3}]}\n", "t.yaml")
+    assert "'a'" in str(exc.value)
+
+
+def test_a_duplicate_in_a_merge_only_mapping_nested_in_another_is_rejected():
+    text = "consumer:\n  <<:\n    <<: {a: 1, a: 2}\n    x: 1\n"
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict(text, "t.yaml")
+    assert "'a'" in str(exc.value) and "line 3" in str(exc.value)
+
+
+def test_a_merge_only_duplicate_deep_in_a_contract_is_rejected():
+    """Contract-shaped: the discarded assertion is inside a frame that only ever
+    gets merged into a timeline entry."""
+    text = ("scenarios:\n  - name: a\n    timeline:\n"
+            "      - <<:\n          at: 1\n"
+            "          assert: {A.b: b == 1}\n"
+            "          assert: {A.c: c == 2}\n")
+    with pytest.raises(DuplicateKeyError) as exc:
+        load_yaml_strict(text, "contract.yaml")
+    assert "'assert'" in str(exc.value) and "contract.yaml" in str(exc.value)
+
+
+def test_a_merge_only_mapping_without_duplicates_still_loads():
+    """Paired control for the four above: same shapes, nothing repeated."""
+    for text in ("consumer: {<<: {a: 1}, a: 2}\n",
+                 "consumer: {<<: &b {a: 1, b: 2}}\n",
+                 "consumer: {<<: [{a: 1}, {b: 2}]}\n",
+                 "consumer:\n  <<:\n    <<: {a: 1}\n    x: 1\n"):
+        assert load_yaml_strict(text, "t.yaml") == yaml.safe_load(text), text
+

@@ -161,7 +161,15 @@ async def lifespan(app: FastAPI):
 
     def _resolve_run_info(data: dict, rid: str):
         """Ensure project_id + graph_name from the run (thread-safe)."""
-        if rid and rid not in _pid_cache:
+        # Creation is published before its transaction commits. Prefer the
+        # identities already carried by that event; a separate reader may not
+        # see the row yet. Never make a transient miss a permanent cache hit.
+        if rid:
+            if data.get("project_id"):
+                _pid_cache.setdefault(rid, data["project_id"])
+            if data.get("graph_name"):
+                _graph_cache.setdefault(rid, data["graph_name"])
+        if rid and (rid not in _pid_cache or rid not in _graph_cache):
             try:
                 import sqlite3 as _sql
                 from api.dependencies import SKILLFLOW_DB_PATH as _SF_DB_PATH
@@ -171,11 +179,13 @@ async def lifespan(app: FastAPI):
                     (rid,),
                 ).fetchone()
                 _sdb.close()
-                _pid_cache[rid] = row[0] if row else ""
-                _graph_cache[rid] = row[1] if row else ""
+                if row:
+                    if row[0]:
+                        _pid_cache.setdefault(rid, row[0])
+                    if row[1]:
+                        _graph_cache.setdefault(rid, row[1])
             except Exception:
-                _pid_cache[rid] = ""
-                _graph_cache[rid] = ""
+                pass  # A later event retries; no empty identity is cached.
         if not data.get("project_id"):
             pid = _pid_cache.get(rid, "")
             if pid:

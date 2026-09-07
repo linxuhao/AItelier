@@ -137,6 +137,97 @@ def test_the_gate_being_off_does_not_open_a_read_only_hole(monkeypatch):
         mcp_router._authorize("_probe_write", object())
 
 
+class _Req:
+    """A request carrying the headers that matter to the gate.
+
+    `cf_ray=True` marks the public edge (Cloudflare tunnel); `False` is the
+    loopback path dsh / the CLI reach the origin through.
+    """
+
+    def __init__(self, token=None, cf_ray=True, admin_token=None):
+        self.headers = {}
+        if cf_ray:
+            self.headers["Cf-Ray"] = "abc123"
+        if token is not None:
+            self.headers["X-AItelier-MCP-External-Token"] = token
+        if admin_token is not None:
+            self.headers["X-AItelier-Admin-Token"] = admin_token
+
+
+def test_an_external_token_authorizes_a_public_write(monkeypatch):
+    """The remote agent reaches /mcp over the public edge (Cf-Ray present), where
+    `authz` deliberately rejects the admin token. The external token is the escape
+    hatch — and it is checked before the authz verdict that would deny it."""
+    monkeypatch.setitem(_TOOL_KIND, "_probe_write", "write")
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda r: False)
+    monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "tok-123")
+    monkeypatch.setattr(mcp_router, "_request_from",
+                        lambda ctx: _Req(token="tok-123"))
+    mcp_router._authorize("_probe_write", object())      # must not raise
+
+
+def test_a_wrong_external_token_does_not_bypass_the_gate(monkeypatch):
+    monkeypatch.setitem(_TOOL_KIND, "_probe_write", "write")
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda r: False)
+    monkeypatch.setattr(mcp_router.authz, "write_denial_reason",
+                        lambda r: "write_denied_not_a_writer")
+    monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "tok-123")
+    monkeypatch.setattr(mcp_router, "_request_from",
+                        lambda ctx: _Req(token="not-it"))
+    with pytest.raises(ToolDenied):
+        mcp_router._authorize("_probe_write", object())
+
+
+def test_an_unset_external_token_never_opens_writes(monkeypatch):
+    """Fail closed: an empty `_EXTERNAL_TOKEN` must not authorise a caller just
+    because the header happens to be present."""
+    monkeypatch.setitem(_TOOL_KIND, "_probe_write", "write")
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda r: False)
+    monkeypatch.setattr(mcp_router.authz, "write_denial_reason",
+                        lambda r: "write_denied_not_a_writer")
+    monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "")
+    monkeypatch.setattr(mcp_router, "_request_from",
+                        lambda ctx: _Req(token="tok-123"))
+    with pytest.raises(ToolDenied):
+        mcp_router._authorize("_probe_write", object())
+
+
+def test_an_external_token_gates_public_reads_too(monkeypatch):
+    """On the public edge the token gates the WHOLE surface: a read tool (pipeline
+    source, prompts, the trace) must not leak to the open internet."""
+    monkeypatch.setitem(_TOOL_KIND, "_probe_read", "read")
+    monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "tok-123")
+    monkeypatch.setattr(mcp_router, "_request_from",
+                        lambda ctx: _Req(token="wrong"))
+    with pytest.raises(ToolDenied):
+        mcp_router._authorize("_probe_read", object())
+
+    monkeypatch.setattr(mcp_router, "_request_from",
+                        lambda ctx: _Req(token="tok-123"))
+    mcp_router._authorize("_probe_read", object())   # must not raise
+
+
+def test_the_external_token_does_not_gate_the_loopback_path(monkeypatch):
+    """dsh reaches /mcp over loopback (no Cf-Ray). The external token protects the
+    PUBLIC edge, not the local client — a loopback write keeps its ordinary authz
+    verdict (admin token), and a loopback read stays open, token or no token."""
+    monkeypatch.setitem(_TOOL_KIND, "_probe_write", "write")
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda r: True)
+    monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "tok-123")
+    monkeypatch.setattr(mcp_router, "_request_from",
+                        lambda ctx: _Req(cf_ray=False, admin_token="adm"))
+    mcp_router._authorize("_probe_write", object())   # must not raise
+
+    monkeypatch.setitem(_TOOL_KIND, "_probe_read", "read")
+    monkeypatch.setattr(mcp_router, "_request_from",
+                        lambda ctx: _Req(cf_ray=False))
+    mcp_router._authorize("_probe_read", object())   # must not raise
+
+
 # ── The whole surface, over the wire ─────────────────────────────────────────
 
 @pytest.fixture

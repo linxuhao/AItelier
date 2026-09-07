@@ -42,6 +42,20 @@ def gate_enabled() -> bool:
     return cf_access.is_configured()
 
 
+def is_via_cloudflare(request) -> bool:
+    """True when the request arrived through Cloudflare's edge — the public path.
+
+    The tunnel always adds `Cf-Ray`; Access adds `Cf-Access-Jwt-Assertion` once it
+    has authenticated the caller. Either marks the request as public, which is what
+    the admin token's anti-replay rule keys on (and what the MCP external token
+    gates). None → False: no request is never a public one.
+    """
+    if request is None:
+        return False
+    return bool(request.headers.get("Cf-Ray")
+                or request.headers.get("Cf-Access-Jwt-Assertion"))
+
+
 def write_denial_reason(request: Request) -> str | None:
     """Why a request may NOT write — None means it may.
 
@@ -55,10 +69,7 @@ def write_denial_reason(request: Request) -> str | None:
     """
     if not gate_enabled():
         return None
-    via_cloudflare = bool(
-        request.headers.get("Cf-Ray")
-        or request.headers.get("Cf-Access-Jwt-Assertion")
-    )
+    via_cloudflare = is_via_cloudflare(request)
     token = request.headers.get("X-AItelier-Admin-Token", "")
     if (not via_cloudflare and ADMIN_TOKEN and token
             and hmac.compare_digest(token, ADMIN_TOKEN)):

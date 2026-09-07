@@ -41,6 +41,7 @@ become world-writable; it raises at import.
 from __future__ import annotations
 
 import functools
+import hmac
 import inspect
 import os
 from typing import Callable
@@ -123,6 +124,27 @@ def _request_from(ctx: Context):
         return None
 
 
+# A DISTINCT credential for remote agents that reach us over the PUBLIC edge
+# (the Cloudflare tunnel). The admin token is deliberately rejected when a
+# request carries `Cf-Ray` / an Access JWT (see `api/authz.py`), so a leaked
+# token cannot be replayed through the public edge — right for the host CLI,
+# which reaches the origin off-tunnel. But a remote agent has no other way to
+# prove authority, and this endpoint is already on the public internet. So an
+# operator who wants one sets this token; when set, it gates the PUBLIC MCP
+# surface — reads included, since pipeline source, prompts and the trace are
+# not safe open — while the loopback path (dsh, the CLI) keeps its ordinary
+# verdict. Strong-random + revocable (clear the env var); it is not rotated.
+_EXTERNAL_TOKEN = os.getenv("AITELIER_MCP_EXTERNAL_TOKEN", "").strip()
+
+
+def _external_token_ok(request) -> bool:
+    headers = getattr(request, "headers", None)
+    token = (headers.get("X-AItelier-MCP-External-Token", "")
+             if headers is not None else "")
+    return bool(_EXTERNAL_TOKEN and token
+                and hmac.compare_digest(token, _EXTERNAL_TOKEN))
+
+
 def _authorize(name: str, ctx: Context | None) -> None:
     """Apply the same verdict `write_gate` would have, per tool rather than per path."""
     kind = _TOOL_KIND.get(name)
@@ -130,11 +152,19 @@ def _authorize(name: str, ctx: Context | None) -> None:
         # Unreachable through `tool()`, which registers the kind. Belt and braces:
         # an unknown tool is never a read.
         raise ToolDenied(f"tool '{name}' declares no authorization class")
+    request = None if ctx is None else _request_from(ctx)
+    if _EXTERNAL_TOKEN and authz.is_via_cloudflare(request):
+        # A configured external token gates the PUBLIC surface — reads included:
+        # pipeline source, prompts and the trace are not safe open on the public
+        # internet. The loopback path (dsh, the CLI) is off-tunnel and keeps its
+        # ordinary verdict, so the external token never breaks a local client.
+        if not _external_token_ok(request):
+            raise ToolDenied(f"'{name}' requires the MCP external token")
+        return
     if kind == "read":
         return
     if not authz.gate_enabled():
         return          # local dev: the gate is inactive for the whole app
-    request = None if ctx is None else _request_from(ctx)
     if request is None:
         # A write tool reached over a transport with no request to check. Denying
         # is the only safe reading: the alternative is granting write authority to

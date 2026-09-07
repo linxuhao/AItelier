@@ -536,8 +536,8 @@ class PipelineEngine:
         """Read this instance's `prompt_delta` rows and rebuild; None if none.
 
         The instance id is the one skillflow re-claimed after the host
-        restart — the same row, so the same trace key. A step that already
-        completed is never re-claimed, so no completion check is needed here.
+        restart — the same row, so the same trace key. Explicit checkpoint
+        revisions use a fresh instance id; old revision traces stay retained.
         """
         iid = getattr(self, "_step_instance_id", None)
         if not iid:
@@ -2082,6 +2082,14 @@ class PipelineEngine:
                 "preview": f"Step {step_id} resumed at turn {resume['turns']} from the trace"})
         else:
             workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
+            if getattr(self, "_carry_forward", False):
+                # Claim-time seeding precedes native fresh-history cleanup.
+                # Restore only promoted output, never a stale attempt's draft.
+                import shutil
+                prior = workspace._final_dir(project_id, step_id, self._draft_graph_name())
+                draft = workspace._draft_dir(project_id, step_id, self._draft_graph_name())
+                if prior.exists():
+                    shutil.copytree(prior, draft, dirs_exist_ok=True)
 
         feedback = ""
         # Carryover across attempts (parity with JSON mode) done the cache-optimal
@@ -2890,7 +2898,8 @@ class PipelineEngine:
                  max_tool_turns: int = 0,
                  run_id: str = "",
                  step_instance_id: int | None = None,
-                 claim_epoch: int = 0) -> bool:
+                 claim_epoch: int = 0,
+                 carry_forward: bool = False) -> bool:
         """
         Dispatch to the appropriate step execution path.
 
@@ -2908,6 +2917,7 @@ class PipelineEngine:
         self._run_id = run_id
         self._step_instance_id = step_instance_id
         self._claim_epoch = claim_epoch
+        self._carry_forward = carry_forward
 
         # Prefer native tool calling if agent config enables it
         if self.factory.is_native(agent_config_name):

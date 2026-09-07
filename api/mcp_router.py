@@ -159,7 +159,7 @@ def _authorize(name: str, ctx: Context | None) -> None:
         # internet. The loopback path (dsh, the CLI) is off-tunnel and keeps its
         # ordinary verdict, so the external token never breaks a local client.
         if not _external_token_ok(request):
-            raise ToolDenied(f"'{name}' requires the MCP external token")
+            raise ToolDenied("unauthorized")
         return
     if kind == "read":
         return

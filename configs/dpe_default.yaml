@@ -407,8 +407,6 @@ steps:
     transitions:
       - to: "3_budget"
         match: { from: "checkpoint", value: "approved" }
-      - to: "task_loop"
-        match: { _error: true }
 
   # ─── Step-budget gate (deterministic, no LLM) ───
   # The PM's list has to be executable by the ENGINE, not just sensible to a

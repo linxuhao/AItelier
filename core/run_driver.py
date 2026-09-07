@@ -407,8 +407,10 @@ async def _step(sf, db, ws, run_id: str, auto_approve: bool, max_steps: int) -> 
             # Retry once, then let it fail: a step that fails identically forever
             # would otherwise eat the whole step budget and report "did not
             # terminate", hiding the actual error.
+            from core.dpe_pipeline import NativeTurnBudgetExhausted
             sf.fail_step(claimed.token, str(e)[:300],
-                         retryable=attempts[claimed.step_id] < 2)
+                         retryable=(not isinstance(e, NativeTurnBudgetExhausted)
+                                    and attempts[claimed.step_id] < 2))
     return (sf.get_run(run_id) or {}).get("status") or "running"
 
 

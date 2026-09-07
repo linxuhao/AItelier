@@ -181,44 +181,27 @@ def test_exploration_exhaustion_still_raises(engine):
     assert not ws.written_drafts  # floor did not trigger
 
 
-def test_retry_continues_conversation_for_cache_reuse(engine):
-    """Cache-friendly carryover: a retry CONTINUES the prior attempt's message
-    list (so the cached prefix is reused) instead of rebuilding a fresh prompt.
-    Verified by checking the retry's first turn already sees attempt-1's
-    assistant/tool messages, and the system+initial-user prompt is unchanged."""
+def test_exhaustion_retains_conversation_without_automatic_retry(engine):
+    """A full exploration budget is incomplete, not a fresh retry budget."""
+    from core.dpe_pipeline import NativeTurnBudgetExhausted
     tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
-    engine._exec_tool = MagicMock(return_value={"output": "read result"})
     engine.factory.get_max_tool_turns.return_value = 2
-    engine.factory.get_max_retries.return_value = 2  # allow a retry
-
-    snapshots = []  # (roles tuple, first-user-content) per turn
+    engine.factory.get_max_retries.return_value = 2
+    snapshots = []
 
     def rec(messages, tools, tool_choice):
-        roles = tuple(m["role"] for m in messages)
-        snapshots.append((roles, messages[1]["content"] if len(messages) > 1 else None))
-        # attempt 1: explore (read) both turns → no write → retry.
-        # attempt 2 (4th turn overall): write, then finish.
-        if len(snapshots) <= 2:
-            return _turn(tool_calls=[_tc("read_file", {"path": "README.md"})])
-        if len(snapshots) == 3:
-            return _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})])
-        return _turn(tool_calls=[_tc("finish_step")])
+        snapshots.append((tuple(m["role"] for m in messages), messages[1]["content"]))
+        return _turn(tool_calls=[_tc("read_file", {"path": "README.md"})])
 
-    engine._exec_tool = MagicMock(side_effect=lambda a: (
-        {"written": "main.py"} if a["tool"] == "write" else {"output": "r"}))
+    engine._exec_tool = MagicMock(return_value={"output": "read result"})
     nat = engine.factory.get_native_agent.return_value
     nat.turn.side_effect = rec
-    assert _run(engine, ws) is True
-
-    # The retry's first turn (snapshot index 2) must have MORE messages than
-    # attempt-1 turn-1 (continuation, not a 2-message rebuild) and include a
-    # 'tool' role from the prior exploration.
-    a1_first_roles = snapshots[0][0]
-    retry_first_roles = snapshots[2][0]
-    assert len(retry_first_roles) > len(a1_first_roles)
-    assert "tool" in retry_first_roles
-    # The cached prefix (system + initial user prompt) is byte-identical.
-    assert snapshots[2][1] == snapshots[0][1]
+    with pytest.raises(NativeTurnBudgetExhausted):
+        _run(engine, ws)
+    assert nat.turn.call_count == 2
+    assert len(snapshots[1][0]) > len(snapshots[0][0])
+    assert "tool" in snapshots[1][0]
+    assert snapshots[1][1] == snapshots[0][1]
 
 
 def test_reasoning_starved_turn_is_reported_not_silent(engine):
@@ -403,8 +386,8 @@ def test_last_turn_starve_grants_the_turn_the_escalation_was_raised_for(engine):
     nat = _wire_real_escalation(engine.factory.get_native_agent.return_value, 16384)
     nat.turn.side_effect = [
         _turn(reasoning="t" * 900, truncated=True),                          # starved
-        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"})]),
-        _turn(tool_calls=[_tc("finish_step")]),
+        _turn(tool_calls=[_tc("write", {"file": "main.py", "content": "x"}),
+                          _tc("finish_step")]),
     ]
     events = []
     engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
@@ -462,3 +445,122 @@ def test_ask_more_turns_actually_extends_the_native_loop(engine):
     # Granted means USED: the write lands on turn 3, past the original bound.
     assert [p for ev, p in events if ev == "files_written"], [ev for ev, _ in events]
     assert nat.turn.call_count == 4
+
+
+@pytest.fixture
+def budget_case(engine, tmp_path):
+    """Real native turn loop; instrumented edit writes actual retained bytes."""
+    _setup(tmp_path)
+    ws = _WS(tmp_path)
+    draft = tmp_path / "default" / "t_impl.tmp" / "partial.gd"
+    events = []
+    engine._trace = lambda category, event, payload: events.append((category, event, payload))
+    engine.factory.get_max_tool_turns.return_value = 20
+    engine.factory.get_max_retries.return_value = 3
+    engine.factory.get_fallback_to_json.return_value = True
+
+    def execute(action):
+        if action["tool"] == "edit":
+            draft.write_text("partial draft; not completed\n")
+            return {"edited": "partial.gd"}
+        return {"ok": True}
+
+    engine._exec_tool = MagicMock(side_effect=execute)
+    return engine, ws, draft, events
+
+
+def test_twenty_turn_partial_exhaustion_retains_draft_and_never_falls_back(budget_case):
+    from core.dpe_pipeline import NativeTurnBudgetExhausted
+    eng, ws, draft, events = budget_case
+    nat = eng.factory.get_native_agent.return_value
+    nat.turn.side_effect = [_turn(tool_calls=[_tc("edit")])] + [
+        _turn(tool_calls=[_tc("read_file")]) for _ in range(19)]
+    with pytest.raises(NativeTurnBudgetExhausted, match="explicit attention required"):
+        _run(eng, ws)
+    assert nat.turn.call_count == 20
+    assert draft.read_text() == "partial draft; not completed\n"
+    assert (ws.get_code_path("default") / "README.md").read_text() == "# existing\n"
+    assert not (ws.get_code_path("default") / "partial.gd").exists()
+    exhausted = [p for c, e, p in events if e == "turn_budget_exhausted"]
+    assert len(exhausted) == 1 and exhausted[0]["turns"] == 20
+    assert exhausted[0]["written_files"] == ["partial.gd"]
+    # A JSON fallback would build a different agent and retry this partial work.
+    eng.factory.get_agent.assert_not_called()
+
+
+@pytest.mark.parametrize("finish_turn, write", [(2, True), (20, True), (1, False)])
+def test_explicit_finish_preserves_native_success_including_final_turn(budget_case, finish_turn, write):
+    eng, ws, draft, _events = budget_case
+    nat = eng.factory.get_native_agent.return_value
+    responses = [_turn(tool_calls=[_tc("read_file")]) for _ in range(finish_turn - 1)]
+    # Deliberately put finish BEFORE edit in the final response: all calls must run.
+    calls = [_tc("finish_step")]
+    if write:
+        calls.append(_tc("edit", cid="write-last"))
+    responses.append(_turn(tool_calls=calls))
+    nat.turn.side_effect = responses
+    assert _run(eng, ws) is True
+    assert nat.turn.call_count == finish_turn
+    assert draft.exists() is write
+
+
+@pytest.mark.asyncio
+async def test_driver_exhaustion_fails_once_without_promotion_or_test_node(budget_case, monkeypatch, tmp_path):
+    from skillflow.core import SkillFlow
+    from skillflow.graph import PipelineGraph, StepNode, Transition
+    from core.run_driver import _step
+    import aitelier.runner
+    eng, ws, draft, _events = budget_case
+    nat = eng.factory.get_native_agent.return_value
+    nat.turn.side_effect = [_turn(tool_calls=[_tc("edit")])] + [
+        _turn(tool_calls=[_tc("read_file")]) for _ in range(19)]
+    sf = SkillFlow(":memory:")
+    sf.register_graph(PipelineGraph(name="budget_guard", begin="t_impl", steps=[
+        StepNode(id="t_impl", step_type="agent", lifecycle={"on_deliver": {"tool": "repo_apply"}}, transitions=[Transition(to="test")]),
+        StepNode(id="test", step_type="tool", tool_name="never_run_tests", transitions=[Transition(to="done")]),
+        StepNode(id="done", step_type="gate", transitions=[Transition(to=None)])]))
+    rid = sf.create_run("budget_guard", {"project_id": "default"}, project_id="default")
+    sf.start_run(rid)
+    confirm = MagicMock(wraps=sf.confirm_step)
+    fail = MagicMock(wraps=sf.fail_step)
+    monkeypatch.setattr(sf, "confirm_step", confirm)
+    monkeypatch.setattr(sf, "fail_step", fail)
+
+    class Runner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def execute(self, _claimed):
+            return _run(eng, ws)
+
+    monkeypatch.setattr(aitelier.runner, "AgentStepRunner", Runner)
+    assert await _step(sf, None, ws, rid, False, 5) == "failed"
+    assert nat.turn.call_count == 20
+    confirm.assert_not_called()
+    assert fail.call_count == 1 and fail.call_args.kwargs["retryable"] is False
+    assert draft.read_text() == "partial draft; not completed\n"
+    assert sf.get_run(rid)["current_node"] == "t_impl"
+    assert not (ws.get_code_path("default") / "partial.gd").exists()
+
+
+def test_exhausted_trace_resume_keeps_draft_without_another_model_turn(budget_case):
+    from core.dpe_pipeline import NativeTurnBudgetExhausted, PipelineEngine
+    eng, ws, draft, events = budget_case
+    nat = eng.factory.get_native_agent.return_value
+    nat.turn.side_effect = [_turn(tool_calls=[_tc("edit")])] + [
+        _turn(tool_calls=[_tc("read_file")]) for _ in range(19)]
+    with pytest.raises(NativeTurnBudgetExhausted):
+        _run(eng, ws)
+    rebuilt = PipelineEngine._rebuild_from_deltas(
+        [(event, payload) for _category, event, payload in events], 20)
+    assert rebuilt["turns"] == 20 and rebuilt["written_files"] == ["partial.gd"]
+    eng._resume_from_trace = MagicMock(return_value=rebuilt)
+    ws._draft_dir = lambda *_args: draft.parent
+    ws.clean_draft_dir = MagicMock(wraps=ws.clean_draft_dir)
+    nat.turn.reset_mock()
+    with pytest.raises(NativeTurnBudgetExhausted):
+        _run(eng, ws)
+    nat.turn.assert_not_called()
+    ws.clean_draft_dir.assert_not_called()
+    assert draft.read_text() == "partial draft; not completed\n"
+    assert any(event == "resumed_from_trace" for _category, event, _payload in events)

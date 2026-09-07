@@ -45,6 +45,10 @@ class MaxRetriesExceeded(Exception):
     """达到最大重试次数熔断异常"""
     pass
 
+class NativeTurnBudgetExhausted(MaxRetriesExceeded):
+    """Incomplete native output retained for attention, never delivery/retry."""
+    pass
+
 
 # How many turns before the cap the agent is warned. One turn is too
 # late to finish anything; the existing final-turn nudge already covers
@@ -2336,7 +2340,11 @@ class PipelineEngine:
                         "step_id": step_id, "turns": turn_count,
                         "preview": f"Step {step_id} stopped at its {turn_count}-turn cap",
                     })
-                    break
+                    raise NativeTurnBudgetExhausted(
+                        f"Step {step_id}: native turn budget exhausted "
+                        f"({turn_count}/{current_max_turns}) without finish_step; "
+                        "incomplete draft and trace retained; explicit attention required. "
+                        "No delivery or automatic retry.")
                 remaining = current_max_turns - turn_count
                 # A LOW BUDGET IS NEWS EVEN WHEN OUTPUT EXISTS.
                 # The nudge below fires only when NOTHING is written, so a step
@@ -2918,7 +2926,7 @@ class PipelineEngine:
                 # native path just finished. The scheduler's quota hold exists
                 # to stop exactly that.
                 from core.llm_quota import is_quota_exhausted
-                if is_quota_exhausted(e):
+                if isinstance(e, NativeTurnBudgetExhausted) or is_quota_exhausted(e):
                     raise
                 if not self.factory.get_fallback_to_json(agent_config_name):
                     raise

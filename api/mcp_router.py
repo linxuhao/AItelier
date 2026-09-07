@@ -43,6 +43,7 @@ from __future__ import annotations
 import functools
 import hmac
 import inspect
+import logging
 import os
 from typing import Callable
 
@@ -160,6 +161,12 @@ def _authorize(name: str, ctx: Context | None) -> None:
         # Cf-Ray is Access auth, not the tunnel, and falls through to the
         # ordinary write gate below.
         if not _external_token_ok(request):
+            _h = getattr(request, "headers", None) or {}
+            logging.getLogger("aitelier.mcp_auth").warning(
+                "deny '%s': host=%r cf_ray=%r access_jwt=%r ext_token=%r",
+                name, _h.get("host"), _h.get("cf-ray"),
+                _h.get("cf-access-jwt-assertion") is not None,
+                _h.get("x-aitelier-mcp-external-token") is not None)
             raise ToolDenied("unauthorized")
         return
     if kind == "read":

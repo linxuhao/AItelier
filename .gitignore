@@ -183,6 +183,9 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# Local docker-compose overrides (host-specific Tailscale bind + env)
+docker-compose.override.yml
+
 # Pyre type checker
 .pyre/
 

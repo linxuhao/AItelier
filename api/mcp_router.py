@@ -153,11 +153,12 @@ def _authorize(name: str, ctx: Context | None) -> None:
         # an unknown tool is never a read.
         raise ToolDenied(f"tool '{name}' declares no authorization class")
     request = None if ctx is None else _request_from(ctx)
-    if _EXTERNAL_TOKEN and authz.is_via_cloudflare(request):
-        # A configured external token gates the PUBLIC surface — reads included:
-        # pipeline source, prompts and the trace are not safe open on the public
-        # internet. The loopback path (dsh, the CLI) is off-tunnel and keeps its
-        # ordinary verdict, so the external token never breaks a local client.
+    if _EXTERNAL_TOKEN and authz.is_via_tunnel(request):
+        # A configured external token gates the public TUNNEL (Cf-Ray) — reads
+        # included: pipeline source, prompts and the trace are not safe open on
+        # the public internet. An Access JWT (Cf-Access-Jwt-Assertion) without
+        # Cf-Ray is Access auth, not the tunnel, and falls through to the
+        # ordinary write gate below.
         if not _external_token_ok(request):
             raise ToolDenied("unauthorized")
         return

@@ -228,6 +228,23 @@ def test_the_external_token_does_not_gate_the_loopback_path(monkeypatch):
     mcp_router._authorize("_probe_read", object())   # must not raise
 
 
+class _AccessReq:
+    """A request that arrived via Cloudflare Access (JWT), not the tunnel."""
+
+    def __init__(self):
+        self.headers = {"Cf-Access-Jwt-Assertion": "jwt-xyz"}
+
+
+def test_an_access_jwt_without_cf_ray_does_not_demand_the_external_token(monkeypatch):
+    """The Cloudflare MCP portal forwards the user's Access JWT (Cf-Access-Jwt-
+    Assertion) WITHOUT Cf-Ray. That is Access auth, not the public tunnel — the
+    external token must not fire there, or every portal read dies 'unauthorized'."""
+    monkeypatch.setitem(_TOOL_KIND, "_probe_read", "read")
+    monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "tok-123")
+    monkeypatch.setattr(mcp_router, "_request_from", lambda ctx: _AccessReq())
+    mcp_router._authorize("_probe_read", object())   # must not raise
+
+
 # ── The whole surface, over the wire ─────────────────────────────────────────
 
 @pytest.fixture

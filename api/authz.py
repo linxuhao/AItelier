@@ -43,12 +43,9 @@ def gate_enabled() -> bool:
 
 
 def is_via_cloudflare(request) -> bool:
-    """True when the request arrived through Cloudflare's edge — the public path.
-
-    The tunnel always adds `Cf-Ray`; Access adds `Cf-Access-Jwt-Assertion` once it
-    has authenticated the caller. Either marks the request as public, which is what
-    the admin token's anti-replay rule keys on (and what the MCP external token
-    gates). None → False: no request is never a public one.
+    """True when the request arrived through Cloudflare in any form — the edge
+    tunnel (`Cf-Ray`) or Access (`Cf-Access-Jwt-Assertion`). This keys the admin
+    token's anti-replay rule: a leaked token must not be replayable through CF.
     """
     if request is None:
         return False
@@ -57,6 +54,17 @@ def is_via_cloudflare(request) -> bool:
         return False
     return bool(headers.get("Cf-Ray")
                 or headers.get("Cf-Access-Jwt-Assertion"))
+
+
+def is_via_tunnel(request) -> bool:
+    """True when the request came through the Cloudflare TUNNEL (`Cf-Ray`).
+
+    This is what the MCP external token gates — the public tunnel path. It is
+    deliberately NARROWER than is_via_cloudflare: an Access JWT without Cf-Ray is
+    Access auth, not the public tunnel, and must NOT demand the external token.
+    """
+    headers = getattr(request, "headers", None)
+    return bool(headers and headers.get("Cf-Ray"))
 
 
 def write_denial_reason(request: Request) -> str | None:

@@ -194,3 +194,20 @@ async def test_a_normal_confirm_return_is_not_acceptance(tmp_path, monkeypatch):
     assert "confirmed" not in ex[0], (
         "a validation-rejected step was logged as confirmed — the exact "
         "overstatement this field was renamed to stop")
+
+
+async def test_output_ceiling_tick_never_confirms_or_retries(tick, monkeypatch):
+    from core.dpe_pipeline import NativeOutputCapExhausted
+    sf, logged = tick
+    runner = MagicMock()
+
+    async def exhausted(_claimed):
+        raise NativeOutputCapExhausted("output cap ceiling; draft retained")
+
+    runner.execute = exhausted
+    monkeypatch.setattr("aitelier.runner.AgentStepRunner", lambda **kw: runner)
+    await scheduler._run_skillflow_tick("p1", None)
+    sf.confirm_step.assert_not_called()
+    sf.fail_step.assert_called_once()
+    assert sf.fail_step.call_args.kwargs["retryable"] is False
+    assert not any(kw.get("confirm_returned") for _, kw in logged)

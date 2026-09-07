@@ -315,7 +315,8 @@ def test_starve_at_the_ceiling_reports_instead_of_escalating(engine):
     ]
     events = []
     engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
-    assert _run(engine, ws) is True
+    with pytest.raises(MaxRetriesExceeded, match="output cap.*explicit attention required"):
+        _run(engine, ws)
 
     assert [p for ev, p in events if ev == "output_cap_escalated"] == []
     ceil = [p for ev, p in events if ev == "output_cap_ceiling"]
@@ -323,6 +324,7 @@ def test_starve_at_the_ceiling_reports_instead_of_escalating(engine):
     assert ceil[0]["previous_cap"] == OUTPUT_CAP_CEILING
     assert ceil[0]["new_cap"] is None
     assert nat.gateway.max_output_tokens == OUTPUT_CAP_CEILING
+    assert nat.turn.call_count == 1
 
 
 def test_healthy_turns_never_escalate(engine):
@@ -416,7 +418,8 @@ def test_last_turn_starve_at_the_ceiling_grants_nothing(engine):
     nat.turn.side_effect = [_turn(reasoning="t" * 900, truncated=True)]      # starved
     events = []
     engine._emit = lambda ev, payload=None: events.append((ev, payload or {}))
-    _run(engine, ws)
+    with pytest.raises(MaxRetriesExceeded, match="output cap.*explicit attention required"):
+        _run(engine, ws)
 
     assert [p for ev, p in events if ev == "turn_granted_for_escalation"] == []
     assert nat.gateway.max_output_tokens == OUTPUT_CAP_CEILING
@@ -564,3 +567,62 @@ def test_exhausted_trace_resume_keeps_draft_without_another_model_turn(budget_ca
     ws.clean_draft_dir.assert_not_called()
     assert draft.read_text() == "partial draft; not completed\n"
     assert any(event == "resumed_from_trace" for _category, event, _payload in events)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_output_ceiling_stops_without_retry_or_delivery(budget_case, partial):
+    from core.ai_router import OUTPUT_CAP_CEILING
+    eng, ws, draft, events = budget_case
+    nat = _wire_real_escalation(eng.factory.get_native_agent.return_value, OUTPUT_CAP_CEILING)
+    emitted = []
+    eng._emit = lambda event, payload=None: emitted.append(event)
+    nat.turn.side_effect = ([_turn(tool_calls=[_tc("edit")])] if partial else []) + [
+        _turn(reasoning="retained ceiling reasoning", truncated=True)]
+    with pytest.raises(MaxRetriesExceeded, match="output cap.*explicit attention required"):
+        _run(eng, ws)
+    assert nat.turn.call_count == (2 if partial else 1)
+    assert draft.exists() is partial
+    if partial:
+        assert draft.read_text() == "partial draft; not completed\n"
+    assert not (ws.get_code_path("default") / "partial.gd").exists()
+    names = [event for _category, event, _payload in events]
+    assert names[-3:] == ["output_cap_starved", "output_cap_ceiling", "output_cap_exhausted"]
+    failed = events[-1][2]
+    assert failed["attempt"] == 1 and failed["written_files"] == (["partial.gd"] if partial else [])
+    assert "step_done" not in emitted and "files_written" not in emitted
+    eng.factory.get_agent.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("partial", [False, True])
+async def test_output_ceiling_driver_has_no_confirm_or_retry(budget_case, monkeypatch, partial):
+    from skillflow.core import SkillFlow
+    from skillflow.graph import PipelineGraph, StepNode, Transition
+    from core.run_driver import _step
+    from core.ai_router import OUTPUT_CAP_CEILING
+    import aitelier.runner
+    eng, ws, draft, events = budget_case
+    nat = _wire_real_escalation(eng.factory.get_native_agent.return_value, OUTPUT_CAP_CEILING)
+    nat.turn.side_effect = ([_turn(tool_calls=[_tc("edit")])] if partial else []) + [_turn(truncated=True)]
+    sf = SkillFlow(":memory:")
+    sf.register_graph(PipelineGraph(name="output_guard", begin="t_impl", steps=[
+        StepNode(id="t_impl", step_type="agent", lifecycle={"on_deliver": {"tool": "repo_apply"}}, transitions=[Transition(to="test")]),
+        StepNode(id="test", step_type="tool", tool_name="never_run_tests", transitions=[Transition(to="done")]),
+        StepNode(id="done", step_type="gate", transitions=[Transition(to=None)])]))
+    rid = sf.create_run("output_guard", {"project_id": "default"}, project_id="default")
+    sf.start_run(rid)
+    confirm = MagicMock(wraps=sf.confirm_step)
+    fail = MagicMock(wraps=sf.fail_step)
+    monkeypatch.setattr(sf,"confirm_step",confirm)
+    monkeypatch.setattr(sf,"fail_step",fail)
+    class Runner:
+        def __init__(self, **_kwargs): pass
+        async def execute(self, _claimed): return _run(eng, ws)
+    monkeypatch.setattr(aitelier.runner,"AgentStepRunner",Runner)
+    assert await _step(sf,None,ws,rid,False,5) == "failed"
+    confirm.assert_not_called()
+    assert fail.call_count == 1 and fail.call_args.kwargs["retryable"] is False
+    assert nat.turn.call_count == (2 if partial else 1)
+    assert sf.get_run(rid)["current_node"] == "t_impl"
+    assert draft.exists() is partial
+    assert not (ws.get_code_path("default")/"partial.gd").exists()

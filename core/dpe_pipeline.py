@@ -45,6 +45,11 @@ class MaxRetriesExceeded(Exception):
     """达到最大重试次数熔断异常"""
     pass
 
+class NativeOutputCapExhausted(MaxRetriesExceeded):
+    """Unrecoverable output starvation; retain draft without fallback/retry."""
+    pass
+
+
 class NativeTurnBudgetExhausted(MaxRetriesExceeded):
     """Incomplete native output retained for attention, never delivery/retry."""
     pass
@@ -2569,6 +2574,12 @@ class PipelineEngine:
                                         f"cannot escalate"),
                         })
                         self._trace("response", "output_cap_ceiling", detail)
+                        incomplete = {**detail, "written_files": sorted(set(written_files))}
+                        self._trace("step", "output_cap_exhausted", incomplete)
+                        self._emit("output_cap_exhausted", incomplete)
+                        raise NativeOutputCapExhausted(
+                            f"Step {step_id}: output cap {previous_cap} exhausted; "
+                            "draft and trace retained; explicit attention required")
 
                 if result.text:
                     self._emit("agent_message", {
@@ -2926,7 +2937,7 @@ class PipelineEngine:
                 # native path just finished. The scheduler's quota hold exists
                 # to stop exactly that.
                 from core.llm_quota import is_quota_exhausted
-                if isinstance(e, NativeTurnBudgetExhausted) or is_quota_exhausted(e):
+                if isinstance(e, (NativeTurnBudgetExhausted, NativeOutputCapExhausted)) or is_quota_exhausted(e):
                     raise
                 if not self.factory.get_fallback_to_json(agent_config_name):
                     raise

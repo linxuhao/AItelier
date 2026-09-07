@@ -13,8 +13,17 @@ def revision(tmp_path,monkeypatch,engine):
  sf.register_graph(PipelineGraph(name='revision',begin='a',steps=[StepNode(id='a',step_type='agent',checkpoint=True,transitions=[Transition(to='b')]),StepNode(id='b',step_type='agent')]))
  rid=sf.create_run('revision',project_id='p');sf.start_run(rid);sf.advance_run(rid);old=sf.claim_next_step(rid)
  sf.confirm_step(old.token,StepResult(outputs={'old':'yes'}));sf.advance_run(rid)
- sf.trace(rid,'agent','prompt_delta',{'turn':1,'message':{'role':'user','content':'old revision'}},step_id='a',step_instance_id=old.token.step_instance_id)
- sf.reject_checkpoint(rid,'a','retain untouched cards');new=sf.claim_next_step(rid)
+ # Use the production trace encoder and a complete exhausted conversation.
+ engine._trace=lambda cat,ev,payload:sf.trace(rid,cat,ev,payload,step_id='a',step_instance_id=old.token.step_instance_id)
+ engine._delta_traced=0
+ old_messages=[{'role':'user','content':'OLD REVISION TRANSCRIPT'}]
+ for i in range(2):
+  old_messages.extend([{'role':'assistant','content':None,'tool_calls':[_tc('read_file',cid=f'old{i}')]},
+                       {'role':'tool','tool_call_id':f'old{i}','content':'{"read":"old"}'}])
+ engine._trace_prompt_deltas(old_messages,2)
+ monkeypatch.setattr(sf,'_append_feedback_log',lambda *a:None)
+ monkeypatch.setattr(sf,'_read_feedback_log',lambda *a:'Previous instruction: do not remove X')
+ sf.reject_checkpoint(rid,'a','remove X');new=sf.claim_next_step(rid)
  monkeypatch.setattr('api.dependencies.get_skillflow',lambda:sf)
  ws=WorkspaceManager(str(tmp_path/'ws'),projects_base=str(tmp_path/'projects'))
  code=tmp_path/'code';code.mkdir();monkeypatch.setattr(ws,'get_code_path',lambda *a,**k:code)
@@ -26,7 +35,7 @@ def revision(tmp_path,monkeypatch,engine):
 
 def run_case(c):
  sf,rid,old,new,e,w,d=c
- return e.run_step(task_id=1,step_id='a',workspace=w,project_id='p',agent_config_name='pm',run_id=rid,step_instance_id=new.token.step_instance_id,claim_epoch=new.token.claim_epoch,output_dir=str(d),carry_forward=True,tool_schemas={'read_file':{},'edit':{}})
+ return e.run_step(task_id=1,step_id='a',workspace=w,project_id='p',agent_config_name='pm',run_id=rid,step_instance_id=new.token.step_instance_id,claim_epoch=new.token.claim_epoch,output_dir=str(d),carry_forward=True,resolved_context=new.inputs['_resolved_context'],tool_schemas={'read_file':{},'edit':{}})
 
 def test_fresh_budget_and_promoted_carry_forward(revision):
  sf,rid,old,new,e,w,d=revision
@@ -35,12 +44,15 @@ def test_fresh_budget_and_promoted_carry_forward(revision):
  def finish(*a,**kw):
   assert (d/'untouched.json').read_text()=='prior card'
   assert not (d/'stale.json').exists()
+  prompt='\n'.join(str(m.get('content','')) for m in kw['messages'])
+  assert '### Latest checkpoint rejection\nremove X' in prompt
+  assert 'OLD REVISION TRANSCRIPT' not in prompt
   return _turn(tool_calls=[_tc('finish_step')])
  nat.turn.side_effect=finish
  assert run_case(revision)
  assert nat.turn.call_count==1
  assert sf.get_trace(rid,step_instance_id=old.token.step_instance_id)==before
- assert 'retain untouched cards' in new.inputs['_feedback']
+ assert new.inputs['_rejection']=='remove X'
 
 def test_same_revision_exhaustion_never_resets(revision):
  sf,rid,old,new,e,w,d=revision
@@ -107,3 +119,16 @@ def test_missing_carry_forward_control(revision):
  nat.turn.side_effect=finish
  assert e.run_step(task_id=1,step_id='a',workspace=w,project_id='p',agent_config_name='pm',run_id=rid,step_instance_id=new.token.step_instance_id,output_dir=str(d),carry_forward=False,tool_schemas={'read_file':{}})
  assert seen==[False]
+
+
+def test_valid_old_exhausted_trace_would_block_same_instance(revision):
+ sf,rid,old,new,e,w,d=revision
+ nat=e.factory.get_native_agent.return_value
+ old_rows=sf.get_trace(rid,step_instance_id=old.token.step_instance_id)
+ # Reuse the historical iid only as a negative component control, not a claim.
+ historical=(sf,rid,new,old,e,w,d)
+ old.inputs['_resolved_context']=new.inputs['_resolved_context']
+ with pytest.raises(NativeTurnBudgetExhausted):run_case(historical)
+ nat.turn.assert_not_called()
+ assert e._resume_from_trace('p',2)['turns']==2
+ assert sf.get_trace(rid,step_instance_id=old.token.step_instance_id)==old_rows

@@ -273,6 +273,22 @@ def build_mcp() -> FastMCP:
     _register_trace_tools(tool)
     _register_lifecycle_tools(tool)
     _register_model_tools(tool)
+
+    @mcp.prompt(name="pipeline_workflow",
+                description="How and when to use AItelier's pipeline engine")
+    def _pipeline_workflow_prompt() -> str:
+        return (
+            "AItelier runs deterministic, auditable multi-step pipelines. Use it when you need a "
+            "reproducible workflow (research → architect → plan → implement → verify), not a quick "
+            "one-off edit.\n"
+            "Generate a pipeline: describe the workflow, then generate_pipeline (coding mode).\n"
+            "Run: list_pipelines → run_pipeline(config) → wait_for_run(run_id).\n"
+            "Checkpoints: when a run pauses, answer_checkpoint(run_id, 'approve'|'reject', feedback).\n"
+            "Inspect: get_run_summary / get_run_status / trace_list / trace_read / get_step_output.\n"
+            "Edit a generated pipeline: edit_pipeline / edit_role / edit_template / edit_tool, then "
+            "drive_pipeline to test it before relying on it."
+        )
+
     return mcp
 
 

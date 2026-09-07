@@ -52,8 +52,11 @@ def is_via_cloudflare(request) -> bool:
     """
     if request is None:
         return False
-    return bool(request.headers.get("Cf-Ray")
-                or request.headers.get("Cf-Access-Jwt-Assertion"))
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return False
+    return bool(headers.get("Cf-Ray")
+                or headers.get("Cf-Access-Jwt-Assertion"))
 
 
 def write_denial_reason(request: Request) -> str | None:

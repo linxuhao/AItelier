@@ -18,8 +18,7 @@
    * and the alternative was a megabyte of renderer for a panel that opens on
    * demand.
    */
-  import { onMount } from 'svelte';
-  import { pipelineGraph } from '../lib/api';
+  import { pipelineGraph, runWorkflowGraph } from '../lib/api';
   import { layoutGraph, type Layout, type LaidOutNode } from '../lib/pipelineLayout';
   import {
     runGraphState, rowDuration, type RunStepRow, type RunGraphState,
@@ -41,7 +40,7 @@
   }
   const { config, runSteps, labels, cacheByStep, runId }: Props = $props();
 
-  const nodeLabel = (id: string): string => labels?.[id] || id;
+  const nodeLabel = (id: string): string => runId ? ((data?.node_labels as Record<string, string>)?.[id] || id) : (labels?.[id] || id);
 
   let error = $state<string | null>(null);
   let data = $state<Record<string, unknown> | null>(null);
@@ -216,14 +215,21 @@
     return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
   }
 
-  onMount(async () => {
-    try {
-      const r = await pipelineGraph(config);
+  $effect(() => {
+    const exactRun = runId;
+    const selectedConfig = config;
+    let cancelled = false;
+    data = null; layout = null; error = null;
+    openNode = null; pickedInstance = null; userPicked = false;
+    const request = exactRun ? runWorkflowGraph(exactRun) : pipelineGraph(selectedConfig);
+    request.then((r) => {
+      if (cancelled) return;
       data = r as Record<string, unknown>;
       layout = layoutGraph((r.steps ?? []) as never[], (r.begin ?? '') as string);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    }
+    }).catch((e) => {
+      if (!cancelled) error = e instanceof Error ? e.message : String(e);
+    });
+    return () => { cancelled = true; };
   });
 </script>
 
@@ -234,6 +240,9 @@
   <p class="graph-loading">{t('pipeline.graphLoading')}</p>
 {:else}
   <div class="graph-meta">
+    {#if runId}
+      <span class="graph-pin">Run <code>{runId.slice(0, 8)}</code> · graph v{String(data?.graph_version ?? '?')} · pinned</span>
+    {/if}
     <span class="graph-legend"><i class="sw agent"></i>agent</span>
     <span class="graph-legend"><i class="sw tool"></i>tool</span>
     <span class="graph-legend"><i class="sw gate"></i>gate/loop</span>

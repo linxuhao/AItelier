@@ -670,3 +670,34 @@ export function listRepos(): Promise<RepoItem[]> {
 export function getRepo(repoPath: string): Promise<RepoDetail> {
   return _get('/api/repos/' + encodeURIComponent(repoPath));
 }
+
+
+// State project data is private; unlike workflow metadata these GETs require
+// writer authorization on the backend. Do not merge it into public repo payloads.
+export function runWorkflowGraph(runId: string): Promise<Record<string, any>> {
+  return _get('/api/runs/' + encodeURIComponent(runId) + '/graph');
+}
+export function stateProjects(repoPath?: string, after = ''): Promise<{projects: import('./stateGraph').StateProjectRow[]; next_after: string | null}> {
+  const query = new URLSearchParams({limit: '100', after});
+  if (repoPath) query.set('repo_path', repoPath);
+  return _get('/api/state/projects?' + query.toString());
+}
+export function stateOverview(projectId: string): Promise<import('./stateGraph').StateOverview> {
+  return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/overview');
+}
+export function stateNode(projectId: string, node: string): Promise<import('./stateGraph').StateNodeDetail> {
+  return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/nodes/' + encodeURIComponent(node));
+}
+export function stateAttempts(projectId: string, after = 0): Promise<{attempts: import('./stateGraph').StateAttempt[]; next_after: number | null}> {
+  return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/attempts?after=' + after + '&limit=30');
+}
+export function stateAttemptDetail(attemptId: string): Promise<import('./stateGraph').AttemptDetail> {
+  return _get('/api/state/attempts/' + encodeURIComponent(attemptId) + '/detail');
+}
+export function stateRunOwners(runId: string): Promise<{links: import('./stateGraph').RunOwner[]; run_id: string}> {
+  return _get('/api/state/runs/' + encodeURIComponent(runId) + '/owners');
+}
+export function stateRefreshProject(projectId: string, after = 0): Promise<{results: {attempt_id: string; status?: string; error?: string}[]; next_after: number | null; effects: string}> {
+  // Explicit user action. No automatic launch/checkpoint/acceptance on reads.
+  return _post('/api/state/commands/refresh_project', {project_id: projectId, after, limit: 10}, 60000);
+}

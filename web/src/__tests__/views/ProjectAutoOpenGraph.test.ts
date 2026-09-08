@@ -12,6 +12,9 @@ import { authStore } from '../../stores/auth';
 import { connectionStore } from '../../stores/connection';
 
 const mockApi = vi.hoisted(() => ({
+  stateRunOwners: vi.fn().mockResolvedValue({links: []}),
+  stateProjects: vi.fn().mockResolvedValue({projects: [], next_after: null}),
+  runWorkflowGraph: vi.fn().mockResolvedValue({begin: "", steps: [], graph_version: 1}),
   pipelineGraph: vi.fn(),
   getProject: vi.fn(),
   getTasks: vi.fn(),
@@ -64,6 +67,7 @@ async function mount(runs: Record<string, unknown>[]) {
   mockApi.getCheckpoint.mockResolvedValue({ checkpoint: null });
   mockApi.getTasks.mockResolvedValue([]);
   mockApi.pipelineGraph.mockResolvedValue(GRAPH);
+  mockApi.runWorkflowGraph.mockResolvedValue({...GRAPH, graph_version: 1});
   mockApi.getTrace.mockResolvedValue({ traces: [], has_more: false });
   mockApi.getRunDetail.mockImplementation(
     async (id: string) => detail(id, 'running'));

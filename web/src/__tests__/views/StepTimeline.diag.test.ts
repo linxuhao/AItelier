@@ -9,6 +9,9 @@ import { connectionStore } from '../../stores/connection';
 import tracePage from '../fixtures/trace_page.json';
 
 const mockApi = vi.hoisted(() => ({
+  stateRunOwners: vi.fn().mockResolvedValue({links: []}),
+  stateProjects: vi.fn().mockResolvedValue({projects: [], next_after: null}),
+  runWorkflowGraph: vi.fn().mockResolvedValue({begin: "", steps: [], graph_version: 1}),
   pipelineGraph: vi.fn(),
   getProject: vi.fn(),
   getTasks: vi.fn(),
@@ -82,6 +85,7 @@ describe('run graph (real payload)', () => {
     mockApi.getTasks.mockResolvedValue([]);
     mockApi.getRunDetail.mockResolvedValue(REAL_RUN_DETAIL);
     mockApi.pipelineGraph.mockResolvedValue(GRAPH);
+  mockApi.runWorkflowGraph.mockResolvedValue({...GRAPH, graph_version: 1});
 
     const { container, findByText } = render(
       await import('../../views/Project.svelte'),
@@ -95,11 +99,12 @@ describe('run graph (real payload)', () => {
 
     const names = Array.from(container.querySelectorAll('text.node-id'))
       .map((el) => el.textContent?.trim());
-    expect(names).toEqual(['Git Sync', 'Researcher']);
+    // Current manifest labels cannot relabel a historical run. Exact IDs survive.
+    expect(names).toEqual(['git_sync_pre', '1']);
 
     // Open the researcher node: its instance ran 23:26:00 -> 23:29:21.
     const node = Array.from(container.querySelectorAll('g.node'))
-      .find((g) => g.querySelector('text.node-id')?.textContent === 'Researcher');
+      .find((g) => g.querySelector('text.node-id')?.textContent === '1');
     await fireEvent.click(node as Element);
     const detail = await waitFor(() => {
       // The per-node detail moved into the trace pane beside the graph; the
@@ -113,8 +118,9 @@ describe('run graph (real payload)', () => {
     // per-step cache figures survive the move off the flat list
     expect(detail.querySelector('.cache-inline-badge')?.textContent)
       .toContain('70% cache');
-    // the real step id stays visible next to the label
-    expect(detail.querySelector('.node-real-id')?.textContent).toBe('1');
+    // A run-pinned view displays the real ID itself, not a current label.
+    expect(detail.querySelector('.tp-header strong')?.textContent ?? detail.querySelector('strong')?.textContent).toBe('1');
+    expect(detail.textContent).not.toContain('Researcher');
   });
 });
 

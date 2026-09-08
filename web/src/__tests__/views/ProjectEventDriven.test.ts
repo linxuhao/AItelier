@@ -21,6 +21,9 @@ import { authStore } from '../../stores/auth';
 import { connectionStore } from '../../stores/connection';
 
 const mockApi = vi.hoisted(() => ({
+  stateRunOwners: vi.fn().mockResolvedValue({links: []}),
+  stateProjects: vi.fn().mockResolvedValue({projects: [], next_after: null}),
+  runWorkflowGraph: vi.fn().mockResolvedValue({begin: "", steps: [], graph_version: 1}),
   pipelineGraph: vi.fn(), getProject: vi.fn(), getTasks: vi.fn(),
   listRuns: vi.fn(), getRunDetail: vi.fn(), retryProject: vi.fn(),
   patchProject: vi.fn(), getCheckpoint: vi.fn(), approveCheckpoint: vi.fn(),

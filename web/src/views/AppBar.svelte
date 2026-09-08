@@ -5,6 +5,19 @@
   import { langStore, setLang } from '../stores/i18n';
   import { presenceStore } from '../stores/presence';
   import { t } from '../lib/i18n.svelte';
+  import { st } from '../lib/stateI18n.svelte';
+
+  let headerElement = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const element = headerElement;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      const height = element.getBoundingClientRect().height;
+      if (height > 0) document.documentElement.style.setProperty('--ait-appbar-height', `${height}px`);
+    };
+    const observer = new ResizeObserver(update); observer.observe(element); update();
+    return () => observer.disconnect();
+  });
 
   const LANG_OPTIONS: { code: string; label: string }[] = [
     { code: 'en', label: 'English' },
@@ -33,7 +46,7 @@
   );
 </script>
 
-<header id="app-bar">
+<header id="app-bar" bind:this={headerElement}>
   <nav>
     <ul>
       <li><strong>AItelier</strong>
@@ -49,6 +62,7 @@
       <li><a href="#/projects">{t('appbar.dashboard')}</a></li>
       <li><a href="#/chat">{t('appbar.chat')}</a></li>
       {#if $authStore.canWrite}
+        <li><a href="#/state-projects">{st('projects')}</a></li>
         <li><a href="#/tracking">{t('appbar.tracking')}</a></li>
       {/if}
     </ul>
@@ -231,5 +245,15 @@
     background: transparent;
     color: inherit;
     cursor: pointer;
+  }
+  @media (max-width: 1050px) {
+    #app-bar nav { flex-wrap: wrap; gap: .3rem .7rem; }
+    #app-bar nav ul { flex-wrap: wrap; gap: .2rem .5rem; margin: 0; max-width: 100%; min-width: 0; }
+    #app-bar nav ul:nth-child(2) { order: 3; width: 100%; justify-content: flex-start; }
+    #app-bar nav ul:nth-child(3) { flex: 1 1 230px; justify-content: flex-end; }
+    #app-bar nav li { padding: .15rem 0; }
+    #app-bar nav a { margin: 0; padding: .2rem .3rem; font-size: .8rem; }
+    .connection-status { font-size: .7rem; }
+    .lang-select { max-width: 110px; }
   }
 </style>

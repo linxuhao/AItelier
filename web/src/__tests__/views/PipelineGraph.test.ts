@@ -8,7 +8,7 @@ import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 // getTrace: opening a node now also opens its trace pane. It returns an empty
 // page here — this file is about the drawing, not the trace.
-const mockApi = vi.hoisted(() => ({ pipelineGraph: vi.fn(), getTrace: vi.fn() }));
+const mockApi = vi.hoisted(() => ({ pipelineGraph: vi.fn(), runWorkflowGraph: vi.fn(), getTrace: vi.fn() }));
 vi.mock('../../lib/api', () => mockApi);
 
 import PipelineGraph from '../../views/PipelineGraph.svelte';
@@ -157,7 +157,7 @@ describe('PipelineGraph with a run folded on', () => {
   });
 
   it('opens a node to the instances behind it, with their items', async () => {
-    mockApi.pipelineGraph.mockResolvedValue(loopGraph);
+    mockApi.runWorkflowGraph.mockResolvedValue({...loopGraph, graph_version: 1});
     mockApi.getTrace.mockResolvedValue({ traces: [], has_more: false });
     const { container } = render(PipelineGraph,
       { props: { config: 'dpe_default_v2', runSteps: rows, runId: 'r1' } });

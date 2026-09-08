@@ -8,6 +8,7 @@
   import { showCheckpoint } from '../stores/checkpoint';
   import WorkspaceBrowser from './WorkspaceBrowser.svelte';
   import PipelineGraph from './PipelineGraph.svelte';
+  import RunStateLinks from './RunStateLinks.svelte';
   import {
     getProject,
     getTasks,
@@ -899,6 +900,7 @@
                 {/if}
               </div>
 
+              <RunStateLinks runId={(runDetail.id as string) || (runDetail.run_id as string)} />
               <!-- Navigation links -->
               <nav class="run-nav">
                 <button class="outline small" onclick={() => navigateToTraceForRun((runDetail.id as string) || (runDetail.run_id as string))}>Trace</button>

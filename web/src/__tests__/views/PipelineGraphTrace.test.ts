@@ -12,6 +12,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 const mockApi = vi.hoisted(() => ({
+  stateRunOwners: vi.fn().mockResolvedValue({links: []}),
+  stateProjects: vi.fn().mockResolvedValue({projects: [], next_after: null}),
+  runWorkflowGraph: vi.fn().mockResolvedValue({begin: "", steps: [], graph_version: 1}),
   pipelineGraph: vi.fn(),
   getTrace: vi.fn(),
 }));
@@ -51,6 +54,7 @@ describe('PipelineGraph — current node and its trace', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockApi.pipelineGraph.mockResolvedValue(GRAPH);
+  mockApi.runWorkflowGraph.mockResolvedValue({...GRAPH, graph_version: 1});
     mockApi.getTrace.mockResolvedValue({
       traces: [TRACE(9, 'search')], has_more: false, next_seq: 9, order: 'desc',
     });
@@ -130,6 +134,7 @@ describe('PipelineGraph — cache badge', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockApi.pipelineGraph.mockResolvedValue(GRAPH);
+  mockApi.runWorkflowGraph.mockResolvedValue({...GRAPH, graph_version: 1});
     mockApi.getTrace.mockResolvedValue({
       traces: [], has_more: false, next_seq: 0, order: 'desc',
     });

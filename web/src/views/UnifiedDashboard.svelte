@@ -26,6 +26,7 @@
   import RepoPanel from './RepoPanel.svelte';
   import WorkspaceBrowser from './WorkspaceBrowser.svelte';
   import PipelineGraph from './PipelineGraph.svelte';
+  import RelatedStateProjects from './RelatedStateProjects.svelte';
 
   // ── State ──
 
@@ -626,6 +627,7 @@
 
         <!-- Lazy load RepoPanel + file browser only when expanded -->
         {#if expandedRepos.has(repo.repo_path)}
+          <RelatedStateProjects repoPath={repo.repo_path} />
           <RepoPanel
             projectId={repo.representative_project_id}
             {canWrite}

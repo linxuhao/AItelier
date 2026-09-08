@@ -14,6 +14,9 @@ import { projectStore } from '../../stores/project';
 // ── Mock API module ─────────────────────────────────────────────────
 
 const mockApi = vi.hoisted(() => ({
+  stateRunOwners: vi.fn().mockResolvedValue({links: []}),
+  stateProjects: vi.fn().mockResolvedValue({projects: [], next_after: null}),
+  runWorkflowGraph: vi.fn().mockResolvedValue({begin: "", steps: [], graph_version: 1}),
   getProject: vi.fn(),
   getTasks: vi.fn(),
   listRuns: vi.fn(),

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
   import { stateOverview, stateAttempts, stateRefreshProject } from '../lib/api';
   import { exactRunHref, type StateOverview, type StateAttempt } from '../lib/stateGraph';
@@ -26,7 +27,7 @@
     loading = true;
     stateOverview(project).then(result => {
       if (version !== generation) return;
-      data = result;
+      data = result; rememberProject(project);
       if (wanted && (routeSelectionChanged || !selected) && result.nodes.some(n => n.node_key === wanted)) selected = wanted;
       else if (!result.nodes.some(n => n.node_key === selected)) selected = result.nodes[0]?.node_key ?? '';
       detailRefresh++;
@@ -97,7 +98,7 @@
         <div class="workspace"><StateGraph nodes={data.nodes} {selected} onselect={selectNode} />
           <StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} /></div>
       {:else if tab === 'runs'}
-        <p class="sync-note">{st('complete')}</p>
+        <p class="sync-note">{st('complete')} · <a href={`#/runs/project/${encodeURIComponent(params.id)}`}>{nt('currentOnly')} — {nt('runs')} ↗</a></p>
         {#if runError}<p role="alert">{runError}</p><button class="outline" onclick={() => detailRefresh++}>{st('retry')}</button>{/if}
         {#if runLoading && !attempts.length}<p>{st('loading')}</p>{/if}
         {#if !attempts.length && !runLoading && !runError}<p>{st('noAttempts')}</p>{/if}

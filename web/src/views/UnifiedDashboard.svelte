@@ -28,6 +28,11 @@
   import PipelineGraph from './PipelineGraph.svelte';
   import RelatedStateProjects from './RelatedStateProjects.svelte';
 
+  import { nt } from '../lib/navigation.svelte';
+  // Legacy component retained for old direct consumers; routed repo tools
+  // do not load workflow definitions or run buckets.
+  const { repositoryOnly = false }: {repositoryOnly?:boolean} = $props();
+
   // ── State ──
 
   let repos = $state<RepoItem[]>([]);
@@ -142,6 +147,7 @@
    *  was nested inside the listAllRuns() try, so a slow/500 /api/runs skipped
    *  the catalog entirely and the whole section vanished with no error. */
   async function refreshRunsAndCatalog() {
+    if (repositoryOnly) return;
     const [runsRes, pipesRes] = await Promise.allSettled([
       listAllRuns(),
       listPipelines(),
@@ -451,7 +457,7 @@
 
   <!-- Page header -->
   <header class="dashboard-header">
-    <h2>{t('dashboard.projects')}</h2>
+    <h2>{repositoryOnly ? nt('repositories') : t('dashboard.projects')}</h2>
     <div class="dashboard-header-controls">
       <input
         type="search"
@@ -730,7 +736,7 @@
        entirely repo-less (generated pipelines, novels) has repos.length === 0,
        which used to land on the "no repositories yet" branch and hide all of
        this. Each section still guards on its own (search-filtered) contents. -->
-  {#if !loading && !(error && repos.length === 0)}
+  {#if !repositoryOnly && !loading && !(error && repos.length === 0)}
     <!-- Orphan projects section -->
     {#if orphanProjects.length > 0}
       {@const filteredOrphans = matchedOrphans}

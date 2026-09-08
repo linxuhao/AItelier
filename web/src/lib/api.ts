@@ -701,3 +701,11 @@ export function stateRefreshProject(projectId: string, after = 0): Promise<{resu
   // Explicit user action. No automatic launch/checkpoint/acceptance on reads.
   return _post('/api/state/commands/refresh_project', {project_id: projectId, after, limit: 10}, 60000);
 }
+
+
+/** Exact run history, not the legacy /api/runs execution-project summaries. */
+export function runHistory(options: {q?:string;status?:string;workflow?:string;state_project_id?:string;offset?:number;limit?:number} = {}): Promise<{runs:import('./navigation.svelte').RunRow[];total:number;next_offset:number|null}> {
+  const query=new URLSearchParams();
+  for(const [key,value] of Object.entries(options)) if(value!==undefined && value!=='')query.set(key,String(value));
+  return _get('/api/run-history?'+query.toString());
+}

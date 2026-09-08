@@ -3,8 +3,10 @@
   import Router from 'svelte-spa-router';
 
   import AppBar from './views/AppBar.svelte';
-  import UnifiedDashboard from './views/UnifiedDashboard.svelte';
-  import RedirectToDashboard from './views/RedirectToDashboard.svelte';
+  import ProjectDashboard from './views/ProjectDashboard.svelte';
+  import Runs from './views/Runs.svelte';
+  import Pipelines from './views/Pipelines.svelte';
+  import Repositories from './views/Repositories.svelte';
   import Project from './views/Project.svelte';
   import StateProjects from './views/StateProjects.svelte';
   import StateProject from './views/StateProject.svelte';
@@ -27,8 +29,11 @@
   import { syncInitialLang } from './stores/i18n';
 
   const routes = {
-    '/': UnifiedDashboard,
-    '/projects': UnifiedDashboard,
+    '/': ProjectDashboard,
+    '/projects': ProjectDashboard,
+    '/runs': Runs,
+    '/runs/project/:projectId': Runs,
+    '/pipelines': Pipelines,
     '/state-projects': StateProjects,
     '/state-projects/for-repo/:repoPath': StateProjects,
     '/state-projects/:id/nodes/:nodeKey': StateProject,
@@ -41,8 +46,8 @@
     '/projects/:id/trace': Trace,
     '/projects/:id/trace/:runId': Trace,
     '/tracking': Tracking,
-    '/repos': RedirectToDashboard,
-    '/repos/:repoPath': RedirectToDashboard,
+    '/repos': Repositories,
+    '/repos/:repoPath': Repositories,
   };
 
   // SSE handler for checkpoint_reached: auto-open the CheckpointModal.

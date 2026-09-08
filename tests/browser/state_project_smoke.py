@@ -91,6 +91,10 @@ def main():
         import uvicorn
         from playwright.sync_api import sync_playwright,expect
         app=FastAPI();app.include_router(router)
+        from api.run_history_routers import router as run_history_router, get_db_manager, get_skillflow
+        app.include_router(run_history_router)
+        app.dependency_overrides[get_db_manager]=lambda:service.db
+        app.dependency_overrides[get_skillflow]=lambda:sf
         app.dependency_overrides[get_service]=lambda:service
         def writer(request:Request):
             if request.cookies.get('fixture-auth')!='writer':raise HTTPException(403,'private project state')
@@ -122,6 +126,15 @@ def main():
             row=sf.get_run(run_id)
             if not row:raise HTTPException(404,'Run missing')
             return {**row,'config_name':row['graph_name'],'steps':sf.get_steps(run_id),'cache_stats_by_step':{}}
+        @app.get('/api/pipelines')
+        def pipeline_list():
+            return {'pipelines':[{'config_name':'browser_feature','label':'Browser fixture workflow','origin':'native','step_count':1,'state_files':[]}]}
+        @app.get('/api/pipelines/{config}/graph')
+        def current_pipeline_graph(config:str):
+            if config!='browser_feature':raise HTTPException(404,'Unknown fixture graph')
+            return {**pinned_run_graph(sf,external),'node_labels':{},'label':'Browser fixture workflow'}
+        @app.get('/api/repos')
+        def repos(): return []
         @app.get('/health')
         def health():return {'ok':True}
         app.mount('/assets',StaticFiles(directory=ROOT/'web/dist/assets'))
@@ -141,6 +154,28 @@ def main():
                 context=browser.new_context(viewport={'width':1440,'height':1000},locale='en-US')
                 context.add_cookies([{'name':'fixture-auth','value':'writer','url':base}])
                 page=context.new_page();page.on('pageerror',lambda e:page_errors.append(str(e)))
+                # The new entry point immediately shows a permitted project's DAG.
+                page.goto(base+'/#/');expect(page.locator('g.goal')).to_have_count(8)
+                expect(page.locator('a[data-nav="projects"]')).to_have_attribute('aria-current','page')
+                page.screenshot(path=str(out/'default-project-dashboard.png'),full_page=True)
+                before_requests=len(requests)
+                page.locator('a[data-nav="runs"]').click()
+                expect(page.locator('.history-run')).to_have_count(2)
+                assert not any(r['path']=='/api/pipelines' for r in requests[before_requests:])
+                expect(page.locator('a[data-nav="runs"]')).to_have_attribute('aria-current','page')
+                assert page.locator('a[href="#/state-runs/'+rid+'"]').count()>=1
+                page.screenshot(path=str(out/'runs-dashboard.png'),full_page=True)
+                before_requests=len(requests)
+                page.locator('a[data-nav="pipelines"]').click()
+                expect(page.locator('.pipeline-card')).to_have_count(1)
+                assert not any(r['path'] in ['/api/run-history','/api/runs'] for r in requests[before_requests:])
+                page.locator('.pipeline-card summary').first.click()
+                expect(page.locator('.pg g.node')).to_have_count(1)
+                expect(page.locator('.pg')).to_contain_text('NEW_NODE_MUST_NOT_APPEAR')
+                page.screenshot(path=str(out/'pipeline-catalog.png'),full_page=True)
+                page.locator('a[data-nav="projects"]').click()
+                expect(page.locator('g.goal')).to_have_count(8)
+                checks.append('Default homepage shows the selected project DAG; Runs/Pipelines have separate requests and all exact fixture runs survive')
                 page.goto(base+'/#/state-projects');expect(page.get_by_role('heading',name='Projects · State DAG')).to_be_visible()
                 page.locator('a.project-card[href="#/state-projects/shrimp-preview"]').click();expect(page.locator('g.goal')).to_have_count(8)
                 expect(page.get_by_role('heading',name='武虾传奇 · Migration preview')).to_be_visible()

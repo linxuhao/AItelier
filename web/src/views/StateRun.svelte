@@ -1,6 +1,7 @@
 <script lang="ts">
   import { authStore } from '../stores/auth';
   import { getRunDetail } from '../lib/api';
+  import { nt } from '../lib/navigation.svelte';
   import { st } from '../lib/stateI18n.svelte';
   import PipelineGraph from './PipelineGraph.svelte';
   import RunStateLinks from './RunStateLinks.svelte';
@@ -19,7 +20,7 @@
   });
 </script>
 <section class="state-run">
-  <a href="#/state-projects">← {st('projects')}</a>
+  <a href="#/runs">← {nt('runs')}</a>
   {#if !allowed}<p>{st('private')}</p>
   {:else if error}<p role="alert">{error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button>
   {:else if !run}<p>{st('loading')}</p>

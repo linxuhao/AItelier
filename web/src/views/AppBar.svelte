@@ -1,11 +1,14 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { nt, navArea } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
   import { connectionStore } from '../stores/connection';
   import { notifPanelOpen, notifUnread } from '../stores/notifications';
   import { langStore, setLang } from '../stores/i18n';
   import { presenceStore } from '../stores/presence';
   import { t } from '../lib/i18n.svelte';
-  import { st } from '../lib/stateI18n.svelte';
+  let route=$state(typeof window==='undefined'?'#/':window.location.hash);
+  onMount(()=>{const changed=()=>{route=window.location.hash;};window.addEventListener('hashchange',changed);return ()=>window.removeEventListener('hashchange',changed);});
 
   let headerElement = $state<HTMLElement | null>(null);
   $effect(() => {
@@ -49,7 +52,7 @@
 <header id="app-bar" bind:this={headerElement}>
   <nav>
     <ul>
-      <li><strong>AItelier</strong>
+      <li><strong><a class="brand" href="#/">AItelier</a></strong>
         {#if $presenceStore && $presenceStore.total > 0}
           <span class="presence-badge"
                 title={`${$presenceStore.authenticated} signed-in · ${$presenceStore.total - $presenceStore.authenticated} anonymous`}>
@@ -59,12 +62,11 @@
       </li>
     </ul>
     <ul>
-      <li><a href="#/projects">{t('appbar.dashboard')}</a></li>
-      <li><a href="#/chat">{t('appbar.chat')}</a></li>
-      {#if $authStore.canWrite}
-        <li><a href="#/state-projects">{st('projects')}</a></li>
-        <li><a href="#/tracking">{t('appbar.tracking')}</a></li>
-      {/if}
+      <li><a data-nav="projects" href="#/" aria-current={navArea(route)==='projects'?'page':undefined}>{nt('projects')}</a></li>
+      <li><a data-nav="runs" href="#/runs" aria-current={navArea(route)==='runs'?'page':undefined}>{nt('runs')}</a></li>
+      <li><a data-nav="pipelines" href="#/pipelines" aria-current={navArea(route)==='pipelines'?'page':undefined}>{nt('pipelines')}</a></li>
+      <li><a data-nav="chat" href="#/chat" aria-current={navArea(route)==='chat'?'page':undefined}>{t('appbar.chat')}</a></li>
+      {#if $authStore.canWrite}<li><a href="#/tracking">{t('appbar.tracking')}</a></li>{/if}
     </ul>
     <ul>
       {#if $authStore.permissionResolved}
@@ -154,6 +156,8 @@
 </header>
 
 <style>
+  a[aria-current="page"] { font-weight:700; text-decoration:underline; text-underline-offset:.35rem; }
+  .brand { color:inherit; text-decoration:none; }
   .presence-badge {
     font-size: 0.75rem;
     color: var(--pico-muted-color, #888);

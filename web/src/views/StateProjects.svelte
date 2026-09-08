@@ -34,7 +34,7 @@
 </script>
 <section class="state-projects">
   <header><div><p class="eyebrow">AITELIER / PROJECTS</p><h1>{st('projects')}</h1><p>{st('intro')}</p></div>
-    <a href="#/projects">{st('dashboard')} ↗</a></header>
+    <a href="#/repos">{st('dashboard')} ↗</a></header>
   {#if !allowed}<p role="status">{st('private')}</p>
   {:else}
     <label>{st('search')}<input type="search" bind:value={query} placeholder={st('search')} /></label>

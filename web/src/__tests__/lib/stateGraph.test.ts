@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLayout, stateTone, stateProjectHref, exactRunHref, cardTitle } from '../../lib/stateGraph';
+import { stateLayout, stateTone, stateProjectHref, exactRunHref, cardTitle, cardLines, STATE_CARD } from '../../lib/stateGraph';
 import { goal } from '../fixtures/stateProject';
 
 describe('State DAG layout semantics', () => {
@@ -37,5 +37,21 @@ describe('State DAG layout semantics', () => {
     expect(exactRunHref('run#1')).toBe('#/state-runs/run%231');
     expect(cardTitle('武虾传奇'.repeat(15)).length).toBeLessThanOrEqual(15);
     expect(cardTitle('abcdef')).toBe('abcdef');
+  });
+});
+
+
+describe('Readable node cards', () => {
+  it('wraps CJK and Latin titles into two lines with explicit truncation', () => {
+    expect(cardLines('短标题')).toEqual(['短标题']);
+    const cjk=cardLines('武虾传奇'.repeat(50));
+    expect(cjk).toHaveLength(2); expect(cjk[1].endsWith('…')).toBe(true);
+    expect(cjk.every(s=>Array.from(s).length <= 18)).toBe(true);
+    expect(cardLines('A'.repeat(200))).toHaveLength(2);
+  });
+  it('allocates separate title, fact, readiness and attempt rows', () => {
+    expect(STATE_CARD.height).toBeGreaterThanOrEqual(156);
+    const layout=stateLayout([goal('a'),goal('b',['a'])]);
+    expect(layout.nodes[1].y-layout.nodes[0].y).toBeGreaterThan(STATE_CARD.height);
   });
 });

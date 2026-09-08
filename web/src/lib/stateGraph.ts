@@ -63,6 +63,24 @@ export function cardTitle(text: string, budget = 28): string {
   }
   return result;
 }
+/** Split labels without assuming every Unicode character has Latin width. */
+export function cardLines(text: string, budget = 34): string[] {
+  const chars = Array.from(text); const lines: string[] = [];
+  let line = '', used = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i], units = ch.codePointAt(0)! > 255 ? 2 : 1;
+    if (used + units > budget) {
+      lines.push(line);
+      if (lines.length === 2) { lines[1] = Array.from(lines[1]).slice(0, -1).join('') + '…'; return lines; }
+      line = ''; used = 0;
+    }
+    line += ch; used += units;
+  }
+  if (line || !lines.length) lines.push(line);
+  return lines;
+}
+export const STATE_CARD = { width: 264, height: 156, xGap: 28, yGap: 36 };
+
 export function stateTone(status: string): string {
   // Only the fact is allowed to be green. A successful attempt remains blue.
   return status === 'VERIFIED' ? 'verified' : status === 'CANDIDATE' ? 'candidate'
@@ -93,9 +111,9 @@ export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', 
   const layout = layoutGraph(visible.map(n => ({ id: n.node_key,
     transitions: outgoing.get(n.node_key)!.filter(to => shown.has(to)).map(to => ({ to })) })), visible[0]?.node_key ?? '');
   const byKey = new Map(visible.map(n => [n.node_key, n]));
-  const boxes = layout.nodes.map(n => ({ ...byKey.get(n.id)!, x: 20 + n.order * 234, y: 20 + n.rank * 142,
+  const boxes = layout.nodes.map(n => ({ ...byKey.get(n.id)!, x: 20 + n.order * (STATE_CARD.width + STATE_CARD.xGap), y: 20 + n.rank * (STATE_CARD.height + STATE_CARD.yGap),
     outsideDependencies: byKey.get(n.id)!.dependencies.filter(k => !shown.has(k)).length }));
-  return { nodes: boxes, edges: layout.edges, width: Math.max(280, 40 + layout.widest * 234 - 24),
-    height: Math.max(150, 40 + layout.rankCount * 142 - 38), tooLarge: false, count: visible.length,
+  return { nodes: boxes, edges: layout.edges, width: Math.max(304, 40 + layout.widest * (STATE_CARD.width + STATE_CARD.xGap) - STATE_CARD.xGap),
+    height: Math.max(196, 40 + layout.rankCount * (STATE_CARD.height + STATE_CARD.yGap) - STATE_CARD.yGap), tooLarge: false, count: visible.length,
     hiddenEdges: whole.edges.filter(e => shown.has(e.from) !== shown.has(e.to)).length };
 }

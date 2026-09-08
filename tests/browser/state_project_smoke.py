@@ -144,6 +144,10 @@ def main():
                 page.goto(base+'/#/state-projects');expect(page.get_by_role('heading',name='Projects · State DAG')).to_be_visible()
                 page.locator('a.project-card[href="#/state-projects/shrimp-preview"]').click();expect(page.locator('g.goal')).to_have_count(8)
                 expect(page.get_by_role('heading',name='武虾传奇 · Migration preview')).to_be_visible()
+                from state_node_paint import assert_state_node_paint
+                paint = assert_state_node_paint(page)
+                (out/'node-paint-contrast.json').write_text(json.dumps(paint,indent=2)+'\n')
+                checks.append('Actual Pico CSS: light/dark normal/hover/focus labels meet 4.5:1 contrast; cards retain readable 100% size')
                 assert page.locator('g.goal.verified').count()==0
                 page.locator('g.goal').filter(has=page.locator('text.goal-key',has_text='ui.responsive')).click()
                 expect(page.locator('.node-panel')).to_contain_text('合作界面与原生输入')

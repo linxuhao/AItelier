@@ -175,3 +175,22 @@ describe('Detail races and exact run navigation', () => {
     await waitFor(()=>expect(view.container.querySelectorAll('a')).toHaveLength(0));
   });
 });
+
+
+describe('Visible node status content', () => {
+  it('keeps running attempt separate from the unverified fact', () => {
+    const view=render(StateGraph,{nodes:[goal('active',[],{status:'OPEN',readiness:'in_progress',latest_attempt:attempt({status:'running'})})],selected:'',onselect:vi.fn()});
+    const card=view.container.querySelector('g.goal')!;
+    expect(card.querySelector('.goal-state')?.textContent).toBe('OPEN');
+    expect(card.querySelector('.goal-attempt')?.textContent).toContain('RUNNING');
+    expect(card.querySelector('.goal-ready')?.textContent).toContain('In progress');
+    expect(card.getAttribute('data-fact')).toBe('OPEN');
+    expect(card.classList.contains('verified')).toBe(false);
+    expect(view.container.querySelector('svg')?.style.width).toMatch(/px$/);
+  });
+  it('shows accepted fact and the absence of an attempt explicitly', () => {
+    const view=render(StateGraph,{nodes:[goal('accepted',[],{status:'VERIFIED',readiness:'closed'})],selected:'',onselect:vi.fn()});
+    expect(view.container.querySelector('.goal-state')?.textContent).toBe('VERIFIED');
+    expect(view.container.querySelector('.goal-attempt')?.textContent).toContain('Not started');
+  });
+});

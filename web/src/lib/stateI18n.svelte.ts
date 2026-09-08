@@ -3,6 +3,7 @@ import { langStore } from '../stores/i18n';
 let lang = $state(get(langStore));
 langStore.subscribe(value => { lang = value; });
 const en: Record<string, string> = {
+  attemptShort:'Attempt', notStarted:'Not started',
   projects: 'Projects · State DAG', project: 'State project', dashboard: 'Repositories & executions',
   intro: 'Long-lived goals, independent of workflow runs.', private: 'Project state is private. Sign in with writer access to view it.',
   loading: 'Loading…', retry: 'Retry', reload: 'Reload view', sync: 'Sync run results', syncMore: 'Sync next batch',
@@ -30,6 +31,7 @@ const en: Record<string, string> = {
   fullRun: 'Open exact run', complete: 'completed ≠ VERIFIED', policy: 'Dispatch policy', criteria: 'Required checks',
 };
 const zh: Record<string, string> = {
+  attemptShort:'最近尝试', notStarted:'尚未执行',
   projects:'项目 · State DAG', project:'长期项目', dashboard:'仓库与执行记录', intro:'长期目标独立于每一次工作流执行。',
   private:'项目状态为私有数据，请使用有写入权限的账号登录后查看。', loading:'正在读取…', retry:'重试', reload:'刷新视图',
   sync:'同步 Run 结果', syncMore:'同步下一批', syncNote:'仅更新观测状态，不启动、不审批、不验收。', syncDone:'Run 状态已同步',
@@ -50,6 +52,7 @@ const zh: Record<string, string> = {
   referenceOnly:'仅历史关联 · 未接管', fullRun:'打开确切 Run', complete:'completed ≠ VERIFIED', policy:'调度策略', criteria:'必需检查',
 };
 const fr: Record<string, string> = {
+  attemptShort:'Tentative', notStarted:'Non commencée',
   projects:'Projets · State DAG', project:'Projet durable', dashboard:'Dépôts et exécutions',
   intro:'Les objectifs persistent indépendamment des exécutions.', private:'État privé : connectez-vous avec un accès en écriture.',
   loading:'Chargement…', retry:'Réessayer', reload:'Actualiser la vue', sync:'Synchroniser les résultats', syncMore:'Lot suivant',

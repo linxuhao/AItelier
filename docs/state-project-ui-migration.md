@@ -2,7 +2,11 @@
 
 ## Navigation and ownership
 
-The top navigation now has **Projects · State DAG** for authorized writers.
+**Navigation update:** `/` and `/projects` now open the selected long-lived project's
+State DAG directly. Primary navigation is Projects / Runs / Pipelines / Chat;
+repository tools live under `/repos`. See [the dashboard UX guide](project-dashboard-ux.md)
+for current routes, visible fact/attempt badges and the white-label fix.
+The catalog and all project/goal/run permalinks below remain supported.
 This is the long-lived product project, not the old execution-project row.
 
 - `#/state-projects`: private project catalog with goal counts and dispatch policy.

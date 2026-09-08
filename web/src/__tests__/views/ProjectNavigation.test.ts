@@ -122,3 +122,14 @@ describe('Runs and definitions have separate queries',()=>{
     expect(navArea('#/pipelines')).toBe('pipelines');
   });
 });
+
+
+it('homepage refreshes persisted state without triggering reconciliation',async()=>{
+  vi.useFakeTimers({toFake:['setInterval','clearInterval']});
+  const view=render(ProjectDashboard);await view.findByRole('heading',{name:'武虾传奇'});
+  await vi.advanceTimersByTimeAsync(15000);
+  await waitFor(()=>expect(api.stateOverview).toHaveBeenCalledTimes(2));
+  expect(api.stateRefreshProject).not.toHaveBeenCalled();
+  view.unmount();await vi.advanceTimersByTimeAsync(15000);
+  expect(api.stateOverview).toHaveBeenCalledTimes(2);
+});

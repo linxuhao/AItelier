@@ -87,13 +87,13 @@
      on buttons (including SVG g), otherwise white labels sit on white cards. */
   .state-graph { min-width:0; --sg-ink:var(--pico-color,#243447); --sg-surface:var(--pico-card-background-color,#fff); }
   .controls { display:flex; gap:.7rem; align-items:flex-end; flex-wrap:wrap; }
-  label { font-size:.8rem; margin:0; }
+  label { font-size:.8rem; line-height:1.25; margin:0; }
   input, select, button { margin:0; font-size:.8rem; padding:.45rem .65rem; min-height:2.1rem; }
   .search { flex:1; min-width:150px; }
   .zoom { display:flex; gap:.25rem; padding-bottom:2px; }
-  .focus-toggle { display:flex; align-items:center; gap:.45rem; margin:.7rem 0; }
+  .focus-toggle { display:flex; align-items:center; gap:.45rem; margin:.3rem 0; }
   .focus-toggle input { min-height:0; width:1rem; }
-  .legend,.boundary { font-size:.76rem; color:var(--pico-muted-color,#64748b); margin:.5rem 0; }
+  .legend,.boundary { font-size:.76rem; color:var(--pico-muted-color,#64748b); line-height:1.3; margin:.3rem 0; }
   .canvas { width:100%; overflow:auto; max-height:68vh; min-height:180px; border:1px solid var(--pico-muted-border-color,#dce2ea); border-radius:10px; background:var(--pico-card-background-color,#fff); }
   svg { display:block; max-width:none; max-inline-size:none; flex:none; }
   .dependency { fill:none; stroke:#8593a6; stroke-width:1.6; color:#8593a6; }

@@ -28,6 +28,8 @@ and the [offline real-engine demonstration](examples/state_graph_demo.py).
 The [State Project frontend and migration preparation guide](docs/state-project-ui-migration.md)
 covers project DAG browsing, exact-run graph versions, protected historical references
 and held shadow migration rehearsal.
+The [project-first dashboard guide](docs/project-dashboard-ux.md) covers the default State DAG workspace,
+separate Runs/Pipelines navigation, readable node badges and actual run history.
 
 ## Why AItelier
 

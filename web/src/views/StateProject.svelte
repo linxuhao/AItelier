@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
   import { stateOverview, stateAttempts, stateRefreshProject } from '../lib/api';
@@ -7,7 +8,7 @@
   import StateGraph from './StateGraph.svelte';
   import StateNodePanel from './StateNodePanel.svelte';
   import StateAttemptEvidence from './StateAttemptEvidence.svelte';
-  const { params }: { params: { id: string; nodeKey?: string } } = $props();
+  const { params, compact = false }: { params: { id: string; nodeKey?: string }; compact?:boolean } = $props();
   let data = $state<StateOverview | null>(null), error = $state(''), loading = $state(false);
   let selected = $state(''), tab = $state('graph'), retry = $state(0), detailRefresh = $state(0);
   let attempts = $state<StateAttempt[]>([]), next = $state<number | null>(null), runError = $state('');
@@ -65,10 +66,16 @@
     } catch (e) { if (version === generation) notice = String(e instanceof Error ? e.message : e); }
     finally { syncing = false; }
   }
+  // The dashboard follows persisted state without executing a reconciliation
+  // or approving anything. Hidden tabs do not generate background requests.
+  onMount(()=>{
+    const timer=setInterval(()=>{if(allowed && !loading && !syncing && document.visibilityState==='visible')retry++;},15000);
+    return ()=>clearInterval(timer);
+  });
   function selectNode(key: string) { selected = key; }
 </script>
 
-<section class="state-project">
+<section class="state-project" class:compact>
   <nav class="breadcrumbs"><a href="#/state-projects">{st('projects')}</a><span>/</span><span>{params.id}</span></nav>
   {#if !allowed}<p role="status">{st('private')}</p>
   {:else}
@@ -76,7 +83,7 @@
     {#if !data && loading}<p aria-live="polite">{st('loading')}</p>{/if}
     {#if data}
       <header><div><p class="eyebrow">{st('project')}</p><h1>{data.project.title}</h1>
-        <p class="source">{st('source')}: <code>{data.source.repo_path ?? st('noSource')}</code></p></div>
+        <details class="source" open={!compact}><summary>{st('source')}</summary><code>{data.source.repo_path ?? st('noSource')}</code></details></div>
         <div class="toolbar"><button class="outline" disabled={loading || syncing} onclick={() => retry++}>{st('reload')}</button>
           <button disabled={syncing || loading} onclick={syncRuns}>{syncing ? st('loading') : syncNext ? st('syncMore') : st('sync')}</button></div></header>
       <p class="sync-note">{st('syncNote')}</p>
@@ -87,7 +94,7 @@
         <div><strong>{data.readiness_counts.ready ?? 0}</strong><span>{st('ready')}</span></div>
         <div><strong>{data.readiness_counts.held ?? 0}</strong><span>{st('held')}</span></div>
       </div>
-      {#if data.policy.dispatch !== 'active'}<div class="policy"><strong>⏸ {st('policy')}: {data.policy.dispatch}</strong><p>{data.policy.reason}</p><small>{st('holdNote')}</small></div>{/if}
+      {#if data.policy.dispatch !== 'active'}<details class="policy" open={!compact}><summary><strong>⏸ {st('policy')}: {data.policy.dispatch}</strong></summary><p>{data.policy.reason}</p><small>{st('holdNote')}</small></details>{/if}
       <nav class="tabs" aria-label={st('overview')}>
         <button class:active={tab === 'graph'} aria-pressed={tab === 'graph'} onclick={() => tab = 'graph'}>{st('graph')}</button>
         <button class:active={tab === 'runs'} aria-pressed={tab === 'runs'} onclick={() => tab = 'runs'}>{st('runs')}</button>
@@ -146,6 +153,20 @@
   .run-row p { margin:.35rem 0; } .run-actions { display:flex; gap:.7rem; align-items:center; flex-wrap:wrap; }
   .node-index h3 { font-size:1rem; } .node-index button { display:block; width:100%; text-align:left; background:none; color:var(--pico-color,#334155); border:1px solid var(--pico-muted-border-color,#ddd); margin:.4rem 0; }
   .node-index .chosen { border-color:var(--pico-primary,#0066cc); } .node-index small { display:block; opacity:.65; }
+  .source summary{font-size:.75rem;margin-bottom:.25rem;}
+  .compact .breadcrumbs,.compact .eyebrow{display:none;}
+  .compact header{gap:.5rem;align-items:center;}
+  .compact h1{font-size:1.3rem;line-height:1.25;margin:.1rem 0 .25rem;}
+  .compact .source{margin:.15rem 0;}
+  .compact .sync-note,.compact .snapshot{margin:.3rem 0;line-height:1.3;}
+  .compact .metrics{margin:.6rem 0;gap:.5rem;}
+  .compact .metrics div{padding:.4rem .65rem;flex-direction:row;gap:.5rem;}
+  .compact .metrics strong{font-size:1.2rem;line-height:1.3;}
+  .compact .metrics span{font-size:.75rem;}
+  .compact .policy{padding:.45rem .7rem;margin:.55rem 0;}
+  .policy summary{font-size:.8rem;line-height:1.35;}
+  .compact .tabs{padding-bottom:.3rem;gap:.3rem;}
+  .compact .tabs button{padding:.3rem .55rem;}
   @media(max-width:950px) { .workspace { grid-template-columns:1fr; } .metrics div { flex-direction:column; gap:.2rem; } }
   @media(max-width:600px) { .evidence-workspace { grid-template-columns:1fr; } .metrics { grid-template-columns:repeat(2,1fr); } h1 { font-size:1.35rem; } .tabs { flex-wrap:wrap; } }
 </style>

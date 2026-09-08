@@ -33,14 +33,15 @@
   {:else if error}<div role="alert"><p>{error}</p><button class="outline" onclick={()=>retry++}>{nt('retry')}</button></div>
   {:else if loading}<p role="status">{st('loading')}</p>
   {:else if selected}
-    {#key selected}<StateProject params={{id:selected}} />{/key}
+    {#key selected}<StateProject params={{id:selected}} compact={true} />{/key}
   {:else}<p>{st('empty')}</p>{/if}
 </section>
 <style>
   .project-dashboard{max-width:1480px;min-width:0;margin:auto;}
-  .project-switcher{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;border-bottom:1px solid var(--pico-muted-border-color,#ddd);padding:.65rem 0 1rem;margin-bottom:.5rem;}
+  .project-switcher{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;border-bottom:1px solid var(--pico-muted-border-color,#ddd);padding:.35rem 0 .6rem;margin-bottom:.35rem;}
   .switch-title{display:flex;flex-direction:column;gap:.2rem;flex:1;min-width:180px;}
-  .switch-title span{font-size:.75rem;color:var(--pico-muted-color,#64748b);}
-  label{font-size:.75rem;margin:0;max-width:100%;}select{font-size:.85rem;margin:.2rem 0 0;padding:.45rem 2rem .45rem .65rem;max-width:min(440px,100%);}
+  .switch-title strong{font-size:.9rem;line-height:1.2;}
+  .switch-title span{line-height:1.2;font-size:.7rem;color:var(--pico-muted-color,#64748b);}
+  label{display:flex;align-items:center;gap:.5rem;font-size:.75rem;line-height:1.2;margin:0;max-width:100%;}select{font-size:.85rem;line-height:1.3;margin:0;padding:.45rem 2rem .45rem .65rem;max-width:min(440px,100%);}
   a{font-size:.8rem;}button{width:auto;font-size:.85rem;}
 </style>

@@ -157,6 +157,9 @@ def main():
                 # The new entry point immediately shows a permitted project's DAG.
                 page.goto(base+'/#/');expect(page.locator('g.goal')).to_have_count(8)
                 expect(page.locator('a[data-nav="projects"]')).to_have_attribute('aria-current','page')
+                geometry=page.evaluate("""() => Object.fromEntries(['#app-bar','.project-switcher','.state-project header','.metrics','.policy','.tabs','.state-graph .canvas'].map(s=>[s,document.querySelector(s)?.getBoundingClientRect().toJSON()]))""")
+                (out/'dashboard-geometry.json').write_text(json.dumps(geometry,indent=2)+'\n')
+                assert geometry['.state-graph .canvas']['top']+176 < 1000, 'Dashboard hides every goal below the first screen'
                 page.screenshot(path=str(out/'default-project-dashboard.png'),full_page=True)
                 before_requests=len(requests)
                 page.locator('a[data-nav="runs"]').click()
@@ -176,6 +179,15 @@ def main():
                 page.locator('a[data-nav="projects"]').click()
                 expect(page.locator('g.goal')).to_have_count(8)
                 checks.append('Default homepage shows the selected project DAG; Runs/Pipelines have separate requests and all exact fixture runs survive')
+                # All new primary views must remain usable on a narrow screen.
+                page.set_viewport_size({'width':390,'height':844})
+                for route,ready_selector in [('/', 'g.goal'),('/runs','.history-run'),('/pipelines','.pipeline-card')]:
+                    page.goto(base+'/#'+route)
+                    expect(page.locator(ready_selector).first).to_be_visible()
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+2'),route
+                    page.screenshot(path=str(out/('mobile-'+('home' if route=='/' else route[1:])+'.png')),full_page=True)
+                checks.append('390px default dashboard, run history and pipeline catalog each avoid document overflow')
+                page.set_viewport_size({'width':1440,'height':1000})
                 page.goto(base+'/#/state-projects');expect(page.get_by_role('heading',name='Projects · State DAG')).to_be_visible()
                 page.locator('a.project-card[href="#/state-projects/shrimp-preview"]').click();expect(page.locator('g.goal')).to_have_count(8)
                 expect(page.get_by_role('heading',name='武虾传奇 · Migration preview')).to_be_visible()

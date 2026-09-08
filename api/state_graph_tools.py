@@ -4,8 +4,10 @@ from core.state_graph import StateGraphError
 from core.state_service import StateService
 
 
-def register_state_tools(tool, mcp):
+def register_state_tools(tool, mcp, service_factory=None):
     def service():
+        if service_factory is not None:
+            return service_factory()
         from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
         from api.mcp_router import _request_from, _start_driver
         from api.state_graph_routers import authenticated_actor
@@ -33,13 +35,16 @@ def register_state_tools(tool, mcp):
     def state_graph_read(action: str, arguments: dict) -> dict:
         return {"result": invoke(action, arguments, False)}
 
-    @tool("state_graph_write", "write", "Manage State DAG goals/attempts using typed state_graph_help contracts. Actions include create_project, add_nodes, revise_node, split_node, supersede_node, start_attempt, recover_attempt, reconcile_attempt, record_evidence, verify_node, import_tasks. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results.")
+    @tool("state_graph_write", "write", "Manage State DAG goals/attempts using typed state_graph_help contracts. Actions include create_project, add_nodes, revise_node, split_node, supersede_node, start_attempt, recover_attempt, reconcile_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results.")
     def state_graph_write(action: str, arguments: dict) -> dict:
         return {"result": invoke(action, arguments, True)}
 
     @mcp.prompt(name="state_graph_driver", description="How to drive long projects without putting project state inside a workflow")
     def state_graph_driver() -> str:
-        return ("Use state_graph_help for schemas. Read a project's frontier; read get_node for its revision, "
+        return ("For your own harness/subagents, start_external_attempt freezes the goal context without creating a workflow. "
+                "Run your own verifier, report_external_attempt with its exact context_hash/artifact/report/quiescence, "
+                "then record real per-criterion evidence and verify_node. Never invent evidence or fake SkillFlow runs. "
+                "Use state_graph_help for schemas. Read a project's frontier; read get_node for its revision, "
                 "contract, dependency receipts and attempts. Choose a seeded SkillFlow workflow, then "
                 "start_attempt with the expected revision and a stable request_key. Preserve the returned attempt_id "
                 "and run_id; use normal wait_for_run/checkpoint tools with review gates. Reconcile the exact attempt. "

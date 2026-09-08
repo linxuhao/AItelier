@@ -12,7 +12,8 @@ from core.state_graph import StateConflict, StateGraphError, digest, integer, ke
 from core.state_metadata import node_hold, project_policy
 
 ATTEMPT_COLUMNS = ("seq", "attempt_id", "project_id", "node_key", "node_revision", "workflow",
-                   "execution_project_id", "run_id", "status", "artifact_ref", "created_at", "updated_at")
+                   "execution_project_id", "run_id", "status", "artifact_ref", "created_at", "updated_at",
+                   "execution_kind", "harness", "external_id", "reporting_actor", "observation_version", "artifact_kind")
 
 
 class StatePortfolio:
@@ -216,5 +217,7 @@ class StatePortfolio:
             from core.state_attempts import StateAttempts, _public
             a = StateAttempts._attempt(conn, attempt_id)
             rows = [dict(r) for r in conn.execute("SELECT * FROM state_evidence WHERE attempt_id=? ORDER BY seq DESC LIMIT 201", (attempt_id,))]
-            return {"attempt": _public(a), "evidence": list(reversed(rows[:200])), "evidence_truncated": len(rows) > 200,
+            external = [dict(r) for r in conn.execute("SELECT * FROM state_external_observations WHERE attempt_id=? ORDER BY version DESC LIMIT 101",(attempt_id,))]
+            return {"attempt": _public(a), "external_observations": list(reversed(external[:100])), "external_observations_truncated":len(external)>100,
+                    "evidence": list(reversed(rows[:200])), "evidence_truncated": len(rows) > 200,
                     "receipts": [dict(r) for r in conn.execute("SELECT * FROM state_acceptances WHERE attempt_id=? ORDER BY created_at DESC LIMIT 100", (attempt_id,))]}

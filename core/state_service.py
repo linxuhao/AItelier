@@ -21,6 +21,8 @@ class StateService:
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
         self.store = StateGraphStore(db)
         self.attempts = StateAttempts(self.store)
+        from core.state_external import ExternalAttempts
+        self.external = ExternalAttempts(self.attempts, actor)
         self.attach_driver = attach_driver
         self.actor = actor
         self.runtime_factory = runtime_factory
@@ -108,6 +110,19 @@ class StateService:
                         raise StateConflict("accepted dependency commit is not in the source; integrate it before launching") from exc
         return out
 
+    def start_external_attempt(self, project_id, node_key, expected_revision, harness, external_id,
+                               request_key, instruction=""):
+        """Register external execution scope; never compose or dispatch a workflow."""
+        return self.external.register(project_id, node_key, expected_revision, harness, external_id,
+                                      request_key, instruction)
+
+    def report_external_attempt(self, attempt_id, observation_id, expected_version, context_hash,
+                                status, report_ref, report_sha256, quiescent=False,
+                                artifact=None, artifact_kind=None, detail=""):
+        return self.external.observe(attempt_id, observation_id, expected_version, context_hash,
+                                     status, report_ref, report_sha256, quiescent=quiescent,
+                                     artifact=artifact, artifact_kind=artifact_kind, detail=detail)
+
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction=""):
         from core.state_metadata import require_dispatch
         with self.store.transaction() as conn:
@@ -183,8 +198,10 @@ class StateService:
                 "scheduler_owned": owned}
 
     def recover_attempt(self, attempt_id):
-        self._components()
         attempt = self.attempts.get(attempt_id)
+        if attempt["execution_kind"] == "external":
+            return self.external.inspect(attempt_id)
+        self._components()
         manifest = self.registry.get(attempt["workflow"])
         if manifest is None:
             raise StateConflict("workflow registration unavailable; preserve the attempt")
@@ -250,8 +267,10 @@ class StateService:
         return digest(manifest_hashes)
 
     def reconcile_attempt(self, attempt_id):
-        self._components()
         attempt = self.attempts.get(attempt_id)
+        if attempt["execution_kind"] == "external":
+            return self.external.inspect(attempt_id)
+        self._components()
         if not attempt["run_id"]:
             return {**attempt, "note": "No bound run; recover_attempt may bind an existing launch."}
         observed = self.attempts.reconcile(attempt_id, self.sf)
@@ -277,6 +296,8 @@ class StateService:
         key(source_project_id, "source project")
         with self.store.transaction(write=True) as conn:
             self.store._project(conn, project_id)
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").fetchone():
+                raise StateGraphError("legacy task import is unavailable in a State-only database")
             if not conn.execute("SELECT 1 FROM runs WHERE project_id=?", (source_project_id,)).fetchone():
                 raise StateGraphError("unknown legacy source project")
             rows = [dict(r) for r in conn.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY id", (source_project_id,))]
@@ -353,11 +374,10 @@ class StateService:
         from core.state_graph import integer
         integer(after, "after", 0, 2**63-1)
         integer(limit, "limit", 1, 50)
-        self._components()
         with self.store.transaction() as conn:
             self.store._project(conn, project_id)
             rows = [dict(r) for r in conn.execute("SELECT seq,attempt_id,run_id FROM state_attempts "
-                    "WHERE project_id=? AND seq>? AND run_id IS NOT NULL ORDER BY seq LIMIT ?", (project_id, after, limit + 1))]
+                    "WHERE project_id=? AND seq>? AND (run_id IS NOT NULL OR execution_kind='external') ORDER BY seq LIMIT ?", (project_id, after, limit + 1))]
         results = []
         for row in rows[:limit]:
             try:

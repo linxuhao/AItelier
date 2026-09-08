@@ -82,6 +82,27 @@ class StartAttempt(Node):
     instruction: str = ""
 
 
+class StartExternalAttempt(Node):
+    expected_revision: int
+    harness: str
+    external_id: str
+    request_key: str
+    instruction: str = ""
+
+
+class ExternalObservation(Attempt):
+    observation_id: str
+    expected_version: int
+    context_hash: str
+    status: str
+    report_ref: str
+    report_sha256: str
+    quiescent: bool = False
+    artifact: str | None = None
+    artifact_kind: str | None = None
+    detail: str = ""
+
+
 class Evidence(Attempt):
     evidence_id: str
     criterion_id: str
@@ -170,12 +191,13 @@ WRITE_REQUESTS = {
     "verify_node": Verify, "import_tasks": ImportTasks,
     "bind_source": BindSource, "set_dispatch": DispatchPolicy, "set_node_hold": NodeHold,
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
+    "start_external_attempt": StartExternalAttempt, "report_external_attempt": ExternalObservation,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 
 
 def describe() -> dict:
-    return {"architecture": "State DAG owns facts; SkillFlow owns execution. A completed run is only a candidate.",
+    return {"architecture": "State DAG owns facts; optional SkillFlow or an external harness owns execution. Completion is only a candidate.",
             "trust": "Evidence is an authorized verifier attestation, not an automatic guarantee of truth.",
             "operations": {name: {"mutates": name in WRITE_REQUESTS, "arguments": model.model_json_schema()}
                            for name, model in REQUESTS.items()}}
@@ -212,6 +234,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "bind_source": service.bind_source, "set_dispatch": service.portfolio.set_dispatch,
         "set_node_hold": service.set_node_hold, "add_reference": service.add_reference,
         "refresh_project": service.refresh_project,
+        "start_external_attempt": service.start_external_attempt, "report_external_attempt": service.report_external_attempt,
     }
     return handlers[action](**args)
 
@@ -224,7 +247,7 @@ DRIVER_TOOL_DEFINITIONS = [
     {"type": "function", "function": {"name": "state_graph_read", "description": "Read persistent state projects, node context, dependency frontier, attempts or evidence. This does not start workflows or certify completion.",
      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": list(READ_REQUESTS)}, "arguments": {"type": "object"}},
                     "required": ["action", "arguments"], "additionalProperties": False}}},
-    {"type": "function", "function": {"name": "state_graph_write", "description": "Manage State DAG goals and workflow attempts using state_graph_help contracts. Start only ready nodes, preserve checkpoints, and never invent passing evidence. Workflow completion is not verification.",
+    {"type": "function", "function": {"name": "state_graph_write", "description": "Manage State DAG goals and SkillFlow/external harness attempts using state_graph_help contracts. Start only ready nodes, preserve checkpoints, and never invent passing evidence. Workflow completion is not verification.",
      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": list(WRITE_REQUESTS)}, "arguments": {"type": "object"}},
                     "required": ["action", "arguments"], "additionalProperties": False}}},
 ]

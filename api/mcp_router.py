@@ -1403,9 +1403,14 @@ def _register_wait_tool(tool):
           "This is the tool to use after run_pipeline — it is push-based, so it "
           "returns the instant the run settles instead of polling. It waits at most "
           "`timeout_seconds` (default 45) and then returns status 'waiting' with "
-          "timed_out=true; that is not a failure, call it again. Waiting longer than "
+          "timed_out=true; this never means failure or permission to restart. Prefer "
+          "600–900 seconds for director work once the client timeout exceeds the wait "
+          "with margin (for example 960 seconds for a 900-second wait). Maximum 3600. "
+          "Keep 45 seconds as a short-client compatibility fallback, not a polling cadence. "
+          "Waiting longer than "
           "your MCP client's per-call timeout (60s by default) does NOT work — the "
-          "client hangs up first. Raise toolCallTimeoutMs before raising this. "
+          "client hangs up first. Raise Codex tool_timeout_sec or dsh toolCallTimeoutMs "
+          "(milliseconds) before raising this. "
           "timeout_seconds=0 checks and returns without waiting. " + _EITHER)
     async def wait_for_run(run_id: RunId, timeout_seconds: int = None) -> dict:
         import asyncio

@@ -460,9 +460,10 @@ def wait_sf(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_wait_returns_at_once_when_the_run_has_already_settled(wait_sf):
+@pytest.mark.parametrize("timeout_seconds", [30, 900])
+async def test_wait_returns_at_once_when_the_run_has_already_settled(wait_sf, timeout_seconds):
     wait_sf.status = "completed"
-    out = await _wait_tool()("r1", timeout_seconds=30)
+    out = await _wait_tool()("r1", timeout_seconds=timeout_seconds)
     assert out["status"] == "completed" and out["timed_out"] is False
 
 

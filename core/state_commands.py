@@ -68,7 +68,7 @@ class WaitForStateChange(Project):
     node_keys: list[str] | None = Field(default=None, min_length=1, max_length=100)
     attempt_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
     actionable_only: bool = True
-    timeout_seconds: float = Field(default=30.0, ge=0, le=60)
+    timeout_seconds: float = Field(default=30.0, ge=0, le=900)
     limit: int = Field(default=100, ge=1, le=500)
 
 

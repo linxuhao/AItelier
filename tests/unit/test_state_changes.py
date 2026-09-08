@@ -114,7 +114,7 @@ async def test_http_wait_contract(service):
         assert response.status_code == 200
         assert response.json()["events"]
         invalid = await client.post("/api/state/query/wait_for_state_change",
-            json={"project_id": "p", "timeout_seconds": 61})
+            json={"project_id": "p", "timeout_seconds": 901})
         assert invalid.status_code == 422
         missing = await client.post("/api/state/query/wait_for_state_change",
             json={"project_id": "missing", "timeout_seconds": 0})
@@ -134,3 +134,25 @@ async def test_child_wait_sees_dependency_and_project_events(service):
         service.store._event(conn, "p", None, "dispatch_policy_changed", {"enabled": False})
     project = await service.wait_for_state_change("p", after=result["next_after"], node_keys=["b"], timeout_seconds=0)
     assert project["events"][0]["event_type"] == "dispatch_policy_changed"
+
+@pytest.mark.asyncio
+async def test_long_wait_wakes_on_change_and_cleans_up(service):
+    cursor = service.store.events("p")[-1]["seq"]
+    wait = asyncio.create_task(service.wait_for_state_change("p", after=cursor, timeout_seconds=900))
+    await asyncio.sleep(.02)
+    service.store.revise_node("p", "a", 1, "changed during long wait", goal="Updated")
+    result = await asyncio.wait_for(wait, 1)
+    assert not result["timed_out"]
+    assert result["events"][0]["event_type"] == "node_revised"
+    assert result["next_after"] > cursor
+    assert not _waiters
+
+
+def test_wait_bounds_and_compatibility_default():
+    from pydantic import ValidationError
+    from core.state_commands import WaitForStateChange
+    assert WaitForStateChange(project_id="p").timeout_seconds == 30
+    assert WaitForStateChange(project_id="p", timeout_seconds=900).timeout_seconds == 900
+    for invalid in (-1, 901, float("inf"), float("nan")):
+        with pytest.raises(ValidationError):
+            WaitForStateChange(project_id="p", timeout_seconds=invalid)

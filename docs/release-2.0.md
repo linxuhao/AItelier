@@ -25,11 +25,13 @@ the wait action. These are scoped checks, not a full release certification.
 - Rehearse upgrade against a copied database and workspace; preserve legacy run
   references and verify State privacy, external evidence, checkpoint recovery and
   restart/cursor behavior. Back up live data before deployment.
-- Build wheel and sdist and install each outside the source checkout. Verify CLI,
-  State-only server and full server startup. The current setuptools configuration
-  discovers Python packages only; runtime code also reads root configs,
-  agent_configs and templates. Asset inclusion and installed path resolution must
-  be demonstrated before promising a working PyPI installation.
+- Check the existing npm client package `integrations/dsh` (`dsh-plugin-aitelier`,
+  source version 0.1.8): refresh its bundled skill and README for State DAG,
+  private State read authorization and live driver-guide discovery; inspect
+  `npm pack` contents and verify installation against the accepted backend.
+- PyPI distribution is not a requirement for this release. Source Python metadata
+  alone does not establish an existing PyPI release. If added later, separately
+  validate wheel/sdist assets and clean installation outside the source tree.
 - Build a clean Docker image and smoke-test it with the built frontend and the
   declared official SkillFlow dependency, without editable host dependencies.
 - Align release identifiers: Python metadata currently says 1.0.0; the private
@@ -42,16 +44,17 @@ the wait action. These are scoped checks, not a full release certification.
 ## Publication surfaces
 
 - Git repository: reviewed source/docs, version tag and GitHub release notes.
-- PyPI: AItelier wheel and sdist only after clean-install acceptance and account
-  ownership/access verification. This checklist does not imply they already ship.
+- npm: publish the updated `dsh-plugin-aitelier` client bundle after its package
+  and backend compatibility checks. Its version can evolve independently of the
+  backend major version.
 - Container registry: optional versioned image if binary container distribution is
   supported; otherwise document building from the tagged checkout.
 - Hosted service: deploy the accepted version and verify HTTP, MCP and frontend.
   A service restart is not a public software release.
 - SkillFlow: no separate engine release is required for these AItelier-only State
   changes; use the existing declared official dependency.
-- npm: no standalone publication; aitelier-web is private and its build is served
-  by the application. MCP prompts/resources ship with the server.
+- Frontend: `aitelier-web` is private; no separate npm publication. Its build is
+  served by the application. MCP prompts/resources ship with the server.
 
 Public publication requires an explicit release decision after reviewing the
 concrete candidate and evidence. No game repository, design, private State DB,

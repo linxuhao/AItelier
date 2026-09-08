@@ -323,27 +323,10 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
                     "config_name": config_name, "message": str(e)}
 
     run_id = sf.get_or_create_run(config_name, project_id, {"project_id": project_id})
-    run = sf.get_run(run_id)
-    if run and run["status"] == "pending":
-        # CHECK-THEN-ACT, and the poller is the other actor: it can start this
-        # very run between the read above and the call below, and `start_run`
-        # raises on a row that is no longer 'pending'. That exception left
-        # `start_config_run` by the front door — the caller was told the launch
-        # failed while a perfectly good run was under way.
-        #
-        # Idempotent by intent instead: what was wanted is a running run, and if
-        # somebody else got there first, that is the wanted state. Only a run
-        # that is genuinely NOT running re-raises.
-        try:
-            sf.start_run(run_id)
-        except SkillFlowError:
-            if (sf.get_run(run_id) or {}).get("status") not in ("running", "paused"):
-                raise
-
-    # Last on this branch, past the seed_file refusal above (see the docstring).
+    # Past every launch refusal and before this run can execute.
     _reconcile_repo_type()
 
-    # Isolation is decided LAST, and after the reconcile on purpose. It reads
+    # Isolation is decided after the reconcile on purpose. It reads
     # the project row to find the checkout, and `_reconcile_repo_type` is what
     # repairs a row still stamped `repo_type='none'` from an earlier repo-less
     # config — deciding before it would refuse a launch whose repository the
@@ -363,6 +346,21 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         return {"status": "error", "project_id": project_id, "run_id": run_id,
                 "message": f"could not isolate run {run_id}: "
                            f"{type(e).__name__}: {e}"}
+
+    run = sf.get_run(run_id)
+    if run and run["status"] == "pending":
+        # Start only after the run has an isolation record. Starting first lets
+        # the scheduler claim immediately; code-path resolution then refuses
+        # the record-less run and SkillFlow's best-effort context wrapper can
+        # drop every context source, including a required State seed.
+        #
+        # CHECK-THEN-ACT is still safe: the poller also provisions isolation
+        # before starting this same run. If it wins, running/paused is success.
+        try:
+            sf.start_run(run_id)
+        except SkillFlowError:
+            if (sf.get_run(run_id) or {}).get("status") not in ("running", "paused"):
+                raise
 
     if manifest.scheduler_owned:
         wake_scheduler(owner_email if owner_email != "cli@local" else None)

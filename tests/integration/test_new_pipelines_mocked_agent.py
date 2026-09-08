@@ -131,7 +131,8 @@ def _response(step_id, tool_schemas):
         {"tool": "finish_step", "params": {"summary": "nothing"}}]})
 
 
-async def _drive(sf, db, ws, run_id, monkeypatch, max_ticks=40):
+async def _drive(sf, db, ws, run_id, monkeypatch, max_ticks=40,
+                 observed_prompts=None):
     """Run the real AgentStepRunner with a mocked LLM until termination.
     Returns (status, executed_step_ids)."""
     from unittest.mock import MagicMock
@@ -143,7 +144,12 @@ async def _drive(sf, db, ws, run_id, monkeypatch, max_ticks=40):
     def fake_get_agent(self, name):
         mg = MagicMock()
         mg.gateway.litellm_model = "mock-model"
-        mg.run.side_effect = lambda *a, **k: current["response"]
+        def respond(*args, **kwargs):
+            if observed_prompts is not None:
+                observed_prompts.append(kwargs.get("user_prompt") or
+                                        (args[0] if args else ""))
+            return current["response"]
+        mg.run.side_effect = respond
         return mg
 
     monkeypatch.setattr(agents_mod.AgentFactory, "get_agent", fake_get_agent)
@@ -201,11 +207,15 @@ class TestMockedAgentPipelines:
         # implement (agent) runs through the real runner; `test`/`done` are
         # inline tool/gate nodes (never claimed), so completion proves the gate
         # ran and passed.
+        sentinel = "STATE-SEED-SENTINEL-3c852bd37038de97"
         sf, db, ws, run_id = _build(tmp_path, "coding_impl",
-                                    {"plan.md": "## Goal\nadd a thing"})
-        status, steps = await _drive(sf, db, ws, run_id, monkeypatch)
+                                    {"plan.md": f"## Goal\n{sentinel}"})
+        prompts = []
+        status, steps = await _drive(sf, db, ws, run_id, monkeypatch,
+                                     observed_prompts=prompts)
         assert status == "completed"
         assert "implement" in steps
+        assert prompts and sentinel in prompts[0]
 
     async def test_fix_tests(self, tmp_path, monkeypatch):
         sf, db, ws, run_id = _build(tmp_path, "fix_tests",

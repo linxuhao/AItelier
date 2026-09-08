@@ -107,6 +107,18 @@ class AgentStepRunner:
         # high-salience [Previous Feedback — MUST FIX] section sat unused. Pass
         # the explicit field so the host can render it as an instruction.
         resolved_context = step.inputs.get("_resolved_context")
+        required_context = [
+            source for source in (step.step_config.get("context") or [])
+            if isinstance(source, dict) and source.get("required") is True
+        ] if isinstance(step.step_config, dict) else []
+        if required_context and not resolved_context:
+            # SkillFlow normally raises RequiredContextMissing while claiming.
+            # A different resolver failure can prevent that check and leave the
+            # host with no context at all. Never turn such a claim into a
+            # generic coding task: the required input is its authority/scope.
+            raise RuntimeError(
+                f"step {step_id!r} has required context but the claim supplied "
+                "no resolved context; refusing to start the agent")
         validation_error = getattr(step, "validation_error", None)
         # Addon prompt fragments (skillflow add_template stores their paths in the
         # step's opaque config): merge them into the resolved context so they reach
@@ -254,6 +266,8 @@ class AgentStepRunner:
                 pass
         return callback
 
+
+
     @staticmethod
     def _make_trace_wrapper(step: ClaimedStep):
         """Bridge PipelineEngine's trace callback to skillflow's durable trace.
@@ -268,5 +282,3 @@ class AgentStepRunner:
             except Exception:
                 pass
         return callback
-
-

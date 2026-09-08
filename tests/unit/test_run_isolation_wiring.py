@@ -134,3 +134,42 @@ def test_a_run_that_cannot_be_isolated_is_not_started(wired, monkeypatch):
     assert sched._get_or_create_skillflow_run("p1") is None
     assert logged.get("outcome") == "isolation_failed"
     assert "disk full" in str(logged.get("reason", ""))
+
+
+def test_direct_launcher_isolates_before_starting_the_run(wired, monkeypatch):
+    """A direct State launch cannot expose a running record-less run."""
+    import core.run_launcher as launcher
+    import core.scheduler as scheduler
+    import api.dependencies as deps
+    from types import SimpleNamespace
+
+    source = wired["tmp"] / "direct-src"
+    _init_repo(source)
+    wired["db"].ensure_project("direct", name="direct", repo_type="existing",
+                               repo_path=str(source), config_name="coding_impl")
+    manifest = SimpleNamespace(config_name="coding_impl", seed_file="plan.md",
+                               scheduler_owned=True, repo_mode="code")
+    registry = SimpleNamespace(get=lambda name: manifest)
+    monkeypatch.setattr(deps, "get_config_registry", lambda: registry)
+    monkeypatch.setattr(launcher, "missing_cross_config_inputs", lambda *a: [])
+    monkeypatch.setattr(scheduler, "wake_scheduler", lambda *a, **k: None)
+
+    sf = deps.get_skillflow()
+    observed = []
+    real_ensure = ri.ensure_for_run
+
+    def ensure(*args, **kwargs):
+        observed.append(sf.get_run(kwargs["run_id"])["status"])
+        return real_ensure(*args, **kwargs)
+
+    monkeypatch.setattr(ri, "ensure_for_run", ensure)
+
+    result = launcher.start_config_run(
+        wired["db"], deps.get_workspace_manager(), "coding_impl", "direct",
+        seed_text="approved State scope", repo_type="existing",
+        repo_path=str(source))
+
+    assert result["status"] == "started"
+    assert observed == ["pending"]
+    assert sf.get_run(result["run_id"])["status"] == "running"
+    assert ri.record(wired["db"], result["run_id"]) is not None

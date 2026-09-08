@@ -25,6 +25,8 @@ class StateService:
         self.external = ExternalAttempts(self.attempts, actor)
         self.attach_driver = attach_driver
         self.actor = actor
+        from core.state_design import StateDesign
+        self.design = StateDesign(self.store, actor)
         self.runtime_factory = runtime_factory
         from core.state_portfolio import StatePortfolio
         self.portfolio = StatePortfolio(self.store, actor)
@@ -55,7 +57,8 @@ class StateService:
                                  "acceptance": dict(r) if r else None}
         return {"node": node, "dependency_receipts": receipts,
                 "attempts": self.attempts.list(project_id, node_key, limit=10),
-                "references": self.portfolio.references(project_id, node_key, limit=100)}
+                "references": self.portfolio.references(project_id, node_key, limit=100),
+                "design": self.design.node_bindings(project_id, node_key)}
 
     def _components(self):
         # Goal inspection/planning must survive an unavailable executor. Only

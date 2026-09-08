@@ -186,7 +186,48 @@ class RefreshProject(Project):
     limit: int = 20
 
 
+class DesignRevision(Project):
+    design_id: str
+    revision: int
+
+
+class CreateDesignRevision(Project):
+    design_id: str
+    expected_revision: int
+    title: str
+    statement: str
+    rationale: str
+    open_questions: list[str]
+    scope: dict[str, str]
+    lifecycle_status: str = "draft"
+    kind: str = "rule"
+    relations: list[dict] = Field(default_factory=list)
+
+
+class DesignBaseline(Project):
+    baseline_id: str
+
+
+class CreateDesignBaseline(DesignBaseline):
+    selected_revisions: list[dict]
+    expected_baseline_id: str | None = None
+
+
+class BindDesign(Node):
+    expected_revision: int
+    baseline_id: str
+    bindings: list[dict]
+    reason: str
+
+
+class CheckDesignMarkdown(DesignBaseline):
+    markdown: str
+
+
 READ_REQUESTS = {
+    "design_catalog": Project, "get_design_revision": DesignRevision,
+    "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
+    "export_design_markdown": DesignBaseline, "check_design_markdown": CheckDesignMarkdown,
     "list_projects": Empty, "get_graph": Project, "get_node": Node,
     "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange, "get_attempt": Attempt,
     "list_attempts": ListAttempts, "evidence": Attempt,
@@ -196,6 +237,8 @@ READ_REQUESTS = {
     "run_owners": RunOwner, "attempt_detail": Attempt,
 }
 WRITE_REQUESTS = {
+    "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
+    "bind_node_design": BindDesign,
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
     "split_node": SplitNode, "supersede_node": SupersedeNode, "start_attempt": StartAttempt,
     "recover_attempt": Attempt, "reconcile_attempt": Attempt, "retire_reservation": RetireReservation, "record_evidence": Evidence,
@@ -228,6 +271,11 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
         raise StateGraphError(str(details)) from exc
     handlers = {
+        "design_catalog": service.design.catalog, "get_design_revision": service.design.get_revision,
+        "get_design_baseline": service.design.get_baseline, "get_design_bindings": service.design.node_bindings,
+        "export_design_markdown": service.design.export_markdown, "check_design_markdown": service.design.check_markdown,
+        "create_design_revision": service.design.create_revision, "create_design_baseline": service.design.create_baseline,
+        "bind_node_design": service.design.bind_node,
         "list_projects": service.store.list_projects, "get_graph": service.store.get_graph,
         "get_node": service.node_context, "frontier": service.store.frontier,
         "wait_for_state_change": service.wait_for_state_change, "events": service.store.events, "get_attempt": service.attempts.get,

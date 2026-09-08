@@ -79,6 +79,8 @@ class StateAttempts:
         self.store = store
         from core.state_attempt_schema import initialize
         initialize(store.db, SCHEMA)
+        from core.state_design import initialize as initialize_design
+        initialize_design(store.db)
 
     @staticmethod
     def _attempt(conn, attempt_id):
@@ -141,6 +143,11 @@ class StateAttempts:
             ctx = {"state_project_id": project_id, "node_key": node_key, "revision": expected_revision,
                    "goal": node["goal"], "acceptance": json.loads(node["contract_json"]),
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
+            from core.state_design import binding_snapshot
+            design = binding_snapshot(conn, project_id, node_key)
+            if design is not None:
+                ctx["design_context"] = design
+                ctx["binding_snapshot_hash"] = digest(design)
             uid = uuid.uuid4().hex
             aid = "attempt-" + uid
             execution = None if external else "sg-" + uid
@@ -459,6 +466,12 @@ class StateAttempts:
                 raise StateConflict("different acceptance already exists; revise or record correcting evidence first")
             rid = "receipt-" + uuid.uuid4().hex
             provenance = {"execution_kind": attempt["execution_kind"]}
+            context = json.loads(attempt["context_json"])
+            if "design_context" in context:
+                design = context["design_context"]
+                provenance["design"] = {"baseline_id": design["baseline_id"],
+                                        "manifest_hash": design["manifest_hash"],
+                                        "binding_snapshot_hash": context["binding_snapshot_hash"]}
             if attempt["execution_kind"] == "external":
                 observation = conn.execute("SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?",
                                            (attempt_id, attempt["terminal_observation_id"])).fetchone()

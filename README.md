@@ -25,6 +25,9 @@ reads require writer authorization. Existing DPE pipelines and task/project UI
 remain compatible; legacy tasks are imported only explicitly and never inherit
 verified status. See [architecture, usage, trust boundaries and rollout](docs/state-graph.md)
 and the [offline real-engine demonstration](examples/state_graph_demo.py).
+The [State Project frontend and migration preparation guide](docs/state-project-ui-migration.md)
+covers project DAG browsing, exact-run graph versions, protected historical references
+and held shadow migration rehearsal.
 
 ## Why AItelier
 
@@ -68,7 +71,7 @@ Honest, current state — so nothing here reads as more finished than it is.
 | Green/Red adversarial review · human approve/reject-with-feedback checkpoints · autonomous goal-loop | ✅ Available today |
 | Append-only trace + trace API · Git event-sourcing · Rich CLI/TUI | ✅ Available today |
 | Runs on the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine (durable workflow-graph execution, tools, checkpoints, trace) | ✅ Available today |
-| Persistent **State DAG** — revisioned goals, dependencies, attempts, evidence, acceptance and driver/API access | ✅ Implemented and tested; no visual graph editor or automatic legacy migration |
+| Persistent **State DAG** — revisioned goals, dependencies, attempts, evidence, acceptance and driver/API access | ✅ Implemented and tested; private project DAG viewer, no automatic legacy migration |
 | **Generate a pipeline from a plain-language description** — grounded generator provisions missing tools, wires + gates the graph, registers it to run by name | ✅ Available today |
 | Final verifier **runs** the generated app (runtime smoke-test) | 🚧 Roadmap — *today it reviews code statically and can miss runtime bugs* |
 | No-code visual workflow builder · managed multi-tenant SaaS · collaboration & compliance tooling | 🚧 Roadmap |

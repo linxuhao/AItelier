@@ -121,7 +121,7 @@
           title="Language"
           aria-label="Language"
         >
-          {#each LANG_OPTIONS as opt}
+          {#each LANG_OPTIONS as opt (opt.code)}
             <option value={opt.code}>{opt.label}</option>
           {/each}
         </select>

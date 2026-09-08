@@ -69,12 +69,19 @@ def fixture(root):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report-dir',required=True,type=Path)
+    parser.add_argument('--migration-manifest',type=Path)
     args=parser.parse_args();out=args.report_dir.resolve();out.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='state-ui-browser-') as temp:
         root=Path(temp)
         for name,part in [('AITELIER_HOME','home'),('DPE_DB_PATH','host.db'),('SKILLFLOW_DB_PATH','engine.db'),
                           ('DPE_WS_PATH','workspaces'),('DPE_PROJECTS_PATH','projects')]:os.environ[name]=str(root/part)
         service,sf,rid,external=fixture(root)
+        migration = None
+        if args.migration_manifest:
+            from core.state_migration import read_manifest, verify_inputs, stage_shadow
+            migration = read_manifest(args.migration_manifest)
+            verify_inputs(migration)
+            stage_shadow(service, migration)
         from fastapi import FastAPI,HTTPException
         from fastapi.responses import FileResponse,Response
         from fastapi.staticfiles import StaticFiles
@@ -135,7 +142,7 @@ def main():
                 context.add_cookies([{'name':'fixture-auth','value':'writer','url':base}])
                 page=context.new_page();page.on('pageerror',lambda e:page_errors.append(str(e)))
                 page.goto(base+'/#/state-projects');expect(page.get_by_role('heading',name='Projects · State DAG')).to_be_visible()
-                page.locator('a.project-card').click();expect(page.locator('g.goal')).to_have_count(8)
+                page.locator('a.project-card[href="#/state-projects/shrimp-preview"]').click();expect(page.locator('g.goal')).to_have_count(8)
                 expect(page.get_by_role('heading',name='武虾传奇 · Migration preview')).to_be_visible()
                 assert page.locator('g.goal.verified').count()==0
                 page.locator('g.goal').filter(has=page.locator('text.goal-key',has_text='ui.responsive')).click()
@@ -179,10 +186,31 @@ def main():
                 assert anon.locator('g.goal').count()==0
                 assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/overview').status==403
                 checks.append('anonymous UI has no goals and direct private API denies access')
+                if migration:
+                    pid=migration['project']['project_id']
+                    page.set_viewport_size({'width':1440,'height':1000})
+                    page.goto(base+'/#/state-projects/'+pid)
+                    expect(page.get_by_role('heading',name=migration['project']['title'],exact=True)).to_be_visible()
+                    expect(page.locator('g.goal')).to_have_count(len(migration['nodes']))
+                    assert page.locator('g.goal.verified').count()==0
+                    page.locator('.state-graph select').select_option('growth')
+                    growth=[n for n in migration['nodes'] if n['key'].startswith('growth.')]
+                    expect(page.locator('g.goal')).to_have_count(len(growth))
+                    page.locator('g.goal').filter(has=page.locator('text.goal-key',has_text='growth.facility-quota')).click()
+                    expect(page.locator('.node-panel')).to_contain_text('大地图设施个人限次与逐次涨价')
+                    expect(page.locator('.node-panel')).to_contain_text('OPEN')
+                    page.screenshot(path=str(out/'wuxia-migration-growth-desktop.png'),full_page=True)
+                    page.set_viewport_size({'width':390,'height':844})
+                    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 2')
+                    page.screenshot(path=str(out/'wuxia-migration-mobile.png'),full_page=True)
+                    with service.store.transaction() as conn:
+                        assert conn.execute('SELECT COUNT(*) FROM state_attempts WHERE project_id=?',(pid,)).fetchone()[0]==0
+                        assert conn.execute('SELECT COUNT(*) FROM state_acceptances WHERE project_id=?',(pid,)).fetchone()[0]==0
+                    checks.append('actual prepared migration manifest: all 30 OPEN/held goals, growth domain, source references, desktop/mobile, zero attempts/acceptance')
                 assert not page_errors,page_errors
                 result={'result':'PASS','browser':browser.version,'checks':checks,'page_errors':page_errors,
-                        'production_data_used':False,'engine_runs':len(sf.list_runs()),'external_run_still_paused':sf.get_run(external)['status']=='paused',
-                        'mutating_requests':[r for r in requests if r['method']=='POST'], 'fixtures':'Synthetic State/SkillFlow rows, not game acceptance'}
+                        'production_database_written':False,'prepared_manifest_used':bool(migration),'engine_runs':len(sf.list_runs()),'external_run_still_paused':sf.get_run(external)['status']=='paused',
+                        'mutating_requests':[r for r in requests if r['method']=='POST'], 'fixtures':'Synthetic workflow rows plus the prepared migration goals when supplied; no game acceptance'}
                 (out/'browser-result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
                 print(json.dumps(result,ensure_ascii=False,indent=2));browser.close()
         except BaseException:

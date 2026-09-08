@@ -1,5 +1,14 @@
 # Persistent State DAG and workflow execution
 
+## Project UI and migration preparation
+
+The private project DAG viewer, exact-run historical graphs, stable source binding,
+project/node dispatch holds and reference-only migration support are documented in
+[state-project-ui-migration.md](state-project-ui-migration.md). The new source
+binding can supersede the legacy source_project_id dependency before attempts
+exist; historical execution IDs remain intact. The viewer is not a graph editor
+and does not automatically migrate or approve existing work.
+
 ## What owns what
 
 AItelier now has an additive, long-lived State DAG layer. It does **not** replace

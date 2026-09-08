@@ -536,17 +536,23 @@ def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
 def _register_forge_roles(sf, config_name: str, roles: dict) -> None:
     """Register a forge-generated pipeline's roles with their REAL emitted prompts
     (namespaced), overriding the generic host-agent fallback. ``roles`` maps a
-    namespaced role name → {system_prompt, tools, model, temperature, thinking}."""
+    namespaced role name → prompt, tools, model, and supported runtime settings."""
     for role, cfg in (roles or {}).items():
         if not isinstance(cfg, dict):
             continue
-        sf.register_agent_config_from_dict(role, {
+        role_config = {
             "model": cfg.get("model") or "host",
             "tools": cfg.get("tools") or ["read_file", "write"],
             "system_prompt": cfg.get("system_prompt") or _role_prompt(role),
             "temperature": cfg.get("temperature", 0.2),
             "thinking": cfg.get("thinking") or {"enable": True},
-        })
+        }
+        # Forward only supported execution settings; omission keeps factory defaults.
+        for key in ("native_tool_calling", "fallback_to_json_mode",
+                    "max_tool_turns", "max_output_tokens"):
+            if key in cfg:
+                role_config[key] = cfg[key]
+        sf.register_agent_config_from_dict(role, role_config)
 
 
 def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:

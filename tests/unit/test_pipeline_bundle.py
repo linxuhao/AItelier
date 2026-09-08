@@ -479,3 +479,54 @@ def test_importing_drops_the_regression_baseline_of_the_pipeline_it_replaces(hom
 
     assert not stale.exists()
     assert "baseline" not in bundle
+
+
+@pytest.mark.parametrize("settings", [
+    {},
+    {"native_tool_calling": True, "fallback_to_json_mode": True,
+     "max_tool_turns": 37, "max_output_tokens": 24576},
+    {"native_tool_calling": False, "fallback_to_json_mode": False,
+     "max_tool_turns": 19, "max_output_tokens": 4096},
+])
+def test_import_export_boot_preserves_runtime_role_settings(home, monkeypatch, settings):
+    from types import SimpleNamespace
+    from skillflow import SkillFlow
+    from core import agents, pipeline_registry
+
+    monkeypatch.setattr(agents, "AIGateway", lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr(agents, "_LEARNED_OUTPUT_CAPS", {})
+    cfg, _ = home
+    _install_alpha(home)
+    role = dict(ROLES["gen_alpha__author"], **settings)
+    # Unknown role fields must not become arbitrary runtime configuration.
+    role["unapproved_runtime_field"] = "must not forward"
+    (cfg / "gen_alpha.roles.json").write_text(
+        json.dumps({"gen_alpha__author": role}), encoding="utf-8")
+    bundle = pb.export_pipeline("gen_alpha")
+
+    def assert_runtime(sf, role_name):
+        factory = agents.AgentFactory(registry=sf.agent_registry)
+        assert factory.is_native(role_name) is settings.get("native_tool_calling", False)
+        assert factory.get_fallback_to_json(role_name) is settings.get("fallback_to_json_mode", False)
+        assert factory.get_max_tool_turns(role_name) == settings.get("max_tool_turns", 10)
+        assert factory._build_gateway(role_name).max_output_tokens == settings.get("max_output_tokens", 8192)
+        inner = sf.agent_registry.get(role_name).config
+        assert "unapproved_runtime_field" not in inner
+        for key in ("native_tool_calling", "fallback_to_json_mode", "max_tool_turns", "max_output_tokens"):
+            assert (key in inner) == (key in settings)
+
+    imported = SkillFlow(":memory:")
+    pb.import_pipeline(imported, _Registry(), bundle, name="beta")
+    assert_runtime(imported, "gen_beta__author")
+    exported = pb.export_pipeline("gen_beta")
+    for key, value in settings.items():
+        assert exported["roles"]["gen_beta__author"][key] == value
+
+    restored = SkillFlow(":memory:")
+    pb.import_pipeline(restored, _Registry(), exported, name="gamma")
+    assert_runtime(restored, "gen_gamma__author")
+
+    booted = SkillFlow(":memory:")
+    loaded = pipeline_registry.load_generated_configs(booted, _Registry())
+    assert "gen_gamma" in loaded
+    assert_runtime(booted, "gen_gamma__author")

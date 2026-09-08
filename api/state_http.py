@@ -1,4 +1,7 @@
 """State-only HTTP routes reusable without importing the workflow host."""
+import inspect
+from functools import partial
+from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException
 from core.state_commands import READ_REQUESTS, WRITE_REQUESTS, describe, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
@@ -43,10 +46,18 @@ def create_state_router(service_dependency, access_dependency):
 
 
     @router.post("/query/{action}")
-    def query(action: str, arguments: dict, service=Depends(service_dependency)):
+    async def query(action: str, arguments: dict, service=Depends(service_dependency)):
         if action not in READ_REQUESTS:
             raise HTTPException(422, "unknown or mutating query")
-        return _call(service, action, arguments)
+        try:
+            result = await to_thread.run_sync(partial(_call, service, action, arguments))
+            return await result if inspect.isawaitable(result) else result
+        except StateNotFound as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except StateConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except StateGraphError as exc:
+            raise HTTPException(422, str(exc)) from exc
 
 
     @router.post("/commands/{action}")

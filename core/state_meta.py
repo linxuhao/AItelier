@@ -1,5 +1,6 @@
 """Thin internal-driver adapter; uses the same State DAG contracts as MCP."""
 import asyncio
+import inspect
 
 from core.state_commands import describe, execute
 from core.state_graph import StateGraphError
@@ -10,7 +11,8 @@ async def execute_state_driver_tool(agent, name: str, arguments: dict):
     if name == "state_graph_help":
         if arguments:
             raise StateGraphError("state_graph_help takes no arguments")
-        return describe()
+        from core.state_driver_guide import STATE_DRIVER_GUIDE
+        return {**describe(), "driver_guide": STATE_DRIVER_GUIDE}
     if name not in {"state_graph_read", "state_graph_write"}:
         raise StateGraphError("unknown state driver tool")
     if not isinstance(arguments, dict) or set(arguments) != {"action", "arguments"}:
@@ -25,4 +27,7 @@ async def execute_state_driver_tool(agent, name: str, arguments: dict):
         return {"result": execute(service, arguments["action"], arguments["arguments"],
                                   allow_write=name == "state_graph_write")}
 
-    return await asyncio.to_thread(call)
+    result = await asyncio.to_thread(call)
+    if inspect.isawaitable(result["result"]):
+        result["result"] = await result["result"]
+    return result

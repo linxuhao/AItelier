@@ -63,6 +63,15 @@ class Events(Project):
     limit: int = 100
 
 
+class WaitForStateChange(Project):
+    after: int = Field(default=0, ge=0, le=2**63-1)
+    node_keys: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    attempt_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    actionable_only: bool = True
+    timeout_seconds: float = Field(default=30.0, ge=0, le=60)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
 class Attempt(Request):
     attempt_id: str
 
@@ -178,7 +187,7 @@ class RefreshProject(Project):
 
 READ_REQUESTS = {
     "list_projects": Empty, "get_graph": Project, "get_node": Node,
-    "frontier": Frontier, "events": Events, "get_attempt": Attempt,
+    "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange, "get_attempt": Attempt,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
     "project_attempts": ProjectAttempts, "references": References,
@@ -219,7 +228,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
     handlers = {
         "list_projects": service.store.list_projects, "get_graph": service.store.get_graph,
         "get_node": service.node_context, "frontier": service.store.frontier,
-        "events": service.store.events, "get_attempt": service.attempts.get,
+        "wait_for_state_change": service.wait_for_state_change, "events": service.store.events, "get_attempt": service.attempts.get,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
         "revise_node": service.store.revise_node, "split_node": service.store.split_node,

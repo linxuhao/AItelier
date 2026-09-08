@@ -258,7 +258,7 @@ class StateAttempts:
             raise StateConflict("workflow run is unknown; a missing run is not successful")
         if row.get("project_id") != attempt["execution_project_id"] or row.get("graph_name") != attempt["workflow"]:
             raise StateConflict("run belongs to a different execution project or workflow")
-        if row.get("status") not in {"pending", "running", "paused", "completed", "failed"}:
+        if row.get("status") not in {"pending", "running", "paused", "completed", "failed", "cancelled", "canceled"}:
             raise StateConflict("unsupported workflow status; retain the attempt")
         if (type(row.get("graph_version")) is not int or row["graph_version"] < 1
                 or not isinstance(row.get("graph_digest"), str)
@@ -317,7 +317,7 @@ class StateAttempts:
         if candidate_artifact is not None:
             artifact_ref(candidate_artifact)
         outcome = row["status"]
-        if outcome in {"completed", "failed"}:
+        if outcome in {"completed", "failed", "cancelled", "canceled"}:
             try:
                 audit = sf.audit_operation_owners(attempt["run_id"])
             except Exception as exc:
@@ -329,7 +329,7 @@ class StateAttempts:
             if audit["lost"] or audit["unknown"] or audit["alive"]:
                 outcome = "unknown"
         status = {"pending": "running", "running": "running", "paused": "paused",
-                  "completed": "candidate", "failed": "failed", "unknown": "unknown"}[outcome]
+                  "completed": "candidate", "failed": "failed", "cancelled": "failed", "canceled": "failed", "unknown": "unknown"}[outcome]
         with self.store.transaction(write=True) as conn:
             current = self._attempt(conn, attempt_id)
             if current["run_id"] != row["id"]:
@@ -344,7 +344,16 @@ class StateAttempts:
                 if artifact and artifact != candidate_artifact:
                     raise StateConflict("candidate artifact is immutable; create another attempt")
                 artifact = candidate_artifact
-            changed = current["status"] != status or artifact != current["artifact_ref"]
+            observation = {"workflow_status": row["status"],
+                           "current_node": row.get("current_node"),
+                           "error_reason": row.get("error_reason")}
+            last = conn.execute("SELECT payload_json FROM state_events WHERE project_id=? "
+                                "AND node_key=? AND event_type='attempt_observed' "
+                                "AND json_extract(payload_json,'$.attempt_id')=? ORDER BY seq DESC LIMIT 1",
+                                (current["project_id"], current["node_key"], attempt_id)).fetchone()
+            prior = json.loads(last[0]).get("workflow_observation") if last else None
+            attention_changed = status in {"paused", "unknown", "failed"} and prior != observation
+            changed = current["status"] != status or artifact != current["artifact_ref"] or attention_changed
             if changed:
                 if status != "candidate":
                     node = self.store._node(conn, current["project_id"], current["node_key"])
@@ -363,7 +372,7 @@ class StateAttempts:
                                  (now(), current["project_id"], current["node_key"]))
                 self.store._event(conn, current["project_id"], current["node_key"], "attempt_observed",
                                   {"attempt_id": attempt_id, "status": status, "artifact_ref": artifact,
-                                   "stale_inputs": not fresh})
+                                   "stale_inputs": not fresh, "workflow_observation": observation})
             return {**_public(self._attempt(conn, attempt_id)), "stale_inputs": not fresh}
 
     def _eligible_candidate(self, conn, attempt):

@@ -396,3 +396,61 @@ def test_missing_or_corrupt_historical_graph_refuses_acceptance(system, monkeypa
     monkeypatch.setattr(sf, "get_graph_version", lambda *_: version)
     with pytest.raises(StateConflict, match="version"):
         attempts.reconcile(a["attempt_id"], sf)
+
+
+def test_lifecycle_projection_preserves_quiescence_and_never_verifies(system, tmp_path):
+    from core.state_changes import reconcile_workflow_project
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    ws = WorkspaceManager(str(tmp_path / "workspaces"))
+    sf.pause_run(rid)
+    result = reconcile_workflow_project(store.db, ws, sf, a["execution_project_id"])
+    assert result[0]["status"] == "paused"
+    count = len(store.events("game"))
+    reconcile_workflow_project(store.db, ws, sf, a["execution_project_id"])
+    assert len(store.events("game")) == count
+    sf.resume_run(rid)
+    sf.advance_run(rid)
+    claimed = sf.claim_next_step(rid)
+    assert claimed is not None
+    sf.confirm_step(claimed.token, StepResult(outputs={"implementation": "candidate"}))
+    sf.advance_run(rid)
+    assert sf.get_run(rid)["status"] == "completed"
+    assert attempts.get(a["attempt_id"])["status"] == "paused"
+    result = reconcile_workflow_project(store.db, ws, sf, a["execution_project_id"])
+    assert result[0]["status"] == "candidate"
+    assert store.get_node("game", "a")["status"] == "CANDIDATE"
+    assert store.get_node("game", "b")["readiness"] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_wait_recovers_missed_workflow_projection(system, tmp_path):
+    from core.state_service import StateService
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    cursor = store.events("game")[-1]["seq"]
+    sf.pause_run(rid)
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {})
+    result = await service.wait_for_state_change("game", after=cursor, timeout_seconds=2)
+    assert result["events"][-1]["payload"]["status"] == "paused"
+    assert attempts.get(a["attempt_id"])["status"] == "paused"
+    assert sf.get_run(rid)["status"] == "paused"
+
+
+def test_scheduler_lifecycle_sync_projects_state_attempt(system, tmp_path, monkeypatch):
+    from core import scheduler
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    sf.pause_run(rid)
+    monkeypatch.setattr(scheduler, "db", store.db)
+    monkeypatch.setattr(scheduler, "ws", WorkspaceManager(str(tmp_path / "workspace")))
+    monkeypatch.setattr(scheduler, "get_skillflow", lambda: sf)
+    scheduler._sync_project_status_to_db(a["execution_project_id"])
+    assert attempts.get(a["attempt_id"])["status"] == "paused"
+    assert sf.get_run(rid)["status"] == "paused"

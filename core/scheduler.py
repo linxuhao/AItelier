@@ -1860,6 +1860,8 @@ def _sync_project_status_to_db(project_id: str):
                 run = None
         if not run:
             return
+        from core.state_changes import reconcile_workflow_project
+        reconcile_workflow_project(db, ws, sf, project_id)
         # Is this a DPE-style config (task loop, coarse step mapping)?
         has_task_loop = False
         manifest = None

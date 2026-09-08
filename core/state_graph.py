@@ -177,9 +177,14 @@ class StateGraphStore:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            before_event = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events").fetchone()[0] if write else None
             try:
                 yield conn
+                after_event = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events").fetchone()[0] if write else None
                 conn.commit()
+                if write and after_event != before_event:
+                    from core.state_changes import notify
+                    notify(self.db.db_path)
             except BaseException:
                 conn.rollback()
                 raise

@@ -31,6 +31,23 @@ and held shadow migration rehearsal.
 The [project-first dashboard guide](docs/project-dashboard-ux.md) covers the default State DAG workspace,
 separate Runs/Pipelines navigation, readable node badges and actual run history.
 
+### Wait for state changes and onboard another agent
+
+Use `state_graph_read(action="wait_for_state_change", arguments={"project_id":
+"my-project", "after": 0, "timeout_seconds": 30})` and persist the returned
+`next_after` cursor. Matching durable events return immediately; unchanged state
+waits without repeated model-driven queries. Workflow stops and pauses are
+reconciled into State observations, with bounded recovery for missed notifications.
+A timeout does not stop a worker, and completion never verifies a goal.
+
+Agents can load the MCP prompt `state_graph_driver`, the resource
+`aitelier://state/driver-guide`, or `driver_guide` from `state_graph_help`.
+See the [agent driver guide](docs/state-agent-driver.md) for external evidence,
+cursor scope, ownership and handoff rules.
+
+The [2.0 release checklist](docs/release-2.0.md) separates implemented features
+from distribution checks still required before a public release.
+
 ### Use State DAG without workflows
 
 Your own director, subagents, CI or proof-checking harness can register an
@@ -261,7 +278,7 @@ State lives in host `~/.AItelier` (bind-mounted). The port is published on loopb
 - **the model routing tables** — `get_available_models` says which models this deployment serves and whether each endpoint behind them can actually answer; `add_provider` / `map_model` / `unmap_model` / `delete_*` edit them. Which vendors you use is deployment config, so this is how an agent configures a machine it did not set up.
 - **`export_pipeline` / `import_pipeline`** — carry a generated pipeline between machines as **one self-contained JSON bundle**: its graph, its roles *with* their prompts, and any custom tool it needs. Import validates everything before writing, renames safely, and refuses to silently overwrite a same-named tool that differs.
 
-Authorization is **per tool**, not per route: read tools are open, write tools require the same authorization as the web UI (Cloudflare Access allowlist, or `AITELIER_ADMIN_TOKEN` off-tunnel). Without credentials you get a legitimate read-only installation — write tools answer `denied: …` and change nothing.
+Authorization is **per tool**, not per route: ordinary workflow read tools are open; private State reads and write tools require the same authorization as the web UI (Cloudflare Access allowlist, or `AITELIER_ADMIN_TOKEN` off-tunnel). Without credentials you get a legitimate read-only installation — write tools answer `denied: …` and change nothing.
 
 For **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (`dsh`) there's a ready plugin bundle in [`integrations/dsh/`](integrations/dsh/) — one command installs it into a profile and registers the tools as `mcp__aitelier__*`:
 

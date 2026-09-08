@@ -1,0 +1,275 @@
+"""A driver-facing boundary: choose work in StateGraph, execute in SkillFlow.
+
+No scheduler, retry engine, implicit approval or universal status setter. Launch
+uses the host's existing launcher; an interrupted launch is recovered by its
+persisted execution-project identity, never by starting an uncorrelated run.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+from pathlib import Path
+
+from core.state_graph import StateConflict, StateGraphError, StateGraphStore, canonical, digest, key, text
+from core.state_attempts import StateAttempts, artifact_ref
+
+
+class StateService:
+    def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator"):
+        self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
+        self.store = StateGraphStore(db)
+        self.attempts = StateAttempts(self.store)
+        self.attach_driver = attach_driver
+        self.actor = actor
+
+    def create_project(self, project_id, title, source_project_id=None):
+        if source_project_id and not self.db.get_project(source_project_id):
+            raise StateGraphError("source_project_id must name an existing AItelier source project")
+        return self.store.create_project(project_id, title, source_project_id)
+
+    def node_context(self, project_id, node_key):
+        node = self.store.get_node(project_id, node_key)
+        receipts = {}
+        with self.store.transaction() as conn:
+            for dep in node["dependencies"]:
+                d = self.store._node(conn, project_id, dep)
+                r = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (d["verified_receipt"],)).fetchone()
+                receipts[dep] = {"goal": d["goal"], "revision": d["revision"], "status": d["status"],
+                                 "acceptance": dict(r) if r else None}
+        return {"node": node, "dependency_receipts": receipts,
+                "attempts": self.attempts.list(project_id, node_key, limit=10)}
+
+    def _components(self):
+        if self.ws is None or self.sf is None or self.registry is None:
+            raise StateGraphError("workflow composition is unavailable")
+
+    def _source(self, project_id):
+        project = self.store.get_project(project_id)
+        source_id = project["source_project_id"]
+        if not source_id:
+            return None
+        source = self.db.get_project(source_id)
+        if not source or not source.get("repo_path"):
+            raise StateConflict("registered source project no longer has a repository")
+        path = Path(source["repo_path"])
+        if not path.is_dir():
+            raise StateConflict("source repository is missing; do not substitute another checkout")
+        return str(path)
+
+    @staticmethod
+    def _git(path, *args):
+        result = subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=path,
+                                capture_output=True, text=True, timeout=20,
+                                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"})
+        if result.returncode != 0:
+            raise StateConflict("Git could not prove the requested source/artifact property")
+        return result.stdout.strip()
+
+    def _dependency_context(self, attempt, source):
+        """Pass accepted contracts/artifact references, not an entire project log."""
+        out = {}
+        with self.store.transaction() as conn:
+            for dep, pin in attempt["dependencies"].items():
+                rec = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (pin["verified_receipt"],)).fetchone()
+                if not rec:
+                    raise StateConflict("verified dependency has no acceptance receipt")
+                out[dep] = dict(rec)
+        # A Git-backed dependency is useful only if this attempt's source
+        # actually includes it. Output-bundle digests are non-code dependencies.
+        if source:
+            for rec in out.values():
+                if len(rec["artifact_ref"]) == 40:
+                    try:
+                        self._git(source, "merge-base", "--is-ancestor", rec["artifact_ref"], "HEAD")
+                    except StateConflict as exc:
+                        raise StateConflict("accepted dependency commit is not in the source; integrate it before launching") from exc
+        return out
+
+    def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction=""):
+        self._components()
+        manifest = self.registry.get(key(workflow, "workflow"))
+        if manifest is None:
+            raise StateGraphError("unknown workflow; use list_pipelines")
+        if not manifest.seed_file:
+            raise StateGraphError("this workflow has no seed-file contract; use a seeded node workflow")
+        source = self._source(project_id)
+        if manifest.repo_mode == "code" and not source:
+            raise StateGraphError("code-producing attempts require a registered source_project_id")
+        # All state writes below use a separate intent identity. No old DPE rows
+        # are reused as the long-lived state project.
+        attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction)
+        return self._launch_or_recover(attempt, manifest, source)
+
+    def _launch_or_recover(self, attempt, manifest, source):
+        aid = attempt["attempt_id"]
+        if attempt["run_id"]:
+            return self.reconcile_attempt(aid)
+        # The standard launcher can finish after its HTTP caller disappears.
+        # One durable execution project identifies that run on a later request.
+        matches = self.sf.list_runs(project_id=attempt["execution_project_id"])
+        if len(matches) > 1:
+            raise StateConflict("multiple runs occupy this attempt's execution project; operator reconciliation required")
+        if matches:
+            self.attempts.bind_run(aid, matches[0]["id"], self.sf)
+            return self._attach_and_observe(aid, manifest)
+        if attempt["status"] in {"launching", "unknown"}:
+            return {**attempt, "recovery_required": True,
+                    "note": "Launch outcome is unknown. No duplicate run was started; retain and inspect the execution project."}
+        if attempt["status"] != "reserved":
+            return attempt
+        attempt = self.attempts.pin_host_contract(aid, {
+            "source_repo": source, "seed_file": manifest.seed_file, "output_step": manifest.output_step,
+            "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})
+        dependency_receipts = self._dependency_context(attempt, source)
+        from core.run_launcher import missing_cross_config_inputs, start_config_run
+        missing = missing_cross_config_inputs(self.sf, attempt["workflow"], attempt["execution_project_id"])
+        if missing:
+            raise StateConflict("workflow requires producer outputs not present for this attempt; use a self-contained "
+                                "node workflow or prepare its prerequisites through the standard producer: " + canonical(missing))
+        if not self.attempts.claim_launch(aid):
+            return self.attempts.get(aid)
+        seed = "# State goal attempt\n\n" + canonical(attempt["context"] | {"accepted_dependencies": dependency_receipts}) + "\n"
+        try:
+            result = start_config_run(self.db, self.ws, attempt["workflow"], attempt["execution_project_id"],
+                                      seed_text=seed, name=f"State {attempt['project_id']}/{attempt['node_key']}",
+                                      owner_email=self.actor, repo_type="existing" if source else "none", repo_path=source)
+        except Exception as exc:
+            return self.attempts.launch_uncertain(aid, f"launcher raised {type(exc).__name__}; recover by execution_project_id")
+        if result.get("status") == "error":
+            return self.attempts.launch_uncertain(aid, str(result.get("message") or "launcher reported an error")[:4000])
+        if not result.get("run_id"):
+            return self.attempts.launch_uncertain(aid, "launcher returned no run identity")
+        self.attempts.bind_run(aid, result["run_id"], self.sf)
+        return self._attach_and_observe(aid, manifest)
+
+    def _attach_and_observe(self, attempt_id, manifest):
+        attempt = self.attempts.get(attempt_id)
+        attached = False
+        host = attempt["context"].get("host_contract")
+        if host is None:
+            raise StateConflict("attempt lacks its host contract pin")
+        owned = host["scheduler_owned"]
+        if self.attach_driver and attempt["status"] in {"running", "paused"}:
+            # Reuse the existing driver, with review gates always enabled.
+            attached = bool(self.attach_driver(attempt["run_id"], scheduler_owned=owned, auto_approve=False))
+        return {**self.reconcile_attempt(attempt_id), "checkpoints": "ask", "driver_attached": attached,
+                "scheduler_owned": owned}
+
+    def recover_attempt(self, attempt_id):
+        self._components()
+        attempt = self.attempts.get(attempt_id)
+        manifest = self.registry.get(attempt["workflow"])
+        if manifest is None:
+            raise StateConflict("workflow registration unavailable; preserve the attempt")
+        if attempt["run_id"]:
+            return self._attach_and_observe(attempt_id, manifest)
+        return self._launch_or_recover(attempt, manifest, self._source(attempt["project_id"]))
+
+    def _artifact(self, attempt):
+        from core import run_isolation
+        rec = run_isolation.record(self.db, attempt["run_id"])
+        if not rec:
+            raise StateConflict("candidate lacks its run-isolation provenance")
+        if rec["mode"] in {run_isolation.MODE_WORKTREE, run_isolation.MODE_READ_SNAPSHOT}:
+            path = run_isolation.resolve_for_resolver(self.db, attempt["run_id"])
+            if not isinstance(path, str):
+                raise StateConflict("candidate source root is not an isolated tree")
+            if self._git(path, "status", "--porcelain=v1", "--untracked-files=all"):
+                raise StateConflict("candidate has uncommitted source; commit before reporting an artifact")
+            # The source could have changed between preflight and isolation.
+            # Check actual candidate ancestry as well, before it can be certified.
+            self._dependency_context(attempt, path)
+            return artifact_ref(self._git(path, "rev-parse", "HEAD"))
+        if rec["mode"] != run_isolation.MODE_NONE:
+            raise StateConflict("direct-mode source cannot be silently used as an isolated state artifact")
+        host = attempt["context"].get("host_contract") or {}
+        output_step = host.get("output_step")
+        if not output_step:
+            raise StateConflict("output-only workflow must declare an output_step for artifact hashing")
+        base = self.ws.get_final_path(attempt["execution_project_id"], output_step, attempt["workflow"])
+        workspace_root = self.ws.base_path.resolve()
+        if (not base.is_dir() or base.is_symlink() or not base.resolve().is_relative_to(workspace_root)
+                or any(parent.is_symlink() for parent in base.parents if parent != workspace_root)):
+            raise StateConflict("final artifact directory is absent or outside the workspace")
+        manifest_hashes = {}
+        total = 0
+        # Only hash files produced at this registered output location. Never
+        # follow symlinks to secrets or other workspaces.
+        for directory, dirs, files in os.walk(base, followlinks=False):
+            for name in dirs:
+                if (Path(directory) / name).is_symlink():
+                    raise StateConflict("output contains a symlink; artifact scope is ambiguous")
+            for name in files:
+                path = Path(directory) / name
+                if path.is_symlink() or not path.is_file():
+                    raise StateConflict("output contains a non-regular file")
+                total += path.stat().st_size
+                if total > 32 * 1024 * 1024 or len(manifest_hashes) >= 1000:
+                    raise StateConflict("output exceeds the bounded artifact hashing budget")
+                size = path.stat().st_size
+                with path.open("rb") as stream:
+                    body = stream.read(size + 1)
+                if len(body) != size:
+                    raise StateConflict("artifact changed during hashing; retry after the output settles")
+                manifest_hashes[str(path.relative_to(base))] = hashlib.sha256(body).hexdigest()
+        if not manifest_hashes:
+            raise StateConflict("an empty output directory is not an artifact")
+        return digest(manifest_hashes)
+
+    def reconcile_attempt(self, attempt_id):
+        self._components()
+        attempt = self.attempts.get(attempt_id)
+        if not attempt["run_id"]:
+            return {**attempt, "note": "No bound run; recover_attempt may bind an existing launch."}
+        observed = self.attempts.reconcile(attempt_id, self.sf)
+        if observed["status"] == "candidate" and not observed["artifact_ref"]:
+            try:
+                artifact = self._artifact(observed)
+            except StateConflict as exc:
+                return {**observed, "artifact_pending": True, "note": str(exc)}
+            observed = self.attempts.reconcile(attempt_id, self.sf, artifact)
+        return observed
+
+    def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail=""):
+        self.reconcile_attempt(attempt_id)
+        return self.attempts.record_evidence(attempt_id, evidence_id, criterion_id, verdict, artifact,
+                                             report_ref, report_sha256, self.actor, detail)
+
+    def verify_node(self, project_id, node_key, expected_revision, attempt_id):
+        self.reconcile_attempt(attempt_id)
+        return self.attempts.verify(project_id, node_key, expected_revision, attempt_id, self.actor)
+
+    def import_tasks(self, project_id, source_project_id):
+        """Explicit legacy snapshot; completed tasks never become verified facts."""
+        key(source_project_id, "source project")
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            if not conn.execute("SELECT 1 FROM runs WHERE project_id=?", (source_project_id,)).fetchone():
+                raise StateGraphError("unknown legacy source project")
+            rows = [dict(r) for r in conn.execute("SELECT * FROM tasks WHERE project_id=? ORDER BY id", (source_project_id,))]
+            if not rows:
+                raise StateGraphError("legacy source has no tasks")
+            specs, statuses = [], {}
+            ids = {r["id"]: "legacy-" + str(r["id"]) for r in rows}
+            for row in rows:
+                try:
+                    deps = json.loads(row["dependencies"] or "[]")
+                except (TypeError, ValueError) as exc:
+                    raise StateGraphError("legacy dependencies are malformed") from exc
+                if not isinstance(deps, list) or any(type(d) is not int or d not in ids for d in deps):
+                    raise StateGraphError("legacy task has a dangling or cross-project dependency")
+                nk = ids[row["id"]]
+                specs.append({"key": nk, "goal": text(row["prompt"], "legacy task goal"),
+                              "dependencies": [ids[d] for d in deps],
+                              "acceptance": [{"id": "legacy-revalidation", "kind": "review",
+                                              "description": "Replace this import contract with explicit criteria and revalidate the historical result"}]})
+                statuses[nk] = row["status"]
+            created = self.store._add(conn, project_id, specs)
+            for nk, status in statuses.items():
+                if status == "completed":
+                    conn.execute("UPDATE state_nodes SET status='CANDIDATE' WHERE project_id=? AND node_key=?", (project_id, nk))
+                self.store._event(conn, project_id, nk, "legacy_task_imported", {"source_project_id": source_project_id,
+                                  "legacy_status": status, "requires_new_contract_and_validation": True})
+            return {"created": created, "verified": 0, "note": "Legacy completion is historical, not acceptance."}

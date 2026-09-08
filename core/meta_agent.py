@@ -6025,3 +6025,26 @@ _CODING_TOOL_HANDLERS = {
     "archive_pipeline": MetaAgent._tool_archive_pipeline,
 }
 _TOOL_HANDLERS.update(_CODING_TOOL_HANDLERS)
+
+
+# State goals are persistent project data, not DPE task-step state. The same
+# finite typed vocabulary is exposed to external drivers through MCP/REST.
+from core.state_commands import DRIVER_TOOL_DEFINITIONS as _STATE_TOOL_DEFINITIONS
+from core.state_meta import execute_state_driver_tool as _execute_state_driver_tool
+TOOL_DEFINITIONS.extend(_STATE_TOOL_DEFINITIONS)
+
+
+async def _state_help(agent, arguments):
+    return await _execute_state_driver_tool(agent, "state_graph_help", arguments)
+
+
+async def _state_read(agent, arguments):
+    return await _execute_state_driver_tool(agent, "state_graph_read", arguments)
+
+
+async def _state_write(agent, arguments):
+    return await _execute_state_driver_tool(agent, "state_graph_write", arguments)
+
+
+_TOOL_HANDLERS.update({"state_graph_help": _state_help, "state_graph_read": _state_read,
+                       "state_graph_write": _state_write})

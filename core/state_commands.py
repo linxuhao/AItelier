@@ -1,0 +1,165 @@
+"""Typed, finite command vocabulary shared by REST, MCP and the driver agent.
+
+This is not reflection RPC: only the handlers enumerated below can be called.
+Extra fields (including status=VERIFIED and spoofed reviewer identity) fail.
+"""
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from core.state_graph import StateGraphError
+
+
+class Request(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class Empty(Request):
+    pass
+
+
+class Project(Request):
+    project_id: str
+
+
+class CreateProject(Project):
+    title: str
+    source_project_id: str | None = None
+
+
+class Node(Project):
+    node_key: str
+
+
+class AddNodes(Project):
+    nodes: list[dict] = Field(min_length=1, max_length=200)
+
+
+class ReviseNode(Node):
+    expected_revision: int
+    reason: str
+    goal: str | None = None
+    acceptance: list[dict] | None = None
+    dependencies: list[str] | None = None
+
+
+class SplitNode(Node):
+    expected_revision: int
+    children: list[dict]
+    reason: str
+
+
+class SupersedeNode(Node):
+    expected_revision: int
+    reason: str
+
+
+class Frontier(Project):
+    limit: int = 30
+
+
+class Events(Project):
+    after: int = 0
+    limit: int = 100
+
+
+class Attempt(Request):
+    attempt_id: str
+
+
+class RetireReservation(Attempt):
+    reason: str
+
+
+class ListAttempts(Node):
+    limit: int = 100
+
+
+class StartAttempt(Node):
+    expected_revision: int
+    workflow: str
+    request_key: str
+    instruction: str = ""
+
+
+class Evidence(Attempt):
+    evidence_id: str
+    criterion_id: str
+    verdict: str
+    artifact: str
+    report_ref: str
+    report_sha256: str
+    detail: str = ""
+
+
+class Verify(Node):
+    expected_revision: int
+    attempt_id: str
+
+
+class ImportTasks(Project):
+    source_project_id: str
+
+
+READ_REQUESTS = {
+    "list_projects": Empty, "get_graph": Project, "get_node": Node,
+    "frontier": Frontier, "events": Events, "get_attempt": Attempt,
+    "list_attempts": ListAttempts, "evidence": Attempt,
+}
+WRITE_REQUESTS = {
+    "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
+    "split_node": SplitNode, "supersede_node": SupersedeNode, "start_attempt": StartAttempt,
+    "recover_attempt": Attempt, "reconcile_attempt": Attempt, "retire_reservation": RetireReservation, "record_evidence": Evidence,
+    "verify_node": Verify, "import_tasks": ImportTasks,
+}
+REQUESTS = READ_REQUESTS | WRITE_REQUESTS
+
+
+def describe() -> dict:
+    return {"architecture": "State DAG owns facts; SkillFlow owns execution. A completed run is only a candidate.",
+            "trust": "Evidence is an authorized verifier attestation, not an automatic guarantee of truth.",
+            "operations": {name: {"mutates": name in WRITE_REQUESTS, "arguments": model.model_json_schema()}
+                           for name, model in REQUESTS.items()}}
+
+
+def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
+    if not isinstance(action, str) or action not in REQUESTS:
+        raise StateGraphError("unknown state graph action; use state_graph_help")
+    if action in WRITE_REQUESTS and not allow_write:
+        raise StateGraphError("mutating action is not available on the read surface")
+    if not isinstance(arguments, dict):
+        raise StateGraphError("arguments must be an object")
+    try:
+        args = REQUESTS[action].model_validate(arguments).model_dump()
+    except ValidationError as exc:
+        # Bounded validation errors without echoing whole inputs into logs.
+        details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
+        raise StateGraphError(str(details)) from exc
+    handlers = {
+        "list_projects": service.store.list_projects, "get_graph": service.store.get_graph,
+        "get_node": service.node_context, "frontier": service.store.frontier,
+        "events": service.store.events, "get_attempt": service.attempts.get,
+        "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
+        "create_project": service.create_project, "add_nodes": service.store.add_nodes,
+        "revise_node": service.store.revise_node, "split_node": service.store.split_node,
+        "supersede_node": service.store.supersede_node, "start_attempt": service.start_attempt,
+        "recover_attempt": service.recover_attempt, "reconcile_attempt": service.reconcile_attempt,
+        "retire_reservation": service.attempts.retire_reservation,
+        "record_evidence": service.record_evidence, "verify_node": service.verify_node,
+        "import_tasks": service.import_tasks,
+    }
+    return handlers[action](**args)
+
+
+# Compact entry points for the internal driver. Exact operation schemas are
+# available on demand rather than expanding every schema into every prompt.
+DRIVER_TOOL_DEFINITIONS = [
+    {"type": "function", "function": {"name": "state_graph_help", "description": "Read the typed State DAG operation contracts before planning or modifying persistent project goals.",
+     "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "state_graph_read", "description": "Read persistent state projects, node context, dependency frontier, attempts or evidence. This does not start workflows or certify completion.",
+     "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": list(READ_REQUESTS)}, "arguments": {"type": "object"}},
+                    "required": ["action", "arguments"], "additionalProperties": False}}},
+    {"type": "function", "function": {"name": "state_graph_write", "description": "Manage State DAG goals and workflow attempts using state_graph_help contracts. Start only ready nodes, preserve checkpoints, and never invent passing evidence. Workflow completion is not verification.",
+     "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": list(WRITE_REQUESTS)}, "arguments": {"type": "object"}},
+                    "required": ["action", "arguments"], "additionalProperties": False}}},
+]

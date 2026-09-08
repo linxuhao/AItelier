@@ -364,3 +364,26 @@ def test_operation_audit_error_is_not_a_success(system, monkeypatch):
     monkeypatch.setattr(sf, "audit_operation_owners", broken)
     with pytest.raises(StateConflict, match="quiescence"):
         attempts.reconcile(a["attempt_id"], sf)
+
+
+def test_only_an_undispatched_reservation_can_be_retired(system):
+    _, attempts, _ = system
+    a = reserve(system)
+    attempts.retire_reservation(a["attempt_id"], "Choose another workflow")
+    assert attempts.get(a["attempt_id"])["status"] == "superseded"
+    b = reserve(system, request="second")
+    attempts.claim_launch(b["attempt_id"])
+    with pytest.raises(StateConflict, match="unlaunched"):
+        attempts.retire_reservation(b["attempt_id"], "Cannot assume dispatch failed")
+
+
+def test_accepted_result_later_reported_failed_invalidates_fact(system, monkeypatch):
+    store, attempts, sf = system
+    a = finish(system, reserve(system))
+    accept(system, a)
+    row = sf.get_run(a["run_id"])
+    row["status"] = "failed"
+    monkeypatch.setattr(sf, "get_run", lambda _rid: row)
+    assert attempts.reconcile(a["attempt_id"], sf)["status"] == "failed"
+    assert store.get_node("game", "a")["status"] == "STALE"
+    assert store.get_node("game", "b")["readiness"] == "blocked"

@@ -62,6 +62,8 @@ from core.tool_guards import (bad_config_name, bad_tool_name,
 # docstring. `read` answers questions; `write` changes state on disk, in the
 # registry, or in the run table.
 _TOOL_KIND: dict[str, str] = {}
+# State goals/evidence may contain private product plans: reads require a writer.
+_PRIVATE_READ_TOOLS = frozenset({"state_graph_read"})
 
 # The event loop the endpoint runs on, captured at lifespan open so a tool
 # body executing in a worker thread can still schedule background work.
@@ -70,6 +72,10 @@ _MAIN_LOOP = None
 # reference to a bare task, so one dropped here would be garbage-collected
 # mid-run and the pipeline would stop moving for no visible reason.
 _DRIVERS: set = set()
+# One process-local driver attachment per run, including reconnects.
+import threading as _threading
+_DRIVER_GUARD = _threading.RLock()
+_DRIVERS_BY_RUN: dict = {}
 
 
 # Published parameter descriptions. Not applied wholesale — these three are where
@@ -169,7 +175,7 @@ def _authorize(name: str, ctx: Context | None) -> None:
                 _h.get("x-aitelier-mcp-external-token") is not None)
             raise ToolDenied("unauthorized")
         return
-    if kind == "read":
+    if kind == "read" and name not in _PRIVATE_READ_TOOLS:
         return
     if not authz.gate_enabled():
         return          # local dev: the gate is inactive for the whole app
@@ -281,6 +287,8 @@ def build_mcp() -> FastMCP:
     _register_trace_tools(tool)
     _register_lifecycle_tools(tool)
     _register_model_tools(tool)
+    from api.state_graph_tools import register_state_tools
+    register_state_tools(tool, mcp)
 
     @mcp.prompt(name="pipeline_workflow",
                 description="How and when to use AItelier's pipeline engine")
@@ -1542,9 +1550,21 @@ def _start_driver(run_id: str, *, scheduler_owned: bool, auto_approve: bool) -> 
             except Exception:
                 pass
 
-    fut = asyncio.run_coroutine_threadsafe(_run(), _MAIN_LOOP)
-    _DRIVERS.add(fut)
-    fut.add_done_callback(_DRIVERS.discard)
+    with _DRIVER_GUARD:
+        prior = _DRIVERS_BY_RUN.get(run_id)
+        if prior is not None and not prior.done():
+            return True
+        fut = asyncio.run_coroutine_threadsafe(_run(), _MAIN_LOOP)
+        _DRIVERS.add(fut)
+        _DRIVERS_BY_RUN[run_id] = fut
+
+        def finished(done):
+            with _DRIVER_GUARD:
+                _DRIVERS.discard(done)
+                if _DRIVERS_BY_RUN.get(run_id) is done:
+                    _DRIVERS_BY_RUN.pop(run_id, None)
+
+        fut.add_done_callback(finished)
     return True
 
 

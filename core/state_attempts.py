@@ -148,6 +148,34 @@ class StateAttempts:
                               "execution_project_id": execution, "workflow": workflow, "revision": expected_revision})
             return _public(self._attempt(conn, aid))
 
+    def pin_host_contract(self, attempt_id: str, descriptor: dict) -> dict:
+        """Freeze host output/source metadata before dispatch; not workflow state."""
+        fields = {"source_repo", "seed_file", "output_step", "scheduler_owned", "repo_mode"}
+        if (not isinstance(descriptor, dict) or set(descriptor) != fields
+                or type(descriptor["scheduler_owned"]) is not bool
+                or descriptor["repo_mode"] not in {"code", "none"}):
+            raise StateGraphError("invalid host launch descriptor")
+        for field in fields - {"scheduler_owned"}:
+            value = descriptor[field]
+            if value is not None:
+                text(value, field, 4000)
+        with self.store.transaction(write=True) as conn:
+            attempt = self._attempt(conn, attempt_id)
+            context = json.loads(attempt["context_json"])
+            old = context.get("host_contract")
+            if old is not None:
+                if old != descriptor:
+                    raise StateConflict("host launch contract changed; retire the unlaunched intent and choose a new request")
+                return _public(attempt)
+            if attempt["status"] != "reserved":
+                raise StateConflict("host contract must be pinned before dispatch")
+            context["host_contract"] = descriptor
+            conn.execute("UPDATE state_attempts SET context_json=?,updated_at=? WHERE attempt_id=?",
+                         (canonical(context), now(), attempt_id))
+            self.store._event(conn, attempt["project_id"], attempt["node_key"], "host_contract_pinned",
+                              {"attempt_id": attempt_id, "descriptor": descriptor})
+            return _public(self._attempt(conn, attempt_id))
+
     def claim_launch(self, attempt_id: str) -> bool:
         """Only the first caller dispatches. Uncertain launches are not retried."""
         with self.store.transaction(write=True) as conn:
@@ -165,6 +193,21 @@ class StateAttempts:
             conn.execute("UPDATE state_attempts SET status='launching',updated_at=? WHERE attempt_id=?", (now(), attempt_id))
             self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_launching", {"attempt_id": attempt_id})
             return True
+
+    def retire_reservation(self, attempt_id: str, reason: str) -> dict:
+        """Cancel only an undispatched intent; never infer a worker has stopped."""
+        reason = text(reason, "reservation retirement reason", 4000)
+        with self.store.transaction(write=True) as conn:
+            attempt = self._attempt(conn, attempt_id)
+            if attempt["status"] == "superseded" and not attempt["run_id"]:
+                return _public(attempt)
+            if attempt["status"] != "reserved" or attempt["run_id"]:
+                raise StateConflict("only an unlaunched reservation can be retired; recover/stop the actual run first")
+            conn.execute("UPDATE state_attempts SET status='superseded',error=?,updated_at=? WHERE attempt_id=?",
+                         (reason, now(), attempt_id))
+            self.store._event(conn, attempt["project_id"], attempt["node_key"], "reservation_retired",
+                              {"attempt_id": attempt_id, "reason": reason})
+            return _public(self._attempt(conn, attempt_id))
 
     def launch_uncertain(self, attempt_id: str, reason: str) -> dict:
         reason = text(reason, "launch uncertainty", 4000)
@@ -260,6 +303,15 @@ class StateAttempts:
                 artifact = candidate_artifact
             changed = current["status"] != status or artifact != current["artifact_ref"]
             if changed:
+                if status != "candidate":
+                    node = self.store._node(conn, current["project_id"], current["node_key"])
+                    receipt = conn.execute("SELECT attempt_id FROM state_acceptances WHERE receipt_id=?",
+                                           (node["verified_receipt"],)).fetchone()
+                    if receipt and receipt[0] == attempt_id:
+                        affected = self.store._invalidate(conn, current["project_id"], current["node_key"])
+                        self.store._event(conn, current["project_id"], current["node_key"], "acceptance_invalidated",
+                                          {"reason": "accepted workflow no longer has a valid candidate outcome",
+                                           "invalidated": affected, "attempt_id": attempt_id})
                 conn.execute("UPDATE state_attempts SET status=?,artifact_ref=?,error=?,updated_at=? WHERE attempt_id=?",
                              (status, artifact, row.get("error_reason"), now(), attempt_id))
                 if status == "candidate":

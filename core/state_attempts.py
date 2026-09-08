@@ -1,4 +1,4 @@
-"""Attempts and acceptance receipts connecting state goals to SkillFlow runs.
+"""Executor-neutral attempts and acceptance receipts for persistent state goals.
 
 The workflow engine is observed through its public API, never by writing its
 SQLite tables. Completion produces a candidate, not a verified fact. Evidence
@@ -70,15 +70,15 @@ def _public(row: dict) -> dict:
     result = dict(row)
     result["context"] = json.loads(result.pop("context_json"))
     result["dependencies"] = json.loads(result.pop("dependency_snapshot"))
+    result["context_hash"] = digest(result["context"])
     return result
 
 
 class StateAttempts:
     def __init__(self, store: StateGraphStore):
         self.store = store
-        with store.db.get_connection() as conn:
-            conn.executescript(SCHEMA)
-            conn.commit()
+        from core.state_attempt_schema import initialize
+        initialize(store.db, SCHEMA)
 
     @staticmethod
     def _attempt(conn, attempt_id):
@@ -111,11 +111,18 @@ class StateAttempts:
                 workflow: str, request_key: str, instruction: str = "") -> dict:
         """Idempotent intent, persisted before a workflow can be launched."""
         key(workflow, "workflow")
+        return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction)
+
+    def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *, external=None):
+        """Common atomic ownership/pin guard for every execution adapter."""
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
         if not isinstance(instruction, str) or len(instruction) > 20000:
             raise StateGraphError("instruction must be text of at most 20000 characters")
-        request_hash = digest({"revision": expected_revision, "workflow": workflow, "instruction": instruction})
+        request = {"revision": expected_revision, "workflow": workflow, "instruction": instruction}
+        if external is not None:
+            request["external"] = external
+        request_hash = digest(request)
         with self.store.transaction(write=True) as conn:
             node = self.store._node(conn, project_id, node_key)
             old = conn.execute("SELECT * FROM state_attempts WHERE project_id=? AND node_key=? AND request_key=?",
@@ -135,19 +142,31 @@ class StateAttempts:
                    "goal": node["goal"], "acceptance": json.loads(node["contract_json"]),
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
             uid = uuid.uuid4().hex
-            aid, execution = "attempt-" + uid, "sg-" + uid
+            aid = "attempt-" + uid
+            execution = None if external else "sg-" + uid
+            kind = "external" if external else "skillflow"
+            if external:
+                ctx["executor"] = {"kind": kind, **external}
+            record = {"attempt_id": aid, "project_id": project_id, "node_key": node_key,
+                      "node_revision": expected_revision, "contract_hash": node["contract_hash"],
+                      "dependency_snapshot": canonical(deps), "context_json": canonical(ctx),
+                      "request_key": request_key, "request_hash": request_hash, "workflow": workflow,
+                      "execution_project_id": execution, "execution_kind": kind,
+                      "harness": external["harness"] if external else None,
+                      "external_id": external["external_id"] if external else None,
+                      "reporting_actor": external["reporting_actor"] if external else None,
+                      "status": "running" if external else "reserved", "created_at": now(), "updated_at": now()}
             try:
-                conn.execute("INSERT INTO state_attempts(attempt_id,project_id,node_key,node_revision,contract_hash,"
-                             "dependency_snapshot,context_json,request_key,request_hash,workflow,execution_project_id,"
-                             "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'reserved',?,?)",
-                             (aid, project_id, node_key, expected_revision, node["contract_hash"], canonical(deps),
-                              canonical(ctx), request_key, request_hash, workflow, execution, now(), now()))
+                conn.execute("INSERT INTO state_attempts(" + ",".join(record) + ") VALUES(" +
+                             ",".join("?" for _ in record) + ")", tuple(record.values()))
             except sqlite3.IntegrityError as exc:
-                raise StateConflict("an active attempt already owns this node; recover it rather than duplicating") from exc
+                raise StateConflict("node has an active attempt or this external execution identity was already registered") from exc
             conn.execute("UPDATE state_nodes SET status='OPEN',updated_at=? WHERE project_id=? AND node_key=?",
                          (now(), project_id, node_key))
-            self.store._event(conn, project_id, node_key, "attempt_reserved", {"attempt_id": aid,
-                              "execution_project_id": execution, "workflow": workflow, "revision": expected_revision})
+            self.store._event(conn, project_id, node_key,
+                              "external_attempt_registered" if external else "attempt_reserved",
+                              {"attempt_id": aid, "execution_project_id": execution, "execution_kind": kind,
+                               "workflow": workflow, "revision": expected_revision, "external": external})
             return _public(self._attempt(conn, aid))
 
     def pin_host_contract(self, attempt_id: str, descriptor: dict) -> dict:
@@ -262,6 +281,8 @@ class StateAttempts:
     def bind_run(self, attempt_id: str, run_id: str, sf) -> dict:
         key(run_id, "run id")
         attempt = self.get(attempt_id)
+        if attempt["execution_kind"] != "skillflow":
+            raise StateConflict("an external attempt cannot be bound to a SkillFlow run")
         row = self._engine_row(sf, run_id, attempt)
         with self.store.transaction(write=True) as conn:
             current = self._attempt(conn, attempt_id)
@@ -285,6 +306,8 @@ class StateAttempts:
     def reconcile(self, attempt_id: str, sf, candidate_artifact: str | None = None) -> dict:
         """Observe a real run; never modify its graph, checkpoints or status."""
         attempt = self.get(attempt_id)
+        if attempt["execution_kind"] != "skillflow":
+            raise StateConflict("use the external observation adapter, not SkillFlow reconciliation")
         if not attempt["run_id"]:
             raise StateConflict("attempt has no run; recover its launch first")
         row = self._engine_row(sf, attempt["run_id"], attempt)
@@ -344,6 +367,12 @@ class StateAttempts:
             return {**_public(self._attempt(conn, attempt_id)), "stale_inputs": not fresh}
 
     def _eligible_candidate(self, conn, attempt):
+        if attempt["execution_kind"] == "external":
+            report = conn.execute("SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?",
+                                  (attempt["attempt_id"], attempt["terminal_observation_id"])).fetchone()
+            if (not report or report["status"] != "candidate" or not report["quiescent"]
+                    or report["artifact_ref"] != attempt["artifact_ref"] or report["artifact_kind"] != attempt["artifact_kind"]):
+                raise StateConflict("external candidate lacks a complete scoped quiescent observation")
         if attempt["status"] != "candidate" or not attempt["artifact_ref"]:
             raise StateConflict("a completed candidate with a pinned artifact is required")
         if not self._pins_current(conn, attempt):
@@ -420,9 +449,23 @@ class StateAttempts:
                     return dict(receipt)
                 raise StateConflict("different acceptance already exists; revise or record correcting evidence first")
             rid = "receipt-" + uuid.uuid4().hex
-            conn.execute("INSERT INTO state_acceptances VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            provenance = {"execution_kind": attempt["execution_kind"]}
+            if attempt["execution_kind"] == "external":
+                observation = conn.execute("SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?",
+                                           (attempt_id, attempt["terminal_observation_id"])).fetchone()
+                provenance.update(harness=attempt["harness"], external_id=attempt["external_id"],
+                                  reporting_actor=attempt["reporting_actor"], artifact_kind=attempt["artifact_kind"],
+                                  context_hash=digest(json.loads(attempt["context_json"])),
+                                  observation_id=observation["observation_id"], report_ref=observation["report_ref"],
+                                  report_sha256=observation["report_sha256"], quiescent=True)
+            else:
+                provenance.update(run_id=attempt["run_id"], workflow=attempt["workflow"],
+                                  graph_version=attempt["graph_version"], graph_digest=attempt["graph_digest"])
+            conn.execute("INSERT INTO state_acceptances(receipt_id,project_id,node_key,node_revision,attempt_id,"
+                         "artifact_ref,contract_hash,dependency_snapshot,evidence_ids,reviewer,created_at,provenance_json) "
+                         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                          (rid, project_id, node_key, expected_revision, attempt_id, attempt["artifact_ref"],
-                          node["contract_hash"], attempt["dependency_snapshot"], evidence_ids, reviewer, now()))
+                          node["contract_hash"], attempt["dependency_snapshot"], evidence_ids, reviewer, now(), canonical(provenance)))
             conn.execute("UPDATE state_nodes SET status='VERIFIED',verified_receipt=?,updated_at=? "
                          "WHERE project_id=? AND node_key=?", (rid, now(), project_id, node_key))
             self.store._event(conn, project_id, node_key, "node_verified",

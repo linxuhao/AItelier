@@ -99,13 +99,6 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 node_keys, attempt_ids, actionable_only, limit)
             if events:
                 return {"events": events, "next_after": cursor, "timed_out": False}
-            if args.return_when_idle:
-                outcome = await asyncio.to_thread(wait_disposition, service.store, project_id,
-                    cursor, node_keys, attempt_ids)
-                if outcome == "rescan":
-                    continue
-                if outcome is not None:
-                    return {"events": [], "next_after": cursor, "timed_out": False, **outcome}
             if timeout_seconds > 0 and (service.sf is not None or service.runtime_factory is not None):
                 # One bounded page per observation cycle; rotated to prevent
                 # starvation. No executor is composed for State-only deployments.
@@ -120,6 +113,19 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
             # Recovery may have committed an actionable event; read it before sleeping.
             if signal.is_set():
                 continue
+            # Finish a bounded recovery sweep before interpreting cached status.
+            # In particular a resumed checkpoint may still be projected paused.
+            if recovery_after:
+                if loop.time() >= deadline:
+                    return {"events": [], "next_after": cursor, "timed_out": True}
+                continue
+            if args.return_when_idle:
+                outcome = await asyncio.to_thread(wait_disposition, service.store, project_id,
+                    cursor, node_keys, attempt_ids)
+                if outcome == "rescan":
+                    continue
+                if outcome is not None:
+                    return {"events": [], "next_after": cursor, "timed_out": False, **outcome}
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return {"events": [], "next_after": cursor, "timed_out": True}

@@ -454,3 +454,35 @@ def test_scheduler_lifecycle_sync_projects_state_attempt(system, tmp_path, monke
     scheduler._sync_project_status_to_db(a["execution_project_id"])
     assert attempts.get(a["attempt_id"])["status"] == "paused"
     assert sf.get_run(rid)["status"] == "paused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("completed", [False, True])
+async def test_director_wait_refreshes_stored_paused_before_disposition(system, tmp_path, completed):
+    from core.state_service import StateService
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    sf.pause_run(rid)
+    attempts.reconcile(a["attempt_id"], sf)
+    cursor = store.events("game")[-1]["seq"]
+    sf.resume_run(rid)
+    if completed:
+        sf.advance_run(rid)
+        claimed = sf.claim_next_step(rid)
+        assert claimed is not None
+        sf.confirm_step(claimed.token, StepResult(outputs={"implementation": "candidate"}))
+        sf.advance_run(rid)
+        assert sf.get_run(rid)["status"] == "completed"
+    assert attempts.get(a["attempt_id"])["status"] == "paused"
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {})
+    result = await service.wait_for_state_change("game", after=cursor,
+        return_when_idle=True, timeout_seconds=.2)
+    if completed:
+        assert result["events"][-1]["payload"]["status"] == "candidate"
+        assert not result["timed_out"]
+    else:
+        assert result["events"] == [] and result["timed_out"]
+        assert attempts.get(a["attempt_id"])["status"] == "running"
+    assert "reason" not in result

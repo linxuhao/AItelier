@@ -17,12 +17,13 @@ from core.state_attempts import StateAttempts, artifact_ref
 
 
 class StateService:
-    def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator"):
+    def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator", runtime_factory=None):
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
         self.store = StateGraphStore(db)
         self.attempts = StateAttempts(self.store)
         self.attach_driver = attach_driver
         self.actor = actor
+        self.runtime_factory = runtime_factory
 
     def create_project(self, project_id, title, source_project_id=None):
         if source_project_id and not self.db.get_project(source_project_id):
@@ -42,6 +43,13 @@ class StateService:
                 "attempts": self.attempts.list(project_id, node_key, limit=10)}
 
     def _components(self):
+        # Goal inspection/planning must survive an unavailable executor. Only
+        # execution/acceptance operations ask the runtime composition root.
+        if self.runtime_factory is not None and (self.sf is None or self.registry is None):
+            try:
+                self.sf, self.registry = self.runtime_factory()
+            except Exception as exc:
+                raise StateConflict(f"workflow runtime is unavailable: {type(exc).__name__}") from exc
         if self.ws is None or self.sf is None or self.registry is None:
             raise StateGraphError("workflow composition is unavailable")
 
@@ -181,7 +189,13 @@ class StateService:
             # The source could have changed between preflight and isolation.
             # Check actual candidate ancestry as well, before it can be certified.
             self._dependency_context(attempt, path)
-            return artifact_ref(self._git(path, "rev-parse", "HEAD"))
+            commit = self._git(path, "rev-parse", "HEAD")
+            # v1 uses 40-hex Git commits and 64-hex output-bundle digests.
+            # Do not mistake a SHA-256-format Git commit for a non-code bundle
+            # and thereby bypass downstream code-ancestry checks.
+            if len(commit) != 40:
+                raise StateConflict("this version requires SHA-1-format Git repositories; candidate retained")
+            return artifact_ref(commit)
         if rec["mode"] != run_isolation.MODE_NONE:
             raise StateConflict("direct-mode source cannot be silently used as an isolated state artifact")
         host = attempt["context"].get("host_contract") or {}
@@ -268,8 +282,9 @@ class StateService:
                 statuses[nk] = row["status"]
             created = self.store._add(conn, project_id, specs)
             for nk, status in statuses.items():
-                if status == "completed":
-                    conn.execute("UPDATE state_nodes SET status='CANDIDATE' WHERE project_id=? AND node_key=?", (project_id, nk))
+                if status in {"completed", "superseded"}:
+                    imported = "CANDIDATE" if status == "completed" else "SUPERSEDED"
+                    conn.execute("UPDATE state_nodes SET status=? WHERE project_id=? AND node_key=?", (imported, project_id, nk))
                 self.store._event(conn, project_id, nk, "legacy_task_imported", {"source_project_id": source_project_id,
                                   "legacy_status": status, "requires_new_contract_and_validation": True})
             return {"created": created, "verified": 0, "note": "Legacy completion is historical, not acceptance."}

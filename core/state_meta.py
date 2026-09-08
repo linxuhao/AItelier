@@ -19,8 +19,9 @@ async def execute_state_driver_tool(agent, name: str, arguments: dict):
     def call():
         from api.dependencies import get_skillflow, get_config_registry
         from api.mcp_router import _start_driver
-        service = StateService(agent.db, agent.ws, get_skillflow(), get_config_registry(), _start_driver,
-                               actor=getattr(agent, "owner_email", None) or "authorized-driver")
+        service = StateService(agent.db, agent.ws, attach_driver=_start_driver,
+                               actor=getattr(agent, "owner_email", None) or "authorized-driver",
+                               runtime_factory=lambda: (get_skillflow(), get_config_registry()))
         return {"result": execute(service, arguments["action"], arguments["arguments"],
                                   allow_write=name == "state_graph_write")}
 

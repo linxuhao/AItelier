@@ -15,7 +15,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from skillflow.core import SkillFlow, StepResult
-from skillflow.graph import PipelineGraph, StepNode
+from skillflow.graph import PipelineGraph, StepNode, Transition
 
 from core.config_registry import ConfigRegistry
 from core.db_manager import DBManager
@@ -41,6 +41,12 @@ def live(tmp_path, monkeypatch):
     for name, value in {"GIT_AUTHOR_NAME": "Test", "GIT_COMMITTER_NAME": "Test",
                         "GIT_AUTHOR_EMAIL": "test@localhost", "GIT_COMMITTER_EMAIL": "test@localhost"}.items():
         monkeypatch.setenv(name, value)
+    # Host git helpers snapshot their environment at import time. Supply the
+    # fixture identity there too, without changing any user's Git config.
+    import core.workspace_manager as workspace_module
+    monkeypatch.setattr(workspace_module, "_GIT_ENV", {**workspace_module._GIT_ENV,
+        "GIT_AUTHOR_NAME": "Test", "GIT_COMMITTER_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@localhost", "GIT_COMMITTER_EMAIL": "test@localhost"})
     db = DBManager(str(tmp_path / "state.sqlite"))
     ws = WorkspaceManager(str(tmp_path / "ws"), str(tmp_path / "projects"))
     sf = SkillFlow(str(tmp_path / "skillflow.sqlite"), workspace_base=str(tmp_path / "ws"),
@@ -389,3 +395,102 @@ def test_read_only_query_cannot_retire_or_verify(live):
     result = execute(live.service, "retire_reservation", {"attempt_id": a["attempt_id"], "reason": "Change workflow"}, allow_write=True)
     assert result["status"] == "superseded"
     assert live.service.store.get_node("game", "a")["readiness"] == "ready"
+
+
+def test_state_inspection_does_not_require_a_working_executor(live):
+    from core.state_commands import execute
+    calls = []
+    def unavailable():
+        calls.append(1)
+        raise RuntimeError("executor unavailable")
+    service = StateService(live.db, live.ws, runtime_factory=unavailable)
+    assert execute(service, "frontier", {"project_id": "game"})["total"] == 1
+    execute(service, "add_nodes", {"project_id": "game", "nodes": [spec("offline-plan")]}, allow_write=True)
+    assert calls == []
+    with pytest.raises(StateConflict, match="runtime is unavailable"):
+        service.start_attempt("game", "a", 1, "state_fixture", "not-started")
+    assert len(calls) == 1
+    assert service.attempts.list("game", "a") == []
+
+
+def test_real_checkpoint_stays_paused_under_state_reconciliation(live):
+    # SkillFlow applies a checkpoint before a transition; a terminal node
+    # with no successor completes instead. Exercise a real review boundary.
+    graph = PipelineGraph(name="checkpoint_fixture", begin="work", steps=[
+        StepNode(id="work", checkpoint=True, transitions=[Transition(to="after_review")]),
+        StepNode(id="after_review")])
+    live.sf.register_graph(graph)
+    live.registry.register_one(live.sf, graph.name, hint_overrides={"scheduler_owned": True,
+        "repo_mode": "none", "seed_file": "plan.md", "output_step": "work"})
+    a = start(live, workflow="checkpoint_fixture")
+    live.sf.advance_run(a["run_id"])
+    claim = live.sf.claim_next_step(a["run_id"])
+    live.sf.confirm_step(claim.token, StepResult(outputs={"done": "candidate only"}))
+    live.sf.advance_run(a["run_id"])
+    assert live.sf.get_run(a["run_id"])["status"] == "paused"
+    assert live.service.reconcile_attempt(a["attempt_id"])["status"] == "paused"
+    with pytest.raises(StateConflict):
+        live.service.verify_node("game", "a", 1, a["attempt_id"])
+    assert live.sf.get_run(a["run_id"])["status"] == "paused"
+
+
+def test_superseded_legacy_task_is_not_reopened_by_import(live):
+    live.db.ensure_project("legacy", name="Legacy", repo_type="none")
+    with live.db.get_connection() as conn:
+        tid = conn.execute("INSERT INTO tasks(project_id,prompt,status,dependencies) VALUES('legacy','obsolete','superseded','[]')").lastrowid
+        conn.commit()
+    live.service.import_tasks("game", "legacy")
+    assert live.service.store.get_node("game", "legacy-" + str(tid))["status"] == "SUPERSEDED"
+
+
+def test_end_to_end_rest_acceptance_and_requirement_revision(live):
+    from api import state_graph_routers as routes
+    app = FastAPI()
+    app.state._test_mode = True
+    app.include_router(routes.router)
+    app.dependency_overrides[routes.get_service] = lambda: live.service
+    with TestClient(app) as client:
+        a = finish(live, start(live))
+        def command(action, args):
+            return client.post("/api/state/commands/" + action, json=args)
+        target = {"project_id": "game", "node_key": "a", "expected_revision": 1, "attempt_id": a["attempt_id"]}
+        assert command("verify_node", target).status_code == 409
+        for check in ["behaviour", "review"]:
+            out = command("record_evidence", {"attempt_id": a["attempt_id"], "evidence_id": "rest-" + check,
+                "criterion_id": check, "verdict": "pass", "artifact": a["artifact_ref"],
+                "report_ref": "test-reports/" + check + ".json", "report_sha256": "f" * 64})
+            assert out.status_code == 200
+            assert out.json()["reviewer"] == "test-reviewer"
+        assert command("verify_node", target).status_code == 200
+        assert client.get("/api/state/projects/game/frontier").json()["nodes"][0]["node_key"] == "b"
+        assert command("revise_node", {"project_id": "game", "node_key": "a", "expected_revision": 1,
+            "reason": "New requirement", "goal": "Changed rule"}).status_code == 200
+        assert command("verify_node", target).status_code == 409
+        assert live.service.store.get_node("game", "b")["readiness"] == "blocked"
+
+
+def test_offline_executable_demo_runs_real_red_then_green_tests(live):
+    import sys
+    source = Path(__file__).resolve().parents[2]
+    report = live.tmp / "demo-result.json"
+    out = subprocess.run([sys.executable, "examples/state_graph_demo.py", "--report", str(report)],
+                         cwd=source, capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stdout + out.stderr
+    result = json.loads(report.read_text())
+    assert result["result"] == "PASS"
+    assert [r["verdict"] for r in result["actual_test_verdicts"]] == ["fail", "pass", "pass"]
+    assert result["workflow_runs"] == 3
+    assert result["requirement_change_invalidated_downstream"] is True
+    assert result["production_data_used"] is False
+
+
+def test_sha256_git_format_is_not_confused_with_output_bundle(live, monkeypatch):
+    from core import run_isolation
+    a = start(live)
+    a = finish(live, a)
+    rec = {"mode": run_isolation.MODE_WORKTREE}
+    monkeypatch.setattr(run_isolation, "record", lambda *_: rec)
+    monkeypatch.setattr(run_isolation, "resolve_for_resolver", lambda *_: str(live.tmp))
+    monkeypatch.setattr(live.service, "_git", lambda path, *args: "" if args[0] == "status" else "b" * 64)
+    with pytest.raises(StateConflict, match="SHA-1-format"):
+        live.service._artifact(a)

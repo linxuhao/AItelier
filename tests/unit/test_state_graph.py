@@ -189,3 +189,13 @@ def test_invalid_limits_and_unknown_ids_fail_explicitly(store):
         store.get_graph("missing")
     with pytest.raises(StateGraphError):
         store.events("shrimp", limit=100000)
+
+
+def test_frontier_is_compact_and_full_context_remains_pullable(store):
+    n = node("large")
+    n["goal"] = "A" * 1500
+    store.add_nodes("shrimp", [n])
+    entry = store.frontier("shrimp")["nodes"][0]
+    assert len(entry["goal"]) == 1200 and entry["goal_truncated"] is True
+    assert "acceptance" not in entry
+    assert len(store.get_node("shrimp", "large")["goal"]) == 1500

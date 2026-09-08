@@ -12,13 +12,27 @@
 
 AItelier makes multi-agent AI pipelines **deterministic and fully auditable** — define a pipeline (or have your agent generate one), run it, and inspect *why* it did everything it did. The whole surface is exposed over **MCP**, so any MCP-speaking agent can use AItelier as its workflow engine: delegate bulk work to cheap, deterministic pipelines and only decide at checkpoints (see [Use AItelier from another agent](#use-aitelier-from-another-agent-mcp)). Under it all is an open engine ([SkillFlow](https://github.com/linxuhao/SkillFlow), MIT, on PyPI as `skillflow-py`) plus a flagship software-delivery pipeline; the broader no-code **workflow platform** is on the [roadmap](#roadmap).
 
+## Persistent project state, separate from workflow execution
+
+AItelier also provides a **State DAG** for long-lived goals, revisioned acceptance
+contracts, dependencies and evidence. SkillFlow continues to own workflow steps,
+loops, retries and checkpoints; the driver chooses a ready goal and a workflow.
+**A completed workflow produces a candidate, not a verified product capability.**
+
+The MCP/internal-driver tools `state_graph_help`, `state_graph_read` and
+`state_graph_write` expose the same typed contracts as `/api/state`. State data
+reads require writer authorization. Existing DPE pipelines and task/project UI
+remain compatible; legacy tasks are imported only explicitly and never inherit
+verified status. See [architecture, usage, trust boundaries and rollout](docs/state-graph.md)
+and the [offline real-engine demonstration](examples/state_graph_demo.py).
+
 ## Why AItelier
 
 Most "AI agent" tooling is built for demos, not trust. The tools that build software or automate a workflow for you are non-deterministic black boxes: you can't reproduce a run, audit *why* the agent did what it did, or insert a human approval where it matters. That's exactly the wall that stops agents from being deployed in anything serious — regulated industries, enterprise, anywhere "it usually works" isn't good enough.
 
 AItelier is built on the opposite premise — that an autonomous pipeline should be **trustworthy by construction**:
 
-- **Deterministic** — pipelines are graphs (DAGs) traversed by the engine, not control flow improvised by an LLM. Same config, same path. Loops, gates, retries, and recovery are the engine's job, not the model's.
+- **Deterministic execution rules** — workflow graphs are traversed by the engine, not control flow improvised by an LLM. Their conditional outcomes may differ and their retry paths may contain cycles; they are not necessarily DAGs. Loops, gates, retries, and recovery are the engine's job. The separate project-state dependency graph is acyclic.
 - **Minimal LLM surface (least privilege)** — each agent sees only the context it declares, and the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine generates a constrained **write tool per declared output** (and gates reads to declared context) — so an agent *cannot* read or write a file outside its contract. Concretely in the software pipeline: the Researcher can only search the web; every other role can write only its own declared output (a design doc, a plan, a review verdict, or the project README) — and *only* the Implementer's outputs are code. The model makes the judgment calls; the framework and its generated tools do everything deterministic — *brain to brain, tools to tools*. It's also why cheap models suffice: small, focused, role-scoped context.
 - **Fully traceable** — every run keeps an append-only audit trace that is *never deleted*: each step, prompt, model response, and tool call. "Why did this run do that?" is one query, not forensic archaeology.
 - **Human-in-the-loop** — approval/reject checkpoints are first-class between stages; review and send work back with feedback at any point.
@@ -53,7 +67,8 @@ Honest, current state — so nothing here reads as more finished than it is.
 | **MCP endpoint + DeepSeek Harness plugin** — drive AItelier from any MCP-speaking agent: list / edit / run / export / import pipelines as native tools | ✅ Available today |
 | Green/Red adversarial review · human approve/reject-with-feedback checkpoints · autonomous goal-loop | ✅ Available today |
 | Append-only trace + trace API · Git event-sourcing · Rich CLI/TUI | ✅ Available today |
-| Runs on the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine (deterministic DAG execution, tools, checkpoints, durable trace) | ✅ Available today |
+| Runs on the [SkillFlow](https://github.com/linxuhao/SkillFlow) engine (durable workflow-graph execution, tools, checkpoints, trace) | ✅ Available today |
+| Persistent **State DAG** — revisioned goals, dependencies, attempts, evidence, acceptance and driver/API access | ✅ Implemented and tested; no visual graph editor or automatic legacy migration |
 | **Generate a pipeline from a plain-language description** — grounded generator provisions missing tools, wires + gates the graph, registers it to run by name | ✅ Available today |
 | Final verifier **runs** the generated app (runtime smoke-test) | 🚧 Roadmap — *today it reviews code statically and can miss runtime bugs* |
 | No-code visual workflow builder · managed multi-tenant SaaS · collaboration & compliance tooling | 🚧 Roadmap |

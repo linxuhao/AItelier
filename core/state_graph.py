@@ -389,7 +389,16 @@ class StateGraphStore:
     def frontier(self, project_id: str, limit: int = 30) -> dict:
         integer(limit, "limit", 1, 200)
         ready = [n for n in self.get_graph(project_id)["nodes"] if n["readiness"] == "ready"]
-        return {"nodes": ready[:limit], "total": len(ready), "truncated": len(ready) > limit}
+        # Frontier is a selection surface, not a dump of every acceptance
+        # document. Pull get_node only for the goal the driver chooses.
+        summary = []
+        for node in ready[:limit]:
+            entry = {field: node[field] for field in ("node_key", "revision", "status", "priority",
+                                                     "contract_hash", "dependencies", "readiness")}
+            entry["goal"] = node["goal"][:1200]
+            entry["goal_truncated"] = len(node["goal"]) > 1200
+            summary.append(entry)
+        return {"nodes": summary, "total": len(ready), "truncated": len(ready) > limit}
 
     def events(self, project_id: str, after: int = 0, limit: int = 100) -> list[dict]:
         integer(after, "after", 0, 2**63-1)

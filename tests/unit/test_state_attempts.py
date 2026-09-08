@@ -387,3 +387,12 @@ def test_accepted_result_later_reported_failed_invalidates_fact(system, monkeypa
     assert attempts.reconcile(a["attempt_id"], sf)["status"] == "failed"
     assert store.get_node("game", "a")["status"] == "STALE"
     assert store.get_node("game", "b")["readiness"] == "blocked"
+
+
+@pytest.mark.parametrize("version", [None, {"digest": "sha256:" + "0" * 64, "graph": {}}])
+def test_missing_or_corrupt_historical_graph_refuses_acceptance(system, monkeypatch, version):
+    _, attempts, sf = system
+    a = finish(system, reserve(system))
+    monkeypatch.setattr(sf, "get_graph_version", lambda *_: version)
+    with pytest.raises(StateConflict, match="version"):
+        attempts.reconcile(a["attempt_id"], sf)

@@ -22,8 +22,8 @@ def authenticated_actor(request) -> str:
 
 def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_workspace_manager)):
     from api.mcp_router import _start_driver
-    return StateService(db, ws, get_skillflow(), get_config_registry(), _start_driver,
-                        actor=authenticated_actor(request))
+    return StateService(db, ws, attach_driver=_start_driver, actor=authenticated_actor(request),
+                        runtime_factory=lambda: (get_skillflow(), get_config_registry()))
 
 
 def _call(service, action, arguments, *, write=False):

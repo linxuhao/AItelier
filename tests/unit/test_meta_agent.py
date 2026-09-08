@@ -43,7 +43,11 @@ class TestToolDefinitions:
         # suggest_pipeline_change, list_pipeline_suggestions — read-only or
         # proposal-only, so butler-visible);
         # generate_pipeline and config_edit are coding-mode only.
-        assert len(TOOL_DEFINITIONS) == 44
+        # State graph help/query/command tools are orchestration, not coding.
+        assert len(TOOL_DEFINITIONS) == 47
+        names = [tool["function"]["name"] for tool in TOOL_DEFINITIONS]
+        assert {"state_graph_help", "state_graph_read", "state_graph_write"} <= set(names)
+        assert len(names) == len(set(names)), "driver tool names must remain unique"
 
     def test_all_tools_have_required_fields(self):
         for td in TOOL_DEFINITIONS:

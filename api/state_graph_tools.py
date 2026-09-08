@@ -13,8 +13,9 @@ def register_state_tools(tool, mcp):
             request = _request_from(mcp.get_context())
         except Exception:
             request = None
-        return StateService(get_db_manager(), get_workspace_manager(), get_skillflow(), get_config_registry(),
-                            _start_driver, actor=authenticated_actor(request))
+        return StateService(get_db_manager(), get_workspace_manager(), attach_driver=_start_driver,
+                            actor=authenticated_actor(request),
+                            runtime_factory=lambda: (get_skillflow(), get_config_registry()))
 
     def invoke(action, arguments, write):
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError

@@ -106,6 +106,12 @@ def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None):
 
     graph = PipelineGraph.from_yaml(_REPO_ROOT / "configs" / "coding_impl.yaml")
     sf.register_graph(graph)
+    # The real graph now requires an atomically published plan. Without this
+    # fixture input all routing tests stop before their gate is exercised.
+    # Preserve every pass/fail assertion below; do not bypass required context.
+    from core.seed_publication import publish_seeds, seed_dir
+    publish_seeds(seed_dir(sf, "p", graph.name), {
+        "plan.md": "Implement the isolated fixture and run the declared test gate.\n"})
     run_id = sf.create_run(graph.name, {"project_id": "p"})
     sf.start_run(run_id)
     return sf, run_id, calls

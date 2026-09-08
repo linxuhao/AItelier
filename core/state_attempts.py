@@ -237,6 +237,18 @@ class StateAttempts:
                 or not isinstance(row.get("graph_digest"), str)
                 or not re.fullmatch(r"sha256:[0-9a-f]{64}", row["graph_digest"])):
             raise StateConflict("workflow has no valid version/digest pin")
+        # SkillFlow can warn and fall back to a current graph if its historical
+        # version vanished. A state acceptance must not quietly inherit that
+        # fallback: validate the actual pinned version through the public API.
+        try:
+            from skillflow.core import graph_digest
+            version = sf.get_graph_version(row["graph_name"], row["graph_version"])
+            valid = (isinstance(version, dict) and version.get("digest") == row["graph_digest"]
+                     and graph_digest(version["graph"]) == row["graph_digest"])
+        except Exception as exc:
+            raise StateConflict("cannot verify workflow graph version history") from exc
+        if not valid:
+            raise StateConflict("pinned workflow graph version is missing or inconsistent")
         return row
 
     def bind_run(self, attempt_id: str, run_id: str, sf) -> dict:

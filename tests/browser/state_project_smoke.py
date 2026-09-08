@@ -237,6 +237,45 @@ def main():
                 assert anon.locator('g.goal').count()==0
                 assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/overview').status==403
                 checks.append('anonymous UI has no goals and direct private API denies access')
+                # A real external attempt in the isolated API has no workflow.
+                # The test harness, not AItelier, runs and waits for its checker.
+                import subprocess, hashlib
+                from core.state_database import StateDatabase
+                from core.state_service import StateService
+                own=StateService(StateDatabase(str(root/'external-only.sqlite')),actor='browser-external-verifier')
+                own.create_project('external-only','External harness project')
+                own.store.add_nodes('external-only',[{'key':'external.goal','goal':'外部 harness 验证目标',
+                    'acceptance':[{'id':'actual-test','kind':'test','description':'Actual Python assertion passes'}]}])
+                a=own.start_external_attempt('external-only','external.goal',1,'director-subagents','session/checker-1','once')
+                check=subprocess.run([sys.executable,'-B','-c','assert sum([2,3])==5'],capture_output=True,text=True,timeout=10)
+                assert check.returncode==0
+                evidence_bytes=json.dumps({'returncode':check.returncode,'stdout':check.stdout,'stderr':check.stderr}).encode()
+                evidence_file=root/'external-fixture-test.json';evidence_file.write_bytes(evidence_bytes)
+                h=hashlib.sha256(evidence_bytes).hexdigest();artifact=hashlib.sha256(b'assert sum([2,3])==5').hexdigest()
+                a=own.report_external_attempt(a['attempt_id'],'complete',0,a['context_hash'],'candidate',
+                    str(evidence_file),h,True,artifact,'sha256')
+                own.record_evidence(a['attempt_id'],'actual-test-evidence','actual-test','pass',artifact,str(evidence_file),h)
+                own.verify_node('external-only','external.goal',1,a['attempt_id'])
+                # Swap the isolated route dependency, not the user's real app.
+                app.dependency_overrides[get_service]=lambda:own
+                page.set_viewport_size({'width':1440,'height':1000})
+                page.goto(base+'/#/state-projects/external-only/nodes/external.goal')
+                expect(page.locator('g.goal.verified')).to_have_count(1)
+                expect(page.locator('.node-panel')).to_contain_text('director-subagents')
+                page.get_by_role('button',name='Inspect evidence').click()
+                expect(page.locator('.attempt-evidence')).to_contain_text('Own harness: no SkillFlow Run is required.')
+                expect(page.locator('.external-observation')).to_contain_text('CANDIDATE')
+                expect(page.locator('.external-provenance')).to_contain_text('session/checker-1')
+                assert page.locator('.attempt-evidence a[href^="#/state-runs/"]').count()==0
+                page.screenshot(path=str(out/'external-harness-verified.png'),full_page=True)
+                page.set_viewport_size({'width':390,'height':844})
+                assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+2')
+                page.screenshot(path=str(out/'external-harness-mobile.png'),full_page=True)
+                with own.db.get_connection() as conn:
+                    assert not conn.execute("SELECT name FROM sqlite_master WHERE name='runs'").fetchone()
+                assert len(sf.list_runs())==2
+                checks.append('A genuinely State-only DB accepts an actual external checker; UI shows harness/job/provenance, no fake workflow, desktop/mobile')
+                app.dependency_overrides[get_service]=lambda:service
                 if migration:
                     pid=migration['project']['project_id']
                     page.set_viewport_size({'width':1440,'height':1000})

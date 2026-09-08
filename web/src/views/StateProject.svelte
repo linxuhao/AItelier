@@ -3,7 +3,7 @@
   import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
   import { stateOverview, stateAttempts, stateRefreshProject } from '../lib/api';
-  import { exactRunHref, type StateOverview, type StateAttempt } from '../lib/stateGraph';
+  import { attemptLabel, exactRunHref, type StateOverview, type StateAttempt } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateGraph from './StateGraph.svelte';
   import StateNodePanel from './StateNodePanel.svelte';
@@ -112,7 +112,7 @@
         {#each attempts as attempt (attempt.attempt_id)}
           <article class="run-card">
             <div class="run-row"><div><button class="node-link" onclick={() => { selected = attempt.node_key; tab = 'graph'; }}>{attempt.node_key}</button>
-              <p><strong>{attempt.workflow}</strong> · {attempt.status} · r{attempt.node_revision}</p><small>{attempt.updated_at}</small></div>
+              <p><strong>{attemptLabel(attempt)}</strong> <span class="executor-kind">{st(attempt.execution_kind==='external'?'externalShort':'workflow')}</span> · {attempt.status} · r{attempt.node_revision}</p><small>{attempt.updated_at}</small>{#if attempt.execution_kind==='external'}<p class="external-job">{st('externalJob')}: <code>{attempt.external_id}</code></p>{/if}</div>
               <div class="run-actions"><button class="outline" onclick={() => openAttempt = openAttempt === attempt.attempt_id ? '' : attempt.attempt_id}>{st('inspect')}</button>
                 {#if attempt.run_id}<a href={exactRunHref(attempt.run_id)}>{st('workflow')} ↗</a>{/if}</div></div>
             {#if openAttempt === attempt.attempt_id}<StateAttemptEvidence attemptId={attempt.attempt_id} />{/if}
@@ -128,6 +128,8 @@
   {/if}
 </section>
 <style>
+  .executor-kind{font-size:.68rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:4px;padding:.1rem .3rem;}
+  .external-job{font-size:.75rem;overflow-wrap:anywhere;}
   .state-project { max-width:1480px; margin:auto; min-width:0; }
   .breadcrumbs { display:flex; justify-content:flex-start; flex-wrap:wrap; gap:.6rem; font-size:.75rem; margin:.4rem 0 1rem; overflow-wrap:anywhere; }
   header { display:flex; justify-content:space-between; gap:1rem; flex-wrap:wrap; align-items:flex-start; }

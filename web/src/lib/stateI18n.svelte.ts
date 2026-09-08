@@ -3,6 +3,7 @@ import { langStore } from '../stores/i18n';
 let lang = $state(get(langStore));
 langStore.subscribe(value => { lang = value; });
 const en: Record<string, string> = {
+  externalShort:'External', externalJob:'External execution', reporter:'Authenticated reporter', externalNoRun:'Own harness: no SkillFlow Run is required.', externalObservations:'External execution observations', quiescent:'Workers settled (reported)', externalTruncated:'Latest 100 external observations shown.', acceptanceProvenance:'Acceptance execution provenance',
   attemptShort:'Attempt', notStarted:'Not started',
   projects: 'Projects · State DAG', project: 'State project', dashboard: 'Repositories & executions',
   intro: 'Long-lived goals, independent of workflow runs.', private: 'Project state is private. Sign in with writer access to view it.',
@@ -31,6 +32,7 @@ const en: Record<string, string> = {
   fullRun: 'Open exact run', complete: 'completed ≠ VERIFIED', policy: 'Dispatch policy', criteria: 'Required checks',
 };
 const zh: Record<string, string> = {
+  externalShort:'外部执行', externalJob:'外部任务标识', reporter:'已认证提交者', externalNoRun:'自有 harness 执行，不需要 SkillFlow Run。', externalObservations:'外部执行报告', quiescent:'执行已静止（提交者声明）', externalTruncated:'显示最近100条外部报告。', acceptanceProvenance:'验收执行来源',
   attemptShort:'最近尝试', notStarted:'尚未执行',
   projects:'项目 · State DAG', project:'长期项目', dashboard:'仓库与执行记录', intro:'长期目标独立于每一次工作流执行。',
   private:'项目状态为私有数据，请使用有写入权限的账号登录后查看。', loading:'正在读取…', retry:'重试', reload:'刷新视图',
@@ -52,6 +54,7 @@ const zh: Record<string, string> = {
   referenceOnly:'仅历史关联 · 未接管', fullRun:'打开确切 Run', complete:'completed ≠ VERIFIED', policy:'调度策略', criteria:'必需检查',
 };
 const fr: Record<string, string> = {
+  externalShort:'Externe', externalJob:'Exécution externe', reporter:'Déclarant authentifié', externalNoRun:'Harness externe : aucun Run SkillFlow requis.', externalObservations:'Observations externes', quiescent:'Travail terminé (déclaré)', externalTruncated:'Les 100 dernières observations sont affichées.', acceptanceProvenance:'Provenance de validation',
   attemptShort:'Tentative', notStarted:'Non commencée',
   projects:'Projets · State DAG', project:'Projet durable', dashboard:'Dépôts et exécutions',
   intro:'Les objectifs persistent indépendamment des exécutions.', private:'État privé : connectez-vous avec un accès en écriture.',

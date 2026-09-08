@@ -19,8 +19,23 @@
   {:else if !data}<p aria-live="polite">{st('loading')}</p>
   {:else}
     <p><strong>{st('artifact')}:</strong> <code>{data.attempt.artifact_ref ?? '—'}</code></p>
-    {#if data.attempt.run_id}<p><a href={exactRunHref(data.attempt.run_id)}>{st('workflow')} → <code>{data.attempt.run_id}</code></a></p>
+    {#if data.attempt.execution_kind==='external'}
+      <div class="external-provenance"><p><strong>{st('externalShort')}: {data.attempt.harness}</strong></p>
+      <p>{st('externalJob')}: <code>{data.attempt.external_id}</code></p>
+      <p>{st('reporter')}: <code>{data.attempt.reporting_actor}</code></p>
+      <p>{st('externalNoRun')}</p></div>
+    {:else if data.attempt.run_id}<p><a href={exactRunHref(data.attempt.run_id)}>{st('workflow')} → <code>{data.attempt.run_id}</code></a></p>
     {:else}<p>{st('noRun')}</p>{/if}
+    {#if data.external_observations?.length}
+      <h5>{st('externalObservations')}</h5>
+      {#each data.external_observations as observation(observation.observation_id)}
+        <details class="external-observation"><summary>{observation.status.toUpperCase()} · v{observation.version} · {st('quiescent')}: {observation.quiescent?'✓':'—'}</summary>
+          <p>{observation.detail}</p><p><code>{observation.report_ref}</code></p><p>SHA-256 <code>{observation.report_sha256}</code></p>
+          <p>{st('reporter')}: <code>{observation.actor}</code></p><p>Context <code>{observation.context_hash}</code></p>
+        </details>
+      {/each}
+      {#if data.external_observations_truncated}<p>{st('externalTruncated')}</p>{/if}
+    {/if}
     <p class="note">{st('trust')}</p>
     <h5>{st('reports')}</h5>
     {#if !data.evidence.length}<p>{st('noEvidence')}</p>{/if}
@@ -34,9 +49,16 @@
     {/each}
     {#if data.evidence_truncated}<p class="note">Latest 200 observations shown. Read full history using the evidence API.</p>{/if}
     <p class="note">Acceptance receipts: {data.receipts.length}. Historical receipts may have been invalidated; the current node state remains authoritative.</p>
+    {#each data.receipts as receipt,i(i)}
+      {#if typeof receipt.provenance_json==='string' && receipt.provenance_json!=='{}'}
+        <details class="receipt-provenance"><summary>{st('acceptanceProvenance')}</summary><pre>{receipt.provenance_json}</pre></details>
+      {/if}
+    {/each}
   {/if}
 </div>
 <style>
+  .external-provenance{padding:.5rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:6px;}
+  pre{font-size:.7rem;white-space:pre-wrap;word-break:break-word;}
   .attempt-evidence { font-size:.8rem; padding:.8rem; border-left:3px solid var(--pico-primary,#3877b5); margin:.6rem 0; }
   p { margin:.45rem 0; overflow-wrap:anywhere; }
   code { font-size:.72rem; white-space:normal; overflow-wrap:anywhere; }

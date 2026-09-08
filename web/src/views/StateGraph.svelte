@@ -73,7 +73,7 @@
             <text class="goal-state" x="22" y="95">{node.status}</text>
             <text class="goal-revision" x="250" y="95" text-anchor="end">r{node.revision}</text>
             <text class="goal-ready" x="14" y="123">{node.hold ? '⏸ ' : ''}{st(node.readiness)}{node.blocked_by.length ? ` · ${node.blocked_by.length}` : ''}</text>
-            <text class="goal-attempt" x="14" y="144">{st('attemptShort')}: {node.latest_attempt ? node.latest_attempt.status.toUpperCase() : st('notStarted')}</text>
+            <text class="goal-attempt" x="14" y="144">{st(node.latest_attempt?.execution_kind==='external'?'externalShort':'attemptShort')}: {node.latest_attempt ? node.latest_attempt.status.toUpperCase() : st('notStarted')}</text>
             {#if node.outsideDependencies}<text x="250" y="20" text-anchor="end" class="outside">+{node.outsideDependencies}</text>{/if}
           </g>
         {/each}

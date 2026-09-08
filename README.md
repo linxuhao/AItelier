@@ -31,6 +31,21 @@ and held shadow migration rehearsal.
 The [project-first dashboard guide](docs/project-dashboard-ux.md) covers the default State DAG workspace,
 separate Runs/Pipelines navigation, readable node badges and actual run history.
 
+### Use State DAG without workflows
+
+Your own director, subagents, CI or proof-checking harness can register an
+external attempt, submit a scoped artifact/report and per-criterion evidence,
+and verify a node without creating a SkillFlow Run. Workflow and external
+attempts share the same acceptance and invalidation rules. External completion
+is still only a candidate.
+
+A dedicated authenticated, headless State HTTP/MCP server starts with
+`python -m api.state_only --db /absolute/private/state.sqlite` and a configured
+`AITELIER_STATE_TOKEN`; it does not import or start SkillFlow, a scheduler,
+workspace manager or model registry. The package's install dependencies are not
+yet split into a separate minimal wheel. See [the integration/standalone guide](docs/state-external-harness.md)
+and [the real own-harness example](examples/external_harness_demo.py).
+
 ## Why AItelier
 
 Most "AI agent" tooling is built for demos, not trust. The tools that build software or automate a workflow for you are non-deterministic black boxes: you can't reproduce a run, audit *why* the agent did what it did, or insert a human approval where it matters. That's exactly the wall that stops agents from being deployed in anything serious — regulated industries, enterprise, anywhere "it usually works" isn't good enough.

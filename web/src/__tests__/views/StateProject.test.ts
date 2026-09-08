@@ -194,3 +194,38 @@ describe('Visible node status content', () => {
     expect(view.container.querySelector('.goal-attempt')?.textContent).toContain('Not started');
   });
 });
+
+
+describe('External harness attempts are first-class',()=>{
+  it('shows harness and job provenance without a missing-run error or workflow link',async()=>{
+    const external=attempt({execution_kind:'external',workflow:null,run_id:null,execution_project_id:null,
+      harness:'director-subagents',external_id:'session/worker-7',reporting_actor:'trusted-caller',status:'candidate'} as never);
+    api.stateNode.mockResolvedValue({...detail('growth.progress'),attempts:[external]});
+    api.stateAttemptDetail.mockResolvedValue({attempt:{...external,context:{}},evidence:[],receipts:[{provenance_json:'{"execution_kind":"external"}'}],
+      external_observations:[{observation_id:'finished',version:1,status:'candidate',quiescent:1,report_ref:'reports/final.json',report_sha256:'a'.repeat(64),actor:'trusted-caller',context_hash:'b'.repeat(64),detail:'All verifier workers completed'}],evidence_truncated:false});
+    const view=render(StateNodePanel,{projectId:'game',nodeKey:'growth.progress',onselect:vi.fn()});
+    await view.findByText('director-subagents');await fireEvent.click(view.getByRole('button',{name:'Inspect evidence'}));
+    await view.findByText('Own harness: no SkillFlow Run is required.');
+    expect(view.container.querySelector('a[href^="#/state-runs/"]')).toBeNull();
+    expect(view.container.textContent).toContain('session/worker-7');
+    expect(view.container.textContent).toContain('Authenticated reporter');
+    expect(view.container.querySelector('.external-observation')?.textContent).toContain('CANDIDATE');
+    expect(view.container.querySelector('.receipt-provenance')).not.toBeNull();
+    expect(api.getRunDetail).not.toHaveBeenCalled();expect(api.runWorkflowGraph).not.toHaveBeenCalled();
+  });
+  it('distinguishes external progress directly on a graph card',()=>{
+    const external=attempt({execution_kind:'external',workflow:null,run_id:null,harness:'CI',status:'running'} as never);
+    const view=render(StateGraph,{nodes:[goal('external',[],{latest_attempt:external,status:'OPEN',readiness:'in_progress'})],selected:'',onselect:vi.fn()});
+    expect(view.container.querySelector('.goal-attempt')?.textContent).toContain('External: RUNNING');
+    expect(view.container.querySelector('.goal-state')?.textContent).toBe('OPEN');
+    expect(view.container.querySelector('g.verified')).toBeNull();
+  });
+  it('project attempt tab retains external executions without inventing a Run',async()=>{
+    api.stateAttempts.mockResolvedValue({attempts:[attempt({execution_kind:'external',workflow:null,run_id:null,
+      harness:'CI-checker',external_id:'job/321'} as never)],next_after:null});
+    const view=render(StateProject,{params:{id:'game'}});await view.findByRole('heading',{name:'武虾传奇'});
+    await fireEvent.click(view.getByRole('button',{name:'Runs / attempts'}));
+    await view.findByText('CI-checker');expect(view.container.textContent).toContain('job/321');
+    expect(view.container.querySelector('.run-card a[href^="#/state-runs/"]')).toBeNull();
+  });
+});

@@ -9,6 +9,15 @@ binding can supersede the legacy source_project_id dependency before attempts
 exist; historical execution IDs remain intact. The viewer is not a graph editor
 and does not automatically migrate or approve existing work.
 
+## External harness / State-only mode
+
+State attempts now support either SkillFlow or your own director/subagent/CI
+harness. External attempts have no dummy workflow, execution project or Run.
+They use the same versioned contracts and evidence/acceptance rules. See
+[external harness integration and the standalone State-only server](state-external-harness.md).
+The workflow examples below describe the SkillFlow adapter, not a requirement
+for every State DAG user.
+
 ## What owns what
 
 AItelier now has an additive, long-lived State DAG layer. It does **not** replace
@@ -17,9 +26,9 @@ SkillFlow, the existing DPE configs, legacy task rows, or their UI.
 | Layer | Responsibility | Not its responsibility |
 |---|---|---|
 | State project / node | Goal identity, requirement revision, acceptance contract, dependencies, evidence and acceptance receipts | Workflow step order or retries |
-| State attempt | One attempt to satisfy one node revision, linked to one exact SkillFlow run | A second execution engine |
+| State attempt | One attempt to satisfy one node revision, with an exact SkillFlow run OR external harness execution identity | A second execution engine |
 | SkillFlow | Versioned workflow graphs, claims, steps, retries, loops, checkpoint decisions, cancellation and output production | Declaring a product goal permanently verified |
-| Driver agent | Read the frontier, choose/decompose a goal, select an existing workflow, inspect outcomes and request verification | Keeping authoritative project state in conversation memory |
+| Driver agent | Read the frontier, choose a goal and a workflow or external harness, inspect evidence and request verification | Keeping authoritative project state in conversation memory |
 
 SkillFlow's graph can contain cycles. Only the **state dependency graph** is
 required to be acyclic. The existing SkillFlow `capability` field is a tool grant;
@@ -28,8 +37,10 @@ it is not a verified product capability.
 The legacy AItelier `runs.project_id` remains the execution-project key. A new
 `state_projects.project_id` is a separate long-lived identity. `source_project_id`
 on a state project points to an existing legacy project that owns its canonical
-source repository. Each attempt receives a separate `sg-<uuid>` execution project
-and an exact SkillFlow run ID. No legacy project/task is automatically converted.
+source repository. Each **workflow-backed** attempt receives a separate
+`sg-<uuid>` execution project and exact SkillFlow run ID. An external attempt
+has neither; it pins its harness/job identity and context instead. No legacy
+project/task is automatically converted.
 
 ## State and validity
 
@@ -53,7 +64,7 @@ integration/acceptance checks still apply. An acceptance is scoped to:
 
 - exact node revision and contract hash;
 - exact dependency acceptance-receipt snapshot;
-- exact attempt, SkillFlow run and historical graph version/digest;
+- exact attempt and execution provenance (SkillFlow run/graph pin, or external harness identity/final observation);
 - exact candidate Git commit or output-bundle digest;
 - the latest passing evidence for every contract criterion.
 
@@ -62,7 +73,7 @@ not a permanent claim about every later source commit. Arbitrary Git edits do
 not automatically revise a State DAG node. A driver must record changed
 requirements/dependencies and obtain fresh validation for changed artifacts.
 
-## Attempts: completion is only a candidate
+## Workflow-backed attempts: completion is only a candidate
 
 The supported lifecycle is:
 
@@ -145,7 +156,8 @@ Read actions: `list_projects`, `get_graph`, `get_node`, `frontier`, `events`,
 `get_attempt`, `list_attempts`, `evidence`.
 
 Write actions: `create_project`, `add_nodes`, `revise_node`, `split_node`,
-`supersede_node`, `start_attempt`, `recover_attempt`, `reconcile_attempt`,
+`supersede_node`, `start_attempt`, `start_external_attempt`, `report_external_attempt`,
+`recover_attempt`, `reconcile_attempt`,
 `retire_reservation`, `record_evidence`, `verify_node`, `import_tasks`.
 
 The MCP prompt `state_graph_driver` describes the intended loop. Workflow

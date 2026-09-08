@@ -1,6 +1,6 @@
 <script lang="ts">
   import { stateNode } from '../lib/api';
-  import { exactRunHref, stateProjectHref, type StateNodeDetail } from '../lib/stateGraph';
+  import { attemptLabel, exactRunHref, stateProjectHref, type StateNodeDetail } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateAttemptEvidence from './StateAttemptEvidence.svelte';
   interface Props { projectId: string; nodeKey: string; refresh?: number; onselect: (key: string) => void }
@@ -50,8 +50,8 @@
     {#if !data.attempts.length}<p class="muted">{st('noAttempts')}</p>{/if}
     {#each data.attempts as attempt (attempt.attempt_id)}
       <div class="attempt-row">
-        <p><strong>{attempt.workflow}</strong> · {attempt.status} · r{attempt.node_revision}</p>
-        <small>{attempt.updated_at}</small>
+        <p><strong>{attemptLabel(attempt)}</strong> <span class="executor-kind">{st(attempt.execution_kind==='external'?'externalShort':'workflow')}</span> · {attempt.status} · r{attempt.node_revision}</p>
+        <small>{attempt.updated_at}</small>{#if attempt.execution_kind==='external'}<p class="external-job">{st('externalJob')}: <code>{attempt.external_id}</code></p>{/if}
         <div class="attempt-actions"><button class="outline" onclick={() => openAttempt = openAttempt === attempt.attempt_id ? '' : attempt.attempt_id}>{st('inspect')}</button>
           {#if attempt.run_id}<a href={exactRunHref(attempt.run_id)}>{st('fullRun')} ↗</a>{/if}</div>
         {#if openAttempt === attempt.attempt_id}<StateAttemptEvidence attemptId={attempt.attempt_id} />{/if}
@@ -74,6 +74,8 @@
   {/if}
 </aside>
 <style>
+  .executor-kind{font-size:.68rem;border:1px solid var(--pico-muted-border-color,#ddd);border-radius:4px;padding:.1rem .3rem;}
+  .external-job{font-size:.75rem;overflow-wrap:anywhere;}
   .node-panel { min-width:0; background:var(--pico-card-background-color,#fff); border:1px solid var(--pico-muted-border-color,#dbe3ec); border-radius:12px; padding:1rem; font-size:.84rem; overflow-wrap:anywhere; }
   .panel-heading { display:flex; justify-content:space-between; gap:.7rem; }
   h3 { font-size:1.04rem; margin:.7rem 0; }

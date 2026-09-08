@@ -10,8 +10,10 @@ export interface StateProjectRow {
 }
 export interface StateAttempt {
   seq: number; attempt_id: string; project_id: string; node_key: string; node_revision: number;
-  workflow: string; execution_project_id: string; run_id: string | null; status: string;
+  workflow: string | null; execution_project_id: string | null; run_id: string | null; status: string;
   artifact_ref: string | null; created_at: string; updated_at: string; title?: string;
+  execution_kind?: 'skillflow' | 'external'; harness?:string|null; external_id?:string|null;
+  reporting_actor?:string|null; observation_version?:number; artifact_kind?:string|null;
 }
 export interface StateNodeSummary {
   node_key: string; title: string; domain: string; revision: number; contract_hash: string;
@@ -44,6 +46,9 @@ export interface StateNodeDetail {
 export interface AttemptDetail {
   attempt: StateAttempt & { context: Record<string, unknown> }; evidence: StateEvidence[];
   receipts: Record<string, unknown>[]; evidence_truncated: boolean;
+  external_observations?: {observation_id:string;version:number;status:string;quiescent:number;
+    report_ref:string;report_sha256:string;actor:string;context_hash:string;detail:string}[];
+  external_observations_truncated?:boolean;
 }
 export interface RunOwner { project_id: string; title: string; node_key: string; relation: string; attempt_id?: string; reference_id?: string }
 
@@ -116,4 +121,10 @@ export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', 
   return { nodes: boxes, edges: layout.edges, width: Math.max(304, 40 + layout.widest * (STATE_CARD.width + STATE_CARD.xGap) - STATE_CARD.xGap),
     height: Math.max(196, 40 + layout.rankCount * (STATE_CARD.height + STATE_CARD.yGap) - STATE_CARD.yGap), tooLarge: false, count: visible.length,
     hiddenEdges: whole.edges.filter(e => shown.has(e.from) !== shown.has(e.to)).length };
+}
+
+
+/** External execution is legitimate without a workflow/run, not a broken link. */
+export function attemptLabel(attempt:StateAttempt):string {
+  return attempt.execution_kind==='external' ? (attempt.harness??'External harness') : (attempt.workflow??'Workflow');
 }

@@ -255,3 +255,15 @@ def test_skillflow_and_external_attempts_can_verify_dependencies_in_one_project(
     store.revise_node('p','external-base',1,'new root requirement')
     assert all(n['status']=='STALE' for n in store.get_graph('p')['nodes'])
     sf._conn.close()
+
+
+def test_executable_own_harness_demo_runs_actual_failed_then_passing_checks(tmp_path):
+    source=Path(__file__).resolve().parents[2];report=tmp_path/'demo.json'
+    result=subprocess.run([sys.executable,'-B','examples/external_harness_demo.py','--report',str(report)],cwd=source,
+                          capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stdout+result.stderr
+    data=json.loads(report.read_text());assert data['result']=='PASS'
+    assert [a['acceptance_http_status'] for a in data['attempts']]==[409,200]
+    assert data['attempts'][0]['check_verdicts'][0]['verdict']=='fail'
+    assert all(c['verdict']=='pass' for c in data['attempts'][1]['check_verdicts'])
+    assert data['workflow_runtime_imported'] is False and data['workflow_runs_created']==0

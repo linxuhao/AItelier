@@ -108,3 +108,13 @@ The original white-node reproduction was captured from the live site; a new
 bundle still needs the normal user-managed deployment after source delivery.
 No Docker socket, SSH permission, active-gameplay-run control, migration rewrite
 or checkpoint approval is required or added by this UI change.
+
+
+## External attempts
+
+State goals may also be verified by your own harness/subagents without a
+workflow. The project Attempts view and node evidence details show execution
+kind, harness/job identity, authenticated reporter, immutable observations and
+acceptance provenance. No missing-run error or synthetic workflow link is
+created. The global Runs page remains actual SkillFlow execution history;
+project Attempts is the cross-executor view. See [external harness integration](state-external-harness.md).

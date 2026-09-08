@@ -76,13 +76,13 @@ def scan(store, project_id, after, node_keys, attempt_ids, actionable_only, limi
 
 
 async def wait_for_state_change(service, project_id, after=0, node_keys=None, attempt_ids=None,
-                                actionable_only=True, timeout_seconds=30.0, limit=100):
+                                actionable_only=True, timeout_seconds=30.0, limit=100, return_when_idle=False):
     # Service callers receive the same strict contract as REST/MCP callers.
     from core.state_commands import WaitForStateChange
     from core.state_graph import key
     args = WaitForStateChange(project_id=project_id, after=after, node_keys=node_keys,
         attempt_ids=attempt_ids, actionable_only=actionable_only,
-        timeout_seconds=timeout_seconds, limit=limit)
+        timeout_seconds=timeout_seconds, limit=limit, return_when_idle=return_when_idle)
     key(project_id, "project_id")
     for value in (node_keys or []) + (attempt_ids or []):
         key(value)
@@ -99,6 +99,13 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 node_keys, attempt_ids, actionable_only, limit)
             if events:
                 return {"events": events, "next_after": cursor, "timed_out": False}
+            if args.return_when_idle:
+                outcome = await asyncio.to_thread(wait_disposition, service.store, project_id,
+                    cursor, node_keys, attempt_ids)
+                if outcome == "rescan":
+                    continue
+                if outcome is not None:
+                    return {"events": [], "next_after": cursor, "timed_out": False, **outcome}
             if timeout_seconds > 0 and (service.sf is not None or service.runtime_factory is not None):
                 # One bounded page per observation cycle; rotated to prevent
                 # starvation. No executor is composed for State-only deployments.
@@ -122,6 +129,38 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 await asyncio.wait_for(signal.wait(), timeout=min(1.0, remaining))
             except asyncio.TimeoutError:
                 pass
+
+
+def wait_disposition(store, project_id, cursor, node_keys, attempt_ids):
+    """An idle decision is a snapshot, never proof of remote quiescence."""
+    with store.transaction() as conn:
+        # Check event watermark and attempts in one snapshot. A commit after the
+        # scan must be replayed before returning an idle/action-required result.
+        high = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?",
+                            (project_id,)).fetchone()[0]
+        if high > cursor:
+            return "rescan"
+        clauses, args = ["project_id=?"], [project_id]
+        if node_keys is not None:
+            marks = ",".join("?" for _ in node_keys)
+            clauses.append("node_key IN (WITH RECURSIVE relevant(k) AS ("
+                "SELECT node_key FROM state_nodes WHERE project_id=? AND node_key IN (" + marks + ") "
+                "UNION SELECT d.dependency_key FROM state_dependencies d JOIN relevant r ON d.node_key=r.k "
+                "WHERE d.project_id=?) SELECT k FROM relevant)")
+            args.extend([project_id, *node_keys, project_id])
+        if attempt_ids is not None:
+            clauses.append("attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")")
+            args.extend(attempt_ids)
+        rows = conn.execute("SELECT attempt_id,status FROM state_attempts WHERE " +
+                            " AND ".join(clauses), args).fetchall()
+        paused = [dict(row) for row in rows if row["status"] == "paused"]
+        if paused:
+            return {"reason": "action_required", "attempts": paused}
+        # An allowlist of terminal states fails conservatively for unknown or
+        # future statuses. Reservations and external registrations count as work.
+        if any(row["status"] not in {"candidate", "failed", "superseded"} for row in rows):
+            return None
+        return {"reason": "nothing_to_wait"}
 
 
 def reconcile_workflow_project(db, ws, sf, project_id):

@@ -156,3 +156,99 @@ def test_wait_bounds_and_compatibility_default():
     for invalid in (-1, 901, float("inf"), float("nan")):
         with pytest.raises(ValidationError):
             WaitForStateChange(project_id="p", timeout_seconds=invalid)
+
+
+@pytest.mark.asyncio
+async def test_director_empty_idle_and_zero_timeout(service):
+    cursor = service.store.events("p")[-1]["seq"]
+    for timeout in (0, 900):
+        result = await asyncio.wait_for(execute(service, "wait_for_state_change", {
+            "project_id": "p", "after": cursor, "timeout_seconds": timeout,
+            "return_when_idle": True}), 1)
+        assert result == {"events": [], "next_after": cursor, "timed_out": False,
+                          "reason": "nothing_to_wait"}
+    assert not _waiters
+
+
+def register_external(service):
+    return service.external.register("p", "a", 1, "test", "worker", "request")
+
+
+def observe_external(service, attempt, status):
+    return service.external.observe(attempt["attempt_id"], "report", 0,
+        attempt["context_hash"], status, "private-report", "a" * 64,
+        quiescent=status == "failed")
+
+
+@pytest.mark.asyncio
+async def test_director_terminal_event_precedes_idle(service):
+    attempt = register_external(service)
+    cursor = service.store.events("p")[-1]["seq"]
+    observe_external(service, attempt, "failed")
+    result = await service.wait_for_state_change("p", after=cursor, return_when_idle=True)
+    assert result["events"][0]["payload"]["status"] == "failed"
+    assert "reason" not in result
+    idle = await service.wait_for_state_change("p", after=result["next_after"], return_when_idle=True)
+    assert idle["reason"] == "nothing_to_wait"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["running", "unknown"])
+async def test_director_external_waits_until_event(service, status):
+    attempt = register_external(service)
+    if status == "unknown":
+        observe_external(service, attempt, status)
+    cursor = service.store.events("p")[-1]["seq"]
+    result = await service.wait_for_state_change("p", after=cursor,
+        return_when_idle=True, timeout_seconds=.02)
+    assert result == {"events": [], "next_after": cursor, "timed_out": True}
+
+
+@pytest.mark.asyncio
+async def test_director_paused_is_actionable_after_event_consumed(service):
+    attempt = register_external(service)
+    observe_external(service, attempt, "paused")
+    cursor = service.store.events("p")[-1]["seq"]
+    result = await service.wait_for_state_change("p", after=cursor, return_when_idle=True)
+    assert result["reason"] == "action_required"
+    assert result["attempts"] == [{"attempt_id": attempt["attempt_id"], "status": "paused"}]
+    assert not result["timed_out"]
+
+
+@pytest.mark.asyncio
+async def test_director_filters_include_upstream_and_intersect_attempts(service):
+    attempt = register_external(service)
+    service.store.add_nodes("p", [
+        {"key": "b", "goal": "Child", "dependencies": ["a"], "acceptance": [
+            {"id": "check", "kind": "test", "description": "Test"}]},
+        {"key": "c", "goal": "Other", "acceptance": [
+            {"id": "check", "kind": "test", "description": "Test"}]}])
+    cursor = service.store.events("p")[-1]["seq"]
+    for nodes, attempts, idle in [(["b"], None, False), (["c"], None, True),
+            (["b"], [attempt["attempt_id"]], False), (["c"], [attempt["attempt_id"]], True)]:
+        result = await service.wait_for_state_change("p", after=cursor, node_keys=nodes,
+            attempt_ids=attempts, return_when_idle=True, timeout_seconds=0)
+        assert (result.get("reason") == "nothing_to_wait") is idle
+        assert result["timed_out"] is not idle
+
+
+@pytest.mark.asyncio
+async def test_director_reservation_is_not_idle(service):
+    service.attempts.reserve("p", "a", 1, "workflow", "request")
+    cursor = service.store.events("p")[-1]["seq"]
+    result = await service.wait_for_state_change("p", after=cursor,
+        return_when_idle=True, timeout_seconds=0)
+    assert result["timed_out"] and "reason" not in result
+
+
+@pytest.mark.asyncio
+async def test_director_commit_between_scan_and_disposition_replays_first(service, monkeypatch):
+    from core import state_changes
+    original = state_changes.wait_disposition
+    cursor = service.store.events("p")[-1]["seq"]
+    def racing_disposition(*args):
+        service.store.revise_node("p", "a", 1, "race", goal="New")
+        return original(*args)
+    monkeypatch.setattr(state_changes, "wait_disposition", racing_disposition)
+    result = await service.wait_for_state_change("p", after=cursor, return_when_idle=True)
+    assert result["events"][0]["event_type"] == "node_revised"

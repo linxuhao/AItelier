@@ -536,3 +536,55 @@ class TestTodayBlock:
         second = a.build_shared_preamble(ws, code_path=code,
                                          graph_name="dpe_default_v2")
         assert first == second
+
+
+class TestJsonGrantedToolCatalog:
+    """Run 35573f4f had game_assets in its claim, but the JSON prompt hid it."""
+
+    @pytest.fixture
+    def schemas(self):
+        import yaml
+        from skillflow.write_tools import generate_write_tool_schemas
+
+        schemas = {s["name"]: s for s in generate_write_tool_schemas("write", {})}
+        schemas["read"] = {
+            "name": "read",
+            "description": "Read the latest staged content.",
+            "parameters": {"path": {"type": "string", "required": True}},
+        }
+        schemas["search"] = {
+            "name": "search", "description": "Search the working tree.",
+            "parameters": {"pattern": {"type": "string", "required": True}},
+        }
+        media = Path(__file__).resolve().parents[2] / "aitelier/tools/gen_image_asset/tool.yaml"
+        schemas["gen_image_asset"] = yaml.safe_load(media.read_text())
+        return schemas
+
+    def test_json_shows_every_granted_tool_and_its_parameter_contract(self, tmp_path, schemas):
+        prompt = PromptAssembler().assemble("implement", tmp_path, tool_schemas=schemas)
+        catalog = prompt.split("[Granted Tools — JSON mode]", 1)[1].split(
+            "[Output Delivery", 1)[0]
+        for name, schema in schemas.items():
+            assert f"`{name}(" in catalog
+            assert json.dumps(schema.get("parameters", {}), ensure_ascii=False) in catalog
+        assert "gen_audio_asset" not in catalog
+        assert "Use ONLY the exact tool names listed above." not in prompt
+
+    def test_write_safety_still_lists_create_edit_and_required_replacement(self, tmp_path, schemas):
+        prompt = PromptAssembler().assemble("implement", tmp_path, tool_schemas=schemas)
+        assert "[Output Delivery — REQUIRED]" in prompt
+        assert "`create(file, content)`" in prompt
+        assert "`edit(file, old_str, new_str)`" in prompt
+        assert '"new_str": {"type": "string", "required": true' in prompt
+        assert "Pattern A" in prompt and "Pattern B" in prompt
+        assert "ALL required output files" in prompt
+        assert "`write(" not in prompt
+
+    def test_json_read_only_step_gets_its_granted_tools_without_delivery(self, tmp_path, schemas):
+        granted = {"read": schemas["read"], "search": schemas["search"]}
+        prompt = PromptAssembler().assemble("inspect", tmp_path, tool_schemas=granted)
+        assert "[Granted Tools — JSON mode]" in prompt
+        assert "`read(path)`" in prompt
+        assert "`search(pattern)`" in prompt
+        assert "gen_image_asset" not in prompt
+        assert "[Output Delivery" not in prompt

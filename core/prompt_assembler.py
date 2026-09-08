@@ -5,6 +5,7 @@
 #        目录树自动注入确保 Agent 知道确切的文件名，避免浪费工具轮次猜测。
 
 import datetime
+import json
 import logging
 import re
 from pathlib import Path
@@ -420,6 +421,26 @@ class PromptAssembler:
                     )
                 sections.append(delivery)
         else:
+            # JSON mode has no native tool-schema channel. Show the complete
+            # claim's catalog, not only file mutators: capability and read tools
+            # are callable too, and hiding them contradicts their briefings.
+            if tool_schemas:
+                tool_lines = []
+                for name, schema in sorted(tool_schemas.items()):
+                    params = schema.get("parameters", {})
+                    tool_lines.append(
+                        f"  - `{name}({', '.join(params)})` — "
+                        f"{schema.get('description', '')}\n"
+                        f"    Parameters: {json.dumps(params, ensure_ascii=False)}")
+                sections.append(
+                    "[Granted Tools — JSON mode]\n"
+                    "These are the tools granted to this step. Call only names "
+                    "in this catalog, using their parameter types and required "
+                    "fields. To call a tool, return a JSON object:\n"
+                    '{"thoughts": "...", "actions": [{"tool": "<tool_name>", '
+                    '"params": {}}]}\n'
+                    + "\n".join(tool_lines))
+
             # [Output Delivery — JSON mode]
             # This is the ORIGINAL delivery path; native mode (above) was added later.
             # Regression fix: after the stepflow migration (04d7074), JSON-mode prompts
@@ -466,7 +487,7 @@ class PromptAssembler:
                     '"files": {"<output_filename>": "<file content here>"}}\n\n'
                     "Available write tools (each writes a specific output file):\n"
                     f"{tool_list_block}\n\n"
-                    "Use ONLY the exact tool names listed above. "
+                    "For actions, use only names in the Granted Tools catalog. "
                     "Include ALL required parameters shown in the tool signatures. "
                     "Do NOT wrap the JSON in markdown code fences. "
                     "The step is complete only once you have written ALL required "

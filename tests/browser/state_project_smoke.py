@@ -297,6 +297,10 @@ def main():
                         assert conn.execute('SELECT COUNT(*) FROM state_attempts WHERE project_id=?',(pid,)).fetchone()[0]==0
                         assert conn.execute('SELECT COUNT(*) FROM state_acceptances WHERE project_id=?',(pid,)).fetchone()[0]==0
                     checks.append('actual prepared migration manifest: all 30 OPEN/held goals, growth domain, source references, desktop/mobile, zero attempts/acceptance')
+                from state_run_summary_checks import check_run_summary
+                summary_result=check_run_summary(page,service,sf,base,out,rid,external)
+                (out/'run-summary-result.json').write_text(json.dumps(summary_result,indent=2)+'\n')
+                checks.append('Actual linked run summary: six plain counters, exact running-only links, token/cache dedup, 390px and completed/failed removal')
                 assert not page_errors,page_errors
                 result={'result':'PASS','browser':browser.version,'checks':checks,'page_errors':page_errors,
                         'production_database_written':False,'prepared_manifest_used':bool(migration),'engine_runs':len(sf.list_runs()),'external_run_still_paused':sf.get_run(external)['status']=='paused',

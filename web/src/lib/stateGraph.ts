@@ -128,3 +128,14 @@ export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', 
 export function attemptLabel(attempt:StateAttempt):string {
   return attempt.execution_kind==='external' ? (attempt.harness??'External harness') : (attempt.workflow??'Workflow');
 }
+
+
+export interface ProjectRunSummary {
+  project_id:string; observed_at:string; runtime_unavailable:boolean; external_attempts_excluded:number;
+  counts:{total:number;running:number;finished:number;failed:number;other:number;unavailable:number};
+  running_runs:{run_id:string;workflow:string;node_keys:string[];current_node:string|null;started_at:string|null;status:'running'}[];
+  usage:{total_tokens:number|null;prompt_tokens:number|null;completion_tokens:number|null;
+    cache_hit_tokens:number|null;cache_miss_tokens:number|null;cache_hit_ratio:number|null;cache_covered_tokens:number;
+    usage_turns:number;token_reported_turns:number;cache_reported_turns:number;runs_with_token_usage:number;
+    runs_without_token_usage:number;usage_errors:number;partial:boolean};
+}

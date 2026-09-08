@@ -118,3 +118,12 @@ kind, harness/job identity, authenticated reporter, immutable observations and
 acceptance provenance. No missing-run error or synthetic workflow link is
 created. The global Runs page remains actual SkillFlow execution history;
 project Attempts is the cross-executor view. See [external harness integration](state-external-harness.md).
+
+
+## Related running runs
+
+The State graph tab now shows six plain counters (Total, Running, Finished,
+Failed, Tokens, Cache) and only the currently running associated runs as links.
+See [scope, token/cache accounting and refresh behavior](state-run-summary.md).
+Finished is a workflow outcome, never State verification. Full histories remain
+on their existing pages, not expanded into the graph summary.

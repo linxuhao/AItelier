@@ -40,6 +40,10 @@ class StateService:
             raise StateGraphError("source_project_id must name an existing AItelier source project")
         return self.store.create_project(project_id, title, source_project_id)
 
+    def project_run_summary(self, project_id):
+        from core.state_run_summary import project_run_summary
+        return project_run_summary(self, project_id)
+
     def node_context(self, project_id, node_key):
         node = self.store.get_node(project_id, node_key)
         receipts = {}

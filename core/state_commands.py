@@ -191,6 +191,7 @@ READ_REQUESTS = {
     "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange, "get_attempt": Attempt,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
+    "project_run_summary": Project,
     "project_attempts": ProjectAttempts, "references": References,
     "run_owners": RunOwner, "attempt_detail": Attempt,
 }
@@ -239,6 +240,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "record_evidence": service.record_evidence, "verify_node": service.verify_node,
         "import_tasks": service.import_tasks,
         "project_catalog": service.portfolio.projects, "project_overview": service.portfolio.overview,
+        "project_run_summary": service.project_run_summary,
         "project_attempts": service.portfolio.project_attempts, "references": service.portfolio.references,
         "run_owners": service.portfolio.run_owners, "attempt_detail": service.portfolio.attempt_detail,
         "bind_source": service.bind_source, "set_dispatch": service.portfolio.set_dispatch,

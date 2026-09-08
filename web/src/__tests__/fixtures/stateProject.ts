@@ -29,3 +29,12 @@ export function detail(key = 'growth.progress'): StateNodeDetail {
     dependency_receipts: Object.fromEntries(n.dependencies.map(d => [d, {goal: d, status: 'CANDIDATE', revision: 1, acceptance: null}])),
     attempts: key === 'growth.progress' ? [attempt()] : [], references: {references: [], next_after: null}};
 }
+
+
+export function runSummary() {
+  return {project_id:'game',observed_at:'2026-09-08T17:00:00Z',runtime_unavailable:false,external_attempts_excluded:0,
+    counts:{total:0,running:0,finished:0,failed:0,other:0,unavailable:0},running_runs:[],
+    usage:{total_tokens:0,prompt_tokens:0,completion_tokens:0,cache_hit_tokens:null,cache_miss_tokens:null,cache_hit_ratio:null,
+      cache_covered_tokens:0,usage_turns:0,token_reported_turns:0,cache_reported_turns:0,runs_with_token_usage:0,
+      runs_without_token_usage:0,usage_errors:0,partial:false}};
+}

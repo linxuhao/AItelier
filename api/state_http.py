@@ -72,6 +72,11 @@ def create_state_router(service_dependency, access_dependency):
         return _call(service, "project_overview", {"project_id": project_id})
 
 
+    @router.get("/projects/{project_id}/run-summary")
+    def run_summary(project_id: str, service=Depends(service_dependency)):
+        return _call(service, "project_run_summary", {"project_id": project_id})
+
+
     @router.get("/projects/{project_id}/nodes/{node_key}")
     def node(project_id: str, node_key: str, service=Depends(service_dependency)):
         return _call(service, "get_node", {"project_id": project_id, "node_key": node_key})

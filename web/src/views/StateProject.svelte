@@ -6,6 +6,7 @@
   import { attemptLabel, exactRunHref, type StateOverview, type StateAttempt } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateGraph from './StateGraph.svelte';
+  import StateRunSummary from './StateRunSummary.svelte';
   import StateNodePanel from './StateNodePanel.svelte';
   import StateAttemptEvidence from './StateAttemptEvidence.svelte';
   const { params, compact = false }: { params: { id: string; nodeKey?: string }; compact?:boolean } = $props();
@@ -102,6 +103,7 @@
       </nav>
       <p class="snapshot">{st('snapshot')}: {data.observed_at} · event {data.event_seq} {loading ? ' · ' + st('loading') : ''}</p>
       {#if tab === 'graph'}
+        <StateRunSummary projectId={params.id} refresh={detailRefresh}/>
         <div class="workspace"><StateGraph nodes={data.nodes} {selected} onselect={selectNode} />
           <StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} /></div>
       {:else if tab === 'runs'}

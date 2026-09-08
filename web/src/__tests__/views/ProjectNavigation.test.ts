@@ -3,7 +3,8 @@ import { render,cleanup,waitFor,fireEvent } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
 import { overview,detail } from '../fixtures/stateProject';
-const api=vi.hoisted(()=>({stateProjects:vi.fn(),stateOverview:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
+import { runSummary } from '../fixtures/stateProject';
+const api=vi.hoisted(()=>({stateProjects:vi.fn(),stateOverview:vi.fn(), stateRunSummary:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
   runHistory:vi.fn(),listPipelines:vi.fn(),pipelineGraph:vi.fn(),pipelineStateFile:vi.fn(),getTrace:vi.fn(),setUserLang:vi.fn(),
   listRepos:vi.fn(),listAllRuns:vi.fn(),createProject:vi.fn(),deleteProject:vi.fn()}));
 vi.mock('../../lib/api',()=>api);
@@ -22,6 +23,7 @@ beforeEach(()=>{
   authStore.set({canWrite:true,permissionResolved:true,email:'owner@local'});
   api.stateProjects.mockResolvedValue({projects:[row()],next_after:null});
   api.stateOverview.mockImplementation(async(id:string)=>({...overview(),project:{...overview().project,project_id:id,title:id==='game'?'武虾传奇':id}}));
+  api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));
   api.stateNode.mockImplementation(async(_p,k)=>detail(k));api.stateAttempts.mockResolvedValue({attempts:[],next_after:null});
   api.runHistory.mockResolvedValue({runs:[run()],total:1,next_offset:null});
   api.listPipelines.mockResolvedValue({pipelines:[{config_name:'gen_report',label:'Generated report',origin:'generated',step_count:1,state_files:[{name:'notes.md',size:20}]}]});

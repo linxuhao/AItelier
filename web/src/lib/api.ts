@@ -709,3 +709,8 @@ export function runHistory(options: {q?:string;status?:string;workflow?:string;s
   for(const [key,value] of Object.entries(options)) if(value!==undefined && value!=='')query.set(key,String(value));
   return _get('/api/run-history?'+query.toString());
 }
+
+
+export function stateRunSummary(projectId:string):Promise<import('./stateGraph').ProjectRunSummary> {
+  return _get(`/api/state/projects/${encodeURIComponent(projectId)}/run-summary`);
+}

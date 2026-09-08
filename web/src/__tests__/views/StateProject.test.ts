@@ -3,8 +3,9 @@ import { render, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
 import { overview, detail, attempt, goal } from '../fixtures/stateProject';
+import { runSummary } from '../fixtures/stateProject';
 
-const api = vi.hoisted(() => ({ stateOverview: vi.fn(), stateNode: vi.fn(), stateAttempts: vi.fn(),
+const api = vi.hoisted(() => ({ stateOverview: vi.fn(), stateRunSummary:vi.fn(), stateNode: vi.fn(), stateAttempts: vi.fn(),
   stateRefreshProject: vi.fn(), stateAttemptDetail: vi.fn(), stateProjects: vi.fn(), stateRunOwners: vi.fn(),
   getRunDetail: vi.fn(), pipelineGraph: vi.fn(), runWorkflowGraph: vi.fn(), getTrace: vi.fn(), setUserLang: vi.fn() }));
 vi.mock('../../lib/api', () => api);
@@ -20,6 +21,7 @@ beforeEach(() => {
   cleanup(); vi.resetAllMocks(); langStore.set('en');
   authStore.set({canWrite: true, permissionResolved: true, email: 'writer@local'});
   api.stateOverview.mockResolvedValue(overview());
+  api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));
   api.stateNode.mockImplementation(async (_p,key) => detail(key));
   api.stateAttempts.mockResolvedValue({attempts:[attempt()], next_after:null});
   api.stateAttemptDetail.mockResolvedValue({attempt: {...attempt(), context:{}}, evidence:[], receipts:[], evidence_truncated:false});

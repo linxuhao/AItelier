@@ -458,7 +458,8 @@ def test_scheduler_lifecycle_sync_projects_state_attempt(system, tmp_path, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completed", [False, True])
-async def test_director_wait_refreshes_stored_paused_before_disposition(system, tmp_path, completed):
+@pytest.mark.parametrize("nodes", [None, ["b"]])
+async def test_director_wait_refreshes_stored_paused_before_disposition(system, tmp_path, completed, nodes):
     from core.state_service import StateService
     from core.workspace_manager import WorkspaceManager
     store, attempts, sf = system
@@ -478,7 +479,7 @@ async def test_director_wait_refreshes_stored_paused_before_disposition(system, 
     assert attempts.get(a["attempt_id"])["status"] == "paused"
     service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {})
     result = await service.wait_for_state_change("game", after=cursor,
-        return_when_idle=True, timeout_seconds=.2)
+        return_when_idle=True, timeout_seconds=.2, node_keys=nodes)
     if completed:
         assert result["events"][-1]["payload"]["status"] == "candidate"
         assert not result["timed_out"]
@@ -486,3 +487,24 @@ async def test_director_wait_refreshes_stored_paused_before_disposition(system, 
         assert result["events"] == [] and result["timed_out"]
         assert attempts.get(a["attempt_id"])["status"] == "running"
     assert "reason" not in result
+
+
+@pytest.mark.asyncio
+async def test_director_recovery_failure_does_not_return_cached_paused(system, tmp_path, monkeypatch):
+    from core.state_service import StateService
+    from core.workspace_manager import WorkspaceManager
+    store, attempts, sf = system
+    a = reserve(system)
+    rid = launch(system, a)
+    sf.pause_run(rid)
+    attempts.reconcile(a["attempt_id"], sf)
+    cursor = store.events("game")[-1]["seq"]
+    def unavailable(_rid):
+        raise OSError("first observation failure")
+    monkeypatch.setattr(sf, "get_run", unavailable)
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {})
+    result = await service.wait_for_state_change("game", after=cursor,
+        return_when_idle=True, timeout_seconds=2, node_keys=["b"])
+    assert result == {"events": [], "next_after": cursor, "timed_out": False,
+                      "reason": "observation_unavailable"}
+    assert attempts.get(a["attempt_id"])["status"] == "paused"

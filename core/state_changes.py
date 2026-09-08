@@ -99,17 +99,27 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 node_keys, attempt_ids, actionable_only, limit)
             if events:
                 return {"events": events, "next_after": cursor, "timed_out": False}
+            recovery_ok = True
             if timeout_seconds > 0 and (service.sf is not None or service.runtime_factory is not None):
                 # One bounded page per observation cycle; rotated to prevent
                 # starvation. No executor is composed for State-only deployments.
                 remaining = deadline - loop.time()
                 if remaining > 0:
                     try:
-                        recovery_after = await asyncio.wait_for(asyncio.to_thread(
+                        recovery_after, recovery_ok = await asyncio.wait_for(asyncio.to_thread(
                             recover_page, service, project_id, recovery_after, node_keys, attempt_ids),
                             timeout=remaining)
                     except asyncio.TimeoutError:
                         return {"events": [], "next_after": cursor, "timed_out": True}
+            if args.return_when_idle and not recovery_ok:
+                # Recovery failures cannot authorize a decision from cached state.
+                # Preserve actionable events committed by other rows in the page.
+                events, cursor = await asyncio.to_thread(scan, service.store, project_id, cursor,
+                    node_keys, attempt_ids, actionable_only, limit)
+                if events:
+                    return {"events": events, "next_after": cursor, "timed_out": False}
+                return {"events": [], "next_after": cursor, "timed_out": False,
+                        "reason": "observation_unavailable"}
             # Recovery may have committed an actionable event; read it before sleeping.
             if signal.is_set():
                 continue
@@ -201,7 +211,7 @@ def recover_page(service, project_id, after, node_keys, attempt_ids):
     identity = str(service.db.db_path)
     with _lock:
         if identity in _recovering:
-            return after
+            return after, False
         _recovering.add(identity)
     try:
         return _recover_page(service, project_id, after, node_keys, attempt_ids)
@@ -216,16 +226,24 @@ def _recover_page(service, project_id, after, node_keys, attempt_ids):
         clauses = ["project_id=?", "seq>?", "run_id IS NOT NULL", "execution_kind='skillflow'",
                    "(status IN ('running','paused','unknown') OR (status='candidate' AND artifact_ref IS NULL))"]
         args = [project_id, after]
-        for column, values in (("node_key", node_keys), ("attempt_id", attempt_ids)):
-            if values is not None:
-                clauses.append(column + " IN (" + ",".join("?" for _ in values) + ")")
-                args.extend(values)
+        if node_keys is not None:
+            marks = ",".join("?" for _ in node_keys)
+            clauses.append("node_key IN (WITH RECURSIVE relevant(k) AS ("
+                "SELECT node_key FROM state_nodes WHERE project_id=? AND node_key IN (" + marks + ") "
+                "UNION SELECT d.dependency_key FROM state_dependencies d JOIN relevant r ON d.node_key=r.k "
+                "WHERE d.project_id=?) SELECT k FROM relevant)")
+            args.extend([project_id, *node_keys, project_id])
+        if attempt_ids is not None:
+            clauses.append("attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")")
+            args.extend(attempt_ids)
         rows = conn.execute("SELECT seq,attempt_id FROM state_attempts WHERE " +
                             " AND ".join(clauses) + " ORDER BY seq LIMIT 10", args).fetchall()
+    recovered = True
     for row in rows:
         try:
             service.reconcile_attempt(row["attempt_id"])
         except Exception:
             import logging
             logging.getLogger(__name__).exception("State wait recovery failed for %s", row["attempt_id"])
-    return rows[-1]["seq"] if len(rows) == 10 else 0
+            recovered = False
+    return (rows[-1]["seq"] if len(rows) == 10 else 0), recovered

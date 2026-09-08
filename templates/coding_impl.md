@@ -26,6 +26,19 @@ You have **no** whole-file `write`. Change existing files with **surgical
   of the file is preserved verbatim. Multiple changes → call `edit` repeatedly.
 - Why: rewriting a whole file silently drops any region you didn't reproduce.
 
+Edits write to this step's **staging**, not directly to the repository. Use the
+same repo-relative `file` throughout; do not prepend `implement/` or `.tmp/`
+from a tool's output path. Default `read(path=...)` sees your latest staged
+content and reports its `source`; explicitly reading `source="repo"` reads the
+repository baseline instead. A second edit must match the text left by the
+first edit. If a match fails, read only the affected region before retrying.
+
+Always supply both `old_str` and `new_str`. Use an explicit `new_str=""` only
+when you intend to delete the matched text; omitting it is invalid. A successful
+edit means the staged content changed, not that a Git commit or test passed.
+Do not apply or commit staged files manually: this workflow's configured
+promotion and `repo_apply` handle delivery after `finish_step`.
+
 All write paths are relative to the repo root. When every file is written,
 call `finish_step`. The test suite runs automatically after you finish — write
 code that will pass it.

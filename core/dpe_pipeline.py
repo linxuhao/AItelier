@@ -1679,6 +1679,7 @@ class PipelineEngine:
 
             tool_results = []
             written_files = []
+            pending_write_failure = ""
             effects: list[str] = []   # non-file output: see _effect_name
 
             # C2: Re-inject previously passed files so agent only fixes failing ones
@@ -1751,7 +1752,10 @@ class PipelineEngine:
                         "Do NOT add any text before or after the JSON."
                     )
                     self._emit("parse_error", {"error": feedback, "preview": "JSON Parse Error"})
-                    break
+                    # A break here falls through to successful delivery of any
+                    # earlier media output, silently dropping this malformed turn.
+                    raise MaxRetriesExceeded(
+                        f"Task {task_id} Step {step_id}: {feedback}")
 
                 if isinstance(payload, list):
                     payload = {"thoughts": "", "actions": payload}
@@ -1845,6 +1849,7 @@ class PipelineEngine:
                                               "preview": f"Executed {len(tool_calls)} tool call(s)"})
 
                 if write_calls:
+                    landed_this_turn = 0
                     for action in write_calls:
                         result = self._exec_tool(action)
                         if "error" in result:
@@ -1853,6 +1858,7 @@ class PipelineEngine:
                         written_file = self._written_name(result)
                         if written_file:
                             written_files.append(written_file)
+                            landed_this_turn += 1
 
                     # Only stop when a write actually LANDED. `break` used to fire
                     # unconditionally, so a turn whose every write errored ended the
@@ -1863,17 +1869,29 @@ class PipelineEngine:
                     # though this step's staging was empty). The agent was never
                     # given the turn in which it could have switched to `edit`; the
                     # step reported writing nothing and failed validation.
-                    if not written_files:
+                    if not landed_this_turn:
                         self._feedback_exploratory = False
                         feedback = ("Every write in your last response failed:\n"
                                     + "\n".join(tool_results[-len(write_calls):]))
+                        pending_write_failure = feedback
                         self._emit("write_failed", {
                             "error": feedback,
                             "preview": f"All {len(write_calls)} write(s) failed"})
                         tool_turn += 1
                         continue
+                    pending_write_failure = ""
                     self._emit("files_written", {"files": written_files,
                                                  "preview": f"Written {len(written_files)} file(s)"})
+                    break
+
+                finishing = any(a.get("tool") in ("finish_step", "end_step")
+                                for a in _control_calls)
+                if finishing and pending_write_failure:
+                    raise MaxRetriesExceeded(
+                        f"Task {task_id} Step {step_id}: {pending_write_failure}")
+                if finishing and written_files:
+                    # Explicit completion after a media tool need not perform a
+                    # redundant create/edit merely to exit the JSON turn loop.
                     break
 
                 # No write calls and no tool calls — agent signals no-op
@@ -1902,6 +1920,11 @@ class PipelineEngine:
                 self._emit("exploration", {"turn": tool_turn + 1, "preview": f"Exploration turn {tool_turn + 1}, continuing..."})
             else:
                 self._emit("tool_turns_exceeded", {"max_turns": max_turns, "preview": "Max tool turns exceeded"})
+                if pending_write_failure:
+                    # Do not restart the attempt and replay earlier media calls
+                    # when the remaining delivery writes never succeeded.
+                    raise MaxRetriesExceeded(
+                        f"Task {task_id} Step {step_id}: {pending_write_failure}")
                 if not written_files and not effects:
                     self._emit("no_files_written", {"max_turns": max_turns})
                     raise MaxRetriesExceeded(

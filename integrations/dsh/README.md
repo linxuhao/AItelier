@@ -40,12 +40,33 @@ That one command installs the package **and** appends it to the profile's `dsh.p
 
 ```sh
 AITELIER_MCP_URL=http://127.0.0.1:4444/mcp   # the default; set it only to override
-AITELIER_ADMIN_TOKEN=…                       # only needed for the write tools
+AITELIER_ADMIN_TOKEN=…                       # required for writes and private State reads
 ```
 
-Reads work with no credentials. Writes need the token — see [Authorization](#authorization).
+Ordinary workflow reads work with no credentials. Writes and private State reads need the token — see [Authorization](#authorization).
 
 Verify the install by asking the agent to call `mcp__aitelier__list_pipelines`; it should come back with the registered pipelines.
+
+## Persistent project State DAG
+
+For project goals and acceptance, first call `state_graph_help` and read its
+`driver_guide` field. It is the tool-only fallback for the MCP prompt
+`state_graph_driver` and resource `aitelier://state/driver-guide`; use the live
+schemas instead of assuming this client bundles the latest server contract.
+If State tools are absent, report the backend capability gap; ordinary pipeline
+operations can still be used where appropriate.
+
+Use one persistent State project per product. Register workflow or external
+attempts before dispatch, retain exact IDs and frozen context, and wait with
+`state_graph_read(action="wait_for_state_change", arguments=...)`. Persist
+`next_after` with its filter scope. Timeout does not stop a worker; completion
+produces a candidate, not acceptance. Record actual evidence for each criterion
+before explicit verification. Checkpoint decisions follow existing authorization.
+
+Keep a compact private director notebook for decisions, unresolved questions,
+worker/worktree ownership and cursor handoff. Reference State IDs; do not copy
+its status tables or event history. No notebook API is assumed. On resume, read
+current State before acting; notes cannot grant permission or certify results.
 
 ## The surface
 
@@ -144,7 +165,7 @@ An approval carries **no** feedback channel: AItelier refuses `decision: "approv
 
 ## Authorization
 
-Reads are open. Writes require `AITELIER_ADMIN_TOKEN`, checked per tool by AItelier itself.
+Ordinary workflow reads are open. Writes and private State reads require authorization, checked per tool by AItelier itself. This client sends `AITELIER_ADMIN_TOKEN` for direct, off-tunnel connections.
 
 The reason it is per tool rather than per path: MCP posts every call, read or write, to the same URL, so AItelier's normal method-based write gate cannot tell them apart. Exempting the path would have left `edit_pipeline` unauthenticated. See `api/mcp_router.py`.
 

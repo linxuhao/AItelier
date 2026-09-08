@@ -1,9 +1,30 @@
 ---
 name: aitelier-pipelines
-description: Use when building, test-driving or repairing an AItelier pipeline through the mcp__aitelier__* tools, OR when those tools are expected but absent — covers the generate → drive → observe → fix loop, what the structural gates do and do not prove, the failure shapes that only a real run exposes, and why a missing toolset cannot be diagnosed from the inside
+description: Use when driving AItelier State DAG goals and evidence, building, test-driving or repairing an AItelier pipeline through the mcp__aitelier__* tools, OR when those tools are expected but absent — covers the generate → drive → observe → fix loop, what the structural gates do and do not prove, the failure shapes that only a real run exposes, and why a missing toolset cannot be diagnosed from the inside
 ---
 
 # Driving an AItelier pipeline
+
+## Persistent project State DAG
+
+For project goals and acceptance, first call `state_graph_help` and read its
+`driver_guide` field. It is the tool-only fallback for the MCP prompt
+`state_graph_driver` and resource `aitelier://state/driver-guide`; use the live
+schemas instead of assuming this client bundles the latest server contract.
+If State tools are absent, report the backend capability gap; ordinary pipeline
+operations can still be used where appropriate.
+
+Use one persistent State project per product. Register workflow or external
+attempts before dispatch, retain exact IDs and frozen context, and wait with
+`state_graph_read(action="wait_for_state_change", arguments=...)`. Persist
+`next_after` with its filter scope. Timeout does not stop a worker; completion
+produces a candidate, not acceptance. Record actual evidence for each criterion
+before explicit verification. Checkpoint decisions follow existing authorization.
+
+Keep a compact private director notebook for decisions, unresolved questions,
+worker/worktree ownership and cursor handoff. Reference State IDs; do not copy
+its status tables or event history. No notebook API is assumed. On resume, read
+current State before acting; notes cannot grant permission or certify results.
 
 ## No `mcp__aitelier__*` tools? Start here.
 
@@ -36,7 +57,7 @@ Then check, in order:
 
 Writes (`generate_pipeline`, `edit_*`, `run_pipeline`) additionally need
 `AITELIER_ADMIN_TOKEN`; without it they answer `denied: …` rather than
-disappearing. Reads need nothing.
+disappearing. Ordinary workflow reads are open; private State reads also require authorization.
 
 
 AItelier turns a description into a runnable SkillFlow graph: steps, agent roles,

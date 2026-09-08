@@ -12,8 +12,8 @@
 #                    use the service name `http://aitelier:4444/mcp` when dsh
 #                    itself is a container on the same docker network — an
 #                    unreachable URL does NOT fail loudly, see below.
-# AITELIER_ADMIN_TOKEN  authorizes the WRITE tools (edit_*, import, run). Reads
-#                    need nothing. Honored only off-tunnel, which both a loopback
+# AITELIER_ADMIN_TOKEN  authorizes writes and private State reads. Ordinary
+#                    workflow reads are open. Honored only off-tunnel, which both a loopback
 #                    and a direct container-network connection are. Leave it unset
 #                    for a read-only installation — the write tools then answer
 #                    `denied: …` instead of failing obscurely.

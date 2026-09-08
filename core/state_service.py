@@ -24,6 +24,8 @@ class StateService:
         self.attach_driver = attach_driver
         self.actor = actor
         self.runtime_factory = runtime_factory
+        from core.state_portfolio import StatePortfolio
+        self.portfolio = StatePortfolio(self.store, actor)
 
     def create_project(self, project_id, title, source_project_id=None):
         if source_project_id and not self.db.get_project(source_project_id):
@@ -40,7 +42,8 @@ class StateService:
                 receipts[dep] = {"goal": d["goal"], "revision": d["revision"], "status": d["status"],
                                  "acceptance": dict(r) if r else None}
         return {"node": node, "dependency_receipts": receipts,
-                "attempts": self.attempts.list(project_id, node_key, limit=10)}
+                "attempts": self.attempts.list(project_id, node_key, limit=10),
+                "references": self.portfolio.references(project_id, node_key, limit=100)}
 
     def _components(self):
         # Goal inspection/planning must survive an unavailable executor. Only
@@ -54,6 +57,16 @@ class StateService:
             raise StateGraphError("workflow composition is unavailable")
 
     def _source(self, project_id):
+        binding = self.portfolio.source_binding(project_id)
+        if binding:
+            path = Path(binding["repo_path"])
+            if not path.is_dir():
+                raise StateConflict("bound source repository is missing")
+            top = self._git(path, "rev-parse", "--show-toplevel")
+            common = self._git(path, "rev-parse", "--git-common-dir")
+            if str(Path(top).resolve()) != binding["repo_path"] or str((path / common).resolve()) != binding["common_dir"]:
+                raise StateConflict("bound source identity changed; do not substitute another repository")
+            return binding["repo_path"]
         project = self.store.get_project(project_id)
         source_id = project["source_project_id"]
         if not source_id:
@@ -96,6 +109,10 @@ class StateService:
         return out
 
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction=""):
+        from core.state_metadata import require_dispatch
+        with self.store.transaction() as conn:
+            self.store._node(conn, project_id, node_key)
+            require_dispatch(conn, project_id, node_key)
         self._components()
         manifest = self.registry.get(key(workflow, "workflow"))
         if manifest is None:
@@ -288,3 +305,68 @@ class StateService:
                 self.store._event(conn, project_id, nk, "legacy_task_imported", {"source_project_id": source_project_id,
                                   "legacy_status": status, "requires_new_contract_and_validation": True})
             return {"created": created, "verified": 0, "note": "Legacy completion is historical, not acceptance."}
+
+
+    def bind_source(self, project_id, repo_path, expected_revision=0):
+        path = Path(text(repo_path, "repo_path", 4000)).expanduser().resolve()
+        if not path.is_dir():
+            raise StateGraphError("source repository must already exist")
+        top = Path(self._git(path, "rev-parse", "--show-toplevel")).resolve()
+        if top != path:
+            raise StateGraphError("bind the repository root, not a subdirectory")
+        common = str((path / self._git(path, "rev-parse", "--git-common-dir")).resolve())
+        return self.portfolio.bind_source(project_id, str(path), common, expected_revision)
+
+    def set_node_hold(self, project_id, node_key, held, expected_revision, reason):
+        if held is False:
+            # Protected references may be legacy runs, never reparented attempts.
+            with self.store.transaction() as conn:
+                refs = [r[0] for r in conn.execute("SELECT ref FROM state_history_links WHERE project_id=? "
+                        "AND node_key=? AND kind='run' AND protection=1", (project_id, node_key))]
+            if refs:
+                self._components()
+                for rid in refs:
+                    row = self.sf.get_run(rid)
+                    if not row or row.get("id") != rid or row.get("status") not in {"completed", "failed"}:
+                        raise StateConflict("protected external run is active or unknown; retain its hold")
+                    audit = self.sf.audit_operation_owners(rid)
+                    if (not isinstance(audit, dict) or audit.get("lost") != [] or audit.get("unknown") != []
+                            or type(audit.get("alive")) is not int or audit["alive"] != 0):
+                        raise StateConflict("protected external run has unretired/unknown operations")
+        return self.portfolio.set_hold(project_id, node_key, held, expected_revision, reason)
+
+    def add_reference(self, project_id, node_key, reference_id, kind, ref, label, provenance_actor,
+                      artifact_ref=None, report_sha256=None, protect=False):
+        status = "historical"
+        if kind == "run":
+            key(ref, "run id")
+            self._components()
+            row = self.sf.get_run(ref)
+            if not row or row.get("id") != ref:
+                raise StateConflict("historical run identity is unknown")
+            status = row["status"]
+            protect = protect or status not in {"completed", "failed"}
+        return self.portfolio.add_reference(project_id, node_key, reference_id, kind, ref, label,
+                    provenance_actor, status, artifact_ref, report_sha256, protect)
+
+    def refresh_project(self, project_id, after=0, limit=20):
+        from core.state_graph import integer
+        integer(after, "after", 0, 2**63-1)
+        integer(limit, "limit", 1, 50)
+        self._components()
+        with self.store.transaction() as conn:
+            self.store._project(conn, project_id)
+            rows = [dict(r) for r in conn.execute("SELECT seq,attempt_id,run_id FROM state_attempts "
+                    "WHERE project_id=? AND seq>? AND run_id IS NOT NULL ORDER BY seq LIMIT ?", (project_id, after, limit + 1))]
+        results = []
+        for row in rows[:limit]:
+            try:
+                updated = self.reconcile_attempt(row["attempt_id"])
+                results.append({"attempt_id": row["attempt_id"], "status": updated["status"],
+                                "artifact_pending": updated.get("artifact_pending", False)})
+            except Exception as exc:
+                # Observation failure retains state; one broken run must not hide
+                # all others. No attempt is launched, stopped, or approved here.
+                results.append({"attempt_id": row["attempt_id"], "error": type(exc).__name__})
+        return {"results": results, "next_after": rows[limit-1]["seq"] if len(rows)>limit else None,
+                "effects": "observations only; no launch, approval or acceptance"}

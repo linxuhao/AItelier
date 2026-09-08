@@ -101,16 +101,75 @@ class ImportTasks(Project):
     source_project_id: str
 
 
+class ProjectCatalog(Request):
+    repo_path: str | None = None
+    after: str = ""
+    limit: int = 100
+
+
+class ProjectAttempts(Project):
+    after: int = 0
+    limit: int = 30
+
+
+class References(Project):
+    node_key: str | None = None
+    after: str = ""
+    limit: int = 100
+
+
+class RunOwner(Request):
+    run_id: str
+
+
+class BindSource(Project):
+    repo_path: str
+    expected_revision: int = 0
+
+
+class DispatchPolicy(Project):
+    dispatch: str
+    expected_revision: int
+    reason: str
+
+
+class NodeHold(Node):
+    held: bool
+    expected_revision: int
+    reason: str
+
+
+class HistoricalReference(Node):
+    reference_id: str
+    kind: str
+    ref: str
+    label: str
+    provenance_actor: str
+    artifact_ref: str | None = None
+    report_sha256: str | None = None
+    protect: bool = False
+
+
+class RefreshProject(Project):
+    after: int = 0
+    limit: int = 20
+
+
 READ_REQUESTS = {
     "list_projects": Empty, "get_graph": Project, "get_node": Node,
     "frontier": Frontier, "events": Events, "get_attempt": Attempt,
     "list_attempts": ListAttempts, "evidence": Attempt,
+    "project_catalog": ProjectCatalog, "project_overview": Project,
+    "project_attempts": ProjectAttempts, "references": References,
+    "run_owners": RunOwner, "attempt_detail": Attempt,
 }
 WRITE_REQUESTS = {
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
     "split_node": SplitNode, "supersede_node": SupersedeNode, "start_attempt": StartAttempt,
     "recover_attempt": Attempt, "reconcile_attempt": Attempt, "retire_reservation": RetireReservation, "record_evidence": Evidence,
     "verify_node": Verify, "import_tasks": ImportTasks,
+    "bind_source": BindSource, "set_dispatch": DispatchPolicy, "set_node_hold": NodeHold,
+    "add_reference": HistoricalReference, "refresh_project": RefreshProject,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 
@@ -147,6 +206,12 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "retire_reservation": service.attempts.retire_reservation,
         "record_evidence": service.record_evidence, "verify_node": service.verify_node,
         "import_tasks": service.import_tasks,
+        "project_catalog": service.portfolio.projects, "project_overview": service.portfolio.overview,
+        "project_attempts": service.portfolio.project_attempts, "references": service.portfolio.references,
+        "run_owners": service.portfolio.run_owners, "attempt_detail": service.portfolio.attempt_detail,
+        "bind_source": service.bind_source, "set_dispatch": service.portfolio.set_dispatch,
+        "set_node_hold": service.set_node_hold, "add_reference": service.add_reference,
+        "refresh_project": service.refresh_project,
     }
     return handlers[action](**args)
 

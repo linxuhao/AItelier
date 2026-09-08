@@ -167,7 +167,8 @@ class StateGraphStore:
         """Use an explicitly supplied DBManager; never resolve a production path."""
         self.db = db
         with db.get_connection() as conn:
-            conn.executescript(SCHEMA)
+            from core.state_metadata import SCHEMA as METADATA_SCHEMA
+            conn.executescript(SCHEMA + METADATA_SCHEMA)
             conn.commit()
 
     @contextmanager
@@ -359,25 +360,37 @@ class StateGraphStore:
                             (project_id, node_key)).fetchall()
         return {r["node_key"]: dict(r) for r in rows}
 
+    def _graph_view(self, conn, project_id):
+        from core.state_metadata import project_policy
+        project = self._project(conn, project_id)
+        nodes, graph = self._graph(conn, project_id)
+        policy = project_policy(conn, project_id)
+        holds = {r["node_key"]: dict(r) for r in conn.execute(
+            "SELECT * FROM state_node_holds WHERE project_id=?", (project_id,))}
+        active = set()
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_attempts'").fetchone():
+            active = {r[0] for r in conn.execute("SELECT node_key FROM state_attempts WHERE project_id=? "
+                      "AND status IN ('reserved','launching','running','paused','unknown')", (project_id,))}
+        result = []
+        for nk, node in nodes.items():
+            blocked_by = [d for d in graph[nk] if nodes[d]["status"] != "VERIFIED" or not nodes[d]["verified_receipt"]]
+            own_hold = holds.get(nk, {"revision": 0, "held": 0, "reason": ""})
+            hold = ({"scope": "project", **policy} if policy["dispatch"] != "active" else
+                    {"scope": "node", **own_hold} if own_hold["held"] else None)
+            item = dict(node)
+            item["acceptance"] = json.loads(item.pop("contract_json"))
+            item["dependencies"] = graph[nk]
+            item["blocked_by"] = blocked_by
+            item["hold"], item["node_hold"] = hold, own_hold
+            item["readiness"] = ("closed" if node["status"] in {"VERIFIED", "SUPERSEDED"}
+                                 else "in_progress" if nk in active else "held" if hold
+                                 else "blocked" if blocked_by else "ready")
+            result.append(item)
+        return {"project": project, "nodes": sorted(result, key=lambda n: (-n["priority"], n["node_key"]))}
+
     def get_graph(self, project_id: str) -> dict:
         with self.transaction() as conn:
-            project = self._project(conn, project_id)
-            nodes, graph = self._graph(conn, project_id)
-            active = set()
-            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_attempts'").fetchone():
-                active = {r[0] for r in conn.execute("SELECT node_key FROM state_attempts WHERE project_id=? "
-                          "AND status IN ('reserved','launching','running','paused','unknown')", (project_id,))}
-            result = []
-            for nk, node in nodes.items():
-                blocked_by = [d for d in graph[nk] if nodes[d]["status"] != "VERIFIED" or not nodes[d]["verified_receipt"]]
-                item = dict(node)
-                item["acceptance"] = json.loads(item.pop("contract_json"))
-                item["dependencies"] = graph[nk]
-                item["blocked_by"] = blocked_by
-                item["readiness"] = ("closed" if node["status"] in {"VERIFIED", "SUPERSEDED"}
-                                     else "in_progress" if nk in active else "blocked" if blocked_by else "ready")
-                result.append(item)
-            return {"project": project, "nodes": sorted(result, key=lambda n: (-n["priority"], n["node_key"]))}
+            return self._graph_view(conn, project_id)
 
     def get_node(self, project_id: str, node_key: str) -> dict:
         key(node_key)

@@ -124,6 +124,8 @@ class StateAttempts:
                 if old["request_hash"] != request_hash:
                     raise StateConflict("request key already used with a different launch request")
                 return _public(dict(old))
+            from core.state_metadata import require_dispatch
+            require_dispatch(conn, project_id, node_key)
             if node["revision"] != expected_revision or node["status"] in {"VERIFIED", "SUPERSEDED"}:
                 raise StateConflict("node is closed or revision changed; revise/reload before attempting it")
             deps = self.store.dependency_snapshot(conn, project_id, node_key)
@@ -161,6 +163,10 @@ class StateAttempts:
                 text(value, field, 4000)
         with self.store.transaction(write=True) as conn:
             attempt = self._attempt(conn, attempt_id)
+            binding = conn.execute("SELECT repo_path FROM state_source_bindings WHERE project_id=?",
+                                   (attempt["project_id"],)).fetchone()
+            if binding and binding["repo_path"] != descriptor["source_repo"]:
+                raise StateConflict("source binding changed between planning and reservation")
             context = json.loads(attempt["context_json"])
             old = context.get("host_contract")
             if old is not None:
@@ -182,6 +188,8 @@ class StateAttempts:
             attempt = self._attempt(conn, attempt_id)
             if attempt["status"] != "reserved":
                 return False
+            from core.state_metadata import require_dispatch
+            require_dispatch(conn, attempt["project_id"], attempt["node_key"])
             if not self._pins_current(conn, attempt):
                 # No dispatch occurred: retiring this intent cannot abandon a
                 # running worker. Otherwise a spec edit strands a node forever.

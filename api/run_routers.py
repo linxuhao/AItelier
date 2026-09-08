@@ -424,3 +424,15 @@ def reject_run_checkpoint(
     """Reject a run's checkpoint (delegates to the project-keyed handler)."""
     from api.meta_routers import reject_checkpoint
     return reject_checkpoint(_run_to_project_id(run_id), body, user, db)
+
+
+@router.get("/runs/{run_id}/graph")
+def exact_run_graph(run_id: str, user: CurrentUser | None = Depends(get_optional_user)):
+    """Safe structural projection of this exact run, not its latest config."""
+    from core.run_graph_view import RunGraphUnavailable, pinned_run_graph
+    try:
+        return pinned_run_graph(get_skillflow(), run_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Exact run not found") from exc
+    except RunGraphUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc

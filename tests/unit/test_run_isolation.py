@@ -5,9 +5,10 @@ the answer is here: the record that says what was decided for a run, the git
 worktree that decision created, the lease that makes direct mode exclusive, and
 the refusal that happens when any of it cannot be honoured.
 
-Nothing in this file deletes a worktree, because nothing in the implementation
-does. Retention is unconditional in this delivery; `is_disposable` exists to say
-whether a disposal WOULD be safe, and is exercised for its refusals.
+Automatic reaping is deliberately conservative: released run-owned worktrees are
+removed only when terminal + quiet + clean and locally proven merged into the
+source checkout's current branch, or after an explicit discard disposition. A
+push or open PR alone never qualifies.
 """
 
 import subprocess
@@ -313,12 +314,12 @@ def test_host_repo_mutations_refuse_while_another_run_holds_the_lease(
         "the refusal must not have committed anything"
 
 
-# ── retention: nothing is deleted, and disposal is only ever advisory ─
+# ── retention: deletion exists only behind the conservative reaper ─────
 
-def test_nothing_in_the_module_deletes_a_worktree(db, home):
-    for name in ("delete", "reap", "prune", "cleanup", "remove_worktree"):
-        assert not hasattr(ri, name), (
-            f"run_isolation.{name} exists — this delivery retains everything")
+def test_no_broad_or_unguarded_cleanup_api_exists(db, home):
+    for name in ("delete", "prune", "cleanup", "remove_worktree"):
+        assert not hasattr(ri, name), f"unguarded cleanup API appeared: {name}"
+    assert hasattr(ri, "reap_released_worktrees")
 
 
 def test_disposal_is_refused_while_the_run_is_not_terminal(db, home, tmp_path):
@@ -392,3 +393,115 @@ def test_retained_reports_every_worktree_it_made(db, home, tmp_path):
     rows = ri.retained(db)
     assert {r["run_id"] for r in rows} == {"run-y1", "run-y2"}
     assert all(r["worktree_path"] and r["base_sha"] for r in rows)
+
+# ── conservative automatic reaping ───────────────────────────────────
+
+class _ReapSF:
+    def __init__(self, rows, audits=None):
+        self.rows = rows
+        self.audits = audits or {}
+
+    def get_run(self, run_id):
+        return self.rows.get(run_id)
+
+    def audit_operation_owners(self, run_id):
+        return self.audits.get(run_id, {"lost": [], "unknown": [], "alive": 0})
+
+
+def _release_for_reap(db, run_id, disposition="auto_released_terminal_quiet"):
+    ri.release(db, run_id, disposition=disposition)
+    rec = ri.record(db, run_id)
+    assert rec["released_at"]
+    return rec
+
+
+def test_reaper_keeps_a_clean_pushed_but_unmerged_run(db, home, tmp_path):
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "reap-push", src)
+    rec = ri.ensure_for_run(db, run_id="run-reap-push", project_id="reap-push",
+                            config_name="coding_impl", repo_mode="code")
+    wt = Path(rec["worktree_path"])
+    (wt / "delivered.txt").write_text("work\n")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "delivered"], cwd=wt, check=True)
+    _release_for_reap(db, "run-reap-push")
+
+    report = ri.reap_released_worktrees(
+        db, _ReapSF({"run-reap-push": {"status": "completed"}}))
+
+    assert wt.exists(), "an unmerged/open-PR-shaped delivery was reaped"
+    assert report["removed"] == []
+    assert "unmerged" in report["retained"][0]["reason"]
+
+
+def test_reaper_removes_after_local_main_contains_the_run_branch(db, home, tmp_path):
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "reap-merged", src)
+    rec = ri.ensure_for_run(db, run_id="run-reap-merged", project_id="reap-merged",
+                            config_name="coding_impl", repo_mode="code")
+    wt = Path(rec["worktree_path"])
+    (wt / "delivered.txt").write_text("work\n")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "delivered"], cwd=wt, check=True)
+    branch = rec["branch"]
+    _release_for_reap(db, "run-reap-merged")
+
+    # Simulate an accepted PR/integration becoming visible in the local source.
+    subprocess.run(["git", "merge", "--ff-only", branch], cwd=src, check=True,
+                   capture_output=True, text=True)
+    report = ri.reap_released_worktrees(
+        db, _ReapSF({"run-reap-merged": {"status": "completed"}}))
+
+    assert not wt.exists()
+    assert [x["run_id"] for x in report["removed"]] == ["run-reap-merged"]
+    final = ri.record(db, "run-reap-merged")
+    assert final["disposition"] == "reaped_merged_into:main"
+    assert _git(src, "show-ref", "--verify", f"refs/heads/{branch}"), \
+        "reaping a checkout must preserve its branch/commit"
+
+
+def test_reaper_keeps_paused_and_dirty_work(db, home, tmp_path):
+    src = tmp_path / "src"
+    _init_repo(src)
+    for rid, pid in (("run-paused", "paused"), ("run-dirty", "dirty")):
+        _project(db, pid, src)
+        rec = ri.ensure_for_run(db, run_id=rid, project_id=pid,
+                                config_name="coding_impl", repo_mode="code")
+        _release_for_reap(db, rid)
+        if rid == "run-dirty":
+            (Path(rec["worktree_path"]) / "unsaved.txt").write_text("do not lose\n")
+
+    sf = _ReapSF({"run-paused": {"status": "paused"},
+                  "run-dirty": {"status": "completed"}})
+    report = ri.reap_released_worktrees(db, sf)
+
+    assert Path(ri.record(db, "run-paused")["worktree_path"]).exists()
+    assert Path(ri.record(db, "run-dirty")["worktree_path"]).exists()
+    reasons = {x["run_id"]: x["reason"] for x in report["retained"]}
+    assert "not terminal" in reasons["run-paused"]
+    assert "uncommitted" in reasons["run-dirty"]
+
+
+def test_reaper_allows_explicit_discard_only_after_terminal_quiet_clean(db, home, tmp_path):
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "discard", src)
+    rec = ri.ensure_for_run(db, run_id="run-discard", project_id="discard",
+                            config_name="coding_impl", repo_mode="code")
+    wt = Path(rec["worktree_path"])
+    (wt / "committed-but-unwanted.txt").write_text("throw away\n")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "unwanted"], cwd=wt, check=True)
+    _release_for_reap(db, "run-discard", disposition="discarded")
+
+    report = ri.reap_released_worktrees(
+        db, _ReapSF({"run-discard": {"status": "failed"}}))
+
+    assert not wt.exists()
+    assert [x["run_id"] for x in report["removed"]] == ["run-discard"]
+    assert ri.record(db, "run-discard")["disposition"] == "reaped_discarded"

@@ -22,11 +22,13 @@ This module is where that promise becomes a record:
   nothing, and a decision that cannot be honoured raises rather than falling
   back to the checkout the run was isolated from.
 
-Nothing here deletes anything. Worktrees are retained unconditionally in this
-delivery; `is_disposable` answers whether a disposal WOULD be safe and is the
-whole of the retention story — a cleanup command is a separate piece of work,
-and the failure mode of not having one is disk, while the failure mode of a
-wrong reap is somebody's unmerged delivery.
+Worktree deletion is deliberately conservative. `is_disposable` is the pure
+safety predicate; `reap_released_worktrees` may remove only RUN-OWNED worktrees
+after the run is terminal + quiet + clean AND its branch is provably integrated
+into the source checkout's current HEAD (or an operator has explicitly recorded
+`discarded`). Merely pushing a branch or opening a PR is never enough. On any
+uncertainty the tree is retained: a missed reap costs disk, a wrong reap can lose
+somebody's unmerged delivery.
 """
 
 from __future__ import annotations
@@ -761,6 +763,108 @@ def reconcile_all_leases(db, sf) -> dict:
     return {"released": released, "retained": retained}
 
 
+def _source_current_ref(rec: dict) -> tuple[str | None, str]:
+    """Return the source checkout's current branch/ref for a merge proof.
+
+    No fetch, network call or guessed default branch: the reaper acts only on
+    integration already visible in the local source checkout. Detached sources
+    are retained because there is no branch policy to prove against.
+    """
+    source = Path(rec.get("source_repo") or "")
+    if not source.is_dir():
+        return None, "source checkout is unavailable"
+    branch = _git(source, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch.returncode != 0 or not branch.stdout.strip():
+        return None, "source checkout is detached; integration target is unknown"
+    return branch.stdout.strip(), ""
+
+
+def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
+    """Remove exactly the recorded run worktree through the owning repository.
+
+    Refuses direct/no-tree records and any path outside AItelier's worktree root.
+    Branches/commits are intentionally preserved; only the checkout is removed.
+    """
+    if rec.get("mode") != MODE_WORKTREE or not rec.get("worktree_path"):
+        return False, "run does not own a disposable worktree"
+    path = Path(rec["worktree_path"]).resolve()
+    root = datadir.worktrees_dir().resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False, f"recorded worktree is outside managed root {root}"
+    source = Path(rec.get("source_repo") or "")
+    if not source.is_dir():
+        return False, "source checkout is unavailable"
+    if not path.exists():
+        return True, "worktree already absent"
+    out = _git(source, "worktree", "remove", str(path))
+    if out.returncode != 0:
+        detail = (out.stderr or out.stdout).strip()[:300]
+        return False, f"git worktree remove refused: {detail}"
+    return True, f"removed {path}"
+
+
+def reap_released_worktrees(db, sf) -> dict:
+    """Reap released isolated worktrees only when losslessness is provable.
+
+    The scheduler calls this after lease reconciliation. A released record is
+    eligible only when its engine run is terminal and has no admitted operation.
+    For normal completion/failure, the run branch must be merged into the source
+    checkout's CURRENT branch as visible locally. `discarded` is the sole explicit
+    operator override: it still requires terminal, quiet and a clean tree, but no
+    merge proof. Push/PR creation alone records neither condition and therefore
+    retains the tree.
+    """
+    removed, kept = [], []
+    for rec in retained(db):
+        rid = rec["run_id"]
+        if rec.get("mode") != MODE_WORKTREE or not rec.get("released_at"):
+            continue
+        if (rec.get("disposition") or "").startswith("reaped_"):
+            continue
+        try:
+            row = sf.get_run(rid)
+        except Exception as exc:
+            kept.append({"run_id": rid, "reason": f"engine lookup failed: {type(exc).__name__}: {exc}"})
+            continue
+        if row is None:
+            kept.append({"run_id": rid, "reason": "run is unknown to the engine"})
+            continue
+        status = (row.get("status") if isinstance(row, dict) else row["status"]) or ""
+        try:
+            audit = sf.audit_operation_owners(rid) or {}
+            admitted = len(audit.get("lost") or []) + len(audit.get("unknown") or []) + int(audit.get("alive") or 0)
+        except Exception as exc:
+            kept.append({"run_id": rid, "reason": f"operation audit failed: {type(exc).__name__}: {exc}"})
+            continue
+
+        discarded = rec.get("disposition") == "discarded"
+        integration_ref = None
+        if not discarded:
+            integration_ref, why = _source_current_ref(rec)
+            if not integration_ref:
+                kept.append({"run_id": rid, "reason": why})
+                continue
+        ok, why = is_disposable(db, rid, run_status=status, admitted_ops=admitted,
+                                integration_ref=integration_ref,
+                                require_merge=not discarded)
+        if not ok:
+            kept.append({"run_id": rid, "reason": why})
+            continue
+        ok, why = _remove_run_worktree(rec)
+        if not ok:
+            kept.append({"run_id": rid, "reason": why})
+            continue
+        with db.get_connection() as conn:
+            conn.execute("UPDATE run_isolation SET disposition = ?, note = ? WHERE run_id = ?",
+                         (("reaped_discarded" if discarded else f"reaped_merged_into:{integration_ref}"),
+                          why[:500], rid))
+            conn.commit()
+        removed.append({"run_id": rid, "reason": why})
+    return {"removed": removed, "retained": kept}
+
+
 def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
                   integration_ref: str | None = None,
                   require_merge: bool = False) -> tuple[bool, str]:
@@ -800,9 +904,12 @@ def is_disposable(db, run_id: str, *, run_status: str, admitted_ops: int,
     if _git(path, "status", "--porcelain").stdout.strip():
         return False, "uncommitted work in the tree"
     if integration_ref:
-        merged = _git(rec["source_repo"], "branch", "--merged", integration_ref)
-        if (rec["branch"] or "") not in [
-                b.strip().lstrip("* ") for b in merged.stdout.splitlines()]:
+        branch = rec.get("branch") or ""
+        if not branch:
+            return False, "run has no branch to prove integrated"
+        merged = _git(rec["source_repo"], "merge-base", "--is-ancestor",
+                      branch, integration_ref)
+        if merged.returncode != 0:
             return False, (f"branch {rec['branch']} is unmerged into "
                            f"{integration_ref}")
     return True, "terminal, quiet, clean" + (

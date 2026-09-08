@@ -2151,6 +2151,20 @@ def _sweep_ended_leases() -> None:
             _lease_sweep_reported[rid] = reason
             tick_log("", "lease_retained", run=rid[:8], reason=reason)
 
+    # Lease release only says the run is terminal + quiet. Reaping is a second,
+    # stricter decision: clean tree + locally provable integration (or explicit
+    # discard). Merely pushed/open-PR work remains on disk.
+    try:
+        reap = run_isolation.reap_released_worktrees(db, get_skillflow())
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.scheduler").warning(
+            "worktree reap sweep failed", exc_info=True)
+        return
+    for item in reap.get("removed", []):
+        tick_log("", "worktree_reaped", run=item["run_id"][:8],
+                 reason=(item.get("reason") or "")[:200])
+
 
 async def poll_and_execute():
     """Advance up to MAX_CONCURRENT_PROJECTS different projects, one step each.

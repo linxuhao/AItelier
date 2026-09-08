@@ -235,7 +235,13 @@ def rpc(client, method, params):
                        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
 
 
-def test_mcp_real_wire_uses_same_graph_and_marks_domain_errors(live, client):
+def test_mcp_real_wire_uses_same_graph_and_marks_domain_errors(live, client, monkeypatch):
+    # Positive wire tests must explicitly authenticate; a real deployment can
+    # enable its auth gate through .env even when the generic HTTP fixture is
+    # in test mode. Separate refusal tests below keep anonymous access closed.
+    from api import mcp_router
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: True)
     handshake = rpc(client, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
         "clientInfo": {"name": "state-test", "version": "1"}})
     assert handshake.status_code == 200
@@ -494,3 +500,17 @@ def test_sha256_git_format_is_not_confused_with_output_bundle(live, monkeypatch)
     monkeypatch.setattr(live.service, "_git", lambda path, *args: "" if args[0] == "status" else "b" * 64)
     with pytest.raises(StateConflict, match="SHA-1-format"):
         live.service._artifact(a)
+
+
+def test_mcp_private_state_denial_is_an_error_without_goal_disclosure(live, client, monkeypatch):
+    from api import mcp_router
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: False)
+    rpc(client, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "state-anonymous-test", "version": "1"}})
+    result = rpc(client, "tools/call", {"name": "state_graph_read", "arguments": {
+        "action": "get_graph", "arguments": {"project_id": "game"}}}).json()["result"]
+    assert result["isError"] is True
+    body = result["content"][0]["text"]
+    assert "denied:" in body and "Deliver a" not in body
+    assert len(live.service.store.get_graph("game")["nodes"]) == 2

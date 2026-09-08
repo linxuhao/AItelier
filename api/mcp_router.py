@@ -211,6 +211,9 @@ def _wrap(mcp: FastMCP, fn: Callable, name: str) -> Callable:
         try:
             _authorize(name, mcp.get_context())
         except ToolDenied as e:
+            if name in {"state_graph_read", "state_graph_write"}:
+                from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
+                raise MCPToolError(f"denied: {e}") from e
             return {"error": f"denied: {e}"}
         try:
             # Every tool body but `wait_for_run` is SYNCHRONOUS, and some of them are

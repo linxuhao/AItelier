@@ -28,6 +28,15 @@ verified by a custom harness can unlock a workflow-backed child, and vice versa.
 Changing a requirement or correcting an accepted outcome invalidates downstream
 facts irrespective of which executor originally produced them.
 
+## Agent onboarding and change waiting
+
+Read the MCP prompt `state_graph_driver`, resource `aitelier://state/driver-guide`,
+or the `driver_guide` field of `state_graph_help`. They share the same protocol;
+clients need not support prompts to follow it. See [state-agent-driver.md](state-agent-driver.md).
+Use the typed `wait_for_state_change` read action with a durable `after` cursor
+instead of repeatedly asking a model to query status. Completion remains a
+candidate; waiting never approves a checkpoint or verifies a goal.
+
 ## Register → execute externally → report → verify
 
 Use the existing authenticated State APIs:

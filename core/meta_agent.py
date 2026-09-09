@@ -1918,14 +1918,31 @@ def _reconcile_lease_after_stop(db, run_id: str) -> None:
     try:
         from api.dependencies import get_skillflow, get_db_manager
         from core import run_isolation
+        sf = get_skillflow()
         run_isolation.reconcile_run_lease(db if db is not None else
-                                          get_db_manager(),
-                                          get_skillflow(), run_id)
+                                          get_db_manager(), sf, run_id)
     except Exception:
         import logging
         logging.getLogger("aitelier.meta").warning(
             "lease reconciliation after stop failed for %s", run_id,
             exc_info=True)
+
+    # stop_run is a supported terminal transition, but it does not know about
+    # AItelier's cached project projection. Sync it here so an immediate stop
+    # cannot leave the dashboard showing running:<old_step> forever. Keep this
+    # separate from lease reconciliation: a lease query may be unavailable
+    # while the terminal run status is still safe to project.
+    try:
+        from core.scheduler import _sync_project_status_to_db
+        run = sf.get_run(run_id) or {}
+        project_id = run.get("project_id")
+        if project_id:
+            _sync_project_status_to_db(project_id)
+    except Exception:
+        import logging
+        logging.getLogger("aitelier.meta").warning(
+            "project status synchronization after stop failed for %s",
+            run_id, exc_info=True)
 
 
 def _declare_isolation(db, run_id: str, project_id: str, config_name: str) -> None:

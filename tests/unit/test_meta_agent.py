@@ -8,7 +8,7 @@ from pathlib import Path
 
 from core.meta_agent import (
     MetaAgent, TOOL_DEFINITIONS, CODING_TOOL_DEFINITIONS, SYSTEM_PROMPT,
-    _load_meta_agent_config, _resolve_provider,
+    _load_meta_agent_config, _resolve_provider, _reconcile_lease_after_stop,
 )
 
 
@@ -490,6 +490,28 @@ class TestLayer3PipelineTools:
         assert out["status"] == "stopped"
         assert out["outcome"] == "stopped"
         sf.stop_run.assert_called_once()
+
+    def test_post_stop_helper_syncs_project_projection(self, monkeypatch):
+        """The shared stop helper updates the cached project row after stop_run."""
+        import api.dependencies as deps
+        import core.run_isolation as isolation
+        import core.scheduler as scheduler
+
+        db = MagicMock()
+        sf = MagicMock()
+        sf.get_run.return_value = {"id": "r1", "project_id": "p1",
+                                   "status": "failed",
+                                   "current_node": "t_impl"}
+        monkeypatch.setattr(isolation, "reconcile_run_lease", MagicMock())
+        sync = MagicMock()
+        monkeypatch.setattr(deps, "get_skillflow", lambda: sf)
+        monkeypatch.setattr(scheduler, "_sync_project_status_to_db", sync)
+
+        _reconcile_lease_after_stop(db, "r1")
+
+        isolation.reconcile_run_lease.assert_called_once_with(db, sf, "r1")
+        sync.assert_called_once_with("p1")
+
 
     def test_stop_pipeline_noop_when_finished(self, mock_db, mock_ws):
         agent = self._agent(mock_db, mock_ws)

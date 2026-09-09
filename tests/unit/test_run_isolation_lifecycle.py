@@ -127,6 +127,32 @@ def test_the_mcp_stop_entry_releases_a_quiet_run_lease(live):
     assert ri.lease_holder(live["db"], canonical)["run_id"] == rid2
 
 
+def test_the_mcp_stop_entry_syncs_cached_status_and_last_step(live, monkeypatch):
+    """A terminal stop must update the AItelier project projection.
+
+    The engine is the source of truth, but the dashboard reads the cached
+    ``runs`` row. Before this regression guard, the supported MCP stop path
+    failed the SkillFlow run and released its lease while leaving that row at
+    ``running:<old_step>`` indefinitely.
+    """
+    import core.scheduler as scheduler
+
+    monkeypatch.setattr(scheduler, "db", live["db"])
+    monkeypatch.setattr(scheduler, "get_skillflow", lambda: live["sf"])
+
+    rid = _direct_run(live)
+    live["db"].update_project("p1", status="running:t_impl",
+                              current_project_step="t_impl")
+
+    out = _mcp_stop(rid, "operator stop regression")
+
+    assert out["outcome"] == "stopped", out
+    row = live["db"].get_project("p1")
+    assert row["status"].startswith("failed:operator stop regression"), row
+    assert row["current_project_step"] == "s1", row
+    assert live["sf"].get_run(rid)["status"] == "failed"
+
+
 def test_the_mcp_stop_entry_keeps_the_lease_while_the_run_drains(live):
     rid = _direct_run(live)
     _admit_real_operation(live["sf_path"], rid)

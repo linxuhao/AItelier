@@ -40,12 +40,18 @@ one, `passed: false`.
    failure edge before you pass it**: if it leads (directly, or through gates that
    only forward) back to the step the SUCCESS edge goes to, the branch is decoration
    and the fail-open is intact. A gate executes nothing.
-5. **A terminal step no end condition names.** Any step with `to: null` or no
+5. **A validated `mode: write` agent omits `validation_on_exhaustion: fail`.**
+   SkillFlow's compatibility default promotes invalid staging after retries are
+   exhausted, then runs delivery hooks such as `repo_apply`. Also block any maker
+   `_error` edge into review, or reviewer unconditional/`_error` edge that advances
+   the item: execution failure, missing verdict, and exhausted review loops must
+   remain failed for operator recovery.
+6. **A terminal step no end condition names.** Any step with `to: null` or no
    transitions ends the graph; if `end_conditions` doesn't name it, the run reaches
    it, writes its output, and dies with "no matching transition". Walk the give-up
    branch of every `max_loop` edge — that is where this hides, and it is why an
    "abstain" outcome the brief asked for came back as a bare failure.
-6. **Two `max_loop` edges between the same two steps.** The loop counter is keyed on
+7. **Two `max_loop` edges between the same two steps.** The loop counter is keyed on
    (run, from, to), so this graph cannot start at all — and lint passes it clean.
 
 ## What is NOT a problem

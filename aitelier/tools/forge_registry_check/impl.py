@@ -130,6 +130,13 @@ RULES: tuple[Rule, ...] = (
          "failure that retries in place WITH the reason attached. Use "
          "`validation: {type: file_exists, files: [\"*\"]}` when the filenames are "
          "not known ahead of time."),
+    Rule("write_steps_promote_invalid_output",
+         "EVERY validated `mode: write` step must set "
+         "`validation_on_exhaustion: fail`. SkillFlow defaults to `promote` for "
+         "backward compatibility: after the retry budget is spent it promotes the "
+         "invalid staging tree, runs `on_deliver` (including `repo_apply`), and "
+         "completes with a `validation_failed` flag. A code maker must stop before "
+         "promotion so invalid output cannot be committed or reviewed as delivered."),
     Rule("routing_file_unguaranteed",
          "IF A STEP'S TRANSITIONS ROUTE ON A FILE, THE STEP MUST GUARANTEE THAT "
          "FILE. An agent step whose edges read `match: {from_file: verdict.json, "
@@ -999,6 +1006,26 @@ def _routing_file_unguaranteed(steps: list) -> list[str]:
     return out
 
 
+def _write_steps_promote_invalid_output(steps: list) -> list[str]:
+    """Validated free-write agents must stop before promoting invalid staging."""
+    out = []
+    for step in steps:
+        if not isinstance(step, dict) or step.get("step_type") != "agent":
+            continue
+        output = step.get("output") or {}
+        mode = (output.get("mode") if isinstance(output, dict) else None)
+        mode = mode or step.get("output_mode")
+        if mode != "write" or not step.get("validation"):
+            continue
+        if step.get("validation_on_exhaustion") != "fail":
+            out.append(
+                f"step '{step.get('id')}': validated mode: write defaults to "
+                f"promoting invalid output when retries are exhausted. Set "
+                f"`validation_on_exhaustion: fail` so promotion and on_deliver "
+                f"never run for failed validation.")
+    return out
+
+
 def _fallible_tools_unrouted(steps: list, fallible: set) -> list[str]:
     """A tool that can fail must have its failure routed, not fall through."""
     out = []
@@ -1192,6 +1219,7 @@ def forge_registry_check(graph_path: str = "", role_table: str = "",
     violations.extend(_template_names_absent_tools(rt, steps, role_table, live_tools))
     violations.extend(_validation_is_a_spec_list(steps))
     violations.extend(_write_steps_without_validation(steps))
+    violations.extend(_write_steps_promote_invalid_output(steps))
     violations.extend(_routing_file_unguaranteed(steps))
     fallible = _fallible_names(live_tools)
     violations.extend(_fallible_tools_unrouted(steps, fallible))

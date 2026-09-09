@@ -92,24 +92,13 @@ def test_end_conditions_name_real_nodes(config):
     assert not missing, f"{config.name} end_conditions name unknown nodes: {missing}"
 
 
-# ── Task-loop reviewers must never dead-end the run ─────────────────────────
-# `t_plan_review` / `t_impl_review` route on `passed` read out of
-# review_verdict.json. When the reviewer (an LLM) writes no verdict at all, or
-# an unparseable one, or a non-bool `passed`, none of the value-matching edges
-# fire and skillflow fails the RUN: "No matching transition from 't_impl_review'
-# with flags {}". That happened live in the 104-task benchmark sweep
-# (nl2repo-asteval / core_astutils: the reviewer burned every tool turn on
-# reasoning and committed "0 file(s)"), throwing away every task the loop had
-# already implemented. These two steps sit inside the task loop, so the blast
-# radius is the whole project — which is why they, unlike the preamble
-# reviewers, carry an explicit bounded fallback chain.
+# ── Task-loop delivery and reviews fail closed ─────────────────────────────
+# A task may be credited only after its implementation passed validation, was
+# delivered, and received a boolean passing verdict. Missing/malformed verdicts,
+# exhausted reject loops, validation exhaustion, and execution errors stay failed
+# for operator recovery; none may advance the loop to its next item.
 
 DPE_CONFIG = CONFIG_DIR / "dpe_default.yaml"
-
-# step id → the node the fallback chain must reach once the retries are spent.
-# Both are forward: `task_loop` credits the current item and dispatches the
-# next, `t_impl` continues the current one. Neither can re-run the same item.
-LOOP_REVIEWER_ESCAPES = {"t_plan_review": "t_impl", "t_impl_review": "task_loop"}
 
 
 def _dpe_resolver():
@@ -117,87 +106,69 @@ def _dpe_resolver():
     return GraphResolver(PipelineGraph.from_yaml(DPE_CONFIG))
 
 
-def _walk(resolver, step, file_reader, counts=None, limit=10):
-    """Follow the transitions out of `step`, counting edges as skillflow does,
-    until they leave the node. Returns the visited targets."""
-    counts = dict(counts or {})
-    seen = []
-    for _ in range(limit):
-        target = resolver.next_node(step, {}, counts, file_reader=file_reader)
-        seen.append(target)
-        if target is None or target != step:
-            return seen
-        counts[(step, target)] = counts.get((step, target), 0) + 1
-    return seen
-
-
 def _no_verdict(path):
     raise FileNotFoundError(path)
 
 
-@pytest.mark.parametrize("step,escape", sorted(LOOP_REVIEWER_ESCAPES.items()))
-def test_loop_reviewer_routes_when_the_verdict_is_missing(step, escape):
-    """A verdict that routes nowhere must not kill the run."""
-    chain = _walk(_dpe_resolver(), step, _no_verdict)
-    assert None not in chain, (
-        f"{step} dead-ends on a missing review_verdict.json — the run fails with "
-        f"\"No matching transition from '{step}' with flags {{}}\" and every task "
-        f"already completed by the loop is lost. Add an unconditional fallback edge."
-    )
-    assert chain[-1] == escape, f"{step} fallback chain ended at {chain[-1]}, not {escape}"
+def _dpe_node(step):
+    return _dpe_resolver().get_node(step)
 
 
-@pytest.mark.parametrize("step,escape", sorted(LOOP_REVIEWER_ESCAPES.items()))
-def test_loop_reviewer_retry_is_bounded(step, escape):
-    """The retry edge re-runs the reviewer, but only finitely often.
-
-    An unconditional self-edge would spin forever on a systematically broken
-    reviewer, so the retries must carry max_loop and hand off to the escape.
-    """
-    chain = _walk(_dpe_resolver(), step, _no_verdict)
-    retries = [t for t in chain if t == step]
-    assert retries, f"{step} does not retry the reviewer before giving up"
-    assert chain[-1] == escape, (
-        f"{step} retries unboundedly — the chain never leaves the node: {chain}"
-    )
+def _dpe_step_dict(step):
+    import yaml
+    graph = yaml.safe_load(DPE_CONFIG.read_text(encoding="utf-8"))
+    return next(item for item in graph["steps"] if item.get("id") == step)
 
 
-def test_loop_reviewer_routes_when_the_reject_edge_is_spent():
-    """max_loop on the reject edge used to be its own dead end.
+@pytest.mark.parametrize("step", ["t_plan", "t_plan_review", "t_impl",
+                                   "t_impl_review"])
+def test_task_loop_validation_exhaustion_is_fail_closed(step):
+    node = _dpe_node(step)
+    assert node.validation, f"{step} has no validation to protect"
+    assert _dpe_step_dict(step).get("validation_on_exhaustion") == "fail", (
+        f"{step} must not promote invalid output after its validation retry budget "
+        f"is spent")
 
-    With every edge exhausted skillflow raises CycleLimitExceeded and fails the
-    run; the fallback has to absorb that too.
-    """
+
+@pytest.mark.parametrize("step", ["t_plan", "t_plan_review", "t_impl",
+                                   "t_impl_review"])
+def test_task_loop_errors_do_not_route_forward(step):
+    assert _dpe_resolver().find_error_transition(step) is None, (
+        f"{step} routes an execution/validation error forward instead of leaving "
+        f"the run failed for recovery")
+
+
+def test_implementation_reaches_review_only_after_normal_completion():
+    transitions = _dpe_node("t_impl").transitions
+    assert len(transitions) == 1
+    assert transitions[0].to == "t_impl_review"
+    assert not transitions[0].match
+
+
+def test_only_a_passing_implementation_review_credits_the_task():
+    transitions = _dpe_node("t_impl_review").transitions
+    to_next = [t for t in transitions if t.to == "task_loop"]
+    assert len(to_next) == 1
+    assert to_next[0].match == {
+        "from_file": "review_verdict.json", "field": "passed", "value": True}
+    assert all(t.match for t in transitions), (
+        "an unconditional reviewer fallback can credit an unreviewed task")
+
+
+def test_missing_implementation_verdict_has_no_forward_route():
+    assert _dpe_resolver().next_node(
+        "t_impl_review", {}, {}, file_reader=_no_verdict) is None
+
+
+def test_exhausted_reject_loop_cannot_fall_through_to_next_task():
     import json
-    resolver = _dpe_resolver()
-    chain = _walk(resolver, "t_impl_review",
-                  lambda p: json.dumps({"passed": False}),
-                  counts={("t_impl_review", "t_impl"): 3})
-    assert chain[-1] == "task_loop", chain
+    from skillflow.exceptions import CycleLimitExceeded
 
-
-def test_loop_reviewer_verdict_routing_is_unchanged():
-    """The fallback must not shadow a verdict that DOES route."""
-    import json
-    resolver = _dpe_resolver()
-    passed = lambda p: json.dumps({"passed": True})       # noqa: E731
-    rejected = lambda p: json.dumps({"passed": False})    # noqa: E731
-    assert resolver.next_node("t_impl_review", {}, {}, file_reader=passed) == "task_loop"
-    assert resolver.next_node("t_impl_review", {}, {}, file_reader=rejected) == "t_impl"
-    assert resolver.next_node("t_plan_review", {}, {}, file_reader=passed) == "t_impl"
-    assert resolver.next_node("t_plan_review", {}, {}, file_reader=rejected) == "t_plan"
-
-
-def test_loop_reviewer_fallbacks_stay_inside_the_loop_body():
-    """The fallback targets must keep the task loop's topology intact.
-
-    skillflow scopes per-item retry budgets to the nodes that can reach back to
-    the loop (graph.loop_body_map); a fallback that left the body would give the
-    reviewer a run-wide budget instead of a per-task one.
-    """
-    resolver = _dpe_resolver()
-    body = set(resolver.loop_bodies().get("task_loop", ()))
-    assert {"t_plan", "t_plan_review", "t_impl", "t_impl_review"} <= body, body
+    rejected = lambda p: json.dumps({"passed": False})  # noqa: E731
+    with pytest.raises(CycleLimitExceeded):
+        _dpe_resolver().next_node(
+            "t_impl_review", {},
+            {("t_impl_review", "t_impl"): 3}, file_reader=rejected)
 
 
 # ── A step that promotes nothing must fail, not complete ────────────────────
@@ -218,69 +189,15 @@ MUST_PROMOTE = {
 }
 
 
-def _dpe_node(step):
-    return _dpe_resolver().get_node(step)
-
-
 @pytest.mark.parametrize("step,required_file", sorted(MUST_PROMOTE.items()))
 def test_task_loop_steps_validate_their_load_bearing_output(step, required_file):
     """Without this the step completes green on zero files."""
     specs = _dpe_node(step).validation or []
-    guarded = [s for s in specs if required_file in (s.get("files") or [])]
+    guarded = [spec for spec in specs
+               if required_file in (spec.get("files") or [])]
     assert guarded, (
         f"{step} declares no validation for {required_file}: an empty staging dir "
-        f"commits as a success and the step completes, so downstream reviews an "
-        f"empty workspace instead of the step being retried."
-    )
-
-
-def _validated_task_loop_steps() -> list[str]:
-    """Every task-loop step that declares validation — not just MUST_PROMOTE.
-
-    The escape below is owed by whatever CAN fail validation, and the two sets
-    diverged: `t_impl` validates `*.py` for importability and was never in
-    MUST_PROMOTE (it has no single load-bearing file), so nothing checked that it
-    could survive its own gate. That was harmless only for as long as the gate
-    was a no-op.
-    """
-    resolver = _dpe_resolver()
-    body = resolver.loop_bodies().get("task_loop", ())
-    steps = sorted(s for s in body if resolver.get_node(s).validation)
-    # A derived list that quietly came back empty would pass every case below.
-    assert set(MUST_PROMOTE) | {"t_impl"} <= set(steps), steps
-    return steps
-
-
-@pytest.mark.parametrize("step", _validated_task_loop_steps())
-def test_validation_exhaustion_routes_instead_of_killing_the_run(step):
-    """Validation exhaustion goes through `_fail_step_in_tx(retryable=False)`.
-
-    That path consults `find_error_transition` and, finding none, fails the RUN
-    — discarding every task the loop already implemented. Adding validation to a
-    task-loop step therefore has to come with an `_error` edge, or it re-opens
-    the dead end the fallback chain above was added to close.
-    """
-    resolver = _dpe_resolver()
-    target = resolver.find_error_transition(step)
-    assert target is not None, (
-        f"{step} is validated but has no `match: {{_error: true}}` transition: "
-        f"once its retry budget is spent the whole run fails."
-    )
-    body = set(resolver.loop_bodies().get("task_loop", ()))
-    assert target in body | {"task_loop"}, (
-        f"{step} escapes validation failure to {target}, outside the task loop"
-    )
-    assert target != step, f"{step} routes validation failure back to itself"
-
-
-def test_error_edge_does_not_shadow_t_plans_forward_edge():
-    """`match: {_error: true}` must never fire on an ordinary completion.
-
-    (The reviewers' own routing is pinned by
-    `test_loop_reviewer_verdict_routing_is_unchanged` above.)
-    """
-    resolver = _dpe_resolver()
-    assert resolver.next_node("t_plan", {}, {}, file_reader=_no_verdict) == "t_plan_review"
+        f"could complete and reach downstream work")
 
 
 def test_reviewer_verdict_schema_only_gates_the_field_that_routes():

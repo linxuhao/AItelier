@@ -55,6 +55,12 @@ cycle). Follow the cheatsheet EXACTLY:
   list of what exists; anything else grants nothing.
 - The ONLY completed terminal is a `step_type: gate` with `transitions: [{to: null}]`.
   Give-up paths must end failed, never share the success terminal.
+- Every validated `output.mode: write` agent must declare
+  `validation_on_exhaustion: fail`. The compatibility default promotes invalid
+  staging after retries are spent and then runs delivery hooks; code must stop
+  before promotion, commit, or review. Validation/execution errors and missing
+  reviewer verdicts must remain failed; never add an unconditional or `_error`
+  edge that credits the item or advances to its success successor.
 - Put an objective tool gate (tests/compile) BEFORE a reviewer where one exists.
 - Use manifest→loop fan-out for per-item work. A loop-body AGENT step writes a
   per-item output folder; the engine routes reads by position (in-loop reader →

@@ -63,6 +63,9 @@ steps:
       - source: { step: review }                           # loop-back feedback
     output:
       mode: write
+    validation_on_exhaustion: fail  # invalid staging never promotes or delivers
+    validation:
+      - {tool: file_exists, files: ["*"]}
     transitions:
       - to: check
 
@@ -79,6 +82,10 @@ steps:
       - to: work
         match: { from_file: "test_report.json", field: passed, value: false }
         max_loop: 3
+
+  # Never route a maker's `_error` to its reviewer, and never give a reviewer an
+  # unconditional/`_error` edge to a success successor. Missing verdicts and
+  # exhausted reject loops must leave the run failed for recovery.
 
   # an AGENT reviewer. output.fixed maps a slot -> a filename the engine writes.
   - id: review

@@ -298,6 +298,7 @@ class TestFailOpen:
         steps = [{"id": "make", "step_type": "agent", "agent_config": "host",
                   "output": {"mode": "write"},
                   "validation": [{"files": ["*"], "tool": "file_exists"}],
+                  "validation_on_exhaustion": "fail",
                   "transitions": [{"to": "done"}]},
                  _gate()]
         res = forge_registry_check(graph_path=_write(tmp_path, _graph(steps)))
@@ -769,11 +770,13 @@ class TestWriteStepsDeclareValidation:
     """
 
     @staticmethod
-    def _graph(validation):
+    def _graph(validation, exhaustion="fail"):
         step = {"id": "make", "step_type": "agent", "agent_config": "maker",
                 "output": {"mode": "write"}, "transitions": [{"to": "done"}]}
         if validation is not None:
             step["validation"] = validation
+            if exhaustion is not None:
+                step["validation_on_exhaustion"] = exhaustion
         return {"name": "g", "description": "x", "begin": "make",
                 "end_conditions": {"combinator": "or", "conditions": [
                     {"type": "node_reached", "node": "done", "result": "completed"}]},
@@ -794,6 +797,21 @@ class TestWriteStepsDeclareValidation:
                                                       "tool": "file_exists"}])),
             role_table="")
         assert not [v for v in res["violations"] if "validation" in v]
+
+    def test_a_validated_write_step_without_fail_policy_is_flagged(self, tmp_path):
+        validation = [{"files": ["*"], "tool": "file_exists"}]
+        res = forge_registry_check(
+            graph_path=_write(tmp_path, self._graph(validation, exhaustion=None)),
+            role_table="")
+        assert any("validation_on_exhaustion: fail" in v
+                   for v in res["violations"])
+
+    def test_fail_policy_blocks_invalid_promotion(self, tmp_path):
+        validation = [{"files": ["*"], "tool": "file_exists"}]
+        res = forge_registry_check(
+            graph_path=_write(tmp_path, self._graph(validation)), role_table="")
+        assert not [v for v in res["violations"]
+                    if "promoting invalid output" in v]
 
     def test_content_mode_is_untouched(self, tmp_path):
         """Content mode enumerates its slots — the engine already enforces them."""

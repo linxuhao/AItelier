@@ -40,7 +40,10 @@ subsets, wildcard priority or scope equivalence.
 
 Relations have exactly `type`, `target` (`design_id`, integer `revision`), and
 `rationale`. `depends_on` and `references` must resolve to exact versions selected
-in the same baseline. Approved items cannot depend_on non-approved items.
+in the same baseline. `conflicts_with` names an existing exact alternative; its
+target need not be selected. It is a direct, reviewable assertion, not a necessary
+dependency or automatic baseline veto. Query either endpoint with `design_impact`
+without storing a reverse edge; conflict relations never propagate. Approved items cannot depend_on non-approved items.
 `supersedes` targets an existing historical exact revision with identical scope;
 it cannot select the replaced revision alongside its replacement or competing
 full-item replacements. Transitive replaced ancestors are checked as well. No
@@ -100,10 +103,23 @@ matches=false. No automatic CI installation, filesystem write or import endpoint
 is supplied. Manual edits are detected when this check runs; they never write
 back to State. Retain the underlying State database to reconstruct history.
 
+## Candidate search and review impact
+
+`search_design_items` returns bounded literal-search summaries, exact versions,
+match reasons and baseline/selection hashes. By default it searches the union of
+current-adopted and newest saved versions so drafts cannot hide adopted rules;
+an explicit baseline searches only its pinned revisions. `design_impact` exposes
+direct assertions, reverse depends_on paths and latest matching node bindings.
+It does not change goals, baseline selection, bindings, attempts or acceptance.
+
+See [the lightweight search/impact protocol](../docs/design-search-impact.md) for
+query schemas, scope/paging/truncation semantics, conflicts_with, and a real
+State-only HTTP example. These are candidate/review helpers, not semantic proof.
+
 ## Boundaries
 
 No graph database, OSLC/ReqIF exchange, game migration, front-end editor,
-LLM-derived dependencies, semantic diff/impact analysis, partial-scope override,
+LLM-derived dependencies, semantic diff or automatic impact adjudication, partial-scope override,
 source import, automatic revalidation, scheduler changes or production deployment.
 Relations describe design interpretation; only explicitly authored existing State
 dependencies block execution. Commercial design records and generated documents

@@ -63,6 +63,11 @@ workspace manager or model registry. The package's install dependencies are not
 yet split into a separate minimal wheel. See [the integration/standalone guide](docs/state-external-harness.md)
 and [the real own-harness example](examples/external_harness_demo.py).
 
+Design authors can use [lightweight design search and impact](docs/design-search-impact.md)
+to find exact-version candidates, record direct conflicts and inspect affected
+bindings. These read-only helpers reuse State revisions/baselines; they do not
+introduce a solver, vector database or automatic acceptance.
+
 ## Why AItelier
 
 Most "AI agent" tooling is built for demos, not trust. The tools that build software or automate a workflow for you are non-deterministic black boxes: you can't reproduce a run, audit *why* the agent did what it did, or insert a human approval where it matters. That's exactly the wall that stops agents from being deployed in anything serious — regulated industries, enterprise, anywhere "it usually works" isn't good enough.

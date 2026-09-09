@@ -180,3 +180,22 @@ def test_real_http_mcp_search_has_auth_strict_input_and_no_write_surface(tmp_pat
         rpc['params']['arguments']['arguments']['baseline_id']='unknown'
         err=c.post('/mcp/',json=rpc,headers={**HEADERS,'Accept':'application/json, text/event-stream'})
         assert err.json()['result']['isError'] is True
+
+
+def test_read_snapshot_does_not_mix_a_new_baseline_or_revision_mid_query(service,monkeypatch):
+    import core.state_design_queries as queries
+    add(service,'rule');first=baseline(service,[('rule',1)])
+    original=queries._candidate_rows
+    changed=False
+    def racing(conn,project_id,selected,include_latest):
+        nonlocal changed
+        if not changed:
+            changed=True
+            add(service,'rule',1,statement='Concurrent new rule without the old terms')
+            baseline(service,[('rule',2)],'new','b1')
+        return original(conn,project_id,selected,include_latest)
+    monkeypatch.setattr(queries,'_candidate_rows',racing)
+    result=service.design.search('game','Ready')
+    assert result['baseline_id']=='b1' and result['manifest_hash']==first['manifest_hash']
+    assert len(result['items'])==1 and result['items'][0]['revision']==1 and result['items'][0]['is_latest']
+    assert service.design.catalog('game')['current_baseline_id']=='new'

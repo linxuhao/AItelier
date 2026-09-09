@@ -185,6 +185,7 @@ def impact(design, project_id, design_id, revision, baseline_id=None, limit=50, 
                 direct.append({'type': rel['type'], 'source': _ref(source), 'target': _ref(target),
                                'direction': 'outgoing' if source == root else 'incoming',
                                'source_selected': source in pins, 'target_selected': target in pins,
+                               'source_lifecycle_status': bodies[source]['lifecycle_status'],
                                'rationale': rel['rationale'][:360], 'rationale_truncated': len(rel['rationale']) > 360})
         direct.sort(key=lambda r: (r['type'], r['direction'], r['source']['design_id'], r['source']['revision'],
                                   r['target']['design_id'], r['target']['revision']))

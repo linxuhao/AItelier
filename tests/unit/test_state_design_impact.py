@@ -263,3 +263,14 @@ def test_unselected_incoming_revision_cannot_leak_into_current_impact(service):
     assert service.design.impact('game','root',1)['declared_conflicts']['items']==[]
     # The unselected author's explicit statement is still readable by its own exact identity.
     assert service.design.impact('game','other',1)['declared_conflicts']['items'][0]['source_selected'] is False
+
+
+def test_draft_incoming_assertions_are_labelled_not_mistaken_for_approved_rule(service):
+    add(service,'adopted')
+    add(service,'proposal',relations=[relation('conflicts_with','adopted')],lifecycle_status='draft',open_questions=['Needs review'])
+    baseline(service,[('adopted',1),('proposal',1)])
+    result=service.design.impact('game','adopted',1)
+    assert result['subject']['lifecycle_status']=='approved'
+    assert result['declared_conflicts']['items'][0]['source_lifecycle_status']=='draft'
+    assert result['declared_conflicts']['items'][0]['both_selected'] is True
+    assert service.design.get_revision('game','proposal',1)['content']['open_questions']==['Needs review']

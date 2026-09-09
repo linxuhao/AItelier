@@ -48,6 +48,25 @@ VERIFIED before an attempt starts" rule — no ordering logic was added. Whether
 node *has* a test node is the director's call; R1 guarantees that anything built
 upon has a contract.
 
+**R3 — a gate names everything it ships.** An `integration` node depends directly
+on the implementation of every contract in its transitive closure. This exists
+because R1 has a side effect nobody drew: `B → A` becomes `B → A.contract`, so the
+old transitive "everything below must be built" property is gone, and a release
+gate that used to reach twelve implementations through implementation chains now
+reaches their contracts and nothing else — while R1/R2 stay perfectly satisfied.
+The director's review found it within the hour (`director/reports/
+state-facets-director-review-20260909.md`). R3 is reported by `facet_lint` as
+`warnings` / `shipping_gaps` rather than rejected: a gate is edited one edge at a
+time, and a rule that cannot be satisfied incrementally is a rule that gets worked
+around. The migration script closes every gap it finds. Adding these edges does not
+serialize implementations — they constrain the gate, which is the point.
+
+The same review reclassified `release.private-demo`: a package/browser/save/exit
+composition is a gate, `integration`, not `content`. Its first-pass contract node
+was retired. `set_node_facet` therefore re-labels a node as long as nothing was
+accepted under the old label and every edge stays legal; the first version refused
+all re-labels, and superseding a node to fix a label is the wrong size of fix.
+
 Key suffixes `.contract` / `.test` must agree with the facet. Everything else may be
 named freely.
 
@@ -121,11 +140,11 @@ is computed off the graph, not observed. Verifying the contract layer is what
 turns it into a measurement — and if the number does not move then, this
 structure is wrong and the deferred list below is where to start unwinding.
 
-`growth.proficiency` is the one node left legacy: an external attempt was in
-flight, and retargeting a running attempt's dependency snapshot is the one thing
-this migration must not do. Its contract was created anyway, so everything
-downstream migrated; re-running the same command after the attempt settles
-finishes it (the script is idempotent).
+`growth.proficiency` was left legacy on the first pass: an external attempt was
+in flight, and retargeting a running attempt's dependency snapshot is the one
+thing this migration must not do. Its contract was created anyway, so everything
+downstream migrated; the second pass (R3 closure, same day) found the attempt
+settled and finished it. 59 nodes, 0 legacy, 1 retired contract.
 
 ## Explicitly deferred
 

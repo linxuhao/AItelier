@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.state_attempts import ACTIVE as ACTIVE_STATUSES  # noqa: E402
-from core.state_graph import facet_violations  # noqa: E402
+from core.state_graph import facet_violations, facet_warnings, shipping_gaps  # noqa: E402
 
 # A generated contract node is a PLACEHOLDER and must say so in a way that
 # blocks its own acceptance. The first template said "the interface compiles"
@@ -151,9 +151,20 @@ def plan(graph_nodes, chain, sample_tests, integration=(), frozen=()):
         base = nodes[k]
         if matches(k, integration):
             # Edges stay: an integration node is where real implementations meet.
-            if facets.get(k) is None:
+            if facets.get(k) != "integration":
                 steps.append(("set_facet", k, "integration"))
                 facets[k] = "integration"
+            ck = k + ".contract"
+            if ck in nodes and ck in edges[k]:
+                # A gate migrated as content got a contract it never needed.
+                # It is dropped from the gate's edges and retired; the gate
+                # composes real things, it does not offer an interface.
+                kept = sorted(d for d in edges[k] if d != ck)
+                steps.append(("revise", k, base["revision"], kept))
+                edges[k] = kept
+                steps.append(("supersede", ck, nodes[ck].get("revision", 1)))
+                del facets[ck]
+                del edges[ck]
             continue
         title = base["goal"].splitlines()[0][:120]
         ck, tk = k + ".contract", k + ".test"
@@ -186,6 +197,18 @@ def plan(graph_nodes, chain, sample_tests, integration=(), frozen=()):
         if facets.get(k) is None:
             steps.append(("set_facet", k, "content"))
             facets[k] = "content"
+    # R3 (director's review): an integration node must depend directly on the
+    # implementation of every contract in its closure, or the release gate
+    # stops requiring twelve things that used to be built before it could pass.
+    for gate, missing in sorted(shipping_gaps(facets, edges).items()):
+        closed = sorted(set(edges[gate]) | set(missing))
+        edges[gate] = closed
+        # One revision per gate: fold into an earlier revise of the same node.
+        earlier = next((i for i, step in enumerate(steps) if step[0] == "revise" and step[1] == gate), None)
+        if earlier is None:
+            steps.append(("revise", gate, nodes[gate]["revision"], closed))
+        else:
+            steps[earlier] = ("revise", gate, steps[earlier][2], closed)
     return steps, facets, edges, skipped
 
 
@@ -211,13 +234,18 @@ def main():
             print(f"  add     {step[1]['key']:40} facet={step[1]['facet']:9} deps={step[1]['dependencies']}")
         elif step[0] == "revise":
             print(f"  revise  {step[1]:40} r{step[2]} deps -> {step[3]}")
+        elif step[0] == "supersede":
+            print(f"  retire  {step[1]:40} (a gate offers no interface)")
         else:
             print(f"  facet   {step[1]:40} -> {step[2]}")
     for k, why in skipped:
         print(f"  SKIP    {k:40} {why}")
-    print("facet_lint on the resulting graph:", "clean" if not problems else "")
+    warnings = facet_warnings(facets, edges)
+    print("facet_lint on the resulting graph:", "clean" if not problems and not warnings else "")
     for p in problems:
         print("  VIOLATION", p)
+    for w in warnings:
+        print("  WARNING  ", w)
     if problems:
         return 2
     if not args.apply:
@@ -239,16 +267,25 @@ def main():
             if sorted(current["dependencies"]) == deps:
                 print("  same   ", k); continue
             api.command("revise_node", project_id=args.project, node_key=k, expected_revision=current["revision"],
-                        reason="facets migration: build on contracts, not implementations (design/state_facets.md)",
+                        reason="facets migration: build on contracts, not implementations; integration gates depend "
+                               "directly on every implementation they compose (design/state_facets.md, R3)",
                         dependencies=deps)
             print("  revised", k)
+        elif step[0] == "supersede":
+            _, k, rev = step
+            current = api.query("get_node", project_id=args.project, node_key=k)["node"]
+            if current["status"] == "SUPERSEDED":
+                print("  retired", k); continue
+            api.command("supersede_node", project_id=args.project, node_key=k, expected_revision=current["revision"],
+                        reason="an integration gate offers no interface; contract created by the first migration pass is retired")
+            print("  retired", k)
         else:
             _, k, value = step
             api.command("set_node_facet", project_id=args.project, node_key=k, facet=value)
             print("  facet  ", k, value)
     lint = api.query("facet_lint", project_id=args.project)
-    print("live facet_lint:", json.dumps({k: lint[k] for k in ("violations", "faceted", "legacy")}, ensure_ascii=False))
-    return 0 if not lint["violations"] else 2
+    print("live facet_lint:", json.dumps({k: lint.get(k) for k in ("violations", "warnings", "faceted", "legacy")}, ensure_ascii=False))
+    return 0 if not lint["violations"] and not lint.get("warnings") else 2
 
 
 if __name__ == "__main__":

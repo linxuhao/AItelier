@@ -187,6 +187,54 @@ def facet_violations(facets: dict[str, str | None], graph: dict[str, list[str]])
     return problems
 
 
+def facet_stem(node_key: str, facets: dict[str, str | None]) -> str:
+    """`x.contract` / `x.test` belong to `x`; everything else is its own goal."""
+    if facets.get(node_key) == "contract" and node_key.endswith(".contract"):
+        return node_key[:-len(".contract")]
+    if facets.get(node_key) == "test" and node_key.endswith(".test"):
+        return node_key[:-len(".test")]
+    return node_key
+
+
+def shipping_gaps(facets: dict[str, str | None], graph: dict[str, list[str]]) -> dict[str, list[str]]:
+    """R3 — what each integration node composes but forgot to depend on.
+
+    R1 turns `B → A` into `B → A.contract`, and with it the old transitive
+    "everything below must be built" property disappears: a release gate that
+    used to reach twelve implementations through implementation chains now
+    reaches their contracts and nothing else, and R1/R2 cannot see it (found by
+    the director's review, 2026-09-09). The rule that restores it: an
+    integration node depends directly on the implementation of every contract
+    in its transitive closure. Reported as a warning, not a rejection — an
+    integration node is edited one edge at a time, and a rule that cannot be
+    satisfied incrementally is a rule that gets worked around.
+    """
+    gaps = {}
+    for node, own in facets.items():
+        if own != "integration":
+            continue
+        seen, stack = set(), list(graph.get(node, ()))
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(graph.get(current, ()))
+        direct = set(graph.get(node, ()))
+        missing = sorted({facet_stem(c, facets) for c in seen if facets.get(c) == "contract"
+                          and facet_stem(c, facets) in facets and facets.get(facet_stem(c, facets)) != "contract"
+                          and facet_stem(c, facets) != node and facet_stem(c, facets) not in direct})
+        if missing:
+            gaps[node] = missing
+    return gaps
+
+
+def facet_warnings(facets: dict[str, str | None], graph: dict[str, list[str]]) -> list[str]:
+    return [f"`{node}` (integration) builds on the contracts of {', '.join('`' + m + '`' for m in missing)} but does not "
+            f"depend on their implementations; add those edges or the release closure silently drops them"
+            for node, missing in shipping_gaps(facets, graph).items()]
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS state_projects (
     project_id TEXT PRIMARY KEY, title TEXT NOT NULL,
@@ -371,32 +419,39 @@ class StateGraphStore:
                                   (f" | (+{len(problems) - 5} more; see facet_lint)" if len(problems) > 5 else ""))
 
     def set_node_facet(self, project_id: str, node_key: str, facet: str) -> dict:
-        """Label a legacy node once. No revision: a label is not a contract change.
+        """Label a node. No revision: a label is not a contract change.
 
-        NULL → value only. Re-labelling is refused because every edge that was
-        accepted under the old label would have to be re-judged; make a new
-        node instead. The rules are checked against the node's CURRENT edges,
+        NULL → value is the migration path. Re-labelling is allowed only while
+        nothing has been ACCEPTED under the old label — a verified receipt was
+        granted against what the node was, and re-judging that is a new node's
+        job — and only if every edge in the graph is still legal afterwards,
         so a node others already build on cannot quietly become `content`.
+        (The first version refused any re-label; the director's review then
+        found a package gate migrated as `content`, and superseding a node to
+        fix a label is the wrong size of correction.)
         """
         own = check_facet(facet)
         if own is None:
             raise StateGraphError("facet is required")
         with self.transaction(write=True) as conn:
             node = self._node(conn, project_id, node_key)
-            if node.get("facet") == own:
+            previous = node.get("facet")
+            if previous == own:
                 return {"key": node_key, "facet": own, "changed": False}
-            if node.get("facet") is not None:
-                raise StateConflict(f"`{node_key}` is already facet {node['facet']}; a facet is set once — create a new node")
+            if previous is not None and node.get("verified_receipt"):
+                raise StateConflict(f"`{node_key}` was accepted as {previous}; a verified node keeps its facet — "
+                                    f"supersede it and create the {own} node")
             nodes, graph = self._graph(conn, project_id)
             facets = {k: n.get("facet") for k, n in nodes.items()}
             facets[node_key] = own
-            # Dependents that are already faceted were accepted against this
-            # node being legacy; they must still be legal once it has a label.
+            # Dependents were accepted against the old label (or none); every
+            # edge must still be legal under the new one.
             self._check_facets(facets, graph)
             conn.execute("UPDATE state_nodes SET facet=?,updated_at=? WHERE project_id=? AND node_key=?",
                          (own, now(), project_id, node_key))
-            self._event(conn, project_id, node_key, "node_facet_set", {"facet": own, "revision": node["revision"]})
-            return {"key": node_key, "facet": own, "changed": True}
+            self._event(conn, project_id, node_key, "node_facet_set",
+                        {"facet": own, "previous": previous, "revision": node["revision"]})
+            return {"key": node_key, "facet": own, "previous": previous, "changed": True}
 
     def facet_lint(self, project_id: str) -> dict:
         """The same rules, read-only, over the whole project including legacy nodes."""
@@ -404,7 +459,8 @@ class StateGraphStore:
             self._project(conn, project_id)
             nodes, graph = self._graph(conn, project_id)
         facets = {k: n.get("facet") for k, n in nodes.items()}
-        return {"violations": facet_violations(facets, graph),
+        return {"violations": facet_violations(facets, graph), "warnings": facet_warnings(facets, graph),
+                "shipping_gaps": shipping_gaps(facets, graph),
                 "faceted": sum(1 for f in facets.values() if f), "legacy": sum(1 for f in facets.values() if not f),
                 "facets": {k: f for k, f in sorted(facets.items()) if f}}
 

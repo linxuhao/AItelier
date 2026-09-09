@@ -86,16 +86,33 @@ class Api:
         return self._call(f"/api/state/commands/{action}", args)
 
 
-def plan(graph_nodes, chain, sample_tests):
-    """Compute the target graph. Returns (steps, facets, edges) for lint + apply."""
+def matches(node_key, selectors):
+    return any(node_key == s or node_key.startswith(s + ".") for s in selectors)
+
+
+def plan(graph_nodes, chain, sample_tests, integration=(), frozen=()):
+    """Compute the target graph. Returns (steps, facets, edges, skipped) for lint + apply.
+
+    `chain` is a node-key prefix, or "all" for every non-design node — the whole
+    project must migrate at once once dependencies cross chains, which they do
+    as soon as more than one domain is faceted. `integration` nodes keep their
+    edges: composing real implementations is precisely their job. `frozen` nodes
+    (an attempt is in flight) are never revised or labelled — retargeting a
+    running attempt's dependency snapshot is the one thing this must not do —
+    but their contract IS created, so everything downstream can still migrate.
+    """
     nodes = {n["node_key"]: n for n in graph_nodes}
     facets = {k: n.get("facet") for k, n in nodes.items()}
     edges = {k: list(n["dependencies"]) for k, n in nodes.items()}
     steps = []
 
     def contract_of(dep):
-        # A design node is buildable as is; anything else is reached via its contract.
-        return dep if facets.get(dep) == "design" or dep.startswith("design.") else dep + ".contract"
+        # A design node is buildable as is, and a contract node IS the contract —
+        # appending the suffix to one invents `x.contract.contract`. Anything
+        # else is reached through its contract.
+        if facets.get(dep) in ("design", "contract") or dep.startswith("design."):
+            return dep
+        return dep + ".contract"
 
     # Design nodes depend on design nodes, and a label is checked against the
     # node's edges, so they too are labelled dependencies-first.
@@ -108,7 +125,9 @@ def plan(graph_nodes, chain, sample_tests):
         facets[k] = "design"
     for k in sorted(nodes):
         label_design(k)
-    members = [k for k in sorted(nodes) if k.startswith(chain + ".") and not k.endswith((".contract", ".test"))]
+    members = [k for k in sorted(nodes)
+               if not k.startswith("design.") and not k.endswith((".contract", ".test"))
+               and (chain == "all" or k.startswith(chain + "."))]
     # Bottom-up so every contract exists before an edge points at it.
     order, seen = [], set()
 
@@ -123,14 +142,24 @@ def plan(graph_nodes, chain, sample_tests):
         visit(k)
     skipped = []
     for k in order:
-        foreign = [d for d in edges[k] if d not in members and not d.startswith("design.")]
+        own_siblings = {k + ".contract", k + ".test"}
+        foreign = [d for d in edges[k] if d not in members and d not in own_siblings
+                   and not d.startswith("design.") and facets.get(d) not in ("contract", "design")]
         if foreign:
-            skipped.append((k, foreign))
+            skipped.append((k, "depends outside the migrated set on " + ", ".join(foreign)))
             continue
         base = nodes[k]
+        if matches(k, integration):
+            # Edges stay: an integration node is where real implementations meet.
+            if facets.get(k) is None:
+                steps.append(("set_facet", k, "integration"))
+                facets[k] = "integration"
+            continue
         title = base["goal"].splitlines()[0][:120]
         ck, tk = k + ".contract", k + ".test"
-        cdeps = sorted({contract_of(d) for d in edges[k]})
+        # A node's own contract/test are added below as `own`; passing them
+        # through contract_of would ask for `<k>.test.contract`.
+        cdeps = sorted({contract_of(d) for d in edges[k] if d not in own_siblings})
         if ck not in nodes:
             steps.append(("add", {"key": ck, "facet": "contract", "dependencies": cdeps,
                                   "goal": f"「{title}」的接口契约：下游可依赖的类型/信号/方法签名与 stub/fake，不含实现。\n原目标：{base['goal'][:600]}",
@@ -145,6 +174,11 @@ def plan(graph_nodes, chain, sample_tests):
             own.append(tk)
         elif tk in nodes:
             own.append(tk)
+        if k in frozen:
+            # Its contract now exists for everything downstream; the node itself
+            # is left legacy (and therefore exempt) until its attempt settles.
+            skipped.append((k, "attempt in flight: contract created, node left legacy until it settles"))
+            continue
         new_deps = sorted({*own, *cdeps})
         if new_deps != sorted(edges[k]):
             steps.append(("revise", k, base["revision"], new_deps))
@@ -158,14 +192,18 @@ def plan(graph_nodes, chain, sample_tests):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--project", required=True)
-    ap.add_argument("--chain", required=True, help="node-key prefix, e.g. coop")
+    ap.add_argument("--chain", required=True, help='node-key prefix, e.g. coop, or "all"')
     ap.add_argument("--sample-test", action="append", default=[], help="node key that gets a .test node now")
+    ap.add_argument("--integration", action="append", default=[],
+                    help="node key or prefix whose nodes compose real implementations (e.g. validation)")
     ap.add_argument("--base", default=os.environ.get("AITELIER_URL", "http://127.0.0.1:4444"))
     ap.add_argument("--apply", action="store_true")
     args = ap.parse_args()
     api = Api(args.base, admin_token())
     graph = api.query("get_graph", project_id=args.project)["nodes"]
-    steps, facets, edges, skipped = plan(graph, args.chain, set(args.sample_test))
+    frozen = {a["node_key"] for a in api.query("project_attempts", project_id=args.project, limit=100)["attempts"]
+              if a["status"] in ACTIVE_STATUSES}
+    steps, facets, edges, skipped = plan(graph, args.chain, set(args.sample_test), args.integration, frozen)
     problems = facet_violations(facets, edges)
     print(f"project {args.project} chain {args.chain}: {len(graph)} nodes now, {len(facets)} after; {len(steps)} steps")
     for step in steps:
@@ -175,8 +213,8 @@ def main():
             print(f"  revise  {step[1]:40} r{step[2]} deps -> {step[3]}")
         else:
             print(f"  facet   {step[1]:40} -> {step[2]}")
-    for k, foreign in skipped:
-        print(f"  SKIP    {k:40} depends outside the chain on {foreign}; migrate that chain first")
+    for k, why in skipped:
+        print(f"  SKIP    {k:40} {why}")
     print("facet_lint on the resulting graph:", "clean" if not problems else "")
     for p in problems:
         print("  VIOLATION", p)
@@ -185,10 +223,9 @@ def main():
     if not args.apply:
         print("dry-run only; add --apply to execute")
         return 0
-    active = [a for a in api.query("project_attempts", project_id=args.project, limit=100)["attempts"]
-              if a["status"] in ACTIVE_STATUSES and a["node_key"].startswith(args.chain + ".")]
-    if active:
-        raise SystemExit("refusing: active attempts on " + ", ".join(sorted({a['node_key'] for a in active})))
+    touched = {step[1] if step[0] != "add" else step[1]["key"] for step in steps}
+    if touched & frozen:
+        raise SystemExit("refusing: attempt in flight on " + ", ".join(sorted(touched & frozen)))
     live = {n["node_key"]: n for n in api.query("get_graph", project_id=args.project)["nodes"]}
     for step in steps:
         if step[0] == "add":

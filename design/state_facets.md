@@ -1,8 +1,11 @@
 # State DAG facets — build on contracts, never on implementations
 
-Status: plan approved 2026-09-09; engine (Phase 1) + protocol (Phase 2) shipped
-in the same change; coop-chain migration (Phase 3) applied through the live API;
-the rest of the graph (Phase 4) waits for one real parallel round on coop.
+Status: shipped 2026-09-09. Engine (Phase 1) + protocol (Phase 2) in one change;
+coop chain (Phase 3) and then the whole `wuxia-myth` graph (Phase 4) migrated
+through the live API the same day, on the owner's instruction — Phase 4 was
+planned to wait for one real parallel round on coop, and did not. What that costs
+is stated under "Result": the parallelism is a projection off the graph, not yet
+a measurement.
 
 ## Why
 
@@ -94,8 +97,35 @@ revision.
 
 **The success metric is frontier width.** Before: 1 ready node in the chain. After
 the contract nodes verify: `encounter-isolation`, `authored-consequences`,
-`late-support` (and `world-facts` impl) ready together. If width does not change,
-the plan is wrong — stop before Phase 4.
+`late-support` (and `world-facts` impl) ready together.
+
+## Result (whole graph, 2026-09-09)
+
+40 → 59 nodes, `facet_lint` clean: design 5 (untouched, 4 VERIFIED with their
+receipts intact), contract 24, content 23, test 1, integration 5 (`validation.*`
+and `release.commercial-readiness` — the only nodes allowed to depend on
+implementations, so their edges were left alone), legacy 1.
+
+**Critical path through implementation-level work: 7 → 4.** Before, seven
+expensive nodes were strictly serial (`growth.proficiency → facility-quota →
+facility-tiers → save-compat → coop.reconnect → validation.coop-devices →
+release.commercial-readiness`). After, the longest chain is four, of which one is
+an implementation and three are integration/acceptance, and **all 24
+implementations sit at a single level**. The serial spine that remains is the
+contract layer (depth 5) — interfaces and stubs, the cheap half.
+
+**Measured frontier width did not move: 7 before, 7 after.** The migration
+*replaced* the implementations on the frontier with their contracts. The width
+gain arrives one layer later, when the contracts verify; that "24 ready at once"
+is computed off the graph, not observed. Verifying the contract layer is what
+turns it into a measurement — and if the number does not move then, this
+structure is wrong and the deferred list below is where to start unwinding.
+
+`growth.proficiency` is the one node left legacy: an external attempt was in
+flight, and retargeting a running attempt's dependency snapshot is the one thing
+this migration must not do. Its contract was created anyway, so everything
+downstream migrated; re-running the same command after the attempt settles
+finishes it (the script is idempotent).
 
 ## Explicitly deferred
 

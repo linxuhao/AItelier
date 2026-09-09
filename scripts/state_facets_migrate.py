@@ -30,11 +30,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.state_attempts import ACTIVE as ACTIVE_STATUSES  # noqa: E402
 from core.state_graph import facet_violations  # noqa: E402
 
+# A generated contract node is a PLACEHOLDER and must say so in a way that
+# blocks its own acceptance. The first template said "the interface compiles"
+# and "a read-back agrees with this contract" — a blind read-back of it (2026-09-09,
+# director/reports/readback-audit-coop-20260909.md) could name no type, signal or
+# method from the text, and found the second clause circular: it validated the
+# read-back rule itself, so any read-back could claim agreement. `inventory` is
+# what makes the placeholder refuse to pass, and `readback` now compares against
+# that inventory instead of against itself.
 CONTRACT_ACCEPTANCE = [
+    {"id": "inventory", "kind": "artifact",
+     "description": "本契约须在验收前被修订为逐项列出接口清单：类型/信号/方法签名及其参数、返回与错误约定，并写明用于判定「编译通过」的确切命令。清单为空即不可验收；本条不得由交付方自证"},
     {"id": "interface", "kind": "test",
-     "description": "接口（类型/信号/方法签名）与 stub/fake 编译通过；下游仅凭本节点即可对 fake 编写并运行测试"},
+     "description": "接口与 stub/fake 按 inventory 清单逐项实现并通过该命令；随附示例测试在只挂载本节点产物的隔离环境中全部通过（证明下游仅凭本节点即可对 fake 编写并运行测试）"},
     {"id": "readback", "kind": "review",
-     "description": "独立 read-back（只读本契约，不读 goal 原文与设计文档）与契约一致；记录为 note readback@r<revision>"},
+     "description": "独立 read-back（只读本契约，不读 goal 原文与设计文档）复述出的接口清单与交付的接口定义逐项比对：缺项/多项/签名不符各计一处偏差，偏差为 0 方可通过；记录为 note readback@r<revision>"},
 ]
 TEST_ACCEPTANCE = [
     {"id": "locatable", "kind": "test",

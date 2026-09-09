@@ -3,11 +3,13 @@
 Membership comes from explicit attempt/run references, never shared repo paths.
 No reconciliation, task dispatch or State verification happens here. Exact run
 IDs and usage events are deduplicated before summation. Finished means workflow
-completed, not an accepted State fact. External jobs have no synthetic run/usage.
+completed, not an accepted State fact. External jobs have no synthetic run/usage:
+an active external attempt is listed from its own last report, never observed.
 """
 from __future__ import annotations
 from collections import Counter
 
+from core.state_attempts import ACTIVE
 from core.state_graph import now
 
 # trace_query deliberately accepts only SELECT, not a WITH-prefixed query.
@@ -48,6 +50,18 @@ def project_run_summary(service, project_id):
             membership.setdefault(row['ref'], set()).add(row['node_key'])
         external = conn.execute("SELECT COUNT(*) FROM state_attempts WHERE project_id=? AND execution_kind='external'",
                                 (project_id,)).fetchone()[0]
+        # An external agent holding a task is the one execution nothing here can
+        # observe: no run to read, only what its harness last reported. Listing
+        # it as "reported" is the whole point; inferring liveness from silence
+        # would be the lie. A reserved attempt has no report yet, and says so.
+        holding = [dict(row) for row in conn.execute(
+            "SELECT attempt_id,node_key,node_revision,harness,external_id,reporting_actor,status,"
+            "observation_version,created_at,updated_at,"
+            "(SELECT o.created_at FROM state_external_observations o WHERE o.attempt_id=a.attempt_id"
+            " ORDER BY o.version DESC LIMIT 1) AS last_report_at "
+            "FROM state_attempts a WHERE project_id=? AND execution_kind='external' "
+            f"AND status IN ({','.join('?' * len(ACTIVE))}) ORDER BY updated_at DESC,attempt_id",
+            (project_id, *ACTIVE))]
     counts = {'total':len(membership),'running':0,'finished':0,'failed':0,'other':0,'unavailable':0}
     sums = Counter()
     running = []
@@ -121,6 +135,9 @@ def project_run_summary(service, project_id):
         'partial':bool(membership) and (usage_runs!=len(membership) or sums['token_turns']!=sums['turns']),
     }
     return {'project_id':project_id,'counts':counts,'running_runs':running,'usage':usage,
-            'external_attempts_excluded':external,'observed_at':now(),
+            'external_attempts_excluded':external,'running_external':holding,
+            'external_counts':{'active':len(holding),'total':external},
+            'observed_at':now(),
             'runtime_unavailable':engine_unavailable,
-            'scope':'Distinct workflow runs bound to State attempts or explicit run references; external executions are not synthetic runs.'}
+            'scope':'Distinct workflow runs bound to State attempts or explicit run references; external executions are not '
+                    'synthetic runs. Active external attempts are listed with their last reported status, not an observed one.'}

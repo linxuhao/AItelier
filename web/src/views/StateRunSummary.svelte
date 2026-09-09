@@ -3,7 +3,7 @@
   import { stateRunSummary } from '../lib/api';
   import { exactRunHref, type ProjectRunSummary } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
-  const { projectId, refresh = 0 }: {projectId:string;refresh?:number} = $props();
+  const { projectId, refresh = 0, onselect }: {projectId:string;refresh?:number;onselect?:(nodeKey:string)=>void} = $props();
   let data=$state<ProjectRunSummary|null>(null), error=$state(''), loading=$state(false);
   let generation=0, previousIdentity='';
   const allowed=$derived($authStore.permissionResolved && $authStore.canWrite);
@@ -53,6 +53,21 @@
         {/each}
       </ul>
     {:else if !data.counts.unavailable}<p class="summary-note">{st('summaryNoRunning')}</p>{/if}
+    {#if data.running_external?.length}
+      <p class="external-caption">{st('summaryExternalRunning')} · {data.running_external.length}</p>
+      <ul class="external-running" aria-label={st('summaryExternalRunning')}>
+        {#each data.running_external as job(job.attempt_id)}
+          <li title={`${job.harness} · ${job.external_id}\n${job.node_key} r${job.node_revision}\n${st('reporter')}: ${job.reporting_actor}\n${st('summaryLastReport')}: ${job.last_report_at ?? st('summaryExternalNoReport')}`}>
+            <span class="external-dot" aria-hidden="true"></span><strong>{job.harness}</strong>
+            {#if onselect}<button class="node-jump" onclick={()=>onselect(job.node_key)}>{job.node_key}</button>
+            {:else}<span class="run-node">{job.node_key}</span>{/if}<span class="external-state">{job.status}</span>
+            <code class="external-ref">{job.external_id}</code>
+            <small>{job.last_report_at ?? st('summaryExternalNoReport')}</small>
+          </li>
+        {/each}
+      </ul>
+      <p class="summary-note">{st('summaryExternalReported')}</p>
+    {/if}
     {#if data.counts.unavailable}<p class="summary-note" role="status">{st('summaryUnavailable')}: {data.counts.unavailable}. {st('summaryLowerBounds')}</p>{/if}
     {#if data.counts.total && (data.usage.partial || data.usage.cache_reported_turns!==data.usage.usage_turns || data.usage.usage_errors)}
       <p class="summary-note">{st('summaryCoverage')}: {data.usage.runs_with_token_usage}/{data.counts.total}. {st('summaryUnknown')}</p>
@@ -75,6 +90,19 @@
   .running-runs a:hover,.running-runs a:focus-visible{border-color:var(--pico-primary,#0066cc);text-decoration:underline;}
   .running-runs strong{font-weight:600;overflow-wrap:anywhere;}.run-node{max-width:20rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.65rem;color:var(--pico-muted-color,#64748b);}
   .running-dot{width:.4rem;height:.4rem;border-radius:50%;background:var(--pico-primary,#0066cc);flex:none;}code{font-size:.63rem;white-space:nowrap;}
+  .external-caption{font-size:.65rem;line-height:1.35;margin:.45rem 0 0;color:var(--pico-muted-color,#64748b);}
+  .external-running{list-style:none;display:flex;flex-wrap:wrap;gap:.3rem;margin:.25rem 0 0;padding:0;max-height:6.5rem;overflow:auto;}
+  .external-running li{list-style:none;min-width:0;max-width:100%;display:flex;align-items:center;gap:.4rem;padding:.3rem .5rem;margin:0;
+    border:1px dashed var(--pico-muted-border-color,#dbe3ec);border-radius:5px;line-height:1.3;font-size:.75rem;}
+  .external-running strong{font-weight:600;overflow-wrap:anywhere;}
+  .external-dot{width:.4rem;height:.4rem;border-radius:50%;background:var(--pico-muted-color,#64748b);flex:none;}
+  .external-state{font-size:.63rem;border:1px solid var(--pico-muted-border-color,#dbe3ec);border-radius:4px;padding:.05rem .25rem;}
+  .external-ref{max-width:11rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .node-jump{border:0;padding:0;margin:0;width:auto;background:none;color:var(--pico-primary,#0066cc);font-size:.65rem;line-height:1.3;
+    max-width:20rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .node-jump:hover,.node-jump:focus-visible{text-decoration:underline;}
+  .external-running small{font-size:.6rem;color:var(--pico-muted-color,#64748b);white-space:nowrap;}
   .summary-note,.summary-error{font-size:.65rem;line-height:1.35;margin:.3rem 0 0;overflow-wrap:anywhere;}.summary-note{color:var(--pico-muted-color,#64748b);}.summary-error{color:var(--pico-del-color,#ad2828);}
-  @media(max-width:680px){.run-summary-metrics{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:.4rem;}.run-node{max-width:7rem;}.running-runs a{flex-wrap:wrap;}.running-runs{max-height:9rem;}}
+  @media(max-width:680px){.run-summary-metrics{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:.4rem;}.run-node{max-width:7rem;}.running-runs a{flex-wrap:wrap;}.running-runs{max-height:9rem;}
+    .external-running li{flex-wrap:wrap;}.external-ref{max-width:7rem;}.external-running{max-height:9rem;}.node-jump{max-width:7rem;}}
 </style>

@@ -101,6 +101,17 @@ describe('Long-lived project pages', () => {
     await waitFor(()=>expect(view.container.querySelector('.node-panel')?.textContent).toContain('Detailed requirement for month.actions'));
     expect(api.stateRefreshProject).not.toHaveBeenCalled();
   });
+  it('selects the goal an external agent holds from the run summary', async () => {
+    api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id,
+      external_attempts_excluded:1,external_counts:{active:1,total:1},
+      running_external:[{attempt_id:'attempt-external',node_key:'month.actions',node_revision:1,harness:'own-harness',
+        external_id:'job-1',reporting_actor:'director@test',status:'running',observation_version:1,
+        created_at:'2026-09-09T08:00:00Z',updated_at:'2026-09-09T08:10:00Z',last_report_at:'2026-09-09T08:10:00Z'}]}));
+    const view=render(StateProject,{params:{id:'game'}});
+    await view.findByRole('heading',{name:'武虾传奇'});
+    await fireEvent.click(await view.findByRole('button',{name:'month.actions'}));
+    await waitFor(()=>expect(view.container.querySelector('.node-panel')?.textContent).toContain('Detailed requirement for month.actions'));
+  });
   it('observes workflow outcomes only on explicit sync and handles next batch', async () => {
     api.stateRefreshProject.mockResolvedValueOnce({results:[{attempt_id:'attempt-one',error:'StateConflict'}],next_after:10})
       .mockResolvedValueOnce({results:[],next_after:null});

@@ -1,5 +1,5 @@
 import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
-import {render,cleanup,waitFor} from '@testing-library/svelte';
+import {render,cleanup,fireEvent,waitFor} from '@testing-library/svelte';
 import {authStore} from '../../stores/auth';
 import {langStore} from '../../stores/i18n';
 import {runSummary} from '../fixtures/stateProject';
@@ -67,6 +67,50 @@ describe('State graph run summary',()=>{
     const view=render(StateRunSummary,{projectId:'game'});await view.findByText(/Run statuses unavailable/);
     expect(view.container.querySelector('[data-metric="running"] dd')?.textContent).toBe('≥ 0');
     expect(view.queryByText('No related run is currently running.')).toBeNull();
+  });
+  it('lists external agents holding a task, as reported, without inventing run links',async()=>{
+    api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:3,external_counts:{active:2,total:3},
+      running_external:[
+        {attempt_id:'attempt-reported',node_key:'growth.progress',node_revision:1,harness:'director-subagents',
+         external_id:'job-7f3c',reporting_actor:'director@test',status:'running',observation_version:2,
+         created_at:'2026-09-09T08:00:00Z',updated_at:'2026-09-09T09:30:00Z',last_report_at:'2026-09-09T09:30:00Z'},
+        {attempt_id:'attempt-silent',node_key:'month.actions',node_revision:2,harness:'own-harness',
+         external_id:'job-a19b',reporting_actor:'director@test',status:'running',observation_version:0,
+         created_at:'2026-09-09T09:00:00Z',updated_at:'2026-09-09T09:00:00Z',last_report_at:null}]});
+    const view=render(StateRunSummary,{projectId:'game'});
+    await view.findByText('director-subagents');
+    const rows=view.container.querySelectorAll('.external-running li');expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain('growth.progress');
+    expect(rows[0].textContent).toContain('job-7f3c');
+    expect(rows[0].textContent).toContain('2026-09-09T09:30:00Z');
+    expect(rows[1].textContent).toContain('No report yet');
+    // Workflow counters stay workflow-scoped and no external row pretends to be a run.
+    expect(view.container.querySelector('[data-metric="running"] dd')?.textContent).toBe('0');
+    expect(view.container.querySelectorAll('a')).toHaveLength(0);
+    expect(view.getByText('No related run is currently running.')).toBeTruthy();
+    expect(view.container.textContent).toContain('not observed here');
+  });
+  it('jumps to the goal the external agent is working on',async()=>{
+    const jump=vi.fn();
+    api.stateRunSummary.mockResolvedValue({...runSummary(),external_counts:{active:1,total:1},external_attempts_excluded:1,
+      running_external:[{attempt_id:'attempt-one',node_key:'month.actions',node_revision:1,harness:'own-harness',
+        external_id:'job-1',reporting_actor:'director@test',status:'running',observation_version:1,
+        created_at:'2026-09-09T08:00:00Z',updated_at:'2026-09-09T08:10:00Z',last_report_at:'2026-09-09T08:10:00Z'}]});
+    const view=render(StateRunSummary,{projectId:'game',onselect:jump});
+    await fireEvent.click(await view.findByRole('button',{name:'month.actions'}));
+    expect(jump).toHaveBeenCalledWith('month.actions');
+    expect(view.container.querySelectorAll('a')).toHaveLength(0);
+  });
+  it('drops an external agent that no longer holds the task',async()=>{
+    const holding={...runSummary(),external_counts:{active:1,total:1},external_attempts_excluded:1,
+      running_external:[{attempt_id:'attempt-one',node_key:'growth.progress',node_revision:1,harness:'own-harness',
+        external_id:'job-1',reporting_actor:'director@test',status:'running',observation_version:1,
+        created_at:'2026-09-09T08:00:00Z',updated_at:'2026-09-09T08:10:00Z',last_report_at:'2026-09-09T08:10:00Z'}]};
+    api.stateRunSummary.mockResolvedValue(holding);
+    const view=render(StateRunSummary,{projectId:'game',refresh:0});await view.findByText('own-harness');
+    api.stateRunSummary.mockResolvedValue({...holding,external_counts:{active:0,total:1},running_external:[]});
+    await view.rerender({projectId:'game',refresh:1});
+    await waitFor(()=>expect(view.container.querySelectorAll('.external-running li')).toHaveLength(0));
   });
   it('explains excluded external harness attempts without creating fake run links',async()=>{
     api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:2});

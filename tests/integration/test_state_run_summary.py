@@ -136,9 +136,38 @@ def test_external_only_state_does_not_initialize_optional_executor(tmp_path):
     out=service.project_run_summary('game')
     assert out['counts']['total']==0 and out['usage']['total_tokens']==0
     assert out['usage']['cache_hit_ratio'] is None
-    assert out['external_attempts_excluded']==1
+    assert out['external_attempts_excluded']==1 and len(out['running_external'])==1
     with service.db.get_connection() as c:
         assert not c.execute("SELECT 1 FROM sqlite_master WHERE name='runs'").fetchone()
+
+
+def test_active_external_agents_are_listed_from_their_own_last_report(tmp_path):
+    """A held task with no run at all must still be visible, as reported."""
+    def forbidden():raise AssertionError('Listing external agents must not initialize a runtime')
+    service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=forbidden,actor='director@example')
+    service.create_project('game','Game')
+    service.store.add_nodes('game',[spec('a'),spec('b'),spec('c')])
+    silent=service.start_external_attempt('game','a',1,'own-harness','job-a','req-a')
+    talking=service.start_external_attempt('game','b',1,'own-harness','job-b','req-b')
+    service.report_external_attempt(talking['attempt_id'],'progress-1',0,talking['context_hash'],'running',
+        'reports/progress-1.json','b'*64,detail='Worker started')
+    done=service.start_external_attempt('game','c',1,'own-harness','job-c','req-c')
+    service.report_external_attempt(done['attempt_id'],'final-1',0,done['context_hash'],'candidate',
+        'reports/final-1.json','b'*64,quiescent=True,artifact='a'*64,artifact_kind='sha256')
+    out=service.project_run_summary('game')
+    assert out['counts']=={'total':0,'running':0,'finished':0,'failed':0,'other':0,'unavailable':0}
+    assert out['external_attempts_excluded']==3 and out['external_counts']=={'active':2,'total':3}
+    listed={row['node_key']:row for row in out['running_external']}
+    assert set(listed)=={'a','b'},'a settled candidate is not still holding the task'
+    # Registration alone claims the task: status 'running' with nothing reported yet.
+    assert listed['a']['status']=='running' and listed['a']['last_report_at'] is None
+    assert listed['a']['observation_version']==0
+    assert listed['a']['harness']=='own-harness' and listed['a']['external_id']=='job-a'
+    assert listed['a']['reporting_actor']=='director@example' and listed['a']['node_revision']==1
+    assert listed['b']['status']=='running' and listed['b']['observation_version']==1
+    assert listed['b']['last_report_at']
+    # The report is the only evidence of activity; nothing here observed a process.
+    assert 'job-c' not in json.dumps(out)
 
 
 def test_missing_run_or_unavailable_runtime_is_not_finished_failed_or_zero_activity(system):

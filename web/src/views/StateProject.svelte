@@ -105,7 +105,7 @@
       </nav>
       <p class="snapshot">{st('snapshot')}: {data.observed_at} · event {data.event_seq} {loading ? ' · ' + st('loading') : ''}</p>
       {#if tab === 'graph'}
-        <StateRunSummary projectId={params.id} refresh={detailRefresh}/>
+        <StateRunSummary projectId={params.id} refresh={detailRefresh} onselect={selectNode}/>
         <div class="workspace"><StateGraph nodes={data.nodes} {selected} onselect={selectNode} />
           <StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} /></div>
       {:else if tab === 'runs'}

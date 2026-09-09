@@ -90,6 +90,10 @@ class StateDesign:
         result['manifest'] = json.loads(result.pop('manifest_json'))
         return result
 
+    def search(self, project_id, query, baseline_id=None, scope=None, limit=20, offset=0):
+        from core.state_design_queries import search
+        return search(self, project_id, query, baseline_id, scope, limit, offset)
+
     def get_revision(self, project_id, design_id, revision):
         with self.store.transaction() as conn:
             self.store._project(conn, project_id)

@@ -498,6 +498,7 @@
   }
 
   function runActiveStep(run: Record<string, unknown>): Record<string, unknown> | null {
+    if (String(run.status || '').split(':', 1)[0] !== 'running') return null;
     const snapshot = run.active_step;
     if (!snapshot || typeof snapshot !== 'object') return null;
     return snapshot as Record<string, unknown>;
@@ -505,8 +506,9 @@
 
   function activeStepText(step: Record<string, unknown>): string {
     const id = String(step.step_id || '');
+    const label = stepLabel(id);
     const item = String(step.loop_item || '');
-    return stepLabel(id) + (item ? ` · ${item}` : '');
+    return id + (label !== id ? ` · ${label}` : '') + (item ? ` · ${item}` : '');
   }
 
   function taskSteps(task: Record<string, unknown>): string {

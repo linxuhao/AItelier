@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from api.auth import get_optional_user
 from api.authz import require_writer
 from api.dependencies import get_db_manager, get_skillflow, owner_filter
+from api.run_routers import _active_step_snapshot
 
 router = APIRouter(prefix="/api", tags=["Run history"], dependencies=[Depends(require_writer)])
 
@@ -43,6 +44,11 @@ def run_history(request: Request, q: str = Query("", max_length=200),
         if workflow and run.get('graph_name') != workflow:
             continue
         row = {field: run.get(field) for field in ('id','project_id','status','current_node','created_at','updated_at','started_at','completed_at','graph_version')}
+        # current_node is graph position, so only expose an executing step when
+        # the run itself is running. The helper prefers claimed/running step
+        # instances and uses current_node only during a transition window.
+        steps = sf.get_steps(run['id']) if run.get('status') == 'running' else []
+        row['active_step'] = _active_step_snapshot(run, steps)
         row.update(config_name=run.get('graph_name'), execution_name=project.get('name') or pid or run['id'],
                    repo_path=project.get('repo_path'), state_project_id=link.get('project_id'),
                    state_node_key=link.get('node_key'), attempt_id=link.get('attempt_id'))

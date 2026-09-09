@@ -169,6 +169,25 @@ describe('Detail races and exact run navigation', () => {
     await waitFor(()=>expect(view.container.textContent).toContain('graph v2'));
     expect(view.container.querySelector('a[href="#/projects/sg-one/trace/run-old"]')).toBeTruthy();
   });
+  it('shows the exact active step id and manifest label only while running', async () => {
+    api.getRunDetail.mockResolvedValue({
+      id:'run-old',config_name:'feature',project_id:'sg-one',status:'running',steps:[],
+      active_step:{step_id:'work',status:'claimed',instance_id:8,loop_item:'goal-a',source:'step_instance'},
+      manifest:{labels:{work:'Build artifact'}},
+    });
+    const live=render(StateRun,{params:{runId:'run-old'}});
+    await live.findByText(/Running step:/);
+    expect(live.container.querySelector('.active-step')?.textContent).toContain('work · Build artifact · goal-a');
+    live.unmount();
+
+    api.getRunDetail.mockResolvedValue({
+      id:'run-wait',config_name:'feature',project_id:'sg-one',status:'paused',steps:[],
+      active_step:{step_id:'review',status:'paused',instance_id:null,loop_item:null,source:'current_node'},
+    });
+    const waiting=render(StateRun,{params:{runId:'run-wait'}});
+    await waiting.findByText(/run-wait/);
+    expect(waiting.queryByText(/Running step:/)).toBeNull();
+  });
   it('does not fall back when pinned history is unavailable', async () => {
     api.getRunDetail.mockResolvedValue({id:'run-old',graph_name:'feature',project_id:'sg-one',status:'failed',steps:[]});
     api.runWorkflowGraph.mockRejectedValue(new Error('Pinned history missing'));

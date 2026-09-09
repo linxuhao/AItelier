@@ -5,7 +5,7 @@
   import { nt, type RunRow } from '../lib/navigation.svelte';
   import { st } from '../lib/stateI18n.svelte';
   import { exactRunHref, stateProjectHref } from '../lib/stateGraph';
-  import { formatTime } from '../lib/format';
+  import { formatTime, stepLabel } from '../lib/format';
   const { params = {} }: {params?:{projectId?:string}}=$props();
   const allowed=$derived($authStore.permissionResolved && $authStore.canWrite);
   let rows=$state<RunRow[]>([]), loading=$state(false), error=$state(''), next=$state<number|null>(null), total=$state(0), retry=$state(0);
@@ -27,6 +27,14 @@
     return ()=>{generation++;};
   });
   onMount(()=>{const timer=setInterval(()=>{if(allowed && !loading && document.visibilityState==='visible')retry++;},15000);return ()=>clearInterval(timer);});
+  function activeStepText(run: RunRow): string {
+    if (run.status !== 'running' || !run.active_step) return '';
+    const id = String(run.active_step.step_id || '');
+    if (!id) return '';
+    const label = stepLabel(id);
+    const item = String(run.active_step.loop_item || '');
+    return `${id}${label !== id ? ` · ${label}` : ''}${item ? ` · ${item}` : ''}`;
+  }
   async function more(){
     if(next===null || loading)return;
     const version=generation;loading=true;
@@ -52,12 +60,13 @@
     {#if !loading && !error && !rows.length}<p>{nt('emptyRuns')}</p>{/if}
     <div class="run-grid">
       {#each rows as run(run.id)}
+        {@const activeStep = activeStepText(run)}
         <article class="history-run" data-run-id={run.id}>
           <div class="run-top"><a class="run-name" href={exactRunHref(run.id)}>{run.config_name}</a><span class="run-badge {run.status}">{run.status.toUpperCase()}</span></div>
           <h2><a href={exactRunHref(run.id)}>{run.execution_name}</a></h2>
           <p class="identity"><code>{run.id}</code> · graph v{run.graph_version??'?'}</p>
           {#if run.state_project_id}<p><a href={stateProjectHref(run.state_project_id,run.state_node_key??undefined)}>{run.state_project_id} / {run.state_node_key}</a></p>{/if}
-          <p class="meta">{run.current_node??'—'} · {formatTime(run.updated_at??run.created_at)}</p>
+          <p class="meta">{#if activeStep}<strong>{nt('runningStep')}:</strong> {activeStep} · {/if}{formatTime(run.updated_at??run.created_at)}</p>
           <div class="links"><a href={exactRunHref(run.id)}>{nt('open')} →</a>{#if run.project_id}<a href={`#/projects/${encodeURIComponent(run.project_id)}`}>{nt('execution')} ↗</a>{/if}</div>
         </article>
       {/each}

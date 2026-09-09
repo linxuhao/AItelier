@@ -42,6 +42,16 @@ def test_repeated_and_repo_free_and_authoring_runs_are_each_present(system):
     assert not any('input_data' in r or 'output' in r for r in out['runs'])
 
 
+def test_history_exposes_only_a_running_step(system):
+    rows = {r['id']: r for r in system.client.get('/api/run-history').json()['runs']}
+    running = rows[system.ids[1]]
+    assert running['status'] == 'running'
+    assert running['active_step']['step_id'] == running['current_node'] == 'a'
+    assert running['active_step']['source'] == 'current_node'
+    assert rows[system.ids[2]]['status'] == 'paused'
+    assert rows[system.ids[2]]['active_step'] is None
+
+
 def test_owner_scope_applies_before_aggregation(system,monkeypatch):
     monkeypatch.setattr(routes,'owner_filter',lambda *_:'owner@test')
     out=system.client.get('/api/run-history').json()

@@ -2,12 +2,24 @@
   import { authStore } from '../stores/auth';
   import { getRunDetail } from '../lib/api';
   import { nt } from '../lib/navigation.svelte';
+  import { stepLabel } from '../lib/format';
   import { st } from '../lib/stateI18n.svelte';
   import PipelineGraph from './PipelineGraph.svelte';
   import RunStateLinks from './RunStateLinks.svelte';
   const { params }: {params: {runId: string}} = $props();
   let run = $state<Record<string, any> | null>(null), error = $state(''), retry = $state(0);
   const allowed = $derived($authStore.permissionResolved && $authStore.canWrite);
+  function activeStepText(value: Record<string, any>): string {
+    if (String(value.status || '').split(':', 1)[0] !== 'running') return '';
+    const step = value.active_step;
+    if (!step || typeof step !== 'object') return '';
+    const id = String(step.step_id || '');
+    if (!id) return '';
+    const labels = value.manifest?.labels;
+    const label = labels && typeof labels === 'object' ? String(labels[id] || '') : stepLabel(id);
+    const item = String(step.loop_item || '');
+    return id + (label && label !== id ? ` · ${label}` : '') + (item ? ` · ${item}` : '');
+  }
   $effect(() => {
     const id = params.runId, canRead = allowed; void retry;
     let cancelled = false; run = null; error = '';
@@ -25,7 +37,9 @@
   {:else if error}<p role="alert">{error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button>
   {:else if !run}<p>{st('loading')}</p>
   {:else}
-    <header><div><h1>{st('run')} · {run.config_name ?? run.graph_name}</h1><p><code>{params.runId}</code> · {run.status}</p></div>
+    {@const activeStep = activeStepText(run)}
+    <header><div><h1>{st('run')} · {run.config_name ?? run.graph_name}</h1><p><code>{params.runId}</code> · {run.status}</p>
+      {#if activeStep}<p class="active-step"><strong>{nt('runningStep')}:</strong> {activeStep}</p>{/if}</div>
       <button class="outline" onclick={() => retry++}>{st('reload')}</button></header>
     <RunStateLinks runId={params.runId} />
     <p class="note">{st('complete')}</p>

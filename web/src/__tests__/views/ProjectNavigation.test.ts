@@ -80,6 +80,19 @@ describe('Runs and definitions have separate queries',()=>{
     expect(view.container.querySelector('a[href="#/state-projects/game/nodes/growth.progress"]')).toBeTruthy();
     expect(api.listAllRuns).not.toHaveBeenCalled();expect(api.listPipelines).not.toHaveBeenCalled();
   });
+  it('names the executing step only for a running run',async()=>{
+    api.runHistory.mockResolvedValue({runs:[
+      run('live',{status:'running',current_node:'stale',active_step:{step_id:'t_impl',status:'claimed',instance_id:9,loop_item:'map_task',source:'step_instance'}}),
+      run('waiting',{status:'paused',current_node:'review',active_step:{step_id:'review',status:'paused',instance_id:null,loop_item:null,source:'current_node'}}),
+    ],total:2,next_offset:null});
+    const view=render(Runs);
+    await view.findByText(/Running step:/);
+    const live=view.container.querySelector('[data-run-id="live"]')!;
+    expect(live.textContent).toContain('t_impl · Implementer · map_task');
+    const waiting=view.container.querySelector('[data-run-id="waiting"]')!;
+    expect(waiting.textContent).not.toContain('Running step');
+    expect(waiting.textContent).not.toContain('review');
+  });
   it('filters through the actual run endpoint before paging',async()=>{
     const view=render(Runs,{params:{projectId:'game'}});await view.findByText('RUNNING');
     await fireEvent.change(view.getByLabelText('Run status'),{target:{value:'paused'}});

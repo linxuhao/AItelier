@@ -306,6 +306,19 @@ describe('Project.svelte', () => {
     });
   });
 
+  it('does not present a paused checkpoint pointer as a running step', async () => {
+    mockApi.listRuns.mockResolvedValue({ runs: [{
+      ...MOCK_RUNS[1], status: 'paused', current_node: 't_impl',
+      active_step: {step_id: 't_impl', status: 'paused', source: 'current_node'},
+    }] });
+
+    const { container, findByText } = render(await import('../../views/Project.svelte'), {
+      props: { params: { id: 'test-project' } },
+    });
+    await findByText('Test Project');
+    expect(container.querySelector('.run-row .active-step-line')).toBeNull();
+  });
+
   it('does not show current_node for a terminal run', async () => {
     mockApi.listRuns.mockResolvedValue({ runs: [{
       ...MOCK_RUNS[0], status: 'completed', current_node: 't_impl', active_step: null,

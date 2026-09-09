@@ -31,6 +31,13 @@ def test_terminal_run_never_exposes_a_stale_step():
     ) is None
 
 
+def test_paused_run_never_claims_a_step_is_executing():
+    assert _active_step_snapshot(
+        _run("paused", "t_impl"),
+        [{"id": 41, "step_id": "t_impl", "status": "claimed"}],
+    ) is None
+
+
 def test_active_run_uses_current_node_only_between_step_instances():
     assert _active_step_snapshot(_run("running", "t_plan"), []) == {
         "step_id": "t_plan",

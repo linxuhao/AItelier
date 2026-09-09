@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api", tags=["Runs & Traces"])
 
 
 _ACTIVE_STEP_STATUSES = {"claimed", "running"}
-_ACTIVE_RUN_STATUSES = {"running", "paused"}
+_ACTIVE_RUN_STATUSES = {"running"}
 
 
 def _active_step_snapshot(run: dict, steps: list[dict]) -> dict | None:

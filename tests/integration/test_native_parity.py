@@ -626,3 +626,59 @@ async def test_output_ceiling_driver_has_no_confirm_or_retry(budget_case, monkey
     assert sf.get_run(rid)["current_node"] == "t_impl"
     assert draft.exists() is partial
     assert not (ws.get_code_path("default")/"partial.gd").exists()
+
+def test_repeated_grant_is_denied_after_only_a_failed_tool_call(engine):
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine.factory.get_max_tool_turns.return_value = 4
+    engine._exec_tool = MagicMock(side_effect=[
+        {"status": "granted"}, {"error": "old_str not found"},
+        {"status": "granted"}, {"status": "ok"},
+    ])
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.side_effect = [
+        _turn(tool_calls=[_tc("ask_more_turns", {"turns": 6}, "a1")]),
+        _turn(tool_calls=[_tc("edit", {"path": "x"}, "e1")]),
+        _turn(tool_calls=[_tc("ask_more_turns", {"turns": 6}, "a2")]),
+        _turn(tool_calls=[_tc("finish_step", {}, "f1")]),
+    ]
+    assert _run(engine, ws) is True
+    tool_payloads = []
+    for call in nat.turn.call_args_list:
+        for message in call.kwargs["messages"]:
+            if message.get("role") == "tool":
+                tool_payloads.append(json.loads(message["content"]))
+    assert any(p.get("status") == "denied"
+               and "no progress" in p.get("note", "").lower()
+               for p in tool_payloads)
+
+
+def test_native_loop_sends_a_bounded_projection_and_traces_the_reduction(engine):
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine.factory.get_max_tool_turns.return_value = 5
+    engine._exec_tool = MagicMock(side_effect=[
+        {"content": "a" * 50000},
+        {"content": "b" * 50000},
+        {"written": "main.py"},
+        {"status": "ok"},
+    ])
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.side_effect = [
+        _turn(reasoning="r" * 20000,
+              tool_calls=[_tc("read_file", {"path": "a"}, "r1")]),
+        _turn(reasoning="s" * 20000,
+              tool_calls=[_tc("read_file", {"path": "b"}, "r2")]),
+        _turn(tool_calls=[_tc("write", {"file": "main.py"}, "w1")]),
+        _turn(tool_calls=[_tc("finish_step", {}, "f1")]),
+    ]
+    events = []
+    engine._trace_cb = lambda category, event, payload: events.append(
+        (category, event, payload))
+    assert _run(engine, ws) is True
+
+    third_prompt = nat.turn.call_args_list[2].kwargs["messages"]
+    first_read = next(m for m in third_prompt
+                      if m.get("tool_call_id") == "r1")
+    assert json.loads(first_read["content"])["_aitelier_compacted"] is True
+    assert any(event == "prompt_projection"
+               and payload["projected_chars"] < payload["original_chars"]
+               for _category, event, payload in events)

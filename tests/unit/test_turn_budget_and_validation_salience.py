@@ -170,3 +170,18 @@ def test_the_runner_passes_the_explicit_field_not_the_label():
     src = inspect.getsource(PipelineEngine.run_step)
     assert "validation_error" in inspect.signature(PipelineEngine.run_step).parameters
     assert "self._validation_error = validation_error" in src
+
+class TestProgressAwareTurnGrants:
+    def test_a_second_grant_requires_progress_since_the_first(self):
+        from core.dpe_pipeline import _grant_turns
+        extra, grants, _ = _grant_turns(0, 6, made_progress=True)
+        assert extra == 6 and grants == 1
+        extra, grants2, message = _grant_turns(
+            grants, 6, made_progress=False)
+        assert extra == 0 and grants2 == grants
+        assert "progress" in message.lower()
+
+    def test_new_evidence_can_earn_the_second_bounded_grant(self):
+        from core.dpe_pipeline import _grant_turns
+        extra, grants, _ = _grant_turns(1, 6, made_progress=True)
+        assert extra == 6 and grants == 2

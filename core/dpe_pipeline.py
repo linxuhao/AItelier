@@ -9,6 +9,7 @@
 import logging
 import os
 import json
+import hashlib
 import threading
 import re
 import time
@@ -65,9 +66,12 @@ _LOW_TURN_BUDGET = 3
 # left asks instead of being cut off (R5: 15 exhaustions, 0 asks).
 _MAX_TURN_GRANTS = 2
 _GRANT_TURNS_MAX = 6
+_NATIVE_HISTORY_TOOL_CHARS = 64 * 1024
+_NATIVE_REASONING_MARKER_CHARS = 512
 
 
-def _grant_turns(turn_grants: int, asked: int) -> tuple[int, int, str]:
+def _grant_turns(turn_grants: int, asked: int, *,
+                 made_progress: bool = True) -> tuple[int, int, str]:
     """Decide one ask_more_turns call: (extra, new_turn_grants, message).
 
     ONE place for both turn loops. The JSON-actions loop capped grants at
@@ -81,10 +85,139 @@ def _grant_turns(turn_grants: int, asked: int) -> tuple[int, int, str]:
             f"ask_more_turns: DENIED — {_MAX_TURN_GRANTS} grants already used "
             f"this step. Finish now: deliver what exists and list what is "
             f"missing in the delivery notes.")
+    if turn_grants and not made_progress:
+        return 0, turn_grants, (
+            "ask_more_turns: DENIED — no progress: no new successful tool "
+            "result or write since the previous grant. Use the remaining "
+            "budget to finish; repeating failed calls does not earn more turns.")
     extra = max(0, min(int(asked), _GRANT_TURNS_MAX))
     turn_grants += 1
     return extra, turn_grants, (
         f"ask_more_turns: +{extra} turns granted ({turn_grants}/{_MAX_TURN_GRANTS}).")
+
+
+
+def _is_failed_tool_result(content: str) -> bool:
+    try:
+        value = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(value, dict):
+        return False
+    if value.get("error"):
+        return True
+    return str(value.get("status", "")).lower() in {
+        "denied", "error", "failed", "failure",
+    }
+
+
+def _compact_marker(content: str, kind: str) -> str:
+    digest = hashlib.sha256(
+        content.encode("utf-8", errors="replace")).hexdigest()[:16]
+    edge = _NATIVE_REASONING_MARKER_CHARS // 2
+    preview = content[:edge]
+    if len(content) > edge * 2:
+        preview += "\n…\n" + content[-edge:]
+    if kind == "tool result":
+        return json.dumps({
+            "_aitelier_compacted": True,
+            "original_chars": len(content),
+            "sha256": digest,
+            "preview": preview,
+            "note": "Full result is retained in the durable tool trace.",
+        }, ensure_ascii=False)
+    return (
+        f"[Earlier reasoning compacted; {len(content)} chars; sha256={digest}. "
+        "Full reasoning is retained in the durable response trace.] "
+        f"{preview}"
+    )
+
+
+def _project_native_messages(messages: list[dict], *,
+                             history_char_budget: int = _NATIVE_HISTORY_TOOL_CHARS
+                             ) -> tuple[list[dict], dict]:
+    """Build the bounded provider view while leaving the durable history intact.
+
+    The latest tool result and latest reasoning remain verbatim. The first tool
+    failure also remains verbatim so retries keep the original diagnostic.
+    Older large results and reasoning are replaced by deterministic references;
+    their full values remain in prompt_delta/tool/response trace events and are
+    restored on resume before this same projection is applied again.
+    """
+    projected = [dict(m) if isinstance(m, dict) else m for m in messages]
+    tool_indices = [i for i, m in enumerate(projected)
+                    if isinstance(m, dict) and m.get("role") == "tool"
+                    and isinstance(m.get("content"), str)]
+    reasoning_indices = [i for i, m in enumerate(projected)
+                         if isinstance(m, dict)
+                         and isinstance(m.get("reasoning_content"), str)
+                         and m.get("reasoning_content")]
+    first_failure = next(
+        (i for i in tool_indices
+         if _is_failed_tool_result(projected[i]["content"])), None)
+    protected_tools = {tool_indices[-1]} if tool_indices else set()
+    if first_failure is not None:
+        protected_tools.add(first_failure)
+
+    remaining = max(0, int(history_char_budget))
+    for i in protected_tools:
+        remaining = max(0, remaining - len(projected[i]["content"]))
+
+    compacted_tools = 0
+    for i in reversed(tool_indices):
+        if i in protected_tools:
+            continue
+        content = projected[i]["content"]
+        if len(content) <= remaining:
+            remaining -= len(content)
+            continue
+        projected[i]["content"] = _compact_marker(content, "tool result")
+        compacted_tools += 1
+
+    compacted_reasoning = 0
+    latest_reasoning = reasoning_indices[-1] if reasoning_indices else None
+    for i in reasoning_indices:
+        if i == latest_reasoning:
+            continue
+        content = projected[i]["reasoning_content"]
+        if len(content) <= _NATIVE_REASONING_MARKER_CHARS:
+            continue
+        projected[i]["reasoning_content"] = _compact_marker(content, "reasoning")
+        compacted_reasoning += 1
+
+    def _chars(seq):
+        total = 0
+        for m in seq:
+            if not isinstance(m, dict):
+                continue
+            for key in ("content", "reasoning_content"):
+                if isinstance(m.get(key), str):
+                    total += len(m[key])
+        return total
+
+    report = {
+        "original_chars": _chars(messages),
+        "projected_chars": _chars(projected),
+        "compacted_tool_results": compacted_tools,
+        "compacted_reasoning": compacted_reasoning,
+    }
+    return projected, report
+
+
+def _progress_signature(tool_name: str, params: dict, result: dict) -> str | None:
+    """Return a stable marker for a novel successful tool outcome."""
+    if tool_name in {"ask_more_turn", "ask_more_turns", "finish_step",
+                     "end_step", "message"}:
+        return None
+    if not isinstance(result, dict) or result.get("error"):
+        return None
+    if str(result.get("status", "")).lower() in {
+            "denied", "error", "failed", "failure"}:
+        return None
+    payload = json.dumps([tool_name, params or {}, result], ensure_ascii=False,
+                         sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 # Argument names an agent may never set on a tool call: the host injects them.
 _AGENT_RESERVED_ARGS = ("project_root", "workspace_root", "step_dir", "out_dir")
@@ -569,7 +702,10 @@ class PipelineEngine:
         reproducible as the concatenation of all `prompt_delta` events with
         turn <= n, without storing the whole history n times. skillflow keeps
         `prompt_delta` unclipped up to 256K per field (`_TRACE_FULL_EVENTS`).
-        `_delta_traced` is reset where a new `messages` list is built; a retry
+        This remains the lossless, resumable history. Before a provider call,
+        the deterministic projection bounds older tool results and repeated
+        reasoning; a prompt_projection event records when that happened.
+        _delta_traced is reset where a new messages list is built; a retry
         attempt continues the same list and therefore the same cursor.
         """
         start = getattr(self, "_delta_traced", 0)
@@ -1210,6 +1346,8 @@ class PipelineEngine:
             effects: list[str] = []   # non-file output: see _effect_name
             current_max_turns = max_turns
             turn_grants = 0
+            progress_signatures: set[str] = set()
+            progress_at_last_grant = 0
             tool_turn = 0
             ended_early = False
 
@@ -1505,6 +1643,10 @@ class PipelineEngine:
                     turn_results = []
                     for action in tool_calls:
                         result = self._exec_tool(action)
+                        progress = _progress_signature(
+                            action["tool"], action.get("params", {}), result)
+                        if progress:
+                            progress_signatures.add(progress)
                         result_str = json.dumps(result, ensure_ascii=False)
                         params_str = json.dumps(action.get("params", {}), ensure_ascii=False)
                         entry = f"Tool: {action['tool']}({params_str})\nResult: {result_str}"
@@ -1527,6 +1669,10 @@ class PipelineEngine:
                 if write_calls:
                     for action in write_calls:
                         result = self._exec_tool(action)
+                        progress = _progress_signature(
+                            action["tool"], action.get("params", {}), result)
+                        if progress:
+                            progress_signatures.add(progress)
                         if "error" in result:
                             tool_results.append(f"Write error: {result['error']}")
                             continue
@@ -1604,8 +1750,16 @@ class PipelineEngine:
                 # this turn have been processed (deferred from detection above).
                 if ask_more_call:
                     reason = ask_more_call.get("params", {}).get("reason", "")
+                    made_progress = (
+                        turn_grants == 0
+                        or len(progress_signatures) > progress_at_last_grant
+                    )
                     extra, turn_grants, msg = _grant_turns(
-                        turn_grants, ask_more_call.get("params", {}).get("turns", 3))
+                        turn_grants,
+                        ask_more_call.get("params", {}).get("turns", 3),
+                        made_progress=made_progress)
+                    if extra:
+                        progress_at_last_grant = len(progress_signatures)
                     current_max_turns += extra
                     tool_results.append(
                         f"{msg} Reason: {reason}. Remaining: {current_max_turns - tool_turn - 1}")
@@ -2340,6 +2494,8 @@ class PipelineEngine:
             # counter is incremented at the TOP: exactly range()'s semantics.
             current_max_turns = max_turns
             turn_grants = 0
+            progress_signatures: set[str] = set()
+            progress_at_last_grant = 0
             turn_count = -1
             resume_nudges_left = 0
             if attempt == 1 and _resumed:
@@ -2440,8 +2596,15 @@ class PipelineEngine:
 
                 try:
                     self._trace_prompt_deltas(messages, turn_count + 1)
+                    model_messages, projection = _project_native_messages(messages)
+                    if (projection["compacted_tool_results"]
+                            or projection["compacted_reasoning"]):
+                        self._trace("prompt", "prompt_projection", {
+                            "attempt": attempt, "turn": turn_count + 1,
+                            **projection,
+                        })
                     result = agent.turn(
-                        messages=messages, tools=native_tools,
+                        messages=model_messages, tools=native_tools,
                         tool_choice=tool_choice,
                     )
                 except Exception as e:
@@ -2736,11 +2899,29 @@ class PipelineEngine:
                         self._note_phase("tool_done", tool_name)
                     if tool_name == "ask_more_turns":
                         # _exec_tool answers "granted" unconditionally; the
-                        # budget decision is the loop's. Overwrite the result
-                        # so the model reads the real grant (or the denial).
-                        ask_more_extra, turn_grants, grant_msg = _grant_turns(turn_grants, ask_more_extra)
-                        tool_result = {"status": "granted" if ask_more_extra else "denied",
-                                       "turns": ask_more_extra, "note": grant_msg}
+                        # provider must never read a false grant, so fail closed
+                        # until the loop proves this request earns one.
+                        tool_result = {"status": "denied", "turns": 0}
+                        # A repeated request
+                        # after a grant must be backed by a novel successful
+                        # tool outcome, not more copies of the same failure.
+                        made_progress = (
+                            turn_grants == 0
+                            or len(progress_signatures) > progress_at_last_grant
+                        )
+                        ask_more_extra, turn_grants, grant_msg = _grant_turns(
+                            turn_grants, ask_more_extra,
+                            made_progress=made_progress)
+                        if ask_more_extra:
+                            progress_at_last_grant = len(progress_signatures)
+                        tool_result.update({
+                            "status": "granted" if ask_more_extra else "denied",
+                            "turns": ask_more_extra, "note": grant_msg,
+                        })
+                    else:
+                        progress = _progress_signature(tool_name, params, tool_result)
+                        if progress:
+                            progress_signatures.add(progress)
                     result_str = json.dumps(tool_result, ensure_ascii=False)
 
                     messages.append({

@@ -119,3 +119,55 @@ def test_none_content_round_trips_as_none_not_the_string_null():
     r = PipelineEngine._rebuild_from_deltas(rows, 30)
     assert r["messages"][2]["content"] is None
     assert r["messages"] == msgs
+
+def test_native_prompt_projection_bounds_old_results_and_reasoning_without_mutating_trace_history():
+    from core.dpe_pipeline import _project_native_messages
+
+    first_failure = json.dumps({"error": "old_str not found", "detail": "first"})
+    huge_a = "reason-a-" + ("a" * 20000)
+    huge_b = "reason-b-" + ("b" * 20000)
+    old_read = json.dumps({"content": "x" * 24000})
+    latest_read = json.dumps({"content": "latest evidence"})
+    messages = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "U"},
+        {"role": "assistant", "content": None, "reasoning_content": huge_a,
+         "tool_calls": [{"id": "e1", "function": {"name": "edit", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "e1", "content": first_failure},
+        {"role": "assistant", "content": None, "reasoning_content": huge_b,
+         "tool_calls": [{"id": "r1", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "r1", "content": old_read},
+        {"role": "assistant", "content": None, "reasoning_content": huge_b,
+         "tool_calls": [{"id": "r2", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "r2", "content": latest_read},
+    ]
+    original = json.loads(json.dumps(messages))
+    projected, report = _project_native_messages(messages, history_char_budget=4096)
+
+    assert messages == original
+    assert projected[3]["content"] == first_failure
+    assert projected[7]["content"] == latest_read
+    assert len(projected[5]["content"]) < len(old_read)
+    assert projected[6]["reasoning_content"] == huge_b
+    assert len(projected[2]["reasoning_content"]) < len(huge_a)
+    assert report["compacted_tool_results"] == 1
+    assert report["compacted_reasoning"] >= 1
+    assert report["projected_chars"] < report["original_chars"]
+
+
+def test_projection_is_deterministic_so_resume_can_recreate_the_model_prompt():
+    from core.dpe_pipeline import _project_native_messages
+    messages = [
+        {"role": "system", "content": "S"},
+        {"role": "assistant", "content": None, "reasoning_content": "z" * 10000,
+         "tool_calls": [{"id": "r1", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "r1",
+         "content": json.dumps({"content": "q" * 10000})},
+        {"role": "assistant", "content": None, "reasoning_content": "new",
+         "tool_calls": [{"id": "r2", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "r2", "content": "{}"},
+    ]
+    assert _project_native_messages(messages, history_char_budget=1024) == (
+        _project_native_messages(json.loads(json.dumps(messages)),
+                                 history_char_budget=1024)
+    )

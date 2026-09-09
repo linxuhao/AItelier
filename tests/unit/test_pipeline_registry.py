@@ -271,6 +271,80 @@ def test_edit_mode_prenamespaced_role_table_is_not_double_prefixed(
     assert set(roles_json) == {role_key}
 
 
+def test_forge_edit_inherits_omitted_baseline_output_fields(
+        tmp_path, registry, gdir):
+    """An edit emitter may copy a node while dropping nested output properties.
+
+    The registration boundary restores omitted legal properties from this run's
+    baseline. Explicit values remain edits, including false/empty values.
+    """
+    import skillflow as _sk
+    from skillflow import PipelineGraph
+    from skillflow.tool_loader import ToolLoader
+
+    loader = ToolLoader(Path(_sk.__file__).parent / "tools")
+    sf = SkillFlow(str(tmp_path / "sf.db"), tool_loader=loader,
+                   workspace_base=str(tmp_path / "ws"),
+                   projects_base=str(tmp_path / "proj"))
+    graph = {
+        "name": "placeholder", "begin": "plan",
+        "end_conditions": {"combinator": "or", "conditions": [
+            {"type": "node_reached", "node": "done", "result": "completed"}]},
+        "steps": [
+            {"id": "plan", "step_type": "agent", "agent_config": "planner",
+             "output": {"mode": "content", "allow_full_write": False},
+             "transitions": [{"to": "done"}]},
+            {"id": "done", "step_type": "gate", "transitions": [{"to": None}]},
+        ],
+    }
+    baseline = {
+        **graph,
+        "steps": [
+            {**graph["steps"][0], "output": {
+                "mode": "content",
+                "fixed": {"task": {"file": "tasks/*.json"}},
+                "allow_full_write": True,
+                "carry_forward": True,
+            }},
+            graph["steps"][1],
+        ],
+    }
+    sf.register_agent_config_from_dict("planner", {"model": "host"})
+    sf.register_graph(PipelineGraph._from_dict({**graph, "name": "pipeline_forge"}))
+    run_id = sf.create_run("pipeline_forge", {"project_id": "p"})
+    config_name = pr.config_name_for("output roundtrip")
+    emit = sf._workspace.get_step_dir("p", "pipeline_forge", "emit_graph")
+    emit.mkdir(parents=True, exist_ok=True)
+    (emit / "pipeline.yaml").write_text(yaml.safe_dump(graph), encoding="utf-8")
+    (emit / "role_table.yaml").write_text(
+        yaml.safe_dump({"planner": {"template": "templates/planner.md"}}),
+        encoding="utf-8")
+    (emit / "templates").mkdir(exist_ok=True)
+    (emit / "templates" / "planner.md").write_text("PLAN", encoding="utf-8")
+    seed = emit.parent / "_seed"
+    seed.mkdir(exist_ok=True)
+    (seed / "baseline_graph.yaml").write_text(
+        yaml.safe_dump(baseline), encoding="utf-8")
+
+    res = pr.register_forge_pipeline(sf, registry, run_id, "output roundtrip")
+    assert "error" not in res, res
+    output = next(
+        step["output"] for step in yaml.safe_load(
+            (gdir / f"{config_name}.yaml").read_text())["steps"]
+        if step["id"] == "plan")
+    assert output == {
+        "mode": "content",
+        "fixed": {"task": {"file": "tasks/*.json"}},
+        "allow_full_write": False,
+        "carry_forward": True,
+    }
+    node = next(step for step in sf._graphs[config_name].steps if step.id == "plan")
+    assert node.output_mode == "content"
+    assert node.output_fixed == {"task": {"file": "tasks/*.json"}}
+    assert node.output_allow_full_write is False
+    assert node.output_carry_forward is True
+
+
 def test_load_generated_configs_on_boot(sf, registry, gdir):
     gdir.mkdir(parents=True, exist_ok=True)
     data = yaml.safe_load(GEN_YAML)

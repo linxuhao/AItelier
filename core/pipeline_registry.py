@@ -25,6 +25,7 @@ Design (see the chat decision log):
     started with, and `repin_run` is how it adopts an edit.
 """
 
+import copy
 import logging
 import os
 from pathlib import Path
@@ -66,6 +67,47 @@ GEN_HINTS = {
                    "result; relay any checkpoints it raises."),
 }
 _log = logging.getLogger(__name__)
+
+_OUTPUT_FIELDS = ("mode", "fixed", "allow_full_write", "carry_forward")
+
+
+def _inherit_baseline_output_fields(data: dict, baseline_path: Path) -> list[str]:
+    """Restore output fields an EDIT-mode emitter omitted from its baseline.
+
+    Pipeline Forge tells the emitter to copy unchanged baseline nodes verbatim,
+    but that instruction is not an integrity boundary: an LLM can reproduce the
+    node while accidentally dropping one nested output field. Registration is
+    the last deterministic boundary before the graph becomes live, so inherit
+    only known SkillFlow output fields that are absent. An explicit value
+    (including False or an empty mapping) remains an intentional edit.
+    """
+    if not baseline_path.exists():
+        return []
+    baseline = yaml.safe_load(baseline_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(baseline, dict):
+        return []
+    old_steps = {
+        step.get("id"): step
+        for step in baseline.get("steps", [])
+        if isinstance(step, dict) and step.get("id")
+    }
+    inherited: list[str] = []
+    for step in data.get("steps", []):
+        if not isinstance(step, dict) or step.get("id") not in old_steps:
+            continue
+        old_output = old_steps[step["id"]].get("output")
+        if not isinstance(old_output, dict):
+            continue
+        if "output" not in step:
+            step["output"] = {}
+        output = step.get("output")
+        if not isinstance(output, dict):
+            continue
+        for field in _OUTPUT_FIELDS:
+            if field in old_output and field not in output:
+                output[field] = copy.deepcopy(old_output[field])
+                inherited.append(f"{step['id']}.output.{field}")
+    return inherited
 
 # Tools that HARD-depend on the project's code repo existing as a git repo
 # (they commit / validate / run against it). Read-type tools (read_file,
@@ -579,6 +621,11 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
         data = yaml.safe_load(gpath.read_text(encoding="utf-8")) or {}
         if not isinstance(data, dict):
             return {"error": "emitted pipeline.yaml is not a mapping"}
+        inherited_output = _inherit_baseline_output_fields(
+            data, emit.parent / "_seed" / "baseline_graph.yaml")
+        if inherited_output:
+            _log.info("forge edit %s inherited omitted baseline fields: %s",
+                      config_name, ", ".join(inherited_output))
         # Order matters: rewrite the graph's OWN references while `data["name"]`
         # still holds the pre-rename identity, then rename, then seed.
         _rewrite_self_config_refs(data, config_name)

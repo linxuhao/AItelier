@@ -18,6 +18,11 @@ in the registry (the missing ones were just built), so reference them freely.
   `name`, unchanged steps, and their transitions identical. Author fresh CONTENT only
   for roles you added or changed — but still WRITE every file (see the output-directory
   note below; "keep the rest" means keep it identical, not skip writing it).
+  Preserve every unchanged output subfield too: mode, fixed,
+  allow_full_write, and carry_forward. In particular, a planner that
+  carries a glob such as tasks/*.json across review retries must retain
+  carry_forward: true; dropping it deletes untouched sibling files at promotion.
+  To remove an output property intentionally, write its explicit empty/false value.
 - **`forge_palette`** — the live tool registry (now includes the just-built tools)
   + exemplar configs + the idiom/trap cheatsheet.
 - **Step `architect` → `graph_spec.md`** — the graph shape to render.

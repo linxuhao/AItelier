@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { stateLayout, stateTone, stateNextAction, shortText, cardLines, groupFacets, stemOf, STATE_CARD,
+  import { stateLayout, stateTone, stateNextAction, shortText, cardLines, groupFacets, stemOf, STATE_CARD, STATE_LANE,
            type StateNodeSummary, type StateLane } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   interface Props { nodes: StateNodeSummary[]; selected: string; onselect: (key: string) => void }
@@ -76,40 +76,75 @@
         {/each}
         {#each result.layout.nodes as node (node.node_key)}
           {@const nextAction = stateNextAction(node)}
-          <g class="goal {stateTone(node.status)}" class:selected={selectedShown === node.node_key} data-fact={node.status} data-readiness={node.readiness}
-             data-attempt-status={node.latest_attempt?.status ?? "none"}
+          {@const lane = lanes(node)}
+          {@const readyLabel = `${node.hold ? '⏸ ' : ''}${st(nextAction ?? node.readiness)}${node.blocked_by.length ? ` · ${node.blocked_by.length}` : ''}`}
+          <!-- A goal with lanes is a FRAME, not a button: its header and each of
+               its lane cards are the buttons, which keeps them siblings rather
+               than interactive elements nested inside an interactive element. -->
+          {#if lane.length}
+          <g class="goal framed {stateTone(node.status)}" class:selected={selectedShown === node.node_key}
+             data-fact={node.status} data-readiness={node.readiness} data-attempt-status={node.latest_attempt?.status ?? "none"}
+             transform={`translate(${node.x}, ${node.y})`}>
+            <rect class="card" width={STATE_CARD.width} height={STATE_CARD.height} rx="10" />
+              <g class="goal-header" role="button" tabindex="0" aria-pressed={selectedShown === node.node_key}
+                 aria-label={`${node.title}: ${st(nextAction ?? node.readiness)} · ${lane.filter(l => l.present).map(l => st('lane_' + l.facet) + ' ' + l.status).join(', ')}`}
+                 onclick={() => onselect(node.node_key)} onkeydown={(event) => keySelect(event, node.node_key)}>
+                <title>{node.title} — {node.node_key} — {readyLabel}</title>
+                <rect class="header-hit" width={STATE_CARD.width} height={STATE_LANE.headerHeight} rx="10" />
+                <text class="goal-key" x="14" y="20">{shortText(node.node_key, 34)}</text>
+                <text class="goal-title" x="14" y="44">{#each cardLines(node.title) as line, i (i)}<tspan x="14" dy={i === 0 ? 0 : 18}>{line}</tspan>{/each}</text>
+                <text class="goal-ready" x="14" y="82">{readyLabel}</text>
+              </g>
+              {#each lane as item, i (item.facet)}
+                {@const at = `translate(${STATE_LANE.x + i * (STATE_LANE.width + STATE_LANE.gap)}, ${STATE_LANE.y})`}
+                {#if item.present}
+                  <g class="lane {stateTone(item.status)}" class:selected={selected === item.node_key}
+                     role="button" tabindex="0" aria-pressed={selected === item.node_key}
+                     aria-label={`${item.node_key}: ${item.status}`} transform={at}
+                     onclick={() => onselect(item.node_key)} onkeydown={(event) => keySelect(event, item.node_key)}>
+                    <title>{item.node_key} — {item.status} · {st(item.readiness)}</title>
+                    {@render laneFace(item)}
+                  </g>
+                {:else}
+                  <g class="lane absent" transform={at}>
+                    <title>{item.node_key} — {st('laneMissing')}</title>
+                    {@render laneFace(item)}
+                  </g>
+                {/if}
+              {/each}
+            {#if node.outsideDependencies}<text x="250" y="20" text-anchor="end" class="outside">+{node.outsideDependencies}</text>{/if}
+          </g>
+          {:else}
+          <g class="goal {stateTone(node.status)}" class:selected={selectedShown === node.node_key}
+             data-fact={node.status} data-readiness={node.readiness} data-attempt-status={node.latest_attempt?.status ?? "none"}
              role="button" tabindex="0" aria-pressed={selected === node.node_key}
-             aria-label={`${node.title}: ${node.status}, ${st(nextAction ?? node.readiness)}${lanes(node).length ? ' · ' + lanes(node).filter(l => l.present).map(l => st('lane_' + l.facet) + ' ' + l.status).join(', ') : ''}`}
+             aria-label={`${node.title}: ${node.status}, ${st(nextAction ?? node.readiness)}`}
              transform={`translate(${node.x}, ${node.y})`}
              onclick={() => onselect(node.node_key)} onkeydown={(event) => keySelect(event, node.node_key)}>
             <title>{node.title} — {node.node_key} — {node.status} / {nextAction ?? node.readiness}</title>
             <rect class="card" width={STATE_CARD.width} height={STATE_CARD.height} rx="10" />
-            <text class="goal-key" x="14" y="20">{shortText(node.node_key, 34)}</text>
-            <text class="goal-title" x="14" y="44">{#each cardLines(node.title) as line, i (i)}<tspan x="14" dy={i === 0 ? 0 : 18}>{line}</tspan>{/each}</text>
-            <rect class="status-background" x="13" y="77" width="153" height="26" rx="6" />
-            <text class="goal-state" x="22" y="95">{node.status}</text>
-            <text class="goal-revision" x="250" y="95" text-anchor="end">{node.facet ? node.facet + ' · ' : ''}r{node.revision}</text>
-            <text class="goal-ready" x="14" y="123">{node.hold ? '⏸ ' : ''}{st(nextAction ?? node.readiness)}{node.blocked_by.length ? ` · ${node.blocked_by.length}` : ''}</text>
-            {#if lanes(node).length}
-              <g class="lane-strip" transform="translate(14, 134)">
-                {#each lanes(node) as lane, i (lane.facet)}
-                  <g transform={`translate(${i * 84}, 0)`} class="lane {lane.present ? stateTone(lane.status) : 'absent'}">
-                    <title>{lane.node_key}{lane.present ? ` — ${lane.status}` : ` — ${st('laneMissing')}`}</title>
-                    <rect class="lane-chip" width="78" height="18" rx="5" />
-                    <text class="lane-text" x="6" y="13">{st('lane_' + lane.facet)} {lane.present ? shortText(lane.status, 9) : '—'}</text>
-                  </g>
-                {/each}
-              </g>
-            {:else}
+              <text class="goal-key" x="14" y="20">{shortText(node.node_key, 34)}</text>
+              <text class="goal-title" x="14" y="44">{#each cardLines(node.title) as line, i (i)}<tspan x="14" dy={i === 0 ? 0 : 18}>{line}</tspan>{/each}</text>
+              <rect class="status-background" x="13" y="77" width="153" height="26" rx="6" />
+              <text class="goal-state" x="22" y="95">{node.status}</text>
+              <text class="goal-revision" x="250" y="95" text-anchor="end">{node.facet ? node.facet + ' · ' : ''}r{node.revision}</text>
+              <text class="goal-ready" x="14" y="123">{readyLabel}</text>
               <text class="goal-attempt" x="14" y="144">{st(node.latest_attempt?.execution_kind==='external'?'externalShort':'attemptShort')}: {node.latest_attempt ? node.latest_attempt.status.toUpperCase() : st('notStarted')}</text>
-            {/if}
             {#if node.outsideDependencies}<text x="250" y="20" text-anchor="end" class="outside">+{node.outsideDependencies}</text>{/if}
           </g>
+          {/if}
         {/each}
       </svg>
     </div>
   {/if}
 </section>
+
+{#snippet laneFace(item: StateLane)}
+  <rect class="lane-card" width={STATE_LANE.width} height={STATE_LANE.height} rx="7" />
+  <text class="lane-facet" x="7" y="16">{st('lane_' + item.facet)}</text>
+  <text class="lane-status" x="7" y="33">{item.present ? shortText(item.status, 10) : '—'}</text>
+  {#if item.present}<text class="lane-meta" x="7" y="47">r{item.revision} · {st(item.readiness)}</text>{/if}
+{/snippet}
 
 <style>
   /* Resolve theme tokens OUTSIDE [role=button]. Pico overrides --pico-color
@@ -137,14 +172,27 @@
   .outside { font-size:10px; }
   .toggles { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
   .toggles small { font-size:.72rem; color:var(--pico-muted-color,#64748b); }
-  .lane-text { font-size:10px; fill:var(--sg-status-ink); }
-  .lane .lane-chip { fill:var(--sg-status); stroke:none; }
+  /* A framed goal is a container: its own fill stays neutral so the lane cards
+     inside it carry the colour, otherwise two status tones fight on one card. */
+  .goal.framed .card { fill:var(--sg-surface); stroke:#9aa8b9; }
+  .goal.framed.selected .card { stroke:var(--pico-primary,#0066cc); stroke-width:3; }
+  .goal-header,.lane { cursor:pointer; outline:none; }
+  .header-hit { fill:transparent; }
+  .goal-header:focus-visible .header-hit { stroke:var(--pico-primary,#0066cc); stroke-width:2; }
+  .lane .lane-card { fill:var(--sg-status); stroke:var(--sg-status-ink); stroke-width:1; stroke-opacity:.35; }
+  .lane text { fill:var(--sg-status-ink); pointer-events:none; }
+  .lane-facet { font-size:10px; font-weight:700; letter-spacing:.04em; }
+  .lane-status { font-size:12px; font-weight:650; }
+  .lane-meta { font-size:9px; opacity:.75; }
   .lane.verified { --sg-status:#dcf5e7; --sg-status-ink:#145638; }
   .lane.candidate { --sg-status:#e0ecff; --sg-status-ink:#194980; }
   .lane.stale { --sg-status:#fff0ce; --sg-status-ink:#644509; }
-  .lane.open { --sg-status:#e8edf3; --sg-status-ink:#25384d; }
-  .lane.absent .lane-chip { fill:none; stroke:var(--pico-muted-border-color,#dce2ea); stroke-dasharray:3 2; }
-  .lane.absent .lane-text { fill:var(--pico-muted-color,#8a97a8); }
+  .lane.open { --sg-status:#eef2f7; --sg-status-ink:#25384d; }
+  .lane.superseded { --sg-status:#eceff3; --sg-status-ink:#5b6773; }
+  .lane.absent .lane-card { fill:none; stroke:var(--pico-muted-border-color,#c9d3df); stroke-dasharray:3 3; stroke-opacity:1; }
+  .lane.absent text { fill:var(--pico-muted-color,#8a97a8); }
+  .lane.selected .lane-card,.lane:focus-visible .lane-card { stroke:var(--pico-primary,#0066cc); stroke-width:2.5; stroke-opacity:1; }
+  .lane:hover .lane-card { stroke-opacity:.9; }
   .goal.verified { --sg-status:#dcf5e7; --sg-status-ink:#145638; }
   .goal.verified .card { stroke:#1d9468; stroke-width:2; }
   .goal.candidate { --sg-status:#e0ecff; --sg-status-ink:#194980; }

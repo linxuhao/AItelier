@@ -87,6 +87,8 @@ export function cardLines(text: string, budget = 34): string[] {
   return lines;
 }
 export const STATE_CARD = { width: 264, height: 156, xGap: 28, yGap: 36 };
+/** A goal's lanes are drawn as small cards inside the goal card. */
+export const STATE_LANE = { width: 76, height: 54, gap: 8, x: 13, y: 92, headerHeight: 88 };
 
 /**
  * The server projects this from current State facts. Older servers only return
@@ -121,7 +123,8 @@ export function stateTone(status: string): string {
 }
 
 /** One goal's three lanes. `present: false` means that lane has no node yet. */
-export interface StateLane { facet:'contract'|'test'|'content'; node_key:string; status:string; readiness:string; present:boolean }
+export interface StateLane { facet:'contract'|'test'|'content'; node_key:string; status:string; readiness:string;
+  revision:number; present:boolean }
 export interface StateGroup extends StateNodeSummary { lanes:StateLane[]; members:string[] }
 const LANE_ORDER:StateLane['facet'][] = ['contract','test','content'];
 
@@ -162,7 +165,8 @@ export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
     const lanes:StateLane[] = LANE_ORDER.map(facet => {
       const node = lane(facet);
       return { facet, node_key: node?.node_key ?? `${key}${facet === 'content' ? '' : '.' + facet}`,
-               status: node?.status ?? '', readiness: node?.readiness ?? '', present: !!node };
+               status: node?.status ?? '', readiness: node?.readiness ?? '',
+               revision: node?.revision ?? 0, present: !!node };
     });
     const hasSiblings = group.length > 1;
     // The lane to act on: the first unfinished one, else the implementation.

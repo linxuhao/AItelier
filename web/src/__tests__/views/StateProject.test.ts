@@ -277,3 +277,40 @@ describe('External harness attempts are first-class',()=>{
     expect(view.container.querySelector('.run-card a[href^="#/state-runs/"]')).toBeNull();
   });
 });
+
+describe('Faceted goals render as nested lane cards', () => {
+  const faceted = () => {
+    const base = overview();
+    const lane = (key: string, facet: string, deps: string[], status: string) =>
+      ({ ...goal(key, deps), facet, status, node_key: key, title: 'Persistent proficiency',
+         readiness: status === 'VERIFIED' ? 'closed' : 'ready' });
+    return { ...base, nodes: [
+      lane('growth.progress.contract', 'contract', [], 'VERIFIED'),
+      lane('growth.progress', 'content', ['growth.progress.contract'], 'STALE'),
+      { ...goal('month.actions'), facet: 'integration' },
+    ] };
+  };
+  beforeEach(() => { api.stateOverview.mockResolvedValue(faceted()); });
+
+  it('collapses the lanes into one framed card whose lanes are their own buttons', async () => {
+    const view = render(StateProject, { params: { id: 'game' } });
+    await view.findByRole('heading', { name: '武虾传奇' });
+    await waitFor(() => expect(view.container.querySelectorAll('g.goal')).toHaveLength(2));
+    const framed = view.container.querySelector('g.goal.framed')!;
+    expect(framed.getAttribute('role')).toBeNull();          // the frame is not itself a button
+    expect(framed.querySelectorAll('g.lane')).toHaveLength(3);
+    expect(framed.querySelector('.lane.verified .lane-status')?.textContent).toBe('VERIFIED');
+    expect(framed.querySelector('.lane.absent .lane-status')?.textContent).toBe('—');
+    expect(framed.querySelector('.lane.absent')?.getAttribute('role')).toBeNull();
+    // The integration node has no siblings, so it keeps the plain single card.
+    expect(view.container.querySelector('g.goal:not(.framed)')?.getAttribute('role')).toBe('button');
+  });
+
+  it('a lane card selects its own node, not the goal', async () => {
+    const view = render(StateProject, { params: { id: 'game' } });
+    await view.findByRole('heading', { name: '武虾传奇' });
+    await waitFor(() => expect(view.container.querySelectorAll('g.lane')).toHaveLength(3));
+    await fireEvent.click(view.container.querySelector('g.lane.verified')!);
+    await waitFor(() => expect(api.stateNode).toHaveBeenCalledWith('game', 'growth.progress.contract'));
+  });
+});

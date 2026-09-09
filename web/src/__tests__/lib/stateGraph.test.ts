@@ -99,8 +99,10 @@ describe('groupFacets', () => {
 
   it('reports every lane, including one that does not exist yet', () => {
     const a = groupFacets(family).find(g => g.node_key === 'a')!;
-    expect(a.lanes.map(l => [l.facet, l.status, l.present])).toEqual([
-      ['contract', 'VERIFIED', true], ['test', 'OPEN', true], ['content', 'OPEN', true]]);
+    expect(a.lanes.map(l => [l.facet, l.status, l.present, l.revision])).toEqual([
+      ['contract', 'VERIFIED', true, 1], ['test', 'OPEN', true, 1], ['content', 'OPEN', true, 1]]);
+    // An absent lane carries no revision to render.
+    expect(groupFacets(family).find(g => g.node_key === 'b')!.lanes[1].revision).toBe(0);
     const b = groupFacets(family).find(g => g.node_key === 'b')!;
     expect(b.lanes.map(l => [l.facet, l.present])).toEqual([
       ['contract', true], ['test', false], ['content', true]]);

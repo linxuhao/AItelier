@@ -9,7 +9,8 @@
  * is terminal so a finished run is not re-read forever.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, waitFor } from '@testing-library/svelte';
+import { render, waitFor, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { authStore } from '../../stores/auth';
 import { connectionStore } from '../../stores/connection';
 
@@ -115,6 +116,70 @@ describe('Project run detail polling', () => {
     await waitFor(() => {
       expect(container.querySelector('.node.is-current')).toBeNull();
     });
+  });
+
+  it('preserves the graph, manual selection and expanded trace across identical run snapshots', async () => {
+    // Use the REAL Project parent: rerendering PipelineGraph with literal
+    // string props misses the dependency on Project's replaced runDetail.
+    mockApi.getRunDetail.mockImplementation(async () => detail('running', 'claimed'));
+    const { container } = await openRun();
+    await waitFor(() => expect(container.querySelector('.step-graph svg')).not.toBeNull());
+    expect(mockApi.runWorkflowGraph).toHaveBeenCalledTimes(1);
+
+    mockApi.getTrace.mockResolvedValue({ traces: [{
+      seq: 1, category: 'tool_call', event: 'read_file', step_id: 'a',
+      created_at: '2026-08-26T10:00:30Z', payload: { path: 'fixture.txt' },
+    }], has_more: false });
+    const nodeA = [...container.querySelectorAll('g.node')]
+      .find(node => node.querySelector('.node-id')?.textContent === 'a');
+    expect(nodeA).toBeTruthy();
+    await fireEvent.click(nodeA!);
+    await waitFor(() => expect(container.querySelector('.nt-head')).not.toBeNull());
+    await fireEvent.click(container.querySelector('.nt-head')!);
+    expect(container.querySelector('.nt-entry.is-open')).not.toBeNull();
+
+    const svg = container.querySelector('.step-graph svg');
+    const graphScroll = container.querySelector('.graph-scroll') as HTMLElement;
+    const traceList = container.querySelector('.nt-list') as HTMLElement;
+    graphScroll.scrollTop = 73;
+    traceList.scrollTop = 41;
+    const traceRequests = mockApi.getTrace.mock.calls.length;
+
+    for (let refresh = 1; refresh <= 3; refresh++) {
+      await vi.advanceTimersByTimeAsync(30000);
+      await tick();
+      expect(mockApi.getRunDetail).toHaveBeenCalledTimes(refresh + 1);
+      expect(mockApi.runWorkflowGraph).toHaveBeenCalledTimes(1);
+      expect(container.querySelector('.graph-loading')).toBeNull();
+      expect(container.querySelector('.step-graph svg')).toBe(svg);
+      expect(container.querySelector('.tp-head strong')?.textContent).toBe('a');
+      expect(container.querySelector('.nt-entry.is-open')).not.toBeNull();
+      expect(container.querySelector('.graph-scroll')).toBe(graphScroll);
+      expect(graphScroll.scrollTop).toBe(73);
+      expect(container.querySelector('.nt-list')).toBe(traceList);
+      expect(traceList.scrollTop).toBe(41);
+      expect(mockApi.getTrace).toHaveBeenCalledTimes(traceRequests);
+    }
+  });
+
+  it('updates step status and tokens without reloading the pinned graph', async () => {
+    mockApi.getRunDetail.mockResolvedValue({
+      ...detail('running', 'claimed'), cache_stats_by_step: { b: { total_tokens: 1000 } },
+    });
+    const { container } = await openRun();
+    await waitFor(() => expect(container.querySelector('.tp-head .cache-inline-badge')?.textContent).toMatch(/1k/i));
+    const svg = container.querySelector('.step-graph svg');
+    expect(container.querySelector('.node.is-current')).not.toBeNull();
+
+    mockApi.getRunDetail.mockResolvedValue({
+      ...detail('running', 'completed'), cache_stats_by_step: { b: { total_tokens: 2000 } },
+    });
+    await vi.advanceTimersByTimeAsync(30000);
+    await waitFor(() => expect(container.querySelector('.tp-head .cache-inline-badge')?.textContent).toMatch(/2k/i));
+    expect(container.querySelector('.node.is-current')).toBeNull();
+    expect(mockApi.getRunDetail).toHaveBeenCalledTimes(2);
+    expect(mockApi.runWorkflowGraph).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('.step-graph svg')).toBe(svg);
   });
 
   it('leaves a finished run alone instead of re-reading it forever', async () => {

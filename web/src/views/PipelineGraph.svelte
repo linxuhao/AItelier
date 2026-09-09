@@ -215,9 +215,18 @@
     return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
   }
 
+  // Project replaces runDetail on every live refresh. Reading its prop getters
+  // directly in this effect also tracks that object replacement, even when
+  // runId/config did not change. A primitive derived identity is an equality
+  // boundary: status/token updates must not refetch the pinned graph, replace
+  // its DOM, or reset the reader's node/instance/trace selection and scroll.
+  // For an exact run, its config label is not part of the graph identity.
+  const graphIdentity = $derived(runId ? `run:${runId}` : `config:${config}`);
+
   $effect(() => {
-    const exactRun = runId;
-    const selectedConfig = config;
+    const identity = graphIdentity;
+    const exactRun = identity.startsWith('run:') ? identity.slice(4) : '';
+    const selectedConfig = identity.startsWith('config:') ? identity.slice(7) : '';
     let cancelled = false;
     data = null; layout = null; error = null;
     openNode = null; pickedInstance = null; userPicked = false;

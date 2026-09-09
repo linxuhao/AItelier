@@ -80,6 +80,35 @@ export function toEpochSeconds(value: unknown): number | null {
   return null;
 }
 
+/**
+ * Elapsed time between two backend timestamps, as "45s" / "12m 3s" /
+ * "2h 07m" / "3d 4h".
+ *
+ * Anchor `now` on a SERVER timestamp (a payload's observed_at), not
+ * Date.now(): the browser's clock is not the server's, and a skewed one ages
+ * a run that started a minute ago by hours — or gives it a negative age. A
+ * number that only moves when the server says so is also honest about being a
+ * snapshot, which is what the rest of these panels already are.
+ *
+ * Returns "" when either end is unparseable, so a caller can omit the label
+ * rather than print a fabricated zero.
+ */
+export function elapsedLabel(
+  start: number | string | null | undefined,
+  now: number | string | null | undefined,
+): string {
+  const from = toEpochSeconds(start);
+  const to = toEpochSeconds(now);
+  if (from == null || to == null) return '';
+  // A clock that ran backwards between two server writes is still not a
+  // negative duration; clamp rather than render "-3s".
+  const secs = Math.floor(Math.max(0, to - from));
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+  if (secs < 86400) return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+  return Math.floor(secs / 86400) + 'd ' + Math.floor((secs % 86400) / 3600) + 'h';
+}
+
 export function formatTime(value: number | string | null | undefined): string {
   const epoch = toEpochSeconds(value);
   if (epoch == null) {

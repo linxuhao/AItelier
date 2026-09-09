@@ -74,6 +74,7 @@ describe('State graph run summary',()=>{
   });
   it('lists external agents holding a task, as reported, without inventing run links',async()=>{
     api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:3,
+      observed_at:'2026-09-09T10:00:00Z',
       external_counts:{active:2,finished:0,failed:0,other:1,total:3},
       execution_counts:{total:3,running:2,finished:0,failed:0,other:1,unavailable:0},
       running_external:[
@@ -88,7 +89,8 @@ describe('State graph run summary',()=>{
     const rows=view.container.querySelectorAll('.external-running li');expect(rows).toHaveLength(2);
     expect(rows[0].textContent).toContain('growth.progress');
     expect(rows[0].textContent).toContain('job-7f3c');
-    expect(rows[0].textContent).toContain('2026-09-09T09:30:00Z');
+    expect(rows[0].textContent).toContain('⏱ 2h 0m');
+    expect(rows[0].textContent).toContain('↩ 30m 0s');
     expect(rows[1].textContent).toContain('No report yet');
     // The counters count executions, so a listed agent is never a row under a zero.
     expect(view.container.querySelector('[data-metric="running"] dd')?.textContent).toBe('2');
@@ -96,6 +98,27 @@ describe('State graph run summary',()=>{
     expect(view.container.querySelectorAll('a')).toHaveLength(0);
     expect(view.getByText('No related run is currently running.')).toBeTruthy();
     expect(view.container.textContent).toContain('not observed here');
+  });
+  it('ages both lists against the snapshot, not the browser clock',async()=>{
+    api.stateRunSummary.mockResolvedValue({...active(),observed_at:'2026-09-08T18:00:00Z',
+      running_runs:[{...active().running_runs[0],started_at:'2026-09-08T17:12:00Z'}],
+      external_counts:{active:1,finished:0,failed:0,other:0,total:1},external_attempts_excluded:1,
+      execution_counts:{...active().execution_counts,total:10,running:2},
+      running_external:[{attempt_id:'attempt-one',node_key:'growth.progress',node_revision:1,harness:'own-harness',
+        external_id:'job-1',reporting_actor:'director@test',status:'running',observation_version:1,
+        created_at:'2026-09-08T14:30:00Z',updated_at:'2026-09-08T17:55:00Z',last_report_at:'2026-09-08T17:55:00Z'}]});
+    const view=render(StateRunSummary,{projectId:'game'});
+    await view.findByText('own-harness');
+    expect(view.container.querySelector('.running-runs .elapsed')?.textContent).toContain('48m 0s');
+    expect(view.container.querySelector('.external-running .elapsed')?.textContent).toContain('3h 30m');
+    // Last report shown as an age too, not a raw timestamp.
+    expect(view.container.querySelector('.external-running small')?.textContent).toBe('↩ 5m 0s');
+  });
+  it('shows no age when the run never reported a start',async()=>{
+    api.stateRunSummary.mockResolvedValue({...active(),running_runs:[{...active().running_runs[0],started_at:null}]});
+    const view=render(StateRunSummary,{projectId:'game'});
+    await view.findByText('feature_delivery');
+    expect(view.container.querySelector('.running-runs .elapsed')).toBeNull();
   });
   it('jumps to the goal the external agent is working on',async()=>{
     const jump=vi.fn();

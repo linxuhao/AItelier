@@ -17,6 +17,7 @@ import {
   debounce,
   formatTaskProgress,
   parseStatus,
+  elapsedLabel,
 } from '../src/lib/format';
 
 // ── escapeHtml ──────────────────────────────────────────────────────
@@ -292,5 +293,31 @@ describe('formatBytes', () => {
     expect(formatBytes(null)).toBe('');
     expect(formatBytes(undefined)).toBe('');
     expect(formatBytes(NaN)).toBe('');
+  });
+});
+
+describe('elapsedLabel', () => {
+  const now = '2026-09-09T12:00:00Z';
+  it('formats each magnitude', () => {
+    expect(elapsedLabel('2026-09-09T11:59:15Z', now)).toBe('45s');
+    expect(elapsedLabel('2026-09-09T11:47:57Z', now)).toBe('12m 3s');
+    expect(elapsedLabel('2026-09-09T09:53:00Z', now)).toBe('2h 7m');
+    expect(elapsedLabel('2026-09-06T08:00:00Z', now)).toBe('3d 4h');
+  });
+  it('is anchored on the given server time, not the browser clock', () => {
+    const realNow = Date.now();
+    // Both ends are years away from the machine clock and the answer stands.
+    expect(elapsedLabel('2019-01-01T00:00:00Z', '2019-01-01T00:05:00Z')).toBe('5m 0s');
+    expect(Date.now()).toBeGreaterThanOrEqual(realNow);
+  });
+  it('accepts SQLite naive-UTC strings and epoch numbers', () => {
+    expect(elapsedLabel('2026-09-09 11:58:00', now)).toBe('2m 0s');
+    expect(elapsedLabel(1757416800, 1757416860)).toBe('1m 0s');
+  });
+  it('never renders a negative age and never fabricates one', () => {
+    expect(elapsedLabel('2026-09-09T12:05:00Z', now)).toBe('0s');
+    expect(elapsedLabel(null, now)).toBe('');
+    expect(elapsedLabel('2026-09-09T12:00:00Z', undefined)).toBe('');
+    expect(elapsedLabel('not a time', now)).toBe('');
   });
 });

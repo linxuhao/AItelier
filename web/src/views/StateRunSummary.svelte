@@ -2,6 +2,7 @@
   import { authStore } from '../stores/auth';
   import { stateRunSummary } from '../lib/api';
   import { exactRunHref, type ProjectRunSummary } from '../lib/stateGraph';
+  import { elapsedLabel } from '../lib/format';
   import { st } from '../lib/stateI18n.svelte';
   const { projectId, refresh = 0, onselect }: {projectId:string;refresh?:number;onselect?:(nodeKey:string)=>void} = $props();
   let data=$state<ProjectRunSummary|null>(null), error=$state(''), loading=$state(false);
@@ -48,7 +49,8 @@
         {#each data.running_runs as run(run.run_id)}
           <li><a href={exactRunHref(run.run_id)} title={`${run.workflow} · ${run.run_id}\n${run.node_keys.join(', ')}${run.current_node?' · '+run.current_node:''}`}>
             <span class="running-dot" aria-hidden="true"></span><strong>{run.workflow}</strong>
-            <span class="run-node">{run.node_keys.join(', ')}</span><code>{run.run_id.slice(0,8)}</code><span aria-hidden="true">↗</span>
+            <span class="run-node">{run.node_keys.join(', ')}</span><code>{run.run_id.slice(0,8)}</code>
+            {#if elapsedLabel(run.started_at,data.observed_at)}<span class="elapsed" title={st('summaryElapsed')}>⏱ {elapsedLabel(run.started_at,data.observed_at)}</span>{/if}<span aria-hidden="true">↗</span>
           </a></li>
         {/each}
       </ul>
@@ -62,7 +64,8 @@
             {#if onselect}<button class="node-jump" onclick={()=>onselect(job.node_key)}>{job.node_key}</button>
             {:else}<span class="run-node">{job.node_key}</span>{/if}<span class="external-state">{job.status}</span>
             <code class="external-ref">{job.external_id}</code>
-            <small>{job.last_report_at ?? st('summaryExternalNoReport')}</small>
+            {#if elapsedLabel(job.created_at,data.observed_at)}<span class="elapsed" title={st('summaryElapsed')}>⏱ {elapsedLabel(job.created_at,data.observed_at)}</span>{/if}
+            <small title={st('summaryLastReport')}>{job.last_report_at ? '↩ ' + elapsedLabel(job.last_report_at,data.observed_at) : st('summaryExternalNoReport')}</small>
           </li>
         {/each}
       </ul>
@@ -102,6 +105,7 @@
     max-width:20rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .node-jump:hover,.node-jump:focus-visible{text-decoration:underline;}
   .external-running small{font-size:.6rem;color:var(--pico-muted-color,#64748b);white-space:nowrap;}
+  .elapsed{font-size:.63rem;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--pico-muted-color,#64748b);}
   .summary-note,.summary-error{font-size:.65rem;line-height:1.35;margin:.3rem 0 0;overflow-wrap:anywhere;}.summary-note{color:var(--pico-muted-color,#64748b);}.summary-error{color:var(--pico-del-color,#ad2828);}
   @media(max-width:680px){.run-summary-metrics{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:.4rem;}.run-node{max-width:7rem;}.running-runs a{flex-wrap:wrap;}.running-runs{max-height:9rem;}
     .external-running li{flex-wrap:wrap;}.external-ref{max-width:7rem;}.external-running{max-height:9rem;}.node-jump{max-width:7rem;}}

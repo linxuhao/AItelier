@@ -13,8 +13,11 @@
 
 FROM python:3.12-slim
 
-ARG GODOT_VERSION=4.4-stable
-ARG GODOT_ZIP=Godot_v4.4-stable_linux.x86_64.zip
+ARG GODOT_VERSION=4.7.2-stable
+ARG GODOT_ZIP=Godot_v4.7.2-stable_linux.x86_64.zip
+# Official release asset SHA-256 digests; update both when changing the version.
+ARG GODOT_SHA256=cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4
+ARG GODOT_TEMPLATES_SHA256=f298490b8d44d934be425a5a65a51bf15f422428b229a06a6e11d9ffea248011
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         wget unzip ca-certificates \
@@ -40,6 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Fetch the headless-capable Godot 4 binary.
 RUN wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/${GODOT_ZIP}" -O /tmp/godot.zip \
+    && echo "${GODOT_SHA256}  /tmp/godot.zip" | sha256sum -c - \
     && unzip -q /tmp/godot.zip -d /opt/godot \
     && mv /opt/godot/Godot_* /usr/local/bin/godot \
     && chmod +x /usr/local/bin/godot \
@@ -54,6 +58,7 @@ RUN wget -q "https://github.com/godotengine/godot/releases/download/${GODOT_VERS
 RUN set -eux; \
     base="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}"; \
     wget -q "${base}/Godot_v${GODOT_VERSION}_export_templates.tpz" -O /tmp/tpl.tpz; \
+    echo "${GODOT_TEMPLATES_SHA256}  /tmp/tpl.tpz" | sha256sum -c -; \
     mkdir -p /tmp/tpl "/tmp/godot-home/.local/share/godot/export_templates"; \
     unzip -q -o /tmp/tpl.tpz -d /tmp/tpl "templates/web_*" "templates/version.txt"; \
     dir="/tmp/godot-home/.local/share/godot/export_templates/$(echo ${GODOT_VERSION} | tr '-' '.')"; \

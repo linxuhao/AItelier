@@ -314,3 +314,18 @@ describe('Faceted goals render as nested lane cards', () => {
     await waitFor(() => expect(api.stateNode).toHaveBeenCalledWith('game', 'growth.progress.contract'));
   });
 });
+
+it('counts goals in the header, not the lanes behind them', async () => {
+  const base = overview();
+  api.stateOverview.mockResolvedValue({ ...base, nodes: [
+    { ...goal('growth.progress.contract'), facet: 'contract', node_key: 'growth.progress.contract' },
+    { ...goal('growth.progress', ['growth.progress.contract']), facet: 'content', node_key: 'growth.progress' },
+    { ...goal('growth.progress.test', ['growth.progress.contract']), facet: 'test', node_key: 'growth.progress.test' },
+    { ...goal('month.actions'), facet: 'design' },
+  ] });
+  const view = render(StateProject, { params: { id: 'game' } });
+  await view.findByRole('heading', { name: '武虾传奇' });
+  const total = view.container.querySelector('.metrics div')!;
+  expect(total.querySelector('strong')?.textContent).toBe('2');       // two goals
+  expect(total.getAttribute('title')).toContain('4');                  // four nodes behind them
+});

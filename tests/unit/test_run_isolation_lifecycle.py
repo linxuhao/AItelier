@@ -83,16 +83,18 @@ def _direct_run(live, pid="p1"):
     return rid
 
 
-async def _mcp_stop_async(run_id: str, reason: str = "stopped in a test"):
+async def _mcp_stop_async(run_id: str, reason: str = "stopped in a test",
+                           mcp=None):
     """The registered MCP tool, reached the way the endpoint reaches it."""
     from api.mcp_router import build_mcp
-    fn = build_mcp()._tool_manager.get_tool("stop_pipeline").fn
+    mcp = mcp or build_mcp()
+    fn = mcp._tool_manager.get_tool("stop_pipeline").fn
     res = fn(run_id=run_id, reason=reason)
     return await res if asyncio.iscoroutine(res) else res
 
 
-def _mcp_stop(run_id: str, reason: str = "stopped in a test"):
-    return asyncio.run(_mcp_stop_async(run_id, reason))
+def _mcp_stop(run_id: str, reason: str = "stopped in a test", mcp=None):
+    return asyncio.run(_mcp_stop_async(run_id, reason, mcp))
 
 
 def _admit_real_operation(sf_path: Path, run_id: str, kind="delivery") -> int:
@@ -136,15 +138,30 @@ def test_the_mcp_stop_entry_syncs_cached_status_and_last_step(live, monkeypatch)
     ``running:<old_step>`` indefinitely.
     """
     import core.scheduler as scheduler
+    from types import SimpleNamespace
+    from api import authz
+    from api.mcp_router import build_mcp
 
     monkeypatch.setattr(scheduler, "db", live["db"])
     monkeypatch.setattr(scheduler, "get_skillflow", lambda: live["sf"])
+    # Exercise the registered MCP wrapper with the supported off-tunnel admin
+    # credential. This test must stay independent of the host's auth env: when
+    # the production gate is enabled, a direct wrapper call with no request is
+    # correctly denied as having no verifiable identity.
+    test_token = "stop-regression-admin-token"
+    monkeypatch.setattr(authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(authz, "ADMIN_TOKEN", test_token)
+    request = SimpleNamespace(headers={"X-AItelier-Admin-Token": test_token})
+    context = SimpleNamespace(
+        request_context=SimpleNamespace(request=request))
+    mcp = build_mcp()
+    monkeypatch.setattr(mcp, "get_context", lambda: context)
 
     rid = _direct_run(live)
     live["db"].update_project("p1", status="running:t_impl",
                               current_project_step="t_impl")
 
-    out = _mcp_stop(rid, "operator stop regression")
+    out = _mcp_stop(rid, "operator stop regression", mcp=mcp)
 
     assert out["outcome"] == "stopped", out
     row = live["db"].get_project("p1")

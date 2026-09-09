@@ -73,7 +73,7 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
     result = _index(projects, worktrees, bin_dir)
 
     assert result.stderr == ""
-    assert log.read_text().splitlines() == [str(source), str(linked)]
+    assert log.read_text().splitlines() == [str(linked), str(source)]
     assert (source / ".zvec-grep").is_dir()
     assert (linked / ".zvec-grep").is_dir()
     assert not (outside / ".zvec-grep").exists()
@@ -82,7 +82,7 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
 
     # Existing indexes are not launched twice.
     _index(projects, worktrees, bin_dir)
-    assert log.read_text().splitlines() == [str(source), str(linked)]
+    assert log.read_text().splitlines() == [str(linked), str(source)]
 
     # Lifecycle ownership stays with git/run-isolation: the indexer issues no
     # cross-worktree drop/delete, and Git can remove an indexed clean worktree.
@@ -90,7 +90,42 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
     assert not linked.exists()
     _index(projects, worktrees, bin_dir)
     assert source.exists()
-    assert log.read_text().splitlines() == [str(source), str(linked)]
+    assert log.read_text().splitlines() == [str(linked), str(source)]
+
+
+def test_backlogs_prioritize_new_worktrees_without_starving_projects(tmp_path):
+    projects = tmp_path / "projects"
+    worktrees = tmp_path / "worktrees"
+    projects.mkdir()
+    worktrees.mkdir()
+
+    for i in range(8):
+        _git_repo(projects / f"project-{i:02d}")
+
+    source = tmp_path / "source"
+    _git_repo(source)
+    for i in range(9):
+        linked = worktrees / f"run-{i:02d}"
+        _run("git", "worktree", "add", "-qb", f"run-{i:02d}", str(linked), cwd=source)
+        os.utime(linked, (1_800_000_000 + i, 1_800_000_000 + i))
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = _stub_zg(bin_dir)
+    _index(projects, worktrees, bin_dir)
+
+    indexed = [Path(line).name for line in log.read_text().splitlines()]
+    assert indexed[:5] == [
+        "run-08", "run-07", "run-06", "run-05", "project-00",
+    ]
+    assert indexed[5:10] == [
+        "run-04", "run-03", "run-02", "run-01", "project-01",
+    ]
+    assert indexed[10:13] == ["run-00", "project-02", "project-03"]
+    assert sorted(indexed) == sorted(
+        [f"run-{i:02d}" for i in range(9)]
+        + [f"project-{i:02d}" for i in range(8)]
+    )
 
 
 def test_failed_index_is_reported_and_retried_without_success_marker(tmp_path):

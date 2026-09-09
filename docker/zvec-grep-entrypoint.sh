@@ -32,27 +32,72 @@ prepare_repo() {
   fi
 }
 
-index_new_repos() {
-  # This function is deliberately serial. zg owns its per-index writer lease;
-  # the entrypoint never launches two index commands concurrently.
-  for parent in "$PROJECTS" "$WORKTREES"; do
-    [ -d "$parent" ] || continue
-    for repo in "$parent"/*/; do
-      repo="${repo%/}"
-      # Run-isolation creates real directories. Never follow a planted symlink
-      # out of the two owned roots.
-      [ -L "$repo" ] && continue
-      prepare_repo "$repo" || continue
-      [ -d "$repo/.zvec-grep" ] && continue
-      echo "[zg-indexer] indexing new repo: $repo"
-      if index_output="$(zg index "$repo" --embedding "$EMBED" --mode server 2>&1)"; then
-        printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /'
-      else
-        printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /' >&2
-        echo "[zg-indexer] index failed; will retry: $repo" >&2
-      fi
-    done
+index_repo() {
+  repo="$1"
+  prepare_repo "$repo" || return 1
+  [ -d "$repo/.zvec-grep" ] && return 1
+  echo "[zg-indexer] indexing new repo: $repo"
+  if index_output="$(zg index "$repo" --embedding "$EMBED" --mode server 2>&1)"; then
+    printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /'
+  else
+    printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /' >&2
+    echo "[zg-indexer] index failed; will retry next pass: $repo" >&2
+  fi
+}
+
+next_repo() {
+  parent="$1"
+  order="$2"
+  attempted="$3"
+  [ -d "$parent" ] || return 1
+  best=""
+  best_mtime=-1
+  for candidate in "$parent"/*/; do
+    candidate="${candidate%/}"
+    [ -L "$candidate" ] && continue
+    [ -e "$candidate/.git" ] || continue
+    [ -d "$candidate/.zvec-grep" ] && continue
+    grep -Fqx "$candidate" "$attempted" 2>/dev/null && continue
+    if [ "$order" = "first" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    mtime="$(stat -c %Y "$candidate" 2>/dev/null || printf 0)"
+    if [ "$mtime" -gt "$best_mtime" ]; then
+      best="$candidate"
+      best_mtime="$mtime"
+    fi
   done
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
+index_new_repos() {
+  # One writer stays strictly serial. Each batch gives four slots to the
+  # newest run worktrees and one to the projects backlog, then rescans so a
+  # just-created run never waits behind the startup inventory.
+  attempted="$(mktemp "${TMPDIR:-/tmp}/aitelier-zg-attempted.XXXXXX")" || {
+    echo "[zg-indexer] cannot create scheduling state; skipping pass" >&2
+    return 1
+  }
+  while :; do
+    scheduled=0
+    worktree_slots=0
+    while [ "$worktree_slots" -lt 4 ]; do
+      repo="$(next_repo "$WORKTREES" newest "$attempted")" || break
+      printf '%s\n' "$repo" >> "$attempted"
+      index_repo "$repo" || true
+      worktree_slots=$((worktree_slots + 1))
+      scheduled=1
+    done
+    if repo="$(next_repo "$PROJECTS" first "$attempted")"; then
+      printf '%s\n' "$repo" >> "$attempted"
+      index_repo "$repo" || true
+      scheduled=1
+    fi
+    [ "$scheduled" -eq 1 ] || break
+  done
+  rm -f "$attempted"
 }
 
 # Unit tests source the functions without starting processes or touching the

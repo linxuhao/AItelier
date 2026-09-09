@@ -159,7 +159,10 @@ services:
   # not reachable from inside aitelier, even by an agent with bash. The
   # entrypoint's serial indexer loop (docker/zvec-grep-entrypoint.sh) indexes
   # every repo under ~/.AItelier/projects/* and each run-owned linked worktree
-  # under ~/.AItelier/worktrees/* within a minute. It excludes `.zvec-grep/`
+  # under ~/.AItelier/worktrees/*. Backlogs run in 4 newest-worktrees : 1
+  # project batches and rescan between batches, so projects still progress
+  # while a new run does not wait behind the startup inventory. It excludes
+  # `.zvec-grep/`
   # through Git metadata before indexing. Index data stays inside the owning
   # checkout; worktree removal owns cleanup and the sidecar never recursively
   # deletes or drops a disappeared worktree. A repo elsewhere (repo_type

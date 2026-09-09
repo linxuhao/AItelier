@@ -17,7 +17,7 @@ export interface StateAttempt {
 }
 export type StateNextAction = 'candidate_review' | 'new_attempt';
 export interface StateNodeSummary {
-  node_key: string; title: string; domain: string; revision: number; contract_hash: string;
+  node_key: string; title: string; domain: string; revision: number; contract_hash: string; facet?: string | null;
   status: string; readiness: string; next_action?: StateNextAction | null; dependencies: string[]; blocked_by: string[];
   hold: ({ scope: string; reason: string } & Partial<DispatchPolicy>) | null; node_hold: NodeHold;
   criteria_count: number; attempt_count: number; latest_attempt: StateAttempt | null;

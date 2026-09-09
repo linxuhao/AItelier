@@ -8,6 +8,7 @@ The owner appointed Codex director of 武虾传奇 / wuxia-myth and authorized C
 - Claude may implement assigned gameplay fixes; director handles docs/tooling/integration. Independent tests must validate the final commit. Zero-assertion/skipped/blind gates do not pass; first failure evidence stays visible.
 - Commercial source and full content remain private. Only reviewed public/ manifests may publish; no complete PCK or copied design/. Old publicly released history cannot be assumed withdrawn.
 - Verify and print current timestamp before user-facing responses. Maintain the server driver state on assignment/queue/run changes.
+- State DAG nodes carry a facet and the engine refuses edges that build on an implementation instead of a contract (2026-09-09): read `design/state_facets.md` and the "Facets" section of the driver guide (`state_graph_help`) before adding or re-pointing nodes; `facet_lint` shows every violation. The coop chain is migrated; the rest of `wuxia-myth` is migrated only after coop has run one parallel round.
 
 The repository documentation below describes AItelier itself; this local checkout is not the production checkout.
 

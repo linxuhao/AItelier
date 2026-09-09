@@ -181,6 +181,7 @@ class StatePortfolio:
             for n in view["nodes"]:
                 a = latest.get(n["node_key"])
                 entry = {k: n[k] for k in ("node_key", "revision", "contract_hash", "status", "priority", "dependencies", "blocked_by", "readiness", "next_action", "hold", "node_hold")}
+                entry["facet"] = n.get("facet")
                 entry.update(title=n["goal"].splitlines()[0][:180], domain=n["node_key"].split(".")[0],
                              criteria_count=len(n["acceptance"]), attempt_count=count.get(n["node_key"], 0),
                              latest_attempt={k: a[k] for k in ATTEMPT_COLUMNS} if a else None,

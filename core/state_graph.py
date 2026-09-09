@@ -17,6 +17,13 @@ from typing import Any
 
 KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 KINDS = frozenset({"test", "review", "human", "artifact", "integration"})
+# A facet says what a node IS, so the graph can say what may be built on it.
+# Only contracts and design facts may be depended upon; an implementation is
+# nobody else's business until an integration node composes it. NULL = legacy,
+# exempt, so a graph migrates one chain at a time. See design/state_facets.md.
+FACETS = frozenset({"design", "contract", "test", "content", "integration"})
+BUILDABLE = frozenset({"design", "contract"})
+FACET_SUFFIXES = {".contract": "contract", ".test": "test"}
 MAX_NODES = 1000
 READY_ACTIONS = ("candidate_review", "new_attempt")
 
@@ -134,6 +141,52 @@ def _validate_dag(graph: dict[str, list[str]]) -> None:
         raise StateGraphError("dependency cycle; use a workflow loop, not a cyclic state dependency")
 
 
+def check_facet(value, label: str = "facet"):
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in FACETS:
+        raise StateGraphError(f"{label} must be one of {sorted(FACETS)}")
+    return value
+
+
+def facet_violations(facets: dict[str, str | None], graph: dict[str, list[str]]) -> list[str]:
+    """Every rule about facets, as messages that name the fix.
+
+    A rule the director cannot repair from its error text costs one rework
+    round per violation forever, so each message says what to create or
+    re-point. Pure: the store calls it inside a transaction, `facet_lint`
+    calls it on a snapshot, and the migration dry-run calls it on a plan.
+    """
+    problems = []
+    for node, own in facets.items():
+        for suffix, expected in FACET_SUFFIXES.items():
+            if node.endswith(suffix) and own is not None and own != expected:
+                problems.append(f"`{node}` ends with {suffix} so its facet must be {expected}, not {own}")
+        if own is None:
+            continue
+        stem = node[:-5] if node.endswith(".test") else node
+        deps = set(graph.get(node, ()))
+        for dep in sorted(deps):
+            target = facets.get(dep)
+            if target is None:
+                problems.append(f"`{node}` ({own}) depends on `{dep}`, which has no facet yet; "
+                                f"set_node_facet on `{dep}` first — dependencies are faceted bottom-up")
+            elif own == "integration" or target in BUILDABLE:
+                continue
+            elif dep in (node + ".test", node + ".contract") or (node.endswith(".test") and dep == stem + ".contract"):
+                continue
+            else:
+                problems.append(f"`{node}` ({own}) cannot depend on `{dep}` ({target}): only contract/design nodes may be "
+                                f"built on. Create `{dep}.contract` (facet contract) holding {dep}'s interface + stub/fake and "
+                                f"point this edge at it, or make `{node}` facet integration if it truly needs {dep}'s implementation")
+        if own in {"content", "test"}:
+            for sibling in (stem + ".contract",) + ((node + ".test",) if own == "content" else ()):
+                if sibling in facets and sibling != node and sibling not in deps:
+                    problems.append(f"`{node}` has `{sibling}` but does not depend on it; add the dependency so "
+                                    f"contract → test → implementation is the accepted order")
+    return problems
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS state_projects (
     project_id TEXT PRIMARY KEY, title TEXT NOT NULL,
@@ -189,6 +242,10 @@ class StateGraphStore:
         with db.get_connection() as conn:
             from core.state_metadata import SCHEMA as METADATA_SCHEMA
             conn.executescript(SCHEMA + METADATA_SCHEMA)
+            # Additive: existing rows stay NULL (legacy, exempt from facet rules).
+            if "facet" not in {r["name"] for r in conn.execute("PRAGMA table_info(state_nodes)")}:
+                conn.execute("ALTER TABLE state_nodes ADD COLUMN facet TEXT "
+                             "CHECK(facet IN ('design','contract','test','content','integration'))")
             conn.commit()
 
     @contextmanager
@@ -273,9 +330,10 @@ class StateGraphStore:
         if not isinstance(specs, list) or not 1 <= len(specs) <= 200:
             raise StateGraphError("add_nodes requires 1-200 nodes per transaction")
         old, graph = self._graph(conn, project_id)
+        facets = {k: n.get("facet") for k, n in old.items()}
         prepared = []
         for spec in specs:
-            if not isinstance(spec, dict) or set(spec) - {"key", "goal", "acceptance", "dependencies", "priority"}:
+            if not isinstance(spec, dict) or set(spec) - {"key", "goal", "acceptance", "dependencies", "priority", "facet"}:
                 raise StateGraphError("unknown node fields; workflow progress is not a state-node property")
             nk = key(spec.get("key"), "node key")
             if nk in graph:
@@ -284,21 +342,71 @@ class StateGraphStore:
             checks = contract(spec.get("acceptance"))
             deps = dependencies(spec.get("dependencies", []))
             priority = integer(spec.get("priority", 0), "priority", -100000, 100000)
+            own = check_facet(spec.get("facet"))
             if any(old.get(d, {}).get("status") == "SUPERSEDED" for d in deps):
                 raise StateConflict("cannot depend on a superseded node")
             graph[nk] = deps
-            prepared.append((nk, goal, checks, deps, priority))
+            facets[nk] = own
+            prepared.append((nk, goal, checks, deps, priority, own))
         _validate_dag(graph)
+        self._check_facets(facets, graph)
         # All nodes first: forward references in a batch are legitimate.
-        for nk, goal, checks, deps, priority in prepared:
+        for nk, goal, checks, deps, priority, own in prepared:
             stamp = now()
-            conn.execute("INSERT INTO state_nodes VALUES(?,?,?,?,?,?,'OPEN',?,NULL,?,?)",
-                         (project_id, nk, 1, goal, canonical(checks), digest(checks), priority, stamp, stamp))
-        for nk, goal, checks, deps, priority in prepared:
+            conn.execute("INSERT INTO state_nodes(project_id,node_key,revision,goal,contract_json,contract_hash,status,"
+                         "priority,verified_receipt,created_at,updated_at,facet) VALUES(?,?,?,?,?,?,'OPEN',?,NULL,?,?,?)",
+                         (project_id, nk, 1, goal, canonical(checks), digest(checks), priority, stamp, stamp, own))
+        for nk, goal, checks, deps, priority, own in prepared:
             conn.executemany("INSERT INTO state_dependencies VALUES(?,?,?)", [(project_id, nk, dep) for dep in deps])
             self._snapshot_revision(conn, self._node(conn, project_id, nk), deps)
-            self._event(conn, project_id, nk, "node_created", {"revision": 1, "dependencies": deps, "contract_hash": digest(checks)})
+            self._event(conn, project_id, nk, "node_created", {"revision": 1, "dependencies": deps,
+                                                                "contract_hash": digest(checks), "facet": own})
         return [nk for nk, *_ in prepared]
+
+    @staticmethod
+    def _check_facets(facets, graph):
+        problems = facet_violations(facets, graph)
+        if problems:
+            raise StateGraphError("facet rules: " + " | ".join(problems[:5]) +
+                                  (f" | (+{len(problems) - 5} more; see facet_lint)" if len(problems) > 5 else ""))
+
+    def set_node_facet(self, project_id: str, node_key: str, facet: str) -> dict:
+        """Label a legacy node once. No revision: a label is not a contract change.
+
+        NULL → value only. Re-labelling is refused because every edge that was
+        accepted under the old label would have to be re-judged; make a new
+        node instead. The rules are checked against the node's CURRENT edges,
+        so a node others already build on cannot quietly become `content`.
+        """
+        own = check_facet(facet)
+        if own is None:
+            raise StateGraphError("facet is required")
+        with self.transaction(write=True) as conn:
+            node = self._node(conn, project_id, node_key)
+            if node.get("facet") == own:
+                return {"key": node_key, "facet": own, "changed": False}
+            if node.get("facet") is not None:
+                raise StateConflict(f"`{node_key}` is already facet {node['facet']}; a facet is set once — create a new node")
+            nodes, graph = self._graph(conn, project_id)
+            facets = {k: n.get("facet") for k, n in nodes.items()}
+            facets[node_key] = own
+            # Dependents that are already faceted were accepted against this
+            # node being legacy; they must still be legal once it has a label.
+            self._check_facets(facets, graph)
+            conn.execute("UPDATE state_nodes SET facet=?,updated_at=? WHERE project_id=? AND node_key=?",
+                         (own, now(), project_id, node_key))
+            self._event(conn, project_id, node_key, "node_facet_set", {"facet": own, "revision": node["revision"]})
+            return {"key": node_key, "facet": own, "changed": True}
+
+    def facet_lint(self, project_id: str) -> dict:
+        """The same rules, read-only, over the whole project including legacy nodes."""
+        with self.transaction() as conn:
+            self._project(conn, project_id)
+            nodes, graph = self._graph(conn, project_id)
+        facets = {k: n.get("facet") for k, n in nodes.items()}
+        return {"violations": facet_violations(facets, graph),
+                "faceted": sum(1 for f in facets.values() if f), "legacy": sum(1 for f in facets.values() if not f),
+                "facets": {k: f for k, f in sorted(facets.items()) if f}}
 
     def add_nodes(self, project_id: str, nodes: list[dict]) -> dict:
         with self.transaction(write=True) as conn:
@@ -330,6 +438,7 @@ class StateGraphStore:
         if any(nodes[d]["status"] == "SUPERSEDED" for d in graph[node_key] if d in nodes):
             raise StateConflict("cannot depend on a superseded node")
         _validate_dag(graph)
+        self._check_facets({k: n.get("facet") for k, n in nodes.items()}, graph)
         new_goal = text(goal, "goal") if goal is not None else old["goal"]
         checks = contract(acceptance) if acceptance is not None else json.loads(old["contract_json"])
         revision = expected_revision + 1

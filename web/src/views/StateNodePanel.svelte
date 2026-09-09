@@ -28,7 +28,7 @@
   {:else}
     <div class="panel-heading"><code>{nodeKey}</code><a href={stateProjectHref(projectId, nodeKey)} aria-label="Permalink">↗</a></div>
     <h3>{data.node.goal.split('\n')[0]}</h3>
-    <div class="badges"><strong>{data.node.status}</strong><span>{st(data.node.readiness)}</span><span>r{data.node.revision}</span></div>
+    <div class="badges"><strong>{data.node.status}</strong><span>{st(data.node.readiness)}</span><span>r{data.node.revision}</span>{#if data.node.facet}<span class="facet">{data.node.facet}</span>{/if}</div>
     <p class="goal-text">{data.node.goal}</p>
     {#if data.node.hold}
       <div class="hold" role="note"><strong>⏸ {st('hold')}</strong><p>{data.node.hold.reason}</p><small>{st('holdNote')}</small></div>

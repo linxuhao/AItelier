@@ -54,6 +54,10 @@ class SupersedeNode(Node):
     reason: str
 
 
+class SetNodeFacet(Node):
+    facet: str
+
+
 class Frontier(Project):
     limit: int = 30
 
@@ -243,7 +247,7 @@ READ_REQUESTS = {
     "search_design_items": SearchDesignItems, "design_impact": DesignImpact,
     "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
     "export_design_markdown": DesignBaseline, "check_design_markdown": CheckDesignMarkdown,
-    "list_projects": Empty, "get_graph": Project, "get_node": Node,
+    "list_projects": Empty, "get_graph": Project, "get_node": Node, "facet_lint": Project,
     "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange, "get_attempt": Attempt,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
@@ -255,8 +259,8 @@ WRITE_REQUESTS = {
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
     "bind_node_design": BindDesign,
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
-    "split_node": SplitNode, "supersede_node": SupersedeNode, "start_attempt": StartAttempt,
-    "recover_attempt": Attempt, "reconcile_attempt": Attempt, "retire_reservation": RetireReservation, "record_evidence": Evidence,
+    "split_node": SplitNode, "supersede_node": SupersedeNode, "set_node_facet": SetNodeFacet,
+    "start_attempt": StartAttempt, "recover_attempt": Attempt, "reconcile_attempt": Attempt, "retire_reservation": RetireReservation, "record_evidence": Evidence,
     "verify_node": Verify, "import_tasks": ImportTasks,
     "bind_source": BindSource, "set_dispatch": DispatchPolicy, "set_node_hold": NodeHold,
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
@@ -293,12 +297,13 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "create_design_revision": service.design.create_revision, "create_design_baseline": service.design.create_baseline,
         "bind_node_design": service.design.bind_node,
         "list_projects": service.store.list_projects, "get_graph": service.store.get_graph,
-        "get_node": service.node_context, "frontier": service.store.frontier,
+        "get_node": service.node_context, "frontier": service.store.frontier, "facet_lint": service.store.facet_lint,
         "wait_for_state_change": service.wait_for_state_change, "events": service.store.events, "get_attempt": service.attempts.get,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
         "revise_node": service.store.revise_node, "split_node": service.store.split_node,
-        "supersede_node": service.store.supersede_node, "start_attempt": service.start_attempt,
+        "supersede_node": service.store.supersede_node, "set_node_facet": service.store.set_node_facet,
+        "start_attempt": service.start_attempt,
         "recover_attempt": service.recover_attempt, "reconcile_attempt": service.reconcile_attempt,
         "retire_reservation": service.attempts.retire_reservation,
         "record_evidence": service.record_evidence, "verify_node": service.verify_node,

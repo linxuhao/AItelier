@@ -42,6 +42,16 @@ source repository. Each **workflow-backed** attempt receives a separate
 has neither; it pins its harness/job identity and context instead. No legacy
 project/task is automatically converted.
 
+## Facets
+
+Nodes carry a `facet` (design / contract / test / content / integration) and the
+engine refuses a dependency edge that points at an implementation instead of a
+contract or design fact — a `content` node is VERIFIED against its dependencies'
+contracts, and real implementations compose only in `integration` nodes. Unfaceted
+nodes are legacy and exempt, so a graph migrates one chain at a time; `facet_lint`
+lists every violation with the fix. Rules, rationale and the migration recipe:
+[design/state_facets.md](../design/state_facets.md).
+
 ## State and validity
 
 Persistent node statuses are `OPEN`, `CANDIDATE`, `VERIFIED`, `STALE`, and

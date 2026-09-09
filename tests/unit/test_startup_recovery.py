@@ -116,15 +116,14 @@ def test_a_paused_run_keeps_its_current_node(sf):
     assert sf.run_row("r1")["current_node"] == "5_vision_judged"
 
 
-def test_a_running_run_still_loses_its_pointer(sf):
-    # For a RUNNING run the reaped claim really does invalidate the pointer;
-    # skillflow re-resolves from scratch. Unchanged on purpose.
+def test_a_running_run_keeps_its_execution_pointer(sf):
+    # A lease restart must continue the interrupted execution position.
     sf.run("r1", "running", "t_impl")
     sf.step(10, "r1", "t_impl", "claimed", "worker host=x")
 
     scheduler.recover_claims_on_startup()
 
-    assert sf.run_row("r1")["current_node"] is None
+    assert sf.run_row("r1")["current_node"] == "t_impl"
 
 
 # ── the immortal inline claim ────────────────────────────────────────────────
@@ -171,3 +170,33 @@ def test_a_dead_worker_is_not_in_flight(sf, monkeypatch):
     sf.step(10, "r1", "3", "claimed", "worker host=x pid=7", "2020-01-01T00:00:00Z")
 
     assert scheduler._has_active_claim(sf, "r1") is False
+
+
+def test_rejected_revision_restart_preserves_instance_and_transcript(tmp_path, monkeypatch):
+    from skillflow.core import SkillFlow, StepResult
+    from skillflow.graph import PipelineGraph, StepNode, Transition
+    s = SkillFlow(str(tmp_path / "sf.db"), workspace_base=str(tmp_path / "ws"))
+    s.register_graph(PipelineGraph(name="revision", begin="a", steps=[
+        StepNode(id="a", checkpoint=True, transitions=[Transition(to="b")]), StepNode(id="b")]))
+    r = s.create_run("revision", project_id="p")
+    s.start_run(r); s.advance_run(r)
+    old = s.claim_next_step(r)
+    s.confirm_step(old.token, StepResult(outputs={"report": "old"})); s.advance_run(r)
+    s.reject_checkpoint(r, "a", "actual UI and persistence")
+    revision = s.claim_next_step(r)
+    iid = revision.token.step_instance_id
+    s.trace(r, "agent", "prompt_delta", {"turn": 5, "role": "assistant", "content": "revision work"},
+            step_id="a", step_instance_id=iid)
+    trace = s.get_trace(r, step_instance_id=iid)
+    historical = dict(s._conn.execute("SELECT * FROM skillflow_steps WHERE id=?", (old.token.step_instance_id,)).fetchone())
+    monkeypatch.setattr(scheduler, "get_skillflow", lambda: s)
+    scheduler.recover_claims_on_startup()
+    assert s.get_run(r)["current_node"] == "a"
+    assert s.advance_run(r) == "a"
+    assert s.get_run(r)["status"] == "running"
+    again = s.claim_next_step(r)
+    assert again.token.step_instance_id == iid
+    assert again.token.claim_epoch > revision.token.claim_epoch
+    assert again.inputs["_feedback"] == revision.inputs["_feedback"]
+    assert s.get_trace(r, step_instance_id=iid)[:len(trace)] == trace
+    assert dict(s._conn.execute("SELECT * FROM skillflow_steps WHERE id=?", (old.token.step_instance_id,)).fetchone()) == historical

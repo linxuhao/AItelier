@@ -660,7 +660,7 @@ def recover_claims_on_startup():
        1504 sat 'claimed' forever. Only the newest instance is reopened now;
        older ones are closed as failed, which is what they are.
 
-    2. A PAUSED RUN KEEPS ITS POINTER. `current_node` was nulled for every run
+    2. A RUN KEEPS ITS POINTER. `current_node` was nulled for every run
        touched. On a run paused at a checkpoint the reaped claim says nothing
        about where the run sits, and the host identifies the pending checkpoint
        from that pointer — so a restart during a checkpoint made the checkpoint
@@ -704,12 +704,9 @@ def recover_claims_on_startup():
                          "process that died; a newer instance is live",
                          row["id"]))
                     superseded += 1
-                # Only a RUNNING run's pointer is invalidated by a reaped claim.
-                sf._conn.execute(
-                    "UPDATE skillflow_runs SET current_node = NULL, "
-                    "updated_at = datetime('now') "
-                    "WHERE id = ? AND status != 'paused'",
-                    (row["run_id"],))
+                # Reopening a claim does not change its execution position.
+                # In particular a rejected checkpoint has an older completed
+                # sibling: clearing its pointer replays that old checkpoint.
             sf._conn.commit()
         import logging
         logging.getLogger("aitelier.scheduler").info(

@@ -1,10 +1,13 @@
 # zvec-grep (zg) sidecar: ripgrep + BM25 + vector search behind one MCP tool.
-# Shares the aitelier container's network namespace (compose: network_mode),
-# because zg's server only listens on loopback — so inside `aitelier`,
-# http://127.0.0.1:7999/mcp is this daemon. State and indexes live on the
-# mounted ~/.AItelier (ZVEC_GREP_HOME) so they survive recreation; each
-# indexed repo also keeps its own .zvec-grep/ under the repo root.
+# The daemon stays on loopback inside this sidecar; a small proxy exposes it
+# only to the compose-private network. State and indexes live on the mounted
+# ~/.AItelier; each indexed checkout keeps its own .zvec-grep/ directory.
 FROM node:22-bookworm-slim
+# Resolve Git's common info/exclude path for linked worktrees. The slim base
+# image does not promise a Git executable.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 RUN npm install -g @zvec/zvec-grep@0.2.0 && npm cache clean --force
 ENV ZVEC_GREP_HOME=/home/linxuhao/.AItelier/zvec-grep-home \
     HOME=/home/linxuhao/.AItelier/zvec-grep-home

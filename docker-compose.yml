@@ -157,10 +157,13 @@ services:
   # the private network only (not on `edge`). Index a repo once:
   # The MCP surface is the AGENT toolset (search only): index/drop/status are
   # not reachable from inside aitelier, even by an agent with bash. The
-  # entrypoint's indexer loop (docker/zvec-grep-entrypoint.sh) indexes every
-  # new repo under ~/.AItelier/projects/* within a minute and keeps
-  # `.zvec-grep/` out of git via .git/info/exclude. A repo elsewhere
-  # (repo_type existing with a repo_path outside projects/) is indexed by hand:
+  # entrypoint's serial indexer loop (docker/zvec-grep-entrypoint.sh) indexes
+  # every repo under ~/.AItelier/projects/* and each run-owned linked worktree
+  # under ~/.AItelier/worktrees/* within a minute. It excludes `.zvec-grep/`
+  # through Git metadata before indexing. Index data stays inside the owning
+  # checkout; worktree removal owns cleanup and the sidecar never recursively
+  # deletes or drops a disappeared worktree. A repo elsewhere (repo_type
+  # existing with a repo_path outside both roots) is indexed by hand:
   #   docker exec aitelier-zg zg index <abs repo path> --embedding local/potion-code-16m-v2 --mode server
   zvec-grep:
     build:

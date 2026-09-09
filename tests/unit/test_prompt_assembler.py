@@ -576,6 +576,13 @@ class TestJsonGrantedToolCatalog:
         assert "`create(file, content)`" in prompt
         assert "`edit(file, old_str, new_str)`" in prompt
         assert '"new_str": {"type": "string", "required": true' in prompt
+        assert "`file_path`, `filename`, and `path` are accepted path aliases" in prompt
+        assert "pass exactly ONE path argument and never combine aliases" in prompt
+        pattern_a = prompt.split("Pattern A", 1)[1].split("Pattern B", 1)[0]
+        assert '"file": "<file>"' in pattern_a
+        assert '"file_path": "<file_path>"' not in pattern_a
+        assert '"filename": "<filename>"' not in pattern_a
+        assert '"path": "<path>"' not in pattern_a
         assert "Pattern A" in prompt and "Pattern B" in prompt
         assert "ALL required output files" in prompt
         assert "`write(" not in prompt

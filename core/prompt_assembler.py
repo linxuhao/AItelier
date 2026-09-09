@@ -279,6 +279,13 @@ def is_mutation_tool(name: str, tool_schemas=None) -> bool:
     return name in GENERIC_MUTATORS or name.startswith(SLOT_MUTATOR_PREFIXES)
 
 
+def _tool_signature(name: str, parameters: dict) -> str:
+    """Render the canonical call shape while the JSON below retains aliases."""
+    if name == "edit":
+        return "edit(file, old_str, new_str)"
+    return f"{name}({', '.join(parameters)})"
+
+
 class PromptAssembler:
     """
     组装结构化的 Agent 提示词。
@@ -429,7 +436,7 @@ class PromptAssembler:
                 for name, schema in sorted(tool_schemas.items()):
                     params = schema.get("parameters", {})
                     tool_lines.append(
-                        f"  - `{name}({', '.join(params)})` — "
+                        f"  - `{_tool_signature(name, params)}` — "
                         f"{schema.get('description', '')}\n"
                         f"    Parameters: {json.dumps(params, ensure_ascii=False)}")
                 sections.append(
@@ -456,13 +463,11 @@ class PromptAssembler:
                     schema = (tool_schemas or {}).get(t, {})
                     desc = schema.get("description", "")
                     params = schema.get("parameters", {})
-                    # Show ALL parameter names — the LLM needs to know about
-                    # `id` for glob patterns (replaces * in filename) and
-                    # `file` for the generic write tool.  Hiding parameters
-                    # causes the LLM to omit them → "path traversal denied"
-                    # or all output landing in "unknown.json".
-                    param_names = list(params.keys())
-                    tool_lines.append(f"  - `{t}({', '.join(param_names)})` — {desc}")
+                    # The catalog above retains the complete JSON schema. Here
+                    # show the canonical call: `edit` has four interchangeable
+                    # path keys, and displaying all four as positional-looking
+                    # arguments teaches the invalid combine-aliases call.
+                    tool_lines.append(f"  - `{_tool_signature(t, params)}` — {desc}")
                 tool_list_block = "\n".join(tool_lines)
                 # Build a params example from the tool with the most parameters,
                 # so the LLM sees the full required shape (including id, file etc.).
@@ -471,8 +476,13 @@ class PromptAssembler:
                 ))
                 example_schema = (tool_schemas or {}).get(example_tool, {})
                 example_params = example_schema.get("parameters", {})
+                example_keys = (
+                    ("file", "old_str", "new_str")
+                    if example_tool == "edit"
+                    else tuple(example_params)
+                )
                 example_params_json = ", ".join(
-                    f'"{k}": "<{k}>"' for k in sorted(example_params.keys())
+                    f'"{k}": "<{k}>"' for k in example_keys
                 )
                 delivery = (
                     "[Output Delivery — REQUIRED]\n"
@@ -489,6 +499,10 @@ class PromptAssembler:
                     f"{tool_list_block}\n\n"
                     "For actions, use only names in the Granted Tools catalog. "
                     "Include ALL required parameters shown in the tool signatures. "
+                    "For `edit`, use canonical `file`; `file_path`, `filename`, and "
+                    "`path` are accepted path aliases, but pass exactly ONE path "
+                    "argument and never combine aliases. `old_str` and `new_str` "
+                    "are always required (an empty `new_str` means deletion). "
                     "Do NOT wrap the JSON in markdown code fences. "
                     "The step is complete only once you have written ALL required "
                     "output files."

@@ -327,6 +327,9 @@ class AIGateway:
         self.max_output_tokens = max_output_tokens
         # Phase 0 cache telemetry: usage of the most recent completion.
         self.last_usage: dict = {}
+        # One gateway owns one conversation; retain routing identity across turns
+        # and endpoint failovers, never share it between independent gateways.
+        self._opencode_session_id = uuid.uuid4().hex
         # Optional liveness hook, set by the host after construction: called
         # with {"chars", "elapsed", "served_by"} every ~_PROGRESS_EVERY_S
         # while a completion streams (see _call_llm). Runs on the LLM worker
@@ -1030,6 +1033,34 @@ class AIGateway:
         self._failover_context(
             f"headroom {left} < max_output_tokens {self.max_output_tokens}")
 
+    def _apply_session_headers(self, kwargs: dict) -> None:
+        """OpenCode Go requires a coding-agent UA and stable conversation ID.
+
+        Preserve caller headers without mutating their dict. The routing header
+        is provider-owned; remove it when rebinding away. Prefixing the UA lets
+        us restore a caller's original value on that same rebind.
+        """
+        headers = dict(kwargs.get("extra_headers") or {})
+        for key in list(headers):
+            if key.lower() == "x-opencode-session":
+                del headers[key]
+        ua_key = next((k for k in headers if k.lower() == "user-agent"), "User-Agent")
+        agent = "AItelier/1.0"
+        ua = headers.get(ua_key, "")
+        if ua == agent or ua.startswith(agent + " "):
+            ua = ua[len(agent):].lstrip()
+            if ua:
+                headers[ua_key] = ua
+            else:
+                headers.pop(ua_key, None)
+        if self.provider == "opencodego":
+            headers["x-opencode-session"] = self._opencode_session_id
+            headers[ua_key] = agent + (" " + ua if ua else "")
+        if headers:
+            kwargs["extra_headers"] = headers
+        else:
+            kwargs.pop("extra_headers", None)
+
     def _apply_binding(self, kwargs: dict) -> dict:
         """(Re)write the keys that depend on WHICH endpoint is bound.
 
@@ -1041,6 +1072,7 @@ class AIGateway:
         leaving the previous provider's `api_key` or `cache_control_*` behind is
         how a failover turns one endpoint's outage into a second endpoint's 400.
         """
+        self._apply_session_headers(kwargs)
         kwargs["model"] = self.litellm_model
         for k in ("api_base", "api_key", "cache_control_injection_points",
                   "reasoning_effort", "extra_body"):
@@ -1165,6 +1197,7 @@ class AIGateway:
         }
         self._apply_binding(kwargs)
         kwargs.update(extra)
+        self._apply_session_headers(kwargs)
         return kwargs
 
     # ── JSON mode (existing) ─────────────────────────────────────────

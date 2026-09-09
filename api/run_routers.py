@@ -18,6 +18,55 @@ from api._cache_stats import compute_cache_stats_per_step, compute_cache_stats_b
 router = APIRouter(prefix="/api", tags=["Runs & Traces"])
 
 
+_ACTIVE_STEP_STATUSES = {"claimed", "running"}
+_ACTIVE_RUN_STATUSES = {"running", "paused"}
+
+
+def _active_step_snapshot(run: dict, steps: list[dict]) -> dict | None:
+    """Return the step instance that is executing now.
+
+    A run's ``current_node`` is graph position, not execution evidence. It can
+    briefly lag a claim or remain populated after a terminal transition. Step
+    instances are the stronger signal: the newest claimed/running instance wins.
+    ``current_node`` is only a transition-window fallback for an active run.
+    """
+    run_status = str(run.get("status") or "").split(":", 1)[0]
+    if run_status not in _ACTIVE_RUN_STATUSES:
+        return None
+
+    active = [s for s in steps if s.get("status") in _ACTIVE_STEP_STATUSES]
+    if active:
+        def recency(step: dict) -> tuple:
+            instance_id = step.get("id")
+            try:
+                instance_order = int(instance_id)
+            except (TypeError, ValueError):
+                instance_order = -1
+            timestamp = (step.get("updated_at") or step.get("claimed_at")
+                         or step.get("created_at") or "")
+            return instance_order, timestamp, step.get("status") == "claimed"
+
+        step = max(active, key=recency)
+        return {
+            "step_id": step.get("step_id") or "",
+            "status": step.get("status") or "",
+            "instance_id": step.get("id"),
+            "loop_item": step.get("loop_item") or None,
+            "source": "step_instance",
+        }
+
+    node = run.get("current_node")
+    if node:
+        return {
+            "step_id": node,
+            "status": run_status,
+            "instance_id": None,
+            "loop_item": None,
+            "source": "current_node",
+        }
+    return None
+
+
 # ── Start a run of any config ─────────────────────────────────────────
 
 class StartRunRequest(BaseModel):
@@ -182,6 +231,7 @@ def list_project_runs(
     enriched = []
     for r in runs:
         steps = sf.get_steps(r["id"])
+        r["active_step"] = _active_step_snapshot(r, steps)
         r["steps"] = [
             {
                 "step_id": s["step_id"],
@@ -254,6 +304,7 @@ def get_run_detail(
     run["manifest"] = manifest.to_dict() if manifest else None
 
     steps = sf.get_steps(internal_id)
+    run["active_step"] = _active_step_snapshot(run, steps)
     run["steps"] = [
         {
             # Instance id: step_id alone is NOT unique — task-loop steps

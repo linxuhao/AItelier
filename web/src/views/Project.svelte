@@ -488,6 +488,27 @@
     return truncate((run.run_id as string) || (run.id as string) || '', 12);
   }
 
+  function projectCurrentStep(): string {
+    if (!project) return '';
+    const explicit = (project.current_project_step as string)
+      || (project.current_step as string);
+    if (explicit) return explicit;
+    const [base, detail = ''] = String(project.status || '').split(':', 2);
+    return (base === 'running' || base === 'paused') ? detail : '';
+  }
+
+  function runActiveStep(run: Record<string, unknown>): Record<string, unknown> | null {
+    const snapshot = run.active_step;
+    if (!snapshot || typeof snapshot !== 'object') return null;
+    return snapshot as Record<string, unknown>;
+  }
+
+  function activeStepText(step: Record<string, unknown>): string {
+    const id = String(step.step_id || '');
+    const item = String(step.loop_item || '');
+    return stepLabel(id) + (item ? ` · ${item}` : '');
+  }
+
   function taskSteps(task: Record<string, unknown>): string {
     // completed_steps is a JSON-encoded string in the API payload
     let completed: unknown = task.completed_steps ?? [];
@@ -617,10 +638,10 @@
               <span class="meta-value">{formatTime(project.created_at as number)}</span>
             </div>
           {/if}
-          {#if project?.current_step}
+          {#if projectCurrentStep()}
             <div class="meta-item">
               <span class="meta-label">{t('project.currentStep')}</span>
-              <span class="meta-value">{stepLabel(project.current_step as string)}</span>
+              <span class="meta-value">{stepLabel(projectCurrentStep())}</span>
             </div>
           {/if}
           {#if llmProgress}
@@ -795,6 +816,7 @@
                 {#each runs as run, runIdx ((run.id as string) || (run.run_id as string) || runIdx)}
                   {@const isSelected = selectedRunId === (run.id as string) || selectedRunId === (run.run_id as string)}
                   {@const parsed = parseStatus(run.status as string)}
+                  {@const activeStep = runActiveStep(run)}
                   <tr
                     class="run-row"
                     class:selected={isSelected}
@@ -807,6 +829,11 @@
                       <span class="status-badge {parsed.className}" title={parsed.text}>
                         {parsed.icon} {parsed.text}
                       </span>
+                      {#if activeStep}
+                        <span class="active-step-line">
+                          {t('project.currentStep')}: {activeStepText(activeStep)}
+                        </span>
+                      {/if}
                     </td>
                     <td>
                       <span class="step-progress">
@@ -861,6 +888,12 @@
                     <div class="meta-item">
                       <span class="meta-label">Status</span>
                       <span class="status-badge {parsed.className}">{parsed.icon} {parsed.text}</span>
+                    </div>
+                  {/if}
+                  {#if runActiveStep(runDetail)}
+                    <div class="meta-item">
+                      <span class="meta-label">{t('project.currentStep')}</span>
+                      <span class="meta-value">{activeStepText(runActiveStep(runDetail)!)}</span>
                     </div>
                   {/if}
                   {#if runDetail.created_at}
@@ -1242,6 +1275,13 @@
   }
   .run-row td code {
     font-size: 0.85rem;
+  }
+  .active-step-line {
+    display: block;
+    margin-top: 0.25rem;
+    color: var(--pico-muted-color, #64748b);
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
   }
   .step-progress {
     font-variant-numeric: tabular-nums;

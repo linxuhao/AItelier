@@ -263,6 +263,61 @@ describe('Project.svelte', () => {
     expect(statusBadges.length).toBe(2);
   });
 
+  it('shows the active step from the live instance and the project API field', async () => {
+    mockApi.getProject.mockResolvedValue({
+      ...MOCK_PROJECT,
+      current_step: undefined,
+      current_project_step: 't_impl',
+    });
+    mockApi.listRuns.mockResolvedValue({ runs: [{
+      ...MOCK_RUNS[1],
+      status: 'running',
+      current_node: 't_plan_review',
+      active_step: {
+        step_id: 't_impl', status: 'claimed', instance_id: 4513,
+        loop_item: 'fix_map_travel_ending_scenarios', source: 'step_instance',
+      },
+    }] });
+    mockApi.getRunDetail.mockResolvedValue({
+      ...MOCK_RUN_DETAIL,
+      id: 'run-002', run_id: 'run-002', status: 'running',
+      current_node: 't_plan_review',
+      active_step: {
+        step_id: 't_impl', status: 'claimed', instance_id: 4513,
+        loop_item: 'fix_map_travel_ending_scenarios', source: 'step_instance',
+      },
+    });
+
+    const { container, findByText } = render(await import('../../views/Project.svelte'), {
+      props: { params: { id: 'test-project' } },
+    });
+    await findByText('Test Project');
+
+    const projectCard = container.querySelector('#project-info-card');
+    expect(projectCard?.textContent).toContain('Current step');
+    expect(projectCard?.textContent).toContain('Implementer');
+    const runStep = container.querySelector('.run-row .active-step-line');
+    expect(runStep?.textContent).toContain('Implementer');
+    expect(runStep?.textContent).toContain('fix_map_travel_ending_scenarios');
+    expect(runStep?.textContent).not.toContain('Plan Review');
+    await waitFor(() => {
+      expect(container.querySelector('.run-detail-panel')?.textContent)
+        .toContain('fix_map_travel_ending_scenarios');
+    });
+  });
+
+  it('does not show current_node for a terminal run', async () => {
+    mockApi.listRuns.mockResolvedValue({ runs: [{
+      ...MOCK_RUNS[0], status: 'completed', current_node: 't_impl', active_step: null,
+    }] });
+
+    const { container, findByText } = render(await import('../../views/Project.svelte'), {
+      props: { params: { id: 'test-project' } },
+    });
+    await findByText('Test Project');
+    expect(container.querySelector('.run-row .active-step-line')).toBeNull();
+  });
+
   // ── Empty state when no runs ──
 
   it('shows empty state when there are no runs', async () => {

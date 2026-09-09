@@ -23,7 +23,7 @@
   }
   function count(kind:'running'|'finished'|'failed'):string {
     if(!data)return '—';
-    return (data.counts.unavailable?'≥ ':'')+number(data.counts[kind]);
+    return (data.counts.unavailable?'≥ ':'')+number(data.execution_counts[kind]);
   }
   const tokenTitle=$derived(data ? `${st('summaryTokenDefinition')} ${st('summaryInput')}: ${data.usage.prompt_tokens??'—'}; ${st('summaryOutput')}: ${data.usage.completion_tokens??'—'}` : st('summaryTokenDefinition'));
   const cacheTitle=$derived(data ? `${st('summaryCacheDefinition')} ${data.usage.cache_hit_tokens??'—'} / ${data.usage.cache_covered_tokens}. ${st('summaryCacheTurns')}: ${data.usage.cache_reported_turns}/${data.usage.usage_turns}` : st('summaryCacheDefinition'));
@@ -33,8 +33,8 @@
 <section class="state-run-summary" aria-label={st('summaryHeading')} aria-busy={loading}>
   <div class="summary-top"><h2>{st('summaryHeading')}</h2><small>{st('summaryScope')}</small></div>
   <dl class="run-summary-metrics">
-    <div data-metric="total" title={st('summaryTotalDefinition')}><dt>{st('summaryTotal')}</dt><dd>{number(data?.counts.total)}</dd></div>
-    <div data-metric="running"><dt>{st('summaryRunning')}</dt><dd>{count('running')}</dd></div>
+    <div data-metric="total" title={st('summaryTotalDefinition')}><dt>{st('summaryTotal')}</dt><dd>{number(data?.execution_counts.total)}</dd></div>
+    <div data-metric="running" title={st('summaryRunningDefinition')}><dt>{st('summaryRunning')}</dt><dd>{count('running')}</dd></div>
     <div data-metric="finished" title={st('summaryFinishedDefinition')}><dt>{st('summaryFinished')}</dt><dd>{count('finished')}</dd></div>
     <div data-metric="failed"><dt>{st('summaryFailed')}</dt><dd>{count('failed')}</dd></div>
     <div data-metric="tokens" title={tokenTitle}><dt>Tokens</dt><dd>{number(data?.usage.total_tokens)}{data?.usage.partial && data?.usage.total_tokens!=null ? '*' : ''}</dd></div>

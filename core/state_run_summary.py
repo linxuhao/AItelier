@@ -48,8 +48,9 @@ def project_run_summary(service, project_id):
         for row in conn.execute("SELECT ref,node_key FROM state_history_links WHERE project_id=? AND kind='run'",
                                 (project_id,)):
             membership.setdefault(row['ref'], set()).add(row['node_key'])
-        external = conn.execute("SELECT COUNT(*) FROM state_attempts WHERE project_id=? AND execution_kind='external'",
-                                (project_id,)).fetchone()[0]
+        by_status = Counter({row['status']:row['n'] for row in conn.execute(
+            "SELECT status,COUNT(*) AS n FROM state_attempts WHERE project_id=? AND execution_kind='external' "
+            "GROUP BY status", (project_id,))})
         # An external agent holding a task is the one execution nothing here can
         # observe: no run to read, only what its harness last reported. Listing
         # it as "reported" is the whole point; inferring liveness from silence
@@ -62,6 +63,14 @@ def project_run_summary(service, project_id):
             "FROM state_attempts a WHERE project_id=? AND execution_kind='external' "
             f"AND status IN ({','.join('?' * len(ACTIVE))}) ORDER BY updated_at DESC,attempt_id",
             (project_id, *ACTIVE))]
+    # The active count IS the listed rows, by construction: a number over an
+    # empty list (or a listed agent under a zero) is the confusion this fixes.
+    # 'candidate' is an external delivery, not an accepted goal — the same
+    # distance from VERIFIED that a completed workflow run is, so it lands in
+    # the same bucket. 'unavailable' has no external counterpart: an external
+    # status is always readable and always merely reported.
+    external = {'active':len(holding),'finished':by_status['candidate'],
+                'failed':by_status['failed'],'other':by_status['superseded'],'total':sum(by_status.values())}
     counts = {'total':len(membership),'running':0,'finished':0,'failed':0,'other':0,'unavailable':0}
     sums = Counter()
     running = []
@@ -134,10 +143,17 @@ def project_run_summary(service, project_id):
         'usage_errors':errors,
         'partial':bool(membership) and (usage_runs!=len(membership) or sums['token_turns']!=sums['turns']),
     }
-    return {'project_id':project_id,'counts':counts,'running_runs':running,'usage':usage,
-            'external_attempts_excluded':external,'running_external':holding,
-            'external_counts':{'active':len(holding),'total':external},
+    # What the panel counts is EXECUTIONS, so a listed external agent is never
+    # a row under a zero. 'counts' stays workflow-only because usage coverage
+    # and 'unavailable' are only meaningful per run.
+    executions = {'total':counts['total']+external['total'],'running':counts['running']+external['active'],
+                  'finished':counts['finished']+external['finished'],'failed':counts['failed']+external['failed'],
+                  'other':counts['other']+external['other'],'unavailable':counts['unavailable']}
+    return {'project_id':project_id,'counts':counts,'execution_counts':executions,'running_runs':running,'usage':usage,
+            'external_attempts_excluded':external['total'],'running_external':holding,
+            'external_counts':external,
             'observed_at':now(),
             'runtime_unavailable':engine_unavailable,
-            'scope':'Distinct workflow runs bound to State attempts or explicit run references; external executions are not '
-                    'synthetic runs. Active external attempts are listed with their last reported status, not an observed one.'}
+            'scope':'Distinct workflow runs bound to State attempts or explicit run references, plus external attempts; '
+                    'external executions are not synthetic runs and carry no usage. counts is workflow-only, '
+                    'execution_counts includes external attempts, whose status is last reported, never observed.'}

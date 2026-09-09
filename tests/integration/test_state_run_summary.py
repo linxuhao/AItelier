@@ -66,6 +66,7 @@ def test_all_runs_counted_only_running_listed_and_exact_ids_deduplicated(system)
     usage(system,unrelated,900000,10,900000,0)
     out=system.s.project_run_summary('game')
     assert out['counts']=={'total':5,'running':1,'finished':1,'failed':1,'other':2,'unavailable':0}
+    assert out['execution_counts']==out['counts'],'no external attempt: the two agree'
     assert [r['run_id'] for r in out['running_runs']]==[bound]
     assert out['running_runs'][0]['node_keys']==['a','b']
     assert out['usage']['total_tokens']==600
@@ -137,6 +138,7 @@ def test_external_only_state_does_not_initialize_optional_executor(tmp_path):
     assert out['counts']['total']==0 and out['usage']['total_tokens']==0
     assert out['usage']['cache_hit_ratio'] is None
     assert out['external_attempts_excluded']==1 and len(out['running_external'])==1
+    assert out['execution_counts']=={'total':1,'running':1,'finished':0,'failed':0,'other':0,'unavailable':0}
     with service.db.get_connection() as c:
         assert not c.execute("SELECT 1 FROM sqlite_master WHERE name='runs'").fetchone()
 
@@ -155,8 +157,11 @@ def test_active_external_agents_are_listed_from_their_own_last_report(tmp_path):
     service.report_external_attempt(done['attempt_id'],'final-1',0,done['context_hash'],'candidate',
         'reports/final-1.json','b'*64,quiescent=True,artifact='a'*64,artifact_kind='sha256')
     out=service.project_run_summary('game')
-    assert out['counts']=={'total':0,'running':0,'finished':0,'failed':0,'other':0,'unavailable':0}
-    assert out['external_attempts_excluded']==3 and out['external_counts']=={'active':2,'total':3}
+    assert out['counts']=={'total':0,'running':0,'finished':0,'failed':0,'other':0,'unavailable':0},'counts stays workflow-only'
+    # The visible counters count executions, so a listed agent is never under a zero.
+    assert out['execution_counts']=={'total':3,'running':2,'finished':1,'failed':0,'other':0,'unavailable':0}
+    assert out['external_attempts_excluded']==3
+    assert out['external_counts']=={'active':2,'finished':1,'failed':0,'other':0,'total':3}
     listed={row['node_key']:row for row in out['running_external']}
     assert set(listed)=={'a','b'},'a settled candidate is not still holding the task'
     # Registration alone claims the task: status 'running' with nothing reported yet.

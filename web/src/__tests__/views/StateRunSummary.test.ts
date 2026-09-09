@@ -9,6 +9,7 @@ import StateRunSummary from '../../views/StateRunSummary.svelte';
 
 function active(){
   return {...runSummary(),counts:{total:9,running:1,finished:5,failed:2,other:1,unavailable:0},
+    execution_counts:{total:9,running:1,finished:5,failed:2,other:1,unavailable:0},
     running_runs:[{run_id:'run-active-exact-id',workflow:'feature_delivery',node_keys:['growth.progress','month.actions'],
       status:'running',current_node:'implement',started_at:'2026-09-08T17:00:00Z'}],
     usage:{...runSummary().usage,total_tokens:4000,prompt_tokens:3400,completion_tokens:600,
@@ -40,6 +41,7 @@ describe('State graph run summary',()=>{
   it('updates counters and removes a finished run from the running-only list',async()=>{
     const view=render(StateRunSummary,{projectId:'game',refresh:0});await view.findByText('feature_delivery');
     const result=active();result.running_runs=[];result.counts.running=0;result.counts.finished=6;
+    result.execution_counts.running=0;result.execution_counts.finished=6;
     api.stateRunSummary.mockResolvedValue(result);
     await view.rerender({projectId:'game',refresh:1});await view.findByText('No related run is currently running.');
     expect(view.container.querySelectorAll('a')).toHaveLength(0);
@@ -48,6 +50,7 @@ describe('State graph run summary',()=>{
   });
   it('does not turn missing usage into zero tokens or a zero cache ratio',async()=>{
     api.stateRunSummary.mockResolvedValue({...runSummary(),counts:{...runSummary().counts,total:1,running:1},
+      execution_counts:{...runSummary().execution_counts,total:1,running:1},
       usage:{...runSummary().usage,total_tokens:null,runs_without_token_usage:1,partial:true}});
     const view=render(StateRunSummary,{projectId:'game'});await waitFor(()=>expect(view.container.querySelector('[data-metric="total"] dd')?.textContent).toBe('1'));
     expect(view.container.querySelector('[data-metric="tokens"] dd')?.textContent).toBe('—');
@@ -63,13 +66,16 @@ describe('State graph run summary',()=>{
   });
   it('marks incomplete status observations as lower bounds, not all idle',async()=>{
     api.stateRunSummary.mockResolvedValue({...runSummary(),runtime_unavailable:true,counts:{...runSummary().counts,total:3,unavailable:3},
+      execution_counts:{...runSummary().execution_counts,total:3,unavailable:3},
       usage:{...runSummary().usage,total_tokens:null,partial:true,runs_without_token_usage:3}});
     const view=render(StateRunSummary,{projectId:'game'});await view.findByText(/Run statuses unavailable/);
     expect(view.container.querySelector('[data-metric="running"] dd')?.textContent).toBe('≥ 0');
     expect(view.queryByText('No related run is currently running.')).toBeNull();
   });
   it('lists external agents holding a task, as reported, without inventing run links',async()=>{
-    api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:3,external_counts:{active:2,total:3},
+    api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:3,
+      external_counts:{active:2,finished:0,failed:0,other:1,total:3},
+      execution_counts:{total:3,running:2,finished:0,failed:0,other:1,unavailable:0},
       running_external:[
         {attempt_id:'attempt-reported',node_key:'growth.progress',node_revision:1,harness:'director-subagents',
          external_id:'job-7f3c',reporting_actor:'director@test',status:'running',observation_version:2,
@@ -84,15 +90,18 @@ describe('State graph run summary',()=>{
     expect(rows[0].textContent).toContain('job-7f3c');
     expect(rows[0].textContent).toContain('2026-09-09T09:30:00Z');
     expect(rows[1].textContent).toContain('No report yet');
-    // Workflow counters stay workflow-scoped and no external row pretends to be a run.
-    expect(view.container.querySelector('[data-metric="running"] dd')?.textContent).toBe('0');
+    // The counters count executions, so a listed agent is never a row under a zero.
+    expect(view.container.querySelector('[data-metric="running"] dd')?.textContent).toBe('2');
+    expect(view.container.querySelector('[data-metric="total"] dd')?.textContent).toBe('3');
     expect(view.container.querySelectorAll('a')).toHaveLength(0);
     expect(view.getByText('No related run is currently running.')).toBeTruthy();
     expect(view.container.textContent).toContain('not observed here');
   });
   it('jumps to the goal the external agent is working on',async()=>{
     const jump=vi.fn();
-    api.stateRunSummary.mockResolvedValue({...runSummary(),external_counts:{active:1,total:1},external_attempts_excluded:1,
+    api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:1,
+      external_counts:{active:1,finished:0,failed:0,other:0,total:1},
+      execution_counts:{...runSummary().execution_counts,total:1,running:1},
       running_external:[{attempt_id:'attempt-one',node_key:'month.actions',node_revision:1,harness:'own-harness',
         external_id:'job-1',reporting_actor:'director@test',status:'running',observation_version:1,
         created_at:'2026-09-09T08:00:00Z',updated_at:'2026-09-09T08:10:00Z',last_report_at:'2026-09-09T08:10:00Z'}]});
@@ -102,20 +111,27 @@ describe('State graph run summary',()=>{
     expect(view.container.querySelectorAll('a')).toHaveLength(0);
   });
   it('drops an external agent that no longer holds the task',async()=>{
-    const holding={...runSummary(),external_counts:{active:1,total:1},external_attempts_excluded:1,
+    const holding={...runSummary(),external_attempts_excluded:1,
+      external_counts:{active:1,finished:0,failed:0,other:0,total:1},
+      execution_counts:{...runSummary().execution_counts,total:1,running:1},
       running_external:[{attempt_id:'attempt-one',node_key:'growth.progress',node_revision:1,harness:'own-harness',
         external_id:'job-1',reporting_actor:'director@test',status:'running',observation_version:1,
         created_at:'2026-09-09T08:00:00Z',updated_at:'2026-09-09T08:10:00Z',last_report_at:'2026-09-09T08:10:00Z'}]};
     api.stateRunSummary.mockResolvedValue(holding);
     const view=render(StateRunSummary,{projectId:'game',refresh:0});await view.findByText('own-harness');
-    api.stateRunSummary.mockResolvedValue({...holding,external_counts:{active:0,total:1},running_external:[]});
+    api.stateRunSummary.mockResolvedValue({...holding,external_counts:{active:0,finished:1,failed:0,other:0,total:1},
+      execution_counts:{...runSummary().execution_counts,total:1,finished:1},running_external:[]});
     await view.rerender({projectId:'game',refresh:1});
     await waitFor(()=>expect(view.container.querySelectorAll('.external-running li')).toHaveLength(0));
+    expect(view.container.querySelector('[data-metric="running"] dd')?.textContent).toBe('0');
+    expect(view.container.querySelector('[data-metric="finished"] dd')?.textContent).toBe('1');
   });
   it('explains excluded external harness attempts without creating fake run links',async()=>{
-    api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:2});
+    api.stateRunSummary.mockResolvedValue({...runSummary(),external_attempts_excluded:2,
+      external_counts:{active:0,finished:2,failed:0,other:0,total:2},
+      execution_counts:{...runSummary().execution_counts,total:2,finished:2}});
     const view=render(StateRunSummary,{projectId:'game'});await view.findByText(/External harness attempts are not workflow runs/);
-    expect(view.container.querySelector('[data-metric="total"] dd')?.textContent).toBe('0');
+    expect(view.container.querySelector('[data-metric="total"] dd')?.textContent).toBe('2');
     expect(view.container.querySelectorAll('a')).toHaveLength(0);
   });
   it('shows a failed request as unavailable, never a successful empty panel',async()=>{

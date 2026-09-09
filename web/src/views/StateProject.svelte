@@ -107,7 +107,7 @@
       {#if tab === 'graph'}
         <StateRunSummary projectId={params.id} refresh={detailRefresh} onselect={selectNode}/>
         <div class="workspace"><StateGraph nodes={data.nodes} {selected} onselect={selectNode} />
-          <StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} /></div>
+          <StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} nodes={data.nodes} /></div>
       {:else if tab === 'runs'}
         <p class="sync-note">{st('complete')} · <a href={`#/runs/project/${encodeURIComponent(params.id)}`}>{nt('currentOnly')} — {nt('runs')} ↗</a></p>
         {#if runError}<p role="alert">{runError}</p><button class="outline" onclick={() => detailRefresh++}>{st('retry')}</button>{/if}
@@ -126,7 +126,7 @@
       {:else}
         <div class="evidence-workspace"><div class="node-index"><h3>{st('total')}</h3>
           {#each data.nodes as node (node.node_key)}<button class:chosen={selected === node.node_key} onclick={() => selected = node.node_key}>{node.title}<small>{node.status}</small></button>{/each}
-        </div><StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} /></div>
+        </div><StateNodePanel projectId={params.id} nodeKey={selected} refresh={detailRefresh} onselect={selectNode} nodes={data.nodes} /></div>
       {/if}
     {/if}
   {/if}

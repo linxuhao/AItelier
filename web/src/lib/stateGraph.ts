@@ -120,6 +120,70 @@ export function stateTone(status: string): string {
     : status === 'STALE' ? 'stale' : status === 'SUPERSEDED' ? 'superseded' : 'open';
 }
 
+/** One goal's three lanes. `present: false` means that lane has no node yet. */
+export interface StateLane { facet:'contract'|'test'|'content'; node_key:string; status:string; readiness:string; present:boolean }
+export interface StateGroup extends StateNodeSummary { lanes:StateLane[]; members:string[] }
+const LANE_ORDER:StateLane['facet'][] = ['contract','test','content'];
+
+/** The goal a node belongs to: `x.contract` and `x.test` both belong to `x`. */
+export function stemOf(node:{node_key:string; facet?:string|null}):string {
+  const { node_key: k, facet } = node;
+  if (facet === 'contract' && k.endsWith('.contract')) return k.slice(0, -'.contract'.length);
+  if (facet === 'test' && k.endsWith('.test')) return k.slice(0, -'.test'.length);
+  return k;
+}
+
+/**
+ * Collapse each goal's contract / test / implementation into one node.
+ *
+ * Faceting tripled the card count — the same goal now occupies three boxes and
+ * the edges between them are internal bookkeeping, not structure a reader needs.
+ * A group carries the lane that is actually actionable (the first that is not
+ * VERIFIED, contract before test before implementation), so clicking it selects
+ * the node someone would work on, and keeps every lane's state as pips.
+ * Dependencies are re-pointed at the depended-on node's group and self-edges
+ * dropped, which is what makes the collapsed graph readable rather than merely
+ * smaller. Nodes with no siblings (design, integration, unfaceted) pass through
+ * with no lanes.
+ */
+export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
+  const byKey = new Map(nodes.map(n => [n.node_key, n]));
+  const stem = (key:string) => { const n = byKey.get(key); return n ? stemOf(n) : key; };
+  const members = new Map<string, StateNodeSummary[]>();
+  for (const node of nodes) {
+    const s = stemOf(node);
+    if (!members.has(s)) members.set(s, []);
+    members.get(s)!.push(node);
+  }
+  const groups:StateGroup[] = [];
+  for (const [key, group] of members) {
+    const lane = (facet:StateLane['facet']) => group.find(n =>
+      facet === 'content' ? n.node_key === key && n.facet !== 'contract' && n.facet !== 'test' : n.facet === facet);
+    const lanes:StateLane[] = LANE_ORDER.map(facet => {
+      const node = lane(facet);
+      return { facet, node_key: node?.node_key ?? `${key}${facet === 'content' ? '' : '.' + facet}`,
+               status: node?.status ?? '', readiness: node?.readiness ?? '', present: !!node };
+    });
+    const hasSiblings = group.length > 1;
+    // The lane to act on: the first unfinished one, else the implementation.
+    const open = lanes.filter(l => l.present && l.status !== 'VERIFIED' && l.status !== 'SUPERSEDED');
+    const chosenKey = (open[0] ?? lanes.filter(l => l.present).at(-1))?.node_key ?? key;
+    const head = byKey.get(chosenKey) ?? group[0];
+    const deps = new Set<string>(), blocked = new Set<string>();
+    for (const node of group) {
+      for (const d of node.dependencies) if (stem(d) !== key) deps.add(stem(d));
+      for (const b of node.blocked_by) if (stem(b) !== key) blocked.add(stem(b));
+    }
+    const impl = lane('content') ?? head;
+    groups.push({ ...head, node_key: key, title: impl.title, domain: key.split('.')[0],
+      dependencies: [...deps].sort(), blocked_by: [...blocked].sort(),
+      hold: group.find(n => n.hold)?.hold ?? null,
+      lanes: hasSiblings ? lanes : [], members: group.map(n => n.node_key).sort() });
+  }
+  return groups;
+}
+
+
 export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', query = '', maximum = 60) {
   const keys = new Set<string>();
   for (const node of nodes) {

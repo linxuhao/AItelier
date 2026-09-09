@@ -1,10 +1,21 @@
 <script lang="ts">
   import { stateNode } from '../lib/api';
-  import { attemptLabel, exactRunHref, stateProjectHref, type StateNodeDetail } from '../lib/stateGraph';
+  import { attemptLabel, exactRunHref, stateProjectHref, stemOf,
+           type StateNodeDetail, type StateNodeSummary } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateAttemptEvidence from './StateAttemptEvidence.svelte';
-  interface Props { projectId: string; nodeKey: string; refresh?: number; onselect: (key: string) => void }
-  const { projectId, nodeKey, refresh = 0, onselect }: Props = $props();
+  interface Props { projectId: string; nodeKey: string; refresh?: number; onselect: (key: string) => void;
+                    nodes?: StateNodeSummary[] }
+  const { projectId, nodeKey, refresh = 0, onselect, nodes = [] }: Props = $props();
+  // The three lanes of one goal. The graph collapses them into a single card,
+  // so this is where you step between contract, test and implementation.
+  const siblings = $derived.by(() => {
+    const here = nodes.find(n => n.node_key === nodeKey);
+    if (!here) return [];
+    const stem = stemOf(here);
+    const family = nodes.filter(n => stemOf(n) === stem);
+    return family.length > 1 ? family.sort((a, b) => a.node_key.length - b.node_key.length) : [];
+  });
   let data = $state<StateNodeDetail | null>(null);
   let error = $state('');
   let retry = $state(0);
@@ -29,6 +40,18 @@
     <div class="panel-heading"><code>{nodeKey}</code><a href={stateProjectHref(projectId, nodeKey)} aria-label="Permalink">↗</a></div>
     <h3>{data.node.goal.split('\n')[0]}</h3>
     <div class="badges"><strong>{data.node.status}</strong><span>{st(data.node.readiness)}</span><span>r{data.node.revision}</span>{#if data.node.facet}<span class="facet">{data.node.facet}</span>{/if}</div>
+    {#if siblings.length}
+      <div class="lanes" aria-label={st('groupFacets')}>
+        {#each siblings as sibling (sibling.node_key)}
+          <button type="button" class="lane-link" class:current={sibling.node_key === nodeKey}
+                  aria-current={sibling.node_key === nodeKey ? 'true' : undefined}
+                  onclick={() => onselect(sibling.node_key)}>
+            {st('lane_' + (sibling.facet === 'contract' || sibling.facet === 'test' ? sibling.facet : 'content'))}
+            <small>{sibling.status}</small>
+          </button>
+        {/each}
+      </div>
+    {/if}
     <p class="goal-text">{data.node.goal}</p>
     {#if data.node.hold}
       <div class="hold" role="note"><strong>⏸ {st('hold')}</strong><p>{data.node.hold.reason}</p><small>{st('holdNote')}</small></div>
@@ -82,6 +105,11 @@
   h4 { font-size:.88rem; margin:1.3rem 0 .45rem; }
   p { margin:.5rem 0; } code { font-size:.71rem; white-space:normal; overflow-wrap:anywhere; }
   .goal-text { white-space:pre-wrap; }
+  .lanes { display:flex; gap:.35rem; margin:.45rem 0; flex-wrap:wrap; }
+  .lane-link { width:auto; margin:0; padding:.25rem .5rem; font-size:.7rem; line-height:1.25; background:none;
+    color:var(--pico-color,#334155); border:1px solid var(--pico-muted-border-color,#dce2ea); border-radius:6px; }
+  .lane-link small { display:block; font-size:.6rem; opacity:.7; }
+  .lane-link.current { border-color:var(--pico-primary,#0066cc); color:var(--pico-primary,#0066cc); }
   .badges { display:flex; flex-wrap:wrap; gap:.4rem; font-size:.72rem; }
   .badges > * { border:1px solid var(--pico-muted-border-color,#ddd); border-radius:5px; padding:.18rem .4rem; }
   .hold { border-left:3px solid #bf8427; background:color-mix(in srgb,#eab447 9%,transparent); padding:.65rem; margin:.8rem 0; }

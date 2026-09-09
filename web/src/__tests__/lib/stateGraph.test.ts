@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { stateLayout, stateTone, stateNextAction, stateReadyActionCounts, stateProjectHref, exactRunHref, cardTitle, cardLines, STATE_CARD } from '../../lib/stateGraph';
+import { stateLayout, stateTone, stateNextAction, stateReadyActionCounts, stateProjectHref, exactRunHref,
+         cardTitle, cardLines, groupFacets, stemOf, STATE_CARD, type StateNodeSummary } from '../../lib/stateGraph';
 import { goal } from '../fixtures/stateProject';
 
 describe('State DAG layout semantics', () => {
@@ -66,5 +67,81 @@ describe('Readable node cards', () => {
     expect(STATE_CARD.height).toBeGreaterThanOrEqual(156);
     const layout=stateLayout([goal('a'),goal('b',['a'])]);
     expect(layout.nodes[1].y-layout.nodes[0].y).toBeGreaterThan(STATE_CARD.height);
+  });
+});
+
+describe('groupFacets', () => {
+  const n = (key: string, facet: string | null, deps: string[] = [], status = 'OPEN'): StateNodeSummary => ({
+    node_key: key, title: 'T ' + key, domain: key.split('.')[0], revision: 1, contract_hash: 'a'.repeat(64),
+    facet, status, readiness: 'ready', dependencies: deps, blocked_by: [], hold: null,
+    node_hold: { revision: 0, held: 0, reason: '' }, criteria_count: 1, attempt_count: 0,
+    latest_attempt: null, latest_evidence: {}, priority: 0,
+  });
+  const family = [
+    n('a.contract', 'contract', [], 'VERIFIED'),
+    n('a.test', 'test', ['a.contract']),
+    n('a', 'content', ['a.contract', 'a.test']),
+    n('b.contract', 'contract', ['a.contract']),
+    n('b', 'content', ['b.contract', 'a.contract']),
+    n('d', 'design', [], 'VERIFIED'),
+    n('v', 'integration', ['a', 'b']),
+  ];
+
+  it('collapses three lanes into one node and drops the internal edges', () => {
+    const groups = groupFacets(family);
+    expect(groups.map(g => g.node_key).sort()).toEqual(['a', 'b', 'd', 'v']);
+    const a = groups.find(g => g.node_key === 'a')!;
+    expect(a.members).toEqual(['a', 'a.contract', 'a.test']);
+    expect(a.dependencies).toEqual([]);                       // a.contract/a.test are internal
+    expect(groups.find(g => g.node_key === 'b')!.dependencies).toEqual(['a']);  // re-pointed at the group
+    expect(groups.find(g => g.node_key === 'v')!.dependencies).toEqual(['a', 'b']);
+  });
+
+  it('reports every lane, including one that does not exist yet', () => {
+    const a = groupFacets(family).find(g => g.node_key === 'a')!;
+    expect(a.lanes.map(l => [l.facet, l.status, l.present])).toEqual([
+      ['contract', 'VERIFIED', true], ['test', 'OPEN', true], ['content', 'OPEN', true]]);
+    const b = groupFacets(family).find(g => g.node_key === 'b')!;
+    expect(b.lanes.map(l => [l.facet, l.present])).toEqual([
+      ['contract', true], ['test', false], ['content', true]]);
+    expect(b.lanes[1].node_key).toBe('b.test');
+  });
+
+  it('carries the lane worth acting on, so a click lands on real work', () => {
+    // a.contract is VERIFIED, so the group speaks for the test lane.
+    const a = groupFacets(family).find(g => g.node_key === 'a')!;
+    expect(a.facet).toBe('test');
+    // Everything done: the group speaks for the implementation.
+    const done = family.map(x => x.node_key.startsWith('a') ? { ...x, status: 'VERIFIED' } : x);
+    expect(groupFacets(done).find(g => g.node_key === 'a')!.facet).toBe('content');
+  });
+
+  it('leaves a node with no siblings alone and gives it no lanes', () => {
+    const groups = groupFacets(family);
+    expect(groups.find(g => g.node_key === 'd')!.lanes).toEqual([]);
+    expect(groups.find(g => g.node_key === 'v')!.lanes).toEqual([]);
+    expect(groups.find(g => g.node_key === 'd')!.members).toEqual(['d']);
+  });
+
+  it('keeps the goal title, not the generated contract prose', () => {
+    const withContractTitle = family.map(x =>
+      x.node_key === 'a.contract' ? { ...x, title: '「T a」的接口契约' } : x);
+    expect(groupFacets(withContractTitle).find(g => g.node_key === 'a')!.title).toBe('T a');
+  });
+
+  it('does not strip a suffix the facet does not claim', () => {
+    expect(stemOf({ node_key: 'x.test', facet: null })).toBe('x.test');
+    expect(stemOf({ node_key: 'x.test', facet: 'test' })).toBe('x');
+    expect(stemOf({ node_key: 'coop.world-facts.contract', facet: 'contract' })).toBe('coop.world-facts');
+    // A legacy node literally named "x.test" is its own goal, not a lane.
+    const groups = groupFacets([n('x.test', null), n('x.test.contract', 'contract')]);
+    expect(groups.map(g => g.node_key).sort()).toEqual(['x.test']);
+    expect(groups[0].members).toEqual(['x.test', 'x.test.contract']);
+  });
+
+  it('the collapsed graph still lays out', () => {
+    const layout = stateLayout(groupFacets(family));
+    expect(layout.nodes.map(x => x.node_key).sort()).toEqual(['a', 'b', 'd', 'v']);
+    expect(layout.tooLarge).toBe(false);
   });
 });

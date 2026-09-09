@@ -1,10 +1,6 @@
-"""Resuming a failed run must give its blocker the retry budget back.
+"""Only the selected current failure may regain its retry budget.
 
-A step reaches status 'failed' only by exhausting max_retries, and
-skillflow's reactivate_run resets the last COMPLETED step — so the one row
-that blocks the resume is the one row the resume does not touch. Live on
-2026-08-26: 5_review stuck at retry_count 3/3 after a provider quota outage;
-the quota reopened, the run could not.
+Historical failed rows and successful loop passes remain immutable on recovery.
 """
 import sqlite3
 
@@ -81,7 +77,7 @@ RUN = "c6dce51c"
 @pytest.fixture
 def sf():
     f = _FakeSF()
-    f.add_run(RUN, node="5_knowledge")     # where reactivate_run leaves it
+    f.add_run(RUN, node="5_review")        # the failed current node selected by reactivate_run
     f.add_step(1456, RUN, "5_knowledge", "completed")
     f.add_step(1457, RUN, "5_review", "failed", retries=3, max_retries=3)
     return f
@@ -97,7 +93,7 @@ def test_exhausted_step_becomes_retryable_again(sf):
 
 
 def test_current_node_points_at_the_step_that_must_rerun(sf):
-    """reactivate_run leaves it on the last completed step; the blocker wins."""
+    """Budget restoration keeps the selected failed node."""
     restore_retry_budget(sf, RUN)
     assert sf.run(RUN)["current_node"] == "5_review"
 
@@ -153,18 +149,20 @@ def test_newest_failure_wins_when_a_step_failed_more_than_once(sf):
     assert sf.step(1457)["status"] == "failed"   # the older instance is history
 
 
-def test_a_second_failed_STEP_is_restored_too(sf):
-    """A fan-out can strand more than one distinct step.
-
-    Restoring only the newest failed row leaves the run blocked on the others,
-    so the resume still silently does nothing — the same shape as the bug this
-    helper exists to fix, one level out.
-    """
+def test_unrelated_failed_step_is_not_resurrected(sf):
     sf.add_step(1500, RUN, "t_impl", "failed", retries=3)
+    before = sf.step(1500)
     got = restore_retry_budget(sf, RUN)
     assert sf.step(1457)["status"] == "pending"
-    assert sf.step(1500)["status"] == "pending"
-    assert got["also_restored"] == ["5_review"]
+    assert sf.step(1500) == before
+    assert got["also_restored"] == []
+
+
+def test_superseded_failure_and_completed_current_are_untouched(sf):
+    sf.add_step(1500, RUN, "5_review", "completed")
+    before = [sf.step(i) for i in (1456, 1457, 1500)]
+    assert restore_retry_budget(sf, RUN) is None
+    assert [sf.step(i) for i in (1456, 1457, 1500)] == before
 
 
 def test_validation_exhaustion_gets_its_budget_back(sf):
@@ -175,7 +173,7 @@ def test_validation_exhaustion_gets_its_budget_back(sf):
     total_retries == max_allowed: the resumed step dies on its first validation
     failure and 'retry' silently did nothing all over again.
     """
-    sf.add_step(1700, RUN, "t_plan", "failed", retries=0, validation_retries=3)
+    sf.add_step(1700, RUN, "5_review", "failed", retries=0, validation_retries=3)
     restore_retry_budget(sf, RUN)
     row = sf.step(1700)
     assert row["retry_count"] == 0
@@ -189,7 +187,7 @@ def test_the_stale_validation_complaint_is_dropped(sf):
     the previous one, and 'fix this' points at a complaint about old output."""
     import json
 
-    sf.add_step(1800, RUN, "t_impl", "failed", retries=3,
+    sf.add_step(1800, RUN, "5_review", "failed", retries=3,
                 inputs_json=json.dumps({"_validation_error": "missing foo.py",
                                         "keep": "me"}))
     restore_retry_budget(sf, RUN)
@@ -243,3 +241,28 @@ def test_it_survives_an_engine_whose_schema_predates_release_count():
     row = conn.execute("SELECT status, retry_count FROM skillflow_steps "
                        "WHERE id = 1").fetchone()
     assert (row["status"], row["retry_count"]) == ("pending", 0)
+
+
+def test_completed_card_history_survives_real_framework_and_host_recovery():
+    from skillflow import SkillFlow
+    from skillflow.graph import PipelineGraph, StepNode
+    sf = SkillFlow(":memory:")
+    sf.register_graph(PipelineGraph(name="recover", begin="3_review",
+                                   steps=[StepNode(id="3_review", step_type="agent")]))
+    run = sf.create_run("recover")
+    sf.start_run(run)
+    sf.advance_run(run)
+    with sf._conn:
+        sf._conn.execute("UPDATE skillflow_steps SET status='completed',outputs_json='{}',completion_seq=1 WHERE run_id=?", (run,))
+        sf._conn.execute("INSERT INTO skillflow_steps (id,run_id,step_id,status) VALUES (4480,?,'t_impl','failed')",(run,))
+        sf._conn.execute("INSERT INTO skillflow_steps (id,run_id,step_id,status,outputs_json) VALUES (4481,?,'t_impl','completed','{\"card\":\"keep\"}')",(run,))
+        sf._conn.execute("INSERT INTO skillflow_steps (id,run_id,step_id,status,retry_count) VALUES (4491,?,'3_review','failed',3)",(run,))
+        sf._conn.execute("UPDATE skillflow_runs SET status='failed',current_node='3_review',error_reason='Step 3_review: native turn budget exhausted' WHERE id=?",(run,))
+    def history():
+        return [dict(r) for r in sf._conn.execute("SELECT * FROM skillflow_steps WHERE run_id=? AND id<4491 ORDER BY id",(run,))]
+    before = history()
+    sf.reactivate_run(run)
+    assert restore_retry_budget(sf, run) is None
+    assert history() == before
+    current = sf._conn.execute("SELECT status,retry_count FROM skillflow_steps WHERE id=4491").fetchone()
+    assert tuple(current) == ("pending", 0)

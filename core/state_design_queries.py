@@ -6,13 +6,15 @@ Every response identifies its exact selection and explicitly limits its claims.
 """
 from __future__ import annotations
 
+from collections import deque
 import json
 
-from core.state_graph import StateGraphError, canonical, digest, integer, text
+from core.state_graph import StateConflict, StateGraphError, canonical, digest, integer, text
 
 
 SEARCH_FIELDS = (('design_id', 8), ('title', 4), ('statement', 2), ('rationale', 1))
 SNIPPET_CHARS = 240
+PATH_LIMIT = 32
 
 
 def _baseline(design, conn, project_id, baseline_id):
@@ -100,3 +102,126 @@ def search(design, project_id, query, baseline_id=None, scope=None, limit=20, of
                 'next_offset': offset+limit if offset+limit < total else None,
                 'scope_filter': scope,
                 'coverage': 'Literal candidate search only. No semantic completeness or conflict-free guarantee.'}
+
+
+def _pin(revision):
+    return revision['design_id'], revision['revision']
+
+
+def _ref(pin):
+    return {'design_id': pin[0], 'revision': pin[1]}
+
+
+def _page(items, limit, *, complete=True):
+    return {'items': items[:limit], 'total': len(items), 'total_is_exact': complete,
+            'truncated': not complete or len(items) > limit}
+
+
+def _binding_impacts(conn, project_id, subject, baseline_id, limit):
+    """Read latest binding per node once, not one query per design or node.
+
+    Match bound/dependency bodies, NEVER every pin in the copied baseline
+    manifest. Older replaced bindings are retained in storage but are not
+    current impacts. The latest snapshot may itself target an older baseline.
+    """
+    rows = conn.execute('''
+        SELECT b.node_key,b.node_revision,b.snapshot_json,b.snapshot_hash,
+               n.revision current_revision,n.status,n.verified_receipt
+        FROM state_design_bindings b JOIN state_nodes n
+          ON n.project_id=b.project_id AND n.node_key=b.node_key
+        WHERE b.project_id=? AND b.node_revision=(
+            SELECT MAX(newer.node_revision) FROM state_design_bindings newer
+            WHERE newer.project_id=b.project_id AND newer.node_key=b.node_key
+              AND newer.node_revision<=n.revision)
+        ORDER BY b.node_key
+    ''', (project_id,))
+    affected, scanned = [], 0
+    for row in rows:
+        scanned += 1
+        snapshot = json.loads(row['snapshot_json'])
+        direct = [b['purpose'] for b in snapshot['bindings'] if _pin(b) == subject]
+        dependency = any(_pin(d) == subject for d in snapshot['design_dependencies'])
+        if not direct and not dependency:
+            continue
+        affected.append({'node_key': row['node_key'], 'node_revision': row['current_revision'], 'status': row['status'],
+                         'verified_receipt': row['verified_receipt'], 'review_only': True,
+                         'reason': 'direct_binding' if direct else 'bound_dependency', 'purposes': sorted(direct),
+                         'binding_node_revision': row['node_revision'], 'binding_snapshot_hash': row['snapshot_hash'],
+                         'binding_baseline_id': snapshot['baseline_id'], 'binding_manifest_hash': snapshot['manifest_hash'],
+                         'matches_requested_baseline': snapshot['baseline_id'] == baseline_id,
+                         'binding_matches_node_revision': row['node_revision'] == row['current_revision']})
+    return {**_page(affected, limit), 'bindings_scanned': scanned,
+            'scope': 'Latest binding snapshots only, including older-baseline bindings; not historical binding versions.'}
+
+
+def impact(design, project_id, design_id, revision, baseline_id=None, limit=50, max_visits=1000):
+    """Exact-version review hints. Nothing here edits relations, goals or runs.
+
+    Incoming edges are restricted to selected baseline versions. Direct outgoing
+    assertions of the requested revision stay visible even if it is not selected.
+    Reverse depends_on traversal never follows conflicts/references/supersedes.
+    """
+    integer(limit, 'limit', 1, 100)
+    integer(max_visits, 'max_visits', 1, 1000)
+    with design.store.transaction() as conn:
+        baseline, selected = _baseline(design, conn, project_id, baseline_id)
+        if baseline is None:
+            raise StateConflict('design_impact requires an explicit or current baseline; no selection exists')
+        subject = design._revision(conn, project_id, design_id, revision)
+        root = _pin(subject)
+        bodies = {_pin(r): json.loads(r['payload_json'])
+                  for r in _candidate_rows(conn, project_id, selected, include_latest=False)}
+        pins = set(bodies)
+        source_pins = {root, *pins}
+        bodies[root] = subject['content']
+        direct, reverse = [], {}
+        for source in sorted(source_pins):
+            for rel in bodies[source]['relations']:
+                target = _pin(rel['target'])
+                if source in pins and rel['type'] == 'depends_on':
+                    reverse.setdefault(target, []).append(source)
+                if source != root and target != root:
+                    continue
+                direct.append({'type': rel['type'], 'source': _ref(source), 'target': _ref(target),
+                               'direction': 'outgoing' if source == root else 'incoming',
+                               'source_selected': source in pins, 'target_selected': target in pins,
+                               'rationale': rel['rationale'][:360], 'rationale_truncated': len(rel['rationale']) > 360})
+        direct.sort(key=lambda r: (r['type'], r['direction'], r['source']['design_id'], r['source']['revision'],
+                                  r['target']['design_id'], r['target']['revision']))
+        # One deterministic shortest reverse-dependency path per visited design.
+        parents, queue, clipped = {root: None}, deque([root]), False
+        while queue:
+            target = queue.popleft()
+            for child in sorted(reverse.get(target, [])):
+                if child in parents:
+                    continue
+                if len(parents) >= max_visits:
+                    clipped = True
+                    continue
+                parents[child] = target
+                queue.append(child)
+        dependents = []
+        for pin in sorted(set(parents) - {root}):
+            path, cursor = [], pin
+            while cursor is not None:
+                path.append(_ref(cursor))
+                cursor = parents[cursor]
+            path.reverse()
+            dependents.append({**_ref(pin), 'title': bodies[pin]['title'], 'lifecycle_status': bodies[pin]['lifecycle_status'],
+                               'path': path if len(path) <= PATH_LIMIT else path[:PATH_LIMIT//2]+path[-PATH_LIMIT//2:],
+                               'path_length': len(path), 'path_truncated': len(path) > PATH_LIMIT,
+                               'path_direction': 'changed_design_to_dependent', 'review_only': True})
+        declared_conflicts = [{**edge, 'message': 'Declared direct conflict; review the recorded rationale and applicable scope.',
+                               'both_selected': edge['source_selected'] and edge['target_selected']}
+                              for edge in direct if edge['type'] == 'conflicts_with']
+        return {'project_id': project_id, **_baseline_label(baseline),
+                'subject': {**_ref(root), 'content_hash': subject['content_hash'], 'title': subject['content']['title'],
+                            'scope': subject['content']['scope'], 'lifecycle_status': subject['content']['lifecycle_status'],
+                            'selected': root in pins},
+                'direct_relations': _page(direct, limit), 'declared_conflicts': _page(declared_conflicts, limit),
+                'dependent_designs': _page(dependents, limit, complete=not clipped),
+                'affected_nodes': _binding_impacts(conn, project_id, root, baseline['baseline_id'], limit),
+                'traversal': {'visited': len(parents), 'max_visits': max_visits, 'truncated': clipped,
+                              'path_limit': PATH_LIMIT},
+                'coverage': 'Review hints from recorded exact relations, not semantic proof. Conflicts are symmetric to query, never propagated. '
+                            'Design edges never change State requires edges or execution. Latest node bindings are a live snapshot, not part of the historical baseline.'}

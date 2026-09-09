@@ -94,6 +94,10 @@ class StateDesign:
         from core.state_design_queries import search
         return search(self, project_id, query, baseline_id, scope, limit, offset)
 
+    def impact(self, project_id, design_id, revision, baseline_id=None, limit=50, max_visits=1000):
+        from core.state_design_queries import impact
+        return impact(self, project_id, design_id, revision, baseline_id, limit, max_visits)
+
     def get_revision(self, project_id, design_id, revision):
         with self.store.transaction() as conn:
             self.store._project(conn, project_id)
@@ -121,7 +125,7 @@ class StateDesign:
         for rel in relations:
             if not isinstance(rel, dict) or set(rel) != {'type', 'target', 'rationale'}:
                 raise StateGraphError('relations require type, exact target and rationale; partial-scope supersedes is unsupported')
-            if rel['type'] not in ('depends_on', 'references', 'supersedes'):
+            if rel['type'] not in ('depends_on', 'references', 'supersedes', 'conflicts_with'):
                 raise StateGraphError('unsupported design relation')
             payload['relations'].append({'type': rel['type'], 'target': _ref(rel['target']),
                                          'rationale': text(rel['rationale'], 'relation rationale', 2000)})
@@ -135,6 +139,8 @@ class StateDesign:
             if latest != expected_revision:
                 raise StateConflict('design revision changed; reload before editing')
             for rel in payload['relations']:
+                if rel['target'] == {'design_id': design_id, 'revision': latest + 1}:
+                    raise StateGraphError('a design revision cannot relate to itself')
                 target = self._revision(conn, project_id, **rel['target'])
                 if rel['type'] == 'supersedes' and target['content']['scope'] != payload['scope']:
                     raise StateGraphError('supersedes supports only complete items with identical scope; split partial overrides')
@@ -174,7 +180,10 @@ class StateDesign:
                     for rel in source['content']['relations']:
                         target = rel['target']
                         target_revision = self._revision(conn, project_id, **target)
-                        if source is rev and rel['type'] != 'supersedes':
+                        # A declared conflict may name an alternative OUTSIDE
+                        # the chosen baseline. It is not a required import and
+                        # does not introduce a semantic scope solver here.
+                        if source is rev and rel['type'] in ('depends_on', 'references'):
                             if selected.get(target['design_id']) != target['revision']:
                                 raise StateGraphError('design reference must resolve to the exact revision selected in this baseline')
                             if (rel['type'] == 'depends_on' and rev['content']['lifecycle_status'] == 'approved'

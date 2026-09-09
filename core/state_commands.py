@@ -199,6 +199,12 @@ class SearchDesignItems(Project):
     offset: int = 0
 
 
+class DesignImpact(DesignRevision):
+    baseline_id: str | None = None
+    limit: int = 50
+    max_visits: int = 1000
+
+
 class CreateDesignRevision(Project):
     design_id: str
     expected_revision: int
@@ -234,7 +240,7 @@ class CheckDesignMarkdown(DesignBaseline):
 
 READ_REQUESTS = {
     "design_catalog": Project, "get_design_revision": DesignRevision,
-    "search_design_items": SearchDesignItems,
+    "search_design_items": SearchDesignItems, "design_impact": DesignImpact,
     "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
     "export_design_markdown": DesignBaseline, "check_design_markdown": CheckDesignMarkdown,
     "list_projects": Empty, "get_graph": Project, "get_node": Node,
@@ -281,7 +287,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise StateGraphError(str(details)) from exc
     handlers = {
         "design_catalog": service.design.catalog, "get_design_revision": service.design.get_revision,
-        "search_design_items": service.design.search,
+        "search_design_items": service.design.search, "design_impact": service.design.impact,
         "get_design_baseline": service.design.get_baseline, "get_design_bindings": service.design.node_bindings,
         "export_design_markdown": service.design.export_markdown, "check_design_markdown": service.design.check_markdown,
         "create_design_revision": service.design.create_revision, "create_design_baseline": service.design.create_baseline,

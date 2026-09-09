@@ -87,10 +87,17 @@ def plan(graph_nodes, chain, sample_tests):
         # A design node is buildable as is; anything else is reached via its contract.
         return dep if facets.get(dep) == "design" or dep.startswith("design.") else dep + ".contract"
 
+    # Design nodes depend on design nodes, and a label is checked against the
+    # node's edges, so they too are labelled dependencies-first.
+    def label_design(k):
+        if not k.startswith("design.") or facets.get(k) is not None:
+            return
+        for d in edges[k]:
+            label_design(d)
+        steps.append(("set_facet", k, "design"))
+        facets[k] = "design"
     for k in sorted(nodes):
-        if k.startswith("design.") and facets.get(k) is None:
-            steps.append(("set_facet", k, "design"))
-            facets[k] = "design"
+        label_design(k)
     members = [k for k in sorted(nodes) if k.startswith(chain + ".") and not k.endswith((".contract", ".test"))]
     # Bottom-up so every contract exists before an edge points at it.
     order, seen = [], set()

@@ -201,6 +201,14 @@ def plan(graph_nodes, chain, sample_tests, integration=(), frozen=()):
     # implementation of every contract in its closure, or the release gate
     # stops requiring twelve things that used to be built before it could pass.
     for gate, missing in sorted(shipping_gaps(facets, edges).items()):
+        # An edge to a frozen (still legacy) implementation would violate R1;
+        # the gap stays visible as a lint warning until the attempt settles.
+        deferred = [m for m in missing if m in frozen]
+        if deferred:
+            skipped.append((gate, "R3 edges to " + ", ".join(deferred) + " deferred: attempt in flight there"))
+        missing = [m for m in missing if m not in frozen]
+        if not missing:
+            continue
         closed = sorted(set(edges[gate]) | set(missing))
         edges[gate] = closed
         # One revision per gate: fold into an earlier revise of the same node.

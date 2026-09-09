@@ -3,7 +3,7 @@
   import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
   import { stateOverview, stateAttempts, stateRefreshProject } from '../lib/api';
-  import { attemptLabel, exactRunHref, type StateOverview, type StateAttempt } from '../lib/stateGraph';
+  import { attemptLabel, exactRunHref, stateReadyActionCounts, type StateOverview, type StateAttempt } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateGraph from './StateGraph.svelte';
   import StateRunSummary from './StateRunSummary.svelte';
@@ -17,6 +17,7 @@
   let syncing = $state(false), syncNext = $state<number | null>(null), notice = $state('');
   let generation = 0, runGeneration = 0, priorProject = '', priorWanted = '';
   const allowed = $derived($authStore.permissionResolved && $authStore.canWrite);
+  const readyActions = $derived(data ? stateReadyActionCounts(data.nodes, data.ready_action_counts) : { candidate_review: 0, new_attempt: 0 });
   $effect(() => {
     const project = params.id, wanted = params.nodeKey, canRead = allowed; void retry;
     const version = ++generation;
@@ -92,7 +93,8 @@
       <div class="metrics">
         <div><strong>{data.nodes.length}</strong><span>{st('total')}</span></div>
         <div><strong>{data.counts.VERIFIED ?? 0}</strong><span>{st('verified')}</span></div>
-        <div><strong>{data.readiness_counts.ready ?? 0}</strong><span>{st('ready')}</span></div>
+        <div><strong>{readyActions.candidate_review}</strong><span>{st('candidatesAwaitingReview')}</span></div>
+        <div><strong>{readyActions.new_attempt}</strong><span>{st('readyForNewAttempt')}</span></div>
         <div><strong>{data.readiness_counts.held ?? 0}</strong><span>{st('held')}</span></div>
       </div>
       {#if data.policy.dispatch !== 'active'}<details class="policy" open={!compact}><summary><strong>⏸ {st('policy')}: {data.policy.dispatch}</strong></summary><p>{data.policy.reason}</p><small>{st('holdNote')}</small></details>{/if}
@@ -139,7 +141,7 @@
   .source { max-width:760px; margin:.4rem 0; font-size:.77rem; overflow-wrap:anywhere; } code { font-size:.72rem; white-space:normal; }
   .toolbar { display:flex; gap:.5rem; flex-wrap:wrap; }
   button { font-size:.8rem; width:auto; padding:.45rem .75rem; margin:0; }
-  .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:.8rem; margin:1rem 0; }
+  .metrics { display:grid; grid-template-columns:repeat(5,1fr); gap:.8rem; margin:1rem 0; }
   .metrics div { display:flex; gap:.7rem; align-items:baseline; border:1px solid var(--pico-muted-border-color,#dbe3ec); border-radius:9px; padding:.8rem; }
   .metrics strong { font-size:1.6rem; } .metrics span { font-size:.8rem; color:var(--pico-muted-color,#667085); }
   .policy { border-left:4px solid #c48a27; padding:.7rem 1rem; background:color-mix(in srgb,#ecc369 10%,transparent); font-size:.83rem; margin:1rem 0; }

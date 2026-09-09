@@ -15,9 +15,10 @@ export interface StateAttempt {
   execution_kind?: 'skillflow' | 'external'; harness?:string|null; external_id?:string|null;
   reporting_actor?:string|null; observation_version?:number; artifact_kind?:string|null;
 }
+export type StateNextAction = 'candidate_review' | 'new_attempt';
 export interface StateNodeSummary {
   node_key: string; title: string; domain: string; revision: number; contract_hash: string;
-  status: string; readiness: string; dependencies: string[]; blocked_by: string[];
+  status: string; readiness: string; next_action?: StateNextAction | null; dependencies: string[]; blocked_by: string[];
   hold: ({ scope: string; reason: string } & Partial<DispatchPolicy>) | null; node_hold: NodeHold;
   criteria_count: number; attempt_count: number; latest_attempt: StateAttempt | null;
   latest_evidence: Record<string, number>; priority: number;
@@ -26,6 +27,7 @@ export interface StateOverview {
   project: { project_id: string; title: string; source_project_id: string | null };
   source: SourceBinding; policy: DispatchPolicy; nodes: StateNodeSummary[];
   counts: Record<string, number>; readiness_counts: Record<string, number>;
+  ready_action_counts?: Partial<Record<StateNextAction, number>>;
   event_seq: number; observed_at: string; run_state_mode: string;
 }
 export interface HistoryReference {
@@ -85,6 +87,32 @@ export function cardLines(text: string, budget = 34): string[] {
   return lines;
 }
 export const STATE_CARD = { width: 264, height: 156, xGap: 28, yGap: 36 };
+
+/**
+ * The server projects this from current State facts. Older servers only return
+ * status/readiness, so retain the same conservative classification during a
+ * rolling UI deployment. Unknown ready statuses never become launchable here.
+ */
+export function stateNextAction(node: StateNodeSummary): StateNextAction | null {
+  if (node.next_action === 'candidate_review' || node.next_action === 'new_attempt') return node.next_action;
+  if (node.readiness !== 'ready') return null;
+  if (node.status === 'CANDIDATE') return 'candidate_review';
+  return node.status === 'OPEN' || node.status === 'STALE' ? 'new_attempt' : null;
+}
+
+export function stateReadyActionCounts(nodes: StateNodeSummary[],
+  reported?: Partial<Record<StateNextAction, number>>): Record<StateNextAction, number> {
+  const fallback = { candidate_review: 0, new_attempt: 0 };
+  for (const node of nodes) {
+    const action = stateNextAction(node);
+    if (action) fallback[action]++;
+  }
+  for (const action of ['candidate_review', 'new_attempt'] as const) {
+    const count = reported?.[action];
+    if (Number.isSafeInteger(count) && count! >= 0) fallback[action] = count!;
+  }
+  return fallback;
+}
 
 export function stateTone(status: string): string {
   // Only the fact is allowed to be green. A successful attempt remains blue.

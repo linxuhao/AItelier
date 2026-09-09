@@ -74,6 +74,22 @@ describe('Long-lived project pages', () => {
     expect(view.container.textContent).toContain('CANDIDATE');
     expect(api.stateRefreshProject).not.toHaveBeenCalled();
   });
+  it('splits actionable nodes into candidate review and new-attempt categories', async () => {
+    const payload=overview();
+    payload.nodes=[goal('review', [], {status:'CANDIDATE', readiness:'ready'}), goal('launch', [], {status:'OPEN', readiness:'ready'})];
+    payload.readiness_counts={ready:2};
+    api.stateOverview.mockResolvedValue(payload);
+    const view=render(StateProject,{params:{id:'game'}});
+    await view.findByRole('heading',{name:'武虾传奇'});
+    const metrics=view.container.querySelector('.metrics')!;
+    expect(metrics.textContent).toContain('Candidates awaiting review');
+    expect(metrics.textContent).toContain('Ready for a new attempt');
+    expect(metrics.textContent).toContain('1Candidates awaiting review');
+    expect(metrics.textContent).toContain('1Ready for a new attempt');
+    await waitFor(() => expect(view.container.querySelectorAll('g.goal')).toHaveLength(2));
+    const cardReadiness=[...view.container.querySelectorAll('.goal-ready')].map(node => node.textContent);
+    expect(cardReadiness).toEqual(expect.arrayContaining(['Candidate awaiting review', 'Ready for a new attempt']));
+  });
   it('preserves user selection across view reload on an initial node permalink', async () => {
     const view=render(StateProject,{params:{id:'game',nodeKey:'growth.progress'}});
     await view.findByRole('heading',{name:'武虾传奇'});

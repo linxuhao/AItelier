@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLayout, stateTone, stateProjectHref, exactRunHref, cardTitle, cardLines, STATE_CARD } from '../../lib/stateGraph';
+import { stateLayout, stateTone, stateNextAction, stateReadyActionCounts, stateProjectHref, exactRunHref, cardTitle, cardLines, STATE_CARD } from '../../lib/stateGraph';
 import { goal } from '../fixtures/stateProject';
 
 describe('State DAG layout semantics', () => {
@@ -31,6 +31,19 @@ describe('State DAG layout semantics', () => {
     expect(stateTone('completed')).not.toBe('verified');
     expect(stateTone('CANDIDATE')).toBe('candidate');
     expect(stateTone('VERIFIED')).toBe('verified');
+  });
+  it('uses server next actions when present and safely derives them during a rolling deployment', () => {
+    const candidate = goal('candidate', [], {status: 'CANDIDATE', readiness: 'ready'});
+    const open = goal('open', [], {status: 'OPEN', readiness: 'ready'});
+    const stale = goal('stale', [], {status: 'STALE', readiness: 'ready'});
+    const held = goal('held', [], {status: 'CANDIDATE', readiness: 'held'});
+    expect(stateNextAction(candidate)).toBe('candidate_review');
+    expect(stateNextAction(open)).toBe('new_attempt');
+    expect(stateNextAction(stale)).toBe('new_attempt');
+    expect(stateNextAction(held)).toBeNull();
+    expect(stateNextAction({...open, next_action: 'candidate_review'})).toBe('candidate_review');
+    expect(stateReadyActionCounts([candidate, open, stale, held])).toEqual({candidate_review: 1, new_attempt: 2});
+    expect(stateReadyActionCounts([candidate], {candidate_review: 5, new_attempt: 2})).toEqual({candidate_review: 5, new_attempt: 2});
   });
   it('encodes exact identities and bounds mixed-width labels', () => {
     expect(stateProjectHref('a/b','c d')).toBe('#/state-projects/a%2Fb/nodes/c%20d');

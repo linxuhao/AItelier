@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { stateLayout, stateTone, shortText, cardLines, STATE_CARD, type StateNodeSummary } from '../lib/stateGraph';
+  import { stateLayout, stateTone, stateNextAction, shortText, cardLines, STATE_CARD, type StateNodeSummary } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   interface Props { nodes: StateNodeSummary[]; selected: string; onselect: (key: string) => void }
   const { nodes, selected, onselect }: Props = $props();
@@ -59,20 +59,21 @@
           <path class="dependency" d={edgePath(edge.from, edge.to)} marker-end="url(#state-dependency-arrow)" />
         {/each}
         {#each result.layout.nodes as node (node.node_key)}
+          {@const nextAction = stateNextAction(node)}
           <g class="goal {stateTone(node.status)}" class:selected={selected === node.node_key} data-fact={node.status} data-readiness={node.readiness}
              data-attempt-status={node.latest_attempt?.status ?? "none"}
              role="button" tabindex="0" aria-pressed={selected === node.node_key}
-             aria-label={`${node.title}: ${node.status}, ${st(node.readiness)}`}
+             aria-label={`${node.title}: ${node.status}, ${st(nextAction ?? node.readiness)}`}
              transform={`translate(${node.x}, ${node.y})`}
              onclick={() => onselect(node.node_key)} onkeydown={(event) => keySelect(event, node.node_key)}>
-            <title>{node.title} — {node.node_key} — {node.status} / {node.readiness}</title>
+            <title>{node.title} — {node.node_key} — {node.status} / {nextAction ?? node.readiness}</title>
             <rect class="card" width={STATE_CARD.width} height={STATE_CARD.height} rx="10" />
             <text class="goal-key" x="14" y="20">{shortText(node.node_key, 34)}</text>
             <text class="goal-title" x="14" y="44">{#each cardLines(node.title) as line, i (i)}<tspan x="14" dy={i === 0 ? 0 : 18}>{line}</tspan>{/each}</text>
             <rect class="status-background" x="13" y="77" width="153" height="26" rx="6" />
             <text class="goal-state" x="22" y="95">{node.status}</text>
             <text class="goal-revision" x="250" y="95" text-anchor="end">r{node.revision}</text>
-            <text class="goal-ready" x="14" y="123">{node.hold ? '⏸ ' : ''}{st(node.readiness)}{node.blocked_by.length ? ` · ${node.blocked_by.length}` : ''}</text>
+            <text class="goal-ready" x="14" y="123">{node.hold ? '⏸ ' : ''}{st(nextAction ?? node.readiness)}{node.blocked_by.length ? ` · ${node.blocked_by.length}` : ''}</text>
             <text class="goal-attempt" x="14" y="144">{st(node.latest_attempt?.execution_kind==='external'?'externalShort':'attemptShort')}: {node.latest_attempt ? node.latest_attempt.status.toUpperCase() : st('notStarted')}</text>
             {#if node.outsideDependencies}<text x="250" y="20" text-anchor="end" class="outside">+{node.outsideDependencies}</text>{/if}
           </g>

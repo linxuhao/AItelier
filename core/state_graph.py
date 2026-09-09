@@ -18,6 +18,26 @@ from typing import Any
 KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
 KINDS = frozenset({"test", "review", "human", "artifact", "integration"})
 MAX_NODES = 1000
+READY_ACTIONS = ("candidate_review", "new_attempt")
+
+
+def ready_next_action(status: str, readiness: str) -> str | None:
+    if readiness != "ready":
+        return None
+    if status == "CANDIDATE":
+        return "candidate_review"
+    if status in {"OPEN", "STALE"}:
+        return "new_attempt"
+    return None
+
+
+def ready_action_counts(nodes: list[dict]) -> dict[str, int]:
+    counts = {action: 0 for action in READY_ACTIONS}
+    for node in nodes:
+        action = node.get("next_action")
+        if action in counts:
+            counts[action] += 1
+    return counts
 
 
 class StateGraphError(ValueError):
@@ -390,6 +410,7 @@ class StateGraphStore:
             item["readiness"] = ("closed" if node["status"] in {"VERIFIED", "SUPERSEDED"}
                                  else "in_progress" if nk in active else "held" if hold
                                  else "blocked" if blocked_by else "ready")
+            item["next_action"] = ready_next_action(node["status"], item["readiness"])
             result.append(item)
         return {"project": project, "nodes": sorted(result, key=lambda n: (-n["priority"], n["node_key"]))}
 
@@ -412,11 +433,12 @@ class StateGraphStore:
         summary = []
         for node in ready[:limit]:
             entry = {field: node[field] for field in ("node_key", "revision", "status", "priority",
-                                                     "contract_hash", "dependencies", "readiness")}
+                                                     "contract_hash", "dependencies", "readiness", "next_action")}
             entry["goal"] = node["goal"][:1200]
             entry["goal_truncated"] = len(node["goal"]) > 1200
             summary.append(entry)
-        return {"nodes": summary, "total": len(ready), "truncated": len(ready) > limit}
+        return {"nodes": summary, "total": len(ready), "truncated": len(ready) > limit,
+                "ready_action_counts": ready_action_counts(ready)}
 
     def events(self, project_id: str, after: int = 0, limit: int = 100) -> list[dict]:
         integer(after, "after", 0, 2**63-1)

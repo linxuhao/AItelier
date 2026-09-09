@@ -8,7 +8,9 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from core.state_graph import StateConflict, StateGraphError, digest, integer, key, now, text
+from core.state_graph import (
+    StateConflict, StateGraphError, digest, integer, key, now, ready_action_counts, text,
+)
 from core.state_metadata import node_hold, project_policy
 
 ATTEMPT_COLUMNS = ("seq", "attempt_id", "project_id", "node_key", "node_revision", "workflow",
@@ -178,7 +180,7 @@ class StatePortfolio:
             nodes = []
             for n in view["nodes"]:
                 a = latest.get(n["node_key"])
-                entry = {k: n[k] for k in ("node_key", "revision", "contract_hash", "status", "priority", "dependencies", "blocked_by", "readiness", "hold", "node_hold")}
+                entry = {k: n[k] for k in ("node_key", "revision", "contract_hash", "status", "priority", "dependencies", "blocked_by", "readiness", "next_action", "hold", "node_hold")}
                 entry.update(title=n["goal"].splitlines()[0][:180], domain=n["node_key"].split(".")[0],
                              criteria_count=len(n["acceptance"]), attempt_count=count.get(n["node_key"], 0),
                              latest_attempt={k: a[k] for k in ATTEMPT_COLUMNS} if a else None,
@@ -187,7 +189,9 @@ class StatePortfolio:
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
             return {"project": view["project"], "source": self._source(conn, view["project"]),
                     "policy": project_policy(conn, project_id), "nodes": nodes,
-                    "counts": dict(Counter(n["status"] for n in nodes)), "readiness_counts": dict(Counter(n["readiness"] for n in nodes)),
+                    "counts": dict(Counter(n["status"] for n in nodes)),
+                    "readiness_counts": dict(Counter(n["readiness"] for n in nodes)),
+                    "ready_action_counts": ready_action_counts(nodes),
                     "event_seq": seq, "observed_at": now(), "run_state_mode": "persisted; explicit refresh observes workflow outcomes"}
 
     def project_attempts(self, project_id, after=0, limit=30):

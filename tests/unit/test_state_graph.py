@@ -28,6 +28,37 @@ def test_forward_references_and_frontier_are_deterministic(store):
     assert store.get_node("shrimp", "a")["status"] == "OPEN"
 
 
+def test_ready_next_action_distinguishes_review_from_new_attempt(store):
+    store.add_nodes("shrimp", [
+        node("open"), node("candidate"), node("stale"),
+        node("blocked", ["candidate"]), node("verified"), node("superseded"),
+    ])
+    with store.db.get_connection() as conn:
+        conn.execute("UPDATE state_nodes SET status='CANDIDATE' WHERE project_id='shrimp' AND node_key='candidate'")
+        conn.execute("UPDATE state_nodes SET status='STALE' WHERE project_id='shrimp' AND node_key='stale'")
+        conn.execute("UPDATE state_nodes SET status='VERIFIED',verified_receipt='receipt' "
+                     "WHERE project_id='shrimp' AND node_key='verified'")
+        conn.commit()
+    store.supersede_node("shrimp", "superseded", 1, "No longer required")
+
+    projected = {n["node_key"]: (n["readiness"], n["next_action"])
+                 for n in store.get_graph("shrimp")["nodes"]}
+    assert projected == {
+        "blocked": ("blocked", None),
+        "candidate": ("ready", "candidate_review"),
+        "open": ("ready", "new_attempt"),
+        "stale": ("ready", "new_attempt"),
+        "superseded": ("closed", None),
+        "verified": ("closed", None),
+    }
+    frontier = store.frontier("shrimp")
+    assert frontier["total"] == 3
+    assert frontier["ready_action_counts"] == {"candidate_review": 1, "new_attempt": 2}
+    assert {n["node_key"]: n["next_action"] for n in frontier["nodes"]} == {
+        "candidate": "candidate_review", "open": "new_attempt", "stale": "new_attempt",
+    }
+
+
 def test_state_project_is_not_a_workflow_run(store):
     with store.db.get_connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0

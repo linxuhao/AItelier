@@ -188,6 +188,25 @@ def test_compact_overview_has_separate_fact_readiness_attempt_and_evidence(live)
     assert live.service.store.events("game") == before
 
 
+def test_overview_counts_ready_actions_without_changing_readiness_counts(live):
+    live.service.store.add_nodes("game", [node("art.open"), node("release.stale")])
+    with live.db.get_connection() as conn:
+        conn.execute("UPDATE state_nodes SET status='CANDIDATE' "
+                     "WHERE project_id='game' AND node_key='growth.proficiency'")
+        conn.execute("UPDATE state_nodes SET status='STALE' "
+                     "WHERE project_id='game' AND node_key='release.stale'")
+        conn.commit()
+
+    view = live.service.portfolio.overview("game")
+    nodes = {n["node_key"]: n for n in view["nodes"]}
+    assert view["readiness_counts"] == {"ready": 3, "blocked": 1}
+    assert view["ready_action_counts"] == {"candidate_review": 1, "new_attempt": 2}
+    assert nodes["growth.proficiency"]["next_action"] == "candidate_review"
+    assert nodes["art.open"]["next_action"] == "new_attempt"
+    assert nodes["release.stale"]["next_action"] == "new_attempt"
+    assert nodes["month.actions"]["next_action"] is None
+
+
 def test_project_attempt_pagination_and_run_reverse_link(live):
     for i in range(3):
         a = reserve(live, request="request" + str(i))

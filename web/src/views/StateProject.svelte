@@ -3,7 +3,7 @@
   import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
   import { stateOverview, stateAttempts, stateRefreshProject } from '../lib/api';
-  import { attemptLabel, exactRunHref, groupFacets, stateReadyActionCounts, type StateOverview, type StateAttempt } from '../lib/stateGraph';
+  import { attemptLabel, exactRunHref, stateReadyActionCounts, type StateOverview, type StateAttempt } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateGraph from './StateGraph.svelte';
   import StateRunSummary from './StateRunSummary.svelte';
@@ -18,11 +18,6 @@
   let generation = 0, runGeneration = 0, priorProject = '', priorWanted = '';
   const allowed = $derived($authStore.permissionResolved && $authStore.canWrite);
   const readyActions = $derived(data ? stateReadyActionCounts(data.nodes, data.ready_action_counts) : { candidate_review: 0, new_attempt: 0 });
-  // Goals, not nodes: faceting put three nodes behind one goal, and a header
-  // that jumped 34 → 59 contradicts the 34 cards drawn underneath it. The
-  // other four counters are per-node and per-goal alike — a goal can only have
-  // one lane ready at a time, since a later lane depends on the earlier one.
-  const goals = $derived(data ? groupFacets(data.nodes) : []);
   $effect(() => {
     const project = params.id, wanted = params.nodeKey, canRead = allowed; void retry;
     const version = ++generation;
@@ -96,7 +91,7 @@
       <p class="sync-note">{st('syncNote')}</p>
       {#if notice}<p class="notice" role="status">{notice}</p>{/if}
       <div class="metrics">
-        <div title={`${goals.length} · ${data.nodes.length} ${st('totalNodes')}`}><strong>{goals.length}</strong><span>{st('total')}</span></div>
+        <div><strong>{data.nodes.length}</strong><span>{st('total')}</span></div>
         <div><strong>{data.counts.VERIFIED ?? 0}</strong><span>{st('verified')}</span></div>
         <div><strong>{readyActions.candidate_review}</strong><span>{st('candidatesAwaitingReview')}</span></div>
         <div><strong>{readyActions.new_attempt}</strong><span>{st('readyForNewAttempt')}</span></div>

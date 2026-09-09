@@ -40,5 +40,8 @@ Do not apply or commit staged files manually: this workflow's configured
 promotion and `repo_apply` handle delivery after `finish_step`.
 
 All write paths are relative to the repo root. When every file is written,
-call `finish_step`. The test suite runs automatically after you finish — write
-code that will pass it.
+call `finish_step` — in that same turn. Do not spend turns re-reading,
+re-listing or re-counting what you already wrote: the test step and an
+independent reviewer check the delivery, and a step that runs out of turns
+while checking itself is indistinguishable from one that never finished. The
+test suite runs automatically after you finish — write code that will pass it.

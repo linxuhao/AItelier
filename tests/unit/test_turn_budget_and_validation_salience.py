@@ -69,6 +69,19 @@ class TestTheWarningSaysTheThingThatMatters:
         assert "silently" in msg
 
 
+class TestTheWarningTellsAFinishedStepToFinish:
+    def test_a_step_with_everything_written_is_told_to_stop_checking_itself(self):
+        # 2026-09-09, art contract run: every file written at turn 31 of 32,
+        # the last turns spent re-listing and re-counting them, then cut off
+        # — indistinguishable from a step that never finished. The warning
+        # has to say the checking is someone else's job.
+        msg = PipelineEngine._low_budget_message(3, 32).lower()
+        assert "already written" in msg
+        assert "this turn" in msg
+        assert "re-reading" in msg or "re-listing" in msg
+        assert "next step" in msg
+
+
 class TestTheWarningNamesTheEscapeHatch:
     def test_it_tells_the_agent_to_ask_for_turns_when_work_remains(self):
         # R5 (2026-09-03): 15 of 18 implementer instances hit the cap and none

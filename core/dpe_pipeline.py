@@ -65,7 +65,10 @@ _LOW_TURN_BUDGET = 3
 # loop forever, and named in the low-budget warning so a step with real work
 # left asks instead of being cut off (R5: 15 exhaustions, 0 asks).
 _MAX_TURN_GRANTS = 2
-_GRANT_TURNS_MAX = 6
+# 8, not 6: with coding_impl's base raised to 32 this puts the ceiling at 48.
+# The art contract run (2026-09-09) used both grants, reached 32 with every
+# file written, and was cut off listing them.
+_GRANT_TURNS_MAX = 8
 _NATIVE_HISTORY_TOOL_CHARS = 64 * 1024
 _NATIVE_REASONING_MARKER_CHARS = 512
 
@@ -3049,13 +3052,18 @@ class PipelineEngine:
         """
         return (
             f"[Turn Budget: {remaining} of {max_turns} turns remain] Stop "
-            "exploring. Finish EVERY output this step owes — if you declared a "
-            "manifest, index or list, every item it names must exist before you "
-            "call finish_step. If real work remains (files or scenarios you have "
-            "not written yet), call ask_more_turns(turns=N, reason=\"what remains\") "
-            f"NOW — at most {_MAX_TURN_GRANTS} grants of up to {_GRANT_TURNS_MAX} "
-            "turns per step. Only when that is exhausted, say so explicitly in "
-            "the output you do write rather than leaving items silently missing."
+            "exploring. If every output this step owes is already written, call "
+            "finish_step THIS turn: do not spend the remaining turns re-reading, "
+            "re-listing or re-counting what you wrote — verification is the next "
+            "step's job, and a step that is cut off while checking itself looks "
+            "identical to one that never finished. Otherwise finish EVERY output "
+            "this step owes — if you declared a manifest, index or list, every "
+            "item it names must exist before you call finish_step. If real work "
+            "remains (files or scenarios you have not written yet), call "
+            "ask_more_turns(turns=N, reason=\"what remains\") NOW — at most "
+            f"{_MAX_TURN_GRANTS} grants of up to {_GRANT_TURNS_MAX} turns per step. "
+            "Only when that is exhausted, say so explicitly in the output you do "
+            "write rather than leaving items silently missing."
         )
 
     @staticmethod

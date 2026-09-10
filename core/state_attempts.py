@@ -224,7 +224,11 @@ class StateAttempts:
             if "relay_of" not in context:
                 raise StateConflict("attempt was not reserved with continue_from")
             if context.get("relay") is not None:
-                if context["relay"] != relay:
+                # mainline_ahead_by is advice for the director, not part of
+                # what the relay inherits; mainline may move between two
+                # preparations without changing the draft.
+                _bound = lambda r: {k: v for k, v in r.items() if k != "mainline_ahead_by"}
+                if _bound(context["relay"]) != _bound(relay):
                     raise StateConflict("relay inventory changed between preparation and dispatch")
                 return _public(attempt)
             if attempt["status"] != "reserved":

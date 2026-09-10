@@ -311,6 +311,8 @@ class WorkspaceManager:
         dst.mkdir(parents=True)
         try:
             for rel in sorted(manifest):
+                if Path(rel).is_absolute() or ".." in Path(rel).parts:
+                    raise RelayDraftChanged(f"{step_id}: manifest path {rel!r} escapes the staging")
                 path = src / rel
                 if path.is_symlink() or not path.is_file():
                     raise RelayDraftChanged(f"{step_id}: {rel} is no longer a regular file")

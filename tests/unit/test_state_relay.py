@@ -127,6 +127,18 @@ def test_relay_is_refused_when_the_draft_moved_since_it_was_read(world):
     with pytest.raises(StateConflict, match="changed since it was read"):
         world["service"]._prepare_relay(b, str(src))
     assert not ws._relay_dir(b["execution_project_id"], "implementation", "feature").exists()
+    # Through the launcher the refusal retires the reservation, so the node is
+    # not stranded behind it: a fresh reservation under a new key succeeds.
+    from core.state_graph import StateGraphError
+    with pytest.raises(StateGraphError, match="requires relay_digest"):
+        world["service"].start_attempt("game", "a", 1, "feature", "relay3", continue_from=a["attempt_id"])
+    from types import SimpleNamespace
+    manifest = SimpleNamespace(seed_file="seed.md", output_step="implementation", scheduler_owned=True, repo_mode="code")
+    with pytest.raises(StateConflict, match="reservation was retired"):
+        world["service"]._launch_or_recover(b, manifest, str(src))
+    assert attempts.get(b["attempt_id"])["status"] == "superseded"
+    assert attempts.reserve("game", "a", 1, "feature", "relay4", continue_from=a["attempt_id"],
+                            relay_digest=inv["digest"])["status"] == "reserved"
     with pytest.raises(Exception, match="64-hex"):
         attempts.reserve("game", "a", 1, "feature", "relay2", continue_from=a["attempt_id"], relay_digest="abc")
 
@@ -146,6 +158,8 @@ def test_park_copy_is_verified_against_the_manifest(world, tmp_path):
     assert not ws._relay_dir("p", "implementation", "feature").exists()
     with pytest.raises(RelayDraftChanged, match="regular file"):
         ws.stage_relay_draft(src, "p", "implementation", "feature", manifest={"gone.py": manifest["a.py"]})
+    with pytest.raises(RelayDraftChanged, match="escapes"):
+        ws.stage_relay_draft(src, "p", "implementation", "feature", manifest={"../a.py": manifest["a.py"]})
 
 
 def test_relay_bases_the_new_worktree_on_the_failed_branch_and_seeds_its_draft(world):

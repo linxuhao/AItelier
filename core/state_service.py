@@ -141,6 +141,11 @@ class StateService:
 
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction="",
                       continue_from=None, relay_digest=None):
+        if relay_digest is not None and continue_from is None:
+            raise StateGraphError("relay_digest only accompanies continue_from")
+        if continue_from is not None and relay_digest is None:
+            raise StateGraphError("continue_from requires relay_digest: read the failed attempt's relay_inventory "
+                                  "and pass its digest, so the relay is bound to the draft you inspected")
         from core.state_metadata import require_dispatch
         with self.store.transaction() as conn:
             self.store._node(conn, project_id, node_key)
@@ -158,8 +163,6 @@ class StateService:
         # are reused as the long-lived state project.
         if continue_from is not None and manifest.repo_mode != "code":
             raise StateGraphError("continue_from needs a code-producing workflow; only a worktree can carry a draft forward")
-        if relay_digest is not None and continue_from is None:
-            raise StateGraphError("relay_digest only accompanies continue_from")
         attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
                                         continue_from=continue_from, relay_digest=relay_digest)
         return self._launch_or_recover(attempt, manifest, source)
@@ -186,7 +189,14 @@ class StateService:
             "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})
         relay = None
         if attempt["context"].get("relay_of"):
-            relay = self._prepare_relay(attempt, source)
+            try:
+                relay = self._prepare_relay(attempt, source)
+            except StateConflict as e:
+                # A refused relay must not strand the node behind a reserved
+                # attempt: retire the intent so the director can re-read the
+                # inventory and start again under a new request key.
+                self.attempts.retire_reservation(aid, f"relay refused: {e}")
+                raise StateConflict(f"{e}; this reservation was retired, start a new attempt") from e
             attempt = self.attempts.pin_relay(aid, relay)
         dependency_receipts = self._dependency_context(attempt, source, ref=relay["base_sha"] if relay else "HEAD")
         from core.run_launcher import missing_cross_config_inputs, start_config_run

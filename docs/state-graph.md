@@ -113,8 +113,9 @@ manifest — re-hashed, refused if any changed — and seeded into the new run's
 staging on the step's first execution, and the seed carries a `relay` section so the agent finishes instead
 of re-grounding. A relay is refused unless the failed attempt targeted the same
 node revision, contract hash, dependency snapshot and workflow, and unless its
-branch head still exists; passing `relay_digest=<the digest read>` also refuses
-the relay if the branch or draft moved since the director read it. It is an
+branch head still exists; `relay_digest=<the digest read>` is required and the
+relay is refused — its reservation retired — if the branch or draft moved since
+the director read it. It is an
 explicit, recorded decision
 (`attempt_relay_prepared`) taken after inspecting the draft — not a retry. Unknown engine state, missing graph history, or admitted operations
 never count as completion. An old attempt that completes after its inputs changed

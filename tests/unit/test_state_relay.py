@@ -78,6 +78,7 @@ def test_failed_attempt_reports_what_it_left_behind(world):
     a, branch_head = _failed_attempt_with_draft(world)
     observed = world["service"].reconcile_attempt(a["attempt_id"])
     inv = observed["relay_inventory"]
+    assert world["service"].get_attempt(a["attempt_id"])["relay_inventory"] == inv, "the read surface shows the same inventory"
     assert inv["branch"] == f"codex/run/{a['run_id']}"
     assert inv["head_sha"] == branch_head and inv["base_sha"] == world["head"]
     assert [c["subject"] for c in inv["commits"]] == ["first half"]

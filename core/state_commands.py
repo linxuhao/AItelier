@@ -303,7 +303,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "bind_node_design": service.design.bind_node,
         "list_projects": service.store.list_projects, "get_graph": service.store.get_graph,
         "get_node": service.node_context, "frontier": service.store.frontier, "facet_lint": service.store.facet_lint,
-        "wait_for_state_change": service.wait_for_state_change, "events": service.store.events, "get_attempt": service.attempts.get,
+        "wait_for_state_change": service.wait_for_state_change, "events": service.store.events, "get_attempt": service.get_attempt,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
         "revise_node": service.store.revise_node, "split_node": service.store.split_node,

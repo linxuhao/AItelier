@@ -286,6 +286,15 @@ class StateService:
                 "mainline_ahead_by": inventory["mainline_ahead_by"], "staged_files": parked,
                 "error": inventory["error"]}
 
+    def get_attempt(self, attempt_id):
+        """The read surface's view of one attempt; a failed SkillFlow attempt
+        carries its relay_inventory so the director can inspect the retained
+        draft without a write call."""
+        attempt = self.attempts.get(attempt_id)
+        if attempt["status"] == "failed" and attempt["execution_kind"] == "skillflow":
+            return {**attempt, "relay_inventory": self._relay_inventory(attempt)}
+        return attempt
+
     def recover_attempt(self, attempt_id):
         attempt = self.attempts.get(attempt_id)
         if attempt["execution_kind"] == "external":

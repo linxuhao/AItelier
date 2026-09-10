@@ -612,7 +612,14 @@ def _run_node_checks(repo: Path) -> dict | None:
 
 
 REPO_GATE_SCRIPT = "run_tests.sh"
-REPO_GATE_TIMEOUT = 900
+# Measured 2026-09-10 on the wuxia baseline, one clean exclusive run:
+# compile 11.5s + playtest 1995s = 2007s for 172 scenarios -- and that
+# run HARD-failed early enough to skip the L0 control block entirely, so
+# its 104 control runs (72,685 headless frames) were never paid. 2007s is
+# therefore a FLOOR for a clean tree, not the figure. 900 was a
+# placeholder and would have failed every gate as a timeout, which is the
+# worst kind of red: one that has nothing to do with the code.
+REPO_GATE_TIMEOUT = 5400
 
 
 def _run_repo_gate(repo: Path) -> dict | None:

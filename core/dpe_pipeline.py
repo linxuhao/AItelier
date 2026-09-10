@@ -285,6 +285,35 @@ def _recall_observation(messages: list[dict], sha256: str = "", *,
     return out
 
 
+# A step that re-reads the same file spends its budget on text it already has.
+# The sect-curriculum run (2026-09-10) took 40 of its 48 turns as reads —
+# player_profile.gd five times, progression_gongfa_data.gd eight — and called
+# recall_observation ZERO times. The way back from a compacted result existed
+# and was never taken, so the host takes it: an identical repeat call is
+# answered with the earlier result's recall id instead of being run again.
+#
+# ALLOWLIST, deliberately, not a blocklist. A tool missing from this set only
+# keeps costing what it costs. A gate tool wrongly INSIDE it would serve a
+# stale verdict as a fresh one, which is the pass-on-absence defect exactly —
+# so run_tests / pytest / godot_* / unity_* are absent on purpose, not by
+# oversight, and must stay absent.
+_REPEATABLE_READ_TOOLS = frozenset({
+    "read_file", "read", "list_tree", "dir_tree", "file_exists",
+    "semantic_search", "search", "git_history", "read_test_written",
+    "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read",
+    "web_fetch",
+})
+# Below this a pointer costs more than the text it would replace.
+_REPEAT_MIN_CHARS = 4 * 1024
+
+
+def _repeat_call_key(tool_name: str, params: dict) -> str:
+    """Identity of one tool call: same tool, same arguments."""
+    return hashlib.sha256(json.dumps(
+        [tool_name, params or {}], ensure_ascii=False, sort_keys=True,
+        default=str).encode("utf-8")).hexdigest()
+
+
 def _progress_signature(tool_name: str, params: dict, result: dict) -> str | None:
     """Return a stable marker for a novel successful tool outcome."""
     if tool_name in {"ask_more_turn", "ask_more_turns", "finish_step",
@@ -2642,6 +2671,8 @@ class PipelineEngine:
             turn_grants = 0
             progress_signatures: set[str] = set()
             progress_at_last_grant = 0
+            # call key -> (recall digest, chars) for read results already held.
+            repeat_index: dict[str, tuple[str, int]] = {}
             turn_count = -1
             resume_nudges_left = 0
             if attempt == 1 and _resumed:
@@ -3039,10 +3070,33 @@ class PipelineEngine:
                     # minutes, and without these the liveness line either
                     # lingers on a stale "generating" or shows nothing.
                     self._note_phase("tool", tool_name)
-                    try:
-                        tool_result = self._exec_tool({"tool": tool_name, "params": params})
-                    finally:
+                    repeat_key = (_repeat_call_key(tool_name, params)
+                                  if tool_name in _REPEATABLE_READ_TOOLS else "")
+                    repeated = repeat_index.get(repeat_key) if repeat_key else None
+                    if repeated:
+                        digest, original_chars = repeated
+                        tool_result = {
+                            "repeat_of_earlier_call": True,
+                            "sha256": digest,
+                            "original_chars": original_chars,
+                            "note": (
+                                f"{tool_name} already ran with these exact "
+                                "arguments in this step and nothing has been "
+                                "written since, so the answer is unchanged and "
+                                "it was NOT re-run. The earlier result is "
+                                "retained in full: read it with "
+                                f'recall_observation(sha256="{digest}", '
+                                "grep=<regex>) or (start=<char>, end=<char>)."),
+                        }
                         self._note_phase("tool_done", tool_name)
+                        self._trace("step", "repeat_call_deduped", {
+                            "tool": tool_name, "sha256": digest,
+                            "original_chars": original_chars})
+                    else:
+                        try:
+                            tool_result = self._exec_tool({"tool": tool_name, "params": params})
+                        finally:
+                            self._note_phase("tool_done", tool_name)
                     if tool_name == "ask_more_turns":
                         # _exec_tool answers "granted" unconditionally; the
                         # provider must never read a false grant, so fail closed
@@ -3081,6 +3135,21 @@ class PipelineEngine:
                     wf = self._written_name(tool_result)
                     if wf:
                         written_files.append(wf)
+                    # Anything that CHANGED the tree invalidates every held
+                    # read. Both predicates, not just `_written_name`: a step
+                    # can change the repo without leaving a file in staging
+                    # (repo_remove_file -> queued_for_deletion, apply_state ->
+                    # state_written, repo_apply -> committed), and a delete
+                    # followed by a deduped list_tree would show the agent the
+                    # file it just removed. Over-invalidating costs one
+                    # re-read; under-invalidating hands back stale truth.
+                    if wf or self._effect_name(tool_result):
+                        repeat_index.clear()
+                    elif (repeat_key and not repeated
+                          and len(result_str) >= _REPEAT_MIN_CHARS
+                          and not _is_failed_tool_result(result_str)):
+                        repeat_index[repeat_key] = (
+                            _observation_digest(result_str), len(result_str))
 
 
                 self._trace_prompt_deltas(messages, turn_count + 1)

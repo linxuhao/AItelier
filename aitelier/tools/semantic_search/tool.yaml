@@ -1,11 +1,18 @@
 name: semantic_search
 description: >
-  Find code or docs by MEANING when you do not know the exact words or the
-  file: hybrid semantic + lexical search over the indexed repository (zvec-grep
-  sidecar). Returns ranked, source-linked snippets grouped by file with line
-  numbers — at most `limit` items (default 8, max 50), NOT an exhaustive
-  occurrence list. Use it to locate the region, then `read` that range.
-  For an exact identifier, quotation, regex or every occurrence, use `search`.
+  Find the RIGHT LINES without reading the whole file: hybrid semantic +
+  lexical search over the indexed repository (zvec-grep sidecar). Returns
+  ranked, source-linked snippets grouped by file with line numbers — at most
+  `limit` items (default 8, max 50), NOT an exhaustive occurrence list.
+  Reach for this FIRST, before `read`, whenever a file is large or you are not
+  certain which file holds the thing: one query hands you `path:start-end` and
+  you then read only that range. Reading a 57 KB script to find one function
+  costs several turns, and after the next few turns the text is no longer in
+  front of you; a query costs one. It also answers what no pattern can —
+  "where is X decided", "what runs after Y" — because it matches meaning, not
+  spelling.
+  `search` is the right tool for an exact identifier, a quotation, a regex, or
+  when you need EVERY occurrence: it is exhaustive where this is ranked.
   Errors (index missing, sidecar down) come back as {error, hint}; fall back
   to `search`/`read` — never treat an error as "nothing exists". A new
   project's index, including an isolated run worktree, is built automatically

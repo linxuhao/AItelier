@@ -579,6 +579,51 @@ class StateGraphStore:
             result.append(item)
         return {"project": project, "nodes": sorted(result, key=lambda n: (-n["priority"], n["node_key"]))}
 
+    def search_nodes(self, project_id: str, query: str, limit: int = 20) -> dict:
+        """Full-text lookup over a project's nodes: key, goal, every acceptance
+        criterion, and the evidence detail recorded against the node's attempts.
+
+        Case-insensitive substring match; several whitespace-separated terms must
+        each hit somewhere in the same node. Returns the matching nodes with one
+        snippet per hit and where it came from, so a director can find "which
+        node owns the map facility cap" without paging through get_graph."""
+        integer(limit, "limit", 1, 200)
+        terms = [t.lower() for t in str(query).split() if t.strip()]
+        if not terms:
+            raise StateGraphError("search_nodes needs a non-empty query")
+        with self.transaction() as conn:
+            self._project(conn, project_id)
+            evidence: dict[str, list[tuple[str, str]]] = {}
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_evidence'").fetchone():
+                for r in conn.execute(
+                        "SELECT a.node_key, e.attempt_id, e.criterion_id, e.verdict, e.detail "
+                        "FROM state_evidence e JOIN state_attempts a ON a.attempt_id=e.attempt_id "
+                        "WHERE a.project_id=?", (project_id,)):
+                    evidence.setdefault(r["node_key"], []).append(
+                        ("evidence:%s:%s:%s" % (r["attempt_id"], r["criterion_id"], r["verdict"]), r["detail"]))
+            results = []
+            for row in conn.execute("SELECT * FROM state_nodes WHERE project_id=?", (project_id,)):
+                fields = [("key", row["node_key"]), ("goal", row["goal"])]
+                for c in json.loads(row["contract_json"]):
+                    fields.append(("acceptance:%s" % c.get("id", ""), "%s %s" % (c.get("id", ""), c.get("description", ""))))
+                fields.extend(evidence.get(row["node_key"], []))
+                hits = []
+                matched_terms = set()
+                for where, text in fields:
+                    low = str(text).lower()
+                    for t in terms:
+                        i = low.find(t)
+                        if i < 0:
+                            continue
+                        matched_terms.add(t)
+                        start, end = max(0, i - 60), min(len(text), i + len(t) + 60)
+                        hits.append({"where": where, "term": t, "snippet": str(text)[start:end]})
+                if matched_terms == set(terms):
+                    results.append({"node_key": row["node_key"], "status": row["status"], "facet": row["facet"],
+                                    "revision": row["revision"], "hit_count": len(hits), "hits": hits[:8]})
+            results.sort(key=lambda n: (-n["hit_count"], n["node_key"]))
+            return {"query": query, "total": len(results), "nodes": results[:limit]}
+
     def get_graph(self, project_id: str) -> dict:
         with self.transaction() as conn:
             return self._graph_view(conn, project_id)

@@ -230,3 +230,46 @@ def test_frontier_is_compact_and_full_context_remains_pullable(store):
     assert len(entry["goal"]) == 1200 and entry["goal_truncated"] is True
     assert "acceptance" not in entry
     assert len(store.get_node("shrimp", "large")["goal"]) == 1500
+
+
+def test_search_nodes_finds_key_goal_acceptance_and_evidence(store):
+    store.add_nodes("shrimp", [
+        {"key": "growth.facility-quota", "goal": "大地图设施个人限次与逐次涨价", "dependencies": [], "priority": 5,
+         "acceptance": [{"id": "cap", "kind": "test", "description": "FacilityQuota refuses the third purchase"}]},
+        node("art.audio"),
+    ])
+    hit = store.search_nodes("shrimp", "限次")
+    assert [n["node_key"] for n in hit["nodes"]] == ["growth.facility-quota"]
+    assert hit["nodes"][0]["hits"][0]["where"] == "goal"
+    # acceptance text is searched too, and the criterion id is named
+    acc = store.search_nodes("shrimp", "third purchase")
+    assert acc["nodes"][0]["hits"][0]["where"] == "acceptance:cap"
+    # every term must hit the same node; a term nothing carries matches nothing
+    assert store.search_nodes("shrimp", "facilityquota zzz-nowhere")["total"] == 0
+    assert store.search_nodes("shrimp", "FACILITY quota")["total"] == 1
+
+
+def test_search_nodes_reaches_recorded_evidence(tmp_path):
+    from core.state_database import StateDatabase
+    from core.state_service import StateService
+    service = StateService(StateDatabase(str(tmp_path / "svc.sqlite")), actor="authorized-author")
+    service.create_project(project_id="shrimp", title="Shrimp game")
+    service.store.add_nodes("shrimp", [node("art.audio")])
+    a = service.start_external_attempt("shrimp", "art.audio", 1, "harness", "job", "request")
+    # evidence only attaches to a reported, quiescent candidate
+    service.report_external_attempt(a["attempt_id"], "done", 0, a["context_hash"], "candidate",
+                                    "reports/result.json", "b" * 64, True, "a" * 64, "sha256")
+    service.attempts.record_evidence(a["attempt_id"], "e1", "behaviour", "fail", "a" * 64, "r.md", "0" * 64,
+                                     "me", "placeholder wav still shipped in bus 3")
+    ev = service.store.search_nodes("shrimp", "placeholder wav")
+    assert ev["total"] == 1 and ev["nodes"][0]["node_key"] == "art.audio"
+    assert ev["nodes"][0]["hits"][0]["where"].startswith("evidence:")
+    # the same lookup is reachable through the read surface used by HTTP and MCP
+    from core.state_commands import execute
+    out = execute(service, "search_nodes", {"project_id": "shrimp", "query": "placeholder wav"})
+    assert out["total"] == 1
+
+
+def test_search_nodes_rejects_empty_query(store):
+    with pytest.raises(StateGraphError):
+        store.search_nodes("shrimp", "   ")

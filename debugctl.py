@@ -696,12 +696,30 @@ def cmd_replay(args):
     if not db.exists():
         print(f"no trace.db for {args.project_id}"); return 1
     conn = sqlite3.connect(db)
+    # step_instance_id is skillflow's GLOBAL row id, not a per-run counter, so a
+    # guessed `--instance 1` finds nothing on a healthy trace. Read the ids that
+    # do carry prompt_delta up front: it makes the default (latest) possible and
+    # keeps "you asked for the wrong instance" from reading as "the trace is
+    # dead" — which is exactly how a live 165-row trace got reported as lost.
+    have = conn.execute(
+        "SELECT step_instance_id, step_id, COUNT(*) FROM skillflow_trace "
+        "WHERE event='prompt_delta' GROUP BY step_instance_id, step_id "
+        "ORDER BY step_instance_id").fetchall()
+    instance = args.instance or (have[-1][0] if have else 0)
     rows = conn.execute(
         "SELECT payload_json FROM skillflow_trace WHERE step_instance_id=? "
-        "AND event='prompt_delta' ORDER BY seq", (args.instance,)).fetchall()
+        "AND event='prompt_delta' ORDER BY seq", (instance,)).fetchall()
     if not rows:
-        print(f"instance {args.instance}: no prompt_delta events (older run, or a "
-              f"non-native step) — fall back to `trace`"); return 1
+        if have:
+            print(f"instance {instance}: no prompt_delta events. This trace HAS "
+                  f"{sum(h[2] for h in have)} prompt_delta events under other "
+                  f"instances — retry with one of:")
+            for iid, sid, n in have:
+                print(f"  --instance {iid}   step={sid or '?'}  ({n} messages)")
+        else:
+            print(f"instance {instance}: no prompt_delta events anywhere in "
+                  f"{db} (older run, or a non-native step) — fall back to `trace`")
+        return 1
     msgs = []
     last_turn = 0
     for (pj,) in rows:
@@ -717,7 +735,7 @@ def cmd_replay(args):
         msgs.append(m)
     if args.json:
         print(json.dumps(msgs, ensure_ascii=False, indent=1)); return 0
-    print(f"# instance {args.instance} — {len(msgs)} messages through turn {last_turn}")
+    print(f"# instance {instance} — {len(msgs)} messages through turn {last_turn}")
     for i, m in enumerate(msgs):
         extra = f" tool_call_id={m['tool_call_id']}" if m.get("tool_call_id") else ""
         print(f"\n=== [{i}] {m['role']}{extra} ({len(m['content'])} chars) ===")
@@ -912,7 +930,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ── trace ──
     s = sub.add_parser("replay", help="Rebuild the exact messages a step instance sent at turn N from prompt_delta events")
     s.add_argument("project_id")
-    s.add_argument("--instance", type=int, required=True, help="step_instance_id (see `trace`)")
+    s.add_argument("--instance", type=int, default=0,
+                   help="step_instance_id (see `trace`); default: the latest one "
+                        "in this project's trace that has prompt_delta events")
     s.add_argument("--turn", type=int, default=0, help="turn to reconstruct (default: last)")
     s.add_argument("--json", action="store_true", help="emit the messages list as JSON")
     s.set_defaults(func=cmd_replay)

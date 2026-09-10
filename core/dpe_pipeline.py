@@ -820,8 +820,19 @@ class PipelineEngine:
         """
         try:
             self._trace_cb(category, event, payload or {})
-        except Exception:
-            pass
+        except Exception as e:
+            # A trace that cannot be written must still be VISIBLE. This was a
+            # bare `pass`: every diagnostic the trace exists to provide (replay,
+            # resume-from-trace, post-mortem of a burnt turn budget) would go
+            # missing with nothing in any log to say so. Report the first
+            # failure per engine instance — a broken trace fails on every one of
+            # hundreds of calls, and flooding the log is its own outage.
+            if not getattr(self, "_trace_write_failed", False):
+                self._trace_write_failed = True
+                logging.getLogger("aitelier.dpe").warning(
+                    "durable trace write FAILED (%s: %s) on %s/%s — the trace is "
+                    "now incomplete for this step; further failures are silent",
+                    type(e).__name__, e, category, event)
 
     def _get_project_path(self, workspace: Any, project_id: str) -> Path:
         """获取 DPS workspace 路径 (Inbox/Outbox/Trace)"""

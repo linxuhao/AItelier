@@ -104,14 +104,18 @@ ready goal → reserved intent → launching → bound SkillFlow run
 A failed workflow keeps its history and allows a new attempt. A paused workflow
 stays active. A workflow that died on its turn or output budget also keeps its
 run branch and its staged, unpromoted draft; `reconcile_attempt` and
-`get_attempt` report both as `relay_inventory`. `start_attempt` with
-`continue_from=<failed attempt id>` **relays** that attempt: the new run's
-worktree is based on the failed branch head (`run_isolation_requests`), the
-staged files are seeded into the new run's staging on the step's first
-execution, and the seed carries a `relay` section so the agent finishes instead
+`get_attempt` report both as `relay_inventory`: every staged regular file
+with its sha256 (symlinks are neither listed nor copied) and a `digest` over
+branch head + manifest. `start_attempt` with `continue_from=<failed attempt
+id>` **relays** that attempt: the new run's worktree is based on the failed
+branch head (`run_isolation_requests`), exactly the listed files are copied by
+manifest — re-hashed, refused if any changed — and seeded into the new run's
+staging on the step's first execution, and the seed carries a `relay` section so the agent finishes instead
 of re-grounding. A relay is refused unless the failed attempt targeted the same
 node revision, contract hash, dependency snapshot and workflow, and unless its
-branch head still exists. It is an explicit, recorded decision
+branch head still exists; passing `relay_digest=<the digest read>` also refuses
+the relay if the branch or draft moved since the director read it. It is an
+explicit, recorded decision
 (`attempt_relay_prepared`) taken after inspecting the draft — not a retry. Unknown engine state, missing graph history, or admitted operations
 never count as completion. An old attempt that completes after its inputs changed
 is superseded, not applied to the new goal revision.

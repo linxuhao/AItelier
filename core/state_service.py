@@ -140,7 +140,7 @@ class StateService:
                                      artifact=artifact, artifact_kind=artifact_kind, detail=detail)
 
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction="",
-                      continue_from=None):
+                      continue_from=None, relay_digest=None):
         from core.state_metadata import require_dispatch
         with self.store.transaction() as conn:
             self.store._node(conn, project_id, node_key)
@@ -158,8 +158,10 @@ class StateService:
         # are reused as the long-lived state project.
         if continue_from is not None and manifest.repo_mode != "code":
             raise StateGraphError("continue_from needs a code-producing workflow; only a worktree can carry a draft forward")
+        if relay_digest is not None and continue_from is None:
+            raise StateGraphError("relay_digest only accompanies continue_from")
         attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
-                                        continue_from=continue_from)
+                                        continue_from=continue_from, relay_digest=relay_digest)
         return self._launch_or_recover(attempt, manifest, source)
 
     def _launch_or_recover(self, attempt, manifest, source):
@@ -226,12 +228,14 @@ class StateService:
         return {**self.reconcile_attempt(attempt_id), "checkpoints": "ask", "driver_attached": attached,
                 "scheduler_owned": owned}
 
-    _RELAY_LIST_CAP = 200
-
     def _relay_inventory(self, attempt):
         """What a failed SkillFlow attempt left behind, as a director-readable
         inventory: the run branch and its commits beyond base, and every staged
-        (unpromoted) file per step. Read-only; None when nothing is recoverable."""
+        (unpromoted) regular file per step with its sha256 — complete, never
+        truncated. `digest` binds branch head + manifest so the director can
+        pass it back as `relay_digest` and have the relay refused if either
+        moved between reading and copying. Read-only; None when nothing is
+        recoverable."""
         from core import run_isolation
         rec = run_isolation.record(self.db, attempt["run_id"]) if attempt.get("run_id") else None
         if not rec or rec["mode"] != run_isolation.MODE_WORKTREE or not rec.get("branch"):
@@ -243,7 +247,7 @@ class StateService:
             behind = int(self._git(source, "rev-list", "--count", f"{head}..HEAD") or 0)
         except StateConflict:
             return None
-        commits = [line.split(" ", 1) for line in log.splitlines() if line][: self._RELAY_LIST_CAP]
+        commits = [line.split(" ", 1) for line in log.splitlines() if line]
         staged = {}
         pid = attempt["execution_project_id"]
         try:
@@ -252,13 +256,15 @@ class StateService:
             config_dir = None
         if config_dir and config_dir.is_dir():
             for tmp in sorted(config_dir.glob("*.tmp")):
-                files = sorted(str(f.relative_to(tmp)) for f in tmp.rglob("*")
-                               if f.is_file() and not f.is_symlink())
-                if files:
-                    staged[tmp.name[:-4]] = files[: self._RELAY_LIST_CAP]
+                if tmp.is_symlink() or not tmp.is_dir():
+                    continue
+                manifest = self.ws.relay_manifest(tmp)
+                if manifest:
+                    staged[tmp.name[:-4]] = manifest
         return {"run_id": attempt["run_id"], "branch": rec["branch"], "base_sha": rec["base_sha"],
                 "head_sha": head, "commits": [{"sha": c[0], "subject": c[1] if len(c) > 1 else ""} for c in commits],
-                "mainline_ahead_by": behind, "staged_files": staged, "error": attempt.get("error")}
+                "mainline_ahead_by": behind, "staged_files": staged,
+                "digest": digest({"head_sha": head, "staged_files": staged}), "error": attempt.get("error")}
 
     def _prepare_relay(self, attempt, source):
         """Make the failed attempt's work physically reachable by the new run:
@@ -271,20 +277,29 @@ class StateService:
         inventory = self._relay_inventory(prior)
         if inventory is None:
             raise StateConflict("the failed attempt has no run branch to continue from; start a fresh attempt")
+        expected = attempt["context"]["relay_of"].get("expected_digest")
+        if expected and expected != inventory["digest"]:
+            raise StateConflict("the failed attempt's branch or staged draft changed since it was read "
+                                f"(relay_digest {expected} != {inventory['digest']}); read relay_inventory again")
         from core import run_isolation
+        from core.workspace_manager import RelayDraftChanged
         run_isolation.request_base(self.db, attempt["execution_project_id"], inventory["head_sha"],
                                    note=f"relay of {prior['attempt_id']} (run {prior['run_id']})")
         parked = {}
         prior_config = self.ws._get_secure_path(prior["execution_project_id"]) / prior["workflow"]
-        for step, files in inventory["staged_files"].items():
-            copied = self.ws.stage_relay_draft(prior_config / f"{step}.tmp", attempt["execution_project_id"],
-                                               step, attempt["workflow"])
+        for step, manifest in inventory["staged_files"].items():
+            try:
+                copied = self.ws.stage_relay_draft(prior_config / f"{step}.tmp", attempt["execution_project_id"],
+                                                   step, attempt["workflow"], manifest=manifest)
+            except RelayDraftChanged as e:
+                raise StateConflict(f"the failed attempt's staged draft changed while being copied ({e}); "
+                                    "read relay_inventory again") from e
             if copied:
-                parked[step] = copied[: self._RELAY_LIST_CAP]
+                parked[step] = copied
         return {"attempt_id": prior["attempt_id"], "run_id": inventory["run_id"], "branch": inventory["branch"],
                 "base_sha": inventory["head_sha"], "commits": inventory["commits"],
                 "mainline_ahead_by": inventory["mainline_ahead_by"], "staged_files": parked,
-                "error": inventory["error"]}
+                "digest": inventory["digest"], "error": inventory["error"]}
 
     def get_attempt(self, attempt_id):
         """The read surface's view of one attempt; a failed SkillFlow attempt

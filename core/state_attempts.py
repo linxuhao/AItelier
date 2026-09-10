@@ -111,11 +111,11 @@ class StateAttempts:
 
     def reserve(self, project_id: str, node_key: str, expected_revision: int,
                 workflow: str, request_key: str, instruction: str = "",
-                continue_from: str | None = None) -> dict:
+                continue_from: str | None = None, relay_digest: str | None = None) -> dict:
         """Idempotent intent, persisted before a workflow can be launched."""
         key(workflow, "workflow")
         return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
-                             continue_from=continue_from)
+                             continue_from=continue_from, relay_digest=relay_digest)
 
     @staticmethod
     def _relay_source(conn, prior_id, project_id, node_key, workflow, node, deps):
@@ -138,7 +138,7 @@ class StateAttempts:
                 "execution_project_id": prior["execution_project_id"], "error": prior["error"]}
 
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
-                 external=None, continue_from=None):
+                 external=None, continue_from=None, relay_digest=None):
         """Common atomic ownership/pin guard for every execution adapter."""
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
@@ -151,6 +151,10 @@ class StateAttempts:
             if external is not None:
                 raise StateGraphError("continue_from applies to SkillFlow attempts only")
             request["continue_from"] = continue_from
+            if relay_digest is not None:
+                if not isinstance(relay_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", relay_digest):
+                    raise StateGraphError("relay_digest must be the 64-hex digest from relay_inventory")
+                request["relay_digest"] = relay_digest
         request_hash = digest(request)
         with self.store.transaction(write=True) as conn:
             node = self.store._node(conn, project_id, node_key)
@@ -172,6 +176,8 @@ class StateAttempts:
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
             if continue_from is not None:
                 ctx["relay_of"] = self._relay_source(conn, continue_from, project_id, node_key, workflow, node, deps)
+                if relay_digest is not None:
+                    ctx["relay_of"]["expected_digest"] = relay_digest
             from core.state_design import binding_snapshot
             design = binding_snapshot(conn, project_id, node_key)
             if design is not None:

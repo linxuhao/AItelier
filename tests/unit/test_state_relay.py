@@ -8,6 +8,7 @@ named the old path in its instruction re-grounded from scratch and failed again.
 These tests bind the channel that now exists: request_base + parked draft +
 seed_relay_draft, driven by `continue_from`.
 """
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -82,9 +83,69 @@ def test_failed_attempt_reports_what_it_left_behind(world):
     assert inv["branch"] == f"codex/run/{a['run_id']}"
     assert inv["head_sha"] == branch_head and inv["base_sha"] == world["head"]
     assert [c["subject"] for c in inv["commits"]] == ["first half"]
-    assert inv["staged_files"] == {"implementation": ["half.py"]}
+    assert inv["staged_files"] == {"implementation": {"half.py": _sha("HALF = 1\n")}}
     assert inv["mainline_ahead_by"] == 0
     assert "turn budget" in inv["error"]
+    assert len(inv["digest"]) == 64
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_inventory_lists_only_regular_files_and_the_copy_follows_the_inventory(world, tmp_path):
+    """A symlink in staging is neither listed nor copied — a link to a directory
+    outside the staging used to be FOLLOWED by copytree while the inventory hid it."""
+    attempts, ws, src = world["attempts"], world["ws"], world["src"]
+    a, _ = _failed_attempt_with_draft(world)
+    staging = ws._draft_dir(a["execution_project_id"], "implementation", "feature")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("not staged\n")
+    (staging / "linked_dir").symlink_to(outside, target_is_directory=True)
+    (staging / "linked.py").symlink_to(staging / "half.py")
+    (staging / "sub").mkdir()
+    (staging / "sub" / "deep.py").write_text("DEEP = 1\n")
+
+    inv = world["service"].get_attempt(a["attempt_id"])["relay_inventory"]
+    assert inv["staged_files"] == {"implementation": {"half.py": _sha("HALF = 1\n"), "sub/deep.py": _sha("DEEP = 1\n")}}
+
+    b = attempts.reserve("game", "a", 1, "feature", "relay", continue_from=a["attempt_id"], relay_digest=inv["digest"])
+    relay = world["service"]._prepare_relay(b, str(src))
+    parked = ws._relay_dir(b["execution_project_id"], "implementation", "feature")
+    assert sorted(str(p.relative_to(parked)) for p in parked.rglob("*") if p.is_file()) == ["half.py", "sub/deep.py"]
+    assert not (parked / "linked_dir").exists() and not (parked / "linked.py").exists()
+    assert relay["staged_files"] == inv["staged_files"] and relay["digest"] == inv["digest"]
+
+
+def test_relay_is_refused_when_the_draft_moved_since_it_was_read(world):
+    attempts, ws, src = world["attempts"], world["ws"], world["src"]
+    a, _ = _failed_attempt_with_draft(world)
+    inv = world["service"].get_attempt(a["attempt_id"])["relay_inventory"]
+    ws.write_draft(a["execution_project_id"], "implementation", "half.py", "HALF = 2\n", graph_name="feature")
+    b = attempts.reserve("game", "a", 1, "feature", "relay", continue_from=a["attempt_id"], relay_digest=inv["digest"])
+    with pytest.raises(StateConflict, match="changed since it was read"):
+        world["service"]._prepare_relay(b, str(src))
+    assert not ws._relay_dir(b["execution_project_id"], "implementation", "feature").exists()
+    with pytest.raises(Exception, match="64-hex"):
+        attempts.reserve("game", "a", 1, "feature", "relay2", continue_from=a["attempt_id"], relay_digest="abc")
+
+
+def test_park_copy_is_verified_against_the_manifest(world, tmp_path):
+    """stage_relay_draft copies by manifest and refuses a file whose bytes differ."""
+    ws = world["ws"]
+    from core.workspace_manager import RelayDraftChanged
+    src = tmp_path / "stage"
+    src.mkdir()
+    (src / "a.py").write_text("A = 1\n")
+    manifest = ws.relay_manifest(src)
+    assert manifest == {"a.py": _sha("A = 1\n")}
+    (src / "a.py").write_text("A = 2\n")
+    with pytest.raises(RelayDraftChanged, match="changed"):
+        ws.stage_relay_draft(src, "p", "implementation", "feature", manifest=manifest)
+    assert not ws._relay_dir("p", "implementation", "feature").exists()
+    with pytest.raises(RelayDraftChanged, match="regular file"):
+        ws.stage_relay_draft(src, "p", "implementation", "feature", manifest={"gone.py": manifest["a.py"]})
 
 
 def test_relay_bases_the_new_worktree_on_the_failed_branch_and_seeds_its_draft(world):
@@ -95,7 +156,7 @@ def test_relay_bases_the_new_worktree_on_the_failed_branch_and_seeds_its_draft(w
     b = attempts.pin_relay(b["attempt_id"], relay)
 
     assert relay["base_sha"] == branch_head
-    assert relay["staged_files"] == {"implementation": ["half.py"]}
+    assert relay["staged_files"] == {"implementation": {"half.py": _sha("HALF = 1\n")}}
     assert b["context"]["relay"] == relay
     assert ri.requested_base(db, b["execution_project_id"])["base_sha"] == branch_head
     # The failed attempt's own staging is untouched — it stays evidence.
@@ -133,5 +194,6 @@ def test_relay_refuses_when_the_failed_branch_is_gone(world):
 def test_start_attempt_exposes_continue_from_on_the_typed_surface():
     from core.state_commands import StartAttempt, describe
     assert "continue_from" in describe()["operations"]["start_attempt"]["arguments"]["properties"]
+    assert "relay_digest" in describe()["operations"]["start_attempt"]["arguments"]["properties"]
     assert StartAttempt(project_id="g", node_key="a", expected_revision=1, workflow="w",
                         request_key="r").continue_from is None

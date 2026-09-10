@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import functools
+import hashlib
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +63,18 @@ def _guarded_mutation(kind: str):
                 return fn(self, project_id, *args, **kwargs)
         return wrapper
     return deco
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class RelayDraftChanged(RuntimeError):
+    """A relay draft differs from the manifest it was read under."""
 
 
 class WorkspaceManager:
@@ -265,19 +278,53 @@ class WorkspaceManager:
                    graph_name: str = DPE_GRAPH_NAME) -> Path:
         return self._get_secure_path(project_id) / graph_name / "_relay" / step_id
 
-    def stage_relay_draft(self, src_dir: Path, project_id: str, step_id: str,
-                          graph_name: str = DPE_GRAPH_NAME) -> list[str]:
-        """Park a prior attempt's staged files for `step_id`; returns their paths."""
+    @staticmethod
+    def relay_manifest(src_dir: Path) -> dict[str, str]:
+        """Every regular file under `src_dir` with its sha256, relative path →
+        hex digest. Symlinks (to files or directories) are neither listed nor
+        followed, so the manifest names exactly what a relay may copy."""
         src = Path(src_dir)
-        files = sorted(str(f.relative_to(src)) for f in src.rglob("*")
-                       if f.is_file() and not f.is_symlink())
-        if not files:
-            return []
+        manifest = {}
+        for directory, dirnames, filenames in os.walk(src, followlinks=False):
+            dirnames[:] = sorted(d for d in dirnames if not (Path(directory) / d).is_symlink())
+            for name in filenames:
+                path = Path(directory) / name
+                if path.is_symlink() or not path.is_file():
+                    continue
+                manifest[str(path.relative_to(src))] = _sha256(path)
+        return manifest
+
+    def stage_relay_draft(self, src_dir: Path, project_id: str, step_id: str,
+                          graph_name: str = DPE_GRAPH_NAME, manifest: dict[str, str] | None = None) -> dict[str, str]:
+        """Park a prior attempt's staged files for `step_id`, STRICTLY by
+        manifest: only the listed paths are copied, each must still be a regular
+        file with the listed sha256, and the park is re-hashed afterwards.
+        Returns the manifest; raises RelayDraftChanged when the draft no longer
+        matches what was read."""
+        src = Path(src_dir)
+        manifest = self.relay_manifest(src) if manifest is None else dict(manifest)
+        if not manifest:
+            return {}
         dst = self._relay_dir(project_id, step_id, graph_name)
         if dst.exists():
             shutil.rmtree(dst)
-        shutil.copytree(src, dst, symlinks=False)
-        return files
+        dst.mkdir(parents=True)
+        try:
+            for rel in sorted(manifest):
+                path = src / rel
+                if path.is_symlink() or not path.is_file():
+                    raise RelayDraftChanged(f"{step_id}: {rel} is no longer a regular file")
+                if _sha256(path) != manifest[rel]:
+                    raise RelayDraftChanged(f"{step_id}: {rel} changed since the draft was read")
+                target = dst / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+            if self.relay_manifest(dst) != manifest:
+                raise RelayDraftChanged(f"{step_id}: parked copy does not match the manifest")
+        except RelayDraftChanged:
+            shutil.rmtree(dst, ignore_errors=True)  # a refused relay leaves no half-park behind
+            raise
+        return manifest
 
     def seed_relay_draft(self, project_id: str, step_id: str,
                          graph_name: str = DPE_GRAPH_NAME) -> list[str]:

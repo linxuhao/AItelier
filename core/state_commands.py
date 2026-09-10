@@ -99,6 +99,10 @@ class StartAttempt(Node):
     # Explicit, so a relay is a recorded decision taken after inspecting the
     # draft (relay_inventory on the failed attempt), never a blind retry.
     continue_from: str | None = None
+    # The `digest` read from that attempt's relay_inventory. When given, the
+    # relay is refused if the branch head or any staged file differs from what
+    # the director read — the copy is bound to the inspected draft.
+    relay_digest: str | None = None
 
 
 class StartExternalAttempt(Node):

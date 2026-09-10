@@ -171,6 +171,20 @@ class DBManager:
                     value TEXT NOT NULL
                 )
             """)
+            # A base requested for a run that does not exist yet, keyed by the
+            # execution project that will own it. Consulted once, by
+            # `run_isolation._provision_tree`, so a relayed State attempt starts
+            # its worktree on the failed attempt's branch head instead of the
+            # source HEAD — and so the request is durable before either the
+            # launcher or the poller (whichever provisions first) reads it.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS run_isolation_requests (
+                    project_id TEXT PRIMARY KEY,
+                    base_sha TEXT NOT NULL,
+                    note TEXT DEFAULT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             self._stamp_run_isolation_since(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS settings (

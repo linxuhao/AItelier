@@ -508,3 +508,70 @@ async def test_director_recovery_failure_does_not_return_cached_paused(system, t
     assert result == {"events": [], "next_after": cursor, "timed_out": False,
                       "reason": "observation_unavailable"}
     assert attempts.get(a["attempt_id"])["status"] == "paused"
+
+
+# ── relay: continue_from a failed attempt ────────────────────────────
+
+def _fail(system, request="first"):
+    _, attempts, sf = system
+    a = reserve(system, request=request)
+    sf.fail_run(launch(system, a), "Step implement: native turn budget exhausted (32/32)")
+    return attempts.reconcile(a["attempt_id"], sf)
+
+
+def test_continue_from_records_the_relayed_attempt_and_is_idempotent(system):
+    store, attempts, _ = system
+    a = _fail(system)
+    b = attempts.reserve("game", "a", 1, "feature", "relay-1", "finish it", continue_from=a["attempt_id"])
+    assert b["context"]["relay_of"]["attempt_id"] == a["attempt_id"]
+    assert b["context"]["relay_of"]["run_id"] == a["run_id"]
+    assert "turn budget" in b["context"]["relay_of"]["error"]
+    again = attempts.reserve("game", "a", 1, "feature", "relay-1", "finish it", continue_from=a["attempt_id"])
+    assert again["attempt_id"] == b["attempt_id"]
+    with pytest.raises(StateConflict, match="different launch request"):
+        attempts.reserve("game", "a", 1, "feature", "relay-1", "finish it")
+    assert store.events("game")[-1]["payload"]["relay_of"]["attempt_id"] == a["attempt_id"]
+
+
+@pytest.mark.parametrize("wrong", ["not-failed", "other-node", "other-workflow", "unknown"])
+def test_continue_from_refuses_anything_but_a_failed_attempt_of_this_goal(system, wrong):
+    _, attempts, sf = system
+    if wrong == "not-failed":
+        a = reserve(system)
+        launch(system, a)
+        with pytest.raises(StateConflict, match="FAILED"):
+            attempts.reserve("game", "a", 1, "feature", "relay", continue_from=a["attempt_id"])
+        return
+    a = _fail(system)
+    if wrong == "other-node":
+        system[0].add_nodes("game", [spec("d")])  # ready, unlike b, so the relay guard answers
+        with pytest.raises(StateConflict, match="of this node"):
+            attempts.reserve("game", "d", 1, "feature", "relay", continue_from=a["attempt_id"])
+    elif wrong == "other-workflow":
+        with pytest.raises(StateConflict, match="workflow"):
+            attempts.reserve("game", "a", 1, "other", "relay", continue_from=a["attempt_id"])
+    else:
+        with pytest.raises(StateConflict, match="of this node"):
+            attempts.reserve("game", "a", 1, "feature", "relay", continue_from="attempt-nope")
+
+
+def test_continue_from_refuses_a_draft_of_a_stale_revision(system):
+    store, attempts, _ = system
+    a = _fail(system)
+    store.revise_node("game", "a", 1, goal="Implement a differently", reason="scope change")
+    with pytest.raises(StateConflict, match="different revision"):
+        attempts.reserve("game", "a", 2, "feature", "relay", continue_from=a["attempt_id"])
+
+
+def test_pin_relay_freezes_the_inventory_before_dispatch(system):
+    _, attempts, _ = system
+    a = _fail(system)
+    b = attempts.reserve("game", "a", 1, "feature", "relay", continue_from=a["attempt_id"])
+    relay = {"attempt_id": a["attempt_id"], "base_sha": "b" * 40, "commits": [], "staged_files": {"implementation": ["x.py"]}}
+    pinned = attempts.pin_relay(b["attempt_id"], relay)
+    assert pinned["context"]["relay"] == relay
+    assert attempts.pin_relay(b["attempt_id"], relay)["context"]["relay"] == relay
+    with pytest.raises(StateConflict, match="changed"):
+        attempts.pin_relay(b["attempt_id"], {**relay, "base_sha": "c" * 40})
+    with pytest.raises(StateConflict, match="not reserved with continue_from"):
+        attempts.pin_relay(a["attempt_id"], relay)

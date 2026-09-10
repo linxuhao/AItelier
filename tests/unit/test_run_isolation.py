@@ -505,3 +505,65 @@ def test_reaper_allows_explicit_discard_only_after_terminal_quiet_clean(db, home
     assert not wt.exists()
     assert [x["run_id"] for x in report["removed"]] == ["run-discard"]
     assert ri.record(db, "run-discard")["disposition"] == "reaped_discarded"
+
+
+# ── requested base (relay) ───────────────────────────────────────────
+
+def test_a_requested_base_replaces_head_for_the_next_worktree(db, home, tmp_path):
+    """A relayed State attempt inherits the failed run's branch head, not HEAD."""
+    src = tmp_path / "src"
+    head = _init_repo(src)
+    _project(db, "p-failed", src)
+    failed = ri.ensure_for_run(db, run_id="run-failed", project_id="p-failed",
+                               config_name="coding_impl", repo_mode="code")
+    wt = Path(failed["worktree_path"])
+    (wt / "draft.txt").write_text("half done\n")
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-qm", "half done"], cwd=wt, check=True)
+    relay_base = _git(wt, "rev-parse", "HEAD")
+    assert relay_base != head
+
+    _project(db, "p-relay", src)
+    ri.request_base(db, "p-relay", relay_base, note="relay of attempt-x")
+    rec = ri.ensure_for_run(db, run_id="run-relay", project_id="p-relay",
+                            config_name="coding_impl", repo_mode="code")
+
+    assert rec["base_sha"] == relay_base
+    assert rec["note"] == "relay of attempt-x"
+    assert (Path(rec["worktree_path"]) / "draft.txt").read_text() == "half done\n"
+    # The source checkout itself never moved.
+    assert _git(src, "rev-parse", "HEAD") == head
+
+
+def test_a_requested_base_that_is_not_a_commit_fails_closed(db, home, tmp_path):
+    """Provisioning from HEAD instead would be the silent restart a relay exists to stop."""
+    src = tmp_path / "src"
+    _init_repo(src)
+    _project(db, "p-relay", src)
+    ri.request_base(db, "p-relay", "f" * 40)
+    with pytest.raises(IsolationUnavailable, match="not a commit"):
+        ri.ensure_for_run(db, run_id="run-relay", project_id="p-relay",
+                          config_name="coding_impl", repo_mode="code")
+    assert ri.record(db, "run-relay") is None
+
+
+def test_a_base_request_is_refused_once_the_project_has_a_record(db, home, tmp_path):
+    src = tmp_path / "src"
+    head = _init_repo(src)
+    _project(db, "p1", src)
+    ri.ensure_for_run(db, run_id="run-aaa", project_id="p1",
+                      config_name="coding_impl", repo_mode="code")
+    with pytest.raises(IsolationUnavailable, match="would never apply"):
+        ri.request_base(db, "p1", head)
+    with pytest.raises(IsolationUnavailable, match="40-hex"):
+        ri.request_base(db, "p-new", "main")
+
+
+def test_a_read_snapshot_cannot_honour_a_requested_base(db, home, tmp_path):
+    src = tmp_path / "src"
+    head = _init_repo(src)
+    _project(db, "p-review", src)
+    ri.request_base(db, "p-review", head)
+    with pytest.raises(IsolationUnavailable, match="read snapshot"):
+        ri.ensure_for_run(db, run_id="run-review", project_id="p-review",
+                          config_name="code_review", repo_mode="none")

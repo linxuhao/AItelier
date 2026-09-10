@@ -255,6 +255,48 @@ class WorkspaceManager:
             shutil.rmtree(d)
         d.mkdir(parents=True, exist_ok=True)
 
+    # ── Relay draft (continue a failed attempt's staged files) ─────────
+    # A State attempt started with `continue_from` inherits the failed
+    # attempt's STAGED files, not only its commits. They are parked here at
+    # launch and moved into `{step}.tmp` by the engine AFTER `clean_draft_dir`
+    # (which would otherwise wipe them), once, on the step's first execution.
+
+    def _relay_dir(self, project_id: str, step_id: str,
+                   graph_name: str = DPE_GRAPH_NAME) -> Path:
+        return self._get_secure_path(project_id) / graph_name / "_relay" / step_id
+
+    def stage_relay_draft(self, src_dir: Path, project_id: str, step_id: str,
+                          graph_name: str = DPE_GRAPH_NAME) -> list[str]:
+        """Park a prior attempt's staged files for `step_id`; returns their paths."""
+        src = Path(src_dir)
+        files = sorted(str(f.relative_to(src)) for f in src.rglob("*")
+                       if f.is_file() and not f.is_symlink())
+        if not files:
+            return []
+        dst = self._relay_dir(project_id, step_id, graph_name)
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst, symlinks=False)
+        return files
+
+    def seed_relay_draft(self, project_id: str, step_id: str,
+                         graph_name: str = DPE_GRAPH_NAME) -> list[str]:
+        """Move a parked relay draft into the step's staging. Consumed once:
+        the parked dir is renamed `.consumed` so a loop-back or a retry of the
+        same step starts from its own state, never from the relay again."""
+        src = self._relay_dir(project_id, step_id, graph_name)
+        if not src.is_dir():
+            return []
+        files = sorted(str(f.relative_to(src)) for f in src.rglob("*") if f.is_file())
+        draft = self._draft_dir(project_id, step_id, graph_name)
+        draft.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, draft, dirs_exist_ok=True)
+        consumed = src.with_name(src.name + ".consumed")
+        if consumed.exists():
+            shutil.rmtree(consumed)
+        src.rename(consumed)
+        return files
+
     def clean_all_task_step_dirs(self, project_id: str):
         """Clean workspace dirs for all task-level steps (for retries)."""
         for step_id in TASK_STEP_SEQUENCE:

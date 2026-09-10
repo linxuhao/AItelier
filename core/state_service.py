@@ -103,8 +103,11 @@ class StateService:
             raise StateConflict("Git could not prove the requested source/artifact property")
         return result.stdout.strip()
 
-    def _dependency_context(self, attempt, source):
-        """Pass accepted contracts/artifact references, not an entire project log."""
+    def _dependency_context(self, attempt, source, ref="HEAD"):
+        """Pass accepted contracts/artifact references, not an entire project log.
+
+        `ref` is the commit this attempt will actually build on: HEAD for a
+        fresh attempt, the failed attempt's branch head for a relay."""
         out = {}
         with self.store.transaction() as conn:
             for dep, pin in attempt["dependencies"].items():
@@ -118,7 +121,7 @@ class StateService:
             for rec in out.values():
                 if len(rec["artifact_ref"]) == 40:
                     try:
-                        self._git(source, "merge-base", "--is-ancestor", rec["artifact_ref"], "HEAD")
+                        self._git(source, "merge-base", "--is-ancestor", rec["artifact_ref"], ref)
                     except StateConflict as exc:
                         raise StateConflict("accepted dependency commit is not in the source; integrate it before launching") from exc
         return out
@@ -136,7 +139,8 @@ class StateService:
                                      status, report_ref, report_sha256, quiescent=quiescent,
                                      artifact=artifact, artifact_kind=artifact_kind, detail=detail)
 
-    def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction=""):
+    def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction="",
+                      continue_from=None):
         from core.state_metadata import require_dispatch
         with self.store.transaction() as conn:
             self.store._node(conn, project_id, node_key)
@@ -152,7 +156,10 @@ class StateService:
             raise StateGraphError("code-producing attempts require a registered source_project_id")
         # All state writes below use a separate intent identity. No old DPE rows
         # are reused as the long-lived state project.
-        attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction)
+        if continue_from is not None and manifest.repo_mode != "code":
+            raise StateGraphError("continue_from needs a code-producing workflow; only a worktree can carry a draft forward")
+        attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
+                                        continue_from=continue_from)
         return self._launch_or_recover(attempt, manifest, source)
 
     def _launch_or_recover(self, attempt, manifest, source):
@@ -175,7 +182,11 @@ class StateService:
         attempt = self.attempts.pin_host_contract(aid, {
             "source_repo": source, "seed_file": manifest.seed_file, "output_step": manifest.output_step,
             "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})
-        dependency_receipts = self._dependency_context(attempt, source)
+        relay = None
+        if attempt["context"].get("relay_of"):
+            relay = self._prepare_relay(attempt, source)
+            attempt = self.attempts.pin_relay(aid, relay)
+        dependency_receipts = self._dependency_context(attempt, source, ref=relay["base_sha"] if relay else "HEAD")
         from core.run_launcher import missing_cross_config_inputs, start_config_run
         missing = missing_cross_config_inputs(self.sf, attempt["workflow"], attempt["execution_project_id"])
         if missing:
@@ -184,6 +195,11 @@ class StateService:
         if not self.attempts.claim_launch(aid):
             return self.attempts.get(aid)
         seed = "# State goal attempt\n\n" + canonical(attempt["context"] | {"accepted_dependencies": dependency_receipts}) + "\n"
+        if relay:
+            seed += ("\n## Relay\n\nThis attempt CONTINUES a prior attempt that ran out of budget. Its commits are "
+                     "already in your repository baseline and its staged files are already in your staging "
+                     "(read them with the default `read`). Do not re-ground from scratch: read `relay.staged_files` "
+                     "and `relay.commits`, verify, finish what is missing, then `finish_step`.\n")
         try:
             result = start_config_run(self.db, self.ws, attempt["workflow"], attempt["execution_project_id"],
                                       seed_text=seed, name=f"State {attempt['project_id']}/{attempt['node_key']}",
@@ -209,6 +225,66 @@ class StateService:
             attached = bool(self.attach_driver(attempt["run_id"], scheduler_owned=owned, auto_approve=False))
         return {**self.reconcile_attempt(attempt_id), "checkpoints": "ask", "driver_attached": attached,
                 "scheduler_owned": owned}
+
+    _RELAY_LIST_CAP = 200
+
+    def _relay_inventory(self, attempt):
+        """What a failed SkillFlow attempt left behind, as a director-readable
+        inventory: the run branch and its commits beyond base, and every staged
+        (unpromoted) file per step. Read-only; None when nothing is recoverable."""
+        from core import run_isolation
+        rec = run_isolation.record(self.db, attempt["run_id"]) if attempt.get("run_id") else None
+        if not rec or rec["mode"] != run_isolation.MODE_WORKTREE or not rec.get("branch"):
+            return None
+        source = rec["source_repo"]
+        try:
+            head = self._git(source, "rev-parse", "--verify", rec["branch"] + "^{commit}")
+            log = self._git(source, "log", "--format=%H %s", f"{rec['base_sha']}..{head}")
+            behind = int(self._git(source, "rev-list", "--count", f"{head}..HEAD") or 0)
+        except StateConflict:
+            return None
+        commits = [line.split(" ", 1) for line in log.splitlines() if line][: self._RELAY_LIST_CAP]
+        staged = {}
+        pid = attempt["execution_project_id"]
+        try:
+            config_dir = self.ws._get_secure_path(pid) / attempt["workflow"]
+        except Exception:
+            config_dir = None
+        if config_dir and config_dir.is_dir():
+            for tmp in sorted(config_dir.glob("*.tmp")):
+                files = sorted(str(f.relative_to(tmp)) for f in tmp.rglob("*")
+                               if f.is_file() and not f.is_symlink())
+                if files:
+                    staged[tmp.name[:-4]] = files[: self._RELAY_LIST_CAP]
+        return {"run_id": attempt["run_id"], "branch": rec["branch"], "base_sha": rec["base_sha"],
+                "head_sha": head, "commits": [{"sha": c[0], "subject": c[1] if len(c) > 1 else ""} for c in commits],
+                "mainline_ahead_by": behind, "staged_files": staged, "error": attempt.get("error")}
+
+    def _prepare_relay(self, attempt, source):
+        """Make the failed attempt's work physically reachable by the new run:
+        request its branch head as the new worktree's base and park its staged
+        drafts where the engine seeds them into the new staging. The failed
+        attempt's own worktree and staging are never modified."""
+        prior = self.attempts.get(attempt["context"]["relay_of"]["attempt_id"])
+        if not source:
+            raise StateConflict("a relay needs a registered source repository")
+        inventory = self._relay_inventory(prior)
+        if inventory is None:
+            raise StateConflict("the failed attempt has no run branch to continue from; start a fresh attempt")
+        from core import run_isolation
+        run_isolation.request_base(self.db, attempt["execution_project_id"], inventory["head_sha"],
+                                   note=f"relay of {prior['attempt_id']} (run {prior['run_id']})")
+        parked = {}
+        prior_config = self.ws._get_secure_path(prior["execution_project_id"]) / prior["workflow"]
+        for step, files in inventory["staged_files"].items():
+            copied = self.ws.stage_relay_draft(prior_config / f"{step}.tmp", attempt["execution_project_id"],
+                                               step, attempt["workflow"])
+            if copied:
+                parked[step] = copied[: self._RELAY_LIST_CAP]
+        return {"attempt_id": prior["attempt_id"], "run_id": inventory["run_id"], "branch": inventory["branch"],
+                "base_sha": inventory["head_sha"], "commits": inventory["commits"],
+                "mainline_ahead_by": inventory["mainline_ahead_by"], "staged_files": parked,
+                "error": inventory["error"]}
 
     def recover_attempt(self, attempt_id):
         attempt = self.attempts.get(attempt_id)
@@ -287,6 +363,10 @@ class StateService:
         if not attempt["run_id"]:
             return {**attempt, "note": "No bound run; recover_attempt may bind an existing launch."}
         observed = self.attempts.reconcile(attempt_id, self.sf)
+        if observed["status"] == "failed":
+            # What the director needs to choose between continue_from and a
+            # fresh attempt: the retained commits and staged files, by step.
+            return {**observed, "relay_inventory": self._relay_inventory(observed)}
         if observed["status"] == "candidate" and not observed["artifact_ref"]:
             try:
                 artifact = self._artifact(observed)

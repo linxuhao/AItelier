@@ -94,6 +94,11 @@ class StartAttempt(Node):
     workflow: str
     request_key: str
     instruction: str = ""
+    # Continue a FAILED SkillFlow attempt of this node: its branch head becomes
+    # the new run's base and its staged draft is seeded into the new staging.
+    # Explicit, so a relay is a recorded decision taken after inspecting the
+    # draft (relay_inventory on the failed attempt), never a blind retry.
+    continue_from: str | None = None
 
 
 class StartExternalAttempt(Node):

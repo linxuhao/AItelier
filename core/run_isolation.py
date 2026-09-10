@@ -546,8 +546,67 @@ def _bootstrap_source(db, project_id: str, source: str) -> str:
     return source
 
 
+# ── requested base (relay) ───────────────────────────────────────────
+
+_SHA1 = re.compile(r"^[0-9a-f]{40}$")
+
+
+def request_base(db, project_id: str, base_sha: str, note: str = "") -> dict:
+    """Ask that the NEXT worktree provisioned for `project_id` start at `base_sha`.
+
+    This is how a relayed State attempt inherits the commits of the failed
+    attempt it continues: the new execution project has no run yet, so the
+    request is keyed by project and read once by `_provision_tree`. Recorded
+    before the run exists because the launcher and the poller race to provision
+    (see `run_launcher.start_config_run`), and whichever wins must see it.
+
+    Refused when the project already has an isolation record: a request that
+    can no longer take effect would otherwise sit there looking honoured.
+    """
+    if not isinstance(base_sha, str) or not _SHA1.match(base_sha):
+        raise IsolationUnavailable("a requested base must be a 40-hex git commit")
+    with db.get_connection() as conn:
+        taken = conn.execute(
+            "SELECT run_id FROM run_isolation WHERE project_id = ? LIMIT 1",
+            (project_id,)).fetchone()
+        if taken:
+            raise IsolationUnavailable(
+                f"project {project_id!r} already has an isolation record "
+                f"(run {taken['run_id']}); a base request would never apply")
+        conn.execute(
+            "INSERT OR REPLACE INTO run_isolation_requests (project_id, base_sha, note) "
+            "VALUES (?, ?, ?)", (project_id, base_sha, (note or "")[:400]))
+        conn.commit()
+    return requested_base(db, project_id)
+
+
+def requested_base(db, project_id: str) -> dict | None:
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM run_isolation_requests WHERE project_id = ?",
+            (project_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def _provision_tree(db, *, run_id, project_id, config_name, source, mode) -> dict:
     base = _head_sha(source)
+    note = None
+    request = requested_base(db, project_id)
+    if request:
+        if mode != MODE_WORKTREE:
+            raise IsolationUnavailable(
+                f"project {project_id!r} requested base {request['base_sha'][:8]} "
+                f"but run {run_id} is provisioned as {mode}; a read snapshot "
+                f"cannot continue a draft")
+        # FAIL CLOSED: a relay whose base is gone must not quietly start from
+        # HEAD — that is exactly the silent restart the request exists to stop.
+        probe = _git(source, "cat-file", "-e", f"{request['base_sha']}^{{commit}}")
+        if probe.returncode != 0:
+            raise IsolationUnavailable(
+                f"requested base {request['base_sha']} for run {run_id} is not a "
+                f"commit in {source}; refusing to provision from HEAD instead")
+        base = request["base_sha"]
+        note = request.get("note") or f"base requested for {project_id}"
     root = datadir.worktrees_dir()
     root.mkdir(parents=True, exist_ok=True)
     path = root / run_id
@@ -568,7 +627,7 @@ def _provision_tree(db, *, run_id, project_id, config_name, source, mode) -> dic
     return _write_record(db, run_id=run_id, project_id=project_id,
                          config_name=config_name, mode=mode,
                          source_repo=source, worktree_path=str(path),
-                         branch=branch, base_sha=base)
+                         branch=branch, base_sha=base, note=note)
 
 
 # ── resolution ───────────────────────────────────────────────────────

@@ -9,6 +9,15 @@ faithfully, not to redesign it.
   it touches), verification commands, and out-of-scope notes.
 - **the repository** — read the real current code before changing it.
 
+## Continuing a prior attempt (seed section `Relay`)
+If the seed carries a `relay` object, a previous attempt at this same plan ran
+out of budget. Its commits (`relay.commits`) are already in the repository you
+read, and its staged files (`relay.staged_files`) are already in your staging —
+the default `read` shows them. Start by reading those files, not by
+re-grounding the whole repository: check what is missing or broken against the
+plan, complete it with `edit`/`create`, and `finish_step`. Treat the draft as
+unreviewed work to verify, not as approved code to keep at all costs.
+
 ## Your task
 1. **Read before you write.** Open the files the plan names and understand
    their current state.

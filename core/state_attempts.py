@@ -110,12 +110,35 @@ class StateAttempts:
                 and all(d["status"] == "VERIFIED" and d["verified_receipt"] for d in snapshot.values()))
 
     def reserve(self, project_id: str, node_key: str, expected_revision: int,
-                workflow: str, request_key: str, instruction: str = "") -> dict:
+                workflow: str, request_key: str, instruction: str = "",
+                continue_from: str | None = None) -> dict:
         """Idempotent intent, persisted before a workflow can be launched."""
         key(workflow, "workflow")
-        return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction)
+        return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
+                             continue_from=continue_from)
 
-    def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *, external=None):
+    @staticmethod
+    def _relay_source(conn, prior_id, project_id, node_key, workflow, node, deps):
+        """The failed attempt a relay continues — same node, revision, contract,
+        dependency snapshot and workflow, or the retained draft targets a goal
+        that no longer exists. A relay is a continuation, not a second engine."""
+        prior = conn.execute("SELECT * FROM state_attempts WHERE attempt_id=?",
+                             (key(prior_id, "continue_from"),)).fetchone()
+        if prior is None or prior["project_id"] != project_id or prior["node_key"] != node_key:
+            raise StateConflict("continue_from must name an attempt of this node")
+        if prior["status"] != "failed" or prior["execution_kind"] != "skillflow" or not prior["run_id"]:
+            raise StateConflict("continue_from must name a FAILED SkillFlow attempt with a bound run")
+        if prior["workflow"] != workflow:
+            raise StateConflict("a relay must reuse the failed attempt's workflow; its draft is keyed by that workflow's steps")
+        if (prior["node_revision"] != node["revision"] or prior["contract_hash"] != node["contract_hash"]
+                or prior["dependency_snapshot"] != canonical(deps)):
+            raise StateConflict("the failed attempt targeted a different revision, contract or dependency snapshot; "
+                                "its draft cannot be continued — start a fresh attempt")
+        return {"attempt_id": prior["attempt_id"], "run_id": prior["run_id"],
+                "execution_project_id": prior["execution_project_id"], "error": prior["error"]}
+
+    def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
+                 external=None, continue_from=None):
         """Common atomic ownership/pin guard for every execution adapter."""
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
@@ -124,6 +147,10 @@ class StateAttempts:
         request = {"revision": expected_revision, "workflow": workflow, "instruction": instruction}
         if external is not None:
             request["external"] = external
+        if continue_from is not None:
+            if external is not None:
+                raise StateGraphError("continue_from applies to SkillFlow attempts only")
+            request["continue_from"] = continue_from
         request_hash = digest(request)
         with self.store.transaction(write=True) as conn:
             node = self.store._node(conn, project_id, node_key)
@@ -143,6 +170,8 @@ class StateAttempts:
             ctx = {"state_project_id": project_id, "node_key": node_key, "revision": expected_revision,
                    "goal": node["goal"], "acceptance": json.loads(node["contract_json"]),
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
+            if continue_from is not None:
+                ctx["relay_of"] = self._relay_source(conn, continue_from, project_id, node_key, workflow, node, deps)
             from core.state_design import binding_snapshot
             design = binding_snapshot(conn, project_id, node_key)
             if design is not None:
@@ -173,8 +202,33 @@ class StateAttempts:
             self.store._event(conn, project_id, node_key,
                               "external_attempt_registered" if external else "attempt_reserved",
                               {"attempt_id": aid, "execution_project_id": execution, "execution_kind": kind,
-                               "workflow": workflow, "revision": expected_revision, "external": external})
+                               "workflow": workflow, "revision": expected_revision, "external": external,
+                               "relay_of": ctx.get("relay_of")})
             return _public(self._attempt(conn, aid))
+
+    def pin_relay(self, attempt_id: str, relay: dict) -> dict:
+        """Freeze what the relay actually inherited (base, commits, staged
+        files) before dispatch, next to the host contract; seed and get_attempt
+        both read it, so the agent and the director see the same inventory."""
+        if not isinstance(relay, dict) or not relay.get("base_sha"):
+            raise StateGraphError("invalid relay descriptor")
+        with self.store.transaction(write=True) as conn:
+            attempt = self._attempt(conn, attempt_id)
+            context = json.loads(attempt["context_json"])
+            if "relay_of" not in context:
+                raise StateConflict("attempt was not reserved with continue_from")
+            if context.get("relay") is not None:
+                if context["relay"] != relay:
+                    raise StateConflict("relay inventory changed between preparation and dispatch")
+                return _public(attempt)
+            if attempt["status"] != "reserved":
+                raise StateConflict("relay must be pinned before dispatch")
+            context["relay"] = relay
+            conn.execute("UPDATE state_attempts SET context_json=?,updated_at=? WHERE attempt_id=?",
+                         (canonical(context), now(), attempt_id))
+            self.store._event(conn, attempt["project_id"], attempt["node_key"], "attempt_relay_prepared",
+                              {"attempt_id": attempt_id, "relay_of": context["relay_of"]["attempt_id"], "relay": relay})
+            return _public(self._attempt(conn, attempt_id))
 
     def pin_host_contract(self, attempt_id: str, descriptor: dict) -> dict:
         """Freeze host output/source metadata before dispatch; not workflow state."""

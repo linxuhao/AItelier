@@ -2262,6 +2262,18 @@ class PipelineEngine:
                 "preview": f"Step {step_id} resumed at turn {resume['turns']} from the trace"})
         else:
             workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
+            # A relayed State attempt (continue_from) parked the failed
+            # attempt's staged files under `_relay/<step>`; they go into the
+            # fresh staging HERE, after the wipe above, and the park is
+            # consumed so a loop-back never re-seeds it (core/state_service.py).
+            relayed = (workspace.seed_relay_draft(project_id, step_id, self._draft_graph_name())
+                       if hasattr(workspace, "seed_relay_draft") else [])
+            if relayed:
+                self._trace("step", "relay_draft_seeded", {
+                    "step_id": step_id, "files": relayed[:200]})
+                self._emit("relay_draft_seeded", {
+                    "step_id": step_id, "files": len(relayed),
+                    "preview": f"Step {step_id} starts from {len(relayed)} relayed draft file(s)"})
             if getattr(self, "_carry_forward", False):
                 # Claim-time seeding precedes native fresh-history cleanup.
                 # Restore only promoted output, never a stale attempt's draft.

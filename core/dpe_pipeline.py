@@ -71,6 +71,12 @@ _MAX_TURN_GRANTS = 2
 _GRANT_TURNS_MAX = 8
 _NATIVE_HISTORY_TOOL_CHARS = 64 * 1024
 _NATIVE_REASONING_MARKER_CHARS = 512
+# recall_observation: one call returns at most this many chars of a compacted
+# result (or this many grep matches). A recall that could return the whole
+# result would undo the projection above one call at a time.
+_RECALL_MAX_CHARS = 16 * 1024
+_RECALL_MAX_MATCHES = 40
+_RECALL_CONTEXT_LINES = 2
 
 
 def _grant_turns(turn_grants: int, asked: int, *,
@@ -114,9 +120,14 @@ def _is_failed_tool_result(content: str) -> bool:
     }
 
 
-def _compact_marker(content: str, kind: str) -> str:
-    digest = hashlib.sha256(
+def _observation_digest(content: str) -> str:
+    """The id a compacted tool result is recalled by (see _recall_observation)."""
+    return hashlib.sha256(
         content.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _compact_marker(content: str, kind: str) -> str:
+    digest = _observation_digest(content)
     edge = _NATIVE_REASONING_MARKER_CHARS // 2
     preview = content[:edge]
     if len(content) > edge * 2:
@@ -127,7 +138,10 @@ def _compact_marker(content: str, kind: str) -> str:
             "original_chars": len(content),
             "sha256": digest,
             "preview": preview,
-            "note": "Full result is retained in the durable tool trace.",
+            "note": ("Full result retained. Recall a part of it with "
+                     f"recall_observation(sha256=\"{digest}\", grep=<regex>) "
+                     "or (start=<char>, end=<char>); never re-run the tool "
+                     "just to see this again."),
         }, ensure_ascii=False)
     return (
         f"[Earlier reasoning compacted; {len(content)} chars; sha256={digest}. "
@@ -207,10 +221,74 @@ def _project_native_messages(messages: list[dict], *,
     return projected, report
 
 
+def _recall_observation(messages: list[dict], sha256: str = "", *,
+                        start: int = 0, end: int | None = None,
+                        grep: str | None = None) -> dict:
+    """Serve part of a compacted tool result back from the durable history.
+
+    The projection replaces an old result with a digest + preview and keeps
+    the full text in `messages` (and, across a restart, in the prompt_delta
+    trace `_resume_from_trace` rebuilds it from). Until this existed the
+    marker was a dead end: the agent could see that something had been
+    dropped and had no way to get it back except re-running the tool —
+    which for a search, a playtest or a test run is a different result.
+
+    Deliberately bounded: a `grep` returns numbered matching lines with a
+    little context; a range returns at most _RECALL_MAX_CHARS and says where
+    to continue. Returning the whole result would re-inflate the prompt the
+    projection just bounded.
+    """
+    key = str(sha256 or "").strip().lower()
+    if len(key) < 8:
+        return {"error": "sha256 must be the id shown in the compacted marker "
+                         "(at least its first 8 hex chars)"}
+    hit = None
+    for m in messages:
+        if not (isinstance(m, dict) and m.get("role") == "tool"
+                and isinstance(m.get("content"), str)):
+            continue
+        if _observation_digest(m["content"]).startswith(key):
+            hit = m["content"]
+            break
+    if hit is None:
+        return {"error": f"no tool result with sha256 {key!r} in this step's "
+                         "history. It may belong to another step, or the step "
+                         "resumed after a restart and the result was larger "
+                         "than the 256K the trace keeps."}
+    digest = _observation_digest(hit)
+    if grep:
+        try:
+            rx = re.compile(grep)
+        except re.error as e:
+            return {"error": f"grep is not a valid regex: {e}"}
+        lines = hit.splitlines()
+        matched = [i for i, ln in enumerate(lines) if rx.search(ln)]
+        shown = []
+        for i in matched[:_RECALL_MAX_MATCHES]:
+            lo, hi = max(0, i - _RECALL_CONTEXT_LINES), min(len(lines), i + _RECALL_CONTEXT_LINES + 1)
+            shown.append({"line": i + 1,
+                          "text": "\n".join(f"{n + 1}: {lines[n]}" for n in range(lo, hi))})
+        return {"sha256": digest, "original_chars": len(hit), "grep": grep,
+                "matches": len(matched), "shown": len(shown), "lines": shown,
+                "truncated": len(matched) > len(shown)}
+    try:
+        lo = max(0, int(start or 0))
+        hi = len(hit) if end is None else max(lo, int(end))
+    except (TypeError, ValueError):
+        return {"error": "start/end must be integers (character offsets)"}
+    hi = min(hi, lo + _RECALL_MAX_CHARS, len(hit))
+    out = {"sha256": digest, "original_chars": len(hit),
+           "start": lo, "end": hi, "content": hit[lo:hi],
+           "truncated": hi < len(hit)}
+    if hi < len(hit):
+        out["next_start"] = hi
+    return out
+
+
 def _progress_signature(tool_name: str, params: dict, result: dict) -> str | None:
     """Return a stable marker for a novel successful tool outcome."""
     if tool_name in {"ask_more_turn", "ask_more_turns", "finish_step",
-                     "end_step", "message"}:
+                     "end_step", "message", "recall_observation"}:
         return None
     if not isinstance(result, dict) or result.get("error"):
         return None
@@ -807,6 +885,21 @@ class PipelineEngine:
         tool_name = action.get("tool", "")
         if tool_name == "ask_more_turns":
             return {"status": "granted", "turns": action.get("params", {}).get("turns", 3)}
+        if tool_name == "recall_observation":
+            # Host-level: answered from the native loop's own durable message
+            # list (`_native_messages`), never from skillflow — the compacted
+            # text exists only in this process (and in prompt_delta).
+            p = action.get("params", {}) or {}
+            res = _recall_observation(
+                getattr(self, "_native_messages", None) or [],
+                p.get("sha256", ""), start=p.get("start", 0) or 0,
+                end=p.get("end"), grep=p.get("grep"))
+            self._trace("step", "observation_recalled", {
+                "sha256": p.get("sha256", ""), "grep": p.get("grep"),
+                "start": p.get("start"), "end": p.get("end"),
+                "returned_chars": len(res.get("content", "")),
+                "matches": res.get("matches"), "error": res.get("error")})
+            return res
         from api.dependencies import get_skillflow
         sf = get_skillflow()
         # The roots are the HOST's to inject, never the agent's to choose.
@@ -2291,6 +2384,7 @@ class PipelineEngine:
         # (cache-missing) text. `messages` and `last_reasoning` therefore persist
         # across attempts.
         messages: list[dict] = []
+        self._native_messages = messages   # what recall_observation reads
         last_reasoning = ""  # cached for deepseek: replay on tool-only turns
         self._current_step = step_id
         self._step_start = time.time()
@@ -2310,6 +2404,31 @@ class PipelineEngine:
                              "description": "Number of extra turns to request"},
                     "reason": {"type": "string", "required": False,
                               "description": "Why extra turns are needed"},
+                },
+            }
+        # recall_observation: the way back from a compacted tool result. Older
+        # large results are replaced in the provider view by a marker carrying
+        # a sha256; this returns a bounded part of the original on demand.
+        if "recall_observation" not in self._tool_schemas:
+            self._tool_schemas["recall_observation"] = {
+                "name": "recall_observation",
+                "description": (
+                    "Retrieve part of an earlier tool result that was compacted "
+                    "out of the conversation (its marker shows `_aitelier_compacted` "
+                    "and a `sha256`). Pass `grep` (regex) to get numbered matching "
+                    "lines with context, or `start`/`end` character offsets for a "
+                    "slice (at most 16K chars per call; the reply says where to "
+                    "continue). Use this instead of re-running the tool."
+                ),
+                "parameters": {
+                    "sha256": {"type": "string", "required": True,
+                               "description": "The sha256 shown in the compacted marker"},
+                    "grep": {"type": "string", "required": False,
+                             "description": "Regex; returns matching lines with line numbers"},
+                    "start": {"type": "integer", "required": False,
+                              "description": "Character offset to start the slice at (default 0)"},
+                    "end": {"type": "integer", "required": False,
+                            "description": "Character offset to end the slice at"},
                 },
             }
         write_tool_names = {k for k in self._tool_schemas if k.startswith("write_") or k.startswith("create_") or k.startswith("append_") or k == "write"}
@@ -2367,6 +2486,7 @@ class PipelineEngine:
 
             if attempt == 1 and resume:
                 messages = resume["messages"]
+                self._native_messages = messages
                 self._delta_traced = len(messages)     # already in the trace
                 self._delta_attempt = attempt
                 staged = ", ".join(sorted(set(resume["written_files"]))) or "none"

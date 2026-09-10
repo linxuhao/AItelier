@@ -1195,6 +1195,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     all_debt: list[dict] = []
     scen_nodes: list[dict] = []
     scen_frames: list[int] = []
+    scen_scenes: list[str] = []
     ran_any = crashed = False
     last_state: dict = {}
     render_mode = "headless"
@@ -1268,10 +1269,21 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
         scen_results.append({"name": name, "ran": ran, "errors": errs,
                              "native_debt": debt,
                              "asserts": asserts, "passed": scen_passed,
-                             "pressed": any(e.get("press") for e in timeline),
+                             # "Did this scenario drive ANY input?" -- derived
+                             # from the normalised entries themselves: after
+                             # _normalize_timeline every key is either the
+                             # schedule (`at`), an assertion, or an input the
+                             # probe delivers (press/release/click/hover, and
+                             # whatever is added to _TIMELINE_KEYS next). This
+                             # used to read only `press`, so the 10 click-only
+                             # scenarios never entered L0 at all -- the same
+                             # two-lists-out-of-sync shape as the actions:/press:
+                             # incident, one level up.
+                             "pressed": any(set(e) - {"at", "assert"} for e in timeline),
                              "input_dead": False})
         scen_nodes.append(_digest(probe.get("nodes", {})))
         scen_frames.append(sframes)
+        scen_scenes.append(sc_scene)
         last_state = probe.get("nodes", last_state)
         render_mode = probe.get("render_mode", render_mode)
         # Every scenario re-runs from frame 0, so basenames collide across them --
@@ -1286,11 +1298,17 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     # it is the cheapest run in the file. This is the gate that would have caught
     # the `actions:`-vs-`press:` mismatch on day one instead of two games later.
     driven = [i for i, r in enumerate(scen_results) if r["pressed"] and r["ran"]]
-    controls: dict[int, dict] = {}
+    # Keyed by (scene, frame budget): the control must boot the SAME scene the
+    # scenario booted. It was keyed by frame budget alone and always booted the
+    # spec-level scene, so every scenario with its own `scene:` override (86 of
+    # 172 on the wuxia tree) was compared against a different node tree --
+    # digests that can never be equal, so input_dead could never fire for them.
+    controls: dict[tuple[str, int], dict] = {}
     if driven and not crashed:
         for i in driven:
             n = scen_frames[i]
-            if n not in controls:
+            key = (scen_scenes[i], n)
+            if key not in controls:
                 spec_path.write_text(json.dumps({"frames": n, "timeline": []}))
                 # The control is a RUN, so it needs the same throwaway user://
                 # every scenario gets. It was the one probe call still on the
@@ -1304,13 +1322,13 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
                     ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
                                               {"AITELIER_PROBE_SPEC": str(spec_path),
                                                "HOME": ctrl_home},
-                                              scene=scene)
+                                              scene=scen_scenes[i])
                 finally:
                     shutil.rmtree(ctrl_home, ignore_errors=True)
-                controls[n] = _digest(ctrl.get("nodes", {}))
+                controls[key] = _digest(ctrl.get("nodes", {}))
             # An empty control means the control pass itself failed to report --
             # stay quiet rather than accuse the game on missing evidence.
-            if controls[n] and scen_nodes[i] == controls[n]:
+            if controls[key] and scen_nodes[i] == controls[key]:
                 scen_results[i]["input_dead"] = True
                 scen_results[i]["passed"] = False
 

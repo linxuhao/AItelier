@@ -886,3 +886,130 @@ def test_an_unexpected_control_error_surfaces_and_leaves_no_home(monkeypatch, tm
 
     control = [s for s in seen if s["is_control"]][0]
     assert control["home"] and not Path(control["home"]).exists()
+
+
+# ── L0 (input-dead) blind spots, 2026-09-10 ────────────────────────────────
+# L0 compares a driven scenario's end state with a no-input control run. Two
+# ways it silently did not apply on the wuxia tree (98 of 172 scenarios):
+#   * the control always booted the SPEC-level scene, so a scenario with its
+#     own `scene:` was compared against a different node tree (never equal);
+#   * "drove input" meant `press` only, so click-only scenarios never entered.
+def _l0_probe_recorder(seen):
+    """Fake _run_probe that records (scene, frames, has_timeline) per call and
+    returns a state that depends on the scene and on whether input was driven,
+    so a control on the wrong scene can never accidentally match."""
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+        import json as _json
+        spec = _json.loads(open(env["AITELIER_PROBE_SPEC"]).read())
+        driven = bool(spec.get("timeline"))
+        seen.append((scene, frames, driven))
+        return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
+                 "nodes": {"Root": {"scene": scene, "driven": driven}}},
+                [], False)
+    return fake
+
+
+def test_the_control_run_boots_the_scenarios_own_scene(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(gh, "_run_probe", _l0_probe_recorder(seen))
+    spec = {"scene": "res://scenes/main.tscn", "scenarios": [
+        {"name": "menu_thing", "scene": "res://scenes/menu.tscn",
+         "timeline": [{"at": 5, "press": "ui_accept"},
+                      {"at": 10, "assert": [{"node": "N", "expr": "x > 0"}]}]},
+    ]}
+    gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    controls = [(sc, n) for sc, n, driven in seen if not driven]
+    assert controls == [("res://scenes/menu.tscn", 300)], (
+        "the no-input control must boot the scene the scenario booted; a "
+        "control on main.tscn compares two different node trees and input_dead "
+        "can never fire: %r" % (seen,))
+
+
+def test_controls_are_shared_per_scene_and_frame_budget(monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(gh, "_run_probe", _l0_probe_recorder(seen))
+    press = [{"at": 5, "press": "ui_accept"}]
+    spec = {"scene": "res://scenes/main.tscn", "scenarios": [
+        {"name": "a_main", "timeline": press},
+        {"name": "b_main_same_budget", "timeline": press},
+        {"name": "c_menu", "scene": "res://scenes/menu.tscn", "timeline": press},
+        {"name": "d_menu_longer", "scene": "res://scenes/menu.tscn",
+         "timeline": [{"at": 400, "press": "ui_accept"}]},
+    ]}
+    gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    controls = sorted((sc, n) for sc, n, driven in seen if not driven)
+    assert controls == [("res://scenes/main.tscn", 300),
+                        ("res://scenes/menu.tscn", 300),
+                        ("res://scenes/menu.tscn", 430)]
+
+
+def test_a_click_only_scenario_enters_l0(monkeypatch, tmp_path):
+    """`clicks:` is input the probe delivers; a scenario made only of clicks
+    that ends in the no-input state tested nothing, exactly like a press."""
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+        return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
+                 "nodes": {"Root": {"x": 1}}}, [], False)   # identical every run
+    monkeypatch.setattr(gh, "_run_probe", fake)
+    spec = {"scenarios": [
+        {"name": "clicks_only", "timeline": [
+            {"at": 5, "clicks": ["Button"]},
+            {"at": 10, "assert": [{"node": "N", "expr": "x > 0"}]}]},
+        {"name": "hover_only", "timeline": [
+            {"at": 5, "hovers": ["Button"]},
+            {"at": 10, "assert": [{"node": "N", "expr": "x > 0"}]}]},
+    ]}
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    dead = {s["name"] for s in r["behavior"]["scenarios"] if s["input_dead"]}
+    assert dead == {"clicks_only", "hover_only"}
+    assert r["passed"] is False
+
+
+def test_every_input_key_the_probe_delivers_counts_as_driving(monkeypatch, tmp_path):
+    """Derived from _TIMELINE_KEYS, not a second hand-written list: whatever
+    the normaliser lets through besides `at`/`assert` is input."""
+    input_keys = sorted(gh._TIMELINE_KEYS - {"at", "assert", "actions", "clicks", "hovers"})
+    assert input_keys == ["click", "hover", "press", "release"]
+    for k in input_keys:
+        def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+            return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
+                     "nodes": {"Root": {"x": 1}}}, [], False)
+        monkeypatch.setattr(gh, "_run_probe", fake)
+        spec = {"scenarios": [{"name": "s", "timeline": [
+            {"at": 5, k: "ui_accept"},
+            {"at": 10, "assert": [{"node": "N", "expr": "x > 0"}]}]}]}
+        r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+        assert r["behavior"]["scenarios"][0]["input_dead"] is True, k
+
+
+def test_a_scenario_with_no_input_at_all_is_not_judged_by_l0(monkeypatch, tmp_path):
+    """`actions: []` plus asserts drives nothing -- there is no input whose
+    arrival L0 could check, and no control run is spent on it."""
+    seen = []
+    monkeypatch.setattr(gh, "_run_probe", _l0_probe_recorder(seen))
+    spec = {"scenarios": [{"name": "self_running_gate", "timeline": [
+        {"at": 30, "actions": [], "assert": [{"node": "N", "expr": "x > 0"}]}]}]}
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    assert len(seen) == 1 and r["behavior"]["scenarios"][0]["input_dead"] is False
+
+
+def test_input_dead_still_fires_on_a_scene_override_that_ignores_input(monkeypatch, tmp_path):
+    """The comparison is not loosened: same scene, same budget, identical end
+    state => input_dead, and a scenario whose state DID move stays alive."""
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+        import json as _json
+        spec = _json.loads(open(env["AITELIER_PROBE_SPEC"]).read())
+        driven = bool(spec.get("timeline"))
+        moved = driven and scene == "res://scenes/map.tscn"
+        return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
+                 "nodes": {"Root": {"scene": scene, "moved": moved}}}, [], False)
+    monkeypatch.setattr(gh, "_run_probe", fake)
+    tl = [{"at": 5, "press": "ui_accept"},
+          {"at": 10, "assert": [{"node": "N", "expr": "x > 0"}]}]
+    spec = {"scene": "res://scenes/main.tscn", "scenarios": [
+        {"name": "menu_ignores", "scene": "res://scenes/menu.tscn", "timeline": tl},
+        {"name": "map_reacts", "scene": "res://scenes/map.tscn", "timeline": tl},
+    ]}
+    r = gh._playtest_spec(tmp_path / "proj", spec, 300, 120)
+    by = {s["name"]: s["input_dead"] for s in r["behavior"]["scenarios"]}
+    assert by == {"menu_ignores": True, "map_reacts": False}
+    assert r["passed"] is False and "menu_ignores" in r["summary"]

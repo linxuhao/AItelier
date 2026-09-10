@@ -9,7 +9,19 @@ offload_implementer:
   temperature: 0.2
   template: "coding_impl.md"
   # create/edit derived from output.mode: write. list_tree/test helpers as DPE.
-  tools: ["list_tree", "test_write", "read_test_written", "repo_remove_file"]
+  #
+  # semantic_search, same as DPE's task_implementer: the repository reaches this
+  # step as READ TOOLS, and skillflow's `read` returns at most 24,000 chars, so
+  # a file above that can only be assembled by paging. The wuxia source has
+  # passed that line — cultivation.gd is 149 KB (7 perfect reads), save_manager
+  # .gd 70 KB, player_profile.gd 48 KB, and the contract READMEs the facets
+  # migration produced run to 39 KB. Measured 2026-09-10 on four zero-delivery
+  # runs: 33 reads over 7 distinct files, save_manager.gd read 21 times,
+  # cultivation.gd 11 times, 0 writes, the whole 32-turn budget spent before
+  # the first line of code. Retrieval is what that step was missing; its DPE
+  # twin has had it since the zg sidecar landed, and the sidecar already
+  # indexes every run worktree.
+  tools: ["semantic_search", "list_tree", "test_write", "read_test_written", "repo_remove_file"]
   max_output_tokens: 32768
   # 32, not 20. The 2026-09-09 parallel contract batch: one implementer had
   # every file written at turn 31 of a 32-turn extended budget and died

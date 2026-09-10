@@ -172,6 +172,41 @@ describe('Detail races and exact run navigation', () => {
     await new Promise(r=>setTimeout(r,0));
     expect(view.container.textContent).not.toContain('Detailed requirement for growth.progress');
   });
+  it('a live refresh replaces the panel content, it does not blank the panel first', async () => {
+    let releaseSecond: (v: unknown)=>void=()=>{};
+    api.stateNode.mockImplementationOnce(async (_p:string,k:string)=>detail(k));
+    const view=render(StateNodePanel,{projectId:'game',nodeKey:'growth.progress',refresh:0,onselect:vi.fn()});
+    await view.findByText(/Detailed requirement for growth.progress/);
+    // The dashboard's 15s poll: same node, bumped refresh. The old panel cleared
+    // `data` here, so a 1960px column collapsed to a one-line "Loading…" every
+    // tick and dragged the reader's scroll position with it.
+    api.stateNode.mockImplementationOnce(()=>new Promise(r=>{releaseSecond=r;}));
+    await view.rerender({projectId:'game',nodeKey:'growth.progress',refresh:1,onselect:vi.fn()});
+    expect(api.stateNode).toHaveBeenCalledTimes(2);
+    expect(view.container.textContent).toContain('Detailed requirement for growth.progress');
+    expect(view.container.querySelector('[aria-live="polite"]')).toBeNull();
+    releaseSecond(detail('growth.progress'));
+    await waitFor(()=>expect(view.container.querySelector('h3')).toBeTruthy());
+  });
+  it('a DIFFERENT node still blanks the panel rather than showing the wrong goal', async () => {
+    api.stateNode.mockImplementationOnce(async (_p:string,k:string)=>detail(k));
+    const view=render(StateNodePanel,{projectId:'game',nodeKey:'growth.progress',refresh:0,onselect:vi.fn()});
+    await view.findByText(/Detailed requirement for growth.progress/);
+    api.stateNode.mockImplementationOnce(()=>new Promise(()=>{}));
+    await view.rerender({projectId:'game',nodeKey:'month.actions',refresh:0,onselect:vi.fn()});
+    expect(view.container.textContent).not.toContain('Detailed requirement for growth.progress');
+    expect(view.container.querySelector('[aria-live="polite"]')).not.toBeNull();
+  });
+  it('a failed refresh annotates the snapshot instead of erasing it', async () => {
+    api.stateNode.mockImplementationOnce(async (_p:string,k:string)=>detail(k));
+    const view=render(StateNodePanel,{projectId:'game',nodeKey:'growth.progress',refresh:0,onselect:vi.fn()});
+    await view.findByText(/Detailed requirement for growth.progress/);
+    api.stateNode.mockImplementationOnce(()=>Promise.reject(new Error('gateway timeout')));
+    await view.rerender({projectId:'game',nodeKey:'growth.progress',refresh:1,onselect:vi.fn()});
+    await view.findByText(/gateway timeout/);
+    expect(view.container.textContent).toContain('Detailed requirement for growth.progress');
+    expect(view.container.querySelector('.stale')).not.toBeNull();
+  });
   it('run page renders the exact pinned graph, not the current config', async () => {
     api.getRunDetail.mockResolvedValue({id:'run-old',config_name:'feature',project_id:'sg-one',status:'completed',steps:[]});
     const view=render(StateRun,{params:{runId:'run-old'}});

@@ -23,20 +23,31 @@
   let previousTarget = '';
   $effect(() => {
     const project = projectId, node = nodeKey; void refresh; void retry;
-    let cancelled = false; data = null; error = '';
+    let cancelled = false; error = '';
     const target = project + '/' + node;
-    if (target !== previousTarget) openAttempt = '';
+    // Only a DIFFERENT node blanks the panel. The dashboard polls every 15s by
+    // bumping `refresh`, which re-runs this effect with the SAME target — and
+    // clearing data there tore the whole panel down to "Loading…" every tick:
+    // measured live, a 1960px column collapsing to 91px, taking any open
+    // evidence and the reader's scroll position with it. The fetch replaces the
+    // content when it lands; until then the panel keeps showing what it has.
+    if (target !== previousTarget) { data = null; openAttempt = ''; }
     previousTarget = target;
-    if (node) stateNode(project, node).then(value => { if (!cancelled) data = value; })
+    if (!node) { data = null; return; }
+    stateNode(project, node).then(value => { if (!cancelled) data = value; })
       .catch(e => { if (!cancelled) error = String(e.message ?? e); });
     return () => { cancelled = true; };
   });
 </script>
 <aside class="node-panel" aria-label={st('detail')}>
   {#if !nodeKey}<p>{st('select')}</p>
-  {:else if error}<p role="alert">{error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button>
+  {:else if error && !data}<p role="alert">{error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button>
   {:else if !data}<p aria-live="polite">{st('loading')}</p>
   {:else}
+    <!-- A failed refresh annotates the snapshot instead of replacing it: the
+         panel already holds a readable, if older, answer. -->
+    {#if error}<p class="stale" role="alert">{st('staleView')} {error}
+      <button class="outline" onclick={() => retry++}>{st('retry')}</button></p>{/if}
     <div class="panel-heading"><code>{nodeKey}</code><a href={stateProjectHref(projectId, nodeKey)} aria-label="Permalink">↗</a></div>
     <h3>{data.node.goal.split('\n')[0]}</h3>
     <div class="badges"><strong>{data.node.status}</strong><span>{st(data.node.readiness)}</span><span>r{data.node.revision}</span>{#if data.node.facet}<span class="facet">{data.node.facet}</span>{/if}</div>
@@ -119,4 +130,5 @@
   button { width:auto; padding:.3rem .55rem; margin:0; font-size:.75rem; }
   .digest { display:block; opacity:.7; }
   .protected { font-size:.72rem; color:#a36d17; }
+  .stale { font-size:.72rem; color:var(--pico-del-color,#ad2828); }
 </style>

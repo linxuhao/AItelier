@@ -83,11 +83,38 @@ def _direct_run(live, pid="p1"):
     return rid
 
 
+_ADMIN_TOKEN = "lifecycle-test-admin-token"
+
+
+@pytest.fixture(autouse=True)
+def _authorized_mcp_writes(monkeypatch):
+    """`stop_pipeline` is a WRITE tool, and `_authorize` denies a write that
+    carries no verifiable identity whenever the Cloudflare gate is configured.
+    On a dev box the gate is off and a bare call passes; in the operator's
+    shell (`.env` exports AITELIER_CF_AUD) the same call is correctly denied,
+    the run stays `running`, and every lease assertion below fails for a reason
+    that has nothing to do with leases. Pin the gate ON and present the
+    off-tunnel admin credential, so the entry is exercised THROUGH the gate the
+    same way on every host."""
+    from api import authz
+    monkeypatch.setattr(authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(authz, "ADMIN_TOKEN", _ADMIN_TOKEN)
+
+
+def _admin_context():
+    from types import SimpleNamespace
+    request = SimpleNamespace(headers={"X-AItelier-Admin-Token": _ADMIN_TOKEN})
+    return SimpleNamespace(request_context=SimpleNamespace(request=request))
+
+
 async def _mcp_stop_async(run_id: str, reason: str = "stopped in a test",
                            mcp=None):
-    """The registered MCP tool, reached the way the endpoint reaches it."""
+    """The registered MCP tool, reached the way the endpoint reaches it —
+    including its authorization, with the admin credential in the request."""
     from api.mcp_router import build_mcp
-    mcp = mcp or build_mcp()
+    if mcp is None:
+        mcp = build_mcp()
+        mcp.get_context = _admin_context
     fn = mcp._tool_manager.get_tool("stop_pipeline").fn
     res = fn(run_id=run_id, reason=reason)
     return await res if asyncio.iscoroutine(res) else res

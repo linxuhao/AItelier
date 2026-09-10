@@ -244,9 +244,19 @@ def test_search_nodes_finds_key_goal_acceptance_and_evidence(store):
     # acceptance text is searched too, and the criterion id is named
     acc = store.search_nodes("shrimp", "third purchase")
     assert acc["nodes"][0]["hits"][0]["where"] == "acceptance:cap"
-    # every term must hit the same node; a term nothing carries matches nothing
-    assert store.search_nodes("shrimp", "facilityquota zzz-nowhere")["total"] == 0
+    # AND across terms: one term hitting and the other missing is no match
+    assert store.search_nodes("shrimp", "facility zzz-nowhere")["total"] == 0
+    # ...but the terms may hit different fields of the same node (goal + acceptance)
+    both = store.search_nodes("shrimp", "限次 purchase")
+    assert both["total"] == 1 and {h["where"] for h in both["nodes"][0]["hits"]} == {"goal", "acceptance:cap"}
     assert store.search_nodes("shrimp", "FACILITY quota")["total"] == 1
+    # total counts before limit is applied
+    assert store.search_nodes("shrimp", "deliver", limit=1)["total"] >= 1
+    # snippet is cut from the original text even when lower() changes length
+    store.add_nodes("shrimp", [{"key": "odd", "goal": "İİİİİİİİİİ 限次 x", "dependencies": [], "priority": 0,
+                                "acceptance": [{"id": "a", "kind": "test", "description": "n/a"}]}])
+    odd = [n for n in store.search_nodes("shrimp", "限次")["nodes"] if n["node_key"] == "odd"][0]
+    assert "限次" in odd["hits"][0]["snippet"]
 
 
 def test_search_nodes_reaches_recorded_evidence(tmp_path):
@@ -263,7 +273,8 @@ def test_search_nodes_reaches_recorded_evidence(tmp_path):
                                      "me", "placeholder wav still shipped in bus 3")
     ev = service.store.search_nodes("shrimp", "placeholder wav")
     assert ev["total"] == 1 and ev["nodes"][0]["node_key"] == "art.audio"
-    assert ev["nodes"][0]["hits"][0]["where"].startswith("evidence:")
+    where = ev["nodes"][0]["hits"][0]["where"]
+    assert where.startswith("evidence:r1:candidate:") and where.endswith(":behaviour:fail")
     # the same lookup is reachable through the read surface used by HTTP and MCP
     from core.state_commands import execute
     out = execute(service, "search_nodes", {"project_id": "shrimp", "query": "placeholder wav"})

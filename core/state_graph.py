@@ -596,11 +596,15 @@ class StateGraphStore:
             evidence: dict[str, list[tuple[str, str]]] = {}
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_evidence'").fetchone():
                 for r in conn.execute(
-                        "SELECT a.node_key, e.attempt_id, e.criterion_id, e.verdict, e.detail "
+                        "SELECT a.node_key, a.node_revision, a.status, e.attempt_id, e.criterion_id, e.verdict, e.detail "
                         "FROM state_evidence e JOIN state_attempts a ON a.attempt_id=e.attempt_id "
                         "WHERE a.project_id=?", (project_id,)):
+                    # Evidence on an older revision or a superseded attempt is still
+                    # searchable (it may be the ruling being looked for), but the label
+                    # says so, so a hit never masquerades as current.
                     evidence.setdefault(r["node_key"], []).append(
-                        ("evidence:%s:%s:%s" % (r["attempt_id"], r["criterion_id"], r["verdict"]), r["detail"]))
+                        ("evidence:r%d:%s:%s:%s:%s" % (r["node_revision"], r["status"], r["attempt_id"],
+                                                       r["criterion_id"], r["verdict"]), r["detail"]))
             results = []
             for row in conn.execute("SELECT * FROM state_nodes WHERE project_id=?", (project_id,)):
                 fields = [("key", row["node_key"]), ("goal", row["goal"])]
@@ -610,14 +614,17 @@ class StateGraphStore:
                 hits = []
                 matched_terms = set()
                 for where, text in fields:
-                    low = str(text).lower()
+                    text = str(text)
                     for t in terms:
-                        i = low.find(t)
-                        if i < 0:
+                        # Locate in the ORIGINAL string: lower() can change length
+                        # (İ, ﬁ), so an offset found in the lowered copy is not an
+                        # offset into the text the snippet is cut from.
+                        m = re.search(re.escape(t), text, re.IGNORECASE)
+                        if m is None:
                             continue
                         matched_terms.add(t)
-                        start, end = max(0, i - 60), min(len(text), i + len(t) + 60)
-                        hits.append({"where": where, "term": t, "snippet": str(text)[start:end]})
+                        start, end = max(0, m.start() - 60), min(len(text), m.end() + 60)
+                        hits.append({"where": where, "term": t, "snippet": text[start:end]})
                 if matched_terms == set(terms):
                     results.append({"node_key": row["node_key"], "status": row["status"], "facet": row["facet"],
                                     "revision": row["revision"], "hit_count": len(hits), "hits": hits[:8]})

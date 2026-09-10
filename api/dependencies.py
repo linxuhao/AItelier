@@ -344,6 +344,11 @@ def get_skillflow():
         # auto-fix pass cannot be allowed to run on delivered code.
         from skillflow.lint_backends import register_backend
         register_backend("ruff", _ruff_check_only)
+        # eslint for .js — the architect's linter_manifest.json names it. Built
+        # 2026-07-02 and never merged: main shipped only the registry, so JS got
+        # the `basic` (non-empty) check while the template promised a linter.
+        from aitelier.lint_backends import register_all as _register_lint_backends
+        _register_lint_backends()
 
         # Register agent configs into skillflow so graph validation catches
         # missing agent_config references at startup.

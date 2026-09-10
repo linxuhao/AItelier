@@ -1,3 +1,4 @@
 {
-  "py": "ruff"
+  ".py": "ruff",
+  ".js": "eslint"
 }

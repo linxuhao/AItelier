@@ -9,7 +9,16 @@ investigator:
   template: "investigate.md"
   tools: ["list_tree"]            # + repo read tools from the context source
   max_output_tokens: 8192
-  max_tool_turns: 20
+  # 32, not 20. Measured 2026-09-10 over 277 runs: `investigate` is 42 completed
+  # / 7 failed, and SIX of those seven died at exactly 20/20 — 86% of this
+  # graph's failures are the budget itself, and 20 is the value nobody ever
+  # revisited. A read-only sweep pays 24,000 chars per `read`, so one 149 KB
+  # source file (cultivation.gd) is seven perfect reads before a single line of
+  # findings. The sect-curriculum inventory (sg-6c959b20) finished on turn 20
+  # exactly — it delivered from the last turn it had.
+  # 32 puts the ceiling at 48 with the two 8-turn ask_more_turns grants, the
+  # same shape coding_impl's implementer has.
+  max_tool_turns: 32
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:

@@ -2,9 +2,17 @@ name: run_tests
 description: >
   Run the project's unit tests (pytest) over the consolidated repo and write
   test_report.json {passed, returncode, summary, failures[], collection_errors[],
-  skipped?, import_error?, no_tests_collected?, node?}. `node` (npm
+  skipped?, import_error?, no_tests_collected?, node?, repo_gate?}. `node` (npm
   install/build/test checks) is present when the repo holds a node project and
-  a failing check also flips `passed`. Always succeeds as a step; the test
+  a failing check also flips `passed`. `repo_gate` is present when the repo
+  ships an executable `run_tests.sh` at its root — that script IS the repo's
+  own declared gate (a Godot game's engine gate, say) and a failure flips
+  `passed` too. pytest alone cannot see a product it does not build: on
+  2026-09-10 a branch that regressed a game from 354/354 scripts parsing to 9
+  parse errors reported 1788 passed, 0 failed here. A graph whose OWN steps
+  already run the engine gate sets `repo_gate: false` in tool_params so the
+  same gate is not paid for twice (dpe_default's 5_test does; coding_impl does
+  not). Always succeeds as a step; the test
   outcome is captured in the report for the verifier to act on. A suite that
   collected NOTHING is reported as passed:false + no_tests_collected:true — a
   gate that checked nothing has not passed. If no test runner can be provisioned

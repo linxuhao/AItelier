@@ -610,8 +610,42 @@ def _run_node_checks(repo: Path) -> dict | None:
     return node
 
 
+
+REPO_GATE_SCRIPT = "run_tests.sh"
+REPO_GATE_TIMEOUT = 900
+
+
+def _run_repo_gate(repo: Path) -> dict | None:
+    """The repo's OWN gate script, when it declares one.
+
+    pytest is not every repo's gate. A Godot game, a Rust workspace, anything
+    whose product is not Python can still carry a Python test suite — so this
+    tool goes green while the product does not compile. Measured 2026-09-10 on
+    the wuxia game: a branch that regressed the engine from "354 of 354 scripts
+    parsed" to 9 parse errors (a dead AudioManager autoload, GameManager failing
+    to load with it) reported ``1788 passed, 0 failed`` here, because nothing in
+    this tool ever asked the engine anything. The Python suite it did run makes
+    source-TEXT assertions about GDScript; text cannot see a parse error.
+
+    A repo that ships an executable ``run_tests.sh`` at its root has DECLARED
+    its gate. Run it and fold the verdict in, exactly as the node gate does.
+    No script -> None, and behaviour is byte-for-byte what it was before.
+
+    Reuses `_run_node_cmd`: the name says npm, the body is a generic
+    "run this argv in that directory, scrubbed env, kill the process group on
+    timeout" — which is what is wanted here too.
+    """
+    script = repo / REPO_GATE_SCRIPT
+    if not script.is_file() or not os.access(script, os.X_OK):
+        return None
+    result = _run_node_cmd(repo, ["bash", str(script)], REPO_GATE_TIMEOUT)
+    result["script"] = REPO_GATE_SCRIPT
+    return result
+
+
 def run_tests(*, project_root: str = "", out_dir: str = "",
-              workspace_root: str = "", **kwargs) -> dict:
+              workspace_root: str = "", repo_gate: bool = True,
+              **kwargs) -> dict:
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
     Returns {written, passed}. The report holds {passed, returncode, summary,
@@ -800,6 +834,24 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                         report["failures"].append(
                             f"node:{name} failed (rc={chk['returncode']}): "
                             f"{chk['output'][-500:]}")
+
+    # The repo's own declared gate (run_tests.sh) — folded in like the node
+    # gate. A green pytest run over a product pytest cannot compile is a
+    # pass-on-absence, and it shipped a non-compiling branch on 2026-09-10.
+    # `repo_gate: false` belongs ONLY to a pipeline that already owns an engine
+    # gate of its own (dpe_game's 5_compile). Everywhere else the default
+    # stands: a green pytest over a product pytest cannot compile is not a pass.
+    if repo_gate and repo is not None and repo.exists():
+        gate = _run_repo_gate(repo)
+        if gate is not None:
+            report["repo_gate"] = gate
+            if not gate["passed"]:
+                report["passed"] = False
+                report["failures"].append(
+                    f"repo_gate:{gate['script']} failed "
+                    f"(rc={gate['returncode']}): "
+                    f"{gate['output'][-1500:]}")
+
 
     # With no repo AND no out_dir there is nowhere to write — say so in the
     # return rather than defaulting to the CWD, which is the whole point above.

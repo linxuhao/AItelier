@@ -118,6 +118,18 @@ steps:
     step_type: "agent"
     agent_config: "researcher"
     timeout_seconds: 300
+    # 24. The researcher had no override at all, so it fell through to
+    # AgentFactory.DEFAULT_MAX_TOOL_TURNS = 10 (core/agents.py:90) — every
+    # other substantive step in this graph already overrides (architect 20,
+    # pm 30, t_plan 30, t_impl 30). Measured 2026-09-10: a gen_dpe_state_game
+    # run died here at 10/10, and one of its siblings failed with "Agent
+    # exhausted 10 tool exploration turns without producing any write actions".
+    # 10 turns cannot read a repo whose largest source file needs 7 reads at
+    # the 24,000-char cap. NOT raised further: across 277 runs, implement-style
+    # steps that pass finish in 13-41 turns (median ~20) while the failures sit
+    # at their ceiling at EVERY level tried (20/26/32/40/48/65/66) — past ~41 a
+    # step is lost, not nearly done. More ceiling buys thrashing, not delivery.
+    max_tool_turns: 24
     context:
       - source: { from: "repository", mode: "tool" }
       # Cross-run memory: distilled, review-verified knowledge left by prior DPE
@@ -916,12 +928,20 @@ steps:
   - id: "5_test"
     step_type: "tool"
     tool_name: "run_tests"
+    # repo_gate: false — this graph already owns an engine gate. The
+    # `game_harness` addon splices 5_compile (godot_compile + headless
+    # play-test) onto the post_verify_tests edge below, so letting
+    # run_tests also shell the repo's own run_tests.sh would run the same
+    # ~12-minute Godot gate twice per goal-loop iteration. Everywhere the
+    # engine gate is NOT in the graph (coding_impl), the default true
+    # stands — see aitelier/tools/run_tests/impl.py:_run_repo_gate.
     # Claim timeout: must exceed run_tests' worst case (venv + pip + project
     # deps + the 180s pytest wall ≈ 900s) so a slow-but-alive run isn't
     # reclaimed mid-flight by a concurrent driver — only a dead claim recovers.
     timeout_seconds: 1200
     tool_params:
       out_dir: "$STEP_DIR"
+      repo_gate: false
     transitions:
       # Engine-agnostic base: goes straight to knowledge. The `game_harness`
       # addon splices the compile/play-test gate (5_compile) in HERE, on this

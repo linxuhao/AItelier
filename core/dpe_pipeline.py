@@ -2699,7 +2699,16 @@ class PipelineEngine:
             turn_count = -1
             resume_nudges_left = 0
             if attempt == 1 and _resumed:
-                current_max_turns = _resumed["current_max_turns"]
+                # The HIGHER of the stored ceiling and the one the role resolves
+                # to now. Restoring the stored value unconditionally made the one
+                # remedy for a turn-budget death unusable: a step that died at
+                # 16/16 came back at 16 and re-exhausted without taking a turn,
+                # so raising max_tool_turns and retrying could never rescue it
+                # (measured 2026-09-11, release.mainline-green r5's 3_review:
+                # raised to 32, reloaded, /retry re-died in 0.6s). max() keeps
+                # grants already earned when the ceiling is LOWERED, and lets a
+                # raise through when it is the operator's fix.
+                current_max_turns = max(_resumed["current_max_turns"], max_turns)
                 turn_grants = _resumed["turn_grants"]
                 turn_count = _resumed["turns"] - 1
                 # DeepSeek thinking+tools wants reasoning_content on the next

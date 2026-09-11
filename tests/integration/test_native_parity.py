@@ -182,6 +182,44 @@ def test_a_resume_after_a_rejected_delivery_shows_the_agent_the_rejection(engine
         "the resume message still reads as a plain host restart; an agent told "
         "only that its files are staged concludes nothing failed")
 
+def test_raising_the_budget_rescues_a_step_that_died_on_its_turn_ceiling(engine, monkeypatch):
+    """A resume must not restore a ceiling the operator has since raised.
+
+    A step killed by `turn budget exhausted` is the one case where raising
+    `max_tool_turns` IS the remedy — and the resume discarded it: it replaced
+    `current_max_turns` with the value stored in the trace, so the step came
+    back at the same wall and exhausted again without taking a single turn.
+    Measured live 2026-09-11: `release.mainline-green` r5's 3_review died at
+    16/16; the graph was raised to 32, reloaded, and /retry re-exhausted in
+    0.6 s. Retry could never rescue it, and the trace had to be deleted by
+    hand. The ceiling a resume honours is the HIGHER of what it stored and
+    what the role resolves to now.
+    """
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.side_effect = [_turn(tool_calls=[_tc("finish_step")])]
+
+    draft = tmp / "draft"; draft.mkdir(); (draft / "main.py").write_text("x")
+    ws._draft_dir = lambda pid, step, graph: draft
+    # Stored ceiling 2, already spent 2 — the exhausted state. The role now
+    # resolves to 4 (the engine fixture), i.e. the operator raised it.
+    monkeypatch.setattr(PipelineEngine, "_resume_from_trace",
+                        lambda self, pid, max_turns: {
+                            "messages": [{"role": "user", "content": "earlier"}],
+                            "turns": 2, "written_files": ["main.py"],
+                            "dropped_tail": 0, "current_max_turns": 2,
+                            "turn_grants": 0})
+
+    assert _run(engine, ws) is True, (
+        "the resumed step exhausted again instead of using the raised ceiling"
+    )
+    assert nat.turn.call_count == 1, (
+        "the resumed step never got a turn; the stored ceiling won over the "
+        "raised one, which is exactly what makes a raise unable to rescue it"
+    )
+
+
 def test_no_tool_reply_is_salvaged_then_writes(engine):
     """Feature B: a prose-only reply nudges the agent to write instead of
     ending the step empty (the inst-975 failure mode)."""

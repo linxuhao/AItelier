@@ -4,8 +4,7 @@ The mechanical (tool) channel of the addon system: an addon that needs a
 guaranteed file in every project it applies to (e.g. a Godot `.gitignore`) ships
 it under configs/addons/<addon>/assets/, and injects a scaffold tool step. Unlike
 a prompt instruction, this doesn't depend on the LLM remembering — the file is
-always there. Writes into the repo working tree (like knowledge_sync); a later
-repo_apply commits it. Never overwrites an existing file: a `*ignore` file is
+always there. Writes into the repo working tree (like knowledge_sync); a run-scoped call commits only its own changed files. Never overwrites an existing file: a `*ignore` file is
 merged in place (missing lines appended), anything else existing is skipped, and
 binary assets are skipped. Result: {written, merged, skipped, addon}.
 
@@ -20,7 +19,7 @@ _CONFIGS = Path(__file__).resolve().parents[3] / "configs"
 
 
 def scaffold(*, project_root: str = "", workspace_root: str = "", addon: str = "",
-             out_dir: str = "", **kwargs) -> dict:
+             out_dir: str = "", run_id: str = "", **kwargs) -> dict:
     repo = Path(project_root or workspace_root).resolve() if (project_root or workspace_root) else None
     if not repo or not repo.is_dir():
         return {"written": [], "reason": f"repo not found: {repo}", "addon": addon}
@@ -62,4 +61,13 @@ def scaffold(*, project_root: str = "", workspace_root: str = "", addon: str = "
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_text(asset_text, encoding="utf-8")
         written.append(str(dst.relative_to(repo)))
+    if run_id and (written or merged):
+        from skillflow.output_targets import git
+        try:
+            names = sorted(set(written + merged))
+            git(repo, "add", "--", *names)
+            git(repo, "commit", "--only", "-m", f"scaffold: {addon}", "--", *names)
+        except RuntimeError as exc:
+            return {"error": str(exc), "written": written, "merged": merged,
+                    "note": "Scaffold changes retained; no later agent may silently adopt them."}
     return {"written": written, "merged": merged, "skipped": skipped, "addon": addon}

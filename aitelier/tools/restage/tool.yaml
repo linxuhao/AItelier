@@ -36,3 +36,7 @@ parameters:
     type: string
     description: "This step's staging dir ($STEP_DIR) — the copy destination."
     required: false
+
+# Reports/metadata are artifacts even when invoked by a code-producing agent.
+output:
+  target: artifact

@@ -231,19 +231,19 @@ steps:
       - source: { step: "1_review" }
       - source: { tool: "dir_tree" }
     output:
-      mode: "content"
+      mode: content
       fixed:
-        design: "step2_design.md"
-        linter_manifest: "linter_manifest.json"
+        design:
+          file: step2_design.md
+          target: artifact
+        linter_manifest:
+          file: linter_manifest.json
+          target: code
+      target: artifact
     validation:
-      - files: ["step2_design.md"]
-        tool: "file_exists"
-    lifecycle:
-      on_deliver:
-        tool: "repo_apply"
-        params:
-          source_dir: "$STEP_DIR"
-        on_failure: "skip"
+    - files:
+      - step2_design.md
+      tool: file_exists
     checkpoint: true
     checkpoint_label: "Architecture Review"
     transitions:
@@ -685,99 +685,27 @@ steps:
       - source: { step: "t_impl_review" }
       - source: { tool: "dir_tree" }
     output:
-      mode: "write"
-    # The importability gate. `lint` dispatches .py to the `ruff` backend, which
-    # the host replaces with a check-only one (api/dependencies.py:
-    # _ruff_check_only, `--select E9,F63,F7,F82`) — syntax errors, and F821
-    # undefined-name, which is the ONE static check that sees the defect class
-    # that zeroes a whole repo: a name used but never imported. A retry re-asks
-    # THIS implementer with the ruff findings in its prompt, so the loop that
-    # fixes it is the one that wrote it.
-    # NL2Repo sweep 2026-08-18, task `fastapi-users`: a missing TypeVar
-    # import (`AP` in authentication/strategy/db/strategy.py) made the package
-    # unimportable and zeroed all 556 tests. Five tasks / ~3200 tests lost the
-    # same way.
-    #
-    # It was already declared here — and it never ran. `workspace_root:
-    # "$STEP_DIR"` is passed through VERBATIM: StepValidator resolves no
-    # variables (only the on_deliver tool-hook path does, see the note below), so
-    # `lint` rglob'd a directory literally named `$STEP_DIR`, matched zero files,
-    # and returned `{all_passed: true, results: []}` — a vacuous pass. 36 lint
-    # calls in that run, every one of them a no-op. Omitting the key is what makes
-    # it work: StepValidator defaults workspace_root to the step's staging dir,
-    # which is exactly the tree this step just wrote.
-    #
-    # manifest_path is omitted too, so the built-in default (.py → ruff) applies.
-    # The architect's linter_manifest.json is LLM-authored and `lint` returns
-    # passed=True for a backend name it does not recognise — one invented linter
-    # name would switch this gate off again, silently, exactly as $STEP_DIR did.
-    # Which checker guards importability is not the architect's to choose.
+      mode: write
+      target: code
     validation_on_exhaustion: fail
     validation:
-      - files: ["*.py"]
-        tool: "lint"
-      # The same gate for GDScript. `lint` cannot serve it: its file glob is the
-      # first filter, so *.py never sees a .gd file, and routing .gd through the
-      # architect's linter_manifest.json would put the gate under LLM control —
-      # lint returns passed=True for a backend name it does not recognise, so one
-      # typo switches it off in silence, exactly as $STEP_DIR did above.
-      # gdscript_check shells `godot --check-only --script` per file through the
-      # sidecar: no project import, cheap enough to run every task, and it passes
-      # trivially for the projects that have no .gd at all.
-      # jinyong-play, task 1: a get_move_range() BFS loop shipped with tab depths
-      # 3/4/5/7 and a duplicated guard — a parse error that reached the repo
-      # because nothing mechanical looked at a .gd file until 5_compile, six
-      # tasks later. The reviewer caught it by counting tabs.
-      - files: ["*.gd"]
-        tool: "gdscript_check"
-    lifecycle:
-      # on_deliver is a SEQUENCE of repo-mutating tool hooks, run in order with
-      # full variable resolution (needs skillflow-py >= 1.4.1). repo_apply
-      # adds/updates the step's files (ignoring the deletions manifest, so it
-      # never reaches the repo); repo_delete then reads _deletions.json from
-      # $STEP_DIR and git-rm's + commits the files the agent queued via
-      # repo_remove_file. No-op when nothing was queued.
-      # (repo_delete cannot live in after_deliver: that path runs through
-      # StepValidator, which neither resolves $STEP_DIR nor unwraps `params`.)
-      on_deliver:
-        - tool: "repo_apply"
-          params:
-            source_dir: "$STEP_DIR"
-            ignore: ["_deletions.json"]
-          on_failure: "retry"
-          max_retries: 3
-        - tool: "repo_delete"
-          params:
-            source_dir: "$STEP_DIR"
-          # retry (not warn): a commit failure rolls back the staged git rm's and
-          # keeps the manifest, so an in-place retry re-attempts from a clean tree
-          # instead of advancing with a half-applied, uncommitted deletion.
-          on_failure: "retry"
-          max_retries: 2
-      after_deliver:
-        # Lint the post-apply, post-deletion tree. Same $STEP_DIR no-op as the
-        # validation block above: dropping the key lets skillflow supply the
-        # after_deliver root, which for this hook IS the project repo — so this
-        # is the whole-tree pass, catching a name that a LATER task broke in an
-        # EARLIER task's file (which the staging-scoped validation cannot see).
-        #
-        # warn, not retry: skillflow only honours per-spec `on_failure` for the
-        # value "warn" — a check-list hook resolves its hook-level policy to
-        # "fail" (core.py: `hook_spec.get(...) if isinstance(hook_spec, dict)`,
-        # and this spec is a list), so `retry` here was never retry. It would be
-        # `_handle_lifecycle_failure` → retryable=False, with no feedback turn:
-        # one undefined name left anywhere in the repo would hard-fail the
-        # after_deliver of every REMAINING task, on a defect that task did not
-        # write and is never told about. The fatal gate is the validation block
-        # above, which does re-ask the implementer with the ruff output in its
-        # prompt; repo-wide drift is reported here.
-        - tool: "lint"
-          files: ["**/*.py"]
-          on_failure: "warn"
-        - tool: "lint"
-          files: ["**/*.js", "**/*.html", "**/*.css"]
-          manifest_path: "linter_manifest.json"
-          on_failure: "warn"
+    - files:
+      - '*.py'
+      tool: lint
+    - files:
+      - '*.gd'
+      tool: gdscript_check
+    - tool: lint
+      files:
+      - '**/*.py'
+      on_failure: warn
+    - tool: lint
+      files:
+      - '**/*.js'
+      - '**/*.html'
+      - '**/*.css'
+      manifest_path: linter_manifest.json
+      on_failure: warn
     transitions:
       - to: "t_impl_review"
 
@@ -872,51 +800,62 @@ steps:
       - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json", required: true }
       - source: { tool: "dir_tree" }
     output:
-      mode: "content"
+      mode: content
       fixed:
-        report: { file: "final/verify_report.json", format: '{"all_goals_met": bool, "goals": [{"goal": str, "status": "met" | "partial" | "unmet" | "blocked", "evidence": str}, ...], "verified_subtasks": [str, ...], "issues": [str, ...], "ready_for_deploy": bool}' }
-        readme: { file: "README.md", format: 'Markdown 项目交付文档：项目简介、安装步骤、运行方法、关键接口/API 端点——反映仓库交付时的真实最终状态' }
-    # The verifier owns project documentation AND runs LAST (after every task is
-    # implemented + verified), so the README reflects the repo's actual final
-    # state. README.md is a DECLARED content-mode output: it is written via the
-    # engine-generated write tool (create_readme) whose target path is bound to
-    # $STEP_DIR by the engine — the agent never supplies a path — and delivered
-    # into the resolved project repo by the on_deliver repo_apply below.
-    # (The retired readme_* custom tools resolved an agent-supplied project_root
-    # against the process CWD, which in the container is the AItelier source repo
-    # bind-mounted at /app, and clobbered AItelier's own README. repo_apply
-    # resolves the real code path, so it can only ever target the project repo.)
-    # One verdict per goal, from a closed set. "blocked" (evidence missing) is
-    # not "unmet" and not "met" — the pass-on-absence defect class was verdicts
-    # over nothing; naming the missing evidence is the only honest third state.
+        report:
+          file: final/verify_report.json
+          format: '{"all_goals_met": bool, "goals": [{"goal": str, "status": "met" | "partial" | "unmet"
+            | "blocked", "evidence": str}, ...], "verified_subtasks": [str, ...], "issues": [str,
+            ...], "ready_for_deploy": bool}'
+          target: artifact
+        readme:
+          file: README.md
+          format: Markdown 项目交付文档：项目简介、安装步骤、运行方法、关键接口/API 端点——反映仓库交付时的真实最终状态
+          target: code
+      target: artifact
     validation:
-      - files: ["final/verify_report.json"]
-        tool: "json_schema"
-        inline_schema:
-          type: object
-          required: [all_goals_met, goals, issues, ready_for_deploy]
-          properties:
-            all_goals_met: { type: boolean }
-            ready_for_deploy: { type: boolean }
-            issues: { type: array, items: { type: string } }
-            goals:
-              type: array
-              minItems: 1
-              items:
-                type: object
-                required: [goal, status, evidence]
-                properties:
-                  goal: { type: string, minLength: 1 }
-                  status: { type: string, enum: [met, partial, unmet, blocked] }
-                  evidence: { type: string, minLength: 1 }
-    lifecycle:
-      on_deliver:
-        tool: "repo_apply"
-        params:
-          source_dir: "$STEP_DIR"
-          # Only README.md ships to the delivered repo — keep the verdict out.
-          ignore: ["verify_report.json", "final/*"]
-        on_failure: "skip"
+    - files:
+      - final/verify_report.json
+      tool: json_schema
+      inline_schema:
+        type: object
+        required:
+        - all_goals_met
+        - goals
+        - issues
+        - ready_for_deploy
+        properties:
+          all_goals_met:
+            type: boolean
+          ready_for_deploy:
+            type: boolean
+          issues:
+            type: array
+            items:
+              type: string
+          goals:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              required:
+              - goal
+              - status
+              - evidence
+              properties:
+                goal:
+                  type: string
+                  minLength: 1
+                status:
+                  type: string
+                  enum:
+                  - met
+                  - partial
+                  - unmet
+                  - blocked
+                evidence:
+                  type: string
+                  minLength: 1
     transitions:
       - to: "5_test"
 

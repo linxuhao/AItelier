@@ -24,3 +24,7 @@ parameters:
 # Its result carries passed/error, so a graph step running it MUST route the
 # failure branch — read by forge_registry_check (fallible_tools_unrouted).
 x-fallible: true
+
+# Reports/metadata are artifacts even when invoked by a code-producing agent.
+output:
+  target: artifact

@@ -16,7 +16,7 @@ parameters:
     required: false
   workspace_root:
     type: string
-    description: "Root for file resolution (injected by StepValidator: the step's staging dir)"
+    description: "Root for file resolution (injected by StepValidator: the declared candidate root: code worktree or artifact output)"
     required: false
   timeout:
     type: integer

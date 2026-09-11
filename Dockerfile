@@ -51,11 +51,10 @@ COPY . /app
 # rebuild + `up -d` is automatically live.
 COPY --from=frontend-build /app/web/dist /srv/web_dist
 ENV AITELIER_WEB_DIST=/srv/web_dist
-# skillflow-py is a normal published dependency (pinned in pyproject.toml) —
-# installed from PyPI. To ship a skillflow change: bump its version, publish to
-# PyPI, then bump the `skillflow-py>=…` pin here. (Replaces the old
-# vendor/wheels local-snapshot override.)
-RUN pip install --no-cache-dir -e .
+# Install the exact reviewed engine, not a mutable host checkout or old image
+# layer. The local-version pin can only resolve from this bundled wheel.
+RUN pip install --no-cache-dir --find-links=/app/vendor/wheels -e .
+RUN python -c "from core.output_migration import require_output_engine; require_output_engine()"
 
 # Identity for in-container git commits (workspace_manager commits set no inline
 # identity, and there is no global ~/.gitconfig in the image). Overridable.

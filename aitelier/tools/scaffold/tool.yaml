@@ -6,7 +6,7 @@ description: >
   is never overwritten: an existing `*ignore` file is MERGED in place (missing
   non-comment lines appended), any other existing file is skipped; binary
   (non-UTF-8) assets are skipped. Convention: an asset named `dot_<x>` lands as
-  `.<x>`. Always succeeds as a step; a later repo_apply commits what it wrote.
+  `.<x>`. A run-scoped call commits only its own changed files and reports commit failures.
   Returns {written, merged, skipped, addon}.
 parameters:
   addon:

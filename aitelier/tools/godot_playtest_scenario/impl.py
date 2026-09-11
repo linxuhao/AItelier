@@ -1,74 +1,14 @@
-"""godot_playtest_scenario — run ONE play-test scenario, not all 26.
+"""Run selected/inline scenarios against the current run worktree.
 
-WHY THIS EXISTS. The 5_compile gate runs the whole contract, and on
-jinyong-assets that is 26 scenarios and about ten minutes. An implementer
-repairing one scenario therefore had no way to ask "is THIS one green yet?"
-short of ending its step and waiting for the full gate — so it did not ask. It
-reasoned from the source instead, guessed at the runtime, and spent a whole task
-slot on a wrong guess. jinyong-usable, 2026-08-24: five enemies failed
-`turns_taken == 1` with `actual: false`, four rounds of static diagnosis missed
-why, and one 90-second single-scenario probe (`/tmp/probe_turns.py`, the
-prototype this tool generalises) produced the number — 2, they had acted twice —
-that settled it immediately.
-
-WHAT IT IS NOT. It is not a gate and it is not wired into any graph edge. The
-full 26-scenario run at 5_compile stays exactly as it is, because it is the only
-thing that catches "fixing X broke Y". This is a probe an agent calls while it
-works.
-
-STAGED EDITS. A t_impl agent's changes live in its staging directory until the
-step's on_deliver repo_apply; the consolidated repo still holds the OLD code.
-Play-testing `project_root` directly would therefore test the code the agent is
-in the middle of replacing and report on it as if it were the fix — a wrong
-answer delivered with a straight face. So when the step has staged files, this
-tool assembles repo+staging into a throwaway tree (under ~/.AItelier/scratch, on
-the mount the sidecar can read) and tests THAT, and it says in its result which
-files were overlaid so the reader knows what ran.
+Code and the playtest contract are read from the same root, including uncommitted
+changes. No staging overlay or temporary copy of the project is constructed.
+Legacy staged callers fail explicitly; they never get a misleading baseline pass.
 """
 
 import json
-import shutil
-import sys
 from pathlib import Path
 
-_SKIP_NAMES = {".gitkeep", "_snapshot.json", "_deletions.json"}
 _MAX_ASSERT_LINES = 200
-
-
-def _scratch_root(step_id: str, run_id: str) -> Path:
-    project_root = Path(__file__).parent.parent.parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
-    from core import datadir
-    import re
-    key = re.sub(r"[^A-Za-z0-9_.-]", "_", str(step_id or run_id or "adhoc"))[:80]
-    return datadir.scratch_dir() / "playtest_scenario" / key
-
-
-def _staged_files(step_tmp_dir: str) -> list[Path]:
-    """The files this step has written but not yet delivered to the repo."""
-    d = Path(step_tmp_dir) if step_tmp_dir else None
-    if not d or not d.is_dir():
-        return []
-    return [f for f in sorted(d.rglob("*"))
-            if f.is_file() and f.name not in _SKIP_NAMES and ".git/" not in str(f)]
-
-
-def _overlay_tree(repo: Path, staged: list[Path], src_root: Path,
-                  dest: Path) -> list[str]:
-    """repo + staged files → a throwaway project tree at ``dest``."""
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(repo, dest,
-                    ignore=shutil.ignore_patterns(".git", ".godot", "frames"))
-    applied = []
-    for f in staged:
-        rel = f.relative_to(src_root)
-        target = dest / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, target)
-        applied.append(str(rel))
-    return applied
 
 
 def _render(scenarios: list[dict]) -> list[str]:
@@ -107,9 +47,9 @@ def _render(scenarios: list[dict]) -> list[str]:
 
 def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
                             project_root: str = "",
-                            workspace_root: str = "", step_tmp_dir: str = "",
+                            workspace_root: str = "",
                             step_id: str = "", run_id: str = "",
-                            use_staged: bool = True, **kwargs) -> dict:
+                            legacy_code_staging: bool = False, **kwargs) -> dict:
     """Play-test one scenario and report every failing assertion's ``observed``.
 
     ``scenario`` names one (or several, comma-separated) from the project's
@@ -120,7 +60,9 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
     from aitelier.tools.godot_playtest.impl import (post_playtest, read_spec,
                                                     select_scenarios)
 
-    repo = Path(project_root or workspace_root).resolve()
+    if not project_root or not Path(project_root).is_absolute():
+        return {"error": "godot_playtest_scenario requires an injected absolute project_root"}
+    repo = Path(project_root).resolve()
     if not (repo / "project.godot").is_file():
         return {"error": f"No project.godot at {repo} — not a Godot project."}
 
@@ -152,85 +94,69 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
     if names and inline_doc is not None:
         return {"error": "give `scenario` or `inline_scenario`, not both."}
 
-    staged = _staged_files(step_tmp_dir) if use_staged else []
-    scratch = _scratch_root(step_id, run_id)
+    # This runtime no longer overlays code drafts. An old pinned graph must
+    # be completed with its old runtime or explicitly migrated, not measured
+    # against the wrong tree after a restart.
+    if legacy_code_staging:
+        return {"error": "Legacy code-staging graph. Code playtests require direct "
+                         "worktree outputs; explicitly recover or finish the old run first."}
+    if "use_staged" in kwargs:
+        return {"error": "use_staged is no longer supported; tests use the current run worktree."}
+    # Artifact drafts (a plan, verdict, report) are NOT source staging and
+    # must not prevent a reviewer/planner from probing the actual code.
     target = repo
-    overlaid: list[str] = []
-    try:
-        if staged:
-            target = scratch / "project"
-            overlaid = _overlay_tree(repo, staged, Path(step_tmp_dir), target)
+    spec, info = read_spec(target)
+    if info["errors"]:
+        return {"error": "The play-test contract could not be read whole: "
+                         + " | ".join(info["errors"])}
+    if not spec:
+        return {"error": f"No play-test contract in {target} (expected a "
+                         f"playtest/ directory or playtest_spec.yaml)."}
 
-        # Read the contract from the OVERLAID tree, never from the repo. The
-        # spec is passed to the sidecar explicitly, so reading it from `repo`
-        # while pointing project_dir at `target` ran the caller's staged CODE
-        # against the BASELINE scenario — and still reported
-        # `staged_files_applied: [that scenario file]`.
-        #
-        # It only bites when the staged file IS a scenario, which is why it
-        # survived its own end-to-end check: that one staged a .gd. Live,
-        # jinyong-winnable 2026-08-24, the first agent to use this tool in
-        # anger: "the sidecar listed the staged file as applied but the
-        # evaluated assert expressions were the repo-baseline (OLD) ones …
-        # i.e. the sidecar ran the scenario against a stale spec copy, not the
-        # staged rewrite." Four of that round's five cards edit scenario files.
-        spec, info = read_spec(target)
-        if info["errors"]:
-            return {"error": "The play-test contract could not be read whole: "
-                             + " | ".join(info["errors"])}
-        if not spec:
-            return {"error": f"No play-test contract in {target} (expected a "
-                             f"playtest/ directory or playtest_spec.yaml)."}
+    if inline_doc is not None:
+        # The contract still supplies the shared header (scene / actions /
+        # surface from _common.yaml) — only the scenario list is replaced.
+        # Nothing is written to playtest/, which is the whole point: the
+        # tool used to take a NAME only, so forcing `observed` values out
+        # meant writing a throwaway scenario into the deliverable directory
+        # and remembering to delete it. jinyong-endgame 2026-08-24: four of
+        # six cards shipped or re-shipped probe scaffolding that way, one of
+        # them across three rejections, and the loader runs unlisted
+        # scenario files — so a forgotten probe reddens the WHOLE gate, not
+        # just itself.
+        picked = dict(spec)
+        picked["scenarios"] = inline_doc
+    else:
+        available = sorted(str(s.get("name")) for s in spec["scenarios"])
+        picked, unknown = select_scenarios(spec, names)
+        if unknown:
+            # Never run the recognised subset and report on it: a typo would
+            # then read as "the scenario I asked about is green".
+            return {"error": f"unknown scenario(s) {unknown}. Available: "
+                             f"{', '.join(available)}"}
 
-        if inline_doc is not None:
-            # The contract still supplies the shared header (scene / actions /
-            # surface from _common.yaml) — only the scenario list is replaced.
-            # Nothing is written to playtest/, which is the whole point: the
-            # tool used to take a NAME only, so forcing `observed` values out
-            # meant writing a throwaway scenario into the deliverable directory
-            # and remembering to delete it. jinyong-endgame 2026-08-24: four of
-            # six cards shipped or re-shipped probe scaffolding that way, one of
-            # them across three rejections, and the loader runs unlisted
-            # scenario files — so a forgotten probe reddens the WHOLE gate, not
-            # just itself.
-            picked = dict(spec)
-            picked["scenarios"] = inline_doc
-        else:
-            available = sorted(str(s.get("name")) for s in spec["scenarios"])
-            picked, unknown = select_scenarios(spec, names)
-            if unknown:
-                # Never run the recognised subset and report on it: a typo would
-                # then read as "the scenario I asked about is green".
-                return {"error": f"unknown scenario(s) {unknown}. Available: "
-                                 f"{', '.join(available)}"}
+    report = post_playtest({"project_dir": str(target), "spec": picked},
+                           timeout=900)
+    if report.get("gate_skipped"):
+        return {"error": report.get("summary", "godot-builder unreachable")}
+    if report.get("no_project"):
+        return {"error": f"godot-builder cannot see {target} — its workspace "
+                         f"mount is stale; recreate the container."}
 
-        report = post_playtest({"project_dir": str(target), "spec": picked},
-                               timeout=900)
-        if report.get("gate_skipped"):
-            return {"error": report.get("summary", "godot-builder unreachable")}
-        if report.get("no_project"):
-            return {"error": f"godot-builder cannot see {target} — its workspace "
-                             f"mount is stale; recreate the container."}
-
-        scen = (report.get("behavior") or {}).get("scenarios") or []
-        results = [{"name": s.get("name"),
-                    "passed": bool(s.get("passed")),
-                    "ok": sum(1 for a in (s.get("asserts") or []) if a.get("passed")),
-                    "total": len(s.get("asserts") or [])} for s in scen]
-        header = [f"ran {len(results)} scenario(s) against "
-                  + ("repo + %d staged file(s): %s"
-                     % (len(overlaid), ", ".join(overlaid[:20]))
-                     if overlaid else "the consolidated repo (no staged edits)"),
-                  f"spec source: {info['source']}",
-                  f"hard gate passed: {report.get('passed')} — "
-                  f"{report.get('summary', '')}",
-                  ""]
-        return {
-            "scenarios": results,
-            "all_passed": bool(results) and all(r["passed"] for r in results),
-            "hard_passed": bool(report.get("passed")),
-            "staged_files_applied": overlaid,
-            "report": "\n".join(header + _render(scen)),
-        }
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    scen = (report.get("behavior") or {}).get("scenarios") or []
+    results = [{"name": s.get("name"),
+                "passed": bool(s.get("passed")),
+                "ok": sum(1 for a in (s.get("asserts") or []) if a.get("passed")),
+                "total": len(s.get("asserts") or [])} for s in scen]
+    header = [f"ran {len(results)} scenario(s) against the current run worktree: {target}",
+              f"spec source: {info['source']}",
+              f"hard gate passed: {report.get('passed')} — "
+              f"{report.get('summary', '')}",
+              ""]
+    return {
+        "scenarios": results,
+        "all_passed": bool(results) and all(r["passed"] for r in results),
+        "hard_passed": bool(report.get("passed")),
+        "code_root": str(target),
+        "report": "\n".join(header + _render(scen)),
+    }

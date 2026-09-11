@@ -118,6 +118,10 @@ def _build_real_pipeline(tmp_path):
     _ri.ensure_for_run(_gdb(), run_id=run_id, project_id="p",
                        config_name=graph.name, repo_mode="code")
 
+    # Both engine and host must resolve the SAME run worktree. The former
+    # staging fixture accidentally used three unrelated project directories.
+    db = _gdb()
+    sf._workspace._code_path_resolver = lambda pid, run_id=None: _ri.resolve_for_resolver(db, run_id)
     sf.start_run(run_id)
     return sf, db, ws, run_id
 
@@ -130,7 +134,7 @@ def _action(tool, **params):
     return {"tool": tool, "params": params}
 
 
-def _build_agent_response(step_id, tool_schemas, *, review_passed=True):
+def _build_agent_response(step_id, tool_schemas, *, review_passed=True, revising_code=False):
     """Return the JSON string a mocked agent would produce for this step."""
     writes = [k for k in tool_schemas if k.startswith("write_")]
 
@@ -141,11 +145,17 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True):
                            "actions": [_action("write_verdict", content=verdict)]})
 
     if step_id == "3":
-        manifest = json.dumps({"total": 1, "execution_order": ["t1"],
-                               "tasks": [{"id": "t1", "description": "implement add"}]})
+        manifest = json.dumps({"execution_order": [["t1"]]})
+        card = {"id": "t1", "description": "implement add",
+                "detailed_requirements": "Add two numbers without side effects.",
+                "artifact_requirement": "main.py", "dependencies": [],
+                "task_type": "code", "interface_contract": "add(a, b) returns a+b",
+                "acceptance": "add(2, 3) returns 5", "owns": ["main.py"],
+                "stop_conditions": "Stop if the API contract conflicts with the repo.",
+                "evidence": "Actual main.py implementation and code change receipt."}
         return json.dumps({"thoughts": "decompose", "actions": [
             _action("write_tasks_manifest", content=manifest),
-            _action("write_task_card", id="t1", content=json.dumps({"id": "t1"})),
+            _action("write_task_card", id="t1", content=json.dumps(card)),
             {"tool": "end_step", "params": {"summary": "1 task"}},
         ]})
 
@@ -154,16 +164,23 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True):
     if "write_sota" in writes:
         return json.dumps({"thoughts": "sota", "actions": [_action("write_sota", content="# SOTA")]})
     if "write_design" in writes:
-        return json.dumps({"thoughts": "design", "actions": [_action("write_design", content="# Design")]})
+        return json.dumps({"thoughts": "design", "actions": [
+            _action("write_design", content="# Design"),
+            _action("write_linter_manifest", content=json.dumps({".py": "ruff"})),
+        ]})
     if "write_plan" in writes:
         return json.dumps({"thoughts": "plan", "actions": [_action("write_plan", content="# Plan")]})
     if "write_report" in writes:
         # verify_report.json is a structured .json slot — string content is
         # json.loads-validated at write time, so it must be real JSON.
-        report = json.dumps({"all_goals_met": True, "verified_subtasks": [],
+        report = json.dumps({"all_goals_met": True, "verified_subtasks": ["t1"],
+                             "goals": [{"goal": "Add two numbers", "status": "met",
+                                        "evidence": "main.py implements add(a, b)."}],
                              "issues": [], "ready_for_deploy": True})
-        return json.dumps({"thoughts": "verify",
-                           "actions": [_action("write_report", content=report)]})
+        return json.dumps({"thoughts": "verify", "actions": [
+            _action("write_report", content=report),
+            _action("write_readme", content="# Addition\nUse add(a, b) from main.py.\n"),
+        ]})
 
     specific = [w for w in writes if not w.startswith("write_linter")]
     if specific:
@@ -176,8 +193,13 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True):
     # end-to-end test passed on a pipeline that had implemented nothing. Turn
     # accounting turned that into a visible failure. Emit valid Python so any
     # non-stubbed check is happy.
-    return json.dumps({"thoughts": "implement", "actions": [
-        _action("create", file="main.py", content="def add(a, b):\n    return a + b\n")]})
+    original = "def add(a, b):\n    return a + b\n"
+    # Review retries edit the candidate that is already in the run worktree.
+    # Do not weaken create's exists guard just to accommodate an invalid mock.
+    action = (_action("edit", file="main.py", old_str=original,
+                      new_str="def add(a, b):\n    # Reviewed implementation.\n    return a + b\n")
+              if revising_code else _action("create", file="main.py", content=original))
+    return json.dumps({"thoughts": "implement", "actions": [action]})
 
 
 async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=120,
@@ -237,7 +259,8 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=120,
             rejected.add(reject_once_at)
         current["response"] = _build_agent_response(
             claimed.step_id, claimed.inputs.get("_tool_schemas", {}),
-            review_passed=review_passed)
+            review_passed=review_passed,
+            revising_code=claimed.step_id == "t_impl" and "t_impl" in executed)
         executed.append(claimed.step_id)
         result = await runner.execute(claimed)
         sf.confirm_step(claimed.token, result)
@@ -259,6 +282,17 @@ class TestRealRunnerFullPipeline:
             assert sid in executed, f"{sid} never ran: {executed}"
         # The three green checkpoints (steps 1, 2, 3) each paused the run.
         assert checkpoints == 3, f"expected 3 checkpoints, got {checkpoints}"
+        root = sf._workspace.get_project_code_path("p", run_id=run_id)
+        assert (root / "main.py").read_text() == "def add(a, b):\n    return a + b\n"
+        assert (root / "README.md").is_file()
+        assert (root / "linter_manifest.json").is_file()
+        artifact = sf._workspace.get_step_dir("p", sf._get_graph_name(run_id), "t_impl", item="t1")
+        receipt = json.loads((artifact / "code_changes.json").read_text())
+        assert receipt["files"] == ["main.py"]
+        assert not (artifact / "main.py").exists()
+        assert executed.count("3") == 1  # no silent promote-on-invalid mock card
+        assert executed.count("5") == 1  # the report must really validate
+
 
     async def test_red_team_rejection_loops_back_then_completes(self, tmp_path, monkeypatch):
         """A red-team rejection at t_impl_review must loop back to t_impl,
@@ -272,3 +306,9 @@ class TestRealRunnerFullPipeline:
         # t_impl ran twice (initial + after the rejection looped back).
         assert executed.count("t_impl") >= 2, f"no loop-back on rejection: {executed}"
         assert executed.count("t_impl_review") >= 2
+        root = sf._workspace.get_project_code_path("p", run_id=run_id)
+        assert "# Reviewed implementation." in (root / "main.py").read_text()
+        artifact = sf._workspace.get_step_dir("p", sf._get_graph_name(run_id), "t_impl", item="t1")
+        receipt = json.loads((artifact / "code_changes.json").read_text())
+        from skillflow.output_targets import git
+        assert "# Reviewed implementation." in git(root, "diff", receipt["base_commit"], receipt["commit"], "--", "main.py")

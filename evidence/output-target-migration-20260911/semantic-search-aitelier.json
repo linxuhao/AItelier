@@ -1,0 +1,4 @@
+{
+  "error": "semantic_search unavailable: URLError: <urlopen error [Errno 111] Connection refused>",
+  "hint": "the zvec-grep sidecar is not answering — use `search` (exact) and `read`"
+}

@@ -575,6 +575,9 @@ def test_a_plan_less_run_cannot_claim_its_implement_step(live):
 
 def test_a_seeded_run_claims_and_the_agent_gets_the_plan(live):
     """The compatible healthy launch the backstop must not break."""
+    from tests.code_output_fixture import init_code_repo
+    root = init_code_repo(live.tmp / "projects" / "p1")
+    live.sf._workspace._code_path_resolver = lambda pid, run_id=None: root
     publish_seeds(seed_dir(live.sf, "p1", "coding_impl"),
                   {"plan.md": "# approved plan\nrename the map\n"})
     rid = live.sf.get_or_create_run("coding_impl", "p1", {"project_id": "p1"})

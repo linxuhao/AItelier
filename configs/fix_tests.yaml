@@ -49,14 +49,8 @@ steps:
       - source: { step: "test" }          # on loop-back: the failing test_report
       - source: { tool: "dir_tree" }
     output:
-      mode: "write"
-    lifecycle:
-      on_deliver:
-        - tool: "repo_apply"
-          params:
-            source_dir: "$STEP_DIR"
-          on_failure: "retry"
-          max_retries: 3
+      mode: write
+      target: code
     transitions:
       - to: "test"
 

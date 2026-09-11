@@ -1,0 +1,4057 @@
+[
+  {
+    "file": "README.md",
+    "line": 80,
+    "text": "- **Human-in-the-loop** — approval/reject checkpoints are first-class between stages; review and send work back with feedback at any point."
+  },
+  {
+    "file": "README.md",
+    "line": 206,
+    "text": "docker compose up -d              # multi-stage build (Node.js → Svelte bundle + Python runtime); serves API + web UI on :4444"
+  },
+  {
+    "file": "README.md",
+    "line": 321,
+    "text": "Agents never hold state in memory. Each step receives its context from the outputs of prior steps, writes its results into a per-step staging directory that the engine validates and then promotes, and every promoted change is committed to **Git (event sourcing)** — so any run can be replayed or inspected after the fact. A scheduler drives the loop one step at a time: `advance → claim → execute → confirm`. The default DPE pipeline applies this to software delivery, but because a pipeline is just config, the same engine runs any auditable multi-agent workflow."
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 11,
+    "text": "AItelier is a multi-agent AI system that plans, architects, implements, and verifies software projects autonomously. It uses a Green (Maker) / Red (Checker) adversarial pattern defined as skillflow graph nodes — agents are stateless: each step reads its context from prior step outputs and writes results into a per-step staging directory (`{step}.tmp/`) that the engine validates and promotes to a final step directory (`{step}/`). All changes tracked via Git event sourcing. Promotion replaces the step's prior output — for a normal step the whole `{step}/`, for a **loop-body agent step** (skillflow ≥1.5.23) only that item's `{step}/{item}/` folder, so every fan-out item's output SURVIVES the loop (siblings are preserved; readers route by position — a same-loop reader gets its own item, an aggregator outside the loop gets all items, `scope: all` on the context source makes that explicit). A goal-loop re-run still overwrites the same step+item — so skillflow's **artifact history** (on by default, `SkillFlow(artifact_history=…)`) git-versions every promoted step output at the workspace root; recover any iteration with `get_skillflow().step_output_versions(pid, config, step)` + `git show <sha>:<config>/<step>/<file>`. Complements the durable trace (why) with the exact files (what)."
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 68,
+    "text": "│   ├── tools/               # 17 native tools (read_file, write, pytest, repo_apply,"
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 83,
+    "text": "│                            # game harness (godot/unity _compile/_playtest); restage, repo_delete, …"
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 100,
+    "text": "   → [per task] t_plan → t_plan_review → t_impl (write + on_deliver repo_apply/repo_delete)"
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 139,
+    "text": "A \"fix a bug / add a feature\" request on an existing codebase becomes a **new project** with `repo_type=\"existing\"` + `repo_path`. The DPE pipeline runs normally and `repo_apply` commits changes into the real repo via skillflow's `code_path_resolver` (wired in `api/dependencies.py:_existing_repo_code_path`)."
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 203,
+    "text": "| `core/workspace_manager.py` | Physical directory jail, Git operations, step staging→final directory lifecycle |"
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 223,
+    "text": "- **`skillflow_steps.release_count` + `release_claim` (skillflow ≥1.5.56)** — a claim handed back because its EXECUTOR went away, not because the step failed. `fail_step(retryable=True)` was the wrong tool for that: it spends `retry_count`, the budget a genuine failure needs, and its error blames the step for what the client did. A cancellation NEVER touches `retry_count` and never ends a run: charging it — in any form — meant a step quietly lost its resilience to real failures and then died on the next genuine one, destroying the staged output this exists to protect (the motivating case is a driver that vanished while a FINISHED step waited to be confirmed). Two shapes of that were shipped and reverted before the charging itself was recognised as the mistake. `release_count` is monotonic, cleared nowhere, and IS the record; every third release logs a warning saying the budget is deliberately not charged. There is deliberately no cap — a repeatedly-killed driver does keep re-running the step at full LLM cost, which is the accepted price. Counted in a COLUMN, not in `inputs_json` — a re-claim rebuilds that dict from freshly resolved context and preserves only `_error`/`_validation_error`/`_feedback`, which is also why the reaper's `_stale_recovery_count` **cannot actually count across reclaims** (unfixed; fixing it changes when that safety net fires)"
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 225,
+    "text": "- **`capability:` (per-step) + the capability registry (skillflow ≥1.5.25)** — a step declares `capability: <keyword>` and the FRAMEWORK provisions its toolset + injected context, so neither the pipeline author nor the agent picks a tool's write folder or its tools (least privilege). Registered in `api/dependencies.py` through `core/capability_registry.py` (the one writer, holding the invariants) via `sf.register_capability(name, tools=, context_provider=, briefing=, owner=)`; injected at ALL FOUR tool-invocation paths (agent toolset@claim, tool-node kwargs, agent-invoked kwargs, and `{source:{tool:X}}` context-source tools). A capability is declared per STEP (`capability: \"name\"`) or per TASK CARD (`capability: {from_item: \"capabilities\", card: \"3/tasks/$current_task.json\"}`), and a graph's top-level `capabilities:` list is what it OFFERS — the bound on what a card may grant (definitions are global, offers are per graph; see `design/declarable_capabilities.md`). Three capabilities: **`stateful`** → hands the tool a durable, per-config, **MOUNTED** `state_dir` = `~/.AItelier/pipeline_state/<config>/` (skillflow `WorkspaceManager.state_dir`; survives across runs AND container recreation — replaces a generated tool hardcoding an un-mounted `~/.aitelier`); **`tool_creation`** → grants `write`/`run_tests`/`register_tool`/`register_capability` (used by pipeline_forge's `t_tool_impl` so the tool-build step can author + register a tool; NO `pytest` — it resolves its `file` against the CODE REPOSITORY while the step's files are in staging, so it can never reach them, and its guard is a NATIVE skillflow tool's, i.e. it ships in the wheel PyPI serves, not here: 1.5.46 in the container has none, so a `repo_mode: none` run's `project_root=\"\"` made its root `/app`. A capability may not grant a native root-resolving tool — `tests/unit/test_a_capability_grant_survives_the_deployed_engine.py`); **`game_assets`** → `gen_image_asset`/`gen_audio_asset` plus the asset discipline as its briefing, offered by the `game_harness` addon and declared per task card by the PM (they used to ride every DPE implementer: 55% of that step's tool schemas, 0 calls in 6,996). Advertised to forge makers in the `forge_palette` cheatsheet + `forge_architect`/`forge_emit`/`forge_tool_impl` templates. **Durable tool DATA lives in `~/.AItelier/pipeline_state/<config>/`** (distinct from generated tool CODE in `~/.AItelier/tools/` and per-run staging in `~/.AItelier/workspaces/<pid>/`)."
+  },
+  {
+    "file": "CLAUDE.md",
+    "line": 239,
+    "text": "- **`aitelier/tools/`** — ~27 AItelier custom tool dirs. DPE web tools: `web_search` (→ SearXNG), `web_fetch`, `run_tests`, `user_stories_present`. Plus the pipeline_forge, novel (scaffold_bible/apply_state/…), game-harness (godot/unity), and repo-op (restage/repo_delete) families"
+  },
+  {
+    "file": "debugctl.py",
+    "line": 165,
+    "text": "    print(\"=== WORKSPACE TREE (planning artifacts + brief staging) ===\")"
+  },
+  {
+    "file": "internal/PITCH_HANDOFF.md",
+    "line": 47,
+    "text": "  - Note: a web-app build is longer and has more moving parts — **pre-build it** and have the exact run command + a couple of browser screenshots ready. Don't build it live on stage."
+  },
+  {
+    "file": "internal/DEMO_SCRIPT.md",
+    "line": 88,
+    "text": "**Show the change:** open `step2_design.md` before/after — a new **Input validation** stage appears in the architecture (and it propagates downstream into the PM's task cards). Then approve:"
+  },
+  {
+    "file": "api/project_routers.py",
+    "line": 129,
+    "text": "    ``root`` selects \"dps\" (pipeline staging) or \"code\" (project code repo)."
+  },
+  {
+    "file": "api/project_routers.py",
+    "line": 327,
+    "text": "      - \"dps\"  (default): the pipeline staging workspace (step dirs 1/, 2/, ...)"
+  },
+  {
+    "file": "api/project_routers.py",
+    "line": 417,
+    "text": "    ``root`` selects \"dps\" (pipeline staging) or \"code\" (project code repo)."
+  },
+  {
+    "file": "api/project_routers.py",
+    "line": 647,
+    "text": "    \"\"\"Stage all changes and commit them.\"\"\""
+  },
+  {
+    "file": "api/dependencies.py",
+    "line": 44,
+    "text": "    (repo_apply commits the fix into the real repo), `from: repository` context,"
+  },
+  {
+    "file": "api/dependencies.py",
+    "line": 306,
+    "text": "                     # step just wrote is in the step's STAGING dir, reported"
+  },
+  {
+    "file": "api/meta_routers.py",
+    "line": 559,
+    "text": "    `restage`'s skip-list — and NO writer anywhere; `find` over a live workspace"
+  },
+  {
+    "file": "core/prompt_assembler.py",
+    "line": 95,
+    "text": "    \"after a previous step's `repo_apply`).\\n\""
+  },
+  {
+    "file": "core/prompt_assembler.py",
+    "line": 96,
+    "text": "    \"2. **Step staging (`.tmp`)** — files you just wrote via `write_*` \""
+  },
+  {
+    "file": "core/prompt_assembler.py",
+    "line": 101,
+    "text": "    \"completes, its staging REPLACES this directory wholesale. Anything \""
+  },
+  {
+    "file": "core/prompt_assembler.py",
+    "line": 102,
+    "text": "    \"you do not write into staging this run is DELETED, even though you \""
+  },
+  {
+    "file": "core/prompt_assembler.py",
+    "line": 107,
+    "text": "    \"project root → step staging → step output. \""
+  },
+  {
+    "file": "core/prompt_assembler.py",
+    "line": 110,
+    "text": "    \"will find your file in the staging directory even though it hasn't \""
+  },
+  {
+    "file": "core/prompt_assembler.py",
+    "line": 1007,
+    "text": "        # searches (it sees only staging + repo) — it answered \"File not found\""
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 45,
+    "text": "                 \"already in your repository baseline and its staged files are already in your staging \""
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 46,
+    "text": "                 \"(read them with the default `read`). Do not re-ground from scratch: read `relay.staged_files` \""
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 270,
+    "text": "        inventory: the run branch and its commits beyond base, and every staged"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 288,
+    "text": "        staged = {}"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 295,
+    "text": "            for tmp in sorted(config_dir.glob(\"*.tmp\")):"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 300,
+    "text": "                    staged[tmp.name[:-4]] = manifest"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 303,
+    "text": "                \"mainline_ahead_by\": behind, \"staged_files\": staged,"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 304,
+    "text": "                \"digest\": digest({\"head_sha\": head, \"staged_files\": staged}), \"error\": attempt.get(\"error\")}"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 308,
+    "text": "        request its branch head as the new worktree's base and park its staged"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 309,
+    "text": "        drafts where the engine seeds them into the new staging. The failed"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 310,
+    "text": "        attempt's own worktree and staging are never modified.\"\"\""
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 319,
+    "text": "            raise StateConflict(\"the failed attempt's branch or staged draft changed since it was read \""
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 327,
+    "text": "        for step, manifest in inventory[\"staged_files\"].items():"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 329,
+    "text": "                copied = self.ws.stage_relay_draft(prior_config / f\"{step}.tmp\", attempt[\"execution_project_id\"],"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 332,
+    "text": "                raise StateConflict(f\"the failed attempt's staged draft changed while being copied ({e}); \""
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 338,
+    "text": "                \"mainline_ahead_by\": inventory[\"mainline_ahead_by\"], \"staged_files\": parked,"
+  },
+  {
+    "file": "core/state_service.py",
+    "line": 429,
+    "text": "            # fresh attempt: the retained commits and staged files, by step."
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 71,
+    "text": "_OUTPUT_FIELDS = (\"mode\", \"fixed\", \"allow_full_write\", \"carry_forward\")"
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 137,
+    "text": "    \"repo_apply\", \"draft_commit\", \"git_sync_pre\", \"repo_validate\","
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 172,
+    "text": "      * a parsed StepNode flattens `output.{mode,fixed}` to `output_mode` /"
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 173,
+    "text": "        `output_fixed`; raw YAML keeps them nested under `output`;"
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 186,
+    "text": "    mode = getattr(step, \"output_mode\", None) or out.get(\"mode\") or \"\""
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 189,
+    "text": "    fixed = getattr(step, \"output_fixed\", None)"
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 231,
+    "text": "    (repo_apply against a nonexistent repo) while guessing \"code\" wrongly only"
+  },
+  {
+    "file": "core/pipeline_registry.py",
+    "line": 771,
+    "text": "    tmp = f.with_suffix(f\".yaml.{_os.getpid()}.tmp\")"
+  },
+  {
+    "file": "core/state_driver_guide.py",
+    "line": 32,
+    "text": "- A failed SkillFlow attempt that died on its turn/output budget keeps its run branch and staged draft; reconcile_attempt/get_attempt report them as relay_inventory (every staged file with its sha256, plus a `digest` over branch head + manifest). After READING that draft, start_attempt with continue_from=<failed attempt id> and relay_digest=<that digest> (required; same node, revision, contract, dependencies and workflow) bases the new worktree on that branch head and seeds the staged files into the new staging, so the agent finishes instead of re-grounding; only the listed files are copied, and the relay is refused (and its reservation retired) if anything differs from the digest you read — re-read and start again. Never relay a draft you have not inspected; a wrong draft is restarted, not continued."
+  },
+  {
+    "file": "core/state_attempts.py",
+    "line": 216,
+    "text": "        \"\"\"Freeze what the relay actually inherited (base, commits, staged"
+  },
+  {
+    "file": "core/state_migration.py",
+    "line": 1,
+    "text": "\"\"\"Migration preparation: validate a manifest and stage ONLY a held shadow graph."
+  },
+  {
+    "file": "core/state_migration.py",
+    "line": 156,
+    "text": "def stage_shadow(service, value: dict) -> dict:"
+  },
+  {
+    "file": "core/state_migration.py",
+    "line": 160,
+    "text": "    Completed identical staging is idempotent and refuses later manual changes."
+  },
+  {
+    "file": "core/state_migration.py",
+    "line": 174,
+    "text": "            raise StateConflict(\"manifest or staged project changed; a new review is required\")"
+  },
+  {
+    "file": "core/state_migration.py",
+    "line": 211,
+    "text": "        first=stage_shadow(service,bundle)"
+  },
+  {
+    "file": "core/state_migration.py",
+    "line": 212,
+    "text": "        second=stage_shadow(service,bundle)"
+  },
+  {
+    "file": "core/model_registry.py",
+    "line": 83,
+    "text": "    fd, tmp = tempfile.mkstemp(dir=str(_REPO_ROOT), prefix=f\".{name}.\", suffix=\".tmp\")"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 33,
+    "text": "* first publication stages into a UNIQUE ``<config>/_seed.<uuid>.tmp/`` —"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 35,
+    "text": "  any child of the config directory whose name ends in ``.tmp`` — writes"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 47,
+    "text": "The unique staging directory is what makes two concurrent publishers safe: they"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 74,
+    "text": "STAGING_SUFFIX = \".tmp\"          # skillflow's context resolver skips *.tmp"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 100,
+    "text": "    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=\".tmp-\","
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 153,
+    "text": "    staging = directory.with_name("
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 154,
+    "text": "        f\"{directory.name}.{uuid.uuid4().hex}{STAGING_SUFFIX}\")"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 155,
+    "text": "    staging.mkdir(parents=True)"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 157,
+    "text": "        _atomic_write(staging / name, content)"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 159,
+    "text": "    _atomic_write(staging / MARKER, json.dumps("
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 173,
+    "text": "        os.rename(staging, directory)"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 175,
+    "text": "        # A concurrent publisher won the race. Unique staging means we have"
+  },
+  {
+    "file": "core/seed_publication.py",
+    "line": 177,
+    "text": "        shutil.rmtree(staging, ignore_errors=True)"
+  },
+  {
+    "file": "core/scheduler.py",
+    "line": 858,
+    "text": "        # owner PROCESS ended, and the contract is about EFFECTS. `repo_apply`"
+  },
+  {
+    "file": "core/run_launcher.py",
+    "line": 173,
+    "text": "        repo read layer, and dies at the first ``on_deliver: repo_apply`` — while"
+  },
+  {
+    "file": "core/run_driver.py",
+    "line": 69,
+    "text": "    staged — when its driver went away. The step sat claimed for 80+ minutes"
+  },
+  {
+    "file": "core/state_commands.py",
+    "line": 98,
+    "text": "    # the new run's base and its staged draft is seeded into the new staging."
+  },
+  {
+    "file": "core/state_commands.py",
+    "line": 103,
+    "text": "    # continue_from. The relay is refused if the branch head or any staged"
+  },
+  {
+    "file": "core/meta_agent.py",
+    "line": 205,
+    "text": "user wants a cross-cutting GATE or STAGE layered onto an *existing base pipeline* \\"
+  },
+  {
+    "file": "core/meta_agent.py",
+    "line": 207,
+    "text": "review stage — call generate_addon(description=<the capability>, base=<base \\"
+  },
+  {
+    "file": "core/meta_agent.py",
+    "line": 701,
+    "text": "                           \"cross-cutting stage layered onto an existing pipeline (an engine \""
+  },
+  {
+    "file": "core/meta_agent.py",
+    "line": 703,
+    "text": "                           \"review stage) — NOT for a standalone pipeline (use generate_pipeline) \""
+  },
+  {
+    "file": "core/meta_agent.py",
+    "line": 3485,
+    "text": "    # (same jail as read_code_file — no staging dir, no AT-9 'project/' strip,"
+  },
+  {
+    "file": "core/meta_agent.py",
+    "line": 4809,
+    "text": "                        f\"is gone does not prove its effects stopped (repo_apply \""
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 1793,
+    "text": "                        # even though it left no file in staging (repo_remove_file, a"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 1824,
+    "text": "                    # though this step's staging was empty). The agent was never"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 1867,
+    "text": "                # not to a file in staging — a queued deletion, a durable state"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 1925,
+    "text": "            # lifecycle hooks (after_validate → draft_promote) in confirm_step()."
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2128,
+    "text": "                        # even though it left no file in staging (repo_remove_file, a"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2159,
+    "text": "                    # though this step's staging was empty). The agent was never"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2192,
+    "text": "                # not to a file in staging — a queued deletion, a durable state"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2233,
+    "text": "                draft_dir = project_path / DPE_GRAPH_NAME / f\"{step_id}.tmp\""
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2234,
+    "text": "                draft_dir.mkdir(parents=True, exist_ok=True)"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2237,
+    "text": "                        fpath = draft_dir / fname"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2243,
+    "text": "            # lifecycle hooks (after_validate → draft_promote) in confirm_step()."
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2315,
+    "text": "    # file in this step's staging. A deletion is real output; so is a durable"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2326,
+    "text": "        Separate from `_written_name` on purpose: a step's staging can be empty"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2354,
+    "text": "        # Reset this step's draft staging at the start of the run, aligned with"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2357,
+    "text": "        # history) must not inherit a prior run's staged files, which the shared,"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2358,
+    "text": "        # never-cleared {step_id}.tmp would otherwise carry forward and commit"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2360,
+    "text": "        # re-clear, so they keep staging consistent with the inherited history."
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2362,
+    "text": "        # instance sent (prompt_delta, one row per message) and the staging"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2365,
+    "text": "        # staging dir only if every traced write is really there."
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2380,
+    "text": "            draft = workspace._draft_dir(project_id, step_id, self._draft_graph_name())"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2385,
+    "text": "                    \"missing_staged_files\": missing[:20]})"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2397,
+    "text": "            workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2399,
+    "text": "            # attempt's staged files under `_relay/<step>`; they go into the"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2400,
+    "text": "            # fresh staging HERE, after the wipe above, and the park is"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2410,
+    "text": "            if getattr(self, \"_carry_forward\", False):"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2415,
+    "text": "                draft = workspace._draft_dir(project_id, step_id, self._draft_graph_name())"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2532,
+    "text": "                staged = \", \".join(sorted(set(resume[\"written_files\"]))) or \"none\""
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2536,
+    "text": "                # \"you were restarted, your files are still staged\", so it"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2550,
+    "text": "                        f\"you had, and every file you wrote is still staged \""
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2551,
+    "text": "                        f\"({staged}) — but the step is NOT done. Do not re-issue \""
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2557,
+    "text": "                        f\"file you wrote is still staged ({staged}). Continue from \""
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 2607,
+    "text": "                    \"already staged, so re-verifying them only burns turns. Never end \""
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3063,
+    "text": "                        # with EMPTY output; repo_apply no-ops on it and"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3182,
+    "text": "                    # can change the repo without leaving a file in staging"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3184,
+    "text": "                    # state_written, repo_apply -> committed), and a delete"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3232,
+    "text": "                # edits (the triplicated-import bug). Empty staging promotes as a"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3233,
+    "text": "                # no-op and repo_apply (empty source) reports success."
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3262,
+    "text": "        (workspaces/<pid>/<graph>/<step>.tmp) so outputs land in the RUN's own"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3368,
+    "text": "                 carry_forward: bool = False) -> bool:"
+  },
+  {
+    "file": "core/dpe_pipeline.py",
+    "line": 3386,
+    "text": "        self._carry_forward = carry_forward"
+  },
+  {
+    "file": "core/baseline.py",
+    "line": 115,
+    "text": "    tmp = p.parent / f\"{p.name}.{os.getpid()}.tmp\""
+  },
+  {
+    "file": "core/run_isolation.py",
+    "line": 5,
+    "text": "checkout therefore both reach `repo_apply`, which copies its step output in and"
+  },
+  {
+    "file": "core/run_isolation.py",
+    "line": 6,
+    "text": "runs `git add -A`: whichever commits first stages the other run's files too,"
+  },
+  {
+    "file": "core/run_isolation.py",
+    "line": 496,
+    "text": "        # resolved to it with nothing refusing either, and `repo_apply` copies"
+  },
+  {
+    "file": "core/run_isolation.py",
+    "line": 499,
+    "text": "        # not the files. If the path is git-inited later, the full cross-staging"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 27,
+    "text": "# repo_apply with \"Unable to create '.git/index.lock'\" — a read-only endpoint"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 126,
+    "text": "    def _draft_dir(self, project_id: str, step_id: str,"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 128,
+    "text": "        \"\"\"Get tmp staging directory for a step ({step_id}.tmp).\"\"\""
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 129,
+    "text": "        return self._get_secure_path(project_id) / graph_name / f\"{step_id}.tmp\""
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 167,
+    "text": "        # in favor of {step_id}.tmp/ → {step_id}/. AItelier now follows"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 173,
+    "text": "            self._draft_dir(project_id, step_id, graph_name).mkdir(parents=True, exist_ok=True)"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 241,
+    "text": "        draft_dir = self._draft_dir(project_id, step_id, graph_name)"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 242,
+    "text": "        draft_path = draft_dir / filename"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 250,
+    "text": "        for getter in (self._draft_dir, self._final_dir):"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 256,
+    "text": "    def clean_draft_dir(self, project_id: str, step_id: str,"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 258,
+    "text": "        \"\"\"Clear ONLY the draft ({step_id}.tmp) staging for a step."
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 261,
+    "text": "        staging — otherwise files written by a prior task or a prior (failed)"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 262,
+    "text": "        attempt linger in the shared, never-cleared {step_id}.tmp and get"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 266,
+    "text": "        d = self._draft_dir(project_id, step_id, graph_name)"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 271,
+    "text": "    # ── Relay draft (continue a failed attempt's staged files) ─────────"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 273,
+    "text": "    # attempt's STAGED files, not only its commits. They are parked here at"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 274,
+    "text": "    # launch and moved into `{step}.tmp` by the engine AFTER `clean_draft_dir`"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 297,
+    "text": "    def stage_relay_draft(self, src_dir: Path, project_id: str, step_id: str,"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 299,
+    "text": "        \"\"\"Park a prior attempt's staged files for `step_id`, STRICTLY by"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 315,
+    "text": "                    raise RelayDraftChanged(f\"{step_id}: manifest path {rel!r} escapes the staging\")"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 333,
+    "text": "        \"\"\"Move a parked relay draft into the step's staging. Consumed once:"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 340,
+    "text": "        draft = self._draft_dir(project_id, step_id, graph_name)"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 528,
+    "text": "        just for the seconds `repo_apply` is committing — so these host APIs"
+  },
+  {
+    "file": "core/workspace_manager.py",
+    "line": 580,
+    "text": "        \"\"\"Stage all changes and commit. No-op (not an error) when clean.\"\"\""
+  },
+  {
+    "file": "core/capability_registry.py",
+    "line": 78,
+    "text": "    tmp = path.with_suffix(f\"{path.suffix}.{os.getpid()}.tmp\")"
+  },
+  {
+    "file": "agent_configs/dpe_default.yaml",
+    "line": 188,
+    "text": "  # one scenario in ~50s against its own staged edits), a task card is no longer"
+  },
+  {
+    "file": "agent_configs/dpe_default.yaml",
+    "line": 201,
+    "text": "  # ending each time, and repo_apply committed the placeholder scenario into"
+  },
+  {
+    "file": "agent_configs/dpe_default.yaml",
+    "line": 248,
+    "text": "  # is delivered by the step's on_deliver repo_apply. No custom readme_* tools — the"
+  },
+  {
+    "file": "docs/state-project-ui-migration.md",
+    "line": 179,
+    "text": "then stages the manifest in a TemporaryDirectory database. A successful second"
+  },
+  {
+    "file": "docs/state-project-ui-migration.md",
+    "line": 180,
+    "text": "staging of the identical manifest is idempotent; different input or modified"
+  },
+  {
+    "file": "docs/state-graph.md",
+    "line": 106,
+    "text": "run branch and its staged, unpromoted draft; `reconcile_attempt` and"
+  },
+  {
+    "file": "docs/state-graph.md",
+    "line": 107,
+    "text": "`get_attempt` report both as `relay_inventory`: every staged regular file"
+  },
+  {
+    "file": "docs/state-graph.md",
+    "line": 113,
+    "text": "staging on the step's first execution, and the seed carries a `relay` section so the agent finishes instead"
+  },
+  {
+    "file": "templates/step5_verifier.md",
+    "line": 48,
+    "text": "4. **产出文档**: 用 `create_readme` 写入项目交付文档 `README.md`（这是一个声明式内容输出，写入后由本步骤的 repo_apply 自动提交进**项目仓库**，反映本次交付的最终状态：项目简介、安装步骤、运行方法、关键接口/API 端点）："
+  },
+  {
+    "file": "templates/coding_impl.md",
+    "line": 15,
+    "text": "read, and its staged files (`relay.staged_files`) are already in your staging —"
+  },
+  {
+    "file": "templates/coding_impl.md",
+    "line": 38,
+    "text": "Edits write to this step's **staging**, not directly to the repository. Use the"
+  },
+  {
+    "file": "templates/coding_impl.md",
+    "line": 39,
+    "text": "same repo-relative `file` throughout; do not prepend `implement/` or `.tmp/`"
+  },
+  {
+    "file": "templates/coding_impl.md",
+    "line": 40,
+    "text": "from a tool's output path. Default `read(path=...)` sees your latest staged"
+  },
+  {
+    "file": "templates/coding_impl.md",
+    "line": 47,
+    "text": "edit means the staged content changed, not that a Git commit or test passed."
+  },
+  {
+    "file": "templates/coding_impl.md",
+    "line": 48,
+    "text": "Do not apply or commit staged files manually: this workflow's configured"
+  },
+  {
+    "file": "templates/coding_impl.md",
+    "line": 49,
+    "text": "promotion and `repo_apply` handle delivery after `finish_step`."
+  },
+  {
+    "file": "templates/forge_explain.md",
+    "line": 14,
+    "text": "2. **The stages** — a short numbered list of the nodes and how they connect"
+  },
+  {
+    "file": "templates/forge_tool_impl.md",
+    "line": 33,
+    "text": "files you write live in the step's staging directory, and every runner resolves"
+  },
+  {
+    "file": "templates/forge_emit.md",
+    "line": 22,
+    "text": "  allow_full_write, and carry_forward. In particular, a planner that"
+  },
+  {
+    "file": "templates/forge_emit.md",
+    "line": 24,
+    "text": "  carry_forward: true; dropping it deletes untouched sibling files at promotion."
+  },
+  {
+    "file": "templates/forge_emit.md",
+    "line": 37,
+    "text": "> this attempt's staging directory onto it, so anything you do not write this time is"
+  },
+  {
+    "file": "templates/forge_emit.md",
+    "line": 71,
+    "text": "    validation_on_exhaustion: fail  # invalid staging never promotes or delivers"
+  },
+  {
+    "file": "templates/task_implementer.md",
+    "line": 50,
+    "text": "  - 只有确实需要整篇时才整篇读（很短的配置、你正要整体重写的文件）。`read` 默认读你的工作树：**你已 `edit`/`create` 的改动会被读到**（结果里的 `source` 字段会标明来自 `staging` 还是 `repo`）——所以改完不必反复回读去\"验证\"，`edit` 返回 `{\"edited\": …}` 即已生效。"
+  },
+  {
+    "file": "templates/forge_review_red.md",
+    "line": 38,
+    "text": "   `draft_commit`, `repo_apply`, any `verify_*`/`check_*` — if its failure is not"
+  },
+  {
+    "file": "templates/forge_review_red.md",
+    "line": 44,
+    "text": "   SkillFlow's compatibility default promotes invalid staging after retries are"
+  },
+  {
+    "file": "templates/forge_review_red.md",
+    "line": 45,
+    "text": "   exhausted, then runs delivery hooks such as `repo_apply`. Also block any maker"
+  },
+  {
+    "file": "templates/subagent_work.md",
+    "line": 35,
+    "text": "wrote** (the result's `source` field says `staging` vs `repo`). So: read a"
+  },
+  {
+    "file": "templates/subagent_work.md",
+    "line": 45,
+    "text": "is matched against your **already-edited** staged copy, so use the current"
+  },
+  {
+    "file": "templates/forge_architect.md",
+    "line": 60,
+    "text": "  staging after retries are spent and then runs delivery hooks; code must stop"
+  },
+  {
+    "file": "templates/forge_survey.md",
+    "line": 28,
+    "text": "2. **Phases** — the ordered stages the pipeline needs (maker→reviewer pairs,"
+  },
+  {
+    "file": "templates/game_designer.md",
+    "line": 50,
+    "text": "你有 `create` / `edit` 两个工具，落盘目录由引擎绑定，之后由 `repo_apply` 提交进"
+  },
+  {
+    "file": "configs/gen_coop_shell_ui60_20260907.yaml",
+    "line": 10,
+    "text": "# create/edit tools, repo_apply commits); run_tests then verifies."
+  },
+  {
+    "file": "configs/gen_coop_shell_ui60_20260907.yaml",
+    "line": 70,
+    "text": "      # that is how a plan-less agent got 95 s and a `repo_apply` on"
+  },
+  {
+    "file": "configs/gen_coop_shell_ui60_20260907.yaml",
+    "line": 83,
+    "text": "        # repo_apply stays HERE (before the test), not after it: run_tests"
+  },
+  {
+    "file": "configs/gen_coop_shell_ui60_20260907.yaml",
+    "line": 85,
+    "text": "        # be applied there for the tests to exercise them — and repo_apply has no"
+  },
+  {
+    "file": "configs/gen_coop_shell_ui60_20260907.yaml",
+    "line": 86,
+    "text": "        # stage-only mode (it always git-adds + commits). A failing test now"
+  },
+  {
+    "file": "configs/gen_coop_shell_ui60_20260907.yaml",
+    "line": 90,
+    "text": "        - tool: \"repo_apply\"        # stage + commit the step's files to the real repo"
+  },
+  {
+    "file": "configs/subagent.yaml",
+    "line": 71,
+    "text": "        - tool: \"repo_apply\""
+  },
+  {
+    "file": "configs/novel_chapter.yaml",
+    "line": 12,
+    "text": "#   → outline_review(Red) → outline_gate(CP#1 人讨论：restage 显示 Red 已审章纲)"
+  },
+  {
+    "file": "configs/novel_chapter.yaml",
+    "line": 135,
+    "text": "  # restage 把 outline 的章纲 + outline_review 的裁决摆进本步目录，弹窗显示 Red 已"
+  },
+  {
+    "file": "configs/novel_chapter.yaml",
+    "line": 140,
+    "text": "    tool_name: \"restage\""
+  },
+  {
+    "file": "configs/novel_chapter.yaml",
+    "line": 394,
+    "text": "  # restage 摆出：终稿正文 + 记账分录 + 审计裁决，一屏批完。"
+  },
+  {
+    "file": "configs/novel_chapter.yaml",
+    "line": 399,
+    "text": "    tool_name: \"restage\""
+  },
+  {
+    "file": "configs/coding_impl.yaml",
+    "line": 10,
+    "text": "# create/edit tools, repo_apply commits); run_tests then verifies."
+  },
+  {
+    "file": "configs/coding_impl.yaml",
+    "line": 69,
+    "text": "      # that is how a plan-less agent got 95 s and a `repo_apply` on"
+  },
+  {
+    "file": "configs/coding_impl.yaml",
+    "line": 82,
+    "text": "        # repo_apply stays HERE (before the test), not after it: run_tests"
+  },
+  {
+    "file": "configs/coding_impl.yaml",
+    "line": 84,
+    "text": "        # be applied there for the tests to exercise them — and repo_apply has no"
+  },
+  {
+    "file": "configs/coding_impl.yaml",
+    "line": 85,
+    "text": "        # stage-only mode (it always git-adds + commits). A failing test now"
+  },
+  {
+    "file": "configs/coding_impl.yaml",
+    "line": 89,
+    "text": "        - tool: \"repo_apply\"        # stage + commit the step's files to the real repo"
+  },
+  {
+    "file": "configs/novel_init.yaml",
+    "line": 78,
+    "text": "  # DPE 纪律（同 t_impl）：agent 自由写 novel/bible/ 各文件 → repo_apply 提交进"
+  },
+  {
+    "file": "configs/novel_init.yaml",
+    "line": 96,
+    "text": "        - tool: \"repo_apply\""
+  },
+  {
+    "file": "configs/novel_init.yaml",
+    "line": 137,
+    "text": "  # 本步自己目录里的文件，故用 restage 把设定摆进来：bible 从【repo】拷（那里是"
+  },
+  {
+    "file": "configs/novel_init.yaml",
+    "line": 142,
+    "text": "    tool_name: \"restage\""
+  },
+  {
+    "file": "configs/fix_tests.yaml",
+    "line": 55,
+    "text": "        - tool: \"repo_apply\""
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 4,
+    "text": "# Code integration is a `lifecycle: on_deliver` HOOK (repo_apply), never a node:"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 5,
+    "text": "# every repo_apply in this file hangs off a step's on_deliver, so the step that"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 143,
+    "text": "      # repo_apply, so its prior draft lives only in the step artifact dir —"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 243,
+    "text": "        tool: \"repo_apply\""
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 348,
+    "text": "      # describes staging and step output as layered for READING and says"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 351,
+    "text": "      # named them. carry_forward (skillflow >=1.5.44) seeds staging from this"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 354,
+    "text": "      carry_forward: true"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 362,
+    "text": "      # output.mode=content: promotion rmtree's the step dir and renames staging"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 364,
+    "text": "      # prompt describes staging and step output as LAYERED for reading and says"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 588,
+    "text": "    # returns {\"passed\": true, \"files\": []} for an empty staging dir, and the"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 647,
+    "text": "  #   on_deliver     → repo_apply (step_dir→project repo)"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 707,
+    "text": "    # it work: StepValidator defaults workspace_root to the step's staging dir,"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 735,
+    "text": "      # full variable resolution (needs skillflow-py >= 1.4.1). repo_apply"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 737,
+    "text": "      # never reaches the repo); repo_delete then reads _deletions.json from"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 740,
+    "text": "      # (repo_delete cannot live in after_deliver: that path runs through"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 743,
+    "text": "        - tool: \"repo_apply\""
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 749,
+    "text": "        - tool: \"repo_delete\""
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 752,
+    "text": "          # retry (not warn): a commit failure rolls back the staged git rm's and"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 762,
+    "text": "        # EARLIER task's file (which the staging-scoped validation cannot see)."
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 884,
+    "text": "    # into the resolved project repo by the on_deliver repo_apply below."
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 887,
+    "text": "    # bind-mounted at /app, and clobbered AItelier's own README. repo_apply"
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 914,
+    "text": "        tool: \"repo_apply\""
+  },
+  {
+    "file": "configs/dpe_default.yaml",
+    "line": 1047,
+    "text": "  # `repo_apply` committed this round's work locally task by task, long before"
+  },
+  {
+    "file": "aitelier/runner.py",
+    "line": 172,
+    "text": "                        carry_forward=bool((step.step_config.get('output') or {}).get('carry_forward', False)),"
+  },
+  {
+    "file": "aitelier/novel_state.py",
+    "line": 102,
+    "text": "        # Nothing staged (no changes) → skip the commit cleanly."
+  },
+  {
+    "file": "aitelier/novel_state.py",
+    "line": 103,
+    "text": "        staged = subprocess.run([\"git\", \"diff\", \"--cached\", \"--quiet\"], cwd=root)"
+  },
+  {
+    "file": "aitelier/novel_state.py",
+    "line": 104,
+    "text": "        if staged.returncode == 0:"
+  },
+  {
+    "file": "aitelier/novel_state.py",
+    "line": 349,
+    "text": "    \"\"\"Chapters this character has been ON STAGE in, per the reverse index."
+  },
+  {
+    "file": "aitelier/novel_state.py",
+    "line": 370,
+    "text": "    Live: chapter 5 wrote create:false for 王超, on stage since chapter 3 but"
+  },
+  {
+    "file": "design/pipeline_forge.md",
+    "line": 10,
+    "text": "**Modeled on:** `configs/dpe_default.yaml` — Green/Red maker–checker, manifest→loop fan-out, staged"
+  },
+  {
+    "file": "design/pipeline_forge.md",
+    "line": 44,
+    "text": "2. **Check semantics adversarially, then execute.** Green/Red agent pairs at each stage"
+  },
+  {
+    "file": "design/pipeline_forge.md",
+    "line": 219,
+    "text": "- **Staged write + `repo_apply`/register** for steps that mutate; validation gates promotion."
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 344,
+    "text": "The lookup always misses, so a generated pipeline whose agents reach `pytest`/`run_tests`/`repo_apply`"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 678,
+    "text": "| **S1, S2, S15** — resolve a tool by its own identity; stage → verify → swap; provenance + loud replace | `aitelier/tools/register_tool/impl.py` | new `tests/unit/test_register_tool.py` (15 tests); the two-item loop case fails without the fix |"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 872,
+    "text": "message: *\"dry-run smoke failed at `repo_apply_code`: no transition matched flags {applied: true}\"*."
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1068,
+    "text": "while validation checks the **fresh** `emit_graph.tmp/` staging dir, which starts empty on every attempt."
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1069,
+    "text": "So the emitter \"correctly\" concluded there was nothing to rewrite and shipped a staging dir with only"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1070,
+    "text": "templates in it. Same staging-vs-final confusion class as the earlier subagent read-thrash."
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1076,
+    "text": "own staging dir every attempt, because prior output is visible but not inherited. Cheaper and more"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1077,
+    "text": "general than a code change; the validation error itself could also name the staging dir as \"yours, and"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1190,
+    "text": "**3.1** `templates/forge_emit.md`: promotion **rmtree's the step dir and renames the staging dir onto it**"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1225,
+    "text": "| 3.1 | The staging-dir contract, stated | `templates/forge_emit.md` |"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1306,
+    "text": "`repo_apply` failure routed to a new `apply_failed` terminal, the redundant `run_tests_fallback`"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1332,
+    "text": "  The letter of the rule is satisfied and the fail-open is preserved: a `repo_apply` that never"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1345,
+    "text": "* `derive_repo_mode` → **`code`** (correct: repo_apply / run_tests / draft_commit),"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1863,
+    "text": "B1.tmp/pyproject.toml"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1864,
+    "text": "B1.tmp/src/word_freq/{__init__,__main__,server}.py"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 1871,
+    "text": "File not found: src (expected in .../B1.tmp). Files present: pyproject.toml"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2073,
+    "text": "was removed (the frontmatter is the authority for the skill's name; the staging"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2111,
+    "text": "   → B3 repo_apply ✓ (pyproject.toml + src/word_frequency/*)"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2113,
+    "text": "   → C2 review ✓ → C3 repo_apply ✓ (tests/test_tools.py, committed)"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2118,
+    "text": "writing files, a reviewer rejecting with feedback and the maker converging, `repo_apply`"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2210,
+    "text": "   → B3 repo_apply ✓ → C1 wrote_files (1 validation retry) → C2 …"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2282,
+    "text": "121  validation_failed    \"Nothing matching '*' was written. Directory is empty: …/C1.tmp\""
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2287,
+    "text": "step's own staging was empty. W1 delivered that error into `tool_results`."
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2495,
+    "text": "**Thirty steps, not one of which failed.** Every review passed, every `repo_apply`"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2550,
+    "text": "cannot fix, because it cannot check: the read tools are closures over the project root / step staging"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 2831,
+    "text": "closures over project root / step staging / step output, so `site-packages` is"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 3070,
+    "text": "root / staging / step output, so `site-packages` is unreachable by design. The"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 3120,
+    "text": "repo — `api/meta_routers.py`, `core/prompt_assembler.py`, and `restage`'s"
+  },
+  {
+    "file": "design/pipeline_generation_ux_test_2026-07-26.md",
+    "line": 3252,
+    "text": "who are in `by_character` but have no card (live: 李默, 周小雨 — on stage since"
+  },
+  {
+    "file": "design/architecture_diagram.md",
+    "line": 27,
+    "text": "        Tools[\"ToolLoader<br/>read_file / write / repo_apply<br/>repo_validate / syntax_lint<br/>py_compile / pytest / notify\"]"
+  },
+  {
+    "file": "design/architecture_diagram.md",
+    "line": 41,
+    "text": "        WS[\"Workspace Manager<br/>step staging dirs ({step}.tmp → {step})<br/>git event sourcing\"]"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 20,
+    "text": "│ • repo_apply, repo_validate                               │"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 297,
+    "text": "      # 写进 t_impl.tmp/"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 304,
+    "text": "    tool: \"repo_apply\""
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 305,
+    "text": "    # repo_apply: 将 t_impl.tmp/ 的文件"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 310,
+    "text": "      source_dir: \"t_impl.tmp\""
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 630,
+    "text": "├── repo_apply/               # 文件合入 repo"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 682,
+    "text": "# skillflow/tools/repo_apply/tool.yaml"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 683,
+    "text": "name: repo_apply"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 685,
+    "text": "  Apply files from the step staging dir to the project repository."
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 717,
+    "text": "# skillflow/tools/repo_apply/impl.py"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 718,
+    "text": "# Export: repo_apply  (function name must == tool name)"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 724,
+    "text": "def repo_apply(source_dir: str, *, workspace_root: str, project_root: str) -> dict:"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 918,
+    "text": "AItelier UI reads `the promoted step dir_{step_id}/` or `the step staging dir_{step_id}/` directory, displays all file contents."
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 929,
+    "text": "│   ├── meta.tmp/"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 938,
+    "text": "│   ├── 1_5.tmp/"
+  },
+  {
+    "file": "design/skillflow_v2_architecture.md",
+    "line": 1068,
+    "text": "      inputs: [\"chapter_summary.md\", \"write_chapter.tmp/*\"]"
+  },
+  {
+    "file": "scripts/replay_step.py",
+    "line": 142,
+    "text": "    # `_output_dir` is <workspace>/<config>/<step>.tmp — the workspace is two up."
+  },
+  {
+    "file": "scripts/replay_step.py",
+    "line": 205,
+    "text": "        \"already staged, so re-verifying them only burns turns. Never end \""
+  },
+  {
+    "file": "tests/browser/state_project_smoke.py",
+    "line": 81,
+    "text": "            from core.state_migration import read_manifest, verify_inputs, stage_shadow"
+  },
+  {
+    "file": "tests/browser/state_project_smoke.py",
+    "line": 84,
+    "text": "            stage_shadow(service, migration)"
+  },
+  {
+    "file": "tests/skillflow/test_runner.py",
+    "line": 40,
+    "text": "            \"output_mode\": \"content\","
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 62,
+    "text": "    calls = {\"run_tests\": 0, \"repo_apply\": 0}"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 76,
+    "text": "    def _repo_apply(*args, **kwargs):"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 77,
+    "text": "        calls[\"repo_apply\"] += 1"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 81,
+    "text": "    loader.register_dynamic_tool(\"repo_apply\", {}, _repo_apply)"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 86,
+    "text": "def _stage_one_file(sf, run_id, step_id):"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 89,
+    "text": "    an empty staging dir never advances.\"\"\""
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 90,
+    "text": "    tmp = Path(sf._workspace.get_step_tmp_dir("
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 98,
+    "text": "    confirm it with one staged file and empty flags (routing test)."
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 114,
+    "text": "        _stage_one_file(sf, run_id, claimed.step_id)"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 146,
+    "text": "    \"\"\"Real subagent graph; repo_apply stubbed; the objective `test` gate"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 152,
+    "text": "    calls = {\"repo_apply\": 0, \"review\": 0, \"run_tests\": 0}"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 155,
+    "text": "    def _repo_apply(*args, **kwargs):"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 156,
+    "text": "        calls[\"repo_apply\"] += 1"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 170,
+    "text": "    loader.register_dynamic_tool(\"repo_apply\", {}, _repo_apply)"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 189,
+    "text": "                _stage_one_file(sf, run_id, claimed.step_id)"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 194,
+    "text": "                tmp = sf._workspace.get_step_tmp_dir(\"p\", graph.name, \"review\")"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 287,
+    "text": "    assert inv.output_mode == \"content\"          # no create/edit derived"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 290,
+    "text": "        assert \"on_deliver\" not in hooks           # no repo_apply"
+  },
+  {
+    "file": "tests/skillflow/test_gated_pipelines.py",
+    "line": 311,
+    "text": "        tmp = sf._workspace.get_step_tmp_dir(\"p\", graph.name, \"review\")"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 15,
+    "text": "# first failing result; the \"fix\" is a later passing one), repo_apply is a no-op."
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 36,
+    "text": "    repo_apply. Returns (sf, run_id, calls).\"\"\""
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 45,
+    "text": "    calls = {\"run_tests\": 0, \"repo_apply\": 0}"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 70,
+    "text": "    def _repo_apply(*args, **kwargs):"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 71,
+    "text": "        calls[\"repo_apply\"] += 1"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 77,
+    "text": "    loader.register_dynamic_tool(\"repo_apply\", {}, _repo_apply)"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 123,
+    "text": "    empty result (routing test, no LLM), after staging one file so the step has"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 141,
+    "text": "        tmp = sf._workspace.get_step_tmp_dir(\"p\", sf.get_run(run_id)[\"graph_name\"],"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 167,
+    "text": "    assert calls[\"repo_apply\"] == 2       # each implement delivery committed"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 210,
+    "text": "    assert implement_runs == calls[\"run_tests\"] == calls[\"repo_apply\"] == 1"
+  },
+  {
+    "file": "tests/skillflow/test_coding_impl_gate.py",
+    "line": 260,
+    "text": "    assert calls[\"run_tests\"] == calls[\"repo_apply\"] == 1"
+  },
+  {
+    "file": "tests/integration/test_dpe_pipeline.py",
+    "line": 81,
+    "text": "    draft_dir = project_path / f\"{step_id}.tmp\""
+  },
+  {
+    "file": "tests/integration/test_dpe_pipeline.py",
+    "line": 82,
+    "text": "    draft_dir.mkdir(parents=True, exist_ok=True)"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 163,
+    "text": "    \"\"\"Staging directories are unique, so concurrent publishers never collide"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 191,
+    "text": "    assert not [p for p in d.parent.iterdir() if p.name.endswith(\".tmp\")], \\"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 192,
+    "text": "        \"a staging directory was left behind\""
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 518,
+    "text": "                              repo_path=str(live.tmp / \"projects\" / \"p1\"))"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 554,
+    "text": "                              repo_path=str(live.tmp / \"projects\" / \"p1\"))"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 601,
+    "text": "                             repo_path=str(live.tmp / \"projects\" / \"p1\"))"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 606,
+    "text": "                              repo_path=str(live.tmp / \"projects\" / \"p1\"))"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 625,
+    "text": "                         repo_path=str(live.tmp / \"projects\" / \"p1\"))"
+  },
+  {
+    "file": "tests/integration/test_seed_before_scheduling.py",
+    "line": 628,
+    "text": "                         repo_path=str(live.tmp / \"projects\" / \"p1\"))"
+  },
+  {
+    "file": "tests/integration/test_agent_routers.py",
+    "line": 32,
+    "text": "class TestAgentChatEndpoint:"
+  },
+  {
+    "file": "tests/integration/test_full_pipeline_real_runner.py",
+    "line": 6,
+    "text": "# (lint / pytest / repo_apply / git) faked. Mocked agents return instantly, so"
+  },
+  {
+    "file": "tests/integration/test_full_pipeline_real_runner.py",
+    "line": 40,
+    "text": "def _stub_repo_apply(*args, **kwargs):"
+  },
+  {
+    "file": "tests/integration/test_full_pipeline_real_runner.py",
+    "line": 59,
+    "text": "    # repo_apply=git, git_sync_pre=git) with instant-pass stubs."
+  },
+  {
+    "file": "tests/integration/test_full_pipeline_real_runner.py",
+    "line": 62,
+    "text": "    loader.register_dynamic_tool(\"repo_apply\", {}, _stub_repo_apply)"
+  },
+  {
+    "file": "tests/integration/test_state_portfolio.py",
+    "line": 113,
+    "text": "    repo = make_repo(live.tmp / \"repo\")"
+  },
+  {
+    "file": "tests/integration/test_state_portfolio.py",
+    "line": 125,
+    "text": "    repo = make_repo(live.tmp / \"repo\")"
+  },
+  {
+    "file": "tests/integration/test_state_portfolio.py",
+    "line": 132,
+    "text": "        live.service.attempts.pin_host_contract(a[\"attempt_id\"], {\"source_repo\": str(live.tmp / \"other\"), \"seed_file\": \"plan.md\","
+  },
+  {
+    "file": "tests/integration/test_new_pipelines_mocked_agent.py",
+    "line": 10,
+    "text": "# Env-dependent leaf tools (run_tests / repo_apply / lint) are stubbed to pass"
+  },
+  {
+    "file": "tests/integration/test_new_pipelines_mocked_agent.py",
+    "line": 46,
+    "text": "def _stub_repo_apply(*a, **k):"
+  },
+  {
+    "file": "tests/integration/test_new_pipelines_mocked_agent.py",
+    "line": 61,
+    "text": "    loader.register_dynamic_tool(\"repo_apply\", {}, _stub_repo_apply)"
+  },
+  {
+    "file": "tests/integration/test_workspace_manager_fs.py",
+    "line": 28,
+    "text": "    # Inbox 目录已废弃 — skillflow 已迁移至 {step_id}.tmp/ → {step_id}/"
+  },
+  {
+    "file": "tests/integration/test_workspace_manager_fs.py",
+    "line": 34,
+    "text": "        for suffix in [\".tmp\", \"\"]:"
+  },
+  {
+    "file": "tests/integration/test_workspace_manager_fs.py",
+    "line": 46,
+    "text": "    \"\"\"测试 Draft 写入（使用 skillflow 布局 {step_id}.tmp）\"\"\""
+  },
+  {
+    "file": "tests/integration/test_workspace_manager_fs.py",
+    "line": 55,
+    "text": "    # 写入 Draft (uses {step_id}.tmp under graph_name)"
+  },
+  {
+    "file": "tests/integration/test_workspace_manager_fs.py",
+    "line": 57,
+    "text": "    assert (proj_path / \"dpe_default_v2\" / \"1.tmp\" / \"output.py\").exists()"
+  },
+  {
+    "file": "tests/integration/test_workspace_manager_fs.py",
+    "line": 61,
+    "text": "    assert (proj_path / \"dpe_default_v2\" / \"1.tmp\" / \"report.json\").exists()"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 31,
+    "text": " draft=ws._draft_dir('p','a','revision');draft.mkdir(parents=True,exist_ok=True);(draft/'stale.json').write_text('unpromoted garbage')"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 38,
+    "text": " return e.run_step(task_id=1,step_id='a',workspace=w,project_id='p',agent_config_name='pm',run_id=rid,step_instance_id=new.token.step_instance_id,claim_epoch=new.token.claim_epoch,output_dir=str(d),carry_forward=True,resolved_context=new.inputs['_resolved_context'],tool_schemas={'read_file':{},'edit':{}})"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 40,
+    "text": "def test_fresh_budget_and_promoted_carry_forward(revision):"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 97,
+    "text": "async def test_real_runner_forwards_carry_forward(revision,monkeypatch):"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 100,
+    "text": " new.step_config['output']={'carry_forward':True}"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 107,
+    "text": " assert called[0]['carry_forward'] is True"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 112,
+    "text": "def test_missing_carry_forward_control(revision):"
+  },
+  {
+    "file": "tests/integration/test_explicit_revision.py",
+    "line": 120,
+    "text": " assert e.run_step(task_id=1,step_id='a',workspace=w,project_id='p',agent_config_name='pm',run_id=rid,step_instance_id=new.token.step_instance_id,output_dir=str(d),carry_forward=False,tool_schemas={'read_file':{}})"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 38,
+    "text": "    def clean_draft_dir(self, project_id, step_id, graph_name=None):"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 39,
+    "text": "        # Reset this step's recorded staging (called at the start of a run)."
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 47,
+    "text": "    (tmp / project_id / f\"{step_id}.tmp\").mkdir(parents=True, exist_ok=True)"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 145,
+    "text": "    It used to say only \"you were restarted, your files are still staged\", so"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 164,
+    "text": "    # The resume is only honoured when every file it claims is really staged."
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 166,
+    "text": "    ws._draft_dir = lambda pid, step, graph: draft"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 183,
+    "text": "        \"only that its files are staged concludes nothing failed\")"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 204,
+    "text": "    ws._draft_dir = lambda pid, step, graph: draft"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 539,
+    "text": "    draft = tmp_path / \"default\" / \"t_impl.tmp\" / \"partial.gd\""
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 603,
+    "text": "        StepNode(id=\"t_impl\", step_type=\"agent\", lifecycle={\"on_deliver\": {\"tool\": \"repo_apply\"}}, transitions=[Transition(to=\"test\")]),"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 642,
+    "text": "    ws._draft_dir = lambda *_args: draft.parent"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 643,
+    "text": "    ws.clean_draft_dir = MagicMock(wraps=ws.clean_draft_dir)"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 648,
+    "text": "    ws.clean_draft_dir.assert_not_called()"
+  },
+  {
+    "file": "tests/integration/test_native_parity.py",
+    "line": 690,
+    "text": "        StepNode(id=\"t_impl\", step_type=\"agent\", lifecycle={\"on_deliver\": {\"tool\": \"repo_apply\"}}, transitions=[Transition(to=\"test\")]),"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 6,
+    "text": "writes at launch, real `git worktree`s, the real `repo_apply` on both sides, and"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 8,
+    "text": "cross-staging defect exists."
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 65,
+    "text": "            id=\"s1\", step_type=\"agent\", output_mode=\"content\","
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 66,
+    "text": "            output_fixed={\"out\": \"out.txt\"},"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 67,
+    "text": "            lifecycle={\"on_deliver\": {\"tool\": \"repo_apply\","
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 96,
+    "text": "def _stage(sf, pid, filename, content):"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 101,
+    "text": "    (sf._workspace.get_step_tmp_dir(pid, \"apply\", \"s1\") / filename"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 109,
+    "text": "    rid_a, tok_a = _stage(sf, \"pA\", \"a.txt\", \"A\\n\")"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 112,
+    "text": "    rid_b, tok_b = _stage(sf, \"pB\", \"b.txt\", \"B\\n\")"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 120,
+    "text": "    import skillflow.tools.repo_apply.impl as apply_impl"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 141,
+    "text": "def test_the_same_two_runs_cross_stage_without_isolation(stack, monkeypatch):"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 148,
+    "text": "    rid_a, tok_a = _stage(sf, \"pA\", \"a.txt\", \"A\\n\")"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 149,
+    "text": "    rid_b, tok_b = _stage(sf, \"pB\", \"b.txt\", \"B\\n\")"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 151,
+    "text": "    import skillflow.tools.repo_apply.impl as apply_impl"
+  },
+  {
+    "file": "tests/integration/test_two_runs_one_repo_isolated.py",
+    "line": 161,
+    "text": "        f\"the control did not reproduce cross-staging: {touched}\")"
+  },
+  {
+    "file": "tests/integration/test_workspace_manager_git.py",
+    "line": 22,
+    "text": "    # (commit_step / apply_final_to_project 已废弃 — skillflow 通过 repo_apply 处理)"
+  },
+  {
+    "file": "tests/integration/test_state_graph_entrypoints.py",
+    "line": 104,
+    "text": "    report = live.tmp / (attempt[\"node_key\"] + \"-\" + check + \".json\")"
+  },
+  {
+    "file": "tests/integration/test_state_graph_entrypoints.py",
+    "line": 353,
+    "text": "    outside = live.tmp / \"outside.txt\""
+  },
+  {
+    "file": "tests/integration/test_state_graph_entrypoints.py",
+    "line": 363,
+    "text": "    repo = live.tmp / \"source\""
+  },
+  {
+    "file": "tests/integration/test_state_graph_entrypoints.py",
+    "line": 481,
+    "text": "    report = live.tmp / \"demo-result.json\""
+  },
+  {
+    "file": "tests/integration/test_state_graph_entrypoints.py",
+    "line": 499,
+    "text": "    monkeypatch.setattr(run_isolation, \"resolve_for_resolver\", lambda *_: str(live.tmp))"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 307,
+    "text": "                \"carry_forward\": True,"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 339,
+    "text": "        \"carry_forward\": True,"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 342,
+    "text": "    assert node.output_mode == \"content\""
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 343,
+    "text": "    assert node.output_fixed == {\"task\": {\"file\": \"tasks/*.json\"}}"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 345,
+    "text": "    assert node.output_carry_forward is True"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 399,
+    "text": "    {\"step_type\": \"tool\", \"tool_name\": \"repo_apply\", \"agent_config\": \"\"},"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 410,
+    "text": "    graph, roles = _graph_with({}, {\"processor\": {\"tools\": [\"read_file\", \"repo_apply\"]}})"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 417,
+    "text": "    entirely — a pipeline whose agents get pytest/repo_apply via their role would be"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 420,
+    "text": "    roles = {\"gen_probe__processor\": {\"tools\": [\"read_file\", \"repo_apply\"]}}"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 622,
+    "text": "        validation = {\"tool\": \"repo_apply\", \"files\": [\"x.py\"]}   # mapping, not list"
+  },
+  {
+    "file": "tests/unit/test_pipeline_registry.py",
+    "line": 636,
+    "text": "        validation = [\"garbage\", None, {\"tool\": \"repo_apply\"}]"
+  },
+  {
+    "file": "tests/unit/test_step_tool_constraints.py",
+    "line": 64,
+    "text": "    if node.output_mode and node.output_fixed:"
+  },
+  {
+    "file": "tests/unit/test_step_tool_constraints.py",
+    "line": 65,
+    "text": "        for ws in generate_write_tool_schemas(node.output_mode, node.output_fixed):"
+  },
+  {
+    "file": "tests/unit/test_step_tool_constraints.py",
+    "line": 77,
+    "text": "    # generated write tool (path bound to the step staging dir) and delivered to"
+  },
+  {
+    "file": "tests/unit/test_step_tool_constraints.py",
+    "line": 78,
+    "text": "    # the resolved project repo by step 5's on_deliver:repo_apply. Step 3 has no"
+  },
+  {
+    "file": "tests/unit/test_step_tool_constraints.py",
+    "line": 79,
+    "text": "    # repo_apply, so it emits only its task files."
+  },
+  {
+    "file": "tests/unit/test_register_tool.py",
+    "line": 124,
+    "text": "    \"\"\"Stage → verify → swap: a bad rebuild must not destroy what already works.\"\"\""
+  },
+  {
+    "file": "tests/unit/test_register_tool.py",
+    "line": 137,
+    "text": "def test_staging_is_cleaned_up_and_never_visible(tmp_path, gen_dir):"
+  },
+  {
+    "file": "tests/unit/test_register_tool.py",
+    "line": 141,
+    "text": "    assert not (gen_dir.parent / \".tool_staging\" / \"alpha_tool\").exists()"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 3,
+    "text": "  repo_delete  — deliver hook: git rm the queued paths + commit + clear manifest"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 16,
+    "text": "from aitelier.tools.repo_delete.impl import repo_delete"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 44,
+    "text": "        nested = tmp_path / \"x\" / \"y.tmp\""
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 55,
+    "text": "    def _draft_dir(self, project_id, step_id, graph_name=None):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 56,
+    "text": "        return self.root / project_id / (graph_name or \"g\") / f\"{step_id}.tmp\""
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 76,
+    "text": "    manifest = ws._draft_dir(\"proj1\", \"t_impl\", \"dpe_default_v2\") / \"_deletions.json\""
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 93,
+    "text": "# ── repo_delete: apply the manifest against a real git repo ─────────────────"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 108,
+    "text": "def test_repo_delete_git_rms_commits_and_clears(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 119,
+    "text": "    r = repo_delete(source_dir=str(step), project_root=str(repo),"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 133,
+    "text": "def test_repo_delete_skips_a_path_the_step_delivered(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 148,
+    "text": "    r = repo_delete(source_dir=str(step), project_root=str(repo),"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 157,
+    "text": "def test_repo_remove_file_refuses_a_path_present_in_staging(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 159,
+    "text": "    draft = ws._draft_dir(\"proj1\", \"t_impl\")"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 165,
+    "text": "    assert \"staging output\" in r[\"error\"]"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 169,
+    "text": "def test_repo_delete_noop_when_no_manifest(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 173,
+    "text": "    r = repo_delete(source_dir=str(step), project_root=str(repo))"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 177,
+    "text": "def test_repo_delete_noop_on_empty_manifest(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 182,
+    "text": "    r = repo_delete(source_dir=str(step), project_root=str(repo))"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 187,
+    "text": "def test_repo_delete_skips_unsafe_and_missing(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 196,
+    "text": "    r = repo_delete(source_dir=str(step), project_root=str(repo))"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 204,
+    "text": "def test_repo_delete_rolls_back_and_keeps_manifest_on_commit_failure(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 205,
+    "text": "    \"\"\"A commit failure must NOT strand a staged deletion (for the next"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 206,
+    "text": "    repo_apply `git add -A` to fold in) or lose the manifest: roll the git rm"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 223,
+    "text": "    r = repo_delete(source_dir=str(step), project_root=str(repo), step_id=\"t_impl\")"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 227,
+    "text": "    # Rolled back: the file is restored, and nothing is left staged for a later"
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 232,
+    "text": "    assert \"old.js\" not in status, f\"staged deletion left dangling:\\n{status}\""
+  },
+  {
+    "file": "tests/unit/test_delete_tools.py",
+    "line": 238,
+    "text": "    r2 = repo_delete(source_dir=str(step), project_root=str(repo), step_id=\"t_impl\")"
+  },
+  {
+    "file": "tests/unit/test_create_flag_teaches.py",
+    "line": 3,
+    "text": "Live failure: chapter 5 wrote `create: false` for 王超, who had been on stage"
+  },
+  {
+    "file": "tests/unit/test_run_isolation.py",
+    "line": 296,
+    "text": "    \"\"\"The lease is not a repo_apply lock. An operator committing through the"
+  },
+  {
+    "file": "tests/unit/test_force_all_agent_models.py",
+    "line": 57,
+    "text": "class TestAgentFactory:"
+  },
+  {
+    "file": "tests/unit/test_gdscript_check_tool.py",
+    "line": 18,
+    "text": "def test_paths_are_reported_relative_to_the_staging_root(tmp_path, monkeypatch):"
+  },
+  {
+    "file": "tests/unit/test_no_by_name_graph_lookup_during_a_run.py",
+    "line": 4,
+    "text": "plugin's staging contract, `_get_checkpoint_info` (which decides which step a"
+  },
+  {
+    "file": "tests/unit/test_config_graph_integrity.py",
+    "line": 175,
+    "text": "# `_step_commit` returns {\"passed\": True, \"files\": []} for an empty staging dir"
+  },
+  {
+    "file": "tests/unit/test_config_graph_integrity.py",
+    "line": 177,
+    "text": "# `output_mode == \"write\"`, which none of these content-mode steps is. So a"
+  },
+  {
+    "file": "tests/unit/test_config_graph_integrity.py",
+    "line": 199,
+    "text": "        f\"{step} declares no validation for {required_file}: an empty staging dir \""
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 1,
+    "text": "\"\"\"A relayed State attempt inherits a failed attempt's commits AND staged draft."
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 4,
+    "text": "turn/output budget with a draft retained in `implement.tmp/` that the next"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 60,
+    "text": "    \"\"\"A real failed run: one commit on its branch, one file left in staging.\"\"\""
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 86,
+    "text": "    assert inv[\"staged_files\"] == {\"implementation\": {\"half.py\": _sha(\"HALF = 1\\n\")}}"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 97,
+    "text": "    \"\"\"A symlink in staging is neither listed nor copied — a link to a directory"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 98,
+    "text": "    outside the staging used to be FOLLOWED by copytree while the inventory hid it.\"\"\""
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 101,
+    "text": "    staging = ws._draft_dir(a[\"execution_project_id\"], \"implementation\", \"feature\")"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 104,
+    "text": "    (outside / \"secret.txt\").write_text(\"not staged\\n\")"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 105,
+    "text": "    (staging / \"linked_dir\").symlink_to(outside, target_is_directory=True)"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 106,
+    "text": "    (staging / \"linked.py\").symlink_to(staging / \"half.py\")"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 107,
+    "text": "    (staging / \"sub\").mkdir()"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 108,
+    "text": "    (staging / \"sub\" / \"deep.py\").write_text(\"DEEP = 1\\n\")"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 111,
+    "text": "    assert inv[\"staged_files\"] == {\"implementation\": {\"half.py\": _sha(\"HALF = 1\\n\"), \"sub/deep.py\": _sha(\"DEEP = 1\\n\")}}"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 118,
+    "text": "    assert relay[\"staged_files\"] == inv[\"staged_files\"] and relay[\"digest\"] == inv[\"digest\"]"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 147,
+    "text": "    \"\"\"stage_relay_draft copies by manifest and refuses a file whose bytes differ.\"\"\""
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 150,
+    "text": "    src = tmp_path / \"stage\""
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 157,
+    "text": "        ws.stage_relay_draft(src, \"p\", \"implementation\", \"feature\", manifest=manifest)"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 160,
+    "text": "        ws.stage_relay_draft(src, \"p\", \"implementation\", \"feature\", manifest={\"gone.py\": manifest[\"a.py\"]})"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 162,
+    "text": "        ws.stage_relay_draft(src, \"p\", \"implementation\", \"feature\", manifest={\"../a.py\": manifest[\"a.py\"]})"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 173,
+    "text": "    assert relay[\"staged_files\"] == {\"implementation\": {\"half.py\": _sha(\"HALF = 1\\n\")}}"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 176,
+    "text": "    # The failed attempt's own staging is untouched — it stays evidence."
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 177,
+    "text": "    assert (ws._draft_dir(a[\"execution_project_id\"], \"implementation\", \"feature\") / \"half.py\").exists()"
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 188,
+    "text": "    # The engine seeds the draft into the fresh staging exactly once."
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 190,
+    "text": "    assert (ws._draft_dir(pid, \"implementation\", \"feature\") / \"half.py\").read_text() == \"HALF = 1\\n\""
+  },
+  {
+    "file": "tests/unit/test_state_relay.py",
+    "line": 192,
+    "text": "    ws.clean_draft_dir(pid, \"implementation\", \"feature\")"
+  },
+  {
+    "file": "tests/unit/test_repeat_read_is_a_recall.py",
+    "line": 29,
+    "text": "    \"unity_playtest\", \"repo_apply\", \"repo_delete\", \"repo_remove_file\","
+  },
+  {
+    "file": "tests/unit/test_repeat_read_is_a_recall.py",
+    "line": 30,
+    "text": "    \"write\", \"test_write\", \"restage\", \"apply_state\", \"scaffold\","
+  },
+  {
+    "file": "tests/unit/test_continuity_check.py",
+    "line": 47,
+    "text": "def _stage(tmp_path, *, prose: str | None = None, draft: str | None = None):"
+  },
+  {
+    "file": "tests/unit/test_continuity_check.py",
+    "line": 61,
+    "text": "    ws, out = _stage(tmp_path, **kw)"
+  },
+  {
+    "file": "tests/unit/test_continuity_check.py",
+    "line": 101,
+    "text": "    ws, out = _stage(tmp_path, prose=_chapter(), draft=None)"
+  },
+  {
+    "file": "tests/unit/test_continuity_check.py",
+    "line": 151,
+    "text": "    ws, _ = _stage(tmp_path, prose=_chapter(), draft=_chapter())"
+  },
+  {
+    "file": "tests/unit/test_addon_registry.py",
+    "line": 445,
+    "text": "    loader.register_dynamic_tool(\"repo_apply\", {}, apply_design)"
+  },
+  {
+    "file": "tests/unit/test_addon_registry.py",
+    "line": 460,
+    "text": "            staging = Path(sf._workspace.get_step_tmp_dir(\"p\", graph.name, \"5_design\"))"
+  },
+  {
+    "file": "tests/unit/test_addon_registry.py",
+    "line": 461,
+    "text": "            staging.mkdir(parents=True, exist_ok=True)"
+  },
+  {
+    "file": "tests/unit/test_addon_registry.py",
+    "line": 462,
+    "text": "            (staging / \"design.md\").write_text(\"design update\")"
+  },
+  {
+    "file": "tests/unit/test_loop_items_implemented.py",
+    "line": 34,
+    "text": "    r = loop_items_implemented(out_dir=str(g / \"5.tmp\"), config_name=\"dpe_game\")"
+  },
+  {
+    "file": "tests/unit/test_loop_items_implemented.py",
+    "line": 42,
+    "text": "    r = loop_items_implemented(out_dir=str(g / \"5.tmp\"), config_name=\"dpe_game\")"
+  },
+  {
+    "file": "tests/unit/test_loop_items_implemented.py",
+    "line": 52,
+    "text": "    r = loop_items_implemented(out_dir=str(g / \"5.tmp\"), config_name=\"dpe_game\")"
+  },
+  {
+    "file": "tests/unit/test_loop_items_implemented.py",
+    "line": 58,
+    "text": "    r = loop_items_implemented(out_dir=str(tmp_path / \"nope\" / \"5.tmp\"),"
+  },
+  {
+    "file": "tests/unit/test_loop_items_implemented.py",
+    "line": 68,
+    "text": "    r = loop_items_implemented(out_dir=str(graph / \"5.tmp\"), config_name=\"dpe_game\")"
+  },
+  {
+    "file": "tests/unit/test_loop_items_implemented.py",
+    "line": 78,
+    "text": "    r = loop_items_implemented(out_dir=str(graph / \"5.tmp\"), config_name=\"dpe_game\")"
+  },
+  {
+    "file": "tests/unit/test_loop_items_implemented.py",
+    "line": 86,
+    "text": "    r = loop_items_implemented(out_dir=str(g / \"5.tmp\"), config_name=\"dpe_game\")"
+  },
+  {
+    "file": "tests/unit/test_state_migration.py",
+    "line": 12,
+    "text": "from core.state_migration import dry_run, stage_shadow, validate_manifest, verify_inputs"
+  },
+  {
+    "file": "tests/unit/test_state_migration.py",
+    "line": 45,
+    "text": "    stage_shadow(svc,bundle)"
+  },
+  {
+    "file": "tests/unit/test_state_migration.py",
+    "line": 46,
+    "text": "    before=svc.store.events('preview');assert stage_shadow(svc,bundle)['idempotent'] is True"
+  },
+  {
+    "file": "tests/unit/test_state_migration.py",
+    "line": 49,
+    "text": "    with pytest.raises(StateConflict):stage_shadow(svc,changed)"
+  },
+  {
+    "file": "tests/unit/test_state_migration.py",
+    "line": 51,
+    "text": "    with pytest.raises(StateConflict):stage_shadow(svc,bundle)"
+  },
+  {
+    "file": "tests/unit/test_state_migration.py",
+    "line": 56,
+    "text": "    with pytest.raises(StateConflict,match='without a complete'):stage_shadow(svc,bundle)"
+  },
+  {
+    "file": "tests/unit/test_state_migration.py",
+    "line": 95,
+    "text": "    stage_shadow(svc,bundle)"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 8,
+    "text": "STAGED edits rather than the code they are replacing, and it surfaces `observed`"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 22,
+    "text": "    \"\"\"The probe stages its throwaway tree under the AItelier data dir. Never"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 101,
+    "text": "def test_it_playtests_the_staged_edits_not_the_repo(tmp_path, monkeypatch):"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 102,
+    "text": "    \"\"\"A t_impl agent's change lives in staging until on_deliver repo_apply."
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 106,
+    "text": "    staging = tmp_path / \"stage\""
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 107,
+    "text": "    (staging / \"scripts\").mkdir(parents=True)"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 108,
+    "text": "    (staging / \"scripts\" / \"combat.gd\").write_text(\"# NEW\\n\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 112,
+    "text": "                                  step_tmp_dir=str(staging), step_id=\"t_impl\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 115,
+    "text": "    assert out[\"staged_files_applied\"] == [\"scripts/combat.gd\"]"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 120,
+    "text": "def test_a_staged_SCENARIO_is_the_one_evaluated_not_the_repo_baseline(tmp_path,"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 122,
+    "text": "    \"\"\"Staging a scenario file must change the contract that gets evaluated."
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 125,
+    "text": "    repo while pointing project_dir at the overlaid tree ran the staged code"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 127,
+    "text": "    `staged_files_applied: [that scenario file]`. It only bites when the staged"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 129,
+    "text": "    stages a .gd, and code overlays worked fine."
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 132,
+    "text": "    \"the sidecar listed the staged file as applied but the evaluated assert"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 137,
+    "text": "    staging = tmp_path / \"stage\""
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 138,
+    "text": "    (staging / \"playtest\").mkdir(parents=True)"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 139,
+    "text": "    (staging / \"playtest\" / \"alpha.yaml\").write_text(yaml.safe_dump("
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 147,
+    "text": "                                  step_tmp_dir=str(staging), step_id=\"t_impl\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 149,
+    "text": "    assert out[\"staged_files_applied\"] == [\"playtest/alpha.yaml\"]"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 155,
+    "text": "        f\"claimed the staged one was applied: {row}\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 158,
+    "text": "def test_staged_overlay_carries_the_untouched_repo_files_too(tmp_path, monkeypatch):"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 161,
+    "text": "    staging = tmp_path / \"stage\""
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 162,
+    "text": "    (staging / \"scripts\").mkdir(parents=True)"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 163,
+    "text": "    (staging / \"scripts\" / \"combat.gd\").write_text(\"# NEW\\n\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 192,
+    "text": "                            step_tmp_dir=str(staging), step_id=\"t_impl\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 198,
+    "text": "    \"\"\"`_deletions.json` is a control file the step's repo_apply ignores; it is"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 201,
+    "text": "    staging = tmp_path / \"stage\""
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 202,
+    "text": "    staging.mkdir()"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 203,
+    "text": "    (staging / \"_deletions.json\").write_text(\"[]\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 207,
+    "text": "                                  step_tmp_dir=str(staging), step_id=\"t_impl\")"
+  },
+  {
+    "file": "tests/unit/test_godot_playtest_scenario.py",
+    "line": 208,
+    "text": "    assert out[\"staged_files_applied\"] == []"
+  },
+  {
+    "file": "tests/unit/test_prompt_assembler.py",
+    "line": 451,
+    "text": "    PROMOTED dir. `read` without `source=` searches only staging + repo, so the"
+  },
+  {
+    "file": "tests/unit/test_prompt_assembler.py",
+    "line": 552,
+    "text": "            \"description\": \"Read the latest staged content.\","
+  },
+  {
+    "file": "tests/unit/test_tasks_manifest_complete.py",
+    "line": 4,
+    "text": "`workspace_root` (set to the step's staging dir) plus the `files` list — the"
+  },
+  {
+    "file": "tests/unit/test_tasks_manifest_complete.py",
+    "line": 77,
+    "text": "    staging = tmp_path / \"ws\" / \"jinyong-r3b\" / \"dpe_game\" / \"3.tmp\""
+  },
+  {
+    "file": "tests/unit/test_tasks_manifest_complete.py",
+    "line": 78,
+    "text": "    staging.mkdir(parents=True)"
+  },
+  {
+    "file": "tests/unit/test_tasks_manifest_complete.py",
+    "line": 79,
+    "text": "    assert _project_id_of(staging) == \"jinyong-r3b\""
+  },
+  {
+    "file": "tests/unit/test_cancelled_driver_releases_its_claim.py",
+    "line": 12,
+    "text": "— `finish_step` returned completed and both outputs were staged — when its"
+  },
+  {
+    "file": "tests/unit/test_vision_handoff.py",
+    "line": 69,
+    "text": "    assert s[\"tool_name\"] == \"restage\""
+  },
+  {
+    "file": "tests/unit/test_vision_handoff.py",
+    "line": 130,
+    "text": "    5_vision_human crashed on `restage: out_dir not resolved (expected"
+  },
+  {
+    "file": "tests/unit/test_vision_handoff.py",
+    "line": 141,
+    "text": "        if s[\"tool_name\"] in (\"restage\", \"godot_vision\", \"godot_compile\","
+  },
+  {
+    "file": "tests/unit/test_novel_configs.py",
+    "line": 89,
+    "text": "    # The human checkpoint is on design_gate (a restage tool step), reject→design."
+  },
+  {
+    "file": "tests/unit/test_novel_configs.py",
+    "line": 92,
+    "text": "    assert gate.tool_name == \"restage\" and gate.checkpoint_reject_to == \"design\""
+  },
+  {
+    "file": "tests/unit/test_novel_configs.py",
+    "line": 117,
+    "text": "    assert gate.tool_name == \"restage\" and gate.checkpoint_reject_to == \"outline\""
+  },
+  {
+    "file": "tests/unit/test_novel_configs.py",
+    "line": 204,
+    "text": "    # of truth) → final_gate(human CP#2, restage prose+journal+verdict) →"
+  },
+  {
+    "file": "tests/unit/test_novel_configs.py",
+    "line": 234,
+    "text": "    assert gate.checkpoint is True and gate.tool_name == \"restage\""
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 60,
+    "text": "    \"repo_delete\",              # refuses a non-absolute project_root"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 61,
+    "text": "    \"restage\",                  # raises on a missing root"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 157,
+    "text": "def test_restage_refuses_when_no_root_is_injected(tmp_path, monkeypatch):"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 158,
+    "text": "    from aitelier.tools.restage.impl import restage"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 162,
+    "text": "        restage(project_root=\"\", workspace_root=\"\", out_dir=str(tmp_path),"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 177,
+    "text": "def test_run_tests_and_repo_delete_refuse_a_non_absolute_project_root("
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 180,
+    "text": "    from aitelier.tools.repo_delete.impl import repo_delete"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 188,
+    "text": "    # repo_delete's guard sits after the deletion manifest is read, so it needs"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 191,
+    "text": "    stage = tmp_path / \"stage\""
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 192,
+    "text": "    stage.mkdir()"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 193,
+    "text": "    (stage / \"_deletions.json\").write_text('[\"x.py\"]', encoding=\"utf-8\")"
+  },
+  {
+    "file": "tests/unit/test_tool_root_guard_inventory.py",
+    "line": 194,
+    "text": "    res = repo_delete(str(stage), project_root=\"\", workspace_root=\"\")"
+  },
+  {
+    "file": "tests/unit/test_public_read_hardening.py",
+    "line": 149,
+    "text": "class TestAgentReadsAreDenied:"
+  },
+  {
+    "file": "tests/unit/test_public_read_hardening.py",
+    "line": 258,
+    "text": "        flood of reads could fail `repo_apply` — a read-only endpoint breaking"
+  },
+  {
+    "file": "tests/unit/test_planner_prompt_guardrails.py",
+    "line": 17,
+    "text": "def _t_plan_output_fixed() -> dict:"
+  },
+  {
+    "file": "tests/unit/test_planner_prompt_guardrails.py",
+    "line": 48,
+    "text": "    fmt = _t_plan_output_fixed()[\"research_notes\"][\"format\"]"
+  },
+  {
+    "file": "tests/unit/test_planner_prompt_guardrails.py",
+    "line": 54,
+    "text": "    fmt = _t_plan_output_fixed()[\"research_notes\"][\"format\"]"
+  },
+  {
+    "file": "tests/unit/test_planner_prompt_guardrails.py",
+    "line": 98,
+    "text": "    (\"step5_verifier.md\", \"repo_apply\"),     # on_deliver hook, not an agent call"
+  },
+  {
+    "file": "tests/unit/test_a_capability_grant_survives_the_deployed_engine.py",
+    "line": 163,
+    "text": "    assert {\"pytest\", \"repo_apply\", \"repo_validate\"} <= found, found"
+  },
+  {
+    "file": "tests/unit/test_git_push_post.py",
+    "line": 9,
+    "text": "as `action: \"error\"` — but it still must not fail the run: `repo_apply`"
+  },
+  {
+    "file": "tests/unit/test_pipeline_versions_tool.py",
+    "line": 29,
+    "text": "        # `output.fixed`, the shape `to_dict()` emits — NOT the `output_fixed`"
+  },
+  {
+    "file": "tests/unit/test_run_launcher_repo_type_reconcile.py",
+    "line": 10,
+    "text": "code path, no repo read layer, and dies at its first `on_deliver: repo_apply`"
+  },
+  {
+    "file": "tests/unit/test_run_launcher_repo_type_reconcile.py",
+    "line": 73,
+    "text": "        \"the first repo_apply will fail the run\")"
+  },
+  {
+    "file": "tests/unit/test_forge_dryrun_smoke.py",
+    "line": 164,
+    "text": "# ── The staging tree must not outlive the run ────────────────────────────────"
+  },
+  {
+    "file": "tests/unit/test_forge_dryrun_smoke.py",
+    "line": 175,
+    "text": "    # that owns the staging dir. Its `except` returns, so success-only cleanup"
+  },
+  {
+    "file": "tests/unit/test_forge_dryrun_smoke.py",
+    "line": 182,
+    "text": "def test_the_staging_tree_is_removed_on_the_failure_path_too(tmp_path, monkeypatch):"
+  },
+  {
+    "file": "tests/unit/test_forge_dryrun_smoke.py",
+    "line": 183,
+    "text": "    staging = tmp_path / \"tmproot\""
+  },
+  {
+    "file": "tests/unit/test_forge_dryrun_smoke.py",
+    "line": 184,
+    "text": "    staging.mkdir()"
+  },
+  {
+    "file": "tests/unit/test_forge_dryrun_smoke.py",
+    "line": 185,
+    "text": "    monkeypatch.setattr(_mod.tempfile, \"tempdir\", str(staging))"
+  },
+  {
+    "file": "tests/unit/test_forge_dryrun_smoke.py",
+    "line": 197,
+    "text": "    assert list(staging.glob(\"forge_smoke_*\")) == []"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 54,
+    "text": "    repo_apply); scaffold_bible then normalizes it. Optionally git-init so the"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 339,
+    "text": "def test_restage_stages_full_bible_from_repo_plus_verdict(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 343,
+    "text": "    from aitelier.tools.restage.impl import restage"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 347,
+    "text": "    # Repo has the full bible (all 7 files accumulated via repo_apply)."
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 360,
+    "text": "    out = ws / cfg / \"design_gate.tmp\""
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 361,
+    "text": "    res = restage(workspace_root=str(ws), project_root=str(repo), config_name=cfg,"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 365,
+    "text": "    assert res[\"restaged\"] is True"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 366,
+    "text": "    staged = {p.relative_to(out).as_posix()"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 368,
+    "text": "    assert staged == {"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 376,
+    "text": "def test_restage_fails_loud_when_nothing_to_copy(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 377,
+    "text": "    from aitelier.tools.restage.impl import restage"
+  },
+  {
+    "file": "tests/unit/test_novel_tools.py",
+    "line": 379,
+    "text": "        restage(project_root=str(tmp_path / \"repo\"), out_dir=str(tmp_path / \"out\"),"
+  },
+  {
+    "file": "tests/unit/test_noop_floor_fix.py",
+    "line": 16,
+    "text": "2. ``clean_draft_dir`` clears ``{step}.tmp`` (so a fresh run can't inherit a"
+  },
+  {
+    "file": "tests/unit/test_noop_floor_fix.py",
+    "line": 17,
+    "text": "   prior task's staged files) while leaving ``{step}/`` intact (self-context)."
+  },
+  {
+    "file": "tests/unit/test_noop_floor_fix.py",
+    "line": 35,
+    "text": "def test_clean_draft_dir_clears_tmp_but_preserves_final(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_noop_floor_fix.py",
+    "line": 39,
+    "text": "    draft = ws._draft_dir(pid, step, graph)"
+  },
+  {
+    "file": "tests/unit/test_noop_floor_fix.py",
+    "line": 44,
+    "text": "    # Stale file left in staging by a prior task, plus a legitimate final output."
+  },
+  {
+    "file": "tests/unit/test_noop_floor_fix.py",
+    "line": 48,
+    "text": "    ws.clean_draft_dir(pid, step, graph)"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 15,
+    "text": "# the step staging dir — the agent never chooses a path) and is delivered into"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 16,
+    "text": "# the RESOLVED project repo by the step's `on_deliver: repo_apply`. The custom"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 21,
+    "text": "# README content output or its repo_apply delivery."
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 48,
+    "text": "        \"output + repo_apply instead.\""
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 82,
+    "text": "def test_step5_delivers_readme_via_repo_apply():"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 83,
+    "text": "    \"\"\"Step 5 must ship its README into the RESOLVED project repo via repo_apply"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 93,
+    "text": "    assert \"repo_apply\" in tools, ("
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 94,
+    "text": "        f\"step 5 on_deliver must include repo_apply to deliver README.md; got {tools}\""
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 98,
+    "text": "    apply_hook = next(h for h in hooks if h.get(\"tool\") == \"repo_apply\")"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 101,
+    "text": "        \"repo_apply should ignore the verdict file so only README.md is delivered; \""
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 141,
+    "text": "def test_repo_delete_rejects_relative_root_before_git(tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 142,
+    "text": "    \"\"\"repo_delete only reaches project_root after finding a non-empty manifest;"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 145,
+    "text": "    from aitelier.tools.repo_delete.impl import repo_delete"
+  },
+  {
+    "file": "tests/unit/test_readme_delivery_regression.py",
+    "line": 149,
+    "text": "    r = repo_delete(source_dir=str(step), project_root=\".\")"
+  },
+  {
+    "file": "tests/unit/test_coding_mode.py",
+    "line": 615,
+    "text": "        # write via the proxy, submit with no result — file already staged"
+  },
+  {
+    "file": "tests/unit/test_coding_mode.py",
+    "line": 616,
+    "text": "        staged = await agent._execute_tool("
+  },
+  {
+    "file": "tests/unit/test_coding_mode.py",
+    "line": 619,
+    "text": "                               \"params\": {\"content\": \"## staged\"}})"
+  },
+  {
+    "file": "tests/unit/test_coding_mode.py",
+    "line": 620,
+    "text": "        assert staged.get(\"written\")"
+  },
+  {
+    "file": "tests/unit/test_coding_mode.py",
+    "line": 626,
+    "text": "        assert plan_file.read_text() == \"## staged\""
+  },
+  {
+    "file": "tests/unit/test_coding_mode.py",
+    "line": 785,
+    "text": "        # investigate: read-only — no output.mode write, no repo_apply"
+  },
+  {
+    "file": "tests/unit/test_coding_mode.py",
+    "line": 788,
+    "text": "        assert istep.output_mode == \"content\""
+  },
+  {
+    "file": "tests/unit/test_apply_state_atomic.py",
+    "line": 26,
+    "text": "    # Scoped to novel/ — in these tests the step staging dirs land in the same"
+  },
+  {
+    "file": "tests/unit/test_apply_state_atomic.py",
+    "line": 34,
+    "text": "    on-stage-but-never-booked character is refused.\"\"\""
+  },
+  {
+    "file": "tests/unit/test_apply_state_atomic.py",
+    "line": 141,
+    "text": "    \"\"\"Live: 李默 and 周小雨 have been on stage since chapter 3 with no bible"
+  },
+  {
+    "file": "tests/unit/test_apply_state_atomic.py",
+    "line": 145,
+    "text": "    def test_an_on_stage_character_without_a_card_is_listed(self, tmp_path):"
+  },
+  {
+    "file": "tests/unit/test_tick_confirmed_is_truthful.py",
+    "line": 162,
+    "text": "                        output_mode=\"write\", max_retries=3,"
+  },
+  {
+    "file": "tests/unit/test_tick_confirmed_is_truthful.py",
+    "line": 174,
+    "text": "            # stage output that the validator will reject"
+  },
+  {
+    "file": "tests/unit/test_tick_confirmed_is_truthful.py",
+    "line": 175,
+    "text": "            tmp = sf._workspace.get_step_tmp_dir(\"pid\", \"g\", \"implement\")"
+  },
+  {
+    "file": "tests/unit/test_run_isolation_lifecycle.py",
+    "line": 48,
+    "text": "        steps=[StepNode(id=\"s1\", step_type=\"agent\", output_mode=\"content\","
+  },
+  {
+    "file": "tests/unit/test_run_isolation_lifecycle.py",
+    "line": 49,
+    "text": "                        output_fixed={\"out\": \"out.txt\"},"
+  },
+  {
+    "file": "tests/unit/test_pm_failure_boundary.py",
+    "line": 40,
+    "text": "    pm.output_mode = \"write\""
+  },
+  {
+    "file": "tests/unit/test_pm_failure_boundary.py",
+    "line": 66,
+    "text": "    draft = Path(sf._workspace.get_step_tmp_dir(\"p\", \"pm_boundary\", \"3\"))"
+  },
+  {
+    "file": "tests/unit/test_pm_failure_boundary.py",
+    "line": 119,
+    "text": "    draft = Path(sf._workspace.get_step_tmp_dir(\"p\", \"pm_boundary\", \"3\"))"
+  },
+  {
+    "file": "tests/unit/test_state_attempts.py",
+    "line": 570,
+    "text": "    relay = {\"attempt_id\": a[\"attempt_id\"], \"base_sha\": \"b\" * 40, \"commits\": [], \"staged_files\": {\"implementation\": [\"x.py\"]}}"
+  },
+  {
+    "file": "tests/unit/test_forge_registry_check.py",
+    "line": 545,
+    "text": "    The letter of the rule is satisfied; a `repo_apply` that never landed the code"
+  },
+  {
+    "file": "tests/unit/test_forge_registry_check.py",
+    "line": 557,
+    "text": "                {\"id\": \"apply\", \"step_type\": \"tool\", \"tool_name\": \"repo_apply\","
+  },
+  {
+    "file": "tests/unit/test_run_isolation_review_fixes.py",
+    "line": 204,
+    "text": "        steps=[StepNode(id=\"s1\", step_type=\"agent\", output_mode=\"content\","
+  },
+  {
+    "file": "tests/unit/test_run_isolation_review_fixes.py",
+    "line": 205,
+    "text": "                        output_fixed={\"out\": \"out.txt\"},"
+  },
+  {
+    "file": "tests/unit/test_run_isolation_review_fixes.py",
+    "line": 244,
+    "text": "        steps=[StepNode(id=\"s1\", step_type=\"agent\", output_mode=\"content\","
+  },
+  {
+    "file": "tests/unit/test_run_isolation_review_fixes.py",
+    "line": 245,
+    "text": "                        output_fixed={\"out\": \"out.txt\"},"
+  },
+  {
+    "file": "tests/unit/test_run_isolation_review_fixes.py",
+    "line": 286,
+    "text": "    \"\"\"Which is what makes 'no repo_apply copy may occur' true: the copy needs"
+  },
+  {
+    "file": "tests/unit/test_run_tests_surfaces_install_failure.py",
+    "line": 188,
+    "text": "    closures over project root / step staging / step output, so `site-packages` is"
+  },
+  {
+    "file": "tests/unit/test_fallible_is_declared_not_listed.py",
+    "line": 155,
+    "text": "        assert {\"repo_apply\", \"draft_commit\"} <= _fallible_names(set())"
+  },
+  {
+    "file": "tests/unit/test_agents_factory.py",
+    "line": 36,
+    "text": "class TestAgentFactoryV2:"
+  },
+  {
+    "file": "tests/unit/test_capability_registry.py",
+    "line": 433,
+    "text": "    rewritten to grant repo_apply/repo_delete to the very step that holds it."
+  },
+  {
+    "file": "tests/unit/test_importability_gate.py",
+    "line": 72,
+    "text": "def _validate(staging: Path) -> dict:"
+  },
+  {
+    "file": "tests/unit/test_importability_gate.py",
+    "line": 75,
+    "text": "    StepValidator's root is the step's staging dir — the tree the implementer"
+  },
+  {
+    "file": "tests/unit/test_importability_gate.py",
+    "line": 82,
+    "text": "    return StepValidator(loader, staging).validate(_t_impl()[\"validation\"])"
+  },
+  {
+    "file": "web/src/views/Project.svelte",
+    "line": 387,
+    "text": "  // the same two-stage shape CheckpointModal already uses. The box used to be"
+  },
+  {
+    "file": "docker/godot/godot_harness.py",
+    "line": 1762,
+    "text": "        out[\"steps\"].append({\"stage\": \"ready\", **rep})"
+  },
+  {
+    "file": "docker/godot/godot_harness.py",
+    "line": 1771,
+    "text": "        out[\"steps\"].append({\"stage\": \"after_left_click\", **after_left})"
+  },
+  {
+    "file": "docker/godot/godot_harness.py",
+    "line": 1784,
+    "text": "        out[\"steps\"].append({\"stage\": \"after_right_click\", **after_right})"
+  },
+  {
+    "file": "configs/addons/game_harness.yaml",
+    "line": 175,
+    "text": "      # The checkpoint modal surfaces the CHECKPOINT step's OWN dir, so restage"
+  },
+  {
+    "file": "configs/addons/game_harness.yaml",
+    "line": 182,
+    "text": "        tool_name: \"restage\""
+  },
+  {
+    "file": "configs/addons/game_harness.yaml",
+    "line": 185,
+    "text": "          # restage refuses to guess: without this it raises \"out_dir not"
+  },
+  {
+    "file": "configs/addons/game_harness.yaml",
+    "line": 302,
+    "text": "  # against the step's own staged edits, instead of ending the step and waiting"
+  },
+  {
+    "file": "configs/addons/game_harness.yaml",
+    "line": 440,
+    "text": "            - tool: \"repo_apply\""
+  },
+  {
+    "file": "configs/addons/game_harness.yaml",
+    "line": 444,
+    "text": "        # Re-test after repo_apply, even when the design step reports an error."
+  },
+  {
+    "file": "aitelier/tools/scaffold/impl.py",
+    "line": 8,
+    "text": "repo_apply commits it. Never overwrites an existing file: a `*ignore` file is"
+  },
+  {
+    "file": "aitelier/tools/scaffold/tool.yaml",
+    "line": 9,
+    "text": "  `.<x>`. Always succeeds as a step; a later repo_apply commits what it wrote."
+  },
+  {
+    "file": "aitelier/tools/forge_palette/impl.py",
+    "line": 33,
+    "text": "5. Staged write + promotion. Steps that mutate use output.mode: write into"
+  },
+  {
+    "file": "aitelier/tools/forge_palette/impl.py",
+    "line": 34,
+    "text": "   $STEP_DIR; validation gates promotion; repo mutation goes through repo_apply"
+  },
+  {
+    "file": "aitelier/tools/forge_palette/impl.py",
+    "line": 75,
+    "text": "  step staged — a step that writes nothing commits nothing and returns"
+  },
+  {
+    "file": "aitelier/tools/knowledge_sync/impl.py",
+    "line": 19,
+    "text": "    never shows in diffs/PRs, and `repo_apply`'s ``git add`` skips it. Corrupt"
+  },
+  {
+    "file": "aitelier/tools/knowledge_sync/impl.py",
+    "line": 66,
+    "text": "        # never stages it."
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 4,
+    "text": "and renames staging over it, so a file that is not in staging is DELETED. The"
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 7,
+    "text": "    2. Step staging (.tmp) — files you just wrote go here FIRST. They are"
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 10,
+    "text": "    read_file and list_tree search in order: project root -> staging -> output."
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 40,
+    "text": "    \"\"\"The project a step staging dir belongs to, from the workspace layout"
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 41,
+    "text": "    (``<workspaces_dir>/<project_id>/<graph>/<step>.tmp``). A validation tool is"
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 42,
+    "text": "    handed only the staging dir; the layout is AItelier's own convention.\"\"\""
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 65,
+    "text": "    # this step's staging dir (see skillflow file_exists, the same contract)."
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/impl.py",
+    "line": 120,
+    "text": "            f\"not write into staging this run is DELETED, even though you can \""
+  },
+  {
+    "file": "aitelier/tools/tasks_manifest_complete/tool.yaml",
+    "line": 18,
+    "text": "    description: \"Directory holding tasks_manifest.json and tasks/ — what StepValidator injects (the step's staging dir).\""
+  },
+  {
+    "file": "aitelier/tools/apply_state/impl.py",
+    "line": 37,
+    "text": "    stage = Path(workspace_root or project_root or \".\")        # step outputs"
+  },
+  {
+    "file": "aitelier/tools/apply_state/impl.py",
+    "line": 38,
+    "text": "    if not ws.is_absolute() or not stage.is_absolute():"
+  },
+  {
+    "file": "aitelier/tools/apply_state/impl.py",
+    "line": 48,
+    "text": "        else stage / \"novel_chapter\" / \"finalize\""
+  },
+  {
+    "file": "aitelier/tools/apply_state/impl.py",
+    "line": 58,
+    "text": "        else stage / \"novel_chapter\" / \"humanize\""
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 14,
+    "text": "Writes into the step's STAGING dir when there is one (see `_target_root`) and"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 15,
+    "text": "reaches the repo through promotion + repo_apply; only a tool node with no"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 16,
+    "text": "staging dir writes straight into the working tree."
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 44,
+    "text": "                    step_tmp_dir: str = \"\", out_dir: str = \"\","
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 49,
+    "text": "    repo = _target_root(step_tmp_dir, project_root, workspace_root)"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 51,
+    "text": "        return {\"written\": [], \"error\": \"no staging dir and no repo to write into\"}"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 101,
+    "text": "def _target_root(step_tmp_dir: str, project_root: str, workspace_root: str) -> Path | None:"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 104,
+    "text": "    The STEP'S STAGING dir, whenever there is one. An agent step's delivery is"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 105,
+    "text": "    reconciled against staging, so a binary written straight into the working"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 110,
+    "text": "    scaffold), where no staging dir exists.\"\"\""
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/impl.py",
+    "line": 111,
+    "text": "    for cand in (step_tmp_dir, project_root, workspace_root):"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/tool.yaml",
+    "line": 3,
+    "text": "  Generate a REAL sound asset and write it into this step's staging dir, so the game"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/tool.yaml",
+    "line": 16,
+    "text": "  Written into the step's staging dir ($STEP_TMP_DIR) whenever one exists — it"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/tool.yaml",
+    "line": 17,
+    "text": "  reaches the repo through promotion + repo_apply; only a tool node with no"
+  },
+  {
+    "file": "aitelier/tools/gen_audio_asset/tool.yaml",
+    "line": 18,
+    "text": "  staging dir writes straight into the repo working tree."
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 1,
+    "text": "\"\"\"restage — copy prior outputs into this step's directory for a human checkpoint."
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 9,
+    "text": "sources into its staging dir (→ promoted → surfaced) so the human reviews the"
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 49,
+    "text": "def restage(*, workspace_root: str = \"\", project_root: str = \"\", config_name: str = \"\","
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 57,
+    "text": "        raise ValueError(\"restage: no from_repo/from_steps/from_step given\")"
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 59,
+    "text": "        raise ValueError(\"restage: out_dir not resolved (expected $STEP_DIR)\")"
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 67,
+    "text": "            raise ValueError(\"restage: project_root not injected (needed for from_repo)\")"
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 80,
+    "text": "        raise ValueError(\"restage: workspace_root/config_name not injected (needed for from_steps)\")"
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 91,
+    "text": "            f\"restage: nothing copied (from_repo={repo_paths}, from_steps={steps}; \""
+  },
+  {
+    "file": "aitelier/tools/restage/impl.py",
+    "line": 94,
+    "text": "    return {\"restaged\": True, \"from_repo\": repo_paths, \"from_steps\": steps,"
+  },
+  {
+    "file": "aitelier/tools/restage/tool.yaml",
+    "line": 1,
+    "text": "name: restage"
+  },
+  {
+    "file": "aitelier/tools/restage/tool.yaml",
+    "line": 7,
+    "text": "  \"no files to review\"; restage re-materializes the named steps' files here."
+  },
+  {
+    "file": "aitelier/tools/restage/tool.yaml",
+    "line": 37,
+    "text": "    description: \"This step's staging dir ($STEP_DIR) — the copy destination.\""
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 19,
+    "text": "STAGED EDITS. A t_impl agent's changes live in its staging directory until the"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 20,
+    "text": "step's on_deliver repo_apply; the consolidated repo still holds the OLD code."
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 23,
+    "text": "answer delivered with a straight face. So when the step has staged files, this"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 24,
+    "text": "tool assembles repo+staging into a throwaway tree (under ~/.AItelier/scratch, on"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 48,
+    "text": "def _staged_files(step_tmp_dir: str) -> list[Path]:"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 50,
+    "text": "    d = Path(step_tmp_dir) if step_tmp_dir else None"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 57,
+    "text": "def _overlay_tree(repo: Path, staged: list[Path], src_root: Path,"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 59,
+    "text": "    \"\"\"repo + staged files → a throwaway project tree at ``dest``.\"\"\""
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 65,
+    "text": "    for f in staged:"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 110,
+    "text": "                            workspace_root: str = \"\", step_tmp_dir: str = \"\","
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 112,
+    "text": "                            use_staged: bool = True, **kwargs) -> dict:"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 155,
+    "text": "    staged = _staged_files(step_tmp_dir) if use_staged else []"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 160,
+    "text": "        if staged:"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 162,
+    "text": "            overlaid = _overlay_tree(repo, staged, Path(step_tmp_dir), target)"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 166,
+    "text": "        # while pointing project_dir at `target` ran the caller's staged CODE"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 168,
+    "text": "        # `staged_files_applied: [that scenario file]`."
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 170,
+    "text": "        # It only bites when the staged file IS a scenario, which is why it"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 171,
+    "text": "        # survived its own end-to-end check: that one staged a .gd. Live,"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 173,
+    "text": "        # anger: \"the sidecar listed the staged file as applied but the"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 176,
+    "text": "        # staged rewrite.\" Four of that round's five cards edit scenario files."
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 221,
+    "text": "                  + (\"repo + %d staged file(s): %s\""
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 223,
+    "text": "                     if overlaid else \"the consolidated repo (no staged edits)\"),"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/impl.py",
+    "line": 232,
+    "text": "            \"staged_files_applied\": overlaid,"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/tool.yaml",
+    "line": 13,
+    "text": "  real ones, never quietly skipped. If your step has files staged but not yet"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/tool.yaml",
+    "line": 14,
+    "text": "  delivered, it play-tests repo + your staged edits (and lists which files it"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/tool.yaml",
+    "line": 42,
+    "text": "  use_staged:"
+  },
+  {
+    "file": "aitelier/tools/godot_playtest_scenario/tool.yaml",
+    "line": 44,
+    "text": "    description: \"Overlay this step's staged (not yet delivered) files onto the repo before running. Default true.\""
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 7,
+    "text": "``repo_delete`` lifecycle hook applies it (git rm + commit) right after"
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 8,
+    "text": "``repo_apply``, and ``repo_apply`` is configured to ignore the manifest so it"
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 45,
+    "text": "def _append_deletion(draft_dir: Path, rel: str) -> int:"
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 47,
+    "text": "    draft_dir.mkdir(parents=True, exist_ok=True)"
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 48,
+    "text": "    manifest = draft_dir / _MANIFEST"
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 77,
+    "text": "        draft = (ws._draft_dir(project_id, step_id, graph_name) if graph_name"
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 78,
+    "text": "                 else ws._draft_dir(project_id, step_id))"
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 80,
+    "text": "            return {\"error\": (f\"{rel} is in this step's staging output. A delivered \""
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/impl.py",
+    "line": 83,
+    "text": "                              \"a path that exists in staging or the repo, so delete+create \""
+  },
+  {
+    "file": "aitelier/tools/repo_remove_file/tool.yaml",
+    "line": 4,
+    "text": "  step's delivery time (git rm + commit, applied by the repo_delete hook right"
+  },
+  {
+    "file": "aitelier/tools/continuity_check/impl.py",
+    "line": 69,
+    "text": "# was never on stage, yet the name vanished) and FALSE-FLAGS legitimate ones"
+  },
+  {
+    "file": "aitelier/tools/continuity_check/impl.py",
+    "line": 82,
+    "text": "    stage = workspace_root or project_root or \".\"          # step outputs (prose)"
+  },
+  {
+    "file": "aitelier/tools/continuity_check/impl.py",
+    "line": 84,
+    "text": "        else Path(stage) / \"novel_chapter\" / \"humanize\""
+  },
+  {
+    "file": "aitelier/tools/continuity_check/impl.py",
+    "line": 86,
+    "text": "    draft_path = Path(stage) / \"novel_chapter\" / \"draft\" / \"chapter_draft.md\""
+  },
+  {
+    "file": "aitelier/tools/forge_registry_check/impl.py",
+    "line": 137,
+    "text": "         \"invalid staging tree, runs `on_deliver` (including `repo_apply`), and \""
+  },
+  {
+    "file": "aitelier/tools/forge_registry_check/impl.py",
+    "line": 161,
+    "text": "         \"a branch's clothes: the gate does no work, so a failed `repo_apply` (the \""
+  },
+  {
+    "file": "aitelier/tools/forge_registry_check/impl.py",
+    "line": 206,
+    "text": "         \"staging/output directory is named after the STEP ID (`$STEP_DIR`, \""
+  },
+  {
+    "file": "aitelier/tools/forge_registry_check/impl.py",
+    "line": 314,
+    "text": "_FALLIBLE_UPSTREAM = {\"pytest\", \"repo_apply\", \"repo_validate\", \"draft_commit\","
+  },
+  {
+    "file": "aitelier/tools/forge_registry_check/impl.py",
+    "line": 819,
+    "text": "    letter — and a `repo_apply` that never landed the code advances into the next"
+  },
+  {
+    "file": "aitelier/tools/forge_registry_check/impl.py",
+    "line": 1010,
+    "text": "    \"\"\"Validated free-write agents must stop before promoting invalid staging.\"\"\""
+  },
+  {
+    "file": "aitelier/tools/forge_registry_check/impl.py",
+    "line": 1017,
+    "text": "        mode = mode or step.get(\"output_mode\")"
+  },
+  {
+    "file": "aitelier/tools/forge_dryrun_smoke/impl.py",
+    "line": 156,
+    "text": "        # The staging tree only ever holds canned stub output, and the :memory: DB"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 22,
+    "text": "Writes into the step's STAGING dir when there is one (see `_target_root`), and"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 23,
+    "text": "reaches the repo through promotion + repo_apply; only a tool node with no"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 24,
+    "text": "staging dir writes straight into the working tree like scaffold/knowledge_sync."
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 62,
+    "text": "                    verify: bool = True, step_tmp_dir: str = \"\", out_dir: str = \"\","
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 85,
+    "text": "    repo = _target_root(step_tmp_dir, project_root, workspace_root)"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 87,
+    "text": "        return {\"written\": [], \"error\": \"no staging dir and no repo to write into\"}"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 165,
+    "text": "def _target_root(step_tmp_dir: str, project_root: str, workspace_root: str) -> Path | None:"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 168,
+    "text": "    The STEP'S STAGING dir, whenever there is one. An agent step's delivery is"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 169,
+    "text": "    reconciled against staging, so a binary written straight into the working"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 174,
+    "text": "    scaffold), where no staging dir exists.\"\"\""
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/impl.py",
+    "line": 175,
+    "text": "    for cand in (step_tmp_dir, project_root, workspace_root):"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/tool.yaml",
+    "line": 4,
+    "text": "  into this step's staging dir, so the game can ship art instead of ColorRect/Polygon2D"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/tool.yaml",
+    "line": 28,
+    "text": "  Written into the step's staging dir ($STEP_TMP_DIR) whenever one exists — it"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/tool.yaml",
+    "line": 29,
+    "text": "  reaches the repo through promotion + repo_apply; only a tool node with no"
+  },
+  {
+    "file": "aitelier/tools/gen_image_asset/tool.yaml",
+    "line": 30,
+    "text": "  staging dir writes straight into the repo working tree."
+  },
+  {
+    "file": "aitelier/tools/git_push_post/impl.py",
+    "line": 15,
+    "text": "does not fail the RUN. The round's work was committed locally by `repo_apply`"
+  },
+  {
+    "file": "aitelier/tools/git_push_post/impl.py",
+    "line": 56,
+    "text": "    `code_path_resolver`, which is what makes `repo_apply` commit into the real"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 6,
+    "text": "step's staging dir directly — nothing is uploaded)."
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 37,
+    "text": "def _baseline_root(staging_root):"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 38,
+    "text": "    \"\"\"The repo this step's staging dir is a delta OF, or None if unresolvable."
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 40,
+    "text": "    Staging lives at ``<workspaces>/<project_id>/<graph>/<step>.tmp``; the"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 48,
+    "text": "        rel = staging_root.resolve().relative_to(ws)"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 74,
+    "text": "def _preexisting_failures(results, staging_root, timeout):"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 93,
+    "text": "    base = _baseline_root(staging_root)"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 101,
+    "text": "            rel = Path(r[\"file\"]).resolve().relative_to(staging_root.resolve())"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 125,
+    "text": "        staged_file, staged_err = hit"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 126,
+    "text": "        if _same_diagnosis(staged_err, br.get(\"error_message\") or \"\"):"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 127,
+    "text": "            forgiven.add(staged_file)"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/impl.py",
+    "line": 205,
+    "text": "    # Report paths relative to the staging root: the absolute container path is"
+  },
+  {
+    "file": "aitelier/tools/gdscript_check/tool.yaml",
+    "line": 19,
+    "text": "    description: \"Root for file resolution (injected by StepValidator: the step's staging dir)\""
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 1,
+    "text": "\"\"\"repo_delete — apply a step's queued file deletions to the project repo."
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 3,
+    "text": "Runs as the second ``on_deliver`` tool-hook right after ``repo_apply``: reads the"
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 4,
+    "text": "``_deletions.json`` manifest promoted into ``$STEP_DIR`` (``repo_apply`` is"
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 7,
+    "text": "ONLY after the commit succeeds; if the commit fails the staged removals are"
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 34,
+    "text": "def repo_delete(source_dir: str = \"\", *, project_root: str = \"\","
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 56,
+    "text": "                \"error\": f\"repo_delete: project_root must be an absolute path \""
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 66,
+    "text": "            # The step delivered this very path (repo_apply just committed it)."
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 113,
+    "text": "        # Commit FAILED. Roll back the staged `git rm`s so they are not left"
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 114,
+    "text": "        # dangling in the index for the next repo_apply's `git add -A` to fold"
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 116,
+    "text": "        # from a clean tree (repo_delete runs with on_failure: retry)."
+  },
+  {
+    "file": "aitelier/tools/repo_delete/impl.py",
+    "line": 120,
+    "text": "               \"error\": (f\"git commit failed (rolled back {len(removed)} staged \""
+  },
+  {
+    "file": "aitelier/tools/repo_delete/tool.yaml",
+    "line": 1,
+    "text": "name: repo_delete"
+  },
+  {
+    "file": "aitelier/tools/repo_delete/tool.yaml",
+    "line": 11,
+    "text": "  on commit failure the staged removals are rolled back, the manifest is KEPT"
+  },
+  {
+    "file": "aitelier/tools/repo_delete/tool.yaml",
+    "line": 14,
+    "text": "  lifecycle hook running right after repo_apply."
+  },
+  {
+    "file": "aitelier/tools/run_tests/impl.py",
+    "line": 272,
+    "text": "    again: the read tools are closures over the project root / step staging /"
+  },
+  {
+    "file": "aitelier/tools/run_tests/impl.py",
+    "line": 866,
+    "text": "    # `out_dir` is normally the step's staging dir, but it is NOT guaranteed:"
+  },
+  {
+    "file": "aitelier/tools/run_tests/impl.py",
+    "line": 868,
+    "text": "    # config_name, step_id, run_id, step_tmp_dir and step_dir — not out_dir —"
+  },
+  {
+    "file": "aitelier/tools/godot_vision/impl.py",
+    "line": 491,
+    "text": "    # ── Locate the play-test's promoted output (restage's pattern) ──"
+  },
+  {
+    "file": "aitelier/tools/scaffold_bible/impl.py",
+    "line": 4,
+    "text": "files INTO the code repo (mode:write + repo_apply, DPE-style):"
+  },
+  {
+    "file": "aitelier/tools/scaffold_bible/impl.py",
+    "line": 34,
+    "text": "    # The bible lives in the code repo (project_root); design's repo_apply put it"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 137,
+    "text": "    Static, not by import: this runs on staged code that has already been verified"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 230,
+    "text": "    # Stage → verify → swap. Staging lives OUTSIDE the scanned tools dir so a"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 234,
+    "text": "    staging = generated_tools_dir().parent / \".tool_staging\" / tool_name"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 235,
+    "text": "    if staging.exists():"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 236,
+    "text": "        shutil.rmtree(staging)"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 237,
+    "text": "    staging.parent.mkdir(parents=True, exist_ok=True)"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 238,
+    "text": "    shutil.copytree(src, staging)"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 240,
+    "text": "    err = _verify_loadable(staging, tool_name)"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 242,
+    "text": "        shutil.rmtree(staging, ignore_errors=True)"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 250,
+    "text": "    _stamp_provenance(staging, owner, tool_name)"
+  },
+  {
+    "file": "aitelier/tools/register_tool/impl.py",
+    "line": 253,
+    "text": "    staging.rename(dest)"
+  },
+  {
+    "file": "aitelier/tools/register_capability/impl.py",
+    "line": 40,
+    "text": "    # scan on every restart), or `tool_creation` is rewritten to grant repo_apply"
+  },
+  {
+    "file": "aitelier/tools/register_capability/impl.py",
+    "line": 41,
+    "text": "    # / repo_delete to the very step that holds it."
+  }
+]

@@ -1,0 +1,1612 @@
+begin: state_seed
+capabilities:
+- game_assets
+description: Full dpe_game with deterministic State-contract seed preparation; original stages, reviews, checkpoints and game gates retained.
+end_conditions:
+  combinator: or
+  conditions:
+  - node: done
+    type: node_reached
+  - limit: 300
+    type: max_total_steps
+  - flag:
+      fatal_error: true
+    type: flag_match
+name: gen_dpe_state_game
+steps:
+- id: state_seed
+  step_type: tool
+  tool_name: gen_dpe_state_game__prepare_seed
+  tool_params:
+    config_dir: $CONFIG_DIR
+    out_dir: $STEP_DIR
+  transitions:
+  - to: git_sync_pre
+- id: git_sync_pre
+  step_type: tool
+  timeout_seconds: 600
+  tool_name: git_sync_pre
+  tool_params:
+    policy: skip
+    project_root: $PROJECT_ROOT
+  transitions:
+  - match:
+      synced: true
+    to: gh_scaffold
+- agent_config: gen_dpe_state_game__researcher
+  checkpoint: true
+  checkpoint_label: SOTA / Codebase Analysis Review
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: .aitelier/knowledge.md
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - files:
+    - step1_goals.json
+    mode: both
+    order: []
+    output: step1_goals.json
+    path: ''
+    required: true
+    scope: task
+    source_type: step
+    step: state_seed
+    step_id: state_seed
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '1'
+    step_id: '1'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 1_review
+    step_id: 1_review
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: dir_tree
+  id: '1'
+  output:
+    fixed:
+      sota: step1_sota.md
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 300
+  transitions:
+  - match:
+      from: checkpoint
+      value: approved
+    to: 1_review
+  validation:
+  - files:
+    - step1_sota.md
+    tool: file_exists
+  max_tool_turns: 24
+- agent_config: gen_dpe_state_game__researcher_reviewer
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '1'
+    step_id: '1'
+  - config_name: ''
+    feedback_of: '1'
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: feedback
+    step_id: ''
+  id: 1_review
+  output:
+    fixed:
+      verdict:
+        file: review_verdict.json
+        format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}'
+        on_exists: new
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 180
+  transitions:
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: true
+    to: '2'
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: false
+    max_loop: 3
+    to: '1'
+  validation:
+  - files:
+    - review_verdict.json
+    inline_schema:
+      properties:
+        feedback:
+          type: string
+        passed:
+          type: boolean
+        suggestions:
+          items:
+            type: string
+          type: array
+      required:
+      - passed
+      type: object
+    tool: json_schema
+  max_tool_turns: 32
+- agent_config: gen_dpe_state_game__architect
+  checkpoint: true
+  checkpoint_label: Architecture Review
+  config:
+    extra_templates:
+    - game_harness/architect.md
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '1'
+    step_id: '1'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 2_review
+    step_id: 2_review
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 1_review
+    step_id: 1_review
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: dir_tree
+  - config_name: ''
+    files: []
+    from: repository
+    mode: index
+    order:
+    - 00_roadmap.md
+    - 90_decisions.md
+    - 40_ux_backlog.md
+    - 00_overview.md
+    - 10_systems.md
+    - 40_progression.md
+    - 30_presentation.md
+    path: design/
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  id: '2'
+  max_tool_turns: 20
+  output:
+    fixed:
+      design:
+        file: step2_design.md
+        target: artifact
+    target: artifact
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 300
+  transitions:
+  - match:
+      from: checkpoint
+      value: approved
+    to: 2_review
+  validation:
+  - files:
+    - step2_design.md
+    tool: file_exists
+- agent_config: gen_dpe_state_game__architect_reviewer
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '2'
+    step_id: '2'
+  - config_name: ''
+    feedback_of: '2'
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: feedback
+    step_id: ''
+  id: 2_review
+  output:
+    fixed:
+      verdict:
+        file: review_verdict.json
+        format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}'
+        on_exists: new
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 180
+  transitions:
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: true
+    to: '3'
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: false
+    max_loop: 3
+    to: '2'
+  validation:
+  - files:
+    - review_verdict.json
+    inline_schema:
+      properties:
+        feedback:
+          type: string
+        passed:
+          type: boolean
+      required:
+      - passed
+      type: object
+    tool: json_schema
+  max_tool_turns: 32
+- agent_config: gen_dpe_state_game__pm
+  checkpoint: true
+  checkpoint_label: Review Task Breakdown
+  config:
+    extra_templates:
+    - game_harness/pm.md
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '1'
+    step_id: '1'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '2'
+    step_id: '2'
+  - config_name: ''
+    feedback_of: '1'
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: feedback
+    step_id: ''
+  - config_name: ''
+    feedback_of: '2'
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: feedback
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 3_review
+    step_id: 3_review
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 2_review
+    step_id: 2_review
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '3'
+    step_id: '3'
+  - config_name: ''
+    file: final/verify_report.json
+    files:
+    - final/verify_report.json
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '5'
+    step_id: '5'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_review
+    step_id: 5_review
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_test
+    step_id: 5_test
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: capability_palette
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: dir_tree
+  - config_name: ''
+    files:
+    - compile_report.json
+    mode: both
+    order: []
+    output: compile_report.json
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  - config_name: ''
+    files:
+    - playtest_summary.md
+    mode: both
+    order: []
+    output: playtest_summary.md
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_vision
+    step_id: 5_vision
+  - config_name: ''
+    files: []
+    from: repository
+    mode: index
+    order:
+    - 00_roadmap.md
+    - 90_decisions.md
+    - 40_ux_backlog.md
+    - 00_overview.md
+    - 10_systems.md
+    - 40_progression.md
+    - 30_presentation.md
+    path: design/
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files:
+    - test_report.json
+    mode: both
+    order: []
+    output: test_report.json
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_final_test
+    step_id: 5_final_test
+  id: '3'
+  max_tool_turns: 30
+  output:
+    carry_forward: true
+    fixed:
+      task_card:
+        file: tasks/*.json
+        format: '{"id": str, "description": "ONE-LINE summary (max 80 chars)", "detailed_requirements": str, "artifact_requirement": str, "dependencies": [str, ...], "task_type": str, "interface_contract": str, "acceptance": "measurable pass/fail criteria a reviewer can check without asking you", "owns": "[str, ...] — files/dirs ONLY this card may write; disjoint from every sibling in its wave", "shared_hotspots": "[str, ...] — OPTIONAL; files another card in this manifest also touches, with the rule for them", "forbidden": "OPTIONAL; what this card must NOT change", "stop_conditions": "when the implementer must STOP and report instead of pushing on (a measured contradiction, a scope needing an owner ruling, an irreversible op without a backup)", "evidence": "what final/delivery_notes_<id>.md must contain to claim done (commands run + output, numbers measured, files diffed)", "capabilities": "[str, ...] — OPTIONAL; extra tools this task needs, chosen ONLY from capability_palette. Omit when
+          the task needs none."}'
+      tasks_manifest:
+        file: tasks_manifest.json
+        format: '{"execution_order": [[str, ...], ...]}'
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 300
+  transitions:
+  - match:
+      from: checkpoint
+      value: approved
+    to: 3_budget
+  validation:
+  - files:
+    - tasks_manifest.json
+    tool: file_exists
+  - files:
+    - tasks_manifest.json
+    tool: tasks_manifest_complete
+  - files:
+    - tasks/*.json
+    tool: capability_declarations_known
+  - files:
+    - tasks/*.json
+    inline_schema:
+      properties:
+        acceptance:
+          minLength: 1
+          type: string
+        artifact_requirement:
+          minLength: 1
+          type: string
+        dependencies:
+          items:
+            type: string
+          type: array
+        description:
+          minLength: 1
+          type: string
+        detailed_requirements:
+          minLength: 1
+          type: string
+        evidence:
+          minLength: 1
+          type: string
+        forbidden:
+          type: string
+        owns:
+          items:
+            minLength: 1
+            type: string
+          minItems: 1
+          type: array
+        shared_hotspots:
+          items:
+            type: string
+          type: array
+        stop_conditions:
+          minLength: 1
+          type: string
+        task_type:
+          minLength: 1
+          type: string
+      required:
+      - description
+      - detailed_requirements
+      - artifact_requirement
+      - dependencies
+      - task_type
+      - acceptance
+      - owns
+      - stop_conditions
+      - evidence
+      type: object
+    tool: json_schema
+- id: 3_budget
+  step_type: tool
+  timeout_seconds: 600
+  tool_name: task_budget_check
+  tool_params:
+    out_dir: $STEP_DIR
+  transitions:
+  - match:
+      within_budget: true
+    to: 3_review
+  - feedback: true
+    match:
+      within_budget: false
+    max_loop: 2
+    to: '3'
+  - to: 3_review
+- agent_config: gen_dpe_state_game__pm_reviewer
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '3'
+    step_id: '3'
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: completed_cards
+  - config_name: ''
+    feedback_of: '3'
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: feedback
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_review
+    step_id: 5_review
+  id: 3_review
+  output:
+    fixed:
+      verdict:
+        file: review_verdict.json
+        format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}'
+        on_exists: new
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 180
+  transitions:
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: true
+    to: task_loop
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: false
+    max_loop: 3
+    to: '3'
+  validation:
+  - files:
+    - review_verdict.json
+    inline_schema:
+      properties:
+        feedback:
+          type: string
+        passed:
+          type: boolean
+      required:
+      - passed
+      type: object
+    tool: json_schema
+  max_tool_turns: 32
+- id: task_loop
+  loop:
+    item_as: current_task
+    max_iterations: 200
+    source:
+      field: execution_order
+      file: tasks_manifest.json
+      step: '3'
+  step_type: loop
+  timeout_seconds: 600
+  transitions:
+  - max_loop: 200
+    to: t_plan
+  - to: '5'
+- agent_config: gen_dpe_state_game__task_planner
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    file: tasks/$current_task.json
+    files:
+    - tasks/$current_task.json
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '3'
+    step_id: '3'
+  - config_name: ''
+    files: []
+    mode: summary
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '1'
+    step_id: '1'
+  - config_name: ''
+    files: []
+    mode: interfaces
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '2'
+    step_id: '2'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_plan_review
+    step_id: t_plan_review
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_plan
+    step_id: t_plan
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: dir_tree
+  - config_name: ''
+    files:
+    - playtest_summary.md
+    mode: both
+    order: []
+    output: playtest_summary.md
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  id: t_plan
+  max_tool_turns: 30
+  output:
+    fixed:
+      plan: task_plan.md
+      research_notes:
+        file: research_notes.md
+        format: 'Literal external references the implementer needs but cannot look up (it has no web access and no shell — only read/list_tree/create/edit on the repo): exact API signatures, import paths, config keys, and version-specific gotchas for any third-party/unfamiliar library this task uses. Use web_fetch on the official docs and record the verbatim signatures — NOT prose summaries. These notes must be SELF-CONTAINED: never defer to a link (''canonical source at <URL>'', ''see the repo for the rest'') — whatever the implementer needs literally, paste literally here. Signatures yes, implementation bodies no: the implementer writes the bodies from the behavioural contract, so never state or imply that matching an upstream source byte-for-byte is the acceptance bar. If the task only uses the standard library or already-known APIs, write a single line: ''No external references needed.'''
+      subtask_card:
+        file: subtasks/*.json
+        format: '{"id": str, "description": str, "dependencies": [str, ...], "artifact_requirement": str, "interface_contract": str}'
+      subtask_manifest:
+        file: subtasks_manifest.json
+        format: '{"subtasks": [subtask, ...], "execution_order": [[str, ...], ...]}'
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 300
+  transitions:
+  - to: t_plan_review
+  validation:
+  - files:
+    - task_plan.md
+    tool: file_exists
+  validation_on_exhaustion: fail
+- agent_config: gen_dpe_state_game__task_planner_reviewer
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_plan
+    step_id: t_plan
+  id: t_plan_review
+  output:
+    fixed:
+      verdict:
+        file: review_verdict.json
+        format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}'
+        on_exists: new
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 600
+  transitions:
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: true
+    to: t_impl
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: false
+    max_loop: 3
+    to: t_plan
+  validation:
+  - files:
+    - review_verdict.json
+    inline_schema:
+      properties:
+        feedback:
+          type: string
+        passed:
+          type: boolean
+      required:
+      - passed
+      type: object
+    tool: json_schema
+  validation_on_exhaustion: fail
+  max_tool_turns: 32
+- agent_config: gen_dpe_state_game__task_implementer
+  capability:
+    card: 3/tasks/$current_task.json
+    from_item: capabilities
+  config:
+    extra_templates:
+    - game_harness/implementer.md
+    extra_tools:
+    - godot_playtest_scenario
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    file: tasks/$current_task.json
+    files:
+    - tasks/$current_task.json
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '3'
+    step_id: '3'
+  - config_name: ''
+    files: []
+    mode: interfaces
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '2'
+    step_id: '2'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_plan
+    step_id: t_plan
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_plan_review
+    step_id: t_plan_review
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_impl
+    step_id: t_impl
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_impl_review
+    step_id: t_impl_review
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: dir_tree
+  - config_name: ''
+    files:
+    - playtest_summary.md
+    mode: both
+    order: []
+    output: playtest_summary.md
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  id: t_impl
+  max_tool_turns: 50
+  output_mode: write
+  step_type: agent
+  timeout_seconds: 300
+  transitions:
+  - to: t_impl_review
+  validation:
+  - files:
+    - '*.py'
+    tool: lint
+  - files:
+    - '*.gd'
+    tool: gdscript_check
+  - files:
+    - '**/*.py'
+    on_failure: warn
+    tool: lint
+  - files:
+    - '**/*.js'
+    - '**/*.html'
+    - '**/*.css'
+    manifest_path: linter_manifest.json
+    on_failure: warn
+    tool: lint
+  validation_on_exhaustion: fail
+  output:
+    target: code
+- agent_config: gen_dpe_state_game__task_implementer_reviewer
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: closeout_gate
+  - config_name: ''
+    files: []
+    mode: interfaces
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '2'
+    step_id: '2'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_plan
+    step_id: t_plan
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: t_impl
+    step_id: t_impl
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: dir_tree
+  id: t_impl_review
+  max_tool_turns: 32
+  output:
+    fixed:
+      verdict:
+        file: review_verdict.json
+        format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}'
+        on_exists: new
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 600
+  transitions:
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: true
+    to: task_loop
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: false
+    max_loop: 3
+    to: t_impl
+  validation:
+  - files:
+    - review_verdict.json
+    inline_schema:
+      properties:
+        feedback:
+          type: string
+        passed:
+          type: boolean
+      required:
+      - passed
+      type: object
+    tool: json_schema
+  validation_on_exhaustion: fail
+- agent_config: gen_dpe_state_game__final_verifier
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '1'
+    step_id: '1'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '2'
+    step_id: '2'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_review
+    step_id: 5_review
+  - files:
+    - step1_goals.json
+    mode: both
+    order: []
+    output: step1_goals.json
+    path: ''
+    required: true
+    scope: task
+    source_type: step
+    step: state_seed
+    step_id: state_seed
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: dir_tree
+  id: '5'
+  output:
+    fixed:
+      readme:
+        file: README.md
+        format: Markdown 项目交付文档：项目简介、安装步骤、运行方法、关键接口/API 端点——反映仓库交付时的真实最终状态
+        target: code
+      report:
+        file: final/verify_report.json
+        format: '{"all_goals_met": bool, "goals": [{"goal": str, "status": "met" | "partial" | "unmet" | "blocked", "evidence": str}, ...], "verified_subtasks": [str, ...], "issues": [str, ...], "ready_for_deploy": bool}'
+        target: artifact
+    target: artifact
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 600
+  transitions:
+  - to: 5_test
+  validation:
+  - files:
+    - final/verify_report.json
+    inline_schema:
+      properties:
+        all_goals_met:
+          type: boolean
+        goals:
+          items:
+            properties:
+              evidence:
+                minLength: 1
+                type: string
+              goal:
+                minLength: 1
+                type: string
+              status:
+                enum:
+                - met
+                - partial
+                - unmet
+                - blocked
+                type: string
+            required:
+            - goal
+            - status
+            - evidence
+            type: object
+          minItems: 1
+          type: array
+        issues:
+          items:
+            type: string
+          type: array
+        ready_for_deploy:
+          type: boolean
+      required:
+      - all_goals_met
+      - goals
+      - issues
+      - ready_for_deploy
+      type: object
+    tool: json_schema
+- id: 5_test
+  step_type: tool
+  timeout_seconds: 1200
+  tool_name: run_tests
+  tool_params:
+    out_dir: $STEP_DIR
+  transitions:
+  - to: 5_compile
+- id: 5_knowledge
+  step_type: tool
+  timeout_seconds: 300
+  tool_name: knowledge_sync
+  tool_params:
+    out_dir: $STEP_DIR
+  transitions:
+  - to: 5_design
+- agent_config: gen_dpe_state_game__final_verifier_reviewer
+  config:
+    extra_templates:
+    - game_harness/verifier.md
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: inline
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: tool
+    step_id: ''
+    tool: loop_items_implemented
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '5'
+    step_id: '5'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_test
+    step_id: 5_test
+  - config_name: ''
+    files:
+    - compile_report.json
+    mode: both
+    order: []
+    output: compile_report.json
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  - config_name: ''
+    files:
+    - playtest_summary.md
+    mode: both
+    order: []
+    output: playtest_summary.md
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_vision
+    step_id: 5_vision
+  - config_name: ''
+    files:
+    - test_report.json
+    mode: both
+    order: []
+    output: test_report.json
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_final_test
+    step_id: 5_final_test
+  id: 5_review
+  output:
+    fixed:
+      verdict:
+        file: review_verdict.json
+        format: '{"passed": bool, "feedback": str, "suggestions": [str, ...]}'
+        on_exists: new
+  output_mode: content
+  step_type: agent
+  timeout_seconds: 600
+  transitions:
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: true
+    to: git_push_post
+  - match:
+      field: passed
+      from_file: review_verdict.json
+      value: false
+    max_loop: 4
+    to: '3'
+  validation:
+  - files:
+    - review_verdict.json
+    inline_schema:
+      properties:
+        feedback:
+          type: string
+        passed:
+          type: boolean
+      required:
+      - passed
+      type: object
+    tool: json_schema
+  max_tool_turns: 32
+- id: git_push_post
+  step_type: tool
+  timeout_seconds: 180
+  tool_error: route
+  tool_name: git_push_post
+  tool_params:
+    policy: direct_only
+    project_root: $PROJECT_ROOT
+  transitions:
+  - to: done
+- id: done
+  step_type: gate
+  timeout_seconds: 600
+  transitions:
+  - to:
+- id: gh_scaffold
+  step_type: tool
+  timeout_seconds: 60
+  tool_name: scaffold
+  tool_params:
+    addon: game_harness
+  transitions:
+  - to: '1'
+- id: 5_compile
+  step_type: tool
+  timeout_seconds: 3900
+  tool_name: godot_compile
+  tool_params:
+    out_dir: $STEP_DIR
+  transitions:
+  - to: 5_vision
+- id: 5_vision
+  step_type: tool
+  timeout_seconds: 3600
+  tool_name: godot_vision
+  tool_params:
+    from_step: 5_compile
+    out_dir: $STEP_DIR
+  transitions:
+  - match:
+      field: blind_reason
+      from_file: vision_report.json
+      value: no_captures
+    to: 5_final_test
+  - match:
+      field: blind
+      from_file: vision_report.json
+      value: true
+    to: 5_vision_human
+  - to: 5_knowledge
+- checkpoint: true
+  checkpoint_label: 可读性闸门没能看 —— 请看帧,按六问裁决
+  checkpoint_reject_to: '3'
+  id: 5_vision_human
+  step_type: tool
+  timeout_seconds: 600
+  tool_name: restage
+  tool_params:
+    from_steps:
+    - 5_vision
+    out_dir: $STEP_DIR
+  transitions:
+  - match:
+      from: checkpoint
+      value: approved
+    to: 5_vision_judged
+- id: 5_vision_judged
+  step_type: tool
+  timeout_seconds: 600
+  tool_name: vision_human_pass
+  tool_params:
+    out_dir: $STEP_DIR
+    vision_step: 5_vision
+  transitions:
+  - to: 5_knowledge
+- agent_config: gen_dpe_state_game__game_designer
+  context:
+  - config_name: ''
+    files: []
+    from: repository
+    mode: tool
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: repository
+    step_id: ''
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '2'
+    step_id: '2'
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: '5'
+    step_id: '5'
+  - config_name: ''
+    files:
+    - compile_report.json
+    mode: both
+    order: []
+    output: compile_report.json
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  - config_name: ''
+    files:
+    - playtest_summary.md
+    mode: both
+    order: []
+    output: playtest_summary.md
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_compile
+    step_id: 5_compile
+  - config_name: ''
+    files: []
+    mode: both
+    order: []
+    path: ''
+    required: false
+    scope: task
+    source_type: step
+    step: 5_vision
+    step_id: 5_vision
+  id: 5_design
+  output_mode: write
+  step_type: agent
+  timeout_seconds: 600
+  transitions:
+  - match:
+      _error: true
+    to: 5_final_test
+  - to: 5_final_test
+  output:
+    target: code
+- id: 5_final_test
+  step_type: tool
+  timeout_seconds: 1200
+  tool_name: run_tests
+  tool_params:
+    out_dir: $STEP_DIR
+  transitions:
+  - match:
+      field: skipped
+      from_file: test_report.json
+      value: true
+    to: 5_final_test_replan
+  - match:
+      field: no_tests_collected
+      from_file: test_report.json
+      value: true
+    to: 5_final_test_replan
+  - match:
+      field: passed
+      from_file: test_report.json
+      value: true
+    to: 5_review
+  - to: 5_final_test_replan
+- id: 5_final_test_replan
+  step_type: gate
+  timeout_seconds: 600
+  transitions:
+  - max_loop: 4
+    to: '3'
+x-aitelier:
+  label: State DPE Game
+  scheduler_owned: true
+  repo_mode: code
+  seed_file: seed_input.md
+  output_step: '5'
+  has_task_loop: true
+  preamble_steps:
+  - '1'
+  - '2'
+  input_hint: Frozen State goal attempt JSON seed; deterministic seed preparer emits the original DPE brief/goals contract. Use isolated existing private repo and checkpoints=ask. Full original DPE game engine gates require director scheduling.

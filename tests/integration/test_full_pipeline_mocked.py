@@ -371,6 +371,9 @@ def _build_real_run(tmp_path):
     (finalize / "step1_goals.json").write_text(
         json.dumps({"mvp_goals": ["x"], "non_goals": [], "user_stories": ["As a user, x"]}),
         encoding="utf-8")
+    from tests.code_output_fixture import init_code_repo
+    root = init_code_repo(tmp_path / "proj" / "p")
+    sf._workspace._code_path_resolver = lambda pid, run_id=None: root
     run_id = sf.create_run(graph.name, {"project_id": "p"})
     sf.start_run(run_id)
     return sf, run_id
@@ -416,7 +419,17 @@ def _drive(sf, run_id, *, reject_at=None, stop_at="t_plan", max_ticks=40):
         if sid == reject_at and sid not in rejected:
             verdict = _VERDICT_FAIL
             rejected.add(sid)
-        _emit_step_output(claimed.inputs.get("_output_dir"), sid, verdict)
+        from tests.integration.test_full_pipeline_real_runner import _build_agent_response
+        delivery = json.loads(_build_agent_response(
+            sid, claimed.inputs.get("_tool_schemas", {}),
+            review_passed=verdict == _VERDICT_PASS))
+        for action in delivery["actions"]:
+            if action["tool"] in ("end_step", "finish_step"):
+                continue
+            reply = sf.execute_tool(action["tool"], action.get("params", {}),
+                run_id=run_id, step_id=sid, step_instance_id=claimed.token.step_instance_id,
+                claim_epoch=claimed.token.claim_epoch)
+            assert not reply.get("error"), reply
         sf.confirm_step(claimed.token, StepResult(flags={"synced": True}))
         if sid == stop_at:
             break

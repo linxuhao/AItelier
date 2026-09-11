@@ -42,6 +42,9 @@ def _wire(tmp_path, test_results, *, tool_result=None, schema_failure=None):
                    projects_base=str(tmp_path / "proj"),
                    stale_threshold_seconds=60)
 
+    from tests.code_output_fixture import init_code_repo
+    init_code_repo(tmp_path / "proj" / "p")
+
     calls = {"run_tests": 0, "repo_apply": 0}
     seq = list(test_results)
 
@@ -138,10 +141,8 @@ def _drive(sf, run_id, max_ticks=40):
         assert claimed.step_id == "implement", (
             f"only `implement` should be claimable, got {claimed.step_id}")
         implement_runs += 1
-        tmp = sf._workspace.get_step_tmp_dir("p", sf.get_run(run_id)["graph_name"],
-                                             claimed.step_id)
-        Path(tmp).mkdir(parents=True, exist_ok=True)
-        (Path(tmp) / "impl.py").write_text("x = 1\n", encoding="utf-8")
+        from tests.code_output_fixture import write_claim_code
+        write_claim_code(sf, run_id, claimed)
         sf.confirm_step(claimed.token, StepResult(flags={}))
     return "TIMEOUT", implement_runs
 
@@ -164,7 +165,9 @@ def test_failing_test_loops_back_then_completes_on_fix(tmp_path):
     assert status == "completed"
     assert implement_runs == 2            # initial + one fix pass
     assert calls["run_tests"] == 2        # re-verified after the fix
-    assert calls["repo_apply"] == 2       # each implement delivery committed
+    from tests.code_output_fixture import commit_count
+    assert calls["repo_apply"] == 0
+    assert commit_count(sf, run_id) == 2   # real candidate commits, no copy hook
 
 
 def test_never_passing_fails_run_bounded(tmp_path):
@@ -207,7 +210,9 @@ def test_invalid_or_absent_evidence_fails_without_implementation_retry(tmp_path,
     sf, run_id, calls = _wire(tmp_path, [report])
     status, implement_runs = _drive(sf, run_id)
     assert status == "failed"
-    assert implement_runs == calls["run_tests"] == calls["repo_apply"] == 1
+    from tests.code_output_fixture import commit_count
+    assert implement_runs == calls["run_tests"] == commit_count(sf, run_id) == 1
+    assert calls["repo_apply"] == 0
     assert "test_evidence_missing" in str(sf.get_run(run_id))
 
 
@@ -257,7 +262,9 @@ def test_validator_error_cannot_reuse_prior_success(tmp_path, failure):
     else:
         pytest.fail("validator error never reached bounded terminal failure")
     assert status == "failed"
-    assert calls["run_tests"] == calls["repo_apply"] == 1
+    from tests.code_output_fixture import commit_count
+    assert calls["run_tests"] == commit_count(sf, run_id) == 1
+    assert calls["repo_apply"] == 0
 
 
 def test_error_flag_wins_over_written_report(tmp_path):

@@ -16,3 +16,7 @@ parameters:
     type: string
     description: "The finalize step's output dir (set to $STEP_DIR) — receives step1_goals.json"
     required: false
+
+# Reports/metadata are artifacts even when invoked by a code-producing agent.
+output:
+  target: artifact

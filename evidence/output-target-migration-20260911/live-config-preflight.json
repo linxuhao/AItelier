@@ -1,0 +1,61 @@
+{
+  "checked_at_utc": "2026-09-11T22:47:06.147119+00:00",
+  "dry_run_only": true,
+  "configs": [
+    {
+      "file": "gen_dpe_state_game.yaml",
+      "sha256": "b1a2c26d40c3226403cc84b525f5e7d2281f065201d548c9673905a196b45cb3",
+      "changes": [
+        {
+          "step": "2",
+          "destinations": {
+            "design": "artifact"
+          }
+        },
+        {
+          "step": "t_impl",
+          "destinations": {
+            "*": "code"
+          }
+        },
+        {
+          "step": "t_impl",
+          "mutating_checks_moved_before_commit": 2
+        },
+        {
+          "step": "5",
+          "destinations": {
+            "readme": "code",
+            "report": "artifact"
+          }
+        },
+        {
+          "step": "5_design",
+          "destinations": {
+            "*": "code"
+          }
+        }
+      ],
+      "valid": true
+    },
+    {
+      "file": "gen_dsh_code_review.yaml",
+      "sha256": "ddb141d47040118537aae0ed9f8013c2765c7540b2e35bce61d078772d42f645",
+      "changes": [],
+      "valid": true
+    },
+    {
+      "file": "gen_gen_media_candidate.yaml",
+      "sha256": "cbcc62bef2d5b225adbcd9893b30e08e3a413e2a30cb3624121879ac016f03ab",
+      "changes": [
+        {
+          "step": "implement",
+          "destinations": {
+            "*": "code"
+          }
+        }
+      ],
+      "valid": true
+    }
+  ]
+}

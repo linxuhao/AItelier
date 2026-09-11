@@ -423,6 +423,10 @@ def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expec
     repo.mkdir()
     record = repo / "design.md"
     record.write_text("valid")
+    from skillflow.output_targets import git
+    git(repo, "init", "-q")
+    git(repo, "add", "--", "design.md")
+    git(repo, "commit", "-qm", "base")
     observed = []
     loader = ToolLoader(Path(skillflow.__file__).parent / "tools")
     loader.add_tools_dir(_ROOT / "aitelier/tools")
@@ -434,15 +438,11 @@ def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expec
         (Path(out_dir) / "test_report.json").write_text(json.dumps({"passed": passed}))
         return {"passed": passed}
 
-    def apply_design(*args, **kwargs):
-        record.write_text("broken" if break_design else "valid")
-        return {"applied": True}
-
     sf = SkillFlow(str(tmp_path / "engine.db"), tool_loader=loader,
                    workspace_base=str(tmp_path / "ws"),
-                   projects_base=str(tmp_path / "projects"))
+                   projects_base=str(tmp_path / "projects"),
+                   code_path_resolver=lambda pid, run_id=None: repo)
     loader.register_dynamic_tool("run_tests", {}, run_tests)
-    loader.register_dynamic_tool("repo_apply", {}, apply_design)
     sf.register_agent_config_from_dict("game_designer", {"model": "test"})
     sf.register_graph(graph)
     run_id = sf.create_run(graph.name, {"project_id": "p"})
@@ -457,9 +457,13 @@ def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expec
         claim = sf.claim_next_step(run_id)
         if claim is not None:
             assert claim.step_id == "5_design"
-            staging = Path(sf._workspace.get_step_tmp_dir("p", graph.name, "5_design"))
-            staging.mkdir(parents=True, exist_ok=True)
-            (staging / "design.md").write_text("design update")
+            outcome = sf.execute_tool("edit", {"file": "design.md", "old_str": "valid",
+                                      "new_str": "broken" if break_design else "valid"},
+                run_id=run_id, step_id="5_design", step_instance_id=claim.token.step_instance_id,
+                claim_epoch=claim.token.claim_epoch)
+            assert "error" not in outcome, outcome
+            assert record.read_text() == ("broken" if break_design else "valid")
+            assert not (sf._workspace.get_config_path("p", graph.name) / "5_design.tmp").exists()
             sf.confirm_step(claim.token, StepResult(flags={}))
     assert observed == [True, not break_design], json.dumps(run)
     assert reached == expected

@@ -55,15 +55,19 @@ cycle). Follow the cheatsheet EXACTLY:
   list of what exists; anything else grants nothing.
 - The ONLY completed terminal is a `step_type: gate` with `transitions: [{to: null}]`.
   Give-up paths must end failed, never share the success terminal.
+- Declare `output.target: code` for repository mutations; code writes directly
+  to the run worktree, never through repo_apply or a code staging directory.
+  Plans/reports use `artifact` (the default); mixed fixed slots can override
+  `target` individually, e.g. report=artifact and README=code.
 - Every validated `output.mode: write` agent must declare
-  `validation_on_exhaustion: fail`. The compatibility default promotes invalid
-  staging after retries are spent and then runs delivery hooks; code must stop
-  before promotion, commit, or review. Validation/execution errors and missing
+  `validation_on_exhaustion: fail`. Code destinations already fail closed; the
+  explicit setting also protects artifact makers from legacy promote-on-error
+  behavior. Invalid output must not be committed or credited. Validation/execution errors and missing
   reviewer verdicts must remain failed; never add an unconditional or `_error`
   edge that credits the item or advances to its success successor.
 - Put an objective tool gate (tests/compile) BEFORE a reviewer where one exists.
-- Use manifest→loop fan-out for per-item work. A loop-body AGENT step writes a
-  per-item output folder; the engine routes reads by position (in-loop reader →
+- Use manifest→loop fan-out for per-item work. A loop-body AGENT step publishes
+  per-item artifacts (code steps publish a change receipt, not source copies); the engine routes reads by position (in-loop reader →
   its own item; a step AFTER the loop → all items). Declare `scope: all` on the
   aggregator's source for clarity; never `scope: task` from outside the loop.
 

@@ -1,3 +1,15 @@
+# Output destinations (current contract)
+
+`output.target` is `artifact` (default) or `code`, independent of `output.mode`.
+Code agents write directly into their run worktree; there is no code .tmp,
+overlay, promotion, repo_apply hook or deferred-delete manifest. Artifact folders
+are retained for plans/cards/reviews/reports and for `code_changes.json` receipts.
+Fixed slots can override the default (README code, verification report artifact).
+Validation failure retains code for repair and blocks delivery; code review is
+still separate. Historical references below describing code staging are old
+incident explanations, not the current output contract. See
+`docs/output-target-migration.md` for migration and restart instructions.
+
 # Director handoff — 2026-09-05
 For 武虾传奇 game tasks, read AGENTS.md here and the game repository AGENTS.md. Codex directs; Claude may implement assigned gameplay in an isolated worktree. The old pipeline-only workflow and old R6 queue are superseded. Do not start AItelier or publish without director assignment.
 
@@ -15,8 +27,8 @@ AItelier is a multi-agent AI system that plans, architects, implements, and veri
 ## Build & Run
 
 ```bash
-# Install AItelier (skillflow-py pulled from PyPI)
-pip install -e .
+# Install AItelier with the pinned reviewed engine wheel
+pip install --find-links=vendor/wheels -e .
 
 # Run CLI
 aitelier
@@ -48,9 +60,14 @@ docker compose logs -f          # tail
 - **Reader/writer auth** (`api/main.py:write_gate`): reads (GET) are open; mutating requests require an allowlisted **Cloudflare Access JWT** (`core/cf_access.py`, verified against `AITELIER_CF_TEAM_DOMAIN` + `AITELIER_CF_AUD`, email ∈ `AITELIER_WRITERS`) **or** the CLI's `AITELIER_ADMIN_TOKEN` (`X-AItelier-Admin-Token` header, honored only off-tunnel). The frontend read-only mode (`/api/me` → `can_write`) is UX only — the server gate is the control. Gate is inactive unless `AITELIER_CF_AUD` is set (local dev).
 - **API-key secret:** every LLM key (`ARK_API_KEY` is the shipped primary, `DEEPSEEK_API_KEY` the failover — see `model_routes.json`) is a **secret file** in `~/.aitelier-secrets/` (host dir overridable via `AITELIER_SECRETS_DIR` — compose's mount source follows it), whole-dir-mounted read-only at `/run/aitelier-secrets` (no per-key compose enumeration — any key name your provider tables declare resolves as soon as the file exists), NOT an env var, so test/build subprocesses that inherit `os.environ` don't receive it. `core/ai_router.py:_read_secret` resolves `/run/secrets/<name>` (legacy fallback) → `$AITELIER_SECRETS_DIR/<name>` (the mount) → `os.getenv`. Keep secrets out of `.env`/git (chmod 600).
 - **Git auth (clone/push/PR):** the host's `~/.ssh` / `~/.git-credentials` are **not** mounted into the container, so private-repo clone broke after containerization. Fixed with the same secret-file model: a **fine-grained GitHub PAT** at `~/.aitelier-secrets/GITHUB_TOKEN` (reaches the container via the whole-dir mount; the helper's path comes from `AITELIER_GITHUB_TOKEN_FILE`). `docker/git-credential-helper.sh` (wired via `GIT_CONFIG_*` in compose) feeds it to **github.com HTTPS remotes only** for clone/push; `core/git_ops.py:create_github_pr` reads the same secret for PR creation. An empty token file = "no credentials" (public clone still works). Chosen over bind-mounting `~/.git-credentials` because the container runs LLM-generated code — a scoped, revocable PAT has a far smaller blast radius than the host's whole credential store.
-- **skillflow dependency — PyPI-only in the image (the vendor/wheels `--find-links` override was REMOVED from the Dockerfile):** the container runs plain `pip install -e .`, so it gets whatever `skillflow-py` version PyPI serves for the pin in `pyproject.toml`. The **host** venv uses an editable install of the skillflow checkout (`~/stepflow`), so host-side skillflow changes are live immediately — the **container** only picks them up via a PyPI release.
-  - **Ship a skillflow change for real:** bump the version in the skillflow checkout's `pyproject.toml`, publish to PyPI, bump the `skillflow-py>=…` pin here, `docker compose build aitelier && up -d`.
-  - **Quick dev-loop override (session-only, NOT durable):** build a wheel in the checkout, then `docker exec aitelier pip install --force-reinstall --no-deps /app/vendor/wheels/<wheel>` + `docker compose restart aitelier`. ⚠️ This lives in the container's writable layer — any container *recreation* (`up -d` after an image/config change) silently reverts to the image's PyPI version. When runner/butler tools error with ImportErrors, check `docker exec aitelier pip show skillflow-py` first.
+- **SkillFlow output-target migration:** this checkout exact-pins the private
+  `1.5.72+aitelier.output1` wheel under `vendor/wheels`. Docker and local installs
+  use `pip install --find-links=vendor/wheels -e .`; the runtime checks the engine
+  supports the explicit target contract before starting. No PyPI publication was
+  performed. Rebuild the image to change the installed engine; restart alone does
+  not replace it. Replacing this private pin with a public release is a separate
+  explicit release operation, with the same behavioral tests.
+
 
 Env reference lives in `.env.example`.
 
@@ -136,7 +153,7 @@ Env reference lives in `.env.example`.
 
 ### Existing-repo support
 
-A "fix a bug / add a feature" request on an existing codebase becomes a **new project** with `repo_type="existing"` + `repo_path`. The DPE pipeline runs normally and `repo_apply` commits changes into the real repo via skillflow's `code_path_resolver` (wired in `api/dependencies.py:_existing_repo_code_path`).
+A "fix a bug / add a feature" request on an existing codebase becomes a **new project** with `repo_type="existing"` + `repo_path`. The DPE pipeline uses `output.target: code` to write directly into the run worktree and records candidate commits via skillflow's `code_path_resolver` (wired in `api/dependencies.py:_existing_repo_code_path`).
 
 ### Web UI
 

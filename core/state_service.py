@@ -42,8 +42,8 @@ def state_seed_text(context: dict, dependency_receipts, relay: bool) -> str:
         context | {"accepted_dependencies": dependency_receipts}) + "\n"
     if relay:
         seed += ("\n## Relay\n\nThis attempt CONTINUES a prior attempt that ran out of budget. Its commits are "
-                 "already in your repository baseline and its staged files are already in your staging "
-                 "(read them with the default `read`). Do not re-ground from scratch: read `relay.staged_files` "
+                 "already in your repository baseline; recovered code is UNVALIDATED in that worktree, "
+                 "and artifact drafts remain in artifact folders. Read `relay.code_changes`, `relay.staged_files` "
                  "and `relay.commits`, verify, finish what is missing, then `finish_step`.\n")
     return seed
 
@@ -298,10 +298,21 @@ class StateService:
                 manifest = self.ws.relay_manifest(tmp)
                 if manifest:
                     staged[tmp.name[:-4]] = manifest
+        from core.code_relay import inventory as code_inventory
+        code = {"files": {}, "steps": {}, "unowned": []}
+        code_error = ""
+        tree = Path(rec.get("worktree_path") or "")
+        if config_dir and rec.get("worktree_path") and tree.is_dir():
+            try:
+                code = code_inventory(tree, config_dir, attempt["run_id"])
+            except (ValueError, RuntimeError, OSError) as exc:
+                code_error = str(exc)
         return {"run_id": attempt["run_id"], "branch": rec["branch"], "base_sha": rec["base_sha"],
                 "head_sha": head, "commits": [{"sha": c[0], "subject": c[1] if len(c) > 1 else ""} for c in commits],
                 "mainline_ahead_by": behind, "staged_files": staged,
-                "digest": digest({"head_sha": head, "staged_files": staged}), "error": attempt.get("error")}
+                "code_changes": code, "code_error": code_error,
+                "digest": digest({"head_sha": head, "staged_files": staged, "code_changes": code}),
+                "error": attempt.get("error")}
 
     def _prepare_relay(self, attempt, source):
         """Make the failed attempt's work physically reachable by the new run:
@@ -320,8 +331,46 @@ class StateService:
                                 f"(relay_digest {expected} != {inventory['digest']}); read relay_inventory again")
         from core import run_isolation
         from core.workspace_manager import RelayDraftChanged
-        run_isolation.request_base(self.db, attempt["execution_project_id"], inventory["head_sha"],
-                                   note=f"relay of {prior['attempt_id']} (run {prior['run_id']})")
+        # Artifact drafts remain relayable. Old CODE drafts cannot be copied
+        # into a new direct-code attempt and then silently ignored by its runner.
+        from skillflow.output_targets import target_for
+        from skillflow.write_tools import _get_pattern
+        from pathlib import PurePath
+        # by-name-ok: creation-time relay admission; the new attempt has no run/pin yet.
+        current_graph = getattr(self.sf, "_graphs", {}).get(attempt["workflow"])
+        current_nodes = {n.id: n for n in getattr(current_graph, "steps", [])}
+        for prior_step, files in inventory.get("staged_files", {}).items():
+            node = current_nodes.get(prior_step)
+            for filename in files:
+                target = target_for(node)
+                for slot in (getattr(node, "output_fixed", {}) or {}):
+                    if PurePath(filename).match(_get_pattern(slot, node.output_fixed)):
+                        target = target_for(node, slot)
+                        break
+                if target == "code":
+                    raise StateConflict("Legacy code draft retained at " + prior_step + "/" + filename
+                        + "; explicitly recover it into a code worktree before relaying to the new output target.")
+        base = inventory["head_sha"]
+        code = inventory.get("code_changes") or {"files": {}, "steps": {}, "unowned": []}
+        if inventory.get("code_error"):
+            raise StateConflict("Cannot inventory failed code: " + inventory["code_error"])
+        if code["files"]:
+            from core.code_relay import recovery_commit, require_quiet
+            from skillflow.output_targets import atomic_json
+            rec = run_isolation.record(self.db, prior["run_id"])
+            prior_dir = self.ws._get_secure_path(prior["execution_project_id"]) / prior["workflow"]
+            try:
+                require_quiet(self.sf, prior["run_id"])
+                base = recovery_commit(Path(rec["worktree_path"]), prior_dir, prior["run_id"],
+                                       inventory["head_sha"], code, attempt["attempt_id"])
+            except (ValueError, RuntimeError, OSError) as exc:
+                raise StateConflict(str(exc)) from exc
+            target_dir = self.ws._get_secure_path(attempt["execution_project_id"]) / attempt["workflow"]
+            atomic_json(target_dir / ".code-output-relay.json", {
+                "recovery_commit": base, "base_commit": inventory["head_sha"],
+                "steps": code["steps"], "validated": False})
+        run_isolation.request_base(self.db, attempt["execution_project_id"], base,
+                                   note=f"relay of {prior['attempt_id']} (run {prior['run_id']}); code remains unvalidated")
         parked = {}
         prior_config = self.ws._get_secure_path(prior["execution_project_id"]) / prior["workflow"]
         for step, manifest in inventory["staged_files"].items():
@@ -334,7 +383,8 @@ class StateService:
             if copied:
                 parked[step] = copied
         return {"attempt_id": prior["attempt_id"], "run_id": inventory["run_id"], "branch": inventory["branch"],
-                "base_sha": inventory["head_sha"], "commits": inventory["commits"],
+                "base_sha": base, "commits": inventory["commits"],
+                "code_changes": code, "code_recovery_validated": False,
                 "mainline_ahead_by": inventory["mainline_ahead_by"], "staged_files": parked,
                 "digest": inventory["digest"], "error": inventory["error"]}
 

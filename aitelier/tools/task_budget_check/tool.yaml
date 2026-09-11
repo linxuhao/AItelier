@@ -20,3 +20,7 @@ parameters:
     type: string
     description: "Pipeline workspace root (auto-injected); fallback locator for step dirs"
     required: false
+
+# Reports/metadata are artifacts even when invoked by a code-producing agent.
+output:
+  target: artifact

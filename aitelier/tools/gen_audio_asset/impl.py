@@ -11,9 +11,9 @@ The audio half of the asset channel, split by what the two jobs actually need:
   kind="voice" -> actor_tts against an actor cast once from `voice`, so a
                  character's lines keep one timbre across calls.
 
-Writes into the step's STAGING dir when there is one (see `_target_root`) and
-reaches the repo through promotion + repo_apply; only a tool node with no
-staging dir writes straight into the working tree.
+Writes into the engine-declared output directory. Code outputs go directly to
+this run's worktree; artifact outputs remain artifacts. No code overlay or
+promotion is involved.
 """
 
 from pathlib import Path
@@ -44,11 +44,17 @@ def gen_audio_asset(*, dest: str = "", kind: str = "sfx", preset: str = "",
                     step_tmp_dir: str = "", out_dir: str = "",
                     actor: str = "", voice: str = "", text: str = "",
                     speaking_rate: float = 0.0,
+                    output_dir: str = "", output_target: str = "",
                     **kwargs) -> dict:
     """Generate one audio asset into the repo. Returns {written, source_url}."""
-    repo = _target_root(step_tmp_dir, project_root, workspace_root)
+    repo = _target_root(output_dir, output_target, project_root, step_tmp_dir)
     if repo is None:
-        return {"written": [], "error": "no staging dir and no repo to write into"}
+        return {"written": [], "error": "no explicit output directory or code root was injected"}
+    from skillflow.output_targets import code_path
+    try:
+        code_path(repo, dest)
+    except (ValueError, TypeError) as exc:
+        return {"written": [], "error": str(exc)}
     if not dest:
         return {"written": [], "error": "dest is required"}
 
@@ -90,25 +96,35 @@ def gen_audio_asset(*, dest: str = "", kind: str = "sfx", preset: str = "",
     except MCPError as e:
         return {"written": [], "error": str(e)}
 
-    dst = (repo / dest).resolve()
-    if not str(dst).startswith(str(repo)):        # keep writes inside the jail
-        return {"written": [], "error": f"dest escapes the repo: {dest}"}
+    try:
+        dst = code_path(repo, dest)
+    except (ValueError, TypeError) as exc:
+        return {"written": [], "error": str(exc)}
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_bytes(data)
+    from skillflow.output_targets import atomic_write_bytes
+    atomic_write_bytes(dst, data)
     return {"written": [str(dst.relative_to(repo))], "source_url": urls[0]}
 
 
-def _target_root(step_tmp_dir: str, project_root: str, workspace_root: str) -> Path | None:
-    """Where a generated asset must be written.
-
-    The STEP'S STAGING dir, whenever there is one. An agent step's delivery is
-    reconciled against staging, so a binary written straight into the working
-    tree looks like it landed and is then deleted again by that reconciliation
-    as "a file this step never delivered" — which is exactly how the first batch
-    of generated sprites disappeared, commit `t_impl delete ... 4 file(s)`.
-    Falling back to the repo keeps the tool usable from a tool node (like
-    scaffold), where no staging dir exists."""
-    for cand in (step_tmp_dir, project_root, workspace_root):
-        if cand and Path(cand).is_dir():
-            return Path(cand).resolve()
+def _target_root(output_dir: str, output_target: str, project_root: str,
+                 legacy_tmp: str = "") -> Path | None:
+    """An explicit output directory wins; code never falls back to a draft."""
+    if output_target not in ("", "artifact", "code"):
+        return None
+    if output_target == "code":
+        if not project_root or not Path(project_root).is_absolute():
+            return None
+        if output_dir and Path(output_dir).resolve() != Path(project_root).resolve():
+            return None
+        return Path(project_root).resolve()
+    if output_dir and Path(output_dir).is_absolute() and Path(output_dir).is_dir():
+        return Path(output_dir).resolve()
+    if output_target == "artifact":
+        return None  # an explicit artifact destination must never fall back to code
+    # Tool nodes can explicitly write code without an agent-output declaration.
+    # A legacy staged agent is refused rather than reintroducing code staging.
+    if legacy_tmp:
+        return None
+    if project_root and Path(project_root).is_absolute() and Path(project_root).is_dir():
+        return Path(project_root).resolve()
     return None

@@ -132,11 +132,12 @@ RULES: tuple[Rule, ...] = (
          "not known ahead of time."),
     Rule("write_steps_promote_invalid_output",
          "EVERY validated `mode: write` step must set "
-         "`validation_on_exhaustion: fail`. SkillFlow defaults to `promote` for "
-         "backward compatibility: after the retry budget is spent it promotes the "
-         "invalid staging tree, runs `on_deliver` (including `repo_apply`), and "
-         "completes with a `validation_failed` flag. A code maker must stop before "
-         "promotion so invalid output cannot be committed or reviewed as delivered."),
+         "`validation_on_exhaustion: fail`. Artifact outputs retain the legacy "
+         "promote-on-exhaustion compatibility default, so declare fail explicitly. "
+         "Code outputs use `output.target: code` (no staging or repo_apply); the "
+         "engine always blocks their candidate commit when validation fails. "
+         "Keep the explicit fail declaration so changing a destination cannot "
+         "silently weaken the validation contract."),
     Rule("routing_file_unguaranteed",
          "IF A STEP'S TRANSITIONS ROUTE ON A FILE, THE STEP MUST GUARANTEE THAT "
          "FILE. An agent step whose edges read `match: {from_file: verdict.json, "

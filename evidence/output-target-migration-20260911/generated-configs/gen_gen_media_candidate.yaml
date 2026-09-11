@@ -1,0 +1,159 @@
+name: gen_gen_media_candidate
+description: 'Director-granted media production: prepare private candidate assets and provenance for independent review; no media acceptance implied.'
+capabilities:
+- game_assets
+x-aitelier:
+  label: Media Candidate
+  scheduler_owned: true
+  repo_mode: code
+  seed_file: seed_input.md
+  output_step: implement
+  input_hint: Director seed_input.md with exact private repo scope/destinations, requested media, explicit generation budget and max tool calls, seeds, intended use/scales, and review requirements. Start only after director schedules shared GPU use; checkpoints=ask. Completion means candidate manifest shape only.
+begin: implement
+end_conditions:
+  combinator: or
+  conditions:
+  - type: node_reached
+    node: candidate_ready
+    result: completed
+  - type: node_reached
+    node: needs_attention
+    result: failed
+steps:
+- id: implement
+  step_type: agent
+  agent_config: gen_gen_media_candidate__media_implementer
+  capability: game_assets
+  timeout_seconds: 1200
+  context:
+  - source:
+      from: repository
+      mode: tool
+  - source:
+      config: gen_gen_media_candidate
+      output: seed_input.md
+      required: true
+  - source:
+      tool: dir_tree
+  output:
+    mode: write
+    target: code
+  transitions:
+  - to: manifest_check
+- id: manifest_check
+  step_type: tool
+  tool_name: json_schema
+  tool_params:
+    workspace_root: $CONFIG_DIR/implement
+    files:
+    - final/media_manifest.json
+    inline_schema:
+      type: object
+      required:
+      - schema_version
+      - status
+      - acceptance_status
+      - assets
+      - attempts
+      - first_failure
+      - limitations
+      - required_reviews
+      properties:
+        schema_version:
+          const: 1
+        status:
+          const: candidate
+        acceptance_status:
+          const: pending_independent_review
+        assets:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required:
+            - path
+            - kind
+            - tool
+            - source_url
+            - seed
+            - warnings
+            - license_status
+            - license_evidence
+            properties:
+              path:
+                type: string
+                minLength: 1
+              kind:
+                enum:
+                - image
+                - sfx
+                - bgm
+                - voice
+              tool:
+                enum:
+                - gen_image_asset
+                - gen_audio_asset
+              source_url:
+                type:
+                - string
+                - 'null'
+              seed:
+                type:
+                - integer
+                - 'null'
+              warnings:
+                type: array
+              license_status:
+                enum:
+                - UNKNOWN
+                - documented
+              license_evidence:
+                type:
+                - string
+                - 'null'
+        attempts:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required:
+            - tool
+            - parameters
+            - result
+            properties:
+              tool:
+                type: string
+              parameters:
+                type: object
+              result:
+                type: object
+        first_failure:
+          type:
+          - object
+          - 'null'
+        limitations:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        required_reviews:
+          type: array
+          minItems: 1
+          items:
+            type: string
+  transitions:
+  - to: needs_attention
+    match:
+      _error: true
+  - to: candidate_ready
+    match:
+      all_passed: true
+  - to: needs_attention
+- id: candidate_ready
+  step_type: gate
+  transitions:
+  - to:
+- id: needs_attention
+  step_type: gate
+  transitions:
+  - to:

@@ -50,14 +50,16 @@ GUARDED = {
                                 # root can never become a path it reads.
     "semantic_search",          # refuses a non-absolute project_root (error + hint)
     "emit_project_artifacts",   # refuses a non-absolute workspace_root
-    "gen_audio_asset",          # _target_root: `if cand and Path(cand).is_dir()`
+    "gen_audio_asset",          # explicit target + absolute output root
     "gen_image_asset",          # same
     "git_history",              # _repo() raises on an empty/blank root, and the
                                 # error names against_project as the fix
     "git_push_post",            # `Path(project_root) … if project_root else None`
     "knowledge_sync",           # `… if project_root else None`
     "loop_items_implemented",   # _graph_dir: every branch is `if <root> and …`
-    "repo_delete",              # refuses a non-absolute project_root
+    "repo_delete",              # legacy hook; refuses a non-absolute project_root
+    "repo_remove_file",         # direct code target + absolute root + symlink/path jail
+    "godot_playtest_scenario",  # absolute project_root, no CWD fallback
     "restage",                  # raises on a missing root
     "run_tests",                # refuses a non-absolute project_root
     "scaffold",                 # `… if (project_root or workspace_root) else None`
@@ -74,7 +76,6 @@ UNGUARDED = {
     "gdscript_check",                  # Path(workspace_root or ".").resolve()
     "godot_compile",                   # Path(project_root or workspace_root)
     "godot_playtest",                  # same
-    "godot_playtest_scenario",         # same
     "godot_vision",                    # … or "."
     "state_probe",                     # project_root or workspace_root or "."
     "tasks_manifest_complete",         # Path(workspace_root or step_dir or … or ".")

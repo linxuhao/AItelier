@@ -79,28 +79,19 @@ def test_step5_declares_readme_as_content_output():
     assert target == "README.md", f"readme output must target README.md, got {target!r}"
 
 
-def test_step5_delivers_readme_via_repo_apply():
-    """Step 5 must ship its README into the RESOLVED project repo via repo_apply
-    (which targets the real code path) — never a CWD-relative direct write."""
+def test_step5_declares_readme_as_code_and_report_as_artifact():
+    """README and report have different destinations; neither needs a copy hook.
+
+    The engine's mixed-slot end-to-end tests cover real writes, validation,
+    commit and artifact publication with this shape.
+    """
     graph = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
     step5 = _step(graph, "5")
-
-    on_deliver = step5.get("lifecycle", {}).get("on_deliver")
-    assert on_deliver, "step 5 lost its on_deliver lifecycle — README won't reach the repo"
-
-    hooks = on_deliver if isinstance(on_deliver, list) else [on_deliver]
-    tools = [h.get("tool") for h in hooks]
-    assert "repo_apply" in tools, (
-        f"step 5 on_deliver must include repo_apply to deliver README.md; got {tools}"
-    )
-
-    # The verdict must NOT ship into the delivered repo — only README.md.
-    apply_hook = next(h for h in hooks if h.get("tool") == "repo_apply")
-    ignore = apply_hook.get("params", {}).get("ignore") or []
-    assert any("verify_report" in pat for pat in ignore), (
-        "repo_apply should ignore the verdict file so only README.md is delivered; "
-        f"ignore={ignore}"
-    )
+    assert step5["output"]["target"] == "artifact"
+    assert step5["output"]["fixed"]["readme"]["target"] == "code"
+    assert step5["output"]["fixed"]["readme"]["file"] == "README.md"
+    assert step5["output"]["fixed"]["report"]["target"] == "artifact"
+    assert "repo_apply" not in str(step5.get("lifecycle", {}))
 
 
 # ── Defense-in-depth: the other commit-writers must reject a CWD-relative path ──

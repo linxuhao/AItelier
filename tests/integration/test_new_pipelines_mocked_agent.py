@@ -100,6 +100,10 @@ def _build(tmp_path, config_name, seeds):
     _ri.ensure_for_run(_gdb(), run_id=run_id, project_id="p",
                        config_name=graph.name, repo_mode="code")
 
+    # Both engine and host must resolve the SAME run worktree. The former
+    # staging fixture accidentally used three unrelated project directories.
+    db = _gdb()
+    sf._workspace._code_path_resolver = lambda pid, run_id=None: _ri.resolve_for_resolver(db, run_id)
     sf.start_run(run_id)
     return sf, db, ws, run_id
 

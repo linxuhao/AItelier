@@ -330,7 +330,8 @@ def _progress_signature(tool_name: str, params: dict, result: dict) -> str | Non
 
 
 # Argument names an agent may never set on a tool call: the host injects them.
-_AGENT_RESERVED_ARGS = ("project_root", "workspace_root", "step_dir", "out_dir")
+_AGENT_RESERVED_ARGS = ("project_root", "workspace_root", "step_dir", "out_dir",
+                        "output_dir", "output_target", "step_tmp_dir")
 
 
 def _strip_agent_roots(params) -> dict:
@@ -764,9 +765,11 @@ class PipelineEngine:
                 continue
             if not isinstance(res, dict):
                 continue
-            wf = PipelineEngine._written_name(res)
-            if wf:
-                written.append(wf)
+            written.extend(PipelineEngine._written_names(res))
+            deleted = res.get("deleted") or res.get("removed") or []
+            deleted = [deleted] if isinstance(deleted, str) else deleted
+            if isinstance(deleted, list):
+                written = [p for p in written if p not in deleted]
             note = str(res.get("note", ""))
             if note.startswith("ask_more_turns: +") and res.get("status") == "granted":
                 grants += 1
@@ -1557,8 +1560,9 @@ class PipelineEngine:
                                     if not filename or not content:
                                         continue
                                     safe_content = self._ensure_valid_json_content(filename, str(content))
-                                    workspace.write_draft(project_id, step_id, filename, safe_content, graph_name=self._draft_graph_name())
-                                    written_files.append(WorkspaceManager._sanitize_filename(filename, safe_content))
+                                    self._write_output_file(workspace, project_id, step_id, filename, safe_content)
+                                    written_files.append(filename if self._output_file_target(filename) == "code"
+                                                 else WorkspaceManager._sanitize_filename(filename, safe_content))
                                 self._emit("files_written", {"files": written_files,
                                             "preview": f"Written {len(written_files)} file(s) (repaired)"})
                                 break
@@ -1612,8 +1616,9 @@ class PipelineEngine:
                                         safe_content = parsed["content"]
                                 except json.JSONDecodeError:
                                     pass
-                            workspace.write_draft(project_id, step_id, filename, safe_content, graph_name=self._draft_graph_name())
-                            written_files.append(WorkspaceManager._sanitize_filename(filename, safe_content))
+                            self._write_output_file(workspace, project_id, step_id, filename, safe_content)
+                            written_files.append(filename if self._output_file_target(filename) == "code"
+                                                 else WorkspaceManager._sanitize_filename(filename, safe_content))
                     elif isinstance(files_data, list):
                         for entry in files_data:
                             if not isinstance(entry, dict):
@@ -1623,8 +1628,9 @@ class PipelineEngine:
                             if not filename or not content:
                                 continue
                             safe_content = self._ensure_valid_json_content(filename, str(content))
-                            workspace.write_draft(project_id, step_id, filename, safe_content, graph_name=self._draft_graph_name())
-                            written_files.append(WorkspaceManager._sanitize_filename(filename, safe_content))
+                            self._write_output_file(workspace, project_id, step_id, filename, safe_content)
+                            written_files.append(filename if self._output_file_target(filename) == "code"
+                                                 else WorkspaceManager._sanitize_filename(filename, safe_content))
                     if written_files:
                         self._emit("files_written", {"files": written_files,
                                                      "preview": f"Written {len(written_files)} file(s)"})
@@ -2298,6 +2304,16 @@ class PipelineEngine:
         return tools
 
     @staticmethod
+    def _written_names(result: dict) -> list[str]:
+        if not isinstance(result, dict):
+            return []
+        # A partial tool failure can still have written these explicit paths.
+        # Keep mutation accounting and invalidate earlier read results.
+        value = result.get("written") or result.get("edited") or result.get("created") or []
+        return ([value] if isinstance(value, str) else
+                [x for x in value if isinstance(x, str)] if isinstance(value, (list, tuple)) else [])
+
+    @staticmethod
     def _written_name(result: dict) -> str:
         """The file a write/edit/create tool reported.
 
@@ -2308,8 +2324,8 @@ class PipelineEngine:
         its edit on the next attempt (the duplicated/triplicated-code bug) and
         the empty written_files trips the whole-repo no-op floor.
         """
-        return (result.get("written") or result.get("edited")
-                or result.get("created") or "")
+        names = PipelineEngine._written_names(result)
+        return names[0] if names else ""
 
     # Keys by which a tool reports that it CHANGED something without leaving a
     # file in this step's staging. A deletion is real output; so is a durable
@@ -2377,8 +2393,8 @@ class PipelineEngine:
         resume = self._resume_from_trace(project_id, self._max_tool_turns
                                          or self.factory.get_max_tool_turns(agent_config_name))
         if resume:
-            draft = workspace._draft_dir(project_id, step_id, self._draft_graph_name())
-            missing = [f for f in resume["written_files"] if not (draft / f).exists()]
+            missing = [f for f in resume["written_files"]
+                       if not self._output_file_path(workspace, project_id, step_id, f).exists()]
             if missing or resume["turns"] < 1:
                 self._trace("step", "resume_refused", {
                     "step_id": step_id, "turns": resume["turns"],
@@ -2393,7 +2409,7 @@ class PipelineEngine:
             self._emit("step_resumed", {
                 "step_id": step_id, "turns": resume["turns"],
                 "preview": f"Step {step_id} resumed at turn {resume['turns']} from the trace"})
-        else:
+        elif getattr(self, "_output_target", "artifact") != "code":
             workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
             # A relayed State attempt (continue_from) parked the failed
             # attempt's staged files under `_relay/<step>`; they go into the
@@ -2547,7 +2563,7 @@ class PipelineEngine:
                     lead = (
                         f"[Your delivery was REJECTED by the output gate at turn "
                         f"{resume['turns']}] The conversation above is exactly what "
-                        f"you had, and every file you wrote is still staged "
+                        f"you had, and every file you wrote is still retained "
                         f"({staged}) — but the step is NOT done. Do not re-issue "
                         f"finish_step until you have fixed the failure below.")
                 else:
@@ -2744,7 +2760,7 @@ class PipelineEngine:
                     raise NativeTurnBudgetExhausted(
                         f"Step {step_id}: native turn budget exhausted "
                         f"({turn_count}/{current_max_turns}) without finish_step; "
-                        "incomplete draft and trace retained; explicit attention required. "
+                        "incomplete outputs and trace retained; explicit attention required. "
                         "No delivery or automatic retry.")
                 remaining = current_max_turns - turn_count
                 # A LOW BUDGET IS NEWS EVEN WHEN OUTPUT EXISTS.
@@ -2982,7 +2998,7 @@ class PipelineEngine:
                         self._emit("output_cap_exhausted", incomplete)
                         raise NativeOutputCapExhausted(
                             f"Step {step_id}: output cap {previous_cap} exhausted; "
-                            "draft and trace retained; explicit attention required")
+                            "outputs and trace retained; explicit attention required")
 
                 if result.text:
                     self._emit("agent_message", {
@@ -3164,9 +3180,9 @@ class PipelineEngine:
 
                     # Track written files (write→'written', edit→'edited',
                     # create→'created'); see _written_name.
-                    wf = self._written_name(tool_result)
-                    if wf:
-                        written_files.append(wf)
+                    names = self._written_names(tool_result)
+                    wf = bool(names)
+                    written_files.extend(names)
                     # Anything that CHANGED the tree invalidates every held
                     # read. Both predicates, not just `_written_name`: a step
                     # can change the repo without leaving a file in staging
@@ -3175,7 +3191,12 @@ class PipelineEngine:
                     # followed by a deduped list_tree would show the agent the
                     # file it just removed. Over-invalidating costs one
                     # re-read; under-invalidating hands back stale truth.
-                    if wf or self._effect_name(tool_result):
+                    # Diagnostic files live outside code but are readable via
+                    # source=self. Refresh their read results as well, without
+                    # counting a test report as a delivered code change.
+                    artifact_changed = any(tool_result.get("artifact_" + key)
+                                           for key in ("written", "edited", "created", "deleted", "removed"))
+                    if wf or self._effect_name(tool_result) or artifact_changed:
                         repeat_index.clear()
                     elif (repeat_key and not repeated
                           and len(result_str) >= _REPEAT_MIN_CHARS
@@ -3247,11 +3268,51 @@ class PipelineEngine:
             f"Step {step_id}: Max retries ({max_retries}) exceeded in native mode."
         )
 
+    def _output_file_target(self, filename: str) -> str:
+        from pathlib import PurePath
+        from skillflow.write_tools import _get_pattern
+        for slot, entry in getattr(self, "_output_fixed", {}).items():
+            if PurePath(filename).match(_get_pattern(slot, self._output_fixed)):
+                return entry.get("target", getattr(self, "_output_target", "artifact")) if isinstance(entry, dict) else getattr(self, "_output_target", "artifact")
+        return getattr(self, "_output_target", "artifact")
+
+    def _output_file_path(self, workspace, project_id, step_id, filename):
+        if self._output_file_target(filename) == "code":
+            from skillflow.output_targets import code_path
+            return code_path(self._code_path, filename)
+        return workspace._draft_dir(project_id, step_id, self._draft_graph_name()) / filename
+
+    def _write_output_file(self, workspace, project_id, step_id, filename, content):
+        if self._output_file_target(filename) != "code":
+            return workspace.write_draft(project_id, step_id, filename, content,
+                                         graph_name=self._draft_graph_name())
+        from pathlib import PurePath
+        from skillflow.write_tools import _get_pattern
+        for slot in getattr(self, "_output_fixed", {}):
+            if PurePath(filename).match(_get_pattern(slot, self._output_fixed)):
+                params = {"content": content}
+                pattern = _get_pattern(slot, self._output_fixed)
+                if "*" in pattern:
+                    prefix, _, suffix = pattern.partition("*")
+                    params["id"] = filename[len(prefix):len(filename)-len(suffix) if suffix else None]
+                result = self._exec_tool({"tool": "write_" + slot, "params": params})
+                break
+        else:
+            tool = "write" if "write" in (self._tool_schemas or {}) else "create"
+            result = self._exec_tool({"tool": tool, "params": {"file": filename, "content": content}})
+        if result.get("error"):
+            raise MaxRetriesExceeded(result["error"])
+        return result
+
     def _draft_graph_name(self) -> str:
         """Graph config for draft writes, derived from skillflow's output_dir
         (workspaces/<pid>/<graph>/<step>.tmp) so outputs land in the RUN's own
         config dir — not the hardcoded DPE default. For DPE runs this equals
         dpe_default_v2 (unchanged); for meta_conversation it is meta_conversation."""
+        if getattr(self, "_config_name", ""):
+            return self._config_name
+        if getattr(self, "_output_target", "artifact") == "code":
+            raise RuntimeError("Code output requires an explicit config_name, not a worktree-parent inference")
         od = getattr(self, "_output_dir", "")
         if od:
             from pathlib import Path
@@ -3355,7 +3416,9 @@ class PipelineEngine:
                  run_id: str = "",
                  step_instance_id: int | None = None,
                  claim_epoch: int = 0,
-                 carry_forward: bool = False) -> bool:
+                 carry_forward: bool = False,
+                 output_target: str = "artifact", output_fixed: dict | None = None,
+                 config_name: str = "", artifact_dir: str = "") -> bool:
         """
         Dispatch to the appropriate step execution path.
 
@@ -3369,6 +3432,10 @@ class PipelineEngine:
         self._validation_error = validation_error
         self._tool_schemas = tool_schemas or {}
         self._output_dir = output_dir
+        self._output_target = output_target
+        self._output_fixed = output_fixed or {}
+        self._config_name = config_name
+        self._artifact_dir = artifact_dir
         self._max_tool_turns = max_tool_turns
         self._run_id = run_id
         self._step_instance_id = step_instance_id

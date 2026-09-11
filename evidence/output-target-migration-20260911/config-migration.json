@@ -1,0 +1,127 @@
+[
+  {
+    "path": "configs/subagent.yaml",
+    "changes": [
+      {
+        "step": "work",
+        "destinations": {
+          "*": "code"
+        }
+      }
+    ]
+  },
+  {
+    "path": "configs/coding_impl.yaml",
+    "changes": [
+      {
+        "step": "implement",
+        "destinations": {
+          "*": "code"
+        }
+      }
+    ]
+  },
+  {
+    "path": "configs/novel_init.yaml",
+    "changes": [
+      {
+        "step": "design",
+        "destinations": {
+          "*": "code"
+        }
+      }
+    ]
+  },
+  {
+    "path": "configs/fix_tests.yaml",
+    "changes": [
+      {
+        "step": "fix",
+        "destinations": {
+          "*": "code"
+        }
+      }
+    ]
+  },
+  {
+    "path": "configs/dpe_default.yaml",
+    "changes": [
+      {
+        "step": "2",
+        "destinations": {
+          "design": "artifact",
+          "linter_manifest": "code"
+        }
+      },
+      {
+        "step": "t_impl",
+        "destinations": {
+          "*": "code"
+        }
+      },
+      {
+        "step": "5",
+        "destinations": {
+          "report": "artifact",
+          "readme": "code"
+        }
+      }
+    ]
+  },
+  {
+    "path": "configs/addons/game_harness.yaml",
+    "changes": [
+      {
+        "step": "5_design",
+        "destinations": {
+          "*": "code"
+        }
+      }
+    ]
+  },
+  {
+    "path": "/home/linxuhao/.AItelier/configs/gen_dpe_state_game.yaml",
+    "before_sha256": "b1a2c26d40c3226403cc84b525f5e7d2281f065201d548c9673905a196b45cb3",
+    "changes": [
+      {
+        "step": "2",
+        "destinations": {
+          "design": "artifact"
+        }
+      },
+      {
+        "step": "t_impl",
+        "destinations": {
+          "*": "code"
+        }
+      },
+      {
+        "step": "5",
+        "destinations": {
+          "readme": "code",
+          "report": "artifact"
+        }
+      },
+      {
+        "step": "5_design",
+        "destinations": {
+          "*": "code"
+        }
+      }
+    ],
+    "prepared": "/home/linxuhao/AItelier/.claude/worktrees/output-target-code-20260911/evidence/output-target-migration-20260911/generated-configs/gen_dpe_state_game.yaml"
+  },
+  {
+    "path": "/home/linxuhao/.AItelier/configs/gen_gen_media_candidate.yaml",
+    "before_sha256": "cbcc62bef2d5b225adbcd9893b30e08e3a413e2a30cb3624121879ac016f03ab",
+    "changes": [
+      {
+        "step": "implement",
+        "destinations": {
+          "*": "code"
+        }
+      }
+    ],
+    "prepared": "/home/linxuhao/AItelier/.claude/worktrees/output-target-code-20260911/evidence/output-target-migration-20260911/generated-configs/gen_gen_media_candidate.yaml"
+  }
+]

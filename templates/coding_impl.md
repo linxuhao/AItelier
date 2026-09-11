@@ -12,11 +12,10 @@ faithfully, not to redesign it.
 ## Continuing a prior attempt (seed section `Relay`)
 If the seed carries a `relay` object, a previous attempt at this same plan ran
 out of budget. Its commits (`relay.commits`) are already in the repository you
-read, and its staged files (`relay.staged_files`) are already in your staging —
-the default `read` shows them. Start by reading those files, not by
-re-grounding the whole repository: check what is missing or broken against the
-plan, complete it with `edit`/`create`, and `finish_step`. Treat the draft as
-unreviewed work to verify, not as approved code to keep at all costs.
+read. Recovered code (`relay.code_changes`) is already in that worktree and is
+explicitly UNVALIDATED; artifact drafts (`relay.staged_files`) remain separate.
+Read the named files, verify what is missing or broken against the plan, complete
+it with `edit`/`create`, and `finish_step`. Do not re-ground the whole repository.
 
 ## Your task
 1. **Read before you write.** Open the files the plan names and understand
@@ -35,18 +34,16 @@ You have **no** whole-file `write`. Change existing files with **surgical
   of the file is preserved verbatim. Multiple changes → call `edit` repeatedly.
 - Why: rewriting a whole file silently drops any region you didn't reproduce.
 
-Edits write to this step's **staging**, not directly to the repository. Use the
-same repo-relative `file` throughout; do not prepend `implement/` or `.tmp/`
-from a tool's output path. Default `read(path=...)` sees your latest staged
-content and reports its `source`; explicitly reading `source="repo"` reads the
-repository baseline instead. A second edit must match the text left by the
-first edit. If a match fails, read only the affected region before retrying.
+Edits write directly to this run's **code worktree** (`output.target: code`).
+There is no code staging folder, overlay, promotion, or `repo_apply` copy.
+Use the same repo-relative path for create/edit/read/search/tests. The next edit
+matches the result of the last edit, including uncommitted changes.
 
-Always supply both `old_str` and `new_str`. Use an explicit `new_str=""` only
-when you intend to delete the matched text; omitting it is invalid. A successful
-edit means the staged content changed, not that a Git commit or test passed.
-Do not apply or commit staged files manually: this workflow's configured
-promotion and `repo_apply` handle delivery after `finish_step`.
+Always supply both `old_str` and `new_str`; an explicit empty `new_str` deletes
+the matching text. A successful edit is not a successful test or review.
+At `finish_step` the engine validates the candidate, commits only this step's
+recorded code paths, and publishes a change receipt in the artifact folder.
+Failure retains the worktree for repair. Do not manually commit or reset it.
 
 All write paths are relative to the repo root. When every file is written,
 call `finish_step` — in that same turn. Do not spend turns re-reading,

@@ -299,7 +299,7 @@ overlay:
   # ── TOOLSET (add_tools) ────────────────────────────────────────────────────
   # The single-scenario Godot probe, granted to the implementer on GAME runs
   # only. It answers "is the scenario I was sent to repair green yet?" in ~50s
-  # against the step's own staged edits, instead of ending the step and waiting
+  # against the current run worktree edits, instead of ending the step and waiting
   # ~12 minutes for the full 26-scenario gate at 5_compile.
   #
   # This lived on the shared task_implementer role between 2026-08-24 and
@@ -431,17 +431,8 @@ overlay:
           # that looked at it said it was unreadable.
           - source: { step: "5_vision" }
         output:
-          mode: "write"
-        # No validation: a run that changed no design writes NOTHING, and that is
-        # the correct outcome — a file_exists gate here would push the agent to
-        # invent a change to satisfy it.
-        lifecycle:
-          on_deliver:
-            - tool: "repo_apply"
-              params:
-                source_dir: "$STEP_DIR"
-              on_failure: "skip"
-        # Re-test after repo_apply, even when the design step reports an error.
+          mode: write
+          target: code
         transitions:
           - to: "5_final_test"
             match: { _error: true }

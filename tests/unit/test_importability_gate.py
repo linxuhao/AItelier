@@ -149,7 +149,7 @@ def test_a_literal_step_dir_makes_the_gate_a_vacuous_pass(tmp_path):
 
 @pytest.mark.parametrize("spec", [
     *_t_impl()["validation"],
-    *[s for s in _t_impl()["lifecycle"]["after_deliver"] if "*.py" in str(s.get("files"))],
+    *[s for s in _t_impl().get("lifecycle", {}).get("after_deliver", []) if "*.py" in str(s.get("files"))],
 ])
 def test_python_lint_specs_let_skillflow_supply_the_root(spec):
     """StepValidator resolves no variables; only the on_deliver tool-hook path does.
@@ -170,9 +170,10 @@ def test_python_lint_specs_do_not_delegate_the_checker_to_the_manifest():
     linter name ("flake8", "pylint") switches the importability gate off with no
     error anywhere. Which checker guards importability is not the agent's choice.
     """
-    specs = [_t_impl()["validation"][0]] + [
-        s for s in _t_impl()["lifecycle"]["after_deliver"]
-        if "*.py" in str(s.get("files"))]
+    specs = [s for s in [*_t_impl()["validation"],
+                         *_t_impl().get("lifecycle", {}).get("after_deliver", [])]
+             if "*.py" in str(s.get("files"))]
+    assert specs, "at least one Python checker must remain configured"
     for spec in specs:
         assert "manifest_path" not in spec, spec
 

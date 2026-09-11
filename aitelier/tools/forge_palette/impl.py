@@ -30,9 +30,11 @@ CHEATSHEET = """\
 4. Objective gate BEFORE semantic review where a suite/build exists (run_tests,
    pytest, a compile tool). A reviewer with no execution tool cannot catch a
    broken build.
-5. Staged write + promotion. Steps that mutate use output.mode: write into
-   $STEP_DIR; validation gates promotion; repo mutation goes through repo_apply
-   lifecycle. Surgical edit/create, never whole-file overwrite.
+5. Explicit output targets. Code agents use output: {mode: write, target: code}:
+   writes go directly to the run worktree; no staging, repo_apply or repo_delete
+   hooks. Artifact plans/reports retain target: artifact (the default). Fixed
+   slots may override target (e.g. README code, verification report artifact).
+   Validation gates code commit/artifact publication; use surgical edit/create.
 6. Manifest -> loop fan-out for per-item work: a step emits a manifest
    {"execution_order": [[id,...],...]}; a `step_type: loop` node consumes it with
    loop.source + item_as + $var interpolation in later steps' context paths.

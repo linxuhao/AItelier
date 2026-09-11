@@ -19,9 +19,9 @@ is asked whether the image depicts the requested subject and its verdict rides
 back in `warning` — semantics are a question for a vision model, not for an
 alpha histogram.
 
-Writes into the step's STAGING dir when there is one (see `_target_root`), and
-reaches the repo through promotion + repo_apply; only a tool node with no
-staging dir writes straight into the working tree like scaffold/knowledge_sync.
+Writes into the engine-declared output directory. Code outputs go directly to
+this run's worktree; artifact outputs remain artifacts. No code overlay or
+promotion is involved.
 """
 
 from pathlib import Path
@@ -61,6 +61,7 @@ def gen_image_asset(*, prompt: str = "", dest: str = "", project_root: str = "",
                     rows: int = 0, cols: int = 0, subject: str = "",
                     verify: bool = True, step_tmp_dir: str = "", out_dir: str = "",
                     cast: str = "", appearance: str = "", cast_kind: str = "character",
+                    output_dir: str = "", output_target: str = "",
                     **kwargs) -> dict:
     """Generate one image asset (optionally cut into frames) into the repo.
 
@@ -82,9 +83,14 @@ def gen_image_asset(*, prompt: str = "", dest: str = "", project_root: str = "",
     object's identity is its GEOMETRY (silhouette, whether the lid is flat or
     domed, where the hinges sit) — colour and material alone do not hold it
     still across angles."""
-    repo = _target_root(step_tmp_dir, project_root, workspace_root)
+    repo = _target_root(output_dir, output_target, project_root, step_tmp_dir)
     if repo is None:
-        return {"written": [], "error": "no staging dir and no repo to write into"}
+        return {"written": [], "error": "no explicit output directory or code root was injected"}
+    from skillflow.output_targets import code_path
+    try:
+        code_path(repo, dest)
+    except (ValueError, TypeError) as exc:
+        return {"written": [], "error": str(exc)}
     if not prompt or not dest:
         return {"written": [], "error": "prompt and dest are both required"}
 
@@ -94,6 +100,7 @@ def gen_image_asset(*, prompt: str = "", dest: str = "", project_root: str = "",
         args["seed"] = int(seed)
 
     warning = None
+    written = []
     try:
         if cast:
             _ensure_cast(cast, appearance, cast_kind, seed)
@@ -124,9 +131,10 @@ def gen_image_asset(*, prompt: str = "", dest: str = "", project_root: str = "",
             targets = [(f"{stem}_{i}.png", u) for i, u in enumerate(frames)]
         else:
             targets = [(dest, url)]
-        written = [_write(repo, rel, fetch(u)) for rel, u in targets]
-    except MCPError as e:
-        return {"written": [], "error": str(e)}
+        for rel, u in targets:
+            written.append(_write(repo, rel, fetch(u)))
+    except (MCPError, OSError) as e:
+        return {"written": written, "error": str(e)}
 
     return {"written": written, "source_url": url, "warning": warning}
 
@@ -139,11 +147,14 @@ def _one_url(reply: str, tool: str) -> str:
 
 
 def _write(repo: Path, rel: str, data: bytes) -> str:
-    dst = (repo / rel).resolve()
-    if not str(dst).startswith(str(repo)):        # keep writes inside the jail
-        raise MCPError(f"dest escapes the repo: {rel}")
+    from skillflow.output_targets import code_path
+    try:
+        dst = code_path(repo, rel)
+    except (ValueError, TypeError) as exc:
+        raise MCPError(str(exc)) from exc
     dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_bytes(data)
+    from skillflow.output_targets import atomic_write_bytes
+    atomic_write_bytes(dst, data)
     return str(dst.relative_to(repo))
 
 
@@ -162,17 +173,25 @@ def _subject_warning(url: str, subject: str) -> str | None:
     return f"subject check: {verdict[:300]}" if verdict[:3].upper() == "NO" else None
 
 
-def _target_root(step_tmp_dir: str, project_root: str, workspace_root: str) -> Path | None:
-    """Where a generated asset must be written.
-
-    The STEP'S STAGING dir, whenever there is one. An agent step's delivery is
-    reconciled against staging, so a binary written straight into the working
-    tree looks like it landed and is then deleted again by that reconciliation
-    as "a file this step never delivered" — which is exactly how the first batch
-    of generated sprites disappeared, commit `t_impl delete ... 4 file(s)`.
-    Falling back to the repo keeps the tool usable from a tool node (like
-    scaffold), where no staging dir exists."""
-    for cand in (step_tmp_dir, project_root, workspace_root):
-        if cand and Path(cand).is_dir():
-            return Path(cand).resolve()
+def _target_root(output_dir: str, output_target: str, project_root: str,
+                 legacy_tmp: str = "") -> Path | None:
+    """An explicit output directory wins; code never falls back to a draft."""
+    if output_target not in ("", "artifact", "code"):
+        return None
+    if output_target == "code":
+        if not project_root or not Path(project_root).is_absolute():
+            return None
+        if output_dir and Path(output_dir).resolve() != Path(project_root).resolve():
+            return None
+        return Path(project_root).resolve()
+    if output_dir and Path(output_dir).is_absolute() and Path(output_dir).is_dir():
+        return Path(output_dir).resolve()
+    if output_target == "artifact":
+        return None  # an explicit artifact destination must never fall back to code
+    # Tool nodes can explicitly write code without an agent-output declaration.
+    # A legacy staged agent is refused rather than reintroducing code staging.
+    if legacy_tmp:
+        return None
+    if project_root and Path(project_root).is_absolute() and Path(project_root).is_dir():
+        return Path(project_root).resolve()
     return None

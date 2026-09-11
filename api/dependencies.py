@@ -217,6 +217,8 @@ def get_skillflow():
     global _skillflow_instance
     if _skillflow_instance is None:
         from skillflow import SkillFlow, PipelineGraph
+        from core.output_migration import require_output_engine
+        require_output_engine()
         from pathlib import Path
         from core.config_registry import ConfigRegistry
 

@@ -88,17 +88,8 @@ steps:
       - source: { from: "repository", mode: "tool" }   # 上一版 bible（修订时读它 edit；首轮为空）
       - source: { step: "design_review" }              # Red 驳回意见（首轮为空）
     output:
-      mode: "write"                                     # 自由 create + edit
-    # 无 file_exists validation：显式嵌套路径在 $STEP_DIR 下解析不稳，且冗余——
-    # scaffold_bible 会校验 7 文件齐全并报错。DPE t_impl 同理只对产物做 lint。
-    lifecycle:
-      on_deliver:
-        - tool: "repo_apply"
-          params:
-            source_dir: "$STEP_DIR"
-          on_failure: "retry"
-          max_retries: 3
-    # NO checkpoint here — Red reviews first, the human gates at design_gate.
+      mode: write
+      target: code
     transitions:
       - to: "design_review"
 

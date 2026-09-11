@@ -68,7 +68,7 @@ GEN_HINTS = {
 }
 _log = logging.getLogger(__name__)
 
-_OUTPUT_FIELDS = ("mode", "fixed", "allow_full_write", "carry_forward")
+_OUTPUT_FIELDS = ("mode", "target", "fixed", "allow_full_write", "carry_forward")
 
 
 def _inherit_baseline_output_fields(data: dict, baseline_path: Path) -> list[str]:
@@ -107,6 +107,14 @@ def _inherit_baseline_output_fields(data: dict, baseline_path: Path) -> list[str
             if field in old_output and field not in output:
                 output[field] = copy.deepcopy(old_output[field])
                 inherited.append(f"{step['id']}.output.{field}")
+        old_fixed, new_fixed = old_output.get("fixed", {}), output.get("fixed", {})
+        if isinstance(old_fixed, dict) and isinstance(new_fixed, dict):
+            for slot, entry in new_fixed.items():
+                old_entry = old_fixed.get(slot)
+                if (isinstance(entry, dict) and isinstance(old_entry, dict)
+                        and "target" in old_entry and "target" not in entry):
+                    entry["target"] = old_entry["target"]
+                    inherited.append(f"{step['id']}.output.fixed.{slot}.target")
     return inherited
 
 # Tools that HARD-depend on the project's code repo existing as a git repo
@@ -232,6 +240,9 @@ def derive_repo_mode(graph, roles: dict | None = None) -> str:
     costs an unused empty repo.
     """
     for step in getattr(graph, "steps", []) or []:
+        from skillflow.output_targets import has_target
+        if has_target(step, "code"):
+            return "code"
         if (getattr(step, "tool_name", "") or "") in _REPO_TOOLS:
             return "code"
         for spec in _specs(getattr(step, "validation", None)):
@@ -1007,6 +1018,9 @@ def load_generated_configs(sf, registry) -> list[str]:
     registered. Invalid files are skipped (logged), never fatal. A companion
     ``<name>.roles.json`` (forge-generated pipelines) restores the real role
     prompts before the graph registers."""
+    from core.output_migration import migrate_generated_outputs
+    for migration in migrate_generated_outputs(generated_configs_dir()):
+        _log.info("output target migration: %s (backup %s)", migration["path"], migration["backup"])
     out: list[str] = []
     skip = archived_names()
     for f in sorted(generated_configs_dir().glob(f"{GEN_PREFIX}*.yaml")):

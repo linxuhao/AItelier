@@ -76,21 +76,8 @@ steps:
       - source: { step: "test" }
       - source: { tool: "dir_tree" }
     output:
-      mode: "write"                # derives surgical create/edit (+ finish_step)
-    lifecycle:
-      on_deliver:
-        # repo_apply stays HERE (before the test), not after it: run_tests
-        # executes against the project's real working tree, so the changes must
-        # be applied there for the tests to exercise them — and repo_apply has no
-        # stage-only mode (it always git-adds + commits). A failing test now
-        # loops back to `implement`, which fixes and re-commits, so HEAD
-        # converges to tested-passing code (fix-forward, exactly like DPE's
-        # t_impl → t_impl_review). The gate below is what blocks completion.
-        - tool: "repo_apply"        # stage + commit the step's files to the real repo
-          params:
-            source_dir: "$STEP_DIR"
-          on_failure: "retry"
-          max_retries: 3
+      mode: write
+      target: code
     transitions:
       - to: "test"
 

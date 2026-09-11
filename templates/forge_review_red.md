@@ -41,8 +41,10 @@ one, `passed: false`.
    only forward) back to the step the SUCCESS edge goes to, the branch is decoration
    and the fail-open is intact. A gate executes nothing.
 5. **A validated `mode: write` agent omits `validation_on_exhaustion: fail`.**
-   SkillFlow's compatibility default promotes invalid staging after retries are
-   exhausted, then runs delivery hooks such as `repo_apply`. Also block any maker
+   Code destinations fail closed; artifact destinations retain the legacy
+   promote-on-error default unless explicitly overridden. Reject repository
+   makers without `output.target: code`, or code makers still declaring
+   copy/promotion/deferred-delete hooks. Also block any maker
    `_error` edge into review, or reviewer unconditional/`_error` edge that advances
    the item: execution failure, missing verdict, and exhausted review loops must
    remain failed for operator recovery.

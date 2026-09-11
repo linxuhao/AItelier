@@ -30,3 +30,7 @@ parameters:
     type: string
     description: "Dir containing chapter_final.md (defaults to novel_chapter/humanize)"
     required: false
+
+# Reports/metadata are artifacts even when invoked by a code-producing agent.
+output:
+  target: artifact

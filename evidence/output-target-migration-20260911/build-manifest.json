@@ -1,0 +1,12 @@
+{
+  "wheel": "vendor/wheels/skillflow_py-1.5.72+aitelier.output1-py3-none-any.whl",
+  "sha256": "2f0b00b69c1ab8196b6ee121d48069b7e6ef73068e737203779f9ec221333dfb",
+  "source_commit": "de0473997df36236343be8abc9febe01c3cf5417",
+  "engine_version": "1.5.72+aitelier.output1",
+  "python": "3.12.14 (main, Sep  1 2026, 14:16:52) [Clang 22.1.3 ]",
+  "verified_import": "/tmp/aitelier-output-migration/venv/lib/python3.12/site-packages/skillflow/__init__.py",
+  "matched_runtime_files": 80,
+  "built_at_utc": "2026-09-11T23:08:49.549048+00:00",
+  "public_release": false,
+  "service_restarted": false
+}

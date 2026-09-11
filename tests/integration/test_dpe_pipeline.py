@@ -1,7 +1,7 @@
 # tests/integration/test_dpe_pipeline.py
 # Pipeline integration tests with mocked agents.
-# New flow: Green writes via sf.execute_tool() → Apply → Build → done.
-# Commit (Draft→Final) is handled by skillflow draft_commit tool node.
+# Code flow: Green writes to its declared run worktree via sf.execute_tool().
+# Artifact publication and candidate code commits are handled by confirm_step().
 # Validation is handled by skillflow confirm_step().
 # Red review is handled by skillflow _review nodes (separate step).
 
@@ -106,11 +106,39 @@ def _mock_green(response):
 # Validation, commit, apply, build are skillflow tool nodes.
 # ════════════════════════════════════════════════════════════════════════
 
-def test_pipeline_happy_path(engine):
+def _wire_code_step(engine, workspace, tmp_path, monkeypatch):
+    """The JSON loop executes against a real claimed direct-code step."""
+    import skillflow
+    from skillflow import SkillFlow, PipelineGraph
+    from skillflow.graph import StepNode, Transition
+    from skillflow.tool_loader import ToolLoader
+    from tests.code_output_fixture import init_code_repo
+    root = init_code_repo(workspace.get_code_path("default"))
+    from skillflow.output_targets import git
+    git(root, "add", "--", "README.md")
+    git(root, "commit", "-qm", "existing fixture code")
+    sf = SkillFlow(str(tmp_path / "sf.db"), workspace_base=str(tmp_path / "artifacts"),
+                   tool_loader=ToolLoader(Path(skillflow.__file__).parent / "tools"),
+                   code_path_resolver=lambda pid, run_id=None: root)
+    node = StepNode(id="t_impl", output_mode="write", output_target="code",
+                    output_allow_full_write=True, config={"extra_tools": ["read_file", "list_tree"]},
+                    transitions=[Transition(to=None)])
+    sf.register_graph(PipelineGraph(name="test_code", begin=node.id, steps=[node]))
+    rid = sf.create_run("test_code", project_id="default")
+    sf.start_run(rid); sf.advance_run(rid); claim = sf.claim_next_step(rid)
+    monkeypatch.setattr("api.dependencies.get_skillflow", lambda: sf)
+    engine.factory.is_native.return_value = False
+    return {"run_id": rid, "step_instance_id": claim.token.step_instance_id,
+            "claim_epoch": claim.token.claim_epoch, "output_target": "code",
+            "config_name": "test_code", "output_dir": str(root)}
+
+
+def test_pipeline_happy_path(engine, monkeypatch):
     import tempfile
     tmp_path = Path(tempfile.mkdtemp())
     mock_workspace = MockWorkspace(tmp_path)
     _setup_workspace(tmp_path)
+    routing = _wire_code_step(engine, mock_workspace, tmp_path, monkeypatch)
 
     engine.factory.get_agent.return_value = _mock_green(json.dumps({
         "thoughts": "Writing the add function.",
@@ -119,7 +147,7 @@ def test_pipeline_happy_path(engine):
 
     result = engine.run_step(task_id=101, step_id="t_impl", workspace=mock_workspace,
                              project_id="default", agent_config_name="task_implementer",
-                             tool_schemas=TS)
+                             tool_schemas=TS, **routing)
 
     assert result is True
 
@@ -128,11 +156,12 @@ def test_pipeline_happy_path(engine):
 # Multi-turn: explore first, then write
 # ════════════════════════════════════════════════════════════════════════
 
-def test_pipeline_tool_exploration_then_write(engine):
+def test_pipeline_tool_exploration_then_write(engine, monkeypatch):
     import tempfile
     tmp_path = Path(tempfile.mkdtemp())
     mock_workspace = MockWorkspace(tmp_path)
     _setup_workspace(tmp_path)
+    routing = _wire_code_step(engine, mock_workspace, tmp_path, monkeypatch)
 
     mg = MagicMock()
     mg.gateway.litellm_model = "mock-model"
@@ -154,10 +183,11 @@ def test_pipeline_tool_exploration_then_write(engine):
 
     result = engine.run_step(task_id=103, step_id="t_impl", workspace=mock_workspace,
                              project_id="default", agent_config_name="task_implementer",
-                             tool_schemas=TS)
+                             tool_schemas=TS, **routing)
 
     assert result is True
     assert mg.run.call_count == 2
+    assert (mock_workspace.get_code_path("default") / "src/main.py").read_text() == "def fixed(): pass"
 
 
 # ════════════════════════════════════════════════════════════════════════

@@ -68,7 +68,8 @@ steps:
       - source: { step: review }                           # loop-back feedback
     output:
       mode: write
-    validation_on_exhaustion: fail  # invalid staging never promotes or delivers
+      target: code               # repository changes; artifact for plans/reports
+    validation_on_exhaustion: fail  # invalid candidate is not accepted/committed
     validation:
       - {tool: file_exists, files: ["*"]}
     transitions:

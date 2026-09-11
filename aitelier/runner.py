@@ -56,6 +56,13 @@ class AgentStepRunner:
 
         Called OUTSIDE any skillflow transaction.
         """
+        if step.inputs.get("_legacy_code_staging"):
+            from skillflow.exceptions import IsolationUnavailable
+            raise IsolationUnavailable(
+                "This run is pinned to a legacy code-staging graph. Its drafts, "
+                "worktree and trace are retained. Finish it on the prior runtime "
+                "or explicitly recover it into a NEW output.target=code attempt; "
+                "the current runtime will not reinterpret pending source drafts.")
         project_id = step.run_context.get("project_id", "unknown")
         task_id = step.run_context.get("task_id")
         step_id = step.step_id
@@ -132,6 +139,13 @@ class AgentStepRunner:
         output_dir = step.inputs.get("_output_dir", "")
         max_tool_turns = step.inputs.get("_max_tool_turns", 0)
         run_id = step.token.run_id
+        if step.inputs.get("_has_code_output"):
+            from core import run_isolation
+            from skillflow.exceptions import IsolationUnavailable
+            rec = run_isolation.record(self._db, run_id)
+            if not rec or rec["mode"] != run_isolation.MODE_WORKTREE:
+                raise IsolationUnavailable("Direct code outputs require this run's writable worktree")
+            run_isolation.resolve_for_resolver(self._db, run_id)
 
         try:
             # Run the LLM step in a thread-pool executor so the uvicorn event
@@ -163,6 +177,10 @@ class AgentStepRunner:
                         validation_error=validation_error,
                         tool_schemas=tool_schemas,
                         output_dir=output_dir,
+                        output_target=step.inputs.get("_output_target", "artifact"),
+                        output_fixed=step.inputs.get("_output_fixed", {}),
+                        config_name=step.inputs.get("_config_name", ""),
+                        artifact_dir=step.inputs.get("_artifact_dir", ""),
                         max_tool_turns=max_tool_turns,
                         run_id=run_id,
                         step_instance_id=step.token.step_instance_id,
@@ -182,7 +200,10 @@ class AgentStepRunner:
         # FW-3: surface the review verdict into the StepResult so it lands in
         # skillflow_steps.result_flags_json. Pipeline routing already reads the
         # file directly; this just stops DB/analytics consumers seeing {}.
-        outputs, flags = self._read_review_verdict(output_dir)
+        # A code worktree may contain an old verdict file. It is never this
+        # step's review output; only artifact outputs can supply verdict flags.
+        outputs, flags = (self._read_review_verdict(output_dir)
+                          if step.inputs.get("_output_target", "artifact") == "artifact" else ({}, {}))
         return StepResult(outputs=outputs, flags=flags)
 
     @staticmethod

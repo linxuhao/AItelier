@@ -7,10 +7,10 @@
 
 ## 核心设计原则
 
-### 1. 物理隔离原则 (Inbox/Outbox)
-- 每一步只能读取自己 Inbox 中的静态文件
-- 处理后写入 Outbox_Draft，审核通过后移至 Outbox_Final
-- 大模型变为"无状态函数"，切断幻觉的向后传染
+### 1. 输出目标与隔离
+- `output.target: code`：源码直接写本 run 独占的 worktree，不再经过 step staging。
+- `output.target: artifact`：计划、任务卡、审核结论和报告留在 artifact 目录，校验后发布。
+- 源码、搜索、测试使用同一个 worktree；审核针对候选版本，不等于无校验直接放行。
 
 ### 2. 原子操作原则
 - 能用代码实现的原子操作就用代码实现
@@ -31,7 +31,7 @@
 - **单线贪婪调度**: 每次只执行一个任务，独占算力
 - **断点续传**: 所有状态持久化到 SQLite (WAL 模式)
 - **Git 事件溯源**: 每步 Final 封卷触发 git commit，支持时光机回滚
-- **上下文流转**: 上一步的 Outbox_Final 物理拷贝至下一步的 Inbox
+- **上下文流转**: 根据 graph 的 context 声明读取 artifact；源码始终从 run worktree 读取
 
 ---
 
@@ -39,23 +39,14 @@
 
 ### 工作区目录结构
 ```
-workspaces/{project_id}/
-├── Global_Mount/              # 只读全局上下文 (DAG, Goals)
-├── Inbox_{step}/              # 当前步骤的输入
-├── Outbox_Draft_{step}/       # Green Agent 草案
-├── Outbox_Final_{step}/       # 审核通过的最终产出
-└── .git/                      # Git 事件溯源
+worktrees/{run_id}/                   # 唯一可变源码工作区
+workspaces/{project_id}/{config}/
+  {artifact_step}.tmp/                # 仅 artifact 待发布内容
+  {artifact_step}/                    # 已发布 artifact
+  {code_step}/{item}/code_changes.json # 候选提交与改动路径，不复制源码
+  .code-output/{run_id}/{step}.json   # 执行恢复元数据
 ```
-
-### 步骤 ID 映射
-| Step ID | 目录名示例 |
-|---------|-----------|
-| "1"     | Inbox_1, Outbox_Draft_1, Outbox_Final_1 |
-| "2"     | Inbox_2, Outbox_Draft_2, Outbox_Final_2 |
-| "3"     | Inbox_3, Outbox_Draft_3, Outbox_Final_3 |
-| "t_plan" | Inbox_t_plan, Outbox_Draft_t_plan, Outbox_Final_t_plan |
-| "t_impl" | Inbox_t_impl, Outbox_Draft_t_impl, Outbox_Final_t_impl |
-| "5"     | Inbox_5, Outbox_Draft_5, Outbox_Final_5 |
+同一代码任务被 review 退回后，保留原始任务基线并继续修复，不清空 worktree。
 
 ### 数据库存储 (SQLite WAL)
 - **tasks 表**: `id, project_id, prompt, status, created_at` — 任务级状态

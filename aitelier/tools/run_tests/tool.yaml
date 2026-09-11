@@ -1,6 +1,6 @@
 name: run_tests
 description: >
-  Run the project's unit tests (pytest) over the consolidated repo and write
+  Run the project's unit tests (pytest) over the current run worktree and write
   test_report.json {passed, returncode, summary, failures[], collection_errors[],
   skipped?, import_error?, no_tests_collected?, node?, repo_gate?}. `node` (npm
   install/build/test checks) is present when the repo holds a node project and
@@ -17,7 +17,8 @@ description: >
   collected NOTHING is reported as passed:false + no_tests_collected:true — a
   gate that checked nothing has not passed. If no test runner can be provisioned
   at all the gate is SKIPPED as passed:true, so a pass does not by itself prove
-  tests ran — read the report.
+  tests ran — read the report. Reports are artifacts, not source files; a code
+  agent can read its report with read(source="self", path="test_report.json").
 parameters:
   project_root:
     type: string
@@ -31,3 +32,7 @@ parameters:
 # Its result carries passed/error, so a graph step running it MUST route the
 # failure branch — read by forge_registry_check (fallible_tools_unrouted).
 x-fallible: true
+
+# Reports/metadata are artifacts even when invoked by a code-producing agent.
+output:
+  target: artifact

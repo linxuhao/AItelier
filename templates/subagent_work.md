@@ -32,7 +32,7 @@ When the reviewer sends you back:
 Use `read(path)` to read a file, `search(pattern)` to grep, `list()` to list.
 Omit `source` and these read your **working tree** — your own pending
 `create`/`edit` output shadows the repo, so **reads reflect what you just
-wrote** (the result's `source` field says `staging` vs `repo`). So: read a
+wrote** (code is written directly to this run's worktree; no code staging). So: read a
 file once before you edit it; **do NOT re-read it afterward to "verify"** —
 `edit` returning `{"edited": …}` means it's applied. To touch another step's
 output, pass an explicit `source` (the tool description lists what you may use).
@@ -42,7 +42,7 @@ No whole-file `write`. New file → `create(file, content)`. Existing file →
 `edit(file, old_str, new_str)` replacing the single unique `old_str` (enough
 surrounding context to match exactly once); the rest is preserved verbatim.
 For several changes to one file, call `edit` repeatedly — each new `old_str`
-is matched against your **already-edited** staged copy, so use the current
+is matched against your **already-edited** worktree file, so use the current
 text, not the original. Rewriting a whole file silently drops regions you
 didn't reproduce — always `edit`.
 

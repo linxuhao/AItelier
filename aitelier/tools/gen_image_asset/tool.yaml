@@ -1,7 +1,7 @@
 name: gen_image_asset
 description: >
   Generate a REAL image asset (sprite, background, tileset, icon) and write it
-  into this step's staging dir, so the game can ship art instead of ColorRect/Polygon2D
+  into the engine-declared output destination, so the game can ship art instead of ColorRect/Polygon2D
   placeholders. Chains generate_image -> remove_bg -> slice_sheet on the shared
   MCP media server. transparent=true (the default, and what you want for any
   character/obstacle sprite) converts to a REAL alpha channel — the image model
@@ -25,9 +25,9 @@ description: >
   costume belongs there: "wearing heavy red armor" re-dresses without changing the
   face. Casting is idempotent — a re-run reuses the existing look rather than
   minting a new one, so assets already in the repo stay consistent.
-  Written into the step's staging dir ($STEP_TMP_DIR) whenever one exists — it
-  reaches the repo through promotion + repo_apply; only a tool node with no
-  staging dir writes straight into the repo working tree.
+  For output.target=code, writes directly to the current run worktree;
+  for output.target=artifact, writes to its artifact destination. There is
+  no code staging, overlay, or repo_apply copy. Validation and review still apply.
 parameters:
   prompt:
     type: string

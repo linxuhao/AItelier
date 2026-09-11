@@ -1,0 +1,98 @@
+{
+  "checked_at_utc": "2026-09-11T23:39:19.187300+00:00",
+  "aitelier_code_commit": "e4577aef47dc24db8ddf86994406a089b5731199",
+  "clean_verification_checkout": "/home/linxuhao/AItelier/.claude/worktrees/output-target-verify-20260912",
+  "skillflow_source_commit": "de0473997df36236343be8abc9febe01c3cf5417",
+  "wheel_sha256": "2f0b00b69c1ab8196b6ee121d48069b7e6ef73068e737203779f9ec221333dfb",
+  "installed_engine": "/tmp/aitelier-output-migration/venv/lib/python3.12/site-packages/skillflow/__init__.py",
+  "matched_wheel_source_and_installed_files": 80,
+  "unit_file_count": 192,
+  "suites": {
+    "aitelier_unit": {
+      "passed": 2933,
+      "skipped": 8,
+      "failed_or_error": 0,
+      "skip_details": [
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_compile_pass",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        },
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_compile_catches_parse_error",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        },
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_playtest_dumps_state",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        },
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_playtest_catches_runtime_error",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        },
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_playtest_spec_evaluates_assertions",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        },
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_playtest_spec_input_timeline",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        },
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_playtest_spec_dict_assert_form",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        },
+        {
+          "class": "tests.unit.test_godot_harness",
+          "name": "test_real_playtest_spec_reports_bad_node",
+          "reason": "no Godot binary (set GODOT_BIN)"
+        }
+      ],
+      "xml": [
+        "handoff-unit-0.xml",
+        "handoff-unit-1.xml",
+        "handoff-unit-2.xml",
+        "handoff-unit-3.xml",
+        "handoff-unit-4.xml",
+        "handoff-unit-5.xml",
+        "handoff-unit-6.xml",
+        "handoff-unit-7.xml"
+      ]
+    },
+    "aitelier_other": {
+      "passed": 500,
+      "skipped": 1,
+      "failed_or_error": 0,
+      "skip_details": [
+        {
+          "class": "tests.api.test_admin_routers",
+          "name": "test_delete_user_no_auth",
+          "reason": "write-gate and require_writer's dev-fallback are both bypassed under app.state._test_mode; writer-only enforcement is covered by tests/integration/test_cli_middleware.py"
+        }
+      ],
+      "xml": [
+        "handoff-nonunit.xml"
+      ]
+    },
+    "skillflow": {
+      "passed": 1110,
+      "skipped": 0,
+      "failed_or_error": 0,
+      "skip_details": [],
+      "xml": [
+        "handoff-skillflow.xml",
+        "handoff-skillflow-plugins.xml"
+      ]
+    }
+  },
+  "aitelier_deselected_network": 11,
+  "browser_scripts_run": false,
+  "docker_build_or_service_restart": false,
+  "semantic_search": "Retried in replacement session: connection refused; not verified."
+}

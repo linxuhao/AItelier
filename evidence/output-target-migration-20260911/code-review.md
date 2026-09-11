@@ -4,7 +4,7 @@ Reviewer: ChatGPT, a separate source-review pass in the replacement session. Thi
 
 ## Scope and disposition
 
-The implementation preserves artifact folders and removes the direct-code path's separate source staging, overlay, promotion and deferred deletion. No artifact-revision/fallback redesign, context-index policy change, model change or production restart is included. Source review is complete; delivery still requires final clean-checkout verification and local integration.
+The implementation preserves artifact folders and removes the direct-code path's separate source staging, overlay, promotion and deferred deletion. No artifact-revision/fallback redesign, context-index policy change, model change or production restart is included. Source review and final clean-checkout verification are complete. The verified runtime commit is e4577aef47dc24db8ddf86994406a089b5731199; the engine source commit is de0473997df36236343be8abc9febe01c3cf5417. Local integration is recorded separately from this candidate-verification report.
 
 Reviewed boundaries: SkillFlow output_targets.py, graph/core routing, write_tools, validation and read surfaces; AItelier native/JSON output dispatch, resume accounting, runner isolation admission, diagnostic reports, direct deletion/media, playtest roots, code relay, generated-config migration, dependency installation and the accompanying behavioral tests. The original exact-text occurrence inventories and plan review remain in this directory. Semantic search was retried in this session and still failed with connection refused; semantic review is not claimed complete.
 
@@ -24,6 +24,10 @@ Reviewed boundaries: SkillFlow output_targets.py, graph/core routing, write_tool
 - git diff --check: passed.
 - Earlier final integration XML confirms both full_pipeline_real_runner cases passed. Those earlier batches are not substituted for the final clean-checkout run.
 
-## Remaining acceptance
+## Final acceptance results
 
-Commit migration without absorbing the pre-existing recall patch. Verify an independent clean worktree against the installed exact wheel, including all currently present unit files (not just the earlier batch list), integration/API/host suites and engine tests. Record exclusions and skips separately. Then integrate locally, restore and verify the original dirty changes, and leave service rebuild/restart and live NEW-run observation to the owner. No public push or PyPI publication.
+The migration was committed without absorbing the pre-existing recall patch. A separate clean worktree at e4577ae was verified against the installed exact wheel. All 192 current unit-test files were enumerated afresh: 2,933 passed, 8 skipped. All other collected AItelier Python tests: 500 passed, 1 skipped, 11 network tests deselected by the existing default marker policy. SkillFlow tests plus the plugin tests outside its top-level tests directory: 1,110 passed, zero skips or failures. No earlier batches were added to these totals. Detailed XML, skip reasons, commands and the test-only subreaper harness are retained in verification/.
+
+The eight unit skips require a Godot binary that is absent from the test environment. The remaining skip is the existing API test-mode write-gate case. Manual browser scripts, Docker build and live gameplay/runtime observation were not performed. The exact wheel SHA-256 matches build-manifest.json; all 80 packaged runtime files match BOTH the installed package and the clean SkillFlow source commit byte for byte.
+
+Disposition: PASS for local source integration and operator rebuild. Preserve the two original dirty recall files and the original untracked configuration during local integration. Service rebuild/restart and observation of a NEW run remain owner actions. No public push or PyPI publication.

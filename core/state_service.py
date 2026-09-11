@@ -16,6 +16,38 @@ from core.state_graph import StateConflict, StateGraphError, StateGraphStore, ca
 from core.state_attempts import StateAttempts, artifact_ref
 
 
+
+
+SEED_HEADING = "# State goal attempt"
+
+
+def state_seed_text(context: dict, dependency_receipts, relay: bool) -> str:
+    """The seed file a launched attempt reads.
+
+    FORMAT CONTRACT, and it has exactly one consumer's assumption behind it:
+    ``SEED_HEADING``, then ONE JSON value, then optional trailing prose. The
+    generated ``*__prepare_seed`` tool decodes that one value and hands the tail
+    to the agent. It used to json.loads() the whole remainder, which meant the
+    relay section added below killed every relayed attempt at its first step
+    ("Extra data: line 3 column 1"; measured 2026-09-11, release.mainline-green
+    r5 relay, state_seed crashed 3x and failed the run before it began).
+
+    So: anything appended after the JSON must be prose the agent can read, and
+    nothing may be inserted BETWEEN the heading and the JSON. The reader lives
+    outside this repository (generated tools are not tracked), which is why the
+    contract is pinned here, by test, rather than left to the two sides to
+    agree on implicitly.
+    """
+    seed = SEED_HEADING + "\n\n" + canonical(
+        context | {"accepted_dependencies": dependency_receipts}) + "\n"
+    if relay:
+        seed += ("\n## Relay\n\nThis attempt CONTINUES a prior attempt that ran out of budget. Its commits are "
+                 "already in your repository baseline and its staged files are already in your staging "
+                 "(read them with the default `read`). Do not re-ground from scratch: read `relay.staged_files` "
+                 "and `relay.commits`, verify, finish what is missing, then `finish_step`.\n")
+    return seed
+
+
 class StateService:
     def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator", runtime_factory=None):
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
@@ -206,12 +238,7 @@ class StateService:
                                 "node workflow or prepare its prerequisites through the standard producer: " + canonical(missing))
         if not self.attempts.claim_launch(aid):
             return self.attempts.get(aid)
-        seed = "# State goal attempt\n\n" + canonical(attempt["context"] | {"accepted_dependencies": dependency_receipts}) + "\n"
-        if relay:
-            seed += ("\n## Relay\n\nThis attempt CONTINUES a prior attempt that ran out of budget. Its commits are "
-                     "already in your repository baseline and its staged files are already in your staging "
-                     "(read them with the default `read`). Do not re-ground from scratch: read `relay.staged_files` "
-                     "and `relay.commits`, verify, finish what is missing, then `finish_step`.\n")
+        seed = state_seed_text(attempt["context"], dependency_receipts, bool(relay))
         try:
             result = start_config_run(self.db, self.ws, attempt["workflow"], attempt["execution_project_id"],
                                       seed_text=seed, name=f"State {attempt['project_id']}/{attempt['node_key']}",

@@ -797,8 +797,22 @@ def retry_project(
     # Accept both raw DB "failed" and enriched "running:{node}" (skillflow
     # run was already reactivated). Check the raw DB column for the definitive
     # answer — enrichment overrides failed→running:node when reactivate was called.
+    #
+    # But the raw column is only WRITTEN by a scheduler tick, and a project stops
+    # being ticked the moment its run fails — so a run that dies on its very
+    # first tick leaves the column at "running:<node>" forever and can never be
+    # retried here. Chicken and egg: the endpoint that exists to recover a failed
+    # run refuses precisely the runs that failed earliest. Measured 2026-09-11:
+    # release.mainline-green r5's relay failed at isolation on its first tick;
+    # the engine said failed, the row said running:state_seed, and /retry
+    # answered "Only failed projects can be retried".
+    #
+    # The guarded direction above is raw=failed / engine=running. The opposite —
+    # engine=failed while the row still says running — is not that case and is
+    # the engine telling the truth, so it is accepted too.
     raw_status = db.get_project(project_id).get("status", "")
-    if not raw_status.startswith("failed"):
+    engine_failed = str(project.get("status", "")).startswith("failed")
+    if not raw_status.startswith("failed") and not engine_failed:
         raise HTTPException(status_code=400, detail="Only failed projects can be retried")
 
     # Clear project meta_state (error info)

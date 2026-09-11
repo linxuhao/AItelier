@@ -139,6 +139,49 @@ def test_the_resume_budget_is_the_role_budget_not_the_default(engine, monkeypatc
         f"configured for")
 
 
+def test_a_resume_after_a_rejected_delivery_shows_the_agent_the_rejection(engine, monkeypatch):
+    """The resume path serves BOTH a host restart and a post-gate retry.
+
+    It used to say only "you were restarted, your files are still staged", so
+    an agent whose delivery the output gate had just rejected saw no failure at
+    all and re-issued finish_step until validation_exhausted. Measured on
+    release.mainline-green r5 (t_impl instance 4998, 2026-09-11): the claim
+    carried a real GDScript parse error and the agent's own reasoning at turns
+    28 and 29 was "every finish_step has returned completed, just re-issue it".
+
+    `_validation_error_block` already existed and its docstring records this
+    same lesson being learned for the fresh-start path. This asserts the RESUME
+    message carries it too — the failure text itself, not merely that some
+    message was appended, because a resume notice that omits the error is
+    exactly the bug.
+    """
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine._exec_tool = MagicMock(return_value={"written": "main.py"})
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.side_effect = [_turn(tool_calls=[_tc("finish_step")])]
+
+    GATE_ERROR = "Validation failed:\n{'file': 'tests/t.gd', 'passed': False}"
+    # The resume is only honoured when every file it claims is really staged.
+    draft = tmp / "draft"; draft.mkdir(); (draft / "main.py").write_text("x")
+    ws._draft_dir = lambda pid, step, graph: draft
+    monkeypatch.setattr(PipelineEngine, "_resume_from_trace",
+                        lambda self, pid, max_turns: {
+                            "messages": [{"role": "user", "content": "earlier"}],
+                            "turns": 2, "written_files": ["main.py"],
+                            "dropped_tail": 0, "current_max_turns": 10,
+                            "turn_grants": 0})
+
+    _run(engine, ws, validation_error=GATE_ERROR)
+
+    resumed = "\n".join(m.get("content") or "" for m in engine._native_messages
+                        if m.get("role") == "user")
+    assert GATE_ERROR in resumed, (
+        "the resume message does not contain the gate's rejection, so the "
+        "agent is asked to continue a delivery it does not know was refused")
+    assert "REJECTED" in resumed, (
+        "the resume message still reads as a plain host restart; an agent told "
+        "only that its files are staged concludes nothing failed")
+
 def test_no_tool_reply_is_salvaged_then_writes(engine):
     """Feature B: a prose-only reply nudges the agent to write instead of
     ending the step empty (the inst-975 failure mode)."""

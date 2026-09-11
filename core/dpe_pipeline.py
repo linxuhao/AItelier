@@ -2530,15 +2530,38 @@ class PipelineEngine:
                 self._delta_traced = len(messages)     # already in the trace
                 self._delta_attempt = attempt
                 staged = ", ".join(sorted(set(resume["written_files"]))) or "none"
-                messages.append({
-                    "role": "user",
-                    "content": (
+                # A resume is not always a restart. The SAME path carries a
+                # retry after the output gate rejected the delivery, and that
+                # rejection used to be dropped here: the agent was told only
+                # "you were restarted, your files are still staged", so it
+                # concluded nothing had failed and re-issued finish_step until
+                # validation_exhausted. Measured 2026-09-11 on
+                # release.mainline-green r5 (t_impl instance 4998): turns 28
+                # and 29 both reason "every finish_step has returned completed,
+                # just re-issue it" while a real parse error sat in the claim's
+                # validation_error. An agent cannot fix what it is never shown.
+                # The block below is the same INSTRUCTION the fresh path gets —
+                # see _validation_error_block, whose own docstring records this
+                # exact lesson being learned once already, for the other path.
+                if self._validation_error:
+                    lead = (
+                        f"[Your delivery was REJECTED by the output gate at turn "
+                        f"{resume['turns']}] The conversation above is exactly what "
+                        f"you had, and every file you wrote is still staged "
+                        f"({staged}) — but the step is NOT done. Do not re-issue "
+                        f"finish_step until you have fixed the failure below.")
+                else:
+                    lead = (
                         f"[Resumed after a host restart at turn {resume['turns']}] "
                         f"The conversation above is exactly what you had; every "
                         f"file you wrote is still staged ({staged}). Continue from "
                         f"here — do not re-read or redo what is above. If your "
                         f"last tool calls are missing their results, they were "
-                        f"lost in the restart: re-issue only those."),
+                        f"lost in the restart: re-issue only those.")
+                messages.append({
+                    "role": "user",
+                    "content": lead + self._validation_error_block(
+                        self._validation_error),
                 })
                 resume = None    # a retry attempt must not re-enter this branch
             elif attempt == 1:

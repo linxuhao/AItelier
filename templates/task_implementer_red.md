@@ -19,6 +19,7 @@
   逐文件通读(不只看 diff 块),每条被改的断言/钉子回答「旧值→新值→为什么让位」,被删的文件说明为什么没人再引用,
   账本文件用 `git diff` 确认只增不删,受保护路径的每一处改动必须在任务卡 `owns`/`shared_hotspots` 里有授权——没有授权就判 `passed: false`。
 - 门给的是深度,不是结论。[closeout_gate] 说 standard,不等于可以通过;它说 deep,才是最低要求。
+- `[closeout_gate]` 报告任何 `out-of-scope delivered path` 都是阻断性越权变更,必须判 `passed: false`;不能因为 `owns` 内的交付正确而忽略。`attempted scope violations` 是执行前已拒绝的尝试,必须在 verdict 中明确记录并复核相关文件仍未改变。
 
 ## 判断标准（三层）
 

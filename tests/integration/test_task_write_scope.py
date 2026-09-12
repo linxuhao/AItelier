@@ -43,6 +43,7 @@ def test_sibling_and_root_untracked_files_survive_the_next_task(monkeypatch, tmp
     engine._code_path = str(repo)
     engine._run_id = "run"
     engine._current_step = "t_impl"
+    engine._write_scope_step_id = "t_impl"
     engine._step_instance_id = 1
     engine._claim_epoch = 1
     engine._emit = lambda *args, **kwargs: None

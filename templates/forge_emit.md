@@ -54,7 +54,7 @@ end_conditions:                  # a MAPPING, not a list
     - type: max_total_steps
       limit: 60
 steps:
-  # an AGENT maker that writes files (mode: write = surgical create/edit tools)
+  # an AGENT maker that writes code (grant apply_patch for generic code output)
   - id: work
     step_type: agent
     agent_config: worker         # must be defined in role_table.yaml
@@ -354,11 +354,16 @@ maker's job to what's achievable, then the reviewer to that same bar).
    - **`tools:` lists REGISTRY tools only** (`web_search`, `run_tests`, `read_file`, a
      tool you just built…). Every name must exist in the palette — a name that does not
      resolve is DROPPED SILENTLY and the step runs without it.
-   - **NEVER list write tools there.** The framework injects them from the step's
-     `output.mode`: `mode: write` → `create(file, content)`, `edit(file, old_str,
-     new_str)`, `finish_step` (+ `write(file, content)` only with
-     `allow_full_write: true`); `mode: content` → `write_<slot>` / `create_<slot>` /
-     `edit_<slot>` per fixed slot, plus `finish_step`.
+   - **Generic code editing** (`output.target: code`, `mode: write`, no fixed slots):
+     include the registry tool `apply_patch` in the role's `tools`. The host exposes
+     it as the generic Add/Update/Delete frontend, with exact-context multi-file
+     patches. Follow its schema; do not generate whole-file `files` shortcuts.
+   - **Artifact writing** uses framework-injected tools: `mode: write` supplies
+     `create(file, content)`, `edit(file, old_str, new_str)`, `finish_step` and,
+     with `allow_full_write: true`, `write(file, content)`. Fixed-slot steps use
+     their injected `write_<slot>` / `create_<slot>` / `edit_<slot>` tools.
+     Do not list injected tools in `tools` or grant arbitrary patch paths to a
+     fixed-slot or artifact-only role.
    - There is **no** `write_file`, `create_file` or `edit_file`. Those belong to a
      different application. A maker told to use them writes nothing while its step still
      reports success — the reviewer then rejects an empty result until the loop dies.
@@ -378,7 +383,8 @@ maker's job to what's achievable, then the reviewer to that same bar).
    - **Only name tools the role actually HAS.** The agent follows its prompt over its
      toolset: a template promising `create_file(path, content)` yields an agent that
      emits its files as prose, writes zero of them, and whose step still reports
-     success. Use the injected names for the step's mode (see 2 above) — for
-     `mode: write` that is `create` / `edit`, not `create_file` / `write_file`.
+     success. For generic code `mode: write`, grant and teach `apply_patch`. For
+     artifact `mode: write`, teach injected `create` / `edit`; neither uses
+     `create_file` / `write_file`.
 
 Emit valid YAML (2-space indent). Make it pass lint + registry-check + dry-run smoke.

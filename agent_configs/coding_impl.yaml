@@ -2,13 +2,13 @@
 # Spawned implementer for the offloaded coding_impl graph. A REAL spawned agent
 # (unlike coding_task's placeholder roles): it does the work in its own
 # ephemeral context, so nothing here lands in the butler's window. Mirrors DPE's
-# task_implementer tooling (write mode auto-derives surgical create/edit).
+# task_implementer tooling (generic code mutation uses native apply_patch).
 
 offload_implementer:
   model: "flash"
   temperature: 0.2
   template: "coding_impl.md"
-  # create/edit derived from output.mode: write. list_tree/test helpers as DPE.
+  # Generic code editing uses the explicitly granted apply_patch tool. list_tree/test helpers as DPE.
   #
   # semantic_search, same as DPE's task_implementer: the repository reaches this
   # step as READ TOOLS, and skillflow's `read` returns at most 24,000 chars, so
@@ -21,7 +21,7 @@ offload_implementer:
   # the first line of code. Retrieval is what that step was missing; its DPE
   # twin has had it since the zg sidecar landed, and the sidecar already
   # indexes every run worktree.
-  tools: ["semantic_search", "list_tree", "test_write", "read_test_written", "repo_remove_file"]
+  tools: ["semantic_search", "list_tree", "test_write", "read_test_written", "apply_patch"]
   max_output_tokens: 32768
   # 32, not 20. The 2026-09-09 parallel contract batch: one implementer had
   # every file written at turn 31 of a 32-turn extended budget and died

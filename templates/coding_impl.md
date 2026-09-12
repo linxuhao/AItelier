@@ -15,7 +15,7 @@ out of budget. Its commits (`relay.commits`) are already in the repository you
 read. Recovered code (`relay.code_changes`) is already in that worktree and is
 explicitly UNVALIDATED; artifact drafts (`relay.staged_files`) remain separate.
 Read the named files, verify what is missing or broken against the plan, complete
-it with `edit`/`create`, and `finish_step`. Do not re-ground the whole repository.
+it with `apply_patch`, and `finish_step`. Do not re-ground the whole repository.
 Your first tool call must be `acknowledge_relay`: report the exact retained byte
 total shown in the relay progress contract and name the incomplete items. This
 proves you saw the recovered work before any new repository operation.
@@ -29,26 +29,24 @@ proves you saw the recovered work before any new repository operation.
 3. **Write tests** the plan calls for (or that the change obviously needs).
 4. **Stay in scope.** Touch only what the plan lists; no drive-by refactors.
 
-## Writing files: `create` (new) / `edit` (existing)
-You have **no** whole-file `write`. Change existing files with **surgical
-`edit`** — never rewrite a whole file:
-- **`create(file, content)`** — a NEW file only (errors if it exists).
-- **`edit(file, old_str, new_str)`** — replace the single, unique `old_str`
-  (include enough surrounding context to make it match exactly once); the rest
-  of the file is preserved verbatim. Multiple changes → call `edit` repeatedly.
-- Why: rewriting a whole file silently drops any region you didn't reproduce.
+## Writing code with `apply_patch(patch)`
+Use Add/Update/Delete File operations in this run's code worktree. One patch can
+contain multiple files and ordered, non-overlapping hunks. Read affected ranges
+with `raw=true` first so line-number prefixes never enter patch context. Updates
+must match exact unique context in the ORIGINAL file for that call. Later calls
+see prior uncommitted changes. Follow the tool's Begin/End Patch format with bare
+`@@` headers. Do not send whole-file shortcuts. Add refuses existing paths;
+Delete takes no body.
 
-Edits write directly to this run's **code worktree** (`output.target: code`).
-Use the same repo-relative path for create/edit/read/search/tests. The next edit
-matches the result of the last edit, including uncommitted changes.
-
-Always supply both `old_str` and `new_str`; an explicit empty `new_str` deletes
-the matching text. A successful edit is not a successful test or review.
+All operations are checked before publication. A stale or ambiguous hunk leaves
+the batch unchanged. On an I/O failure with `partial`, inspect `written`/`deleted`
+and reread affected paths before repairing the remainder; never replay the batch.
+An applied patch changes the uncommitted worktree, but is not validation or review.
 At `finish_step` the engine validates the candidate, commits only this step's
 recorded code paths, and publishes a change receipt in the artifact folder.
 Failure retains the worktree for repair. Do not manually commit or reset it.
 
-All write paths are relative to the repo root. When every file is written,
+All patch paths are relative to the repo root. When every file is written,
 call `finish_step` — in that same turn. Do not spend turns re-reading,
 re-listing or re-counting what you already wrote: the test step and an
 independent reviewer check the delivery, and a step that runs out of turns

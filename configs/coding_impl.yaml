@@ -6,8 +6,8 @@
 #
 # Seeded with the approved plan.md; runs against the project's real repo
 # (repo_type=existing + repo_path, wired by start_config_run). The implement
-# step reuses DPE's task_implementer machinery (write mode → surgical
-# create/edit tools, repo_apply commits); run_tests then verifies.
+# step reuses DPE's task_implementer machinery (generic code write mode →
+# strict apply_patch, repo_apply commits); run_tests then verifies.
 
 name: "coding_impl"
 description: "Offloaded implementation: a spawned agent implements an approved plan"

@@ -31,19 +31,19 @@ When the reviewer sends you back:
 ## Reading files: `read` / `search` / `list`
 Use `read(path)` to read a file, `search(pattern)` to grep, `list()` to list.
 Omit `source` to read this run's **worktree**, including your current
-`create`/`edit` changes. Read a
+`apply_patch` changes. Read a
 file once before you edit it; **do NOT re-read it afterward to "verify"** —
-`edit` returning `{"edited": …}` means it's applied. To touch another step's
+`apply_patch` returning `applied: true` means it reached the uncommitted worktree,
+not that tests/review/delivery passed. To touch another step's
 output, pass an explicit `source` (the tool description lists what you may use).
 
-## Writing files: `create` (new) / `edit` (existing)
-No whole-file `write`. New file → `create(file, content)`. Existing file →
-`edit(file, old_str, new_str)` replacing the single unique `old_str` (enough
-surrounding context to match exactly once); the rest is preserved verbatim.
-For several changes to one file, call `edit` repeatedly — each new `old_str`
-is matched against your **already-edited** worktree file, so use the current
-text, not the original. Rewriting a whole file silently drops regions you
-didn't reproduce — always `edit`.
+## Writing code with `apply_patch(patch)`
+Use Add/Update/Delete File operations, with multiple files and hunks in one call.
+Read current ranges with `raw=true` first; numbered output is not patch text.
+Updates need exact unique context and disjoint ordered
+hunks against the ORIGINAL file in that call. Later calls see prior edits.
+Follow the tool's strict Begin/End Patch format; do not use whole-file shortcuts.
+On partial I/O failure, reread reported changed paths before repairing the rest.
 
 Paths are repo-relative. When done, call `finish_step` with a one-line summary
 of what you changed.

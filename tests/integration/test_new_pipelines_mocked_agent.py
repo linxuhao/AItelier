@@ -122,6 +122,11 @@ def _response(step_id, tool_schemas):
     if "write_summary" in names:
         return json.dumps({"thoughts": "done", "actions": [
             {"tool": "write_summary", "params": {"content": "# Summary\ndid it"}}]})
+    if "apply_patch" in names:
+        return json.dumps({"thoughts": "implement", "actions": [
+            {"tool": "apply_patch", "params": {"patch":
+                "*** Begin Patch\n*** Add File: impl.py\n+x = 1\n*** End Patch"}},
+            {"tool": "finish_step", "params": {"summary": "done"}}]})
     # output.mode: write → create a new file, then finish.
     if "create" in names:
         return json.dumps({"thoughts": "implement", "actions": [

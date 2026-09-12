@@ -43,7 +43,7 @@ output contract, not a way to override arbitrary tool-node filesystem behavior.
 
 ## Execution and reads
 
-Code create/edit/delete and media output touch the current worktree immediately.
+Code mutation tools (including strict `apply_patch`) and media output touch the current worktree immediately.
 Default read/search, explicit repo reads, and playtests use that same code tree.
 Playtests no longer copy the repository and overlay step files. Semantic search
 uses the same worktree root, but its external index can still lag uncommitted

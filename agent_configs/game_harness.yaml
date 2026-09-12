@@ -7,14 +7,14 @@
 # The design keeper. Runs after 5_review passes and EDITS the repo's design/
 # record so it describes the game that actually shipped.
 #
-# tools: [] — the step is output.mode "write", so the engine supplies
-# create/edit/write itself, and `{from: repository, mode: tool}` supplies the
-# read surface. Nothing to declare here.
+# apply_patch is granted explicitly. The engine removes create/edit/write for
+# generic code output so every multi-file change uses one strict patch contract.
+# `{from: repository, mode: tool}` supplies the read surface.
 game_designer:
   model: "glm"
   temperature: 0.1
   template: "game_designer.md"
-  tools: []
+  tools: ["apply_patch"]
   max_tool_turns: 40
   native_tool_calling: true
   fallback_to_json_mode: true

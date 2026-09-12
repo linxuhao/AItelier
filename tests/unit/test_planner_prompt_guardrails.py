@@ -26,7 +26,7 @@ def test_planner_template_states_the_implementer_has_no_network_or_shell():
     assert "没有网络" in text and "没有 shell" in text
     # Named concretely, not abstractly: a planner that knows the actual tool
     # list will not write a plan that assumes a missing one.
-    for tool in ("read", "list_tree", "create", "edit", "test_write", "repo_remove_file"):
+    for tool in ("read", "list_tree", "apply_patch", "test_write", "read_test_written"):
         assert tool in text, f"planner template never names implementer tool '{tool}'"
 
 
@@ -90,10 +90,10 @@ def test_implementer_role_really_has_no_network_or_shell_tools():
 _NAMED_BUT_NOT_CALLED = {
     ("task_plan.md", "test_write"),          # describing t_impl's toolset
     ("task_plan.md", "read_test_written"),
-    ("task_plan.md", "repo_remove_file"),
+    ("task_plan.md", "apply_patch"),
     ("task_plan_red.md", "test_write"),      # same list, from the reviewer side
     ("task_plan_red.md", "read_test_written"),
-    ("task_plan_red.md", "repo_remove_file"),
+    ("task_plan_red.md", "apply_patch"),
     ("task_implementer.md", "write"),        # "你没有整文件覆写的 `write` 工具"
     ("step5_verifier.md", "repo_apply"),     # on_deliver hook, not an agent call
 }
@@ -192,3 +192,21 @@ class TestReadDisciplineSurvivesInBothPlaces:
         assert "start_line" in block and "context_lines" in block, (
             "read-discipline was dropped from the turn-budget block — measured "
             "worth 7 of 10 scoped tool calls; see this class's docstring")
+
+
+def test_generic_design_roles_use_the_strict_patch_contract():
+    cases = [
+        ("game_harness.yaml", "game_designer", "game_designer.md"),
+        ("novel_init.yaml", "novel_designer", "novel_design.md"),
+    ]
+    for config_name, role, template_name in cases:
+        roles = yaml.safe_load(
+            (ROOT / "agent_configs" / config_name).read_text(encoding="utf-8")
+        )
+        tools = set(roles[role]["tools"])
+        assert "apply_patch" in tools
+        assert not tools.intersection({"create", "edit", "write", "repo_remove_file"})
+        template = (TEMPLATES / template_name).read_text(encoding="utf-8")
+        assert "apply_patch" in template
+        assert "read(raw=true)" in template
+        assert "不做模糊替换" in template or "不会模糊替换" in template

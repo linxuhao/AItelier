@@ -227,8 +227,13 @@ def _build_agent_response(step_id, tool_schemas, *, base_sha,
                            "actions": [_action("write_verdict", content=verdict)]})
 
     if step_id == "5_design":
+        assert "apply_patch" in tool_schemas
         return json.dumps({"thoughts": "record design", "actions": [
-            _action("create", file="design_trace.md", content="# Current design"),
+            _action(
+                "apply_patch",
+                patch=("*** Begin Patch\n*** Add File: design_trace.md\n"
+                       "+# Current design\n*** End Patch"),
+            ),
         ]})
 
     if step_id == "3":
@@ -277,14 +282,22 @@ def _build_agent_response(step_id, tool_schemas, *, base_sha,
     if specific:
         return json.dumps({"thoughts": "out", "actions": [_action(specific[0], content="# output")]})
 
-    # `mode: write` step (t_impl): the tools skillflow actually grants are
-    # `create`/`edit` — NOT `write`, which needs `allow_full_write`. This mock
-    # used to call `write`, a name t_impl does not have; the engine discarded the
-    # call without a word and the step returned SUCCESS with zero files, so this
-    # end-to-end test passed on a pipeline that had implemented nothing. Turn
-    # accounting turned that into a visible failure. Emit valid Python so any
-    # non-stubbed check is happy.
+    # Emit the generic editor actually granted to this code role. Review retries
+    # update the existing candidate; the real tool must enforce its own guards.
     original = "def add(a, b):\n    return a + b\n"
+    if "apply_patch" in tool_schemas:
+        rows = ["*** Begin Patch"]
+        if revising_code:
+            rows += ["*** Update File: main.py", "@@"]
+            rows += ["-" + line for line in original.splitlines()]
+            revised = "def add(a, b):\n    # Reviewed implementation.\n    return a + b\n"
+            rows += ["+" + line for line in revised.splitlines()]
+        else:
+            rows += ["*** Add File: main.py"]
+            rows += ["+" + line for line in original.splitlines()]
+        rows += ["*** End Patch"]
+        return json.dumps({"thoughts": "implement", "actions": [
+            _action("apply_patch", patch="\n".join(rows))]})
     # Review retries edit the candidate that is already in the run worktree.
     # Do not weaken create's exists guard just to accommodate an invalid mock.
     action = (_action("edit", file="main.py", old_str=original,

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
-_GENERIC = frozenset({"create", "edit", "write"})
+_GENERIC = frozenset({"create", "edit", "write", "apply_patch"})
 _SLOT_PREFIXES = ("create_", "edit_", "write_", "append_")
 _PATH_TOOLS = {
     "repo_remove_file": ("name",),
@@ -151,6 +151,9 @@ def mutation_paths(tool: str, params: object, output_fixed: object = None) -> li
     instead of passing a mutation whose destination was not proven.
     """
     params = params if isinstance(params, dict) else {}
+    if tool == "apply_patch":
+        from skillflow.strict_patch import parse_patch
+        return [op.path for op in parse_patch(params.get("patch"))]
     if tool in _GENERIC:
         for key in ("file", "file_path", "filename", "path"):
             if params.get(key) not in (None, ""):

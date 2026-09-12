@@ -254,7 +254,7 @@ def build_today_block(now: datetime.datetime | None = None) -> str:
 # wrote nothing". Meanwhile the one tool a lucky step WAS told about carried the
 # advice "Prefer 'edit' for existing files", recommending a tool the prompt did
 # not document.
-GENERIC_MUTATORS = ("write", "create", "edit")
+GENERIC_MUTATORS = ("write", "create", "edit", "apply_patch")
 SLOT_MUTATOR_PREFIXES = ("write_", "create_", "append_", "edit_")
 
 
@@ -497,6 +497,20 @@ class PromptAssembler:
                     "The step is complete only once you have written ALL required "
                     "output files."
                 )
+                if "apply_patch" in write_tools:
+                    example = {"thoughts": "...", "actions": [{
+                        "tool": "apply_patch", "params": {"patch":
+                            "*** Begin Patch\n*** Add File: new.py\n+x = 1\n*** End Patch"}}]}
+                    delivery = (
+                        "[Output Delivery — REQUIRED]\n"
+                        "Use JSON actions with the granted apply_patch tool. "
+                        "Do not use a whole-file files shortcut. Follow the strict "
+                        "patch format and read unique current context before updates.\n"
+                        + json.dumps(example, ensure_ascii=False)
+                        + "\nAvailable code editing tools:\n" + tool_list_block
+                        + "\nOn partial I/O failure, reread reported changed paths "
+                        "and repair the remainder; do not replay the original batch. "
+                        "Finish only after the requested changes and checks are complete.")
                 # Role-aware: a checker (reviewer/verifier) shouldn't be nudged
                 # toward authoring/implementing.
                 if self._is_checker(write_tools, step_id):

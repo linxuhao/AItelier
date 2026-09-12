@@ -1567,7 +1567,11 @@ class PipelineEngine:
         scope = getattr(self, "_write_scope", None)
         if scope is None or not is_repo_mutator(tool_name):
             return None
-        for path in mutation_paths(tool_name, params, self._output_fixed):
+        try:
+            paths = mutation_paths(tool_name, params, self._output_fixed)
+        except (ValueError, UnicodeError) as exc:
+            return {"error": f"{tool_name}: {exc}"}
+        for path in paths:
             if scope.authorizes(path):
                 continue
             refusal = {
@@ -1613,6 +1617,15 @@ class PipelineEngine:
         # the injected one and point a root-resolving tool (semantic_search,
         # run_tests, …) at any path the container can see. Strip them here.
         params = _strip_agent_roots(action.get("params", {}))
+        schemas = getattr(self, "_tool_schemas", {}) or {}
+        if tool_name == "apply_patch":
+            if (getattr(self, "_output_target", "artifact") != "code"
+                    or getattr(self, "_output_fixed", {}) or "apply_patch" not in schemas):
+                return {"error": "apply_patch requires a granted generic code-output step"}
+            if set(params) != {"patch"}:
+                return {"error": "apply_patch accepts exactly one argument: patch"}
+        elif "apply_patch" in schemas and tool_name in ("create", "edit", "write", "repo_remove_file"):
+            return {"error": "Use the granted apply_patch tool for code Add/Update/Delete operations"}
         refusal = self._write_scope_refusal(tool_name, params)
         if refusal is not None:
             return refusal
@@ -1772,7 +1785,7 @@ class PipelineEngine:
     # The mutation vocabulary skillflow actually injects for a step, from its
     # `output.mode`: `mode: write` gives generic `create` / `edit` / `write`,
     # `mode: content` gives per-slot `create_<slot>` / `write_<slot>` / `edit_<slot>`.
-    _GENERIC_MUTATORS = ("write", "create", "edit")
+    _GENERIC_MUTATORS = ("write", "create", "edit", "apply_patch")
     _SLOT_MUTATOR_PREFIXES = ("write_", "create_", "append_", "edit_")
 
     # Read tools the engine executes itself, plus the step-control pseudo-tools.
@@ -2474,18 +2487,24 @@ class PipelineEngine:
                     self._emit("tool_calls", {"count": len(tool_calls), "preview": f"Executed {len(tool_calls)} tool call(s)"})
 
                 if write_calls:
+                    landed_this_turn = 0
+                    patch_failed = False
                     for action in write_calls:
                         result = self._exec_tool(action)
                         progress = _progress_signature(
                             action["tool"], action.get("params", {}), result)
                         if progress:
                             progress_signatures.add(progress)
+                        names = self._written_names(result)
+                        written_files.extend(names)
+                        effect = self._effect_name(result)
+                        if effect:
+                            effects.append(effect)
                         if "error" in result:
-                            tool_results.append(f"Write error: {result['error']}")
+                            tool_results.append("Write error: " + json.dumps(result, ensure_ascii=False))
+                            patch_failed |= action.get("tool") == "apply_patch"
                             continue
-                        written_file = self._written_name(result)
-                        if written_file:
-                            written_files.append(written_file)
+                        landed_this_turn += len(names) or bool(effect)
                     # Only stop when a write actually LANDED. `break` used to fire
                     # unconditionally, so a turn whose every write errored ended the
                     # loop with the reason captured in `tool_results` and never
@@ -2495,7 +2514,7 @@ class PipelineEngine:
                     # though this step's staging was empty). The agent was never
                     # given the turn in which it could have switched to `edit`; the
                     # step reported writing nothing and failed validation.
-                    if not written_files:
+                    if not landed_this_turn or patch_failed:
                         self._feedback_exploratory = False
                         feedback = ("Every write in your last response failed:\n"
                                     + "\n".join(tool_results[-len(write_calls):]))
@@ -2811,15 +2830,19 @@ class PipelineEngine:
 
                 if write_calls:
                     landed_this_turn = 0
+                    patch_failed = False
                     for action in write_calls:
                         result = self._exec_tool(action)
+                        names = self._written_names(result)
+                        written_files.extend(names)
+                        effect = self._effect_name(result)
+                        if effect:
+                            effects.append(effect)
                         if "error" in result:
-                            tool_results.append(f"Write error: {result['error']}")
+                            tool_results.append("Write error: " + json.dumps(result, ensure_ascii=False))
+                            patch_failed |= action.get("tool") == "apply_patch"
                             continue
-                        written_file = self._written_name(result)
-                        if written_file:
-                            written_files.append(written_file)
-                            landed_this_turn += 1
+                        landed_this_turn += len(names) or bool(effect)
 
                     # Only stop when a write actually LANDED. `break` used to fire
                     # unconditionally, so a turn whose every write errored ended the
@@ -2830,7 +2853,7 @@ class PipelineEngine:
                     # though this step's staging was empty). The agent was never
                     # given the turn in which it could have switched to `edit`; the
                     # step reported writing nothing and failed validation.
-                    if not landed_this_turn:
+                    if not landed_this_turn or patch_failed:
                         self._feedback_exploratory = False
                         feedback = ("Every write in your last response failed:\n"
                                     + "\n".join(tool_results[-len(write_calls):]))
@@ -3008,7 +3031,13 @@ class PipelineEngine:
         and the step still have done its job. `t_impl` is granted `repo_remove_file`,
         whose success is `{"queued_for_deletion": …}` — no file, a real effect.
         """
-        if not isinstance(result, dict) or result.get("error"):
+        if not isinstance(result, dict):
+            return ""
+        # A failed patch may have published an earlier per-file operation.
+        for key in ("deleted", "removed"):
+            if result.get(key):
+                return f"{key}: {result[key]}"
+        if result.get("error"):
             return ""
         for k in cls._EFFECT_KEYS:
             v = result.get(k)
@@ -4362,7 +4391,13 @@ class PipelineEngine:
         self._project_id = project_id
         self._resolved_context = resolved_context
         self._validation_error = validation_error
-        self._tool_schemas = tool_schemas or {}
+        self._tool_schemas = dict(tool_schemas or {})
+        if output_target == "code" and not output_fixed and "apply_patch" in self._tool_schemas:
+            for retired in ("create", "edit", "write", "repo_remove_file"):
+                self._tool_schemas.pop(retired, None)
+        else:
+            # Fixed-slot and artifact authority is narrower than arbitrary paths.
+            self._tool_schemas.pop("apply_patch", None)
         self._output_dir = output_dir
         self._output_target = output_target
         self._output_fixed = output_fixed or {}

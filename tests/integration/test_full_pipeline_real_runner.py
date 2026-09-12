@@ -26,6 +26,7 @@ from skillflow.tool_loader import ToolLoader
 from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from aitelier.runner import AgentStepRunner
+from aitelier.gate_evidence import stamp_report
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -47,13 +48,13 @@ def _stub_git_synced(*args, **kwargs):
 def _cycle_report(out_dir, run_id, step_id, marker):
     target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
-    if step_id == "5_test":
-        cycle = f"{run_id}:integration-cycle"
-    else:
-        seed = json.loads((target.parent / "5_test" / "test_report.json").read_text())
-        cycle = seed["evidence_cycle_id"]
-    return {"passed": True, "summary": marker, "run_id": run_id,
-            "evidence_cycle_id": cycle}
+    report = {"passed": True, "summary": marker}
+    return stamp_report(
+        report,
+        run_id=run_id,
+        out_dir=out_dir,
+        start_cycle=(step_id == "5_test"),
+    )
 
 
 def _stub_gate_tests(*args, out_dir="", run_id="", step_id="", **kwargs):

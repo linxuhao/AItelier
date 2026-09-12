@@ -1,8 +1,9 @@
 """The final verdict is downstream of fresh evidence from this verification cycle."""
 import json
 from pathlib import Path
-
 from unittest.mock import ANY
+
+import pytest
 import yaml
 
 from aitelier.gate_evidence import (
@@ -24,6 +25,13 @@ def _composed():
     )
 
 
+def _start_cycle(root, cycle, run_id=RUN):
+    (root / ".evidence_cycle.json").write_text(json.dumps({
+        "version": 1, "run_id": run_id, "evidence_cycle_id": cycle,
+        "evidence_generated_at": "test",
+    }), encoding="utf-8")
+
+
 def _write(root, step, filename, *, cycle, run_id=RUN, passed=True, **extra):
     d = root / step
     d.mkdir(parents=True, exist_ok=True)
@@ -31,6 +39,8 @@ def _write(root, step, filename, *, cycle, run_id=RUN, passed=True, **extra):
             "evidence_cycle_id": cycle, "summary": step}
     body.update(extra)
     (d / filename).write_text(json.dumps(body), encoding="utf-8")
+    if step == "5_test":
+        _start_cycle(root, cycle, run_id)
 
 
 def test_start_stamp_creates_a_new_cycle_each_time(tmp_path):
@@ -54,6 +64,75 @@ def test_negative_control_same_run_previous_cycle_is_stale(tmp_path):
     assert verdict["passed"] is False
     assert verdict["state"] == "stale"
     assert verdict["stale_reports"][0]["evidence_cycle_id"] == "cycle-old"
+
+
+def test_negative_control_complete_same_run_previous_cycle_is_stale(tmp_path):
+    gates = [
+        ("5_test", "test_report.json"),
+        ("5_compile", "compile_report.json"),
+        ("5_compile", "playtest_report.json"),
+        ("5_vision", "vision_report.json"),
+        ("5_final_test", "test_report.json"),
+    ]
+    for step, filename in gates:
+        _write(tmp_path, step, filename, cycle="cycle-old")
+    # The current-cycle identity is independent of every report being audited.
+    _start_cycle(tmp_path, "cycle-current")
+    verdict = audit_evidence(tmp_path, RUN, gates)
+    assert verdict["passed"] is False
+    assert verdict["state"] == "stale"
+    assert len(verdict["stale_reports"]) == len(gates)
+
+
+@pytest.mark.parametrize("unrun", [
+    {"unrun": True},
+    {"ran": False},
+    {"executed": False},
+    {"status": "not_run"},
+])
+def test_explicit_unrun_report_is_non_passing(tmp_path, unrun):
+    _write(tmp_path, "5_test", "test_report.json", cycle="cycle-new", **unrun)
+    verdict = audit_evidence(tmp_path, RUN, [["5_test", "test_report.json"]])
+    assert verdict["passed"] is False
+    assert verdict["state"] == "skipped"
+    assert verdict["skipped_gates"][0]["skipped_because"] == "gate_unrun"
+
+
+def test_non_boolean_pass_value_is_unreadable_and_non_passing(tmp_path):
+    _write(tmp_path, "5_test", "test_report.json", cycle="cycle-new",
+           passed="false")
+    verdict = audit_evidence(tmp_path, RUN, [["5_test", "test_report.json"]])
+    assert verdict["passed"] is False
+    assert verdict["state"] == "stale"
+    assert verdict["stale_reports"][0]["skipped_because"] == "invalid_passed_type"
+
+
+def test_missing_cycle_manifest_is_non_passing_even_with_complete_reports(tmp_path):
+    for step, filename in (
+        ("5_test", "test_report.json"),
+        ("5_compile", "compile_report.json"),
+    ):
+        _write(tmp_path, step, filename, cycle="cycle-current")
+    (tmp_path / ".evidence_cycle.json").unlink()
+    verdict = audit_evidence(
+        tmp_path, RUN,
+        [["5_test", "test_report.json"],
+         ["5_compile", "compile_report.json"]],
+    )
+    assert verdict["passed"] is False
+    assert verdict["state"] == "stale"
+    assert verdict["evidence_cycle_id"] == ""
+
+
+def test_unreadable_current_report_is_non_passing(tmp_path):
+    _start_cycle(tmp_path, "cycle-current")
+    report = tmp_path / "5_test" / "test_report.json"
+    report.parent.mkdir()
+    report.write_text("{not-json", encoding="utf-8")
+    verdict = audit_evidence(tmp_path, RUN, [["5_test", "test_report.json"]])
+    assert verdict["passed"] is False
+    assert verdict["state"] == "stale"
+    assert verdict["stale_reports"][0]["state"] == "unreadable"
 
 
 def test_missing_gate_is_explicit_non_passing_evidence(tmp_path):

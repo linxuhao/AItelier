@@ -2,7 +2,7 @@ name: verify_evidence
 description: >
   Fail-closed preflight for a verifier verdict. Reads the declared gate reports,
   requires every one to carry the current run id and the same per-verification-cycle
-  id created by the first gate, and writes evidence_report.json. Missing, unreadable,
+  id published in the independent run-cycle manifest, and writes evidence_report.json. Missing, unreadable,
   stale, skipped, or unrun evidence is explicit and non-passing; this catches stale
   reports from an earlier goal-loop iteration in the same run as well as another run.
 parameters:

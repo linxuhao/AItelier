@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'root=$(git rev-parse --show-toplevel) && exec \"$root/.codex/hooks/postcompact-driver-state.sh\"'",
+            "async": false,
+            "timeout": 20,
+            "statusMessage": "Preparing AItelier director state reload..."
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "^compact$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'root=$(git rev-parse --show-toplevel) && exec \"$root/.codex/hooks/postcompact-driver-state.sh\"'",
+            "async": false,
+            "timeout": 20,
+            "additionalContextLimit": 4000,
+            "statusMessage": "Reloading AItelier director state..."
+          }
+        ]
+      }
+    ]
+  }
+}

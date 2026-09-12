@@ -39,6 +39,14 @@ services:
       # never 127.0.0.1, so the app-level localhost guard must be relaxed.
       # Put Cloudflare Access (or equivalent auth) in front of the published port.
       AITELIER_ALLOW_EXTERNAL: "1"
+      # How many DIFFERENT projects the poller may advance per tick. The poll
+      # takes this many active candidates, skips the ones whose per-project tick
+      # lock is held, and asyncio.gathers the rest — so this is the real
+      # concurrency ceiling, not a hint. Measured 2026-09-12 at the default 4:
+      # one game round plus three platform runs saturated it, 95% of ticks
+      # returned outcome=locked (= "all slots busy"), and a fifth launched run never
+      # entered the candidate window at all. Owner raised it to 10.
+      AITELIER_MAX_CONCURRENT_PROJECTS: "10"
       AITELIER_SECRETS_DIR: /run/aitelier-secrets
       AITELIER_GITHUB_TOKEN_FILE: /run/aitelier-secrets/GITHUB_TOKEN
       # Git auth for clone/push of GitHub repos. The credential helper feeds the

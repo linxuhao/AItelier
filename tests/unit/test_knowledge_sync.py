@@ -168,3 +168,27 @@ def test_loadable_via_tool_loader():
     schema = loader.load_schema("knowledge_sync")
     assert schema["name"] == "knowledge_sync"
     assert callable(loader.load_fn("knowledge_sync"))
+
+
+def test_linked_worktree_uses_common_git_exclude(tmp_path):
+    """Linked worktrees read excludes from the common git dir, not their gitdir."""
+    primary = _make_repo(tmp_path)
+    linked = tmp_path / "linked"
+    made = _git(primary, "worktree", "add", "-q", "-b", "linked-test", str(linked))
+    assert made.returncode == 0, made.stderr
+    tracked_ignore = linked / ".gitignore"
+    tracked_ignore.write_text("user-owned/\n", encoding="utf-8")
+    _git(linked, "add", ".gitignore")
+    _git(linked, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "user ignore")
+    before = tracked_ignore.read_bytes()
+
+    ws = _make_workspace(tmp_path, report={"all_goals_met": True})
+    res = _call(linked, ws, "proj1")
+
+    assert res["written"] is True
+    assert tracked_ignore.read_bytes() == before
+    assert _git(linked, "check-ignore", ".aitelier/knowledge.md").returncode == 0
+    assert ".aitelier" not in _git(linked, "status", "--short").stdout
+    common = _git(linked, "rev-parse", "--git-common-dir").stdout.strip()
+    common_dir = Path(common) if Path(common).is_absolute() else (linked / common).resolve()
+    assert (common_dir / "info" / "exclude").read_text().count(".aitelier/") == 1

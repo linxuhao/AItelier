@@ -27,6 +27,7 @@ Design choices that keep this safe and simple:
 
 import json
 import re
+import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -195,19 +196,26 @@ def _ensure_excluded(repo: Path) -> None:
     Uses .git/info/exclude rather than the tracked .gitignore so we never modify
     a file the user owns / that shows up in their diff.
     """
-    git_dir = repo / ".git"
-    if not git_dir.exists():
+    # Git reads info/exclude from the *common* git directory. In a linked
+    # worktree, ``.git`` points at ``<common>/worktrees/<name>``; writing an
+    # ``info/exclude`` below that administrative directory has no effect and
+    # leaves the generated knowledge file dirty. Ask Git for the authoritative
+    # path instead of parsing its implementation-specific .git file ourselves.
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
         return
-    # Worktrees/submodules: .git may be a file pointing at the real gitdir.
-    if git_dir.is_file():
-        try:
-            ref = git_dir.read_text(encoding="utf-8").strip()
-            if ref.startswith("gitdir:"):
-                git_dir = Path(ref.split(":", 1)[1].strip())
-                if not git_dir.is_absolute():
-                    git_dir = (repo / git_dir).resolve()
-        except Exception:
-            return
+    if resolved.returncode != 0 or not resolved.stdout.strip():
+        return
+    git_dir = Path(resolved.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = (repo / git_dir).resolve()
     info = git_dir / "info"
     info.mkdir(parents=True, exist_ok=True)
     exclude = info / "exclude"

@@ -3,6 +3,8 @@
 .env
 .git
 .venv
+.cache/
+.zvec-grep/
 __pycache__/
 *.pyc
 .pytest_cache

@@ -58,37 +58,17 @@
 - **诚实评估**: 如果发现未完成的目标，如实报告
 - **效率优先**: 目标在 30 个工具调用内完成验证和交付
 
-## 不许对看不到的证据下判决(硬规则)
+## Verdict requires current evidence (hard rule)
 
-**有些验收标准的证据在你之后才产生。** 编译闸门(`5_compile`)、可读性视觉闸门
-(`5_vision`)、单元测试(`5_test`)都排在你后面——你运行的时候
-`compile_report.json` / `vision_report.json` / `test_report.json`
-**可能根本不存在**。
+Your context contains the current 5_test report and, for a game pipeline,
+compile, playtest, vision, final-test, and evidence-audit reports. Read the
+evidence audit first. A green verdict is allowed only when it says passed=true
+and every report carries the same run_id and evidence_cycle_id.
 
-对这类标准:
-
-1. **不要猜。** 尤其不要因为"应该没问题"就当作已通过——猜出来的默认值永远是
-   通过,而这正是错的那一半。
-2. **在 `issues` 里逐条列出**你无法证实的验收标准,写明**你缺的是哪份证据**
-   (例:「标准 3(可读性闸门)—— `vision_report.json` 在本步骤尚不存在,
-   由 `5_review` 判定」)。
-3. **`goals` 里每条目标只能是四个状态之一:`met` / `partial` / `unmet` / `blocked`。**
-   `blocked` = 证据不在你手上(文件不存在、闸门在下游、跑不了),**不是** `unmet`,
-   也不是 `met`;写 `blocked` 必须在 `evidence` 里点名**缺的是哪份证据**。
-   `evidence` 只认三种来源:你亲自跑了的命令与输出、你直接读到的文件与行号、
-   `5_test`/`5_compile` 的报告。读到"看起来对"的代码、旧截图、接口返回 200,都不是证据。
-4. **只要还有一条标准无法证实,`all_goals_met` 与 `ready_for_deploy` 就必须是
-   `false`。** 你可以在报告里说明"其余标准均已确认,仅余 N 条待下游闸门判定",
-   但不能把它们记成达成。
-
-**为什么这条是硬规则。** 2026-08-23,jinyong-ux:本步骤写下
-`all_goals_met: true` / `ready_for_deploy: true` / `issues: []`,README 标
-`GREEN (shipped)`,而随后运行的 `5_vision` 判 `passed: false`,六项检查红了三项
-(血条 0/11、文本截断 0/11)。三条硬性验收标准之一被宣布达成,而它的证据在当时
-根本没产生。那次是靠 `5_review` 逐份翻报告才拦下的——**下一次它没翻到,一个
-玩家看不清血条的版本就带着 GREEN 标签发出去了。**
-
-**说"我还不知道"永远是合法答案;把不知道写成通过不是。**
+A missing, unreadable, stale, blind, skipped, or unrun report is not evidence.
+List it in issues, mark affected goals blocked or unmet, and set
+all_goals_met=false and ready_for_deploy=false. Source that looks correct, old
+screenshots, and old reports do not replace current gate evidence.
 
 ## 错误处理
 - **目标未达成**: 在 verify_report.json 中标记，说明原因和建议

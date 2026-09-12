@@ -66,6 +66,7 @@ overlay:
         timeout_seconds: 3900
         tool_params:
           out_dir: "$STEP_DIR"
+          evidence_cycle_from: "5_test"
         # No transitions: a step LIST wires sequentially, so this falls through
         # to 5_vision below, and 5_vision inherits 5_test's original target.
         # A red compile is NOT routed around the readability gate — see the
@@ -112,6 +113,7 @@ overlay:
         tool_params:
           from_step: "5_compile"
           out_dir: "$STEP_DIR"
+          evidence_cycle_from: "5_test"
         # ── BLIND IS NOT FAILED ────────────────────────────────────────────
         # The gate has two ways to say `passed: false` and they call for
         # opposite responses:
@@ -159,9 +161,9 @@ overlay:
         # nothing marking it stale. Letting the step RUN keeps the report fresh
         # and honest; only where it goes afterwards changes.
         #
-        # It goes through final tests to 5_review, skipping 5_knowledge: 5_design
-        # rewrites the durable design record, which must not be re-derived from
-        # a build that never compiled.
+        # It still goes through final tests and the current-cycle evidence
+        # audit. The missing rendered evidence therefore remains explicit and
+        # non-passing when the verifier and reviewer make their decisions.
         transitions:
           - to: "5_final_test"
             match:
@@ -170,7 +172,7 @@ overlay:
               value: "no_captures"
           - to: "5_vision_human"
             match: { from_file: "vision_report.json", field: "blind", value: true }
-          - to: "5_knowledge"
+          - to: "5_evidence"
 
       # The checkpoint modal surfaces the CHECKPOINT step's OWN dir, so restage
       # the gate's report into it — otherwise the reviewer is asked to judge a
@@ -210,7 +212,7 @@ overlay:
           vision_step: "5_vision"
           out_dir: "$STEP_DIR"
         transitions:
-          - to: "5_knowledge"
+          - to: "5_evidence"
 
   # ── CONTEXT ────────────────────────────────────────────────────────────────
   # 3. Let the final verifier read the gate's reports.
@@ -237,6 +239,20 @@ overlay:
   #     use, and signs the run off.
   - add_context: "@verifier_review"
     source: { step: "5_vision" }
+
+  # The verdict receives every concrete report by filename.
+  - add_context: "5"
+    source: { step: "5_compile", output: "compile_report.json", required: true }
+  - add_context: "5"
+    source: { step: "5_compile", output: "playtest_report.json", required: true }
+  - add_context: "5"
+    source: { step: "5_compile", output: "playtest_summary.md", required: true }
+  - add_context: "5"
+    source: { step: "5_vision", output: "vision_report.json", required: true }
+  - add_context: "5"
+    source: { step: "5_final_test", output: "test_report.json", required: true }
+  - add_context: "5"
+    source: { step: "5_game_evidence", output: "evidence_report.json", required: true }
 
   # 3b. And the PM — because the PM is who authors the FIX tasks. On a goal-loop
   #     iteration (5_review failed → back to "3") the PM is asked to plan repairs
@@ -375,7 +391,8 @@ overlay:
       mode: "index"
       order: *design_order
 
-  # 6. The design keeper. Runs AFTER the gates and BEFORE the final review.
+  # 6. The design keeper. Runs AFTER the first gate audit and BEFORE the
+  #    final-tree test, combined evidence audit, verdict, and final review.
   #
   #    It used to sit on 5_review's PASS edge, so the record described only what
   #    SHIPPED — sound, but it had two costs that only showed up once the record
@@ -412,7 +429,7 @@ overlay:
   #    quietly loses accumulated decisions the first time a model reorganises
   #    while regenerating.
   #
-  - insert_after: "5_knowledge"
+  - insert_after: "5_evidence"
     steps:
       - id: "5_design"
         step_type: "agent"
@@ -421,7 +438,7 @@ overlay:
         context:
           - source: { from: "repository", mode: "tool" }
           - source: { step: "2" }
-          - source: { step: "5" }
+          - source: { step: "5_test", output: "test_report.json" }
           - source: { step: "5_compile", output: "compile_report.json" }
           - source: { step: "5_compile", output: "playtest_summary.md" }
           # …and the readability verdict. The design keeper records what SHIPPED,
@@ -444,6 +461,7 @@ overlay:
         timeout_seconds: 1200
         tool_params:
           out_dir: "$STEP_DIR"
+          evidence_cycle_from: "5_test"
         # Read the report, not inherited flags. Missing/invalid evidence and
         # skipped runners or zero collected tests cannot release review/push.
         # Even a pure Godot project needs checks of the final tree here: its
@@ -453,9 +471,19 @@ overlay:
             match: { from_file: "test_report.json", field: "skipped", value: true }
           - to: "5_final_test_replan"
             match: { from_file: "test_report.json", field: "no_tests_collected", value: true }
-          - to: "5_review"
+          - to: "5_game_evidence"
             match: { from_file: "test_report.json", field: "passed", value: true }
           - to: "5_final_test_replan"
+
+      - id: "5_game_evidence"
+        step_type: "tool"
+        tool_name: "verify_evidence"
+        timeout_seconds: 120
+        tool_params:
+          out_dir: "$STEP_DIR"
+          gates: '[["5_test", "test_report.json"], ["5_compile", "compile_report.json"], ["5_compile", "playtest_report.json"], ["5_vision", "vision_report.json"], ["5_final_test", "test_report.json"]]'
+        transitions:
+          - to: "5"
 
       - id: "5_final_test_replan"
         step_type: "gate"
@@ -467,5 +495,7 @@ overlay:
   # earlier 5_test report remains available as pre-design diagnostic evidence.
   - add_context: "@verifier_review"
     source: { step: "5_final_test", output: "test_report.json" }
+  - add_context: "@verifier_review"
+    source: { step: "5_game_evidence", output: "evidence_report.json", required: true }
   - add_context: "@pm"
     source: { step: "5_final_test", output: "test_report.json" }

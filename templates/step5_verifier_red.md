@@ -10,6 +10,7 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 
 > **上下文提示**: 被审查的 Green Agent 输出已包含在你的 prompt 上下文中（以 "Step 5" 章节形式），无需使用工具读取文件。
 > 此外，单元测试报告以 "Step 5_test" 章节形式提供（`test_report.json`：`passed` / `failures` / `summary`）—— 这是**真实运行了项目测试**的客观结果，必须纳入判定。
+> `evidence_report.json` 是本轮证据审计：它必须为 `passed: true`，并且其中每个报告的 `run_id` 和 `evidence_cycle_id` 必须属于同一本轮。缺失、陈旧、skipped 或 unrun 的门槛都必须判 `passed: false`；旧报告不能替代本轮证据。
 
 ## 审查要点
 
@@ -52,7 +53,7 @@ Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档
 
 使用以下三级判定。仅当存在 **阻塞性问题** 时才判定为 false。
 
-- **passed: true** — MVP 目标全部达成 **且** 单元测试全部通过（`test_report.passed: true`）**且**（如有其它硬性门槛报告，如编译/运行时）均通过或 skipped，验证完整、裁定诚实、（如适用）可独立部署。
+- **passed: true** — MVP 目标全部达成 **且** 单元测试全部通过（`test_report.passed: true`）**且**（如有其它硬性门槛报告，如编译/运行时）均有本轮报告且通过；skipped / unrun 不算通过，验证完整、裁定诚实、（如适用）可独立部署。
 - **passed: true, suggestions: [...]** — 同上，但有轻微改进建议。将建议放在 suggestions 数组中，**不要阻塞**。
 - **passed: false** — 存在阻塞性问题：**任何单元测试失败**、**任何硬性门槛报告失败**、**任何卡没有实现产出（`loop_items_implemented.complete` 不为 true）**、核心验证项缺失、交付物无法运行、或 MVP 目标未达成但未如实报告。
 

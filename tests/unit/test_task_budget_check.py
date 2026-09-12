@@ -79,9 +79,9 @@ def test_shape_is_derived_from_the_real_graph(live):
     assert shape["body"] == 4, "the task loop body is t_plan/t_plan_review/t_impl/t_impl_review"
     # Every agent/tool node outside the body, plus the loop node itself (it is
     # marked completed when it drains). Gates leave no row and are excluded.
-    # 14 since git_push_post joined the chain (2026-08-27): a finished round
-    # pushes to its remote branch before `done`.
-    assert shape["linear"] == 14
+    # 15 since the current-cycle evidence audit joined the chain: a finished
+    # round cannot reach the verifier until its deterministic reports are bound.
+    assert shape["linear"] == 15
     # Read, never pinned: the cap is an operational knob (200 -> 300 on
     # 2026-09-04, when a legitimate 21-card round died at step 204 inside the
     # final verification chain). A test that pins the number turns every future
@@ -93,11 +93,11 @@ def test_shape_is_derived_from_the_real_graph(live):
 
 def test_the_boltons_list_is_the_one_that_did_not_fit(live):
     """The boltons shape: a clean pass is linear + 4 per task; one fix round
-    is what overflows. 33 tasks measured 146 clean / 248 with the fix round
+    is what overflows. 33 tasks measured 147 clean / 250 with the fix round
     against the cap of 200 that was in force then."""
     shape = _graph_shape(GRAPH)
-    assert shape["linear"] + shape["body"] * 33 == 146
-    assert _required_steps(shape, 33) == 248
+    assert shape["linear"] + shape["body"] * 33 == 147
+    assert _required_steps(shape, 33) == 250
 
 
 # ── The verdict ────────────────────────────────────────────────────────────

@@ -32,6 +32,14 @@ parameters:
     type: string
     description: "Path to the project repo (auto-injected by the engine)"
     required: false
+  evidence_cycle_start:
+    type: boolean
+    description: "Create a new per-verification-cycle id; only the first gate sets this."
+    required: false
+  evidence_cycle_from:
+    type: string
+    description: "Step whose test_report.json carries the cycle id to inherit."
+    required: false
   out_dir:
     type: string
     description: "Directory to write test_report.json (set to $STEP_DIR)"

@@ -741,7 +741,9 @@ def _apply_baseline(report: dict, state_dir: str) -> None:
 
 def run_tests(*, project_root: str = "", out_dir: str = "",
               workspace_root: str = "", repo_gate: bool = True,
-              state_dir: str = "",
+              state_dir: str = "", run_id: str = "",
+              evidence_cycle_start: bool = False,
+              evidence_cycle_from: str = "",
               **kwargs) -> dict:
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
@@ -982,6 +984,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         return {"written": None, "passed": False, "error": report["summary"]}
     target_dir = Path(out_dir) if out_dir else repo
     target_dir.mkdir(parents=True, exist_ok=True)
+    if run_id and (evidence_cycle_start or evidence_cycle_from):
+        from aitelier.gate_evidence import stamp_report
+        stamp_report(report, run_id=run_id, out_dir=str(target_dir),
+                     start_cycle=evidence_cycle_start,
+                     cycle_from=evidence_cycle_from)
     (target_dir / "test_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
     return {"written": "test_report.json", "passed": report["passed"],

@@ -51,6 +51,7 @@ x-aitelier:
     t_impl_review: "Impl Review"
     "5": "Final Verifier"
     "5_test": "Final Tests"
+    "5_evidence": "Evidence Audit"
     "5_knowledge": "Knowledge Sync"
     "5_review": "Final Review"
 
@@ -537,7 +538,7 @@ steps:
     transitions:
       - to: "t_plan"
         max_loop: 200
-      - to: "5"
+      - to: "5_test"
 
   # ─── Task Plan ───
   - id: "t_plan"
@@ -798,6 +799,8 @@ steps:
       - source: { step: "1" }
       - source: { step: "2" }
       - source: { step: "5_review" }
+      - source: { step: "5_test", output: "test_report.json", required: true }
+      - source: { step: "5_evidence", output: "evidence_report.json", required: true }
       # Goals delivered by skillflow context from the meta run's surviving copy
       # (DPE step-1 promotion wipes any copy placed in dpe_default_v2/1/).
       - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json", required: true }
@@ -860,9 +863,9 @@ steps:
                   type: string
                   minLength: 1
     transitions:
-      - to: "5_test"
+      - to: "5_knowledge"
 
-  # ─── Run unit tests (deterministic gate, AFTER the verifier) ───
+  # ─── Run unit tests (deterministic gate, BEFORE the verifier) ───
   # Runs pytest over the consolidated repo and writes test_report.json. Always
   # succeeds as a step; the outcome is captured for 5_review to fold into its
   # verdict, so the verifier's semantic issues AND test failures loop back to PM
@@ -884,11 +887,21 @@ steps:
     tool_params:
       out_dir: "$STEP_DIR"
       repo_gate: false
+      evidence_cycle_start: true
     transitions:
-      # Engine-agnostic base: goes straight to knowledge. The `game_harness`
-      # addon splices the compile/play-test gate (5_compile) in HERE, on this
-      # edge (anchor: post_verify_tests), for game projects.
-      - to: "5_knowledge"
+      # Engine-agnostic base: the current unit report is audited first. The
+      # game_harness addon splices its engine gates onto this edge.
+      - to: "5_evidence"
+
+  - id: "5_evidence"
+    step_type: "tool"
+    tool_name: "verify_evidence"
+    timeout_seconds: 120
+    tool_params:
+      out_dir: "$STEP_DIR"
+      gates: '[["5_test", "test_report.json"]]'
+    transitions:
+      - to: "5"
 
   # ─── Cross-run knowledge transfer (deterministic, NEVER fails) ───
   # Distills this run's review-verified knowledge (approved architecture +
@@ -924,6 +937,7 @@ steps:
       - source: { tool: "loop_items_implemented" }
       - source: { step: "5" }
       - source: { step: "5_test" }
+      - source: { step: "5_evidence", output: "evidence_report.json", required: true }
       # { step: "5_compile" } is added by the game_harness addon (add_context),
       # so the base reviewer stays engine-agnostic.
     output:

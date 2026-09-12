@@ -242,7 +242,7 @@ def test_run_tests_refuses_a_relative_out_dir(tmp_path):
     bind-mounted AItelier checkout.
     """
     import importlib.util
-    p = "/home/linxuhao/AItelier/aitelier/tools/run_tests/impl.py"
+    p = str(Path(__file__).resolve().parents[2] / "aitelier/tools/run_tests/impl.py")
     s = importlib.util.spec_from_file_location("run_tests_probe", p)
     m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
 

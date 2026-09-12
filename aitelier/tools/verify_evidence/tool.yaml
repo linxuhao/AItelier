@@ -1,0 +1,22 @@
+name: verify_evidence
+description: >
+  Fail-closed preflight for a verifier verdict. Reads the declared gate reports,
+  requires every one to carry the current run id and the same per-verification-cycle
+  id created by the first gate, and writes evidence_report.json. Missing, unreadable,
+  stale, skipped, or unrun evidence is explicit and non-passing; this catches stale
+  reports from an earlier goal-loop iteration in the same run as well as another run.
+parameters:
+  out_dir:
+    type: string
+    description: "Absolute output directory ($STEP_DIR)."
+  run_id:
+    type: string
+    description: "Current run id (auto-injected)."
+    required: false
+  gates:
+    type: string
+    description: "JSON list of [step_id, report_filename] pairs, first entry is the cycle source."
+    required: false
+x-fallible: true
+output:
+  target: artifact

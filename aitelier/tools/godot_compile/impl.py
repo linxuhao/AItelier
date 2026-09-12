@@ -150,8 +150,8 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
         "\n".join(lines), encoding="utf-8")
 
 
-def godot_compile(*, project_root: str = "", out_dir: str = "",
-                  workspace_root: str = "", **kwargs) -> dict:
+def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
+                             workspace_root: str = "", **kwargs) -> dict:
     """Parse-check the repo's GDScript via godot-builder, then (if it passed)
     play-test it. Writes compile_report.json always, and playtest_report.json
     always. Returns {written, passed}."""
@@ -235,7 +235,11 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
         reason = ("Parse failed — play-test skipped (fix parse errors first)."
                   if not report.get("passed", True)
                   else "No project.godot — not a Godot project; play-test skipped.")
-        skipped = {"passed": True, "frames": 0, "errors": [], "state": {},
+        skipped = {"passed": report.get("passed", True), "frames": 0,
+                   "errors": [], "state": {}, "gate_skipped": True,
+                   "skipped_because": ("upstream_failed"
+                                       if not report.get("passed", True)
+                                       else "not_applicable"),
                    "summary": reason}
         (target_dir / "playtest_report.json").write_text(
             json.dumps(skipped, indent=2), encoding="utf-8")
@@ -245,3 +249,25 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
     return {"written": ["compile_report.json", "playtest_report.json",
                         "playtest_summary.md"],
             "passed": report.get("passed", True) and pt_passed}
+
+
+def godot_compile(*, project_root: str = "", out_dir: str = "",
+                  workspace_root: str = "", run_id: str = "",
+                  evidence_cycle_from: str = "", **kwargs) -> dict:
+    """Run compile/playtest, then bind both reports to this evidence cycle."""
+    result = _godot_compile_unstamped(
+        project_root=project_root, out_dir=out_dir,
+        workspace_root=workspace_root, **kwargs)
+    target = Path(out_dir) if out_dir else Path(project_root or workspace_root)
+    if run_id and evidence_cycle_from:
+        from aitelier.gate_evidence import stamp_file
+        for name in ("compile_report.json", "playtest_report.json"):
+            stamp_file(target / name, run_id=run_id, out_dir=str(target),
+                       cycle_from=evidence_cycle_from)
+        try:
+            reports = [json.loads((target / name).read_text(encoding="utf-8"))
+                       for name in ("compile_report.json", "playtest_report.json")]
+            result["passed"] = all(bool(r.get("passed", False)) for r in reports)
+        except Exception:
+            result["passed"] = False
+    return result

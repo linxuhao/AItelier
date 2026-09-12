@@ -443,9 +443,9 @@ def _write(report: dict, out_dir: str, project_root: Path) -> dict:
             "summary": report.get("summary", "")}
 
 
-def godot_vision(*, project_root: str = "", out_dir: str = "",
-                 workspace_root: str = "", config_name: str = "",
-                 from_step: str = "5_compile", **kwargs) -> dict:
+def _godot_vision_unstamped(*, project_root: str = "", out_dir: str = "",
+                            workspace_root: str = "", config_name: str = "",
+                            from_step: str = "5_compile", **kwargs) -> dict:
     """Judge the rendered frames against the readability checklist.
 
     Writes vision_report.json and returns {written, passed, summary}."""
@@ -739,3 +739,24 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
             f"green and the game still be unplayable to look at. "
             + " | ".join(report["failures"]))
     return _write(report, out_dir, repo)
+
+
+def godot_vision(*, project_root: str = "", out_dir: str = "",
+                 workspace_root: str = "", config_name: str = "",
+                 from_step: str = "5_compile", run_id: str = "",
+                 evidence_cycle_from: str = "", **kwargs) -> dict:
+    """Judge frames, then bind the report to this evidence cycle."""
+    result = _godot_vision_unstamped(
+        project_root=project_root, out_dir=out_dir, workspace_root=workspace_root,
+        config_name=config_name, from_step=from_step, **kwargs)
+    target = Path(out_dir) if out_dir else Path(project_root or workspace_root or ".")
+    if run_id and evidence_cycle_from:
+        from aitelier.gate_evidence import stamp_file
+        stamp_file(target / "vision_report.json", run_id=run_id,
+                   out_dir=str(target), cycle_from=evidence_cycle_from)
+        try:
+            report = json.loads((target / "vision_report.json").read_text(encoding="utf-8"))
+            result["passed"] = bool(report.get("passed", False))
+        except Exception:
+            result["passed"] = False
+    return result

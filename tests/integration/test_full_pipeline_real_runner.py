@@ -44,7 +44,44 @@ def _stub_git_synced(*args, **kwargs):
     return {"synced": True, "passed": True}
 
 
-def _build_real_pipeline(tmp_path):
+def _cycle_report(out_dir, run_id, step_id, marker):
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    if step_id == "5_test":
+        cycle = f"{run_id}:integration-cycle"
+    else:
+        seed = json.loads((target.parent / "5_test" / "test_report.json").read_text())
+        cycle = seed["evidence_cycle_id"]
+    return {"passed": True, "summary": marker, "run_id": run_id,
+            "evidence_cycle_id": cycle}
+
+
+def _stub_gate_tests(*args, out_dir="", run_id="", step_id="", **kwargs):
+    marker = ("TRACE_UNIT_CURRENT" if step_id == "5_test"
+              else "TRACE_FINAL_TREE_CURRENT")
+    report = _cycle_report(out_dir, run_id, step_id, marker)
+    (Path(out_dir) / "test_report.json").write_text(json.dumps(report))
+    return {"passed": True, "written": "test_report.json"}
+
+
+def _stub_game_compile(*args, out_dir="", run_id="", step_id="", **kwargs):
+    target = Path(out_dir)
+    compile_report = _cycle_report(out_dir, run_id, step_id, "TRACE_COMPILE_CURRENT")
+    playtest_report = _cycle_report(out_dir, run_id, step_id, "TRACE_PLAYTEST_CURRENT")
+    (target / "compile_report.json").write_text(json.dumps(compile_report))
+    (target / "playtest_report.json").write_text(json.dumps(playtest_report))
+    (target / "playtest_summary.md").write_text("TRACE_PLAYTEST_CURRENT")
+    return {"passed": True, "written": ["compile_report.json", "playtest_report.json"]}
+
+
+def _stub_game_vision(*args, out_dir="", run_id="", step_id="", **kwargs):
+    report = _cycle_report(out_dir, run_id, step_id, "TRACE_VISION_CURRENT")
+    report.update(blind=False, blind_reason="")
+    (Path(out_dir) / "vision_report.json").write_text(json.dumps(report))
+    return {"passed": True, "written": "vision_report.json"}
+
+
+def _build_real_pipeline(tmp_path, *, game=False):
     """Wire an isolated, fully-real DPE pipeline with stubbed env tools."""
     ws_base = tmp_path / "ws"
     loader = ToolLoader(Path(_skillflow_pkg.__file__).parent / "tools")
@@ -58,7 +95,9 @@ def _build_real_pipeline(tmp_path):
     # Override the env-dependent tools (lint=ruff, run_tests=pytest,
     # repo_apply=git, git_sync_pre=git) with instant-pass stubs.
     loader.register_dynamic_tool("lint", {}, _stub_pass)
-    loader.register_dynamic_tool("run_tests", {}, _stub_pass)
+    loader.register_dynamic_tool("run_tests", {}, _stub_gate_tests)
+    loader.register_dynamic_tool("godot_compile", {}, _stub_game_compile)
+    loader.register_dynamic_tool("godot_vision", {}, _stub_game_vision)
     loader.register_dynamic_tool("repo_apply", {}, _stub_repo_apply)
     loader.register_dynamic_tool("git_sync_pre", {}, _stub_git_synced)
 
@@ -67,7 +106,8 @@ def _build_real_pipeline(tmp_path):
     # is true; run_tests is a custom (non-native) tool, so advance would
     # otherwise delegate it and stall. Treat both as native so our stubs run
     # inline — exactly as the real native git_sync_pre already does.
-    _inline_tools = {"git_sync_pre", "run_tests"}
+    _inline_tools = {"git_sync_pre", "run_tests", "godot_compile",
+                     "godot_vision", "verify_evidence"}
     _orig_is_native = loader.is_native
     loader.is_native = lambda name: name in _inline_tools or _orig_is_native(name)
 
@@ -78,7 +118,16 @@ def _build_real_pipeline(tmp_path):
             except Exception:
                 pass
 
-    graph = PipelineGraph.from_yaml(_REPO_ROOT / "configs" / "dpe_default.yaml")
+    if game:
+        from skillflow.compose import compose_graph
+        composed = compose_graph(
+            yaml.safe_load((_REPO_ROOT / "configs" / "dpe_default.yaml").read_text()),
+            [yaml.safe_load((_REPO_ROOT / "configs/addons/game_harness.yaml").read_text())],
+        )
+        composed["name"] = "dpe_game_trace"
+        graph = PipelineGraph._from_dict(composed)
+    else:
+        graph = PipelineGraph.from_yaml(_REPO_ROOT / "configs" / "dpe_default.yaml")
     sf.register_graph(graph)
 
     db = DBManager(str(tmp_path / "aitelier.db"))
@@ -144,6 +193,11 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True, revising
         return json.dumps({"thoughts": "review",
                            "actions": [_action("write_verdict", content=verdict)]})
 
+    if step_id == "5_design":
+        return json.dumps({"thoughts": "record design", "actions": [
+            _action("create", file="design_trace.md", content="# Current design"),
+        ]})
+
     if step_id == "3":
         manifest = json.dumps({"execution_order": [["t1"]]})
         card = {"id": "t1", "description": "implement add",
@@ -202,8 +256,8 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True, revising
     return json.dumps({"thoughts": "implement", "actions": [action]})
 
 
-async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=120,
-                               reject_once_at=None):
+async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
+                               reject_once_at=None, observed_claims=None):
     """Run the real scheduler loop with mocked agents until the run terminates."""
     from unittest.mock import MagicMock
     import api.dependencies as deps
@@ -229,6 +283,15 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=120,
 
     runner = AgentStepRunner(db_manager=db, workspace_manager=ws,
                              agent_factory=None, prompt_assembler=None, event_bus=None)
+
+    # Fail visibly if the host cannot append its prompt/response events. The
+    # production wrapper contains trace failures, while this integration is
+    # evidence that the real trace path accepted the rendered verifier prompt.
+    monkeypatch.setattr(
+        AgentStepRunner, "_make_trace_wrapper",
+        staticmethod(lambda step: lambda category, event, payload=None:
+                     step.trace(category, event, payload)),
+    )
 
     executed = []
     checkpoints = 0
@@ -262,8 +325,17 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=120,
             review_passed=review_passed,
             revising_code=claimed.step_id == "t_impl" and "t_impl" in executed)
         executed.append(claimed.step_id)
+        if observed_claims is not None:
+            observed_claims[claimed.step_id] = {
+                "resolved_context": claimed.inputs.get("_resolved_context", {}),
+                "step_instance_id": claimed.token.step_instance_id,
+            }
         result = await runner.execute(claimed)
         sf.confirm_step(claimed.token, result)
+        if observed_claims is not None:
+            observed_claims[claimed.step_id]["trace"] = sf.get_trace(
+                run_id, step_instance_id=claimed.token.step_instance_id)
+
     return "TIMEOUT", executed, checkpoints
 
 
@@ -293,6 +365,30 @@ class TestRealRunnerFullPipeline:
         assert executed.count("3") == 1  # no silent promote-on-invalid mock card
         assert executed.count("5") == 1  # the report must really validate
 
+
+    async def test_game_verdict_runtime_trace_contains_all_current_gate_reports(
+            self, tmp_path, monkeypatch):
+        sf, db, ws, run_id = _build_real_pipeline(tmp_path, game=True)
+        observed = {}
+        status, executed, _ = await _drive_to_completion(
+            sf, db, ws, run_id, monkeypatch, observed_claims=observed)
+
+        assert status == "completed", executed
+        assert executed.index("5") > executed.index("5_design")
+        context_blob = json.dumps(observed["5"]["resolved_context"])
+        for marker in (
+            "TRACE_UNIT_CURRENT", "TRACE_COMPILE_CURRENT",
+            "TRACE_PLAYTEST_CURRENT", "TRACE_VISION_CURRENT",
+            "TRACE_FINAL_TREE_CURRENT",
+        ):
+            assert marker in context_blob
+
+        trace_blob = json.dumps(observed["5"]["trace"])
+        assert "user_prompt" in trace_blob
+        for marker in ("TRACE_UNIT_CURRENT", "TRACE_COMPILE_CURRENT",
+                       "TRACE_PLAYTEST_CURRENT", "TRACE_VISION_CURRENT",
+                       "TRACE_FINAL_TREE_CURRENT"):
+            assert marker in trace_blob
 
     async def test_red_team_rejection_loops_back_then_completes(self, tmp_path, monkeypatch):
         """A red-team rejection at t_impl_review must loop back to t_impl,

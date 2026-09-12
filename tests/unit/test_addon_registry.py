@@ -224,15 +224,15 @@ def test_any_other_blind_reason_still_reaches_the_human(dpe_game):
 
 
 def test_a_sighted_gate_is_untouched(dpe_game):
-    assert _vision_target(dpe_game, '{"passed": true, "blind": false}') == "5_knowledge"
-    assert _vision_target(dpe_game, '{"passed": false, "blind": false}') == "5_knowledge"
+    assert _vision_target(dpe_game, '{"passed": true, "blind": false}') == "5_evidence"
+    assert _vision_target(dpe_game, '{"passed": false, "blind": false}') == "5_evidence"
 
 
 def test_an_unreadable_vision_report_still_reaches_the_human(dpe_game):
     # Failing SAFE: an absent or unparseable report must not be read as
     # "the build did not compile" and quietly routed past the gate.
-    assert _vision_target(dpe_game, None) == "5_knowledge"
-    assert _vision_target(dpe_game, "not json") == "5_knowledge"
+    assert _vision_target(dpe_game, None) == "5_evidence"
+    assert _vision_target(dpe_game, "not json") == "5_evidence"
 
 
 def test_5_compile_still_falls_through_to_the_gate(dpe_game):
@@ -350,7 +350,7 @@ def test_design_delivery_always_retests(dpe_game, flags):
 
 
 @pytest.mark.parametrize("report, expected", [
-    ('{"passed": true}', "5_review"),
+    ('{"passed": true}', "5_game_evidence"),
     ('{"passed": false, "summary": "design contract broken"}', "5_final_test_replan"),
     ('{"passed": true, "skipped": true}', "5_final_test_replan"),
     ('{"passed": true, "no_tests_collected": true}', "5_final_test_replan"),
@@ -389,7 +389,8 @@ def test_final_report_is_resolved_for_review_and_replanning(dpe_game, tmp_path):
         assert any("BEFORE_DESIGN" in value for value in result.values())
     final = next(n for n in graph.steps if n.id == "5_final_test")
     assert final.tool_name == "run_tests"
-    assert final.tool_params == {"out_dir": "$STEP_DIR"}
+    assert final.tool_params == {
+        "out_dir": "$STEP_DIR", "evidence_cycle_from": "5_test"}
     replan = next(n for n in graph.steps if n.id == "5_final_test_replan")
     assert [(t.to, t.max_loop) for t in replan.transitions] == [("3", 4)]
 
@@ -413,9 +414,13 @@ def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expec
     initial["transitions"] = [{"to": "5_design"}]
     design = nodes["5_design"]
     design["context"] = []
+    final = nodes["5_final_test"]
+    for transition in final["transitions"]:
+        if transition.get("to") == "5_game_evidence":
+            transition["to"] = "5_review"
     graph = PipelineGraph._from_dict({
         "name": "final_tree_regression", "begin": "5_test",
-        "steps": [initial, design, nodes["5_final_test"], nodes["5_final_test_replan"],
+        "steps": [initial, design, final, nodes["5_final_test_replan"],
                   {"id": "3", "step_type": "agent", "agent_config": "game_designer", "transitions": []},
                   {"id": "5_review", "step_type": "agent", "agent_config": "game_designer", "transitions": []}],
     })

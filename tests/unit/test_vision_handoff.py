@@ -56,7 +56,7 @@ def test_a_gate_that_could_see_is_not_sent_to_a_human():
     """The checkpoint is for absence of evidence, not for a failing grade."""
     v = _steps()["5_vision"]
     default = [t for t in v["transitions"] if "match" not in t]
-    assert default and default[0]["to"] == "5_knowledge"
+    assert default and default[0]["to"] == "5_evidence"
 
 
 def test_rejecting_the_checkpoint_goes_back_to_the_planner():

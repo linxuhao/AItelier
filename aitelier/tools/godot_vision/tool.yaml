@@ -36,6 +36,10 @@ parameters:
     type: string
     description: "Step id whose promoted output holds playtest_report.json + frames/ (default 5_compile)"
     required: false
+  evidence_cycle_from:
+    type: string
+    description: "Step whose test_report.json carries the current verification-cycle id."
+    required: false
   out_dir:
     type: string
     description: "Directory to write vision_report.json (set to $STEP_DIR)"

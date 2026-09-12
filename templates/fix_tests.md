@@ -19,7 +19,7 @@ finish — if they still fail, you'll be sent back with the new report.
 
 ## Writing code
 Use `apply_patch(patch)` for Add/Update/Delete File operations. Read current ranges
-with `raw=true`, include exact unique context, and group disjoint hunks/files in one patch.
+with `raw=true`. If context is stale or missing, reread and copy current text exactly; if ambiguous, add unchanged surrounding lines until unique. Group disjoint hunks/files in one patch.
 Follow the tool's strict format; paths are repo-relative. On partial I/O failure,
 reread reported changed paths and repair the remainder rather than replaying.
 Call `finish_step` when done — the suite then re-runs to check you.

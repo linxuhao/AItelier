@@ -16,6 +16,25 @@ import yaml
 COPY_TOOLS = {"repo_apply", "repo_delete"}
 CODE_SLOTS = {"linter_manifest", "readme"}
 ARTIFACT_SLOTS = {"design", "report"}
+GENERIC_CODE_MUTATORS = {"create", "edit", "write", "repo_remove_file"}
+STRICT_PATCH_GUIDANCE_EN = """Use `apply_patch(patch)` for Add/Update/Delete operations in this run's code
+worktree. Read affected ranges with `raw=true`; numbered output is not patch
+text. If context is stale or not found, reread and copy the current text exactly.
+If context matches more than once, add unchanged surrounding lines until it is
+unique; never shrink ambiguous context. Patches use exact matching and complete
+preflight. On a partial I/O failure, inspect `written`/`deleted` and reread
+those paths before repairing the remainder. A successful call changes only the
+uncommitted worktree; validation, review, and delivery remain pending."""
+STRICT_PATCH_GUIDANCE_ZH = """## 写文件的工具：`apply_patch(patch)`
+用严格补丁批量新建、修改或删除本 run worktree 中的代码文件。修改前用
+`read(raw=true)` 读取当前范围；带行号的输出不能复制进补丁。上下文失效或
+未找到时，重新 raw 读取并逐字复制当前文本；命中多处时，增加前后未改动行
+直到唯一，绝不缩短歧义上下文。补丁先完整预检；若 I/O 失败返回 partial，
+检查 written/deleted 并重读这些路径后再修复。成功只代表未提交 worktree
+已改变，验证、审查和交付仍未通过。
+
+不要整文件覆盖已有文件。找不到位置时先 semantic_search/search，再只读取
+相关范围。后续调用能读到本轮之前已应用的补丁。"""
 
 
 def _tools(value):
@@ -145,7 +164,7 @@ def write_migrated_config(path: Path, original: bytes, rendered: bytes, backup_d
     return backup
 
 
-def migrate_role_prompt(prompt: str) -> str:
+def migrate_role_prompt(prompt: str, *, strict_code: bool = False) -> str:
     """Replace known output instructions while preserving role-specific content."""
     replacements = (
         ("（结果里的 `source` 字段会标明来自 `staging` 还是 `repo`）",
@@ -164,9 +183,12 @@ def migrate_role_prompt(prompt: str) -> str:
 
     start = "Edits write to this step's **staging**, not directly to the repository."
     end = "promotion and `repo_apply` handle delivery after `finish_step`."
-    if start in prompt and end in prompt[prompt.index(start):]:
+    if strict_code and start in prompt and end in prompt[prompt.index(start):]:
         a, b = prompt.index(start), prompt.index(end, prompt.index(start)) + len(end)
-        prompt = prompt[:a] + (
+        prompt = prompt[:a] + STRICT_PATCH_GUIDANCE_EN + prompt[b:]
+
+    if strict_code:
+        legacy_en = (
             "Edits write to this run's code worktree. Use the same repo-relative path "
             "for create, edit, read, search and tests. Each edit uses the current file, "
             "including previous edits. If a match fails, read the affected region "
@@ -175,8 +197,20 @@ def migrate_role_prompt(prompt: str) -> str:
             "matched text. Successful writes confirm persistence. The engine validates "
             "the candidate and records its commit after finish_step. Independent review "
             "determines acceptance."
-        ) + prompt[b:]
-
+        )
+        prompt = prompt.replace(legacy_en, STRICT_PATCH_GUIDANCE_EN)
+        section_start = "## 写文件的工具：`create`（新文件）/ `edit`（改已有文件）"
+        section_end = "\n## 输出"
+        if section_start in prompt and section_end in prompt[prompt.index(section_start):]:
+            a = prompt.index(section_start)
+            b = prompt.index(section_end, a)
+            prompt = prompt[:a] + STRICT_PATCH_GUIDANCE_ZH + prompt[b:]
+        design_start = "## 工作方式：外科手术，不是重写"
+        design_end = "\n## 硬约束"
+        if design_start in prompt and design_end in prompt[prompt.index(design_start):]:
+            a = prompt.index(design_start)
+            b = prompt.index(design_end, a)
+            prompt = prompt[:a] + design_start + "\n\n" + STRICT_PATCH_GUIDANCE_ZH + prompt[b:]
     start = "## 接力轮：仓库基线不是本轮的树（硬约束）"
     end = "\n## 先落盘的硬线"
     if start in prompt and end in prompt[prompt.index(start):]:
@@ -193,8 +227,36 @@ def migrate_role_prompt(prompt: str) -> str:
     return prompt
 
 
+def _code_roles(config_dir: Path) -> set[str]:
+    """Roles for explicit generic code outputs; artifacts keep staged create/edit."""
+    names: set[str] = set()
+
+    def visit(value):
+        if isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, dict):
+            output = value.get("output") or {}
+            role = value.get("agent_config")
+            if (isinstance(role, str) and output.get("target") == "code"
+                    and output.get("mode", value.get("output_mode")) == "write"
+                    and not output.get("fixed")):
+                names.add(role)
+            for child in value.values():
+                visit(child)
+
+    for path in sorted(config_dir.glob("gen_*.yaml")):
+        try:
+            document = yaml.safe_load(path.read_bytes())
+        except (yaml.YAMLError, UnicodeError):
+            continue
+        visit(document)
+    return names
+
+
 def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[dict]:
     reports = []
+    code_roles = _code_roles(config_dir)
     for path in sorted(config_dir.glob("gen_*.roles.json")):
         original = path.read_bytes()
         try:
@@ -204,21 +266,35 @@ def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[
         if not isinstance(roles, dict):
             continue
         changed = []
+        tool_roles = []
         for name, role in roles.items():
-            if not isinstance(role, dict) or not isinstance(role.get("system_prompt"), str):
+            if not isinstance(role, dict):
                 continue
-            before = role["system_prompt"]
-            after = migrate_role_prompt(before)
-            if after != before:
-                role["system_prompt"] = after
-                changed.append(name)
-        if changed:
+            strict_code = name in code_roles
+            before = role.get("system_prompt")
+            if isinstance(before, str):
+                after = migrate_role_prompt(before, strict_code=strict_code)
+                if after != before:
+                    role["system_prompt"] = after
+                    changed.append(name)
+            if strict_code:
+                tools = role.get("tools")
+                if tools is None:
+                    tools = []
+                if isinstance(tools, list):
+                    migrated = [tool for tool in tools if tool not in GENERIC_CODE_MUTATORS]
+                    if "apply_patch" not in migrated:
+                        migrated.append("apply_patch")
+                    if migrated != tools:
+                        role["tools"] = migrated
+                        tool_roles.append(name)
+        if changed or tool_roles:
             rendered = (json.dumps(roles, ensure_ascii=False, indent=2) + "\n").encode()
             backup = write_migrated_config(path, original, rendered, backup_dir)
             reports.append({"path": str(path), "backup": str(backup),
                             "before_sha256": hashlib.sha256(original).hexdigest(),
                             "after_sha256": hashlib.sha256(rendered).hexdigest(),
-                            "roles": changed})
+                            "roles": changed, "tool_roles": tool_roles})
     return reports
 
 

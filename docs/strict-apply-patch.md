@@ -27,7 +27,7 @@ Limits are 128 files, 2 MiB UTF-8 patch text, 1024 hunks per updated file, 16 Mi
 
 ## Read and lifecycle rules
 
-Use `read(raw=true)` immediately before composing exact patch context. Default `read` output includes numbered lines for navigation and must not be copied into a patch. If a match fails, read the current target range again with `raw=true`, narrow the context until it is unique, and retry. Do not approximate whitespace or line endings.
+Use `read(raw=true)` immediately before composing exact patch context. Default `read` output includes numbered lines for navigation and must not be copied into a patch. If context is stale or not found, read the current target range again with `raw=true` and copy the current text exactly. If context matches more than once, add unchanged surrounding lines until it is unique; never shrink ambiguous context. Do not approximate whitespace or line endings.
 
 For `output.target: code`, a successful mutation immediately changes the run's uncommitted worktree. It does not mean validation, review, commit, or delivery passed. Artifact `create`/`edit` is different: it writes the step's staged candidate and is promoted only after confirmation. When reading an artifact step's own staged candidate, use `source="self"`; this is not the code-worktree `apply_patch` lifecycle.
 

@@ -40,7 +40,8 @@ output, pass an explicit `source` (the tool description lists what you may use).
 ## Writing code with `apply_patch(patch)`
 Use Add/Update/Delete File operations, with multiple files and hunks in one call.
 Read current ranges with `raw=true` first; numbered output is not patch text.
-Updates need exact unique context and disjoint ordered
+For stale or missing context, reread and copy current text exactly. For ambiguity,
+add unchanged surrounding lines until the match is unique. Updates need disjoint ordered
 hunks against the ORIGINAL file in that call. Later calls see prior edits.
 Follow the tool's strict Begin/End Patch format; do not use whole-file shortcuts.
 On partial I/O failure, reread reported changed paths before repairing the rest.

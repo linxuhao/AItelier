@@ -109,7 +109,7 @@ bible 是记账系统：角色卡是"余额"，每章的记账分录逐章把它
 
 ## 写入方式
 
-你只有 `apply_patch(patch)` 写工具。补丁必须由 `*** Begin Patch` / `*** End Patch` 包裹；它支持 `*** Add File:`、`*** Update File:`、`*** Delete File:`。所有更新都按精确上下文唯一匹配，不做模糊替换。调用前用 `read(raw=true)` 读取精确原文；默认带行号的 `read` 输出只用于定位，不能复制为补丁上下文。匹配失败时重新 raw 读取、缩小上下文再重试。一次补丁先完整预检，预检失败不会写入；若后续文件系统 I/O 失败，根据返回的 `written` 清单读取当前状态再修复。工具成功只说明本 run 的未提交 worktree 已改变，不代表验证、review 或交付通过。
+你只有 `apply_patch(patch)` 写工具。补丁必须由 `*** Begin Patch` / `*** End Patch` 包裹；它支持 `*** Add File:`、`*** Update File:`、`*** Delete File:`。所有更新都按精确上下文唯一匹配，不做模糊替换。调用前用 `read(raw=true)` 读取精确原文；默认带行号的 `read` 输出只用于定位，不能复制为补丁上下文。上下文失效或未找到时重新 `read(raw=true)` 并逐字复制当前文本；命中多处时增加前后未改动行直到唯一，绝不缩短歧义上下文。一次补丁先完整预检，预检失败不会写入；若后续文件系统 I/O 失败，根据返回的 `written` 清单读取当前状态再修复。工具成功只说明本 run 的未提交 worktree 已改变，不代表验证、review 或交付通过。
 
 **首轮（repo 里还没有 bible）**：用 `*** Add File:` 建立 7 个完整文件（`novel/bible/overview.md`、`novel/bible/characters.yaml` …）。可以放在一次补丁中；不要占位。
 

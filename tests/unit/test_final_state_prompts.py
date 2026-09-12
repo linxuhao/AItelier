@@ -77,10 +77,10 @@ def test_media_prompt_migration_preserves_scope_outside_output_block():
            "old output instructions\n"
            "promotion and `repo_apply` handle delivery after `finish_step`.\n"
            "media provenance and review requirements")
-    new = migrate_role_prompt(old)
+    new = migrate_role_prompt(old, strict_code=True)
     assert new.startswith("budget and scope\n")
     assert new.endswith("\nmedia provenance and review requirements")
-    assert "code worktree" in new and "Independent review" in new
+    assert "apply_patch(patch)" in new and "review" in new
     for obsolete in OBSOLETE:
         assert obsolete not in new.lower()
     assert migrate_role_prompt(new) == new
@@ -110,3 +110,32 @@ def test_invalid_sidecar_is_left_for_normal_registration(tmp_path, content):
     path.write_bytes(content)
     assert migrate_generated_outputs(tmp_path) == []
     assert path.read_bytes() == content
+
+
+@pytest.mark.parametrize("name", [
+    "coding_impl", "fix_tests", "subagent_work", "task_implementer",
+    "game_designer", "novel_design",
+])
+def test_code_templates_split_stale_and_ambiguous_patch_recovery(name):
+    text = (ROOT / "templates" / f"{name}.md").read_text().lower()
+    assert "raw=true" in text
+    if name in {"task_implementer", "game_designer", "novel_design"}:
+        assert "逐字复制" in text
+        assert "增加前后未改动行" in text
+    else:
+        assert "copy current text exactly" in text or "exact copy of current text" in text
+        assert "add unchanged surrounding lines" in text or "more unchanged surrounding lines" in text
+
+
+def test_checked_in_generated_impl_uses_current_code_target_contract():
+    graph = __import__("yaml").safe_load(
+        (ROOT / "configs" / "gen_coop_shell_ui60_20260907.yaml").read_text()
+    )
+    impl = next(step for step in graph["steps"] if step["id"] == "implement")
+    assert impl["output"] == {"mode": "write", "target": "code"}
+    assert "lifecycle" not in impl
+    role = __import__("yaml").safe_load(
+        (ROOT / "agent_configs" / "coding_impl.yaml").read_text()
+    )["offload_implementer"]
+    assert "apply_patch" in role["tools"]
+    assert not {"create", "edit", "write", "repo_remove_file"} & set(role["tools"])

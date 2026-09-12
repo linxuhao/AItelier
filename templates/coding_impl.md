@@ -38,8 +38,9 @@ see prior uncommitted changes. Follow the tool's Begin/End Patch format with bar
 `@@` headers. Do not send whole-file shortcuts. Add refuses existing paths;
 Delete takes no body.
 
-All operations are checked before publication. A stale or ambiguous hunk leaves
-the batch unchanged. On an I/O failure with `partial`, inspect `written`/`deleted`
+All operations are checked before publication. A stale or missing hunk requires a
+new `read(raw=true)` and an exact copy of current text. An ambiguous hunk requires
+more unchanged surrounding lines until it is unique. Either failure leaves the batch unchanged. On an I/O failure with `partial`, inspect `written`/`deleted`
 and reread affected paths before repairing the remainder; never replay the batch.
 An applied patch changes the uncommitted worktree, but is not validation or review.
 At `finish_step` the engine validates the candidate, commits only this step's

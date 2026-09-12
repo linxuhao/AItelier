@@ -75,5 +75,10 @@ def scratch_dir() -> Path:
     return aitelier_home() / "scratch"
 
 
+def native_context_dir() -> Path:
+    """Durable native observations and recovery fences, outside workspace Git."""
+    return aitelier_home() / "native_context"
+
+
 def orphan_log_path() -> Path:
     return aitelier_home() / "orphan_dbg.log"

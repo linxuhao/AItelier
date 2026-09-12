@@ -61,6 +61,11 @@ class NativeSideEffectsRetained(MaxRetriesExceeded):
     pass
 
 
+class NativeObservationUnavailable(MaxRetriesExceeded):
+    """A durable observation/fence required for safe reclaim is unavailable."""
+    pass
+
+
 # How many turns before the cap the agent is warned. One turn is too
 # late to finish anything; the existing final-turn nudge already covers
 # the nothing-written cliff.
@@ -125,10 +130,15 @@ def _is_failed_tool_result(content: str) -> bool:
     }
 
 
-def _observation_digest(content: str) -> str:
-    """The id a compacted tool result is recalled by (see _recall_observation)."""
+def _observation_storage_digest(content: str) -> str:
+    """Full content address used by the durable observation store."""
     return hashlib.sha256(
-        content.encode("utf-8", errors="replace")).hexdigest()[:16]
+        content.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _observation_digest(content: str) -> str:
+    """Short id exposed to the model for recall_observation."""
+    return _observation_storage_digest(content)[:16]
 
 
 def _compact_marker(content: str, kind: str) -> str:
@@ -229,26 +239,58 @@ def _context_boundary(gateway, messages: list[dict], tools: list[dict]) -> dict:
     }
 
 
+def _current_handoff_payload(messages: list[dict]) -> dict:
+    value = next((m.get("content", "") for m in messages
+                  if isinstance(m, dict) and m.get("role") == "user"), "")
+    try:
+        parsed = json.loads(str(value))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if (isinstance(parsed, dict)
+                      and parsed.get("context_handoff")) else {}
+
+
+def _original_assignment(messages: list[dict]) -> str:
+    """Recover the primitive assignment instead of nesting handoff envelopes."""
+    value = next((m.get("content", "") for m in messages
+                  if isinstance(m, dict) and m.get("role") == "user"), "")
+    value = str(value)
+    # Old/candidate handoffs may already be nested. Bound malformed input while
+    # unwrapping every valid envelope to the original assignment.
+    for _ in range(32):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            break
+        if not (isinstance(parsed, dict) and parsed.get("context_handoff")
+                and isinstance(parsed.get("original_assignment"), str)):
+            break
+        value = parsed["original_assignment"]
+    return value
+
+
 def _context_handoff_messages(messages: list[dict], *, segment: int,
                                written_files: list[str]) -> list[dict]:
     """Start a recoverable protocol-clean segment without replaying effects."""
     system = next((m.get("content", "") for m in messages
                    if isinstance(m, dict) and m.get("role") == "system"), "")
-    original = next((m.get("content", "") for m in messages
-                     if isinstance(m, dict) and m.get("role") == "user"), "")
-    original = str(original)
+    original = _original_assignment(messages)
     if len(original) > 24000:
         digest = _observation_digest(original)
         original = (original[:12000] + "\n…\n" + original[-12000:]
                     + f"\n[full original prompt retained in trace; sha256={digest}]")
-    observations = []
-    first_failure = None
+    previous = _current_handoff_payload(messages)
+    observations = [x for x in (previous.get("observation_ids") or [])
+                    if isinstance(x, str)]
+    first_failure = previous.get("first_failure")
     for m in messages:
         if not (isinstance(m, dict) and m.get("role") == "tool"
                 and isinstance(m.get("content"), str)):
             continue
         content = m["content"]
-        observations.append(_observation_digest(content))
+        digest = _observation_digest(content)
+        if digest not in observations:
+            observations.append(digest)
         if first_failure is None and _is_failed_tool_result(content):
             first_failure = _compact_marker(content, "tool result")
     handoff = {
@@ -421,6 +463,148 @@ class PipelineEngine:
         # True while the pending feedback came from an exploratory turn (thoughts
         # with no actions) rather than a rejection. See _note_feedback.
         self._feedback_exploratory = False
+        self._observation_store_dir: Path | None = None
+        self._effect_fence_dir: Path | None = None
+
+    def _persist_native_observation(self, content: str) -> str:
+        """Atomically retain provider-hidden content by digest for reclaim."""
+        digest = _observation_storage_digest(content)
+        root = self._observation_store_dir
+        if root is None:
+            raise NativeObservationUnavailable(
+                "native observation store was not initialized")
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = root / digest
+        if target.exists():
+            self._read_native_observation(digest)
+            return digest
+        tmp = root / (f".{digest}.{os.getpid()}.{threading.get_ident()}."
+                      f"{time.time_ns()}.tmp")
+        try:
+            with open(tmp, "x", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+            try:
+                fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+        return digest
+
+    def _read_native_observation(self, digest: str) -> str:
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise NativeObservationUnavailable(
+                f"invalid native observation reference {digest!r}")
+        root = self._observation_store_dir
+        if root is None:
+            raise NativeObservationUnavailable(
+                "native observation store was not initialized")
+        try:
+            content = (root / digest).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise NativeObservationUnavailable(
+                f"durable native observation {digest} is unavailable") from exc
+        if _observation_storage_digest(content) != digest:
+            raise NativeObservationUnavailable(
+                f"durable native observation {digest} failed digest validation")
+        return content
+
+    def _hydrate_resume_observations(self, resume: dict) -> dict:
+        seen: set[int] = set()
+        for group in (resume.get("messages") or [],
+                      resume.get("recall_messages") or []):
+            for message in group:
+                if not isinstance(message, dict) or id(message) in seen:
+                    continue
+                seen.add(id(message))
+                ref = message.get("observation_ref")
+                if ref:
+                    message["content"] = self._read_native_observation(ref)
+        refs = resume.pop("effect_result_refs", {}) or {}
+        effects = resume.setdefault("completed_effect_calls", {})
+        for call_key, ref in refs.items():
+            effects[call_key] = self._read_native_observation(ref)
+        durable_effects, durable_written = self._load_native_effects()
+        effects.update(durable_effects)
+        if durable_written:
+            resume["written_files"] = list(dict.fromkeys(
+                list(resume.get("written_files") or []) + durable_written))
+        return resume
+
+    def _persist_native_effect(self, call_key: str, result: str,
+                               written_files: list[str], effect: str) -> str:
+        """Fsync one mutation fence before execution can advance."""
+        root = self._effect_fence_dir
+        if root is None or not re.fullmatch(r"[0-9a-f]{64}", call_key):
+            raise NativeObservationUnavailable(
+                "native effect-fence store was not initialized")
+        result_ref = self._persist_native_observation(result)
+        payload = json.dumps({
+            "call_key": call_key, "result_ref": result_ref,
+            "written_files": written_files, "effect": effect,
+        }, ensure_ascii=False, sort_keys=True)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        target = root / f"{call_key}.json"
+        if target.exists():
+            if target.read_text(encoding="utf-8") != payload:
+                raise NativeObservationUnavailable(
+                    f"native effect fence {call_key} conflicts with retained state")
+            return result_ref
+        tmp = root / (f".{call_key}.{os.getpid()}.{threading.get_ident()}."
+                      f"{time.time_ns()}.tmp")
+        try:
+            with open(tmp, "x", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+            try:
+                fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                pass
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+        return result_ref
+
+    def _load_native_effects(self) -> tuple[dict[str, str], list[str]]:
+        root = self._effect_fence_dir
+        effects: dict[str, str] = {}
+        written: list[str] = []
+        if root is None or not root.exists():
+            return effects, written
+        for path in sorted(root.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                call_key = payload["call_key"]
+                if path.stem != call_key or not re.fullmatch(r"[0-9a-f]{64}", call_key):
+                    raise ValueError("call key mismatch")
+                effects[call_key] = self._read_native_observation(
+                    payload["result_ref"])
+                names = payload.get("written_files") or []
+                if isinstance(names, list):
+                    written.extend(x for x in names if isinstance(x, str))
+            except (OSError, ValueError, KeyError, TypeError,
+                    json.JSONDecodeError) as exc:
+                raise NativeObservationUnavailable(
+                    f"native effect fence {path} is unreadable") from exc
+        return effects, written
 
     # Delivered three times unchanged: a recovering agent essentially never sees
     # this, and every one of the twelve harness defects did.
@@ -769,7 +953,25 @@ class PipelineEngine:
         # an older segment cannot mask the successor on reclaim; older tool
         # observations are retained separately for recall and side-effect audit.
         by_position: dict[tuple[int, int], dict] = {}
+        fenced_effects: dict[str, str] = {}
+        effect_result_refs: dict[str, str] = {}
+        fenced_written: list[str] = []
         for event, payload in rows:
+            if event == "side_effect_completed" and isinstance(payload, dict):
+                key = payload.get("call_key")
+                if isinstance(key, str) and key:
+                    fenced_effects[key] = str(payload.get("result_json") or
+                                               '{"status":"completed"}')
+                    ref = payload.get("result_ref")
+                    if isinstance(ref, str):
+                        effect_result_refs[key] = ref
+                    names = payload.get("written_files") or []
+                    if isinstance(names, str):
+                        names = [names]
+                    if isinstance(names, list):
+                        fenced_written.extend(x for x in names
+                                              if isinstance(x, str))
+                continue
             if event != "prompt_delta" or not isinstance(payload, dict):
                 continue
             idx = payload.get("index")
@@ -779,7 +981,8 @@ class PipelineEngine:
                 continue
             m: dict = {"role": payload.get("role", ""),
                        "content": None if payload.get("content_null") else payload.get("content", "")}
-            for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
+            for k in ("tool_call_id", "tool_calls", "reasoning_content", "name",
+                      "observation_ref"):
                 v = payload.get(k)
                 if v is None:
                     continue
@@ -808,7 +1011,7 @@ class PipelineEngine:
         all_messages = [by_position[key] for key in sorted(by_position)
                         if key[0] < latest_segment] + messages
         turns = sum(1 for m in all_messages if m["role"] == "assistant")
-        written: list[str] = []
+        written: list[str] = list(fenced_written)
         grants = 0
         extra_total = 0
         for m in all_messages:
@@ -837,7 +1040,7 @@ class PipelineEngine:
         results_by_id = {m.get("tool_call_id"): m.get("content", "")
                          for m in all_messages if m.get("role") == "tool"
                          and m.get("tool_call_id")}
-        completed_effect_calls: dict[str, str] = {}
+        completed_effect_calls: dict[str, str] = dict(fenced_effects)
         for m in all_messages:
             if m.get("role") != "assistant":
                 continue
@@ -858,15 +1061,17 @@ class PipelineEngine:
                 if (PipelineEngine._written_names(result)
                         or PipelineEngine._effect_name(result)
                         or artifact_changed):
-                    completed_effect_calls[_repeat_call_key(
-                        str(fn.get("name") or ""), params)] = result_text
+                    completed_effect_calls.setdefault(_repeat_call_key(
+                        str(fn.get("name") or ""), params), result_text)
 
+        written = list(dict.fromkeys(written))
         return {"messages": messages, "turns": turns, "written_files": written,
                 "turn_grants": grants, "current_max_turns": max_turns + extra_total,
                 "dropped_tail": dropped, "segment": latest_segment,
                 "recall_messages": [m for m in all_messages
                                     if m.get("role") == "tool"],
-                "completed_effect_calls": completed_effect_calls}
+                "completed_effect_calls": completed_effect_calls,
+                "effect_result_refs": effect_result_refs}
 
     def _resume_from_trace(self, project_id: str, max_turns: int) -> dict | None:
         """Read this instance's `prompt_delta` rows and rebuild; None if none.
@@ -890,7 +1095,17 @@ class PipelineEngine:
         except Exception:
             return None
         try:
-            return self._rebuild_from_deltas(rows, max_turns)
+            rebuilt = self._rebuild_from_deltas(rows, max_turns)
+            if not rebuilt:
+                effects, _ = self._load_native_effects()
+                if effects:
+                    raise NativeSideEffectsRetained(
+                        "native side effects are retained but the conversation "
+                        "trace is unavailable; refusing fresh replay")
+                return None
+            return self._hydrate_resume_observations(rebuilt)
+        except NativeObservationUnavailable:
+            raise
         except Exception:
             return None
 
@@ -905,7 +1120,8 @@ class PipelineEngine:
         reproducible as the concatenation of all `prompt_delta` events with
         turn <= n, without storing the whole history n times. skillflow keeps
         `prompt_delta` unclipped up to 256K per field (`_TRACE_FULL_EVENTS`).
-        This remains the lossless, resumable history. Before a provider call,
+        Oversized tool observations also receive a durable content-addressed
+        reference because trace fields are clipped above 256 KiB. Before a provider call,
         the deterministic projection bounds older tool results and repeated
         reasoning; a prompt_projection event records when that happened.
         _delta_traced is reset where a new messages list is built; a retry
@@ -926,6 +1142,11 @@ class PipelineEngine:
                        "segment": getattr(self, "_context_segment", 0)}
             if content_null:
                 payload["content_null"] = True    # an assistant tool-call turn: content None
+            persist = getattr(self, "_persist_native_observation", None)
+            if (m.get("role") == "tool" and isinstance(m.get("content"), str)
+                    and len(m["content"]) > _NATIVE_HISTORY_TOOL_CHARS
+                    and callable(persist)):
+                payload["observation_ref"] = persist(m["content"])
             for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
                 if m.get(k) is not None:
                     v = m[k]
@@ -2564,6 +2785,14 @@ class PipelineEngine:
         role = self._agent_role(step_id)
         role_label = "Red Agent" if role == "red" else "Green Agent"
         project_path = self._get_project_path(workspace, project_id)
+        from core import datadir
+        project_scope = hashlib.sha256(project_id.encode("utf-8")).hexdigest()
+        native_root = datadir.native_context_dir() / project_scope
+        self._observation_store_dir = native_root / "observations"
+        recovery_scope = hashlib.sha256(
+            f"{getattr(self, '_run_id', '')}:{getattr(self, '_step_instance_id', '')}".encode(
+                "utf-8")).hexdigest()
+        self._effect_fence_dir = native_root / "effects" / recovery_scope
         code_path = self._get_code_path(workspace, project_id)
         self._code_path = code_path
 
@@ -2595,7 +2824,8 @@ class PipelineEngine:
         if resume:
             missing = [f for f in resume["written_files"]
                        if not self._output_file_path(workspace, project_id, step_id, f).exists()]
-            if missing or resume["turns"] < 1:
+            if (missing or (resume["turns"] < 1
+                            and not resume.get("completed_effect_calls"))):
                 self._trace("step", "resume_refused", {
                     "step_id": step_id, "turns": resume["turns"],
                     "missing_staged_files": missing[:20]})
@@ -3440,6 +3670,32 @@ class PipelineEngine:
                             progress_signatures.add(progress)
                     result_str = json.dumps(tool_result, ensure_ascii=False)
 
+                    # Classify the result before exposing another crash point.
+                    # A successful mutation is fenced independently of the
+                    # conversational batch: reclaim consumes this record even
+                    # when the assistant/tool pair is still incomplete.
+                    names = self._written_names(tool_result)
+                    wf = bool(names)
+                    artifact_changed = any(tool_result.get("artifact_" + key)
+                                           for key in ("written", "edited", "created", "deleted", "removed"))
+                    effect = self._effect_name(tool_result)
+                    mutated = bool(wf or effect or artifact_changed)
+                    if mutated:
+                        self._native_side_effects_committed = True
+                        if replayed_effect is None:
+                            effect_replays[effect_key] = result_str
+                            result_ref = self._persist_native_effect(
+                                effect_key, result_str, names, effect)
+                            self._trace("step", "side_effect_completed", {
+                                "tool": tool_name,
+                                "call_key": effect_key,
+                                "result_ref": result_ref,
+                                "result_json": (result_str if len(result_str) <= 8192
+                                                else ""),
+                                "written_files": names,
+                                "effect": effect,
+                            })
+
                     tool_message = {
                         "role": "tool",
                         "tool_call_id": tc["id"],
@@ -3447,12 +3703,13 @@ class PipelineEngine:
                     }
                     messages.append(tool_message)
                     self._native_messages.append(tool_message)
-
-                    # Track written files (write→'written', edit→'edited',
-                    # create→'created'); see _written_name.
-                    names = self._written_names(tool_result)
-                    wf = bool(names)
                     written_files.extend(names)
+                    if mutated:
+                        # Persist the exact tool-call/result pair now, not after
+                        # the rest of a multi-call batch. The independent fence
+                        # above remains sufficient if this trace write fails.
+                        self._trace_prompt_deltas(messages, turn_count + 1)
+
                     # Anything that CHANGED the tree invalidates every held
                     # read. Both predicates, not just `_written_name`: a step
                     # can change the repo without leaving a file in staging
@@ -3461,17 +3718,7 @@ class PipelineEngine:
                     # followed by a deduped list_tree would show the agent the
                     # file it just removed. Over-invalidating costs one
                     # re-read; under-invalidating hands back stale truth.
-                    # Diagnostic files live outside code but are readable via
-                    # source=self. Refresh their read results as well, without
-                    # counting a test report as a delivered code change.
-                    artifact_changed = any(tool_result.get("artifact_" + key)
-                                           for key in ("written", "edited", "created", "deleted", "removed"))
-                    effect = self._effect_name(tool_result)
-                    if wf or effect or artifact_changed:
-                        self._native_side_effects_committed = True
-                        if replayed_effect is None:
-                            effect_replays[effect_key] = result_str
-                    if wf or effect or artifact_changed:
+                    if mutated:
                         repeat_index.clear()
                     elif (repeat_key and not repeated
                           and len(result_str) >= _REPEAT_MIN_CHARS
@@ -3772,7 +4019,8 @@ class PipelineEngine:
                 from core.llm_quota import is_quota_exhausted
                 if isinstance(e, (NativeTurnBudgetExhausted,
                                   NativeOutputCapExhausted,
-                                  NativeSideEffectsRetained)) or is_quota_exhausted(e):
+                                  NativeSideEffectsRetained,
+                                  NativeObservationUnavailable)) or is_quota_exhausted(e):
                     raise
                 if getattr(self, "_native_side_effects_committed", False):
                     raise NativeSideEffectsRetained(

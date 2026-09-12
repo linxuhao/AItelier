@@ -23,43 +23,86 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from core import external_deps
+from core.datadir import aitelier_home
 
 import re
 
 from aitelier.gate_skip_log import log_gate_skip
 
 
-def _baseline_root(staging_root):
-    """The repo this step's staging dir is a delta OF, or None if unresolvable.
+def _git(root, *args, binary=False):
+    """Run git in `root`. Returns stdout (str or bytes), or None on any failure."""
+    try:
+        r = subprocess.run(
+            ["git", "-c", "safe.directory=*", "-C", str(root), *args],
+            capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return r.stdout if binary else r.stdout.decode("utf-8", "replace").strip()
 
-    Staging lives at ``<workspaces>/<project_id>/<graph>/<step>.tmp``; the
-    project id is the first segment under the workspaces dir, and the code repo
-    for it is whatever the host's resolver says (worktree-aware, so a run in its
-    own worktree is baselined against ITS worktree, not the shared checkout).
+
+def _baseline_head(checked_root):
+    """(work-tree root, HEAD sha) of the git tree holding `checked_root`, or None.
+
+    The baseline is the checked tree's OWN HEAD. It used to be inferred instead:
+    read the project id out of ``<workspaces>/<project_id>/…`` and ask the host
+    resolver for that project's code path. Both halves broke on the step this
+    gate actually runs on. ``t_impl`` declares ``output: target: code``, so
+    skillflow points StepValidator at the code repo root — a per-run worktree
+    under ``~/.AItelier/worktrees/``, which is not under the workspaces dir, so
+    ``relative_to`` raised and the whole exemption returned None. And the
+    resolver was called without ``run_id``, i.e. asked the project-keyed
+    question, whose answer is the SHARED checkout rather than this run's tree.
+    Run 4a2d71bf died on a file it had not broken with the exemption code fully
+    present and never executed.
+
+    A git work tree answers both questions by itself, needs no id, and is the
+    correct baseline for a `target: code` step: HEAD is exactly "the code as it
+    was before this step wrote anything".
     """
-    try:
-        from core.datadir import workspaces_dir
-        ws = Path(workspaces_dir()).resolve()
-        rel = staging_root.resolve().relative_to(ws)
-    except Exception:
+    top = _git(checked_root, "rev-parse", "--show-toplevel")
+    if not top:
         return None
-    pid = rel.parts[0] if rel.parts else ""
-    if not pid:
-        return None
-    try:
-        from api.dependencies import _existing_repo_code_path
-        p = _existing_repo_code_path(pid)
-    except Exception:
-        return None
-    if not p or p is True:
-        return None
-    root = Path(str(p))
-    return root if root.is_dir() else None
+    head = _git(top, "rev-parse", "HEAD")
+    if not head:
+        return None          # unborn branch: nothing shipped, nothing to forgive
+    return Path(top), head
+
+
+def _export_baseline(top, head, rels):
+    """Write the HEAD blob of each rel path under the sidecar-visible data root.
+
+    The sidecar mounts only ``~/.AItelier``, so the baseline copies have to live
+    there — it cannot read a git object store, and `git worktree`/`git archive`
+    of the whole tree would cost far more than the handful of failing files.
+    Keyed by HEAD sha, so a second call in the same run reuses the export.
+    Returns {absolute export path: rel} for the paths that exist at HEAD; a path
+    with no HEAD version (a file this step CREATED) is absent, and so is never
+    forgiven.
+    """
+    out = {}
+    base = aitelier_home() / "gdscript_baseline" / head[:12]
+    for rel in rels:
+        dest = base / rel
+        if not dest.is_file():
+            blob = _git(top, "cat-file", "blob", f"HEAD:{rel}", binary=True)
+            if blob is None:
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(blob)
+            except OSError:
+                continue
+        out[str(dest.resolve())] = rel
+    return out
 
 
 def _same_diagnosis(a, b):
@@ -71,43 +114,45 @@ def _same_diagnosis(a, b):
     return bool(sa) and sa == sb
 
 
-def _preexisting_failures(results, staging_root, timeout):
-    """Of the files that failed, which ones ALSO fail as shipped, identically.
+def _preexisting_failures(results, checked_root, timeout):
+    """Of the files that failed, which ones ALSO fail at HEAD, identically.
 
     WHY: ``godot --check-only --script`` parses ONE file with no project import,
-    so a ``const X = preload(...)`` used as a type annotation is reported as
-    "X is a constant but does not contain a type" -- in code that imports and
-    runs fine. Measured 2026-09-11 on the wuxia tree: 2 of 7 SHIPPED files fail
-    this check untouched (scripts/data/monthly_travel_step.gd,
-    scripts/data/chain_logic.gd). A step that merely re-anchored a comment in
-    such a file was failed for a defect it did not write and could not fix, and
-    with ``validation_on_exhaustion: fail`` it could never pass -- the
-    release.mainline-green round died exactly there.
+    so every reference that lives in another file is unresolvable. Measured
+    2026-09-12 on the wuxia tree at HEAD, unmodified: 60 of 354 shipped .gd
+    files fail this check (16.9%) — `const K := preload(...)` used as a type,
+    `extends` a class defined in another script, and constants folded from an
+    imported constant. A step that merely re-anchored a comment in such a file
+    was failed for a defect it did not write and could not fix, and with
+    ``validation_on_exhaustion: fail`` it could never pass.
 
     A step is answerable for what IT broke. So a failing file is forgiven only
-    when the same path, as shipped, fails with the SAME diagnosis. A file the
-    step actually broke fails here and passes in the baseline; a NEW file has no
-    baseline and is never forgiven. When the baseline cannot be established at
-    all, the strict verdict stands -- a gate that cannot check must not pass.
+    when the same path, at the checked tree's HEAD, fails with the SAME
+    diagnosis. A file the step actually broke fails here and passes at HEAD; a
+    file the step created has no HEAD version and is never forgiven. When the
+    baseline or the builder cannot be reached at all, the strict verdict stands
+    -- a gate that cannot check must not pass.
     """
-    base = _baseline_root(staging_root)
-    if base is None:
+    resolved = _baseline_head(checked_root)
+    if resolved is None:
         return set()
-    pairs = {}
+    top, head = resolved
+    staged = {}
     for r in results:
         if r.get("passed"):
             continue
         try:
-            rel = Path(r["file"]).resolve().relative_to(staging_root.resolve())
+            rel = str(Path(r["file"]).resolve().relative_to(top.resolve()))
         except (ValueError, KeyError, OSError):
             continue
-        cand = base / rel
-        if cand.is_file():
-            pairs[str(cand.resolve())] = (r["file"], r.get("error_message") or "")
-    if not pairs:
+        staged[rel] = (r["file"], r.get("error_message") or "")
+    if not staged:
+        return set()
+    exported = _export_baseline(top, head, sorted(staged))
+    if not exported:
         return set()
     try:
-        body = json.dumps({"files": sorted(pairs), "timeout": timeout}).encode("utf-8")
+        body = json.dumps({"files": sorted(exported), "timeout": timeout}).encode("utf-8")
         req = urllib.request.Request(
             _BUILDER_URL.rstrip("/") + "/checkgd", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
@@ -119,10 +164,10 @@ def _preexisting_failures(results, staging_root, timeout):
     for br in base_report.get("results", []):
         if br.get("passed"):
             continue
-        hit = pairs.get(str(Path(br.get("file", "")).resolve()))
-        if not hit:
+        rel = exported.get(str(Path(br.get("file", "")).resolve()))
+        if rel is None:
             continue
-        staged_file, staged_err = hit
+        staged_file, staged_err = staged[rel]
         if _same_diagnosis(staged_err, br.get("error_message") or ""):
             forgiven.add(staged_file)
     return forgiven

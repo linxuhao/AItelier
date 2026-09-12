@@ -156,3 +156,149 @@ def test_the_skip_log_never_raises_into_the_gate(tmp_path, monkeypatch):
 
     r = gdscript_check(files=["*.gd"], workspace_root=str(tmp_path))
     assert r["all_passed"] is True and r["gate_skipped"] is True
+
+
+# --- baseline exemption -------------------------------------------------
+# A step is answerable for what IT broke. These pin the mechanism that decides
+# that, because the first version of it shipped with no test and was DEAD in
+# every real run: it inferred a project id from the staging path, which a
+# `target: code` step's root (a per-run worktree) is not under.
+
+def _git_repo(path, files):
+    import subprocess
+    path.mkdir(parents=True, exist_ok=True)
+    for rel, text in files.items():
+        p = path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    run = lambda *a: subprocess.run(["git", "-C", str(path), *a], check=True,
+                                    capture_output=True)
+    run("init", "-q")
+    run("add", "-A")
+    run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "shipped")
+    return path
+
+
+def test_the_baseline_is_the_checked_trees_own_head_not_an_inferred_project(
+        tmp_path, monkeypatch):
+    from aitelier.tools.gdscript_check.impl import _baseline_head
+    import subprocess
+    repo = _git_repo(tmp_path / "checkout", {"a.gd": "extends Node\n"})
+    wt = tmp_path / "worktrees" / "run-1"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "r1",
+                    str(wt)], check=True, capture_output=True)
+
+    # The root a `target: code` step is validated at is the run's worktree. It
+    # is NOT under workspaces/, and the project-keyed resolver would have
+    # answered with the shared checkout; the tree answers for itself.
+    resolved = _baseline_head(wt)
+    assert resolved is not None
+    top, head = resolved
+    assert top.resolve() == wt.resolve()
+    assert top.resolve() != repo.resolve()
+    assert head == subprocess.run(
+        ["git", "-C", str(wt), "rev-parse", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
+
+
+def test_a_tree_that_is_not_a_git_repo_has_no_baseline(tmp_path):
+    from aitelier.tools.gdscript_check.impl import _baseline_head
+    plain = tmp_path / "staging"
+    plain.mkdir()
+    # No baseline => the strict verdict stands. A gate that cannot check the
+    # baseline must not forgive.
+    assert _baseline_head(plain) is None
+
+
+def _fake_builder(monkeypatch, verdicts):
+    """Stub /checkgd: verdicts maps a path SUFFIX -> error_message (or None)."""
+    calls = []
+
+    class _Resp:
+        def __init__(self, body): self._b = body
+        def read(self): return self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _open(req, *a, **k):
+        files = json.loads(req.data)["files"]
+        calls.append(files)
+        results = []
+        for f in files:
+            err = None
+            for suffix, msg in verdicts.items():
+                if f.endswith(suffix):
+                    err = msg
+                    break
+            results.append({"file": f, "passed": err is None,
+                            "error_message": err or ""})
+        return _Resp(json.dumps({
+            "all_passed": all(r["passed"] for r in results),
+            "results": results}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    return calls
+
+
+def test_an_untouched_file_that_fails_identically_at_head_is_forgiven(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    repo = _git_repo(tmp_path / "wt", {
+        "pre.gd": "extends Node\nconst K = preload('res://x.gd')\n"})
+    # --check-only sees one file with no project import, so this idiom fails
+    # both in the tree and at HEAD, with the same complaint.
+    _fake_builder(monkeypatch, {
+        "pre.gd": 'SCRIPT ERROR: Parse Error: "K" is a constant but does not '
+                  'contain a type.'})
+
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    assert r["all_passed"] is True
+    assert r["results"][0]["preexisting"] is True
+
+
+def test_a_file_the_step_broke_is_not_forgiven_by_its_preexisting_failure(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    repo = _git_repo(tmp_path / "wt", {
+        "pre.gd": "extends Node\nconst K = preload('res://x.gd')\n"})
+    (repo / "pre.gd").write_text("extends Node\nfunc broken(\n")
+    # HEAD complains about the preload idiom; the working copy has a real
+    # syntax error. Different diagnosis => the step owns it.
+    calls = []
+
+    class _Resp:
+        def __init__(self, b): self._b = b
+        def read(self): return self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def _open(req, *a, **k):
+        files = json.loads(req.data)["files"]
+        calls.append(files)
+        in_baseline = "gdscript_baseline" in files[0]
+        msg = ('SCRIPT ERROR: Parse Error: "K" is a constant but does not '
+               'contain a type.') if in_baseline else (
+              'SCRIPT ERROR: Parse Error: Expected closing ")" after function '
+              'parameters.')
+        return _Resp(json.dumps({"all_passed": False, "results": [
+            {"file": f, "passed": False, "error_message": msg}
+            for f in files]}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    assert r["all_passed"] is False
+    assert len(calls) == 2          # the baseline really was consulted
+
+
+def test_a_file_the_step_created_has_no_baseline_and_is_never_forgiven(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    repo = _git_repo(tmp_path / "wt", {"keep.md": "shipped\n"})
+    (repo / "new.gd").write_text("extends Node\nfunc oops(\n")
+    calls = _fake_builder(monkeypatch, {
+        "new.gd": 'SCRIPT ERROR: Parse Error: Expected closing ")".'})
+
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    assert r["all_passed"] is False
+    # Nothing to export at HEAD, so the builder is asked exactly once.
+    assert len(calls) == 1

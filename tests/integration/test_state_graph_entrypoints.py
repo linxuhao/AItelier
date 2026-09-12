@@ -514,3 +514,93 @@ def test_mcp_private_state_denial_is_an_error_without_goal_disclosure(live, clie
     body = result["content"][0]["text"]
     assert "denied:" in body and "Deliver a" not in body
     assert len(live.service.store.get_graph("game")["nodes"]) == 2
+
+
+def _source_repo(live, name="source"):
+    repo = live.tmp / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "feature.py").write_text("def value(): return 1\n")
+    subprocess.run(["git", "add", "feature.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "unrelated work by somebody else"], cwd=repo, check=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    live.db.ensure_project(name, name="Source", repo_type="existing", repo_path=str(repo))
+    return repo, head
+
+
+def test_read_only_attempt_pins_its_own_findings_not_the_head_it_read(live):
+    """An investigate-shaped attempt must not pin the repo HEAD it read.
+
+    Measured defect: `investigate` runs (declared repo_mode code by default)
+    were handed a worktree, committed nothing, and their artifact_ref became
+    the source HEAD at launch time -- a commit holding none of the findings.
+    record_evidence binds a verdict to (attempt, artifact_ref), so the review
+    was an attestation about an unrelated tree.
+    """
+    from core import run_isolation
+    repo, head = _source_repo(live)
+    live.service.create_project("readgame", "Read-only game", source_project_id="source")
+    live.service.store.add_nodes("readgame", [spec("look")])
+    a = live.service.start_attempt("readgame", "look", 1, "state_fixture", "look-1")
+    rec = run_isolation.record(live.db, a["run_id"])
+    assert rec["mode"] == run_isolation.MODE_READ_SNAPSHOT
+    assert rec["base_sha"] == head
+    a = finish(live, a, output="findings: the growth curve is flat\n")
+    assert a["status"] == "candidate"
+    assert a["artifact_ref"] != head
+    assert len(a["artifact_ref"]) == 64          # digest of its own output, not a commit
+    # And the findings are what a reviewer's evidence binds to.
+    evidence(live, a, "behaviour")
+    evidence(live, a, "review")
+    live.service.verify_node("readgame", "look", 1, a["attempt_id"])
+    assert live.service.store.get_node("readgame", "look")["status"] == "VERIFIED"
+
+
+def test_read_only_attempt_without_findings_is_refused_not_pinned_to_the_head(live):
+    """No deliverable => no artifact. Never fall back to the commit it read."""
+    from core import run_isolation
+    repo, head = _source_repo(live, "source2")
+    live.service.create_project("emptygame", "Read-only game", source_project_id="source2")
+    live.service.store.add_nodes("emptygame", [spec("look")])
+    a = live.service.start_attempt("emptygame", "look", 1, "state_fixture", "look-1")
+    assert run_isolation.record(live.db, a["run_id"])["mode"] == run_isolation.MODE_READ_SNAPSHOT
+    live.sf.advance_run(a["run_id"])
+    claimed = live.sf.claim_next_step(a["run_id"])
+    live.sf.confirm_step(claimed.token, StepResult())
+    live.sf.advance_run(a["run_id"])
+    a = live.service.reconcile_attempt(a["attempt_id"])
+    assert a["artifact_pending"] is True and a["artifact_ref"] is None
+    assert head not in json.dumps(a["note"])
+    body = b"{}"
+    report = live.tmp / "empty-evidence.json"
+    report.write_bytes(body)
+    with pytest.raises(StateConflict, match="pinned artifact"):
+        live.service.record_evidence(a["attempt_id"], "ev-empty", "review", "pass", head,
+                                     str(report), hashlib.sha256(body).hexdigest())
+    assert live.service.store.get_node("emptygame", "look")["status"] != "VERIFIED"
+
+
+def test_code_attempt_that_committed_nothing_is_refused_not_pinned_to_its_base(live):
+    """A code-declared run whose worktree HEAD never moved delivered nothing."""
+    from core import run_isolation
+    repo, head = _source_repo(live, "source3")
+    live.service.create_project("nocommit", "Code game", source_project_id="source3")
+    live.service.store.add_nodes("nocommit", [spec("code")])
+    a = live.service.start_attempt("nocommit", "code", 1, "state_code_fixture", "code-1")
+    rec = run_isolation.record(live.db, a["run_id"])
+    assert rec["mode"] == run_isolation.MODE_WORKTREE and rec["base_sha"] == head
+    a = finish(live, a)                       # writes the output step, commits no code
+    assert a["artifact_pending"] is True and a["artifact_ref"] is None
+    assert "committed nothing" in a["note"]
+    with pytest.raises(StateConflict, match="pinned artifact"):
+        live.service.verify_node("nocommit", "code", 1, a["attempt_id"])
+
+
+def test_investigate_config_declares_that_it_owns_no_repository(live):
+    """The shipped investigate pipeline is read-only; declaring it code-producing
+    is what routed it to a worktree and made its artifact a foreign commit."""
+    import yaml
+    root = Path(__file__).resolve().parents[2]
+    hints = yaml.safe_load((root / "configs" / "investigate.yaml").read_text())["x-aitelier"]
+    assert hints["repo_mode"] == "none"
+    assert hints["output_step"] == "investigate"

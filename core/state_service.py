@@ -414,7 +414,21 @@ class StateService:
         rec = run_isolation.record(self.db, attempt["run_id"])
         if not rec:
             raise StateConflict("candidate lacks its run-isolation provenance")
-        if rec["mode"] in {run_isolation.MODE_WORKTREE, run_isolation.MODE_READ_SNAPSHOT}:
+        if rec["mode"] == run_isolation.MODE_READ_SNAPSHOT:
+            # A read snapshot is handed to a run that owns NO repository: it
+            # cannot commit, so the commit it was pinned to READ is provably not
+            # its output. Pinning that commit as the artifact is the
+            # pass-on-absence shape: record_evidence binds a verdict to
+            # (attempt, artifact_ref), so the reviewer would be attesting about
+            # a tree containing none of the attempt's work. What such a run
+            # delivers is its promoted output step, so hash that.
+            path = run_isolation.resolve_for_resolver(self.db, attempt["run_id"])
+            if not isinstance(path, str):
+                raise StateConflict("candidate source root is not an isolated tree")
+            # Still prove the accepted dependencies are in the tree it read.
+            self._dependency_context(attempt, path)
+            return self._output_digest(attempt)
+        if rec["mode"] == run_isolation.MODE_WORKTREE:
             path = run_isolation.resolve_for_resolver(self.db, attempt["run_id"])
             if not isinstance(path, str):
                 raise StateConflict("candidate source root is not an isolated tree")
@@ -429,9 +443,32 @@ class StateService:
             # and thereby bypass downstream code-ancestry checks.
             if len(commit) != 40:
                 raise StateConflict("this version requires SHA-1-format Git repositories; candidate retained")
+            if rec.get("base_sha") and commit == rec["base_sha"]:
+                # FAIL LOUD, do not pin the base commit. A code-declared run
+                # whose worktree HEAD never moved committed nothing: that sha
+                # holds none of this attempt's bytes, and every downstream
+                # reader (evidence, acceptance receipt, dependency ancestry)
+                # would treat an unrelated commit as the delivery.
+                raise StateConflict(
+                    "this attempt committed nothing: its worktree HEAD is still the commit it "
+                    "started from, which contains none of its own output, so there is no code "
+                    "artifact to pin. If this workflow delivers findings/analysis rather than "
+                    "code, declare x-aitelier.repo_mode: none on its config so its output step "
+                    "is hashed as the artifact instead")
             return artifact_ref(commit)
         if rec["mode"] != run_isolation.MODE_NONE:
             raise StateConflict("direct-mode source cannot be silently used as an isolated state artifact")
+        return self._output_digest(attempt)
+
+    def _output_digest(self, attempt):
+        """Hash what the attempt actually produced: its promoted output step.
+
+        The artifact of a run that owns no repository is its own deliverable,
+        never a commit it merely read. Absence is an error here, never an
+        empty pass: no declared output_step, a missing directory or an empty
+        one all raise, so a bytes-less attempt cannot acquire an artifact for
+        evidence to bind to.
+        """
         host = attempt["context"].get("host_contract") or {}
         output_step = host.get("output_step")
         if not output_step:

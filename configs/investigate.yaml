@@ -12,6 +12,13 @@ x-aitelier:
   scheduler_owned: true           # spawned agent, context isolated
   seed_file: "task.md"
   output_step: "investigate"
+  # This investigator NEVER mutates the repository, so it owns none: it gets a
+  # detached read snapshot of the codebase it was launched against, and its
+  # State-DAG artifact is the digest of the findings it produced. Declared
+  # `code` (the default), it was handed a worktree instead and its artifact
+  # became the source HEAD at launch time — a commit holding none of its own
+  # output, which left a reviewer's evidence bound to an unrelated tree.
+  repo_mode: none
   input_hint: >-
     seed_text = the question or investigation task (e.g. "how does auth work
     here?", "research approaches to X"). For a codebase question add

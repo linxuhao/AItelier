@@ -14,7 +14,7 @@ already known to be spent, on top of the walk the native path just finished.
 """
 import pytest
 
-from core.dpe_pipeline import PipelineEngine
+from core.dpe_pipeline import PipelineEngine, NativeSideEffectsRetained
 
 
 class _Factory:
@@ -80,3 +80,17 @@ def test_the_quota_error_is_recognised_by_the_same_predicate_the_scheduler_uses(
 
     assert is_quota_exhausted(QUOTA)
     assert not is_quota_exhausted(ValueError("tool call schema mismatch"))
+
+
+def test_native_side_effects_refuse_fresh_json_replay():
+    e = _engine(ValueError("provider failed after write"), fallback=True)
+    e._native_side_effects_committed = True
+    # run_step initializes the flag before entering the native function, so the
+    # reduced stub must set it at the point the native error is raised.
+    def _after_write(*a, **k):
+        e._native_side_effects_committed = True
+        raise ValueError("provider failed after write")
+    e._run_native_step = _after_write
+    with pytest.raises(NativeSideEffectsRetained):
+        _run(e)
+    assert "native_fallback" not in e.events

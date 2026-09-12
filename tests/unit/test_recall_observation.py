@@ -140,14 +140,9 @@ def test_exec_tool_answers_recall_from_the_loop_messages_without_skillflow(monke
         {"tool": "recall_observation", "params": {"sha256": sha}})["error"]
 
 
-def test_the_native_loop_publishes_every_messages_list_and_offers_the_tool():
-    """Every binding of the live conversation must be published to recall.
-
-    There are three bindings today: the initial empty list, a resumed history,
-    and the fresh-attempt system/user list. The fresh binding is load-bearing:
-    without it repeat-read dedupe can hand the model a valid sha256 while
-    recall_observation searches the abandoned empty list and fails every call.
-    """
+def test_the_native_loop_keeps_full_observations_across_context_segments():
+    """Recall owns a full-observation store, independent of provider segments."""
     src = inspect.getsource(PipelineEngine._run_native_step)
-    assert src.count("self._native_messages = messages") == 3
+    assert "self._native_messages.append(tool_message)" in src
+    assert 'resume.get("recall_messages")' in src
     assert '"recall_observation" not in self._tool_schemas' in src

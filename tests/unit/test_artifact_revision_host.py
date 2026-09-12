@@ -8,7 +8,7 @@ import skillflow
 from skillflow.core import SkillFlow, StepResult
 from skillflow.graph import PipelineGraph, StepNode, Transition
 from skillflow.tool_loader import ToolLoader
-from core.dpe_pipeline import PipelineEngine
+from core.dpe_pipeline import NativeSideEffectsRetained, PipelineEngine
 from core.workspace_manager import WorkspaceManager
 from aitelier.tools.tasks_manifest_complete.impl import tasks_manifest_complete
 
@@ -162,7 +162,15 @@ def test_error_after_native_edit_keeps_the_edit_and_siblings(tmp_path, monkeypat
         assert (current / "tasks/B.json").is_file() and (current / "tasks/C.json").is_file()
         return json.dumps({"actions": [{"tool": "finish_step", "params": {"summary": "retained"}}]})
     e, ws = host(sf, rid, claim, repo, True, json_run, turn)
-    assert execute(e, ws, rid, claim)
-    sf.confirm_step(claim.token, StepResult())
-    assert count == (["native", "native", "json"] if failure == "protocol" else ["native", "native"])
-    assert json.loads((Path(claim.inputs["_artifact_dir"]) / "tasks/A.json").read_text())["value"] == 9
+    if failure == "protocol":
+        with pytest.raises(NativeSideEffectsRetained):
+            execute(e, ws, rid, claim)
+        candidate = Path(claim.inputs["_output_dir"])
+    else:
+        assert execute(e, ws, rid, claim)
+        sf.confirm_step(claim.token, StepResult())
+        candidate = Path(claim.inputs["_artifact_dir"])
+    assert count == ["native", "native"]
+    assert json.loads((candidate / "tasks/A.json").read_text())["value"] == 9
+    assert (candidate / "tasks/B.json").is_file()
+    assert (candidate / "tasks/C.json").is_file()

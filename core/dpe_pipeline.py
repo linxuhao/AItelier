@@ -56,6 +56,11 @@ class NativeTurnBudgetExhausted(MaxRetriesExceeded):
     pass
 
 
+class NativeSideEffectsRetained(MaxRetriesExceeded):
+    """Native work changed state, so a fresh JSON replay is unsafe."""
+    pass
+
+
 # How many turns before the cap the agent is warned. One turn is too
 # late to finish anything; the existing final-turn nudge already covers
 # the nothing-written cliff.
@@ -69,7 +74,7 @@ _MAX_TURN_GRANTS = 2
 # The art contract run (2026-09-09) used both grants, reached 32 with every
 # file written, and was cut off listing them.
 _GRANT_TURNS_MAX = 8
-_NATIVE_HISTORY_TOOL_CHARS = 64 * 1024
+_NATIVE_HISTORY_TOOL_CHARS = 16 * 1024
 _NATIVE_REASONING_MARKER_CHARS = 512
 # recall_observation: one call returns at most this many chars of a compacted
 # result (or this many grep matches). A recall that could return the whole
@@ -153,72 +158,112 @@ def _compact_marker(content: str, kind: str) -> str:
 def _project_native_messages(messages: list[dict], *,
                              history_char_budget: int = _NATIVE_HISTORY_TOOL_CHARS
                              ) -> tuple[list[dict], dict]:
-    """Build the bounded provider view while leaving the durable history intact.
+    """Build a bounded, stable provider view from durable full history.
 
-    The latest tool result and latest reasoning remain verbatim. The first tool
-    failure also remains verbatim so retries keep the original diagnostic.
-    Older large results and reasoning are replaced by deterministic references;
-    their full values remain in prompt_delta/tool/response trace events and are
-    restored on resume before this same projection is applied again.
+    A tool result is frozen to its final wire representation the first time it
+    can be sent: every result larger than the per-observation bound is replaced
+    deterministically, including the newest result. Therefore a later turn
+    never rewrites an already-sent result merely because it stopped being the
+    newest. Full text remains in ``messages`` and the durable prompt-delta trace,
+    addressable through ``recall_observation``.
+
+    Reasoning is kept byte-for-byte. Providers that require reasoning replay may
+    reject a summary or truncated substitute; the context-boundary handoff owns
+    growth instead of mutating a protocol-bearing assistant message in place.
     """
+    limit = max(1, int(history_char_budget))
     projected = [dict(m) if isinstance(m, dict) else m for m in messages]
-    tool_indices = [i for i, m in enumerate(projected)
-                    if isinstance(m, dict) and m.get("role") == "tool"
-                    and isinstance(m.get("content"), str)]
-    reasoning_indices = [i for i, m in enumerate(projected)
-                         if isinstance(m, dict)
-                         and isinstance(m.get("reasoning_content"), str)
-                         and m.get("reasoning_content")]
-    first_failure = next(
-        (i for i in tool_indices
-         if _is_failed_tool_result(projected[i]["content"])), None)
-    protected_tools = {tool_indices[-1]} if tool_indices else set()
-    if first_failure is not None:
-        protected_tools.add(first_failure)
-
-    remaining = max(0, int(history_char_budget))
-    for i in protected_tools:
-        remaining = max(0, remaining - len(projected[i]["content"]))
-
     compacted_tools = 0
-    for i in reversed(tool_indices):
-        if i in protected_tools:
+    for i, message in enumerate(projected):
+        if not (isinstance(message, dict) and message.get("role") == "tool"
+                and isinstance(message.get("content"), str)):
             continue
-        content = projected[i]["content"]
-        if len(content) <= remaining:
-            remaining -= len(content)
-            continue
-        projected[i]["content"] = _compact_marker(content, "tool result")
-        compacted_tools += 1
-
-    compacted_reasoning = 0
-    latest_reasoning = reasoning_indices[-1] if reasoning_indices else None
-    for i in reasoning_indices:
-        if i == latest_reasoning:
-            continue
-        content = projected[i]["reasoning_content"]
-        if len(content) <= _NATIVE_REASONING_MARKER_CHARS:
-            continue
-        projected[i]["reasoning_content"] = _compact_marker(content, "reasoning")
-        compacted_reasoning += 1
+        content = message["content"]
+        if len(content) > limit:
+            projected[i]["content"] = _compact_marker(content, "tool result")
+            compacted_tools += 1
 
     def _chars(seq):
-        total = 0
-        for m in seq:
-            if not isinstance(m, dict):
-                continue
-            for key in ("content", "reasoning_content"):
-                if isinstance(m.get(key), str):
-                    total += len(m[key])
-        return total
+        return sum(
+            len(m.get(key))
+            for m in seq if isinstance(m, dict)
+            for key in ("content", "reasoning_content")
+            if isinstance(m.get(key), str)
+        )
 
-    report = {
+    return projected, {
         "original_chars": _chars(messages),
         "projected_chars": _chars(projected),
         "compacted_tool_results": compacted_tools,
-        "compacted_reasoning": compacted_reasoning,
+        "compacted_reasoning": 0,
+        "observation_char_limit": limit,
+        "stable_at_first_send": True,
     }
-    return projected, report
+
+def _context_boundary(gateway, messages: list[dict], tools: list[dict]) -> dict:
+    """Return the active endpoint's measured handoff decision.
+
+    The configured input window is the real boundary. The request estimate uses
+    the active adapter/model tokenizer and reserves the output cap. Unknown is
+    explicit in telemetry and never disguised as a made-up vendor limit.
+    """
+    limit_fn = getattr(gateway, "declared_input_window", None)
+    estimate_fn = getattr(gateway, "estimate_request_tokens", None)
+    limit = limit_fn() if callable(limit_fn) else None
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        limit = None
+    estimate = estimate_fn(messages, tools) if callable(estimate_fn) else None
+    if not isinstance(estimate, int) or isinstance(estimate, bool) or estimate < 0:
+        # Test/custom gateway adapters predating budget introspection remain
+        # explicit-unknown rather than crashing the execution path.
+        estimate = (len(json.dumps(messages, ensure_ascii=False, default=str)) + 2) // 3
+    raw_reserve = getattr(gateway, "max_output_tokens", 0)
+    reserve = raw_reserve if isinstance(raw_reserve, int) and not isinstance(
+        raw_reserve, bool) and raw_reserve > 0 else 0
+    return {
+        "limit": limit,
+        "estimated_prompt_tokens": estimate,
+        "output_reserve": reserve,
+        "handoff": bool(limit and estimate + reserve >= limit),
+        "unknown": limit is None,
+    }
+
+
+def _context_handoff_messages(messages: list[dict], *, segment: int,
+                               written_files: list[str]) -> list[dict]:
+    """Start a recoverable protocol-clean segment without replaying effects."""
+    system = next((m.get("content", "") for m in messages
+                   if isinstance(m, dict) and m.get("role") == "system"), "")
+    original = next((m.get("content", "") for m in messages
+                     if isinstance(m, dict) and m.get("role") == "user"), "")
+    original = str(original)
+    if len(original) > 24000:
+        digest = _observation_digest(original)
+        original = (original[:12000] + "\n…\n" + original[-12000:]
+                    + f"\n[full original prompt retained in trace; sha256={digest}]")
+    observations = []
+    first_failure = None
+    for m in messages:
+        if not (isinstance(m, dict) and m.get("role") == "tool"
+                and isinstance(m.get("content"), str)):
+            continue
+        content = m["content"]
+        observations.append(_observation_digest(content))
+        if first_failure is None and _is_failed_tool_result(content):
+            first_failure = _compact_marker(content, "tool result")
+    handoff = {
+        "context_handoff": {"from_segment": segment, "to_segment": segment + 1},
+        "instruction": ("Continue the same step. Do not repeat tool side effects "
+                        "already completed. Full observations remain available "
+                        "through recall_observation using the ids below."),
+        "written_files": sorted(set(written_files)),
+        "observation_ids": observations[-100:],
+        "first_failure": first_failure,
+        "original_assignment": original,
+    }
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(
+                handoff, ensure_ascii=False, sort_keys=True)}]
 
 
 def _recall_observation(messages: list[dict], sha256: str = "", *,
@@ -720,12 +765,17 @@ class PipelineEngine:
         traced — is dropped: the host cannot tell which of those tools ran,
         so the model re-decides from the last complete turn.
         """
-        by_index: dict[int, dict] = {}
+        # A context handoff restarts message indices at zero. Key by segment so
+        # an older segment cannot mask the successor on reclaim; older tool
+        # observations are retained separately for recall and side-effect audit.
+        by_position: dict[tuple[int, int], dict] = {}
         for event, payload in rows:
             if event != "prompt_delta" or not isinstance(payload, dict):
                 continue
             idx = payload.get("index")
-            if not isinstance(idx, int) or idx in by_index:
+            segment = payload.get("segment", 0)
+            if (not isinstance(idx, int) or not isinstance(segment, int)
+                    or (segment, idx) in by_position):
                 continue
             m: dict = {"role": payload.get("role", ""),
                        "content": None if payload.get("content_null") else payload.get("content", "")}
@@ -739,10 +789,13 @@ class PipelineEngine:
                     except (json.JSONDecodeError, TypeError):
                         pass
                 m[k] = v
-            by_index[idx] = m
-        if not by_index:
+            by_position[(segment, idx)] = m
+        if not by_position:
             return None
-        messages = [by_index[i] for i in sorted(by_index)]
+        latest_segment = max(segment for segment, _ in by_position)
+        messages = [by_position[key] for key in sorted(by_position)
+                    if key[0] == latest_segment]
+        all_messages = [by_position[key] for key in sorted(by_position)]
         dropped = 0
         # trailing incomplete turn
         last_a = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=-1)
@@ -752,11 +805,13 @@ class PipelineEngine:
             if not calls or got < len(calls):
                 dropped = len(messages) - last_a
                 messages = messages[:last_a]
-        turns = sum(1 for m in messages if m["role"] == "assistant")
+        all_messages = [by_position[key] for key in sorted(by_position)
+                        if key[0] < latest_segment] + messages
+        turns = sum(1 for m in all_messages if m["role"] == "assistant")
         written: list[str] = []
         grants = 0
         extra_total = 0
-        for m in messages:
+        for m in all_messages:
             if m["role"] != "tool":
                 continue
             try:
@@ -774,9 +829,44 @@ class PipelineEngine:
             if note.startswith("ask_more_turns: +") and res.get("status") == "granted":
                 grants += 1
                 extra_total += int(res.get("turns", 0) or 0)
+        # Completed mutations are replay fences. A reclaim may start from a
+        # compacted successor segment that no longer contains their tool-call
+        # pair, but the workspace still contains their effects. Keep the exact
+        # call identity + result so an identical retry is acknowledged without
+        # executing it a second time.
+        results_by_id = {m.get("tool_call_id"): m.get("content", "")
+                         for m in all_messages if m.get("role") == "tool"
+                         and m.get("tool_call_id")}
+        completed_effect_calls: dict[str, str] = {}
+        for m in all_messages:
+            if m.get("role") != "assistant":
+                continue
+            for call in m.get("tool_calls") or []:
+                fn = (call or {}).get("function") or {}
+                call_id = (call or {}).get("id")
+                result_text = results_by_id.get(call_id)
+                if not result_text:
+                    continue
+                try:
+                    result = json.loads(result_text)
+                    params = json.loads(fn.get("arguments") or "{}")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                artifact_changed = any(result.get("artifact_" + key)
+                                       for key in ("written", "edited", "created",
+                                                   "deleted", "removed"))
+                if (PipelineEngine._written_names(result)
+                        or PipelineEngine._effect_name(result)
+                        or artifact_changed):
+                    completed_effect_calls[_repeat_call_key(
+                        str(fn.get("name") or ""), params)] = result_text
+
         return {"messages": messages, "turns": turns, "written_files": written,
                 "turn_grants": grants, "current_max_turns": max_turns + extra_total,
-                "dropped_tail": dropped}
+                "dropped_tail": dropped, "segment": latest_segment,
+                "recall_messages": [m for m in all_messages
+                                    if m.get("role") == "tool"],
+                "completed_effect_calls": completed_effect_calls}
 
     def _resume_from_trace(self, project_id: str, max_turns: int) -> dict | None:
         """Read this instance's `prompt_delta` rows and rebuild; None if none.
@@ -832,7 +922,8 @@ class PipelineEngine:
                 content = json.dumps(content, ensure_ascii=False, default=str)
             payload = {"turn": turn, "index": i, "role": m.get("role", ""),
                        "content": content,
-                       "attempt": getattr(self, "_delta_attempt", 1)}
+                       "attempt": getattr(self, "_delta_attempt", 1),
+                       "segment": getattr(self, "_context_segment", 0)}
             if content_null:
                 payload["content_null"] = True    # an assistant tool-call turn: content None
             for k in ("tool_call_id", "tool_calls", "reasoning_content", "name"):
@@ -2543,7 +2634,11 @@ class PipelineEngine:
         # (cache-missing) text. `messages` and `last_reasoning` therefore persist
         # across attempts.
         messages: list[dict] = []
-        self._native_messages = messages   # what recall_observation reads
+        # Full tool observations live independently of the bounded provider
+        # segment so recall survives an explicit context handoff.
+        self._native_messages: list[dict] = []
+        self._context_segment = 0
+        context_budget_unknown_reported = False
         last_reasoning = ""  # cached for deepseek: replay on tool-only turns
         self._current_step = step_id
         self._step_start = time.time()
@@ -2634,6 +2729,11 @@ class PipelineEngine:
         resolved_ctx = self._drop_context_value(resolved_ctx, self._validation_error)
 
         _resumed = dict(resume) if resume else {}
+        # Exact successful mutation calls survive every recovery boundary in
+        # this invocation, including an ordinary native retry. Their effects
+        # remain in staging/state even when the conversational attempt changes.
+        effect_replays: dict[str, str] = dict(
+            _resumed.get("completed_effect_calls") or {})
         for attempt in range(1, max_retries + 1):
             self._refuse_if_run_cancelled(step_id, attempt)
             self._emit("step_attempt", {
@@ -2645,7 +2745,8 @@ class PipelineEngine:
 
             if attempt == 1 and resume:
                 messages = resume["messages"]
-                self._native_messages = messages
+                self._native_messages = list(resume.get("recall_messages") or messages)
+                self._context_segment = int(resume.get("segment") or 0)
                 self._delta_traced = len(messages)     # already in the trace
                 self._delta_attempt = attempt
                 staged = ", ".join(sorted(set(resume["written_files"]))) or "none"
@@ -2677,11 +2778,18 @@ class PipelineEngine:
                         f"here — do not re-read or redo what is above. If your "
                         f"last tool calls are missing their results, they were "
                         f"lost in the restart: re-issue only those.")
-                messages.append({
+                resume_notice = {
                     "role": "user",
                     "content": lead + self._validation_error_block(
                         self._validation_error),
-                })
+                }
+                messages.append(resume_notice)
+                # Legacy traces predate the separate full-observation recall
+                # stream. In that case `_native_messages` is a copy of
+                # `messages`; retain this newly appended rejection/restart
+                # instruction in both stores.
+                if self._native_messages is not messages:
+                    self._native_messages.append(dict(resume_notice))
                 resume = None    # a retry attempt must not re-enter this branch
             elif attempt == 1:
                 self._delta_attempt = attempt
@@ -2769,7 +2877,8 @@ class PipelineEngine:
                 # the abandoned empty list and failed 100% of fresh-step calls.
                 # Keep the published reference aligned whenever `messages` is
                 # rebound (resume does the same above).
-                self._native_messages = messages
+                self._native_messages = []
+                self._context_segment = 0
                 self._delta_traced = 0
                 self._trace("prompt", "user_prompt", {
                     "attempt": attempt, "mode": "native",
@@ -2927,8 +3036,39 @@ class PipelineEngine:
                 try:
                     self._trace_prompt_deltas(messages, turn_count + 1)
                     model_messages, projection = _project_native_messages(messages)
-                    if (projection["compacted_tool_results"]
-                            or projection["compacted_reasoning"]):
+                    boundary = _context_boundary(agent.gateway, model_messages,
+                                                 native_tools)
+                    if boundary["unknown"] and not context_budget_unknown_reported:
+                        context_budget_unknown_reported = True
+                        self._trace("prompt", "context_budget_unknown", {
+                            "attempt": attempt, "turn": turn_count + 1,
+                            **boundary,
+                        })
+                    if boundary["handoff"]:
+                        old_segment = self._context_segment
+                        messages = _context_handoff_messages(
+                            messages, segment=old_segment,
+                            written_files=written_files)
+                        self._context_segment += 1
+                        self._delta_traced = 0
+                        last_reasoning = ""
+                        self._trace("prompt", "context_handoff", {
+                            "attempt": attempt, "turn": turn_count + 1,
+                            "from_segment": old_segment,
+                            "to_segment": self._context_segment,
+                            **boundary,
+                        })
+                        self._trace_prompt_deltas(messages, turn_count + 1)
+                        model_messages, projection = _project_native_messages(messages)
+                        after = _context_boundary(agent.gateway, model_messages,
+                                                  native_tools)
+                        if after["handoff"]:
+                            raise NativeTurnBudgetExhausted(
+                                f"Step {step_id}: context handoff still exceeds "
+                                f"active endpoint budget ({after['estimated_prompt_tokens']} "
+                                f"+ {after['output_reserve']} >= {after['limit']}); "
+                                "stopping explicitly without another provider call")
+                    if projection["compacted_tool_results"]:
                         self._trace("prompt", "prompt_projection", {
                             "attempt": attempt, "turn": turn_count + 1,
                             **projection,
@@ -2971,10 +3111,18 @@ class PipelineEngine:
                 # Phase 0 cache telemetry: record per-turn token + prompt-cache
                 # usage so a run's cache hit-ratio can be aggregated from traces.
                 usage = getattr(agent.gateway, "last_usage", {}) or {}
+                outbound = getattr(agent.gateway, "last_outbound", {}) or {}
                 if usage:
                     self._trace("usage", "token_usage", {
                         "step_id": step_id, "attempt": attempt,
-                        "turn": turn_count + 1, **usage,
+                        "turn": turn_count + 1,
+                        "context_segment": self._context_segment,
+                        "outbound_fingerprint": outbound.get("fingerprint"),
+                        "outbound_first_changed_position": outbound.get(
+                            "first_changed_position"),
+                        "outbound_append_only": outbound.get("append_only"),
+                        "outbound_message_count": outbound.get("message_count"),
+                        **usage,
                     })
 
                 # Record trace — store the full response (free text + every
@@ -3226,7 +3374,22 @@ class PipelineEngine:
                     repeat_key = (_repeat_call_key(tool_name, params)
                                   if tool_name in _REPEATABLE_READ_TOOLS else "")
                     repeated = repeat_index.get(repeat_key) if repeat_key else None
-                    if repeated:
+                    effect_key = _repeat_call_key(tool_name, params)
+                    replayed_effect = effect_replays.get(effect_key)
+                    if replayed_effect is not None:
+                        try:
+                            tool_result = json.loads(replayed_effect)
+                        except (json.JSONDecodeError, TypeError):
+                            tool_result = {"status": "completed"}
+                        tool_result = dict(tool_result)
+                        tool_result["replayed_side_effect"] = False
+                        tool_result["note"] = (
+                            "This exact successful state-changing call already "
+                            "ran before recovery and was not executed again.")
+                        self._note_phase("tool_done", tool_name)
+                        self._trace("step", "side_effect_replay_refused", {
+                            "tool": tool_name, "call_key": effect_key})
+                    elif repeated:
                         digest, original_chars = repeated
                         tool_result = {
                             "repeat_of_earlier_call": True,
@@ -3277,11 +3440,13 @@ class PipelineEngine:
                             progress_signatures.add(progress)
                     result_str = json.dumps(tool_result, ensure_ascii=False)
 
-                    messages.append({
+                    tool_message = {
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "content": result_str,
-                    })
+                    }
+                    messages.append(tool_message)
+                    self._native_messages.append(tool_message)
 
                     # Track written files (write→'written', edit→'edited',
                     # create→'created'); see _written_name.
@@ -3301,7 +3466,12 @@ class PipelineEngine:
                     # counting a test report as a delivered code change.
                     artifact_changed = any(tool_result.get("artifact_" + key)
                                            for key in ("written", "edited", "created", "deleted", "removed"))
-                    if wf or self._effect_name(tool_result) or artifact_changed:
+                    effect = self._effect_name(tool_result)
+                    if wf or effect or artifact_changed:
+                        self._native_side_effects_committed = True
+                        if replayed_effect is None:
+                            effect_replays[effect_key] = result_str
+                    if wf or effect or artifact_changed:
                         repeat_index.clear()
                     elif (repeat_key and not repeated
                           and len(result_str) >= _REPEAT_MIN_CHARS
@@ -3573,6 +3743,7 @@ class PipelineEngine:
 
         # Prefer native tool calling if agent config enables it
         if self.factory.is_native(agent_config_name):
+            self._native_side_effects_committed = False
             try:
                 return self._run_native_step(
                     task_id, step_id, workspace, project_id,
@@ -3599,8 +3770,15 @@ class PipelineEngine:
                 # native path just finished. The scheduler's quota hold exists
                 # to stop exactly that.
                 from core.llm_quota import is_quota_exhausted
-                if isinstance(e, (NativeTurnBudgetExhausted, NativeOutputCapExhausted)) or is_quota_exhausted(e):
+                if isinstance(e, (NativeTurnBudgetExhausted,
+                                  NativeOutputCapExhausted,
+                                  NativeSideEffectsRetained)) or is_quota_exhausted(e):
                     raise
+                if getattr(self, "_native_side_effects_committed", False):
+                    raise NativeSideEffectsRetained(
+                        f"Step {step_id}: native execution changed state before "
+                        f"{type(e).__name__}; refusing JSON fallback because it "
+                        "would replay successful side effects") from e
                 if not self.factory.get_fallback_to_json(agent_config_name):
                     raise
                 # Fall through to JSON mode dispatch below

@@ -5,6 +5,7 @@
 import os
 import re
 import json
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -118,6 +119,45 @@ def _endpoint_window(concrete: str, provs: dict | None) -> int | None:
 # The burst-vs-spent-window test lives in core.llm_quota: the scheduler asks
 # the same questions on a path that must not import litellm.
 from core.llm_quota import is_quota_exhausted, quota_reset_at
+
+
+def _canonical_request_value(value) -> str:
+    """Stable JSON for request-prefix telemetry."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), default=repr)
+
+
+def _request_prefix(messages: list[dict], tools: list[dict] | None) -> list[str]:
+    """One digest per provider-visible prefix layer, in wire order."""
+    def digest(value) -> str:
+        return hashlib.sha256(
+            _canonical_request_value(value).encode("utf-8")).hexdigest()
+
+    return [digest(tools or [])] + [digest(m) for m in messages]
+
+
+def _observe_request_prefix(messages: list[dict], tools: list[dict] | None,
+                            previous: dict | None = None,
+                            endpoint: str | None = None) -> dict:
+    """Locate the first changed wire layer relative to the previous request."""
+    current = _request_prefix(messages, tools)
+    old = list((previous or {}).get("prefix") or [])
+    first = next((i for i, pair in enumerate(zip(old, current))
+                  if pair[0] != pair[1]), min(len(old), len(current)))
+    same_endpoint = bool(endpoint) and (previous or {}).get("served_by") == endpoint
+    append_only = (bool(old) and same_endpoint and len(current) >= len(old)
+                   and current[:len(old)] == old)
+    if old and not same_endpoint:
+        first = 0
+    return {
+        "fingerprint": hashlib.sha256(
+            _canonical_request_value(current).encode("utf-8")).hexdigest(),
+        "prefix": current,
+        "first_changed_position": first,
+        "append_only": append_only,
+        "message_count": len(messages),
+        "served_by": endpoint,
+    }
 
 
 def _retry_llm_error(exc: BaseException) -> bool:
@@ -327,6 +367,9 @@ class AIGateway:
         self.max_output_tokens = max_output_tokens
         # Phase 0 cache telemetry: usage of the most recent completion.
         self.last_usage: dict = {}
+        # Fingerprint the sanitized request at the final adapter boundary. The
+        # DPE trace pairs this with provider cache usage for the same request.
+        self.last_outbound: dict | None = None
         # One gateway owns one conversation; retain routing identity across turns
         # and endpoint failovers, never share it between independent gateways.
         self._opencode_session_id = uuid.uuid4().hex
@@ -581,6 +624,33 @@ class AIGateway:
                 m = {**m, "content": " "}
             cleaned.append(m)
         return cleaned
+
+    def declared_input_window(self) -> int | None:
+        """The active endpoint's configured input ceiling, if one is known."""
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                providers = json.load(f)
+        except (OSError, ValueError):
+            return None
+        return _endpoint_window(self.active_model, providers)
+
+    def estimate_request_tokens(self, messages: list[dict],
+                                tools: list[dict] | None = None) -> int:
+        """Estimate the exact adapter payload without issuing a paid request.
+
+        LiteLLM supplies the model tokenizer when it knows one. Custom aliases
+        can be absent from its registry, so the deterministic character fallback
+        is deliberately conservative and includes the tool schema.
+        """
+        clean = self._sanitize_messages(messages)
+        try:
+            count = int(litellm.token_counter(
+                model=self.litellm_model, messages=clean) or 0)
+        except Exception:
+            count = (len(_canonical_request_value(clean)) + 2) // 3
+        if tools:
+            count += (len(_canonical_request_value(tools)) + 2) // 3
+        return count
 
     def _cache_control_points(self):
         """Return LiteLLM cache_control_injection_points for explicit-cache
@@ -1231,7 +1301,16 @@ class AIGateway:
                     msgs.append({"role": "system",
                                  "content": "Respond with valid JSON."})
 
+        self.last_outbound = _observe_request_prefix(
+            kwargs["messages"], kwargs.get("tools"), self.last_outbound,
+            self.active_model)
+        requested_endpoint = self.active_model
         response = self._complete_prebuilt(kwargs)   # sets self.last_usage
+        if self.last_outbound is not None:
+            if self.active_model != requested_endpoint:
+                self.last_outbound["append_only"] = False
+                self.last_outbound["first_changed_position"] = 0
+            self.last_outbound["served_by"] = self.active_model
         return response.choices[0].message.content.strip()
 
     def _explain_auth(self, e: Exception) -> Exception:
@@ -1298,7 +1377,16 @@ class AIGateway:
         # Native tool calling is incompatible with JSON mode response_format
         kwargs.pop("response_format", None)
 
+        self.last_outbound = _observe_request_prefix(
+            kwargs["messages"], kwargs.get("tools"), self.last_outbound,
+            self.active_model)
+        requested_endpoint = self.active_model
         response = self._complete_prebuilt(kwargs)   # sets self.last_usage
+        if self.last_outbound is not None:
+            if self.active_model != requested_endpoint:
+                self.last_outbound["append_only"] = False
+                self.last_outbound["first_changed_position"] = 0
+            self.last_outbound["served_by"] = self.active_model
         choice = response.choices[0]
         msg = choice.message
         finish_reason = getattr(choice, "finish_reason", "") or ""

@@ -148,10 +148,11 @@ def test_native_prompt_projection_bounds_old_results_and_reasoning_without_mutat
     assert projected[3]["content"] == first_failure
     assert projected[7]["content"] == latest_read
     assert len(projected[5]["content"]) < len(old_read)
+    # Reasoning is protocol-bearing and therefore never rewritten after send.
     assert projected[6]["reasoning_content"] == huge_b
-    assert len(projected[2]["reasoning_content"]) < len(huge_a)
+    assert projected[2]["reasoning_content"] == huge_a
     assert report["compacted_tool_results"] == 1
-    assert report["compacted_reasoning"] >= 1
+    assert report["compacted_reasoning"] == 0
     assert report["projected_chars"] < report["original_chars"]
 
 

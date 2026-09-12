@@ -30,6 +30,16 @@ _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
 # max_retries (3); anything far above that is a resumed terminal state.
 _MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
 
+# Claim-time failures happen before an executor exists.  In particular, a code
+# output step refuses a dirty run worktree and rolls its claim transaction back;
+# without a host-side bound, the same pending row raises on every scheduler tick
+# forever.  The count itself lives in the durable trace, not in this process.
+_MAX_IDENTICAL_CLAIM_PRECONDITIONS = max(1, int(
+    _os.getenv("AITELIER_MAX_IDENTICAL_CLAIM_PRECONDITIONS", "3")))
+_CLAIM_CONTENTION_BACKOFF_S = max(0.1, float(
+    _os.getenv("AITELIER_CLAIM_CONTENTION_BACKOFF_SECONDS", "15")))
+_claim_retry_after: dict[tuple[int, str], float] = {}
+
 # ── Provider quota hold ──────────────────────────────────────────────────────
 # A spent usage window is the one provider failure that is BOTH certain to clear
 # and certain not to clear soon, and the scheduler had no way to express that.
@@ -1262,7 +1272,18 @@ async def _run_skillflow_tick(project_id: str, loop):
         tick_log(project_id, "wedged", run=run_id[:8], status=run["status"],
                  node=run.get("current_node"))
 
-    # Phase B: Claim
+    # Phase B: Claim.  A transient database/CAS contention gets a real
+    # backoff instead of another call five seconds later.  This state is
+    # deliberately process-local: contention is transient; deterministic
+    # precondition accounting below is durable.
+    retry_key = (id(sf), run_id)
+    retry_at = _claim_retry_after.get(retry_key, 0.0)
+    now = _time.monotonic()
+    if retry_at > now:
+        tick_log(project_id, "claim_backoff", run=run_id[:8],
+                 remaining=f"{retry_at - now:.1f}s")
+        return
+    _claim_retry_after.pop(retry_key, None)
     try:
         claimed = sf.claim_next_step(run_id)
     except RequiredContextMissing as e:
@@ -1282,16 +1303,29 @@ async def _run_skillflow_tick(project_id: str, loop):
         _sync_project_status_to_db(project_id)
         tick_log(project_id, "claim_terminal", run=run_id[:8], error=str(e)[:160])
         return
+    except RuntimeError as e:
+        # claim_next_step has not handed work to an agent yet.  Keep this on a
+        # claim-precondition surface: calling it an agent/output failure sends
+        # recovery to the wrong owner and hides the still-retained worktree.
+        if _is_transient_claim_contention(e):
+            _record_tick_error(sf, run_id, project_id, e, "claim_contention")
+            _claim_retry_after[retry_key] = (
+                _time.monotonic() + _CLAIM_CONTENTION_BACKOFF_S)
+            tick_log(project_id, "claim_contention", run=run_id[:8],
+                     retry_in=f"{_CLAIM_CONTENTION_BACKOFF_S:.1f}s",
+                     error=str(e)[:160])
+        else:
+            settled, count = _record_and_settle_claim_precondition(
+                sf, run_id, project_id, e)
+            tick_log(project_id,
+                     "claim_precondition_terminal" if settled
+                     else "claim_precondition_retry",
+                     run=run_id[:8], count=count, error=str(e)[:160])
+        _sync_project_status_to_db(project_id)
+        return
     except Exception as e:
-        # This swallowed the reason ENTIRELY — no log, no trace, no status — and
-        # the tick just returned, so the run sat at its current node looking
-        # healthy while every tick re-raised and re-swallowed. Live: a dpe_default
-        # run started without its meta_conversation predecessor sat at
-        # `running:1` for 47 minutes; `claim_next_step` was raising
-        # `RequiredContextMissing: Required context source resolved to no
-        # content: finalize` every single tick — a perfectly actionable sentence
-        # that no surface ever showed. Control flow is unchanged (still returns,
-        # still retries next tick); only the silence is removed.
+        # Non-RuntimeError claim failures retain the historical retry behavior,
+        # but stay visible. RequiredContextMissing is handled terminally above.
         _record_tick_error(sf, run_id, project_id, e, "claim_failed")
         _sync_project_status_to_db(project_id)
         tick_log(project_id, "claim_failed", run=run_id[:8], error=str(e)[:160])
@@ -1747,6 +1781,108 @@ def log_job_event(ev) -> None:
              # this log's contract, and a pydantic ValidationError object turns
              # one call into eight physical lines.
              error=(str(exc)[:160].replace("\n", " ") if exc else None))
+
+
+_TRANSIENT_CLAIM_MARKERS = (
+    "database is locked",
+    "database table is locked",
+    "database is busy",
+    "transaction is busy",
+    "version conflict",
+    "concurrent claim",
+)
+
+
+def _is_transient_claim_contention(exc: RuntimeError) -> bool:
+    """Only known contention is allowed to retry without a durable bound."""
+    message = " ".join(str(exc).lower().split())
+    return any(marker in message for marker in _TRANSIENT_CLAIM_MARKERS)
+
+
+def _record_and_settle_claim_precondition(sf, run_id: str, project_id: str,
+                                          exc: RuntimeError) -> tuple[bool, int]:
+    """Record one claim precondition and fail after an identical durable run.
+
+    claim_next_step performs output-target preparation inside its transaction.
+    When preparation raises, the step row returns to pending; there is therefore
+    no claim token or executor failure to mark.  Trace is the durable host-owned
+    ledger available on both sides of a process restart.
+    """
+    import hashlib
+    message = " ".join(str(exc).split())
+    try:
+        run = sf.get_run(run_id) or {}
+    except Exception:
+        run = {}
+    step_id = run.get("current_node") or "unknown"
+    step_instance_id = 0
+    try:
+        pending = [row for row in sf.get_steps(run_id)
+                   if row.get("step_id") == step_id
+                   and row.get("status") == "pending"]
+        if pending:
+            step_instance_id = max(int(row.get("id") or 0) for row in pending)
+    except Exception:
+        pass
+    fingerprint = hashlib.sha256(
+        f"{type(exc).__name__}\0{step_id}\0{step_instance_id}\0{message}".encode("utf-8")
+    ).hexdigest()
+    payload = {
+        "error": f"{type(exc).__name__}: {message}",
+        "failure_fingerprint": fingerprint,
+        "project_id": project_id or run.get("project_id") or "",
+        "run_id": run_id,
+        "owning_step": step_id,
+        "step_instance_id": step_instance_id,
+        "recovery": ("Resume/recover that owning step after reconciling its retained "
+                     "worktree; never clean, commit, or discard unknown dirty files."),
+    }
+    try:
+        sf.trace(run_id, "scheduler", "claim_precondition_failed", payload,
+                 step_id=step_id, step_instance_id=step_instance_id or None,
+                 project_id=project_id or run.get("project_id") or "")
+    except Exception:
+        pass
+
+    count = 0
+    try:
+        rows = sf.trace_query(
+            run_id,
+            "SELECT payload_json FROM skillflow_trace "
+            "WHERE run_id = ? AND event = ? "
+            "AND step_id = ? AND step_instance_id IS ? ORDER BY seq DESC LIMIT ?",
+            (run_id, "claim_precondition_failed", step_id,
+             step_instance_id or None, _MAX_IDENTICAL_CLAIM_PRECONDITIONS),
+        )
+        for row in rows:
+            raw = row["payload_json"] if hasattr(row, "keys") else row[0]
+            item = json.loads(raw)
+            if item.get("failure_fingerprint") != fingerprint:
+                break
+            count += 1
+    except Exception:
+        # Without the durable ledger, do not guess that the threshold was met.
+        # The event/error log still exposes the condition for an operator.
+        count = 0
+
+    settled = count >= _MAX_IDENTICAL_CLAIM_PRECONDITIONS
+    if settled:
+        reason = (
+            f"Claim precondition for owning step {step_id} repeated {count} "
+            f"times (run_id={run_id}, project_id={project_id}, "
+            f"step_instance_id={step_instance_id or 'unknown'}). {message} "
+            "Resume/recover that owning step after reconciling its retained "
+            "worktree; do not clean, commit, or discard unknown dirty files."
+        )
+        try:
+            sf.fail_run(run_id, reason)
+        except Exception:
+            settled = False
+    logging.getLogger("aitelier.scheduler").warning(
+        "claim precondition on run %s project=%s step=%s count=%d/%d: %s",
+        run_id, project_id, step_id, count,
+        _MAX_IDENTICAL_CLAIM_PRECONDITIONS, message)
+    return settled, count
 
 
 def _record_tick_error(sf, run_id: str, project_id: str, exc: BaseException,

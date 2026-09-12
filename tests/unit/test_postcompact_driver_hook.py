@@ -16,6 +16,10 @@ HOOK = REPO / ".codex" / "hooks" / "postcompact-driver-state.sh"
 class StateStub(BaseHTTPRequestHandler):
     revision = 1
     requests = []
+    permanent = None
+    temporary = None
+    guide = None
+    nodes = None
 
     def log_message(self, *_args):
         pass
@@ -29,7 +33,7 @@ class StateStub(BaseHTTPRequestHandler):
         if name == "state_graph_help":
             result = {
                 "driver_resource": "aitelier://state/driver-guide",
-                "driver_guide": """# State DAG director protocol
+                "driver_guide": StateStub.guide or """# State DAG director protocol
 State owns goals and evidence.
 
 ## Resume safely
@@ -52,17 +56,18 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
             assert args["arguments"] == {"project_id": "aitelier"}
             result = {
                 "project_id": "aitelier", "revision": StateStub.revision,
-                "permanent": f"permanent revision {StateStub.revision}",
-                "temporary": "fresh temporary; Authorization: Bearer forbidden-secret",
+                "permanent": StateStub.permanent or f"permanent revision {StateStub.revision}",
+                "temporary": StateStub.temporary or "fresh temporary; Authorization: Bearer forbidden-secret",
                 "updated_at": "2026-09-12T00:00:00Z",
             }
         else:
             assert args == {"action": "project_overview", "arguments": {"project_id": "aitelier"}}
             result = {
                 "event_seq": 57,
-                "nodes": [
-                    {"node_key": "ready", "status": "READY"},
-                    {"node_key": "busy", "status": "IN_PROGRESS", "latest_attempt": {"attempt_id": "attempt-1", "status": "running"}},
+                "nodes": StateStub.nodes or [
+                    {"node_key": "ready", "status": "OPEN", "readiness": "ready", "next_action": "new_attempt"},
+                    {"node_key": "busy", "status": "OPEN", "readiness": "in_progress", "next_action": None,
+                     "latest_attempt": {"attempt_id": "attempt-1", "status": "running"}},
                 ],
             }
         text = json.dumps({"result": result})
@@ -78,6 +83,7 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
 def state_server():
     StateStub.revision = 1
     StateStub.requests = []
+    StateStub.permanent = StateStub.temporary = StateStub.guide = StateStub.nodes = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), StateStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -117,7 +123,8 @@ def test_hook_emits_legal_bounded_fresh_project_context_from_any_cwd(tmp_path, s
     assert "project_id=aitelier (fixed project isolation)" in context
     assert "driver_note_revision=1" in context
     assert "state_event_cursor=57" in context
-    assert "ready: node=READY" in context and "attempt=running id=attempt-1" in context
+    assert "ready: node=OPEN readiness=ready next_action=new_attempt" in context
+    assert "busy" not in context
     assert "DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION" not in context
     assert "helper-secret" not in context and "forbidden-secret" not in context
     assert "[REDACTED]" in context
@@ -152,6 +159,67 @@ def test_postcompact_lifecycle_event_is_a_legal_noop_before_compact_session_star
     assert StateStub.requests == []
 
 
+def test_credentials_are_redacted_and_frontier_excludes_closed_or_busy_history(tmp_path, state_server):
+    synthetic_values = [
+        "synthetic-password", "synthetic-passphrase", "synthetic-private", "synthetic-credential",
+        "synthetic-basic", "synthetic-url-password", "SYNTHETICPEMBODY",
+    ]
+    StateStub.permanent = (
+        'password="synthetic-password" passwd=synthetic-password pwd: synthetic-password\n'
+        "passphrase='synthetic-passphrase' private_key=synthetic-private credential: synthetic-credential\n"
+        "Authorization: Basic synthetic-basic https://director:synthetic-url-password@example.invalid\n"
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETICPEMBODY\n-----END OPENSSH PRIVATE KEY-----"
+    )
+    StateStub.guide = """# State DAG director protocol
+client_secret=synthetic-credential
+## Resume safely
+password: synthetic-password
+## Dispatch through either executor
+private-key=synthetic-private
+## Wait instead of repeatedly querying
+credential=synthetic-credential
+## Director notebook: context, not a second State database
+passphrase=synthetic-passphrase
+"""
+    StateStub.nodes = [
+        {"node_key": "open-ready", "status": "OPEN", "readiness": "ready", "next_action": "new_attempt"},
+        {"node_key": "candidate-ready", "status": "CANDIDATE", "readiness": "ready", "next_action": "candidate_review"},
+        {"node_key": "verified-history", "status": "VERIFIED", "readiness": "closed", "next_action": None,
+         "latest_attempt": {"attempt_id": "old", "status": "candidate"}},
+        {"node_key": "open-busy", "status": "OPEN", "readiness": "in_progress", "next_action": None,
+         "latest_attempt": {"attempt_id": "live", "status": "running"}},
+        {"node_key": "open-blocked", "status": "OPEN", "readiness": "blocked", "next_action": None},
+    ]
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    for value in synthetic_values:
+        assert value not in context
+    assert "[REDACTED" in context
+    assert "open-ready: node=OPEN readiness=ready next_action=new_attempt" in context
+    assert "candidate-ready: node=CANDIDATE readiness=ready next_action=candidate_review" in context
+    assert "verified-history" not in context and "open-busy" not in context and "open-blocked" not in context
+
+
+def test_bounded_multilingual_context_is_complete_with_spilling_disabled(tmp_path, state_server):
+    StateStub.permanent = "永久导演笔记 START — current ownership — 结束 END"
+    StateStub.temporary = "临时状态 START — next action / 下一步 — 尾部 END"
+    StateStub.guide = """# State DAG director protocol
+协议开头 GUIDE-START
+## Resume safely
+恢复当前状态 RESUME-COMPLETE
+## Dispatch through either executor
+先注册 attempt DISPATCH-COMPLETE
+## Wait instead of repeatedly querying
+保留 cursor WAIT-COMPLETE
+## Director notebook: context, not a second State database
+项目隔离 GUIDE-END
+"""
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    for marker in ("永久导演笔记 START", "结束 END", "临时状态 START", "尾部 END",
+                   "GUIDE-START", "RESUME-COMPLETE", "DISPATCH-COMPLETE", "WAIT-COMPLETE", "GUIDE-END"):
+        assert marker in context
+    assert len(context) <= 12_000
+
+
 def test_tracked_hook_config_uses_current_command_shape_and_move_safe_lookup():
     config = json.loads((REPO / ".codex" / "hooks.json").read_text())
     postcompact = config["hooks"]["PostCompact"][0]["hooks"][0]
@@ -161,7 +229,9 @@ def test_tracked_hook_config_uses_current_command_shape_and_move_safe_lookup():
     assert postcompact["async"] is handler["async"] is False
     assert postcompact["timeout"] == handler["timeout"] == 20
     assert "additionalContextLimit" not in postcompact
-    assert handler["additionalContextLimit"] == 4000
+    # Zero disables Codex spilling. The script's own MAX_CONTEXT_CHARS remains
+    # the strict safety boundary for complete mixed-language delivery.
+    assert handler["additionalContextLimit"] == 0
     assert "git rev-parse --show-toplevel" in handler["command"]
     assert "/Users/" not in handler["command"] and "/home/" not in handler["command"]
     assert HOOK.stat().st_mode & 0o111

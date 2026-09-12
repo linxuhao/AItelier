@@ -37,10 +37,27 @@ def _sha256(text: str) -> str:
 
 
 def _redact(text: str) -> str:
+    # Remove whole PEM/OpenSSH private-key blocks before handling inline
+    # assignments.  Values in tests are synthetic; never put a real credential
+    # in a test merely to exercise this boundary.
+    text = re.sub(
+        r"(?is)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
+        "[REDACTED PRIVATE KEY]",
+        text,
+    )
     patterns = (
         (r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+", r"\1[REDACTED]"),
-        (r"(?i)((?:x-aitelier-admin-token|api[_-]?key|access[_-]?token|secret)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]"),
+        (r"(?i)(authorization\s*[:=]\s*basic\s+)[^\s,;]+", r"\1[REDACTED]"),
+        (r"(?i)(://[^\s/:@]+:)[^\s/@]+(@)", r"\1[REDACTED]\2"),
+        (
+            r"(?i)((?:password|passwd|pwd|passphrase|private[_ -]?key|credential(?:s)?|"
+            r"x-aitelier-admin-token|api[_-]?key|access[_-]?token|refresh[_-]?token|"
+            r"auth[_-]?token|client[_-]?secret|secret)\s*[\"']?\s*[:=]\s*)"
+            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\]}]+)",
+            r"\1[REDACTED]",
+        ),
         (r"\b(?:sk|ghp|github_pat)_[A-Za-z0-9_\-]{16,}\b", "[REDACTED]"),
+        (r"\bAKIA[A-Z0-9]{16}\b", "[REDACTED]"),
     )
     for pattern, replacement in patterns:
         text = re.sub(pattern, replacement, text)
@@ -179,18 +196,18 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
             continue
         status = str(node.get("status", "unknown"))
         counts[status] = counts.get(status, 0) + 1
-        attempt = node.get("latest_attempt") if isinstance(node.get("latest_attempt"), dict) else {}
-        attempt_status = str(attempt.get("status", ""))
-        if status == "READY" or attempt_status in {"running", "paused", "unknown", "candidate"}:
+        readiness = str(node.get("readiness", "unknown"))
+        next_action = node.get("next_action")
+        if readiness == "ready" and next_action in {"new_attempt", "candidate_review"}:
             selected.append(
-                f"- {node.get('node_key', node.get('key', '?'))}: node={status}"
-                + (f" attempt={attempt_status} id={attempt.get('attempt_id', '?')}" if attempt_status else "")
+                f"- {node.get('node_key', node.get('key', '?'))}: node={status} "
+                f"readiness=ready next_action={next_action}"
             )
     selected = selected[:8]
     return "\n".join([
         f"event_seq={overview.get('event_seq', 'unknown')}",
         "node_status_counts=" + json.dumps(counts, sort_keys=True, separators=(",", ":")),
-        "bounded actionable snapshot (max 8; reconcile exact records before acting):",
+        "bounded actionable frontier (readiness=ready, max 8; reconcile exact records before acting):",
         *(selected or ["- none listed"]),
     ])
 

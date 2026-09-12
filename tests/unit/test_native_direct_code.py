@@ -50,12 +50,13 @@ def response(name,**args):
         {'id':name,'type':'function','function':{'name':name,'arguments':json.dumps(args)}}])
 
 
-def execute(e,ws,rid,claim):
+def execute(e,ws,rid,claim,resolved_context=None):
     return e.run_step(1,claim.step_id,ws,'p',agent_config_name='fake',run_id=rid,
         step_instance_id=claim.token.step_instance_id,claim_epoch=claim.token.claim_epoch,
         tool_schemas=claim.inputs['_tool_schemas'],output_dir=claim.inputs['_output_dir'],
         output_target=claim.inputs['_output_target'],output_fixed=claim.inputs['_output_fixed'],
-        config_name=claim.inputs['_config_name'],artifact_dir=claim.inputs['_artifact_dir'])
+        config_name=claim.inputs['_config_name'],artifact_dir=claim.inputs['_artifact_dir'],
+        resolved_context=resolved_context)
 
 
 def test_native_code_write_read_and_finish_same_worktree(tmp_path,monkeypatch):
@@ -129,3 +130,50 @@ def test_native_report_refresh_invalidates_reads_without_becoming_code(tmp_path,
     artifact = Path(claim.inputs["_artifact_dir"])
     assert (artifact / "report.txt").read_text().startswith("SECOND")
     assert json.loads((artifact / "code_changes.json").read_text())["files"] == ["new.py"]
+
+
+def test_coding_impl_relay_acknowledges_retained_bytes_before_targeted_work(tmp_path, monkeypatch):
+    sf, rid, claim, root = run_fixture(tmp_path, monkeypatch)
+    retained_bytes = (root / "baseline.py").stat().st_size
+    state = {
+        "instruction": "Finish baseline wiring and add the targeted test; do not re-ground.",
+        "relay": {
+            "run_id": "prior-budget-run",
+            "error": "native turn budget exhausted (32/32)",
+            "code_changes": {"files": {
+                "baseline.py": {"bytes": retained_bytes},
+            }},
+        },
+    }
+    seed = "# State goal attempt\n\n" + json.dumps(state) + "\n\n## Relay\ncontinue\n"
+    calls = []
+
+    def turn(messages, **kwargs):
+        calls.append(messages)
+        n = len(calls)
+        if n == 1:
+            assert "Relay Progress Contract" in messages[1]["content"]
+            return response("list_tree")  # must be refused before acknowledgement
+        if n == 2:
+            assert "relay acknowledgement required" in messages[-1]["content"]
+            return response("acknowledge_relay", retained_bytes=retained_bytes,
+                            incomplete_items=["finish baseline wiring", "add targeted test"])
+        if n in (3, 4, 5, 6):
+            return response("read", path="baseline.py")
+        if n == 7:
+            assert "targeted-read limit reached" in messages[-1]["content"]
+            return response("create", file="relay_done.py", content="done = True\n")
+        return response("finish_step", summary="continued retained work")
+
+    e, ws = host(sf, rid, claim, root, turn)
+    e._draft_graph_name = lambda: "coding_impl"
+    e.factory.get_max_tool_turns = lambda _: 10
+    assert execute(e, ws, rid, claim, {"coding_impl/plan.md": seed})
+    events = [row[0] for row in sf._conn.execute(
+        "SELECT event FROM skillflow_trace WHERE run_id = ? ORDER BY seq", (rid,))]
+    assert "relay_operation_refused_before_ack" in events
+    assert "relay_progress_acknowledged" in events
+    assert "relay_broad_survey_refused" in events
+    assert "early_progress_intervention" in events
+    assert "implementation_first_write" in events
+    assert (root / "relay_done.py").read_text() == "done = True\n"

@@ -16,10 +16,14 @@ read. Recovered code (`relay.code_changes`) is already in that worktree and is
 explicitly UNVALIDATED; artifact drafts (`relay.staged_files`) remain separate.
 Read the named files, verify what is missing or broken against the plan, complete
 it with `edit`/`create`, and `finish_step`. Do not re-ground the whole repository.
+Your first tool call must be `acknowledge_relay`: report the exact retained byte
+total shown in the relay progress contract and name the incomplete items. This
+proves you saw the recovered work before any new repository operation.
 
 ## Your task
-1. **Read before you write.** Open the files the plan names and understand
-   their current state.
+1. **Land progress early.** Read only the plan-named regions needed for the
+   first change, then write the smallest compilable, testable slice. Do not
+   spend half the turn budget on reads/searches without a repository write.
 2. **Follow the plan's steps** in order. Implement exactly what it describes —
    if reality forces a deviation, make the minimal one and note it.
 3. **Write tests** the plan calls for (or that the change obviously needs).

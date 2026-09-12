@@ -13,6 +13,7 @@
 # REAL (file_exists / json_schema), only the three env-bound tools are stubbed.
 
 import asyncio
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -31,6 +32,15 @@ from aitelier.gate_evidence import stamp_report
 from aitelier.tools.requirement_coverage.impl import hash_document
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_GOALS = {
+    "mvp_goals": ["Add two numbers"],
+    "non_goals": ["No UI"],
+    "user_stories": ["As a user, I can add two numbers"],
+}
+_DEFAULT_BASELINE = {
+    "id": "meta_conversation/finalize/step1_goals.json",
+    "revision": hashlib.sha256(json.dumps(_DEFAULT_GOALS).encode()).hexdigest(),
+}
 
 
 # ── Stubs for the three environment-dependent tools ──────────────────────
@@ -144,11 +154,8 @@ def _build_real_pipeline(tmp_path, *, game=False):
     # fail-loud-on-missing-brief guard. Mirror that artifact here.
     finalize = ws_base / "p" / "meta_conversation" / "finalize"
     finalize.mkdir(parents=True, exist_ok=True)
-    (finalize / "step1_goals.json").write_text(json.dumps({
-        "mvp_goals": ["Add two numbers"],
-        "non_goals": ["No UI"],
-        "user_stories": ["As a user, I can add two numbers"],
-    }), encoding="utf-8")
+    (finalize / "step1_goals.json").write_text(
+        json.dumps(_DEFAULT_GOALS), encoding="utf-8")
 
     run_id = sf.create_run(graph.name, {"project_id": "p"})
     # Declare this run's isolation exactly as a launch does. These harnesses
@@ -190,7 +197,7 @@ def _requirement_documents(base_sha):
     inventory = {
         "document_type": "requirement_inventory", "schema_version": 1,
         "inventory_version": 1, "base_sha": base_sha,
-        "baseline": {"id": "mock-brief", "revision": 1},
+        "baseline": dict(_DEFAULT_BASELINE),
         "requirements": [{
             "id": "add-two-numbers", "source_locator": "step1_goals.json#mvp_goals[0]",
             "status": "active",
@@ -287,7 +294,9 @@ def _build_agent_response(step_id, tool_schemas, *, base_sha,
 
 
 async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
-                               reject_once_at=None, observed_claims=None):
+                               reject_once_at=None, observed_claims=None,
+                               checkpoint_rejections=None,
+                               response_factory=None):
     """Run the real scheduler loop with mocked agents until the run terminates."""
     from unittest.mock import MagicMock
     import api.dependencies as deps
@@ -326,6 +335,8 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
     executed = []
     checkpoints = 0
     rejected = set()
+    checkpoint_rejected = set()
+    checkpoint_rejections = checkpoint_rejections or {}
     for _ in range(max_ticks):
         node = sf.advance_run(run_id)
         if node is None:
@@ -333,7 +344,14 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
             status = run["status"]
             if status == "paused":
                 checkpoints += 1
-                sf.approve_checkpoint(run_id)
+                checkpoint_step = executed[-1]
+                feedback = checkpoint_rejections.get(checkpoint_step)
+                if (feedback is not None
+                        and checkpoint_step not in checkpoint_rejected):
+                    sf.reject_checkpoint(run_id, checkpoint_step, feedback)
+                    checkpoint_rejected.add(checkpoint_step)
+                else:
+                    sf.approve_checkpoint(run_id)
                 continue
             if status == "running":
                 # advance_run reached an internal node (tool/gate/loop) and
@@ -360,6 +378,9 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
             claimed.step_id, claimed.inputs.get("_tool_schemas", {}),
             base_sha=base_sha, review_passed=review_passed,
             revising_code=claimed.step_id == "t_impl" and "t_impl" in executed)
+        if response_factory is not None:
+            current["response"] = response_factory(
+                claimed, current["response"], base_sha, tuple(executed))
         executed.append(claimed.step_id)
         if observed_claims is not None:
             observed_claims[claimed.step_id] = {
@@ -400,6 +421,204 @@ class TestRealRunnerFullPipeline:
         assert not (artifact / "main.py").exists()
         assert executed.count("3") == 1  # no silent promote-on-invalid mock card
         assert executed.count("5") == 1  # the report must really validate
+
+
+    async def test_owner_checkpoint_withdrawal_reauthors_inventory_and_reaches_pm_reviewer(
+            self, tmp_path, monkeypatch):
+        """A real rejected architecture checkpoint must reauthor the inventory.
+
+        The PM and its reviewer then receive the same validated compact ledger;
+        neither is allowed to resurrect C7 as a hollow task.
+        """
+        sf, db, ws, run_id = _build_real_pipeline(tmp_path)
+        observed = {}
+        fixture = json.loads((
+            _REPO_ROOT / "tests/fixtures/context_ruling_propagation_4a2d71bf_c7.json"
+        ).read_text(encoding="utf-8"))
+        assert fixture["run_id"] == "4a2d71bf-2d29-40ee-9e85-43a91a4f3537"
+        owner_feedback = fixture["captured_source"]["owner_ruling_excerpt"]
+        latest = {}
+        c7_id = fixture["requirement_id"]
+        hollow_card = fixture["invalid_retry_output"]["card_id"]
+
+        def response_factory(claimed, default, _base_sha, already_executed):
+            sid = claimed.step_id
+            if sid == "2":
+                code_root = sf._workspace.get_project_code_path("p", run_id=run_id)
+                live_head = subprocess.run(
+                    ["git", "-C", str(code_root), "rev-parse", "HEAD"],
+                    check=True, capture_output=True, text=True,
+                ).stdout.strip()
+                revised = "2" in already_executed
+                c7 = {
+                    "id": c7_id,
+                    "source_locator": "project_brief.md#3",
+                    "status": "withdrawn" if revised else "active",
+                }
+                if revised:
+                    assert owner_feedback in json.dumps(
+                        claimed.inputs.get("_resolved_context", {}),
+                        ensure_ascii=False)
+                    c7["ruling"] = {
+                        "authority": "owner",
+                        "source_id": fixture["captured_source"][
+                            "ruling_source_id"],
+                        "revision": str(fixture["captured_source"]["trace_seq"]),
+                        "baseline_id": _DEFAULT_BASELINE["id"],
+                        "baseline_revision": _DEFAULT_BASELINE["revision"],
+                        "decision": "withdrawn",
+                        "content_sha256": hash_document({
+                            "owner_checkpoint_feedback": owner_feedback,
+                        }),
+                    }
+                inventory = {
+                    "document_type": "requirement_inventory",
+                    "schema_version": 1,
+                    "inventory_version": 2 if revised else 1,
+                    "base_sha": live_head,
+                    "baseline": dict(_DEFAULT_BASELINE),
+                    "state_contract": None,
+                    "requirements": [
+                        {
+                            "id": "add-two-numbers",
+                            "source_locator":
+                                "step1_goals.json#mvp_goals[0]",
+                            "status": "active",
+                        },
+                        c7,
+                    ],
+                }
+                inventory["inventory_sha256"] = hash_document(inventory)
+                latest["inventory"] = inventory
+                return json.dumps({"thoughts": "design", "actions": [
+                    _action("write_design", content="# Design"),
+                    _action("write_requirement_inventory",
+                            content=json.dumps(inventory)),
+                    _action("write_linter_manifest",
+                            content=json.dumps({".py": "ruff"})),
+                ]})
+
+            if sid == "3":
+                inventory = latest["inventory"]
+                assert inventory["requirements"][1]["status"] == "withdrawn"
+                planner_context = json.dumps(
+                    claimed.inputs.get("_resolved_context", {}),
+                    ensure_ascii=False)
+                assert inventory["inventory_sha256"] in planner_context
+                assert inventory["requirements"][1]["ruling"]["source_id"] in (
+                    planner_context)
+                assert hollow_card not in planner_context
+                ledger = {
+                    "document_type": "coverage_ledger",
+                    "schema_version": 1,
+                    "ledger_version": 1,
+                    "inventory_sha256": inventory["inventory_sha256"],
+                    "base_sha": inventory["base_sha"],
+                    "baseline": inventory["baseline"],
+                    "entries": [
+                        {
+                            "requirement_id": "add-two-numbers",
+                            "disposition": "card",
+                            "card_id": "t1",
+                        },
+                        {
+                            "requirement_id": c7_id,
+                            "disposition": "ruling",
+                            "ruling": inventory["requirements"][1]["ruling"],
+                        },
+                    ],
+                }
+                ledger["ledger_sha256"] = hash_document(ledger)
+                latest["ledger"] = ledger
+                card = {
+                    "id": "t1",
+                    "description": "implement add",
+                    "detailed_requirements":
+                        "Add two numbers without side effects.",
+                    "artifact_requirement": "main.py",
+                    "dependencies": [],
+                    "task_type": "code",
+                    "interface_contract": "add(a, b) returns a+b",
+                    "acceptance": "add(2, 3) returns 5",
+                    "owns": ["main.py"],
+                    "stop_conditions":
+                        "Stop if the API contract conflicts with the repo.",
+                    "evidence":
+                        "Actual main.py implementation and code change receipt.",
+                }
+                return json.dumps({"thoughts": "decompose", "actions": [
+                    _action("write_tasks_manifest",
+                            content=json.dumps({"execution_order": [["t1"]]})),
+                    _action("write_task_card", id="t1",
+                            content=json.dumps(card)),
+                    _action("write_coverage_ledger",
+                            content=json.dumps(ledger)),
+                    {"tool": "end_step", "params": {"summary": "1 task"}},
+                ]})
+
+            if sid == "3_review":
+                inventory = latest["inventory"]
+                ledger = latest["ledger"]
+                reviewer_context = json.dumps(
+                    claimed.inputs.get("_resolved_context", {}),
+                    ensure_ascii=False)
+                passed = all((
+                    inventory["inventory_sha256"] in reviewer_context,
+                    ledger["ledger_sha256"] in reviewer_context,
+                    inventory["requirements"][1]["ruling"]["source_id"]
+                        in reviewer_context,
+                    hollow_card not in reviewer_context,
+                    owner_feedback not in reviewer_context,
+                ))
+                verdict = {
+                    "passed": passed,
+                    "feedback": "C7 withdrawal accepted"
+                        if passed else "coverage context mismatch",
+                    "suggestions": [],
+                }
+                return json.dumps({"thoughts": "review coverage", "actions": [
+                    _action("write_verdict", content=json.dumps(verdict)),
+                ]})
+            return default
+
+        status, executed, checkpoints = await _drive_to_completion(
+            sf, db, ws, run_id, monkeypatch, observed_claims=observed,
+            checkpoint_rejections={"2": owner_feedback},
+            response_factory=response_factory,
+        )
+
+        assert status == "completed", executed
+        assert checkpoints == 4
+        assert executed.count("2") == 2
+        inventory = latest["inventory"]
+        ledger = latest["ledger"]
+        assert inventory["requirements"][1]["status"] == "withdrawn"
+        assert [entry["card_id"] for entry in ledger["entries"]
+                if entry["disposition"] == "card"] == ["t1"]
+
+        planner_context = json.dumps(observed["3"]["resolved_context"], ensure_ascii=False)
+        reviewer_context = json.dumps(observed["3_review"]["resolved_context"], ensure_ascii=False)
+        source_id = inventory["requirements"][1]["ruling"]["source_id"]
+        assert inventory["inventory_sha256"] in planner_context
+        assert source_id in planner_context
+        assert ledger["ledger_sha256"] not in planner_context
+        assert inventory["inventory_sha256"] in reviewer_context
+        assert ledger["ledger_sha256"] in reviewer_context
+        assert source_id in reviewer_context
+        for captured in (planner_context, reviewer_context):
+            assert hollow_card not in captured
+            assert owner_feedback not in captured
+            assert fixture["review_input"]["brief_section_3_excerpt"] not in captured
+            assert fixture["review_output"]["summary"] not in captured
+
+        planner_trace = json.dumps(observed["3"]["trace"])
+        reviewer_trace = json.dumps(observed["3_review"]["trace"])
+        assert ledger["ledger_sha256"] in planner_trace
+        assert ledger["ledger_sha256"] in reviewer_trace
+        assert '"passed": true' in reviewer_trace.lower()
+        graph = sf._get_graph_name(run_id)
+        step3 = sf._workspace.get_step_dir("p", graph, "3")
+        assert not (step3 / "tasks" / f"{hollow_card}.json").exists()
 
 
     async def test_game_verdict_runtime_trace_contains_all_current_gate_reports(

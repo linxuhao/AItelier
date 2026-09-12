@@ -37,8 +37,12 @@
 先读取 [requirement_authority_context] 中的真实 base_sha。在
 step2_design.md 之外必须写 requirement_inventory.json：
 
-- inventory_version 每次需求或 owner 裁决变化时递增；base_sha 必须逐字采用
-  authority context 的完整 SHA。
+- inventory_version 每次需求或 owner 裁决变化时递增；base_sha、state_contract
+  以及 authority context 给出的 baseline 必须逐字采用，不得用任意祖先提交或相似
+  State 节点替代。
+- checkpoint 若被 owner 用反馈驳回，你会重新运行。必须把该 feedback 中的新增、撤回
+  或修订应用到新 inventory，再重新计算 inventory_sha256；不得只改设计正文或把反馈
+  留给 PM。无反馈的 approve 表示批准当前 inventory，不存在 approve+feedback 路径。
 - baseline 标识本轮适用的 brief/design 基线及其版本。
 - 每个真实必做项有稳定 id、精确 source_locator 和 status: active。
 - owner/State 撤回或取代的项仍保留同一个 id，但状态改为

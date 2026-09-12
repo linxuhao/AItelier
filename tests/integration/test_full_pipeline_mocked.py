@@ -399,8 +399,11 @@ def _build_real_run(tmp_path):
     finalize = tmp_path / "ws" / "p" / "meta_conversation" / "finalize"
     finalize.mkdir(parents=True, exist_ok=True)
     (finalize / "step1_goals.json").write_text(
-        json.dumps({"mvp_goals": ["x"], "non_goals": [], "user_stories": ["As a user, x"]}),
-        encoding="utf-8")
+        json.dumps({
+            "mvp_goals": ["Add two numbers"],
+            "non_goals": ["No UI"],
+            "user_stories": ["As a user, I can add two numbers"],
+        }), encoding="utf-8")
     from tests.code_output_fixture import init_code_repo
     root = init_code_repo(tmp_path / "proj" / "p")
     sf._workspace._code_path_resolver = lambda pid, run_id=None: root

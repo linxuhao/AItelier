@@ -21,6 +21,7 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]*$")
 _ALLOWED_AUTHORITIES = {"owner", "state"}
 _INACTIVE = {"withdrawn", "superseded"}
+_STATE_HEADING = "# State goal attempt"
 
 
 def _canonical(document: dict[str, Any]) -> bytes:
@@ -79,7 +80,7 @@ def _ruling_errors(ruling: Any, requirement: dict[str, Any],
         errors.append(
             f"{rid}: ruling authority must be owner or state, got {authority!r}")
     for field in ("source_id", "revision"):
-        if not _nonempty(str(ruling.get(field, "")).strip()):
+        if not _nonempty(ruling.get(field)):
             errors.append(f"{rid}: ruling.{field} must be non-empty")
     if ruling.get("decision") != requirement.get("status"):
         errors.append(
@@ -346,7 +347,7 @@ def _roots(workspace_root: str, step_dir: str, out_dir: str,
 
 
 def _git_base_error(project_root: str, base_sha: Any) -> str:
-    """Require the pinned base to exist in the current checkout ancestry."""
+    """Require the inventory base to equal the checkout at authoring time."""
     if not project_root or not _COMMIT_RE.fullmatch(str(base_sha or "")):
         return ""
     root = Path(project_root)
@@ -354,16 +355,102 @@ def _git_base_error(project_root: str, base_sha: Any) -> str:
         return ""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "merge-base", "--is-ancestor",
-             str(base_sha), "HEAD"],
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
             check=False, capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return ""
-    if proc.returncode == 0:
+    head = proc.stdout.strip()
+    if proc.returncode == 0 and head == base_sha:
         return ""
     return (
-        f"inventory base_sha {base_sha!r} is not an ancestor of the current checkout"
+        f"inventory base_sha {base_sha!r} does not equal the current checkout {head!r}"
     )
+
+
+def _state_context(step2: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    """Read the immutable State attempt envelope from the published run seed."""
+    seed = step2.parent / "project_brief.md"
+    try:
+        raw = seed.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, []
+    except OSError as exc:
+        return None, [f"State seed unreadable: {exc}"]
+    if not raw.startswith(_STATE_HEADING):
+        return None, []
+    remainder = raw[len(_STATE_HEADING):].lstrip()
+    try:
+        value, _ = json.JSONDecoder().raw_decode(remainder)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return None, [f"State seed has invalid frozen context: {exc}"]
+    if not isinstance(value, dict):
+        return None, ["State seed frozen context must be an object"]
+    return value, []
+
+
+def _expected_state_contract(context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "project_id": context.get("state_project_id"),
+        "node_key": context.get("node_key"),
+        "revision": context.get("revision"),
+        "contract_hash": context.get("contract_hash"),
+    }
+
+
+def _expected_baseline(
+    step2: Path, state_context: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Derive baseline identity from a frozen source, never from the inventory."""
+    if state_context is not None:
+        design = state_context.get("design_context")
+        if isinstance(design, dict) and design.get("baseline_id"):
+            return {
+                "id": design.get("baseline_id"),
+                "revision": design.get("manifest_hash"),
+            }, []
+        return {
+            "id": "state_contract",
+            "revision": state_context.get("contract_hash"),
+        }, []
+
+    candidates = (
+        (step2.parent.parent / "meta_conversation" / "finalize" /
+         "step1_goals.json", "meta_conversation/finalize/step1_goals.json"),
+        (step2.parent / "project_brief.md", "project_brief.md"),
+    )
+    for path, source_id in candidates:
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return None, [f"baseline source unreadable: {exc}"]
+        return {
+            "id": source_id,
+            "revision": hashlib.sha256(content).hexdigest(),
+        }, []
+    return None, []
+
+
+def _authority_errors(inventory: dict[str, Any], step2: Path) -> list[str]:
+    """Bind provenance-shaped fields to the frozen run authority, when present."""
+    context, errors = _state_context(step2)
+    if errors:
+        return errors
+    actual = inventory.get("state_contract")
+    if context is None:
+        if actual is not None:
+            errors.append("state_contract must be null outside a State attempt")
+    else:
+        expected = _expected_state_contract(context)
+        if actual != expected:
+            errors.append(
+                "state_contract does not equal the frozen State attempt context")
+    expected_baseline, baseline_errors = _expected_baseline(step2, context)
+    errors.extend(baseline_errors)
+    if expected_baseline is not None and inventory.get("baseline") != expected_baseline:
+        errors.append("inventory baseline does not equal the frozen authority baseline")
+    return errors
 
 
 def _git_head(project_root: str) -> str:
@@ -426,17 +513,43 @@ def requirement_coverage(
             and root.name not in {"2", "3"}
             and not root.name.endswith(".tmp"))
         if head and is_project_workspace:
+            graph = root / config_name if config_name else root
+            state_context, state_errors = _state_context(graph / "2")
+            if state_errors:
+                return {"passed": False, "error": "; ".join(state_errors)}
+            lines = [
+                "[requirement_authority_context]",
+                f"base_sha={head}",
+            ]
+            if state_context is None:
+                lines.append("state_contract=null")
+            else:
+                lines.append(
+                    "state_contract=" + json.dumps(
+                        _expected_state_contract(state_context),
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    )
+                )
+            expected_baseline, baseline_errors = _expected_baseline(
+                graph / "2", state_context)
+            if baseline_errors:
+                return {"passed": False, "error": "; ".join(baseline_errors)}
+            if expected_baseline is not None:
+                lines.append("baseline=" + json.dumps(
+                    expected_baseline, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":")))
+            lines.append(
+                "Use these exact values in requirement_inventory.json. Reports "
+                "and model opinions are observations; only owner or State "
+                "sources may withdraw or supersede a requirement."
+            )
             return {
                 "passed": True,
                 "phase": "authority_context",
                 "base_sha": head,
-                "content": (
-                    "[requirement_authority_context]\n"
-                    f"base_sha={head}\n"
-                    "Use this exact commit in requirement_inventory.json. "
-                    "Reports and model opinions are observations; only owner or "
-                    "State sources may withdraw or supersede a requirement."
-                ),
+                "state_contract": (_expected_state_contract(state_context)
+                                   if state_context is not None else None),
+                "content": "\n".join(lines),
             }
         return {"passed": False, "error": "; ".join(root_errors)}
 
@@ -445,9 +558,15 @@ def requirement_coverage(
     if inventory is None:
         return {"passed": False, "error": "; ".join(errors)}
     errors.extend(_inventory_errors(inventory))
-    base_error = _git_base_error(project_root, inventory.get("base_sha"))
-    if base_error:
-        errors.append(base_error)
+    errors.extend(_authority_errors(inventory, step2))
+    # Exact checkout equality is an authoring-time gate. Later context-source
+    # reads may see commits made by prior DPE steps; the promoted inventory is
+    # then the frozen, content-addressed base authority.
+    raw_root = Path(workspace_root or step_dir or out_dir)
+    if raw_root.name.startswith("2"):
+        base_error = _git_base_error(project_root, inventory.get("base_sha"))
+        if base_error:
+            errors.append(base_error)
 
     if step3 is None or not (step3 / "requirements_coverage.json").is_file():
         if errors:

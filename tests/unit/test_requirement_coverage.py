@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -338,6 +339,201 @@ def test_dpe_wires_inventory_ledger_validation_before_review():
         "requirements_coverage.json")
     assert any(v.get("tool") == "requirement_coverage"
                for v in step3["validation"])
+    assert {"source": {"feedback_of": "2"}} in step2["context"]
     assert {"source": {"tool": "requirement_coverage"}} in step3["context"]
+    assert {"source": {"feedback_of": "2"}} not in step3["context"]
+    assert {"source": {"feedback_of": "1"}} not in step3["context"]
     assert {"source": {"tool": "requirement_coverage"}} in reviewer["context"]
     assert any(t.get("to") == "3_budget" for t in step3["transitions"])
+
+
+@pytest.mark.parametrize("field", ["source_id", "revision"])
+@pytest.mark.parametrize("bad", [None, "", "   ", True, 1, {}, []])
+def test_ruling_source_and_revision_require_real_strings(tmp_path, field, bad):
+    inventory = _inventory()
+    inventory["requirements"][1]["ruling"][field] = bad
+    inventory["inventory_sha256"] = hash_document(inventory)
+    ledger = _ledger(inventory)
+    step3 = _tree(tmp_path, inventory, ledger)
+
+    result = requirement_coverage(workspace_root=str(step3))
+
+    assert result["passed"] is False
+    assert f"ruling.{field} must be non-empty" in result["error"]
+
+
+def _git_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Authority test"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "authority@test.invalid"], cwd=repo, check=True)
+    (repo / "one").write_text("one\n")
+    subprocess.run(["git", "add", "one"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+    first = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                           capture_output=True, text=True).stdout.strip()
+    (repo / "two").write_text("two\n")
+    subprocess.run(["git", "add", "two"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "two"], cwd=repo, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+    return repo, first, head
+
+
+def _state_seed(context: dict) -> str:
+    return "# State goal attempt\n\n" + json.dumps(
+        context, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def test_inventory_base_must_equal_head_not_merely_be_an_ancestor(tmp_path):
+    repo, ancestor, _ = _git_repo(tmp_path)
+    inventory = _inventory()
+    inventory["base_sha"] = ancestor
+    inventory["inventory_sha256"] = hash_document(inventory)
+    step2 = tmp_path / "graph" / "2.tmp"
+    step2.mkdir(parents=True)
+    (step2 / "requirement_inventory.json").write_text(json.dumps(inventory))
+
+    result = requirement_coverage(
+        workspace_root=str(step2), project_root=str(repo))
+
+    assert result["passed"] is False
+    assert "does not equal the current checkout" in result["error"]
+
+
+def test_state_contract_and_design_baseline_equal_frozen_seed(tmp_path):
+    repo, _, head = _git_repo(tmp_path)
+    state = {
+        "state_project_id": "state-project",
+        "node_key": "feature.node",
+        "revision": 3,
+        "contract_hash": "b" * 64,
+        "design_context": {"baseline_id": "design-b9", "manifest_hash": "c" * 64},
+    }
+    graph = tmp_path / "graph"
+    step2 = graph / "2.tmp"
+    step2.mkdir(parents=True)
+    (graph / "project_brief.md").write_text(_state_seed(state))
+    inventory = _inventory()
+    inventory["base_sha"] = head
+    inventory["state_contract"] = {
+        "project_id": "state-project", "node_key": "feature.node",
+        "revision": 3, "contract_hash": "b" * 64,
+    }
+    inventory["baseline"] = {"id": "design-b9", "revision": "c" * 64}
+    inventory["requirements"][1]["ruling"]["baseline_id"] = "design-b9"
+    inventory["requirements"][1]["ruling"]["baseline_revision"] = "c" * 64
+    inventory["inventory_sha256"] = hash_document(inventory)
+    (step2 / "requirement_inventory.json").write_text(json.dumps(inventory))
+
+    assert requirement_coverage(
+        workspace_root=str(step2), project_root=str(repo))["passed"] is True
+
+    for mutation, expected in (
+        (lambda d: d.__setitem__("state_contract", None), "frozen State"),
+        (lambda d: d.__setitem__("state_contract", {
+            **inventory["state_contract"], "node_key": "other.node"}), "frozen State"),
+        (lambda d: d.__setitem__("baseline", {
+            "id": "old-baseline", "revision": "c" * 64}), "frozen authority baseline"),
+    ):
+        broken = copy.deepcopy(inventory)
+        mutation(broken)
+        broken["inventory_sha256"] = hash_document(broken)
+        (step2 / "requirement_inventory.json").write_text(json.dumps(broken))
+        result = requirement_coverage(workspace_root=str(step2), project_root=str(repo))
+        assert result["passed"] is False
+        assert expected in result["error"]
+
+
+def test_state_without_design_context_uses_contract_as_frozen_baseline(tmp_path):
+    repo, _, head = _git_repo(tmp_path)
+    state = {
+        "state_project_id": "state-project",
+        "node_key": "feature.node",
+        "revision": 3,
+        "contract_hash": "b" * 64,
+    }
+    graph = tmp_path / "graph"
+    step2 = graph / "2.tmp"
+    step2.mkdir(parents=True)
+    (graph / "project_brief.md").write_text(_state_seed(state))
+
+    authority = requirement_coverage(
+        workspace_root=str(graph), project_root=str(repo))
+    assert authority["passed"] is True
+    assert authority["state_contract"] == {
+        "project_id": "state-project", "node_key": "feature.node",
+        "revision": 3, "contract_hash": "b" * 64,
+    }
+    assert 'baseline={"id":"state_contract","revision":"' in (
+        authority["content"])
+
+    inventory = _inventory()
+    inventory["base_sha"] = head
+    inventory["state_contract"] = authority["state_contract"]
+    inventory["baseline"] = {"id": "state_contract", "revision": "b" * 64}
+    inventory["requirements"][1]["ruling"]["baseline_id"] = "state_contract"
+    inventory["requirements"][1]["ruling"]["baseline_revision"] = "b" * 64
+    inventory["inventory_sha256"] = hash_document(inventory)
+    (step2 / "requirement_inventory.json").write_text(json.dumps(inventory))
+    assert requirement_coverage(
+        workspace_root=str(step2), project_root=str(repo))["passed"] is True
+
+
+def test_non_state_baseline_is_bound_to_frozen_goals_file(tmp_path):
+    repo, _, head = _git_repo(tmp_path)
+    goals = tmp_path / "meta_conversation" / "finalize" / "step1_goals.json"
+    goals.parent.mkdir(parents=True)
+    goals.write_text('{"mvp_goals":["A"]}')
+    graph = tmp_path / "graph"
+    graph.mkdir()
+
+    authority = requirement_coverage(
+        workspace_root=str(graph), project_root=str(repo))
+    expected = {
+        "id": "meta_conversation/finalize/step1_goals.json",
+        "revision": __import__("hashlib").sha256(goals.read_bytes()).hexdigest(),
+    }
+    assert authority["passed"] is True
+    assert json.dumps(expected, sort_keys=True, separators=(",", ":")) in (
+        authority["content"])
+
+    step2 = graph / "2.tmp"
+    step2.mkdir()
+    inventory = _inventory()
+    inventory["base_sha"] = head
+    inventory["baseline"] = expected
+    inventory["requirements"][1]["ruling"]["baseline_id"] = expected["id"]
+    inventory["requirements"][1]["ruling"]["baseline_revision"] = expected["revision"]
+    inventory["inventory_sha256"] = hash_document(inventory)
+    (step2 / "requirement_inventory.json").write_text(json.dumps(inventory))
+    assert requirement_coverage(
+        workspace_root=str(step2), project_root=str(repo))["passed"] is True
+
+    inventory["baseline"] = {"id": "self-asserted", "revision": 1}
+    inventory["requirements"][1]["ruling"]["baseline_id"] = "self-asserted"
+    inventory["requirements"][1]["ruling"]["baseline_revision"] = 1
+    inventory["inventory_sha256"] = hash_document(inventory)
+    (step2 / "requirement_inventory.json").write_text(json.dumps(inventory))
+    result = requirement_coverage(
+        workspace_root=str(step2), project_root=str(repo))
+    assert result["passed"] is False
+    assert "frozen authority baseline" in result["error"]
+
+
+def test_non_state_run_rejects_self_asserted_state_contract(tmp_path):
+    inventory = _inventory()
+    inventory["state_contract"] = {
+        "project_id": "invented", "node_key": "invented.node",
+        "revision": 1, "contract_hash": "d" * 64,
+    }
+    inventory["inventory_sha256"] = hash_document(inventory)
+    step2 = tmp_path / "graph" / "2"
+    step2.mkdir(parents=True)
+    (step2 / "requirement_inventory.json").write_text(json.dumps(inventory))
+
+    result = requirement_coverage(workspace_root=str(step2))
+
+    assert result["passed"] is False
+    assert "must be null outside a State attempt" in result["error"]

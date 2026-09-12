@@ -70,11 +70,35 @@ def _baseline_head(checked_root):
     """
     top = _git(checked_root, "rev-parse", "--show-toplevel")
     if not top:
+        # Any non-zero `git` exit lands here too — not just "no .git": a
+        # missing `git` binary, PATH without it, or `dubious ownership` all
+        # make `_git` return None indistinguishably. Whatever the cause, the
+        # exemption is about to go silently strict (see _preexisting_failures
+        # returning `set()`), so that fact needs to survive the run.
+        log_gate_skip("gdscript_check", "baseline resolve failed: not a git "
+                      "work tree, or git is unavailable", checked_root=checked_root)
         return None
     head = _git(top, "rev-parse", "HEAD")
     if not head:
         return None          # unborn branch: nothing shipped, nothing to forgive
     return Path(top), head
+
+
+def _cache_matches_head(top, dest, rel):
+    """True only if the cached blob at `dest` is bit-identical to HEAD:rel.
+
+    The cache directory is under the mounted, container-writable data root —
+    a step (or anything else with write access to the mount) could plant a
+    file at the exact path a real HEAD:rel export would use, and the old
+    `dest.is_file()` short-circuit would trust it outright, letting a real
+    error be forgiven by a forged baseline. Compare content hashes instead of
+    trusting presence; either side failing to resolve means "don't trust it".
+    """
+    want = _git(top, "rev-parse", f"HEAD:{rel}")
+    if not want:
+        return False
+    got = _git(top, "hash-object", str(dest))
+    return bool(got) and got == want
 
 
 def _export_baseline(top, head, rels):
@@ -83,7 +107,9 @@ def _export_baseline(top, head, rels):
     The sidecar mounts only ``~/.AItelier``, so the baseline copies have to live
     there — it cannot read a git object store, and `git worktree`/`git archive`
     of the whole tree would cost far more than the handful of failing files.
-    Keyed by HEAD sha, so a second call in the same run reuses the export.
+    Keyed by HEAD sha, so a second call in the same run reuses the export — but
+    reuse is only ever a cache HIT, verified against HEAD, never a bare
+    presence check; see _cache_matches_head.
     Returns {absolute export path: rel} for the paths that exist at HEAD; a path
     with no HEAD version (a file this step CREATED) is absent, and so is never
     forgiven.
@@ -92,14 +118,16 @@ def _export_baseline(top, head, rels):
     base = aitelier_home() / "gdscript_baseline" / head[:12]
     for rel in rels:
         dest = base / rel
-        if not dest.is_file():
+        if not (dest.is_file() and _cache_matches_head(top, dest, rel)):
             blob = _git(top, "cat-file", "blob", f"HEAD:{rel}", binary=True)
             if blob is None:
                 continue
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(blob)
-            except OSError:
+            except OSError as e:
+                log_gate_skip("gdscript_check", "baseline export failed",
+                              rel=rel, error=e)
                 continue
         out[str(dest.resolve())] = rel
     return out
@@ -158,7 +186,9 @@ def _preexisting_failures(results, checked_root, timeout):
             headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=timeout + 60) as resp:
             base_report = json.loads(resp.read())
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError) as e:
+        log_gate_skip("gdscript_check", "baseline checkgd call failed",
+                      url=_BUILDER_URL, error=e, files=len(exported))
         return set()
     forgiven = set()
     for br in base_report.get("results", []):

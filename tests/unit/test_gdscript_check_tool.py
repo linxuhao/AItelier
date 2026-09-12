@@ -1,7 +1,9 @@
 """gdscript_check — the per-task GDScript parse gate (host-side tool)."""
 
 import json
+import subprocess
 import urllib.error
+from pathlib import Path
 
 import pytest
 
@@ -302,3 +304,202 @@ def test_a_file_the_step_created_has_no_baseline_and_is_never_forgiven(
     assert r["all_passed"] is False
     # Nothing to export at HEAD, so the builder is asked exactly once.
     assert len(calls) == 1
+
+
+# --- degradation is visible ---------------------------------------------
+# The exemption above has three ways to fall back to the strict verdict
+# silently: a baseline that fails to resolve (no git root, or `git` itself
+# unavailable/erroring), a baseline export that hits an OSError, and a second
+# /checkgd call that fails. None of them may widen or narrow the verdict —
+# they only have to leave a line saying it happened. And a cache directory
+# that is container-writable must never be trusted by presence alone.
+
+def _capture_gate_log(monkeypatch):
+    import aitelier.gate_skip_log as gsl
+    lines = []
+    monkeypatch.setattr(gsl, "_logger", type("L", (), {
+        "info": lambda self, fmt, *a: lines.append(fmt % a)})())
+    return lines
+
+
+def test_a_non_git_root_leaves_a_line_and_the_verdict_stays_strict(tmp_path, monkeypatch):
+    lines = _capture_gate_log(monkeypatch)
+    plain = tmp_path / "not_a_repo"
+    plain.mkdir()
+    f = plain / "a.gd"
+    f.write_text("func f(:\n")
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _resp(
+        {"all_passed": False, "results": [
+            {"file": str(f), "passed": False,
+             "error_message": "Parse Error: Expected identifier"}]}))
+
+    r = gdscript_check(files=["*.gd"], workspace_root=str(plain))
+    # A baseline that cannot be resolved must never WIDEN the exemption —
+    # the strict verdict from the sidecar stands untouched.
+    assert r["all_passed"] is False
+    assert any("gate=gdscript_check" in l and "SKIPPED" in l
+               and "baseline resolve failed" in l for l in lines)
+
+
+def test_git_missing_from_path_leaves_a_line_and_the_verdict_stays_strict(
+        tmp_path, monkeypatch):
+    lines = _capture_gate_log(monkeypatch)
+    repo = _git_repo(tmp_path / "wt", {"a.gd": "extends Node\n"})
+    (repo / "a.gd").write_text("func f(:\n")
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: _resp(
+        {"all_passed": False, "results": [
+            {"file": str(repo / "a.gd"), "passed": False,
+             "error_message": "Parse Error: Expected identifier"}]}))
+    empty_bin = tmp_path / "empty_bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))     # no `git` reachable at all
+
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    assert r["all_passed"] is False
+    assert any("gate=gdscript_check" in l and "baseline resolve failed" in l
+               for l in lines)
+
+
+def test_a_second_checkgd_call_failure_leaves_a_line_and_the_verdict_stays_strict(
+        tmp_path, monkeypatch):
+    lines = _capture_gate_log(monkeypatch)
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    repo = _git_repo(tmp_path / "wt", {
+        "pre.gd": "extends Node\nconst K = preload('res://x.gd')\n"})
+    calls = {"n": 0}
+
+    def _open(req, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:      # the primary check, against the staged file
+            return _resp({"all_passed": False, "results": [
+                {"file": str(repo / "pre.gd"), "passed": False,
+                 "error_message": 'SCRIPT ERROR: Parse Error: "K" is a '
+                                  'constant but does not contain a type.'}]})
+        raise urllib.error.URLError("no route")   # the baseline call, fails
+
+    monkeypatch.setattr("urllib.request.urlopen", _open)
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    assert calls["n"] == 2
+    # The baseline could not be consulted, so nothing is forgiven — strict.
+    assert r["all_passed"] is False
+    assert any("gate=gdscript_check" in l and "baseline checkgd call failed" in l
+               for l in lines)
+
+
+def test_a_baseline_export_oserror_leaves_a_line_and_the_verdict_stays_strict(
+        tmp_path, monkeypatch):
+    lines = _capture_gate_log(monkeypatch)
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    repo = _git_repo(tmp_path / "wt", {
+        "pre.gd": "extends Node\nconst K = preload('res://x.gd')\n"})
+    _fake_builder(monkeypatch, {
+        "pre.gd": 'SCRIPT ERROR: Parse Error: "K" is a constant but does not '
+                  'contain a type.'})
+    monkeypatch.setattr("pathlib.Path.write_bytes", lambda self, data: (
+        _ for _ in ()).throw(OSError("disk full")))
+
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    # The export failed, so nothing could be exported to compare against —
+    # the primary (strict) failure stands.
+    assert r["all_passed"] is False
+    assert any("gate=gdscript_check" in l and "baseline export failed" in l
+               for l in lines)
+
+
+def test_healthy_path_writes_no_degradation_line(tmp_path, monkeypatch):
+    """Negative control: none of the three failure paths fire on a clean run,
+    including one that legitimately consults and finds a matching baseline."""
+    lines = _capture_gate_log(monkeypatch)
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    repo = _git_repo(tmp_path / "wt", {
+        "pre.gd": "extends Node\nconst K = preload('res://x.gd')\n"})
+    _fake_builder(monkeypatch, {
+        "pre.gd": 'SCRIPT ERROR: Parse Error: "K" is a constant but does not '
+                  'contain a type.'})
+
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    assert r["all_passed"] is True            # forgiven normally, via a real baseline
+    assert r["results"][0]["preexisting"] is True
+    assert lines == []
+
+
+def test_a_forged_baseline_cache_entry_is_not_trusted(tmp_path, monkeypatch):
+    """The cache directory is under the mounted, container-writable data root.
+
+    Before the fix, `dest.is_file()` alone decided reuse: planting a file at
+    the exact `gdscript_baseline/<head12>/<rel>` path a real export would use
+    let a genuine, freshly-introduced syntax error be "forgiven" as identical
+    to a HEAD failure it never actually had. The fake godot-builder below
+    parses the FILE CONTENT it is handed (like the real one does), so this
+    only stays green if the forged cache is actually treated as the baseline.
+    """
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    # HEAD ships the (idiomatic-but-check-only-hostile) preload constant.
+    repo = _git_repo(tmp_path / "wt", {
+        "pre.gd": "extends Node\nconst K = preload('res://x.gd')\n"})
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    # The step then breaks the file for real, with an UNRELATED syntax error.
+    (repo / "pre.gd").write_text("extends Node\nfunc broken(\n")
+
+    # Plant a forged cache entry that claims to be the HEAD blob but is
+    # actually a copy of the step's own broken content — an attempt to make
+    # the real error look "identical to what HEAD already had".
+    cache = tmp_path / "home" / "gdscript_baseline" / head[:12] / "pre.gd"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("extends Node\nfunc broken(\n")
+
+    def _content_aware_open(req, *a, **k):
+        files = json.loads(req.data)["files"]
+        results = []
+        for f in files:
+            text = Path(f).read_text()
+            if "func broken(" in text:
+                msg = ('SCRIPT ERROR: Parse Error: Expected closing ")" '
+                      'after function parameters.')
+            elif "preload(" in text:
+                msg = ('SCRIPT ERROR: Parse Error: "K" is a constant but '
+                      'does not contain a type.')
+            else:
+                msg = None
+            results.append({"file": f, "passed": msg is None,
+                            "error_message": msg or ""})
+        return _resp({"all_passed": all(r["passed"] for r in results),
+                      "results": results})
+
+    monkeypatch.setattr("urllib.request.urlopen", _content_aware_open)
+    r = gdscript_check(files=["*.gd"], workspace_root=str(repo))
+    # If the forged cache had been trusted by presence alone, the baseline
+    # call would have echoed the SAME broken diagnosis as the staged file,
+    # and the real, newly-introduced error would have been forgiven.
+    assert r["all_passed"] is False
+    assert not r["results"][0].get("preexisting")
+    # The forged content must have been overwritten with the real HEAD blob.
+    assert cache.read_text() == "extends Node\nconst K = preload('res://x.gd')\n"
+
+
+def test_an_untampered_cache_hit_is_still_reused(tmp_path, monkeypatch):
+    """Positive control for the same mechanism: a cache entry that genuinely
+    matches HEAD must still be reused, not re-fetched every time — the fix
+    is a content check, not a ban on reuse."""
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    repo = _git_repo(tmp_path / "wt", {
+        "pre.gd": "extends Node\nconst K = preload('res://x.gd')\n"})
+    from aitelier.tools.gdscript_check.impl import _baseline_head, _export_baseline
+    top, head = _baseline_head(repo)
+    first = _export_baseline(top, head, ["pre.gd"])
+    cache_path = next(iter(first))
+    mtime_before = Path(cache_path).stat().st_mtime_ns
+
+    fetch_calls = {"n": 0}
+    real_git = subprocess.run
+    def _counting_run(args, *a, **k):
+        if "cat-file" in args:
+            fetch_calls["n"] += 1
+        return real_git(args, *a, **k)
+    monkeypatch.setattr(subprocess, "run", _counting_run)
+
+    second = _export_baseline(top, head, ["pre.gd"])
+    assert second == first
+    assert fetch_calls["n"] == 0        # no re-fetch: the cache hit was trusted
+    assert Path(cache_path).stat().st_mtime_ns == mtime_before

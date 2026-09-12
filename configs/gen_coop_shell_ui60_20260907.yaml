@@ -1,0 +1,175 @@
+# configs/coding_impl.yaml
+# OFFLOADED implementation of an approved plan — scheduler-driven so the whole
+# edit/test loop runs in a SPAWNED agent's ephemeral context, never touching
+# the butler's window (the context-offload half of the hybrid coding flow:
+# butler plans in runner mode, then hands the approved plan here).
+#
+# Seeded with the approved plan.md; runs against the project's real repo
+# (repo_type=existing + repo_path, wired by start_config_run). The implement
+# step reuses DPE's task_implementer machinery (write mode → surgical
+# create/edit tools, repo_apply commits); run_tests then verifies.
+
+name: "gen_coop_shell_ui60_20260907"
+description: "Offloaded implementation: a spawned agent implements an approved plan"
+
+x-aitelier:
+  label: "Coding Implementation"
+  scheduler_owned: true          # poller-driven → spawned agent → context isolated
+  seed_file: "plan.md"
+  output_step: "test"
+  input_hint: >-
+    seed_text = the APPROVED plan.md content (goal, numbered steps, verification).
+    Start with against_project=<the project whose repo to implement into>. A
+    spawned agent implements the plan, commits, and runs the tests in its own
+    context — poll to completion, then report the summary + test_report. Use
+    this to OFFLOAD implementation of an approved plan out of your context.
+
+begin: "implement"
+
+end_conditions:
+  combinator: or
+  conditions:
+    # Complete successfully ONLY at the dedicated `done` node, which is reached exclusively
+    # when the tests pass (test_outcome → done). `done` sits OUTSIDE the implement↔test
+    # loop, so it is entered at most once.
+    #
+    # This node MUST NOT be `test`: `test` is inside the loop, so on a
+    # loop-back the graph advances INTO `test` again while a stale `completed`
+    # `test` row from the prior iteration still exists — `node_reached: test`
+    # would then fire and complete the run as SUCCESS *before the retried test
+    # even runs*, reporting green on unverified code (the exact failure we are
+    # fixing). `done` is a gate (no completed step row), so `require_completed`
+    # is intentionally omitted.
+    # The never-passes loop is bounded by `max_loop: 3` on test_outcome → implement
+    # below (enforced on tool-step edges since skillflow-py 1.5.2): once the edge
+    # is exhausted the run fails with CycleLimitExceeded.
+    - type: node_reached
+      node: "done"
+      result: "completed"
+    - type: node_reached
+      node: "test_evidence_missing"
+      result: "failed"
+
+steps:
+  - id: "implement"
+    step_type: "agent"
+    agent_config: "offload_implementer"
+    max_tool_turns: 60
+    timeout_seconds: 600
+    context:
+      - source: { from: "repository", mode: "tool" }        # repo read tools
+      # `required` is the RUNTIME backstop, and it is second, not first: the
+      # poller now refuses to create a run for this config until the seed is
+      # published (core/seed_publication.py), so a healthy launch never reaches
+      # this. It fires only if something creates a run with no plan anyway —
+      # and then ContextResolver raises RequiredContextMissing at the first
+      # claim, which the scheduler turns into a terminal run with a named
+      # reason, instead of spawning an implementer with no scope at all.
+      #
+      # Without it the source resolved to EMPTY and the step claimed cleanly:
+      # that is how a plan-less agent got 95 s and a `repo_apply` on
+      # 2026-09-05.
+      - source: { config: "gen_coop_shell_ui60_20260907", output: "plan.md", required: true }  # the approved plan
+      # On a test-failure loop-back this carries the previous run's
+      # test_report.json (failures[] + summary) so the agent fixes the actual
+      # breakage instead of re-guessing. Empty on the first pass (test hasn't
+      # run yet), like DPE's goal-loop feedback inputs.
+      - source: { step: "test" }
+      - source: { tool: "dir_tree" }
+    output:
+      mode: "write"                # derives surgical create/edit (+ finish_step)
+    lifecycle:
+      on_deliver:
+        # repo_apply stays HERE (before the test), not after it: run_tests
+        # executes against the project's real working tree, so the changes must
+        # be applied there for the tests to exercise them — and repo_apply has no
+        # stage-only mode (it always git-adds + commits). A failing test now
+        # loops back to `implement`, which fixes and re-commits, so HEAD
+        # converges to tested-passing code (fix-forward, exactly like DPE's
+        # t_impl → t_impl_review). The gate below is what blocks completion.
+        - tool: "repo_apply"        # stage + commit the step's files to the real repo
+          params:
+            source_dir: "$STEP_DIR"
+          on_failure: "retry"
+          max_retries: 3
+    transitions:
+      - to: "test"
+
+  - id: "test"
+    step_type: "tool"
+    tool_name: "run_tests"
+    # Must exceed run_tests' worst case (venv + deps + pytest wall) so a slow
+    # run isn't reclaimed mid-flight.
+    timeout_seconds: 1200
+    tool_params:
+      out_dir: "$STEP_DIR"
+    # A failed tool invocation must not consume a report from a prior attempt.
+    transitions:
+      - to: "test_evidence_missing"
+        match: { _error: true }
+      - to: "test_evidence"
+        match: { written: "test_report.json" }
+      - to: "test_evidence_missing"
+
+  - id: "test_evidence"
+    step_type: "tool"
+    tool_name: "json_schema"
+    tool_params:
+      workspace_root: "$CONFIG_DIR/test"
+      files: ["test_report.json"]
+      # Validate the actual artifact before routing. Missing runners and zero
+      # collected tests are not code defects for the implementer to repair.
+      # jsonschema is a direct runtime dependency: the native tool fallback
+      # cannot enforce these constraints when that package is absent.
+      inline_schema:
+        type: object
+        required: [passed, summary, failures]
+        properties:
+          passed: { type: boolean }
+          summary: { type: string, minLength: 1 }
+          failures: { type: array, items: { type: string } }
+          skipped: { const: false }
+          no_tests_collected: { const: false }
+          node:
+            type: object
+            properties:
+              skipped: { const: false }
+    transitions:
+      - to: "test_evidence_missing"
+        match: { _error: true }
+      - to: "test_outcome"
+        match: { all_passed: true }
+      - to: "test_evidence_missing"
+
+  - id: "test_outcome"
+    step_type: "tool"
+    tool_name: "json_schema"
+    tool_params:
+      workspace_root: "$CONFIG_DIR/test"
+      files: ["test_report.json"]
+      inline_schema:
+        type: object
+        required: [passed]
+        properties:
+          passed: { const: true }
+    transitions:
+      - to: "test_evidence_missing"
+        match: { _error: true }
+      - to: "done"
+        match: { all_passed: true }
+      - to: "implement"
+        match: { all_passed: false }
+        # Initial test plus three repair attempts; never complete on exhaustion.
+        max_loop: 3
+
+  - id: "test_evidence_missing"
+    step_type: "gate"
+    transitions:
+      - to: null
+
+  # Terminal no-op gate: reached only after the tests pass. Its sole purpose is
+  # to be the loop-external node the end-condition fires on (see end_conditions).
+  - id: "done"
+    step_type: "gate"
+    transitions:
+      - to: null

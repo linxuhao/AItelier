@@ -37,7 +37,8 @@ index_repo() {
   prepare_repo "$repo" || return 1
   [ -d "$repo/.zvec-grep" ] && return 1
   echo "[zg-indexer] indexing new repo: $repo"
-  if index_output="$(zg index "$repo" --embedding "$EMBED" --mode server 2>&1)"; then
+  if index_output="$(zg index "$repo" --embedding "$EMBED" --mode server \
+      --glob '!**/.zvec-grep/**' 2>&1)"; then
     printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /'
   else
     printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /' >&2

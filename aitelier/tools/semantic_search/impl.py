@@ -18,6 +18,7 @@ from pathlib import Path
 
 _DEFAULT_URL = "http://127.0.0.1:7999/mcp"
 _MAX_LIMIT = 50
+_INTERNAL_STORAGE_GLOB = "!**/.zvec-grep/**"
 _session_id: str | None = None
 
 
@@ -101,8 +102,8 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
         lim = 8
     lim = max(1, min(lim, _MAX_LIMIT))
     args = {"root": str(Path(project_root).resolve()), "query": q, "limit": lim}
-    if globs:
-        args["globs"] = [str(g) for g in globs]
+    requested_globs = [str(g) for g in globs] if globs else []
+    args["globs"] = requested_globs + [_INTERNAL_STORAGE_GLOB]
     if fts:
         args["fts"] = [str(f) for f in fts]
     try:

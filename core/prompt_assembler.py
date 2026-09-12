@@ -10,6 +10,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Optional
+from skillflow.source_visibility import iter_visible_source_paths
 from core.workspace_manager import DPE_GRAPH_NAME, TASK_STEP_SEQUENCE, PROJECT_STEP_SEQUENCE, STEP_SEQUENCE
 
 logger = logging.getLogger(__name__)
@@ -677,7 +678,7 @@ class PromptAssembler:
             "# repo root" 标题下给 agent 看
         :return: 目录树字符串，为空则返回 ""
         """
-        BLOCKED = {".git", "__pycache__", ".venv", "node_modules", ".gitkeep", "_snapshot.json"}
+        BLOCKED = {".git", ".zvec-grep", "__pycache__", ".venv", "node_modules", ".gitkeep", "_snapshot.json"}
         MAX_DEPTH = 3
         MAX_ENTRIES = 100
 
@@ -687,7 +688,7 @@ class PromptAssembler:
                 return []
             entries = []
             count = 0
-            for item in sorted(directory.rglob("*")):
+            for item in iter_visible_source_paths(directory):
                 if count >= MAX_ENTRIES:
                     entries.append(f"  ... [truncated at {MAX_ENTRIES} entries]")
                     break

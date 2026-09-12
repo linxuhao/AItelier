@@ -5,6 +5,10 @@ import os
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from skillflow.source_visibility import (
+    is_internal_source_storage,
+    prune_internal_source_storage,
+)
 
 # ── helpers ────────────────────────────────────────────────────────
 
@@ -350,6 +354,8 @@ def workspace_tree(
     base = (root_dir / subdir).resolve() if subdir else root_dir
     if not base.is_relative_to(root_dir):
         raise HTTPException(status_code=403, detail="Path traversal denied")
+    if is_internal_source_storage(base.relative_to(root_dir)):
+        raise HTTPException(status_code=404, detail="Workspace not found")
     if not base.exists():
         raise HTTPException(status_code=404, detail="Workspace not found")
 
@@ -375,7 +381,8 @@ def workspace_tree(
         # 405 files on disk and 200 returned. Sorting makes the cut a prefix:
         # what is missing is the tail, which is a thing a reader can reason
         # about, instead of an arbitrary subset.
-        dirnames[:] = sorted(d for d in dirnames if d != ".git")
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+        prune_internal_source_storage(dirnames)
         # Directories count toward the scan budget too. Counting only files made
         # `_WORKSPACE_TREE_SCAN_MAX` unreachable — `scanned` incremented on the
         # same line as `tree.append`, so it could never exceed the 200-file cap

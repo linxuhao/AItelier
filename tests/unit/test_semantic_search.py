@@ -73,7 +73,8 @@ def test_limit_is_clamped_and_globs_fts_forwarded(zg, tmp_path):
     r = semantic_search("x", limit=500, globs=["scripts/**"], fts=["apply_damage"], project_root=str(tmp_path))
     args = _FakeZg.calls[-1][2]["params"]["arguments"]
     assert r["limit"] == 50 and args["limit"] == 50
-    assert args["globs"] == ["scripts/**"] and args["fts"] == ["apply_damage"]
+    assert args["globs"] == ["scripts/**", "!**/.zvec-grep/**"]
+    assert args["fts"] == ["apply_damage"]
 
 
 def test_missing_root_is_an_error_not_cwd(monkeypatch, tmp_path):

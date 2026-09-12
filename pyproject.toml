@@ -11,7 +11,7 @@ license-files = ["LICENSE"]
 dependencies = [
     # This storage migration spans host + engine. Exact-pin the reviewed public
     # release so an older engine cannot ignore the explicit output target.
-    "skillflow-py==1.5.73",
+    "skillflow-py==1.5.74",
     # coding_impl requires the native json_schema tool's full validator; its
     # import fallback checks only required fields and cannot enforce const.
     # 3.0 adds Draft 6/7; 3.0.2 fixes boolean-versus-number const comparisons.

@@ -19,6 +19,9 @@ from typing import AsyncGenerator, NamedTuple
 
 import litellm
 import yaml
+from skillflow.source_visibility import (
+    iter_visible_source_files,
+)
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -3424,7 +3427,7 @@ class MetaAgent:
         if not base.exists():
             return {"error": f"Code repo not found for {pid}"}
         tree = []
-        for item in sorted(base.rglob("*")):
+        for item in iter_visible_source_files(base):
             if item.is_file() and "/.git/" not in f"/{item}":
                 tree.append(str(item.relative_to(base)))
         return {"project_id": pid, "tree": tree[:200]}
@@ -3918,7 +3921,7 @@ class MetaAgent:
             regex = None  # not a valid regex → literal substring match
         matches = []
         truncated = False
-        for item in sorted(base.rglob(glob) if glob else base.rglob("*")):
+        for item in iter_visible_source_files(base, glob):
             if not item.is_file() or "/.git/" in f"/{item}":
                 continue
             if item.suffix.lower() in _BINARY_SUFFIXES:
@@ -4000,7 +4003,7 @@ class MetaAgent:
         if not base.exists():
             return {"error": f"Workspace not found for {pid}"}
         tree = []
-        for item in sorted(base.rglob("*")):
+        for item in iter_visible_source_files(base):
             if item.is_file():
                 rel = str(item.relative_to(base))
                 tree.append(rel)

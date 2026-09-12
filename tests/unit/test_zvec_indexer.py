@@ -29,7 +29,7 @@ def _stub_zg(bin_dir: Path) -> Path:
     zg = bin_dir / "zg"
     zg.write_text(
         "#!/bin/sh\n"
-        "printf '%s\\n' \"$2\" >> \"$ZG_TEST_LOG\"\n"
+        "printf '%s\\n' \"$*\" >> \"$ZG_TEST_LOG\"\n"
         "[ \"${ZG_TEST_FAIL:-0}\" = 1 ] && { echo forced failure >&2; exit 7; }\n"
         "mkdir -p \"$2/.zvec-grep\"\n"
         "echo indexed\n"
@@ -73,7 +73,9 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
     result = _index(projects, worktrees, bin_dir)
 
     assert result.stderr == ""
-    assert log.read_text().splitlines() == [str(linked), str(source)]
+    calls = log.read_text().splitlines()
+    assert [line.split()[1] for line in calls] == [str(linked), str(source)]
+    assert all("--glob !**/.zvec-grep/**" in line for line in calls)
     assert (source / ".zvec-grep").is_dir()
     assert (linked / ".zvec-grep").is_dir()
     assert not (outside / ".zvec-grep").exists()
@@ -82,7 +84,7 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
 
     # Existing indexes are not launched twice.
     _index(projects, worktrees, bin_dir)
-    assert log.read_text().splitlines() == [str(linked), str(source)]
+    assert len(log.read_text().splitlines()) == 2
 
     # Lifecycle ownership stays with git/run-isolation: the indexer issues no
     # cross-worktree drop/delete, and Git can remove an indexed clean worktree.
@@ -90,7 +92,7 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
     assert not linked.exists()
     _index(projects, worktrees, bin_dir)
     assert source.exists()
-    assert log.read_text().splitlines() == [str(linked), str(source)]
+    assert len(log.read_text().splitlines()) == 2
 
 
 def test_backlogs_prioritize_new_worktrees_without_starving_projects(tmp_path):
@@ -114,7 +116,7 @@ def test_backlogs_prioritize_new_worktrees_without_starving_projects(tmp_path):
     log = _stub_zg(bin_dir)
     _index(projects, worktrees, bin_dir)
 
-    indexed = [Path(line).name for line in log.read_text().splitlines()]
+    indexed = [Path(line.split()[1]).name for line in log.read_text().splitlines()]
     assert indexed[:5] == [
         "run-08", "run-07", "run-06", "run-05", "project-00",
     ]
@@ -143,5 +145,5 @@ def test_failed_index_is_reported_and_retried_without_success_marker(tmp_path):
     assert not (repo / ".zvec-grep").exists()
 
     second = _index(projects, worktrees, bin_dir, ZG_TEST_FAIL="1")
-    assert log.read_text().splitlines() == [str(repo), str(repo)]
+    assert [line.split()[1] for line in log.read_text().splitlines()] == [str(repo), str(repo)]
     assert "index failed; will retry" in second.stderr

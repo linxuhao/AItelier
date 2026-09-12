@@ -919,17 +919,80 @@ class PipelineEngine:
                 f"Run '{run_id}' is {status}; attempt {attempt} of step "
                 f"'{step_id}' was not started.")
 
+    def _write_scope_receipt_identity(self) -> dict:
+        scope = getattr(self, "_write_scope", None)
+        return {
+            "run_id": getattr(self, "_run_id", ""),
+            "step_id": (getattr(self, "_write_scope_step_id", "") or
+                        getattr(self, "_current_step", "")),
+            "task": scope.task if scope is not None else None,
+        }
+
+    def _scope_claim_record(self) -> dict:
+        return {
+            "step_instance_id": getattr(self, "_step_instance_id", None),
+            "claim_epoch": getattr(self, "_claim_epoch", 0),
+        }
+
+    def _load_write_scope_receipt(self) -> None:
+        """Restore this task's refusal ledger before a reclaimed claim runs."""
+        self._scope_violations = []
+        self._scope_claim_history = []
+        artifact_dir = getattr(self, "_artifact_dir", "")
+        if not artifact_dir:
+            return
+        target = Path(artifact_dir) / "write_scope_receipt.json"
+        if not target.is_file():
+            return
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("receipt is not a JSON object")
+            expected = self._write_scope_receipt_identity()
+            actual = {key: payload.get(key) for key in expected}
+            if actual != expected:
+                return
+            violations = payload.get("violations", [])
+            claims = payload.get("claim_history", [])
+            if (not isinstance(violations, list)
+                    or not all(isinstance(item, dict) for item in violations)):
+                raise ValueError("violations is not a list of objects")
+            if (not isinstance(claims, list)
+                    or not all(isinstance(item, dict) for item in claims)):
+                raise ValueError("claim_history is not a list of objects")
+            self._scope_violations = violations
+            self._scope_claim_history = claims
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            # A damaged ledger is absence of trustworthy scope evidence, never
+            # a clean attempt. Surface it through the same reviewer-visible
+            # violations channel instead of overwriting it with an empty list.
+            self._scope_violations = [{
+                "scope_violation": True,
+                "tool": "write_scope_receipt",
+                "task": self._write_scope_receipt_identity()["task"],
+                "requested_path": "write_scope_receipt.json",
+                "allowed_scope": None,
+                "reason": f"prior write-scope receipt is unreadable: {exc}",
+                **self._scope_claim_record(),
+            }]
+
     def _persist_write_scope_receipt(self) -> None:
-        """Expose scope decisions to the next reviewer without touching code."""
+        """Expose the claim-independent refusal ledger to the next reviewer."""
         artifact_dir = getattr(self, "_artifact_dir", "")
         if not artifact_dir or getattr(self, "_output_target", "artifact") != "code":
             return
         scope = getattr(self, "_write_scope", None)
+        claim = self._scope_claim_record()
+        claims = getattr(self, "_scope_claim_history", [])
+        if claim not in claims:
+            claims.append(claim)
+        self._scope_claim_history = claims
         payload = {
+            **self._write_scope_receipt_identity(),
             "policy": (scope.policy if scope is not None else
                        "isolated-non-task-code-step"),
-            "task": scope.task if scope is not None else None,
             "allowed_scope": scope.allowed() if scope is not None else None,
+            "claim_history": claims,
             "violations": getattr(self, "_scope_violations", []),
         }
         try:
@@ -951,7 +1014,10 @@ class PipelineEngine:
         for path in mutation_paths(tool_name, params, self._output_fixed):
             if scope.authorizes(path):
                 continue
-            refusal = scope.refusal(tool_name, path)
+            refusal = {
+                **scope.refusal(tool_name, path),
+                **self._scope_claim_record(),
+            }
             self._scope_violations.append(refusal)
             self._persist_write_scope_receipt()
             self._emit("write_scope_violation", refusal)
@@ -3474,8 +3540,12 @@ class PipelineEngine:
         self._output_fixed = output_fixed or {}
         self._config_name = config_name
         self._artifact_dir = artifact_dir
-        self._scope_violations: list[dict] = []
         self._write_scope = write_scope
+        self._write_scope_step_id = step_id
+        self._run_id = run_id
+        self._step_instance_id = step_instance_id
+        self._claim_epoch = claim_epoch
+        self._load_write_scope_receipt()
         if output_target == "code":
             if write_scope is None:
                 # Standalone code workflows (for example coding_impl) have one
@@ -3492,9 +3562,6 @@ class PipelineEngine:
                 self._trace("step", "write_scope_resolved", event)
             self._persist_write_scope_receipt()
         self._max_tool_turns = max_tool_turns
-        self._run_id = run_id
-        self._step_instance_id = step_instance_id
-        self._claim_epoch = claim_epoch
         self._carry_forward = carry_forward
         if carry_forward:
             self._resolved_context = dict(resolved_context or {})

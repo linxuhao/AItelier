@@ -37,8 +37,11 @@ def closeout_gate(*, project_root: str = "", owns=None,
                   shared_hotspots=None, task_name: str = "",
                   scope_violations=None, **kwargs) -> dict:
     attempted = list(scope_violations or [])
-    attempted_note = (f"; {len(attempted)} attempted out-of-scope mutation(s)"
-                      if attempted else "")
+    attempted_detail = ", ".join(
+        f"{item.get('tool', '?')} {item.get('requested_path', '?')}"
+        for item in attempted)
+    attempted_note = (f"; {len(attempted)} attempted out-of-scope mutation(s): "
+                      f"{attempted_detail}" if attempted else "")
     if not project_root or not Path(project_root).is_absolute():
         return {"depth": "deep", "error": "closeout_gate: project_root must be an absolute "
                 "path — no delivery to inspect; review the whole working tree",
@@ -114,7 +117,13 @@ def closeout_gate(*, project_root: str = "", owns=None,
     if attempted:
         lines.append("attempted scope violations (refused before mutation):")
         for item in attempted:
-            lines.append(f"  - {item.get('tool', '?')} {item.get('requested_path', '?')}")
+            provenance = ""
+            if item.get("step_instance_id") is not None:
+                provenance = (f" (step instance {item['step_instance_id']}, "
+                              f"claim epoch {item.get('claim_epoch', 0)})")
+            lines.append(
+                f"  - {item.get('tool', '?')} {item.get('requested_path', '?')}"
+                + provenance)
     return {"depth": depth, "reasons": reasons, "commits": [s for s, _ in head],
             "files": files, "protected": protected, "added": added, "deleted": deleted,
             "out_of_scope": outside, "scope_violations": attempted,

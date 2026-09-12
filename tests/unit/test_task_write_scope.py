@@ -20,6 +20,7 @@ def _engine(scope, artifact):
     engine._artifact_dir = str(artifact)
     engine._run_id = "run"
     engine._current_step = "t_impl"
+    engine._write_scope_step_id = "t_impl"
     engine._step_instance_id = 1
     engine._claim_epoch = 1
     engine._emit = lambda *args, **kwargs: None
@@ -197,3 +198,96 @@ def test_dpe_task_card_sources_are_required():
                  and entry["source"].get("file") == "tasks/$current_task.json"]
         assert cards == [{"step": "3", "file": "tasks/$current_task.json",
                           "required": True}]
+
+
+def test_refusal_survives_reclaim_clean_delivery_and_review(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "base.txt").write_text("base")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    artifact = tmp_path / "artifact"
+    scope = WriteScope("card-a", ("owned/",))
+
+    class Executor:
+        def execute_tool(self, name, params, **kwargs):
+            target = Path(kwargs["project_root"]) / params["file"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(params["content"], encoding="utf-8")
+            return {"written": params["file"]}
+
+    _install_skillflow(monkeypatch, Executor())
+    engine = _engine(scope, artifact)
+    engine._code_path = str(repo)
+    first = engine._exec_tool({
+        "tool": "create",
+        "params": {"file": "sibling/lost.txt", "content": "blocked"},
+    })
+    assert first["scope_violation"] is True
+
+    class Factory:
+        def is_native(self, name):
+            return False
+        def get_fallback_to_json(self, name):
+            return False
+
+    engine.factory = Factory()
+    def clean_delivery(*args, **kwargs):
+        result = engine._exec_tool({
+            "tool": "create",
+            "params": {"file": "owned/clean.txt", "content": "ok"},
+        })
+        assert result["written"] == "owned/clean.txt"
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-qm", "t_impl [card-a] clean delivery")
+        return True
+    engine._run_tool_step = clean_delivery
+    assert engine.run_step(
+        task_id=1, step_id="t_impl", workspace=object(), project_id="p",
+        agent_config_name="role", resolved_context={}, tool_schemas={},
+        output_target="code", output_fixed={}, config_name="g",
+        artifact_dir=str(artifact), write_scope=scope, run_id="run",
+        step_instance_id=1, claim_epoch=2,
+    ) is True
+
+    # A later SkillFlow retry may allocate a new step instance while retaining
+    # the same task artifact. That clean reclaim must not erase the first claim.
+    engine._run_tool_step = lambda *args, **kwargs: True
+    assert engine.run_step(
+        task_id=1, step_id="t_impl", workspace=object(), project_id="p",
+        agent_config_name="role", resolved_context={}, tool_schemas={},
+        output_target="code", output_fixed={}, config_name="g",
+        artifact_dir=str(artifact), write_scope=scope, run_id="run",
+        step_instance_id=2, claim_epoch=1,
+    ) is True
+
+    receipt = json.loads((artifact / "write_scope_receipt.json").read_text())
+    assert [(item["step_instance_id"], item["claim_epoch"])
+            for item in receipt["claim_history"]] == [(1, 1), (1, 2), (2, 1)]
+    assert receipt["violations"][0]["requested_path"] == "sibling/lost.txt"
+    assert receipt["violations"][0]["claim_epoch"] == 1
+    assert (repo / "owned/clean.txt").read_text() == "ok"
+
+    review = closeout_gate(
+        project_root=str(repo), owns=["owned/"], shared_hotspots=[],
+        task_name="card-a", scope_violations=receipt["violations"],
+    )
+    review_context = {"[closeout_gate]": review["content"]}
+    assert "sibling/lost.txt" in review_context["[closeout_gate]"]
+    assert "attempted scope violations" in review_context["[closeout_gate]"]
+    assert "claim epoch 1" in review_context["[closeout_gate]"]
+
+
+def test_corrupt_prior_receipt_cannot_become_clean(tmp_path):
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    (artifact / "write_scope_receipt.json").write_text("{broken")
+    engine = _engine(WriteScope("card-a", ("owned/",)), artifact)
+    engine._load_write_scope_receipt()
+    engine._persist_write_scope_receipt()
+    receipt = json.loads((artifact / "write_scope_receipt.json").read_text())
+    assert receipt["violations"][0]["tool"] == "write_scope_receipt"
+    assert "unreadable" in receipt["violations"][0]["reason"]

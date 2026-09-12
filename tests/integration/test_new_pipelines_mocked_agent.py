@@ -19,6 +19,7 @@ import yaml
 
 from skillflow import SkillFlow, PipelineGraph
 import skillflow as _skillflow_pkg
+from skillflow.output_targets import git
 from skillflow.tool_loader import ToolLoader
 
 from aitelier.runner import AgentStepRunner
@@ -26,6 +27,17 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+_INITIAL_IMPL = """def calculate_total(items):
+    subtotal = sum(items)
+    return subtotal
+"""
+
+_UPDATED_IMPL = """def calculate_total(items):
+    subtotal = sum(items)
+    service_fee = subtotal * 0.10
+    return subtotal + service_fee
+"""
 
 
 def _stub_pass(*a, **k):
@@ -47,7 +59,7 @@ def _stub_repo_apply(*a, **k):
     return {"passed": True, "applied": True, "committed": True}
 
 
-def _build(tmp_path, config_name, seeds):
+def _build(tmp_path, config_name, seeds, *, repo_files=None):
     """Real SkillFlow for one config, env tools stubbed, seeds written to the
     config's _seed dir (so {config: X, output: Y} context sources resolve)."""
     ws_base = tmp_path / "ws"
@@ -104,8 +116,16 @@ def _build(tmp_path, config_name, seeds):
     # staging fixture accidentally used three unrelated project directories.
     db = _gdb()
     sf._workspace._code_path_resolver = lambda pid, run_id=None: _ri.resolve_for_resolver(db, run_id)
+    code_root = Path(_ri.resolve_for_resolver(db, run_id))
+    for fname, content in (repo_files or {}).items():
+        target = code_root / fname
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    if repo_files:
+        git(code_root, "add", "--", *repo_files)
+        git(code_root, "commit", "-qm", "multiline fixture baseline")
     sf.start_run(run_id)
-    return sf, db, ws, run_id
+    return sf, db, ws, run_id, code_root
 
 
 def _response(step_id, tool_schemas):
@@ -125,7 +145,13 @@ def _response(step_id, tool_schemas):
     if "apply_patch" in names:
         return json.dumps({"thoughts": "implement", "actions": [
             {"tool": "apply_patch", "params": {"patch":
-                "*** Begin Patch\n*** Add File: impl.py\n+x = 1\n*** End Patch"}},
+                "*** Begin Patch\n*** Update File: impl.py\n@@\n"
+                " def calculate_total(items):\n"
+                "     subtotal = sum(items)\n"
+                "-    return subtotal\n"
+                "+    service_fee = subtotal * 0.10\n"
+                "+    return subtotal + service_fee\n"
+                "*** End Patch"}},
             {"tool": "finish_step", "params": {"summary": "done"}}]})
     # output.mode: write → create a new file, then finish.
     if "create" in names:
@@ -197,16 +223,18 @@ def _final(sf, run_id, config, step, fname):
 
 class TestMockedAgentPipelines:
     async def test_investigate(self, tmp_path, monkeypatch):
-        sf, db, ws, run_id = _build(tmp_path, "investigate",
-                                    {"task.md": "what functions exist?"})
+        sf, db, ws, run_id, _ = _build(tmp_path, "investigate",
+                                       {"task.md": "what functions exist?"})
         status, steps = await _drive(sf, db, ws, run_id, monkeypatch)
         assert status == "completed"
         assert steps == ["investigate"]
         assert "Findings" in (_final(sf, run_id, "investigate", "investigate", "findings.md") or "")
 
     async def test_code_review(self, tmp_path, monkeypatch):
-        sf, db, ws, run_id = _build(tmp_path, "code_review",
-                                    {"review_request.md": "task\n\ndiff --git a/x b/x\n+x"})
+        sf, db, ws, run_id, _ = _build(
+            tmp_path, "code_review",
+            {"review_request.md": "task\n\ndiff --git a/x b/x\n+x"},
+        )
         status, steps = await _drive(sf, db, ws, run_id, monkeypatch)
         assert status == "completed"
         verdict = _final(sf, run_id, "code_review", "review", "review_verdict.json")
@@ -217,25 +245,43 @@ class TestMockedAgentPipelines:
         # inline tool/gate nodes (never claimed), so completion proves the gate
         # ran and passed.
         sentinel = "STATE-SEED-SENTINEL-3c852bd37038de97"
-        sf, db, ws, run_id = _build(tmp_path, "coding_impl",
-                                    {"plan.md": f"## Goal\n{sentinel}"})
+        sf, db, ws, run_id, code_root = _build(
+            tmp_path,
+            "coding_impl",
+            {"plan.md": f"## Goal\n{sentinel}"},
+            repo_files={"impl.py": _INITIAL_IMPL},
+        )
         prompts = []
         status, steps = await _drive(sf, db, ws, run_id, monkeypatch,
                                      observed_prompts=prompts)
         assert status == "completed"
         assert "implement" in steps
         assert prompts and sentinel in prompts[0]
+        assert (code_root / "impl.py").read_text(encoding="utf-8") == _UPDATED_IMPL
+        assert list((tmp_path / "ws").rglob("code_changes.json"))
 
     async def test_fix_tests(self, tmp_path, monkeypatch):
-        sf, db, ws, run_id = _build(tmp_path, "fix_tests",
-                                    {"task.md": "make tests pass"})
+        sf, db, ws, run_id, code_root = _build(
+            tmp_path,
+            "fix_tests",
+            {"task.md": "make tests pass"},
+            repo_files={"impl.py": _INITIAL_IMPL},
+        )
         status, steps = await _drive(sf, db, ws, run_id, monkeypatch)
         assert status == "completed"
         assert "fix" in steps
+        assert (code_root / "impl.py").read_text(encoding="utf-8") == _UPDATED_IMPL
+        assert list((tmp_path / "ws").rglob("code_changes.json"))
 
     async def test_subagent(self, tmp_path, monkeypatch):
-        sf, db, ws, run_id = _build(tmp_path, "subagent",
-                                    {"task.md": "do the thing"})
+        sf, db, ws, run_id, code_root = _build(
+            tmp_path,
+            "subagent",
+            {"task.md": "do the thing"},
+            repo_files={"impl.py": _INITIAL_IMPL},
+        )
         status, steps = await _drive(sf, db, ws, run_id, monkeypatch)
         assert status == "completed"
         assert "work" in steps and "review" in steps
+        assert (code_root / "impl.py").read_text(encoding="utf-8") == _UPDATED_IMPL
+        assert list((tmp_path / "ws").rglob("code_changes.json"))

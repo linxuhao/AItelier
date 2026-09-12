@@ -52,6 +52,8 @@ class StateService:
     def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator", runtime_factory=None):
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
         self.store = StateGraphStore(db)
+        from core.state_driver_notes import StateDriverNotes
+        self.driver_notes = StateDriverNotes(self.store, actor)
         self.attempts = StateAttempts(self.store)
         from core.state_external import ExternalAttempts
         self.external = ExternalAttempts(self.attempts, actor)
@@ -64,10 +66,12 @@ class StateService:
         self.portfolio = StatePortfolio(self.store, actor)
 
     async def wait_for_state_change(self, project_id, after=0, node_keys=None, attempt_ids=None,
-                                    actionable_only=True, timeout_seconds=30.0, limit=100, return_when_idle=False):
+                                    note_after_revision=None, filter_mode="all", actionable_only=True,
+                                    timeout_seconds=30.0, limit=100, return_when_idle=False):
         from core.state_changes import wait_for_state_change
-        return await wait_for_state_change(self, project_id, after, node_keys, attempt_ids,
-                                           actionable_only, timeout_seconds, limit, return_when_idle)
+        return await wait_for_state_change(
+            self, project_id, after, node_keys, attempt_ids, note_after_revision,
+            filter_mode, actionable_only, timeout_seconds, limit, return_when_idle)
 
     def create_project(self, project_id, title, source_project_id=None):
         if source_project_id and not self.db.get_project(source_project_id):

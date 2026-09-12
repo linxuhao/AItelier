@@ -36,7 +36,7 @@ def register_state_tools(tool, mcp, service_factory=None):
         return {**describe(), "driver_guide": STATE_DRIVER_GUIDE,
                 "driver_prompt": "state_graph_driver", "driver_resource": "aitelier://state/driver-guide"}
 
-    @tool("state_graph_read", "read", "Private State DAG query. Requires writer authorization even though it does not mutate. Actions: list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help.")
+    @tool("state_graph_read", "read", "Private State DAG query. Requires writer authorization even though it does not mutate. Actions include get_driver_note, driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help.")
     async def state_graph_read(action: str, arguments: dict) -> dict:
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
         try:
@@ -47,7 +47,7 @@ def register_state_tools(tool, mcp, service_factory=None):
         except StateGraphError as exc:
             raise MCPToolError(str(exc)) from exc
 
-    @tool("state_graph_write", "write", "Manage State DAG goals/attempts using typed state_graph_help contracts. Actions include create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results.")
+    @tool("state_graph_write", "write", "Manage State DAG goals/attempts using typed state_graph_help contracts. Actions include update_driver_note, create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results.")
     def state_graph_write(action: str, arguments: dict) -> dict:
         return {"result": invoke(action, arguments, True)}
 

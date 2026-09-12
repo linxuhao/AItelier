@@ -5,6 +5,8 @@ Extra fields (including status=VERIFIED and spoofed reviewer identity) fail.
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.state_graph import StateGraphError
@@ -71,10 +73,29 @@ class WaitForStateChange(Project):
     after: int = Field(default=0, ge=0, le=2**63-1)
     node_keys: list[str] | None = Field(default=None, min_length=1, max_length=100)
     attempt_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    note_after_revision: int | None = Field(default=None, ge=0, le=2**63-1)
+    filter_mode: Literal["all", "any"] = "all"
     actionable_only: bool = True
     return_when_idle: bool = False
     timeout_seconds: float = Field(default=30.0, ge=0, le=900)
     limit: int = Field(default=100, ge=1, le=500)
+
+
+class DriverNote(Project):
+    pass
+
+
+class DriverNoteHistory(Project):
+    after_revision: int = Field(default=0, ge=0, le=2**63-1)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class UpdateDriverNote(Project):
+    section: Literal["permanent", "temporary"]
+    content: str = Field(max_length=100000)
+    expected_revision: int = Field(ge=0, le=2**63-1)
+    director_identity: str = Field(min_length=1, max_length=320)
+    operation: Literal["replace", "append"] = "replace"
 
 
 class Attempt(Request):
@@ -263,7 +284,8 @@ READ_REQUESTS = {
     "get_design_baseline": DesignBaseline, "get_design_bindings": Node,
     "export_design_markdown": DesignBaseline, "check_design_markdown": CheckDesignMarkdown,
     "list_projects": Empty, "get_graph": Project, "get_node": Node, "search_nodes": SearchNodes, "facet_lint": Project,
-    "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange, "get_attempt": Attempt,
+    "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange,
+    "get_driver_note": DriverNote, "driver_note_history": DriverNoteHistory, "get_attempt": Attempt,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
     "project_run_summary": Project,
@@ -280,6 +302,7 @@ WRITE_REQUESTS = {
     "bind_source": BindSource, "set_dispatch": DispatchPolicy, "set_node_hold": NodeHold,
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
     "start_external_attempt": StartExternalAttempt, "report_external_attempt": ExternalObservation,
+    "update_driver_note": UpdateDriverNote,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 
@@ -313,7 +336,9 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "bind_node_design": service.design.bind_node,
         "list_projects": service.store.list_projects, "get_graph": service.store.get_graph,
         "get_node": service.node_context, "search_nodes": service.store.search_nodes, "frontier": service.store.frontier, "facet_lint": service.store.facet_lint,
-        "wait_for_state_change": service.wait_for_state_change, "events": service.store.events, "get_attempt": service.get_attempt,
+        "wait_for_state_change": service.wait_for_state_change, "events": service.store.events,
+        "get_driver_note": service.driver_notes.get, "driver_note_history": service.driver_notes.history,
+        "get_attempt": service.get_attempt,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
         "revise_node": service.store.revise_node, "split_node": service.store.split_node,
@@ -331,6 +356,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "set_node_hold": service.set_node_hold, "add_reference": service.add_reference,
         "refresh_project": service.refresh_project,
         "start_external_attempt": service.start_external_attempt, "report_external_attempt": service.report_external_attempt,
+        "update_driver_note": service.driver_notes.update,
     }
     return handlers[action](**args)
 

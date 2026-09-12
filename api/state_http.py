@@ -40,6 +40,18 @@ def create_state_router(service_dependency, access_dependency):
         return _call(service, "frontier", {"project_id": project_id, "limit": limit})
 
 
+    @router.get("/projects/{project_id}/driver-note")
+    def driver_note(project_id: str, service=Depends(service_dependency)):
+        return _call(service, "get_driver_note", {"project_id": project_id})
+
+
+    @router.get("/projects/{project_id}/driver-note/history")
+    def driver_note_history(project_id: str, after_revision: int = 0, limit: int = 100,
+                            service=Depends(service_dependency)):
+        return _call(service, "driver_note_history", {
+            "project_id": project_id, "after_revision": after_revision, "limit": limit})
+
+
     @router.get("/attempts/{attempt_id}")
     def attempt(attempt_id: str, service=Depends(service_dependency)):
         return _call(service, "get_attempt", {"attempt_id": attempt_id})

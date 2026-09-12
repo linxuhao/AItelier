@@ -42,6 +42,12 @@ A timeout does not stop a worker, and completion never verifies a goal.
 
 Agents can load the MCP prompt `state_graph_driver`, the resource
 `aitelier://state/driver-guide`, or `driver_guide` from `state_graph_help`.
+Each State project also has a revisioned `permanent`/`temporary` driver note:
+`get_driver_note`, `driver_note_history`, and CAS-protected
+`update_driver_note` let different directors manage projects in parallel without
+sharing note revisions or event cursors. `wait_for_state_change` keeps its
+single-project compatibility defaults and adds `filter_mode="any"` plus
+`note_after_revision` for OR-style handoff waits.
 See the [agent driver guide](docs/state-agent-driver.md) for external evidence,
 cursor scope, ownership and handoff rules.
 

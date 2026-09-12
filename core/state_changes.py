@@ -39,25 +39,35 @@ def notify(db_path):
             pass  # Closing caller loop; durable event remains replayable.
 
 
-def scan(store, project_id, after, node_keys, attempt_ids, actionable_only, limit):
+def scan(store, project_id, after, node_keys, attempt_ids, note_after_revision,
+         filter_mode, actionable_only, limit):
     # Filter in SQL so an unbounded quiet backlog never becomes an unbounded read.
     with store.transaction() as conn:
         store._project(conn, project_id)
         high = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?",
                             (project_id,)).fetchone()[0]
         clauses, args = ["project_id=?", "seq>?", "seq<=?"], [project_id, after, high]
+        filters, filter_args = [], []
         if node_keys is not None:
             marks = ",".join("?" for _ in node_keys)
-            clauses.append("(node_key IS NULL OR node_key IN (WITH RECURSIVE relevant(k) AS ("
+            filters.append("(node_key IS NULL OR node_key IN (WITH RECURSIVE relevant(k) AS ("
                 "SELECT node_key FROM state_nodes WHERE project_id=? AND node_key IN (" + marks + ") "
                 "UNION SELECT d.dependency_key FROM state_dependencies d JOIN relevant r ON d.node_key=r.k "
                 "WHERE d.project_id=?) SELECT k FROM relevant) OR EXISTS "
                 "(SELECT 1 FROM json_each(payload_json,'$.invalidated') WHERE value IN (" + marks + ")))")
-            args.extend([project_id, *node_keys, project_id, *node_keys])
+            filter_args.extend([project_id, *node_keys, project_id, *node_keys])
         if attempt_ids is not None:
-            clauses.append("json_extract(payload_json,'$.attempt_id') IN (" +
+            filters.append("json_extract(payload_json,'$.attempt_id') IN (" +
                            ",".join("?" for _ in attempt_ids) + ")")
-            args.extend(attempt_ids)
+            filter_args.extend(attempt_ids)
+        if note_after_revision is not None:
+            filters.append("(event_type='driver_note_updated' AND "
+                           "COALESCE(json_extract(payload_json,'$.revision'),0)>?)")
+            filter_args.append(note_after_revision)
+        if filters:
+            joiner = " OR " if filter_mode == "any" else " AND "
+            clauses.append("(" + joiner.join(filters) + ")")
+            args.extend(filter_args)
         if actionable_only:
             clauses.append("event_type NOT IN (" + ",".join("?" for _ in _QUIET) + ")")
             args.extend(sorted(_QUIET))
@@ -76,13 +86,15 @@ def scan(store, project_id, after, node_keys, attempt_ids, actionable_only, limi
 
 
 async def wait_for_state_change(service, project_id, after=0, node_keys=None, attempt_ids=None,
-                                actionable_only=True, timeout_seconds=30.0, limit=100, return_when_idle=False):
+                                note_after_revision=None, filter_mode="all", actionable_only=True,
+                                timeout_seconds=30.0, limit=100, return_when_idle=False):
     # Service callers receive the same strict contract as REST/MCP callers.
     from core.state_commands import WaitForStateChange
     from core.state_graph import key
     args = WaitForStateChange(project_id=project_id, after=after, node_keys=node_keys,
-        attempt_ids=attempt_ids, actionable_only=actionable_only,
-        timeout_seconds=timeout_seconds, limit=limit, return_when_idle=return_when_idle)
+        attempt_ids=attempt_ids, note_after_revision=note_after_revision, filter_mode=filter_mode,
+        actionable_only=actionable_only, timeout_seconds=timeout_seconds,
+        limit=limit, return_when_idle=return_when_idle)
     key(project_id, "project_id")
     for value in (node_keys or []) + (attempt_ids or []):
         key(value)
@@ -95,8 +107,9 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
     with subscribe(service.db.db_path) as signal:
         while True:
             signal.clear()
-            events, cursor = await asyncio.to_thread(scan, service.store, project_id, cursor,
-                node_keys, attempt_ids, actionable_only, limit)
+            events, cursor = await asyncio.to_thread(
+                scan, service.store, project_id, cursor, node_keys, attempt_ids,
+                note_after_revision, filter_mode, actionable_only, limit)
             if events:
                 return {"events": events, "next_after": cursor, "timed_out": False}
             recovery_ok = True
@@ -114,8 +127,9 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
             if args.return_when_idle and not recovery_ok:
                 # Recovery failures cannot authorize a decision from cached state.
                 # Preserve actionable events committed by other rows in the page.
-                events, cursor = await asyncio.to_thread(scan, service.store, project_id, cursor,
-                    node_keys, attempt_ids, actionable_only, limit)
+                events, cursor = await asyncio.to_thread(
+                    scan, service.store, project_id, cursor, node_keys, attempt_ids,
+                    note_after_revision, filter_mode, actionable_only, limit)
                 if events:
                     return {"events": events, "next_after": cursor, "timed_out": False}
                 return {"events": [], "next_after": cursor, "timed_out": False,
@@ -130,8 +144,9 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                     return {"events": [], "next_after": cursor, "timed_out": True}
                 continue
             if args.return_when_idle:
-                outcome = await asyncio.to_thread(wait_disposition, service.store, project_id,
-                    cursor, node_keys, attempt_ids)
+                outcome = await asyncio.to_thread(
+                    wait_disposition, service.store, project_id, cursor, node_keys,
+                    attempt_ids, note_after_revision, filter_mode)
                 if outcome == "rescan":
                     continue
                 if outcome is not None:
@@ -147,7 +162,8 @@ async def wait_for_state_change(service, project_id, after=0, node_keys=None, at
                 pass
 
 
-def wait_disposition(store, project_id, cursor, node_keys, attempt_ids):
+def wait_disposition(store, project_id, cursor, node_keys, attempt_ids,
+                     note_after_revision=None, filter_mode="all"):
     """An idle decision is a snapshot, never proof of remote quiescence."""
     with store.transaction() as conn:
         # Check event watermark and attempts in one snapshot. A commit after the
@@ -156,17 +172,29 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids):
                             (project_id,)).fetchone()[0]
         if high > cursor:
             return "rescan"
-        clauses, args = ["project_id=?"], [project_id]
+        note_pending = note_after_revision is not None
+        if note_pending:
+            row = conn.execute("SELECT revision FROM state_driver_notes WHERE project_id=?",
+                               (project_id,)).fetchone()
+            current = row["revision"] if row else 0
+            if current > note_after_revision:
+                return {"reason": "driver_note_changed", "note_revision": current}
+        filters, filter_args = [], []
         if node_keys is not None:
             marks = ",".join("?" for _ in node_keys)
-            clauses.append("node_key IN (WITH RECURSIVE relevant(k) AS ("
+            filters.append("node_key IN (WITH RECURSIVE relevant(k) AS ("
                 "SELECT node_key FROM state_nodes WHERE project_id=? AND node_key IN (" + marks + ") "
                 "UNION SELECT d.dependency_key FROM state_dependencies d JOIN relevant r ON d.node_key=r.k "
                 "WHERE d.project_id=?) SELECT k FROM relevant)")
-            args.extend([project_id, *node_keys, project_id])
+            filter_args.extend([project_id, *node_keys, project_id])
         if attempt_ids is not None:
-            clauses.append("attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")")
-            args.extend(attempt_ids)
+            filters.append("attempt_id IN (" + ",".join("?" for _ in attempt_ids) + ")")
+            filter_args.extend(attempt_ids)
+        clauses, args = ["project_id=?"], [project_id]
+        if filters:
+            joiner = " OR " if filter_mode == "any" else " AND "
+            clauses.append("(" + joiner.join(filters) + ")")
+            args.extend(filter_args)
         rows = conn.execute("SELECT attempt_id,status FROM state_attempts WHERE " +
                             " AND ".join(clauses), args).fetchall()
         paused = [dict(row) for row in rows if row["status"] == "paused"]
@@ -175,6 +203,8 @@ def wait_disposition(store, project_id, cursor, node_keys, attempt_ids):
         # An allowlist of terminal states fails conservatively for unknown or
         # future statuses. Reservations and external registrations count as work.
         if any(row["status"] not in {"candidate", "failed", "superseded"} for row in rows):
+            return None
+        if note_pending:
             return None
         return {"reason": "nothing_to_wait"}
 

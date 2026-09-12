@@ -78,3 +78,45 @@ def test_mcp_wait_returns_external_completion_and_remains_private(tmp_path):
         invalid = call("state_graph_read", "wait_for_state_change",
                        {**args, "project_id": "missing", "timeout_seconds": 0}).json()["result"]
         assert invalid["isError"] is True
+
+
+def test_mcp_driver_notes_are_authorized_project_scoped_and_cas_protected(tmp_path):
+    app = create_app(str(tmp_path / "notes.sqlite"), "x" * 40)
+    with TestClient(app) as client:
+        headers = {"Authorization": "Bearer " + "x" * 40,
+                   "Accept": "application/json, text/event-stream"}
+
+        def rpc(name, action, arguments, authorized=True):
+            return client.post("/mcp/", json={"jsonrpc": "2.0", "id": 1,
+                "method": "tools/call", "params": {"name": name,
+                "arguments": {"action": action, "arguments": arguments}}},
+                headers=headers if authorized else {"Accept": headers["Accept"]})
+
+        def result(response):
+            body = response.json()["result"]
+            assert not body.get("isError"), body
+            return json.loads(body["content"][0]["text"])["result"]
+
+        for project in ("aitelier", "wuxia-myth"):
+            result(rpc("state_graph_write", "create_project",
+                       {"project_id": project, "title": project}))
+        write = {"project_id": "aitelier", "section": "temporary",
+                 "content": "release handoff", "expected_revision": 0,
+                 "director_identity": "aitelier-director", "operation": "replace"}
+        assert rpc("state_graph_write", "update_driver_note", write,
+                   authorized=False).status_code == 401
+        note = result(rpc("state_graph_write", "update_driver_note", write))
+        assert note["revision"] == 1 and note["temporary"] == "release handoff"
+        assert result(rpc("state_graph_read", "get_driver_note",
+                          {"project_id": "wuxia-myth"}))["revision"] == 0
+        conflict = rpc("state_graph_write", "update_driver_note", write).json()["result"]
+        assert conflict["isError"] is True
+        assert "current 1" in conflict["content"][0]["text"]
+        history = result(rpc("state_graph_read", "driver_note_history",
+                             {"project_id": "aitelier"}))
+        assert history["entries"][0]["director_identity"] == "aitelier-director"
+        rest = client.get("/api/state/projects/aitelier/driver-note", headers=headers)
+        assert rest.status_code == 200
+        assert rest.json()["temporary"] == "release handoff"
+        foreign = client.get("/api/state/projects/wuxia-myth/driver-note", headers=headers)
+        assert foreign.status_code == 200 and foreign.json()["revision"] == 0

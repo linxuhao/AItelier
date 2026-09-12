@@ -177,19 +177,37 @@ Unknown actions, extra fields and incorrect argument types are rejected.
 MCP domain errors use `isError: true`. State-data MCP reads require writer
 authorization even though other legacy metadata reads may be public.
 
-Read actions: `list_projects`, `get_graph`, `get_node`, `frontier`, `events`,
-`get_attempt`, `list_attempts`, `evidence`.
+Read actions include `get_driver_note`, `driver_note_history`, `list_projects`,
+`get_graph`, `get_node`, `frontier`, `events`, `wait_for_state_change`,
+`get_attempt`, `list_attempts`, and `evidence`.
 
 Write actions: `create_project`, `add_nodes`, `revise_node`, `split_node`,
 `supersede_node`, `start_attempt`, `start_external_attempt`, `report_external_attempt`,
 `recover_attempt`, `reconcile_attempt`,
-`retire_reservation`, `record_evidence`, `verify_node`, `import_tasks`.
+`retire_reservation`, `record_evidence`, `verify_node`, `import_tasks`, and
+`update_driver_note`.
 
 The MCP prompt `state_graph_driver` describes the intended loop. Workflow
 completion is observed by the driver using `reconcile_attempt`; this version
 does not add an autonomous project-planning scheduler or auto-acceptance hook.
 State inspection/planning remains available without composing a working
 SkillFlow executor; only execution and acceptance operations require it.
+
+### Project-scoped driver notes
+
+Each State project owns one two-section note. `permanent` holds durable operating
+context and decision references; `temporary` holds current handoff details.
+`update_driver_note` addresses one project and section, records the authenticated
+actor plus a caller-supplied director identity, and uses `expected_revision` as
+a compare-and-swap guard. Concurrent writes from the same revision cannot silently
+overwrite each other. `driver_note_history` retains every committed revision.
+
+The note is context, not another source of goal truth. State nodes, attempts,
+evidence and acceptance remain authoritative. Project IDs isolate note contents,
+revisions and wait events, so separate directors may manage separate projects.
+A wait can subscribe with `note_after_revision`; `filter_mode="any"` wakes when
+any selected node, attempt or note condition changes. The default
+`filter_mode="all"` preserves the earlier combined-filter behavior.
 
 ### Example: create and decompose a project
 

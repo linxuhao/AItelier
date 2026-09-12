@@ -89,6 +89,221 @@ _RECALL_MAX_MATCHES = 40
 _RECALL_CONTEXT_LINES = 2
 
 
+def _relay_progress_context(value: Any) -> dict | None:
+    """Return the exact retained-work contract from a State relay seed."""
+    if isinstance(value, dict):
+        relay = value.get("relay")
+        if isinstance(relay, dict):
+            files = (relay.get("code_changes") or {}).get("files") or {}
+            retained = {
+                str(name): int(meta.get("bytes", 0) or 0)
+                for name, meta in files.items()
+                if isinstance(meta, dict)
+            }
+            instruction = str(value.get("instruction") or "").strip()
+            relay_of = value.get("relay_of")
+            if not isinstance(relay_of, dict):
+                relay_of = {}
+            first_failure_run_id = str(
+                relay_of.get("first_failure_run_id")
+                or relay.get("first_failure_run_id")
+                or relay_of.get("run_id")
+                or relay.get("run_id")
+                or ""
+            )
+            return {
+                "run_id": str(relay.get("run_id") or ""),
+                "first_failure_run_id": first_failure_run_id,
+                "retained_files": retained,
+                "retained_bytes": sum(retained.values()),
+                "incomplete_items": [instruction] if instruction else [
+                    "finish the approved plan portions not proven by the retained change set"
+                ],
+                "prior_budget_failure": (
+                    "turn budget exhausted" in str(relay.get("error", "")).lower()
+                ),
+            }
+        for child in value.values():
+            found = _relay_progress_context(child)
+            if found:
+                return found
+        return None
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            found = _relay_progress_context(child)
+            if found:
+                return found
+        return None
+    if isinstance(value, str):
+        marker = "# State goal attempt"
+        at = value.find(marker)
+        if at >= 0:
+            try:
+                decoded, _ = json.JSONDecoder().raw_decode(
+                    value[at + len(marker):].lstrip()
+                )
+            except (json.JSONDecodeError, TypeError):
+                return None
+            return _relay_progress_context(decoded)
+    return None
+
+
+def _should_intervene_early(*, turn: int, max_turns: int, writable: bool,
+                            written_files: list[str], already_intervened: bool) -> bool:
+    """True once, at half budget, for a writable step without a first write."""
+    return (
+        writable
+        and not written_files
+        and not already_intervened
+        and turn >= max(1, max_turns // 2)
+    )
+
+
+_ACK_STOPWORDS = frozenset({
+    "a", "an", "and", "the", "to", "of", "from", "this", "that", "then",
+    "do", "not", "before", "after", "with", "into", "for", "existing",
+})
+
+
+def _ack_tokens(value: str) -> set[str]:
+    return {
+        token.lower()
+        for token in re.findall(r"[A-Za-z0-9_]+", value)
+        if len(token) >= 3 and token.lower() not in _ACK_STOPWORDS
+    }
+
+
+def _acknowledges_incomplete(expected: list[str], supplied: Any) -> bool:
+    """Require supplied work items to cover the known remaining-work facts."""
+    if not isinstance(supplied, list) or not supplied:
+        return False
+    supplied_text = [str(item).strip() for item in supplied]
+    if any(not item for item in supplied_text):
+        return False
+    supplied_tokens = [_ack_tokens(item) for item in supplied_text]
+    if any(not tokens for tokens in supplied_tokens):
+        return False
+    expected_tokens = [_ack_tokens(str(item)) for item in expected if str(item).strip()]
+    if not expected_tokens:
+        return False
+    # Each claimed item must be grounded in the retained instruction, and each
+    # retained instruction must have meaningful coverage. This accepts a useful
+    # split such as "finish wiring" + "add targeted tests", while rejecting an
+    # arbitrary acknowledgement such as "banana".
+    all_expected = set().union(*expected_tokens)
+    if any(not (tokens & all_expected) for tokens in supplied_tokens):
+        return False
+    supplied_union = set().union(*supplied_tokens)
+    return all(
+        len(tokens & supplied_union) >= max(1, (len(tokens) + 1) // 2)
+        for tokens in expected_tokens
+    )
+
+
+def _relay_acknowledgement(relay: dict, params: dict) -> tuple[bool, dict]:
+    supplied_items = params.get("incomplete_items")
+    acknowledged = (
+        params.get("retained_bytes") == relay["retained_bytes"]
+        and _acknowledges_incomplete(relay["incomplete_items"], supplied_items)
+    )
+    result = {
+        "status": "acknowledged" if acknowledged else "denied",
+        "retained_bytes": relay["retained_bytes"],
+        "retained_files": relay["retained_files"],
+        "incomplete_items": relay["incomplete_items"],
+    }
+    if not acknowledged:
+        result["error"] = (
+            "acknowledge the exact retained byte total and the known incomplete "
+            "work from the relay contract before continuing"
+        )
+    return acknowledged, result
+
+
+def _remaining_delivery(*, written_files: list[str],
+                        expansion_requests: list[dict], relay: dict | None) -> list[str]:
+    requested = [
+        str(item.get("reason") or "").strip()
+        for item in expansion_requests
+        if str(item.get("reason") or "").strip()
+    ]
+    if requested:
+        return requested
+    if relay and relay.get("incomplete_items"):
+        return list(relay["incomplete_items"])
+    if written_files:
+        names = ", ".join(sorted(set(written_files)))
+        return [
+            f"complete targeted validation for the retained changes in {names}",
+            "call finish_step with the validation result and any remaining file list",
+        ]
+    return [
+        "write the smallest compilable implementation slice from the approved plan",
+        "run its targeted validation and call finish_step, or split the unfinished scope",
+    ]
+
+
+def _budget_failure_report(*, max_turns: int, first_write_turn: int | None,
+                           written_files: list[str], reads_searches: int,
+                           tool_failures: int, expansion_requests: list[dict],
+                           relay: dict | None) -> dict:
+    """Classify exhausted work without hiding overlapping failure modes."""
+    halfway = max(1, max_turns // 2)
+    classes: list[str] = []
+    late_write = first_write_turn is None or first_write_turn > halfway
+    if reads_searches >= max(4, halfway) and late_write:
+        classes.append("re_grounding")
+    if tool_failures >= 2:
+        classes.append("edit_friction")
+    if written_files and (first_write_turn is not None) and (
+            first_write_turn <= halfway or len(set(written_files)) >= 5):
+        classes.append("task_too_big")
+    if not classes:
+        classes.append("model_exploration")
+
+    repeated = bool(relay and relay.get("prior_budget_failure"))
+    strategies: list[str] = []
+    for failure_class in classes:
+        strategy = {
+            "re_grounding": "relay_targeted_context",
+            "edit_friction": "switch_edit_method_or_executor",
+            "task_too_big": "split_task",
+            "model_exploration": "switch_model_or_external_executor",
+        }[failure_class]
+        if strategy not in strategies:
+            strategies.append(strategy)
+    if repeated:
+        for strategy in ("split_task", "external_executor"):
+            if strategy not in strategies:
+                strategies.append(strategy)
+
+    return {
+        "first_write_turn": first_write_turn,
+        "written_files": sorted(set(written_files)),
+        "reads_searches": reads_searches,
+        "tool_failures": tool_failures,
+        "expansion_requested": bool(expansion_requests),
+        "expansion_requests": expansion_requests,
+        "remaining_delivery": _remaining_delivery(
+            written_files=written_files,
+            expansion_requests=expansion_requests,
+            relay=relay,
+        ),
+        "failure_class": classes[0],
+        "failure_classes": classes,
+        "consecutive_budget_failure": repeated,
+        "first_failure_run_id": (
+            relay.get("first_failure_run_id") or relay.get("run_id")
+            if repeated else None
+        ),
+        "escalation_policy": (
+            "split_or_external_executor"
+            if repeated else "relay_retained_work_then_split_if_repeated"
+        ),
+        "strategy_triggers": strategies,
+    }
+
+
 def _grant_turns(turn_grants: int, asked: int, *,
                  made_progress: bool = True) -> tuple[int, int, str]:
     """Decide one ask_more_turns call: (extra, new_turn_grants, message).
@@ -390,6 +605,10 @@ _REPEATABLE_READ_TOOLS = frozenset({
     "skillflow_docs_list", "skillflow_docs_search", "skillflow_docs_read",
     "web_fetch",
 })
+# Telemetry and relay survey limits cover every repository enumeration tool.
+# This is intentionally separate from repeat-call dedupe: adding a read here
+# must not silently make it eligible to return a stale cached observation.
+_REPOSITORY_READ_TOOLS = _REPEATABLE_READ_TOOLS | {"list"}
 # Below this a pointer costs more than the text it would replace.
 _REPEAT_MIN_CHARS = 4 * 1024
 
@@ -1041,11 +1260,20 @@ class PipelineEngine:
                          for m in all_messages if m.get("role") == "tool"
                          and m.get("tool_call_id")}
         completed_effect_calls: dict[str, str] = dict(fenced_effects)
+        first_write_turn: int | None = None
+        reads_searches = 0
+        tool_failures = 0
+        expansion_requests: list[dict] = []
+        assistant_turn = 0
         for m in all_messages:
             if m.get("role") != "assistant":
                 continue
+            assistant_turn += 1
             for call in m.get("tool_calls") or []:
                 fn = (call or {}).get("function") or {}
+                tool_name = str(fn.get("name") or "")
+                if tool_name in _REPOSITORY_READ_TOOLS:
+                    reads_searches += 1
                 call_id = (call or {}).get("id")
                 result_text = results_by_id.get(call_id)
                 if not result_text:
@@ -1055,14 +1283,26 @@ class PipelineEngine:
                     params = json.loads(fn.get("arguments") or "{}")
                 except (json.JSONDecodeError, TypeError, ValueError):
                     continue
+                if _is_failed_tool_result(result_text):
+                    tool_failures += 1
+                if tool_name == "ask_more_turns":
+                    expansion_requests.append({
+                        "turn": assistant_turn,
+                        "asked": int(params.get("turns", 3) or 3),
+                        "granted": int(result.get("turns", 0) or 0),
+                        "reason": str(params.get("reason") or ""),
+                    })
                 artifact_changed = any(result.get("artifact_" + key)
                                        for key in ("written", "edited", "created",
                                                    "deleted", "removed"))
-                if (PipelineEngine._written_names(result)
-                        or PipelineEngine._effect_name(result)
-                        or artifact_changed):
+                mutated = bool(PipelineEngine._written_names(result)
+                               or PipelineEngine._effect_name(result)
+                               or artifact_changed)
+                if mutated:
+                    if first_write_turn is None:
+                        first_write_turn = assistant_turn
                     completed_effect_calls.setdefault(_repeat_call_key(
-                        str(fn.get("name") or ""), params), result_text)
+                        tool_name, params), result_text)
 
         written = list(dict.fromkeys(written))
         return {"messages": messages, "turns": turns, "written_files": written,
@@ -1071,7 +1311,11 @@ class PipelineEngine:
                 "recall_messages": [m for m in all_messages
                                     if m.get("role") == "tool"],
                 "completed_effect_calls": completed_effect_calls,
-                "effect_result_refs": effect_result_refs}
+                "effect_result_refs": effect_result_refs,
+                "first_write_turn": first_write_turn,
+                "reads_searches": reads_searches,
+                "tool_failures": tool_failures,
+                "expansion_requests": expansion_requests}
 
     def _resume_from_trace(self, project_id: str, max_turns: int) -> dict | None:
         """Read this instance's `prompt_delta` rows and rebuild; None if none.
@@ -2872,6 +3116,11 @@ class PipelineEngine:
         last_reasoning = ""  # cached for deepseek: replay on tool-only turns
         self._current_step = step_id
         self._step_start = time.time()
+        # A State relay carries exact recovered bytes and the director's
+        # remaining-work instruction. Require proof that the continuation has
+        # adopted both before any repository operation.
+        relay_progress = _relay_progress_context(self._resolved_context)
+        implementation_progress_enabled = self._draft_graph_name() == "coding_impl"
         # Tool schemas → OpenAI format.
         # Inject ask_more_turns (host-level step-control tool) alongside
         # skillflow-generated tools so the agent can request extra turns.
@@ -2915,7 +3164,31 @@ class PipelineEngine:
                             "description": "Character offset to end the slice at"},
                 },
             }
-        write_tool_names = {k for k in self._tool_schemas if k.startswith("write_") or k.startswith("create_") or k.startswith("append_") or k == "write"}
+        if relay_progress and "acknowledge_relay" not in self._tool_schemas:
+            retained = ", ".join(
+                f"{name}={size} bytes"
+                for name, size in sorted(relay_progress["retained_files"].items())
+            ) or "no code files"
+            self._tool_schemas["acknowledge_relay"] = {
+                "name": "acknowledge_relay",
+                "description": (
+                    "Required first action for a continued State attempt. "
+                    f"Acknowledge retained code exactly ({retained}; total "
+                    f"{relay_progress['retained_bytes']} bytes) and restate the "
+                    "known incomplete work from the relay instruction."
+                ),
+                "parameters": {
+                    "retained_bytes": {"type": "integer", "required": True},
+                    "incomplete_items": {
+                        "type": "array", "required": True,
+                        "items": {"type": "string"},
+                    },
+                },
+            }
+        write_tool_names = {
+            name for name in self._tool_schemas
+            if self._is_mutation_tool(name, self._tool_schemas)
+        }
         native_tools = self._to_openai_tools(self._tool_schemas)
 
         max_retries = self.factory.get_max_retries(step_id)
@@ -2964,6 +3237,18 @@ class PipelineEngine:
         # remain in staging/state even when the conversational attempt changes.
         effect_replays: dict[str, str] = dict(
             _resumed.get("completed_effect_calls") or {})
+        first_write_turn: int | None = _resumed.get("first_write_turn")
+        reads_searches = int(_resumed.get("reads_searches") or 0)
+        tool_failures = int(_resumed.get("tool_failures") or 0)
+        expansion_requests: list[dict] = list(
+            _resumed.get("expansion_requests") or []
+        )
+        early_progress_intervened = False
+        relay_acknowledged = not bool(relay_progress)
+        relay_read_limit = (
+            max(4, 3 * len(relay_progress["retained_files"]))
+            if relay_progress else 0
+        )
         for attempt in range(1, max_retries + 1):
             self._refuse_if_run_cancelled(step_id, attempt)
             self._emit("step_attempt", {
@@ -3076,6 +3361,23 @@ class PipelineEngine:
                     "region. Reading a large file whole spends the context you need "
                     "for the edit itself."
                 )
+                if relay_progress:
+                    retained = ", ".join(
+                        f"{name}={size} bytes"
+                        for name, size in sorted(relay_progress["retained_files"].items())
+                    ) or "no code files"
+                    incomplete = " | ".join(relay_progress["incomplete_items"])
+                    user_prompt += (
+                        "\n\n[Relay Progress Contract — FIRST ACTION REQUIRED]\n"
+                        f"Retained code: {retained} (total "
+                        f"{relay_progress['retained_bytes']} bytes).\n"
+                        f"Incomplete work: {incomplete}\n"
+                        "Your first tool call MUST be acknowledge_relay with the exact "
+                        "retained byte total and a faithful restatement of the known "
+                        "incomplete work. Until it succeeds, repository reads, searches, "
+                        "lists, mutations, and finish_step are refused. Then continue from "
+                        "the retained files and targeted tests; do not survey the repository."
+                    )
 
                 # [Language] — injected ONCE, here, as the absolute last block of
                 # the user message (after [Turn Budget]). It is the last content
@@ -3192,10 +3494,21 @@ class PipelineEngine:
                     # the checkpoint) then reads an incomplete deliverable with
                     # no hint that it was cut off mid-flight rather than judged
                     # complete by its author.
+                    failure = _budget_failure_report(
+                        max_turns=current_max_turns,
+                        first_write_turn=first_write_turn,
+                        written_files=written_files,
+                        reads_searches=reads_searches,
+                        tool_failures=tool_failures,
+                        expansion_requests=expansion_requests,
+                        relay=relay_progress,
+                    )
                     self._trace("step", "turn_budget_exhausted", {
                         "step_id": step_id, "turns": turn_count,
                         "max_turns": current_max_turns,
-                        "written_files": sorted(written_files or []),
+                        "early_progress_intervened": early_progress_intervened,
+                        "relay_acknowledged": relay_acknowledged,
+                        **failure,
                     })
                     self._emit("turn_budget_exhausted", {
                         "step_id": step_id, "turns": turn_count,
@@ -3207,6 +3520,36 @@ class PipelineEngine:
                         "incomplete outputs and trace retained; explicit attention required. "
                         "No delivery or automatic retry.")
                 remaining = current_max_turns - turn_count
+                # Intervene at half of the ORIGINAL writable-step budget. Later
+                # grants must not postpone the signal that no code has landed.
+                if (implementation_progress_enabled and _should_intervene_early(
+                        turn=turn_count, max_turns=max_turns,
+                        writable=bool(write_tool_names),
+                        written_files=(written_files if first_write_turn is None
+                                       else ["<repository mutation>"]),
+                        already_intervened=early_progress_intervened)):
+                    early_progress_intervened = True
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[Early progress intervention at turn {turn_count}/{max_turns}] "
+                            f"No repository write after {reads_searches} repository "
+                            "read/search/list calls. Stop broad exploration. Write the "
+                            "smallest compilable, testable slice from the approved plan now. "
+                            "If the remaining scope cannot fit, name it in ask_more_turns so "
+                            "the host can split or move it to an external executor; do not "
+                            "re-ground."
+                        ),
+                    })
+                    self._trace("step", "early_progress_intervention", {
+                        "step_id": step_id,
+                        "turn": turn_count,
+                        "max_turns": max_turns,
+                        "first_write_turn": first_write_turn,
+                        "written_files": [],
+                        "reads_searches": reads_searches,
+                        "action": "demand_write_or_split_external",
+                    })
                 # A LOW BUDGET IS NEWS EVEN WHEN OUTPUT EXISTS.
                 # The nudge below fires only when NOTHING is written, so a step
                 # that has produced SOME of what it owes looks identical to one
@@ -3581,7 +3924,7 @@ class PipelineEngine:
                 for tc in result.tool_calls:
                     fn = tc["function"]
                     tool_name = fn["name"]
-                    if tool_name == "finish_step":
+                    if tool_name == "finish_step" and relay_acknowledged:
                         called_finish = True
                         agent_signaled_done = True
                     elif tool_name == "ask_more_turns":
@@ -3601,12 +3944,44 @@ class PipelineEngine:
                     # minutes, and without these the liveness line either
                     # lingers on a stale "generating" or shows nothing.
                     self._note_phase("tool", tool_name)
+                    if tool_name in _REPOSITORY_READ_TOOLS:
+                        reads_searches += 1
                     repeat_key = (_repeat_call_key(tool_name, params)
                                   if tool_name in _REPEATABLE_READ_TOOLS else "")
                     repeated = repeat_index.get(repeat_key) if repeat_key else None
                     effect_key = _repeat_call_key(tool_name, params)
                     replayed_effect = effect_replays.get(effect_key)
-                    if replayed_effect is not None:
+                    host_policy_refusal = False
+                    if not relay_acknowledged and tool_name != "acknowledge_relay":
+                        host_policy_refusal = True
+                        tool_result = {
+                            "error": "relay acknowledgement required before repository operations",
+                            "expected_retained_bytes": relay_progress["retained_bytes"],
+                            "incomplete_items": relay_progress["incomplete_items"],
+                        }
+                        self._note_phase("tool_done", tool_name)
+                        self._trace("step", "relay_operation_refused_before_ack", {
+                            "turn": turn_count + 1,
+                            "tool": tool_name,
+                            "retained_bytes": relay_progress["retained_bytes"],
+                        })
+                    elif tool_name == "acknowledge_relay":
+                        relay_acknowledged, tool_result = _relay_acknowledgement(
+                            relay_progress, params
+                        )
+                        host_policy_refusal = not relay_acknowledged
+                        if relay_acknowledged:
+                            self._trace("step", "relay_progress_acknowledged", {
+                                "turn": turn_count + 1,
+                                "retained_bytes": relay_progress["retained_bytes"],
+                                "retained_files": relay_progress["retained_files"],
+                                "incomplete_items": params.get("incomplete_items"),
+                                "first_failure_run_id": relay_progress.get(
+                                    "first_failure_run_id"
+                                ),
+                            })
+                        self._note_phase("tool_done", tool_name)
+                    elif replayed_effect is not None:
                         try:
                             tool_result = json.loads(replayed_effect)
                         except (json.JSONDecodeError, TypeError):
@@ -3619,6 +3994,26 @@ class PipelineEngine:
                         self._note_phase("tool_done", tool_name)
                         self._trace("step", "side_effect_replay_refused", {
                             "tool": tool_name, "call_key": effect_key})
+                    elif (relay_progress and tool_name in _REPOSITORY_READ_TOOLS
+                          and not written_files and reads_searches > relay_read_limit):
+                        host_policy_refusal = True
+                        tool_result = {
+                            "error": (
+                                "relay targeted-read limit reached before a new write; "
+                                "continue the retained implementation now, run a targeted "
+                                "test, or split/escalate instead of surveying the repository"
+                            ),
+                            "reads_searches": reads_searches,
+                            "read_limit": relay_read_limit,
+                            "retained_files": relay_progress["retained_files"],
+                        }
+                        self._note_phase("tool_done", tool_name)
+                        self._trace("step", "relay_broad_survey_refused", {
+                            "turn": turn_count + 1,
+                            "tool": tool_name,
+                            "reads_searches": reads_searches,
+                            "read_limit": relay_read_limit,
+                        })
                     elif repeated:
                         digest, original_chars = repeated
                         tool_result = {
@@ -3664,11 +4059,19 @@ class PipelineEngine:
                             "status": "granted" if ask_more_extra else "denied",
                             "turns": ask_more_extra, "note": grant_msg,
                         })
+                        expansion_requests.append({
+                            "turn": turn_count + 1,
+                            "asked": int(params.get("turns", 3) or 3),
+                            "granted": ask_more_extra,
+                            "reason": ask_more_reason,
+                        })
                     else:
                         progress = _progress_signature(tool_name, params, tool_result)
                         if progress:
                             progress_signatures.add(progress)
                     result_str = json.dumps(tool_result, ensure_ascii=False)
+                    if _is_failed_tool_result(result_str) and not host_policy_refusal:
+                        tool_failures += 1
 
                     # Classify the result before exposing another crash point.
                     # A successful mutation is fenced independently of the
@@ -3704,6 +4107,14 @@ class PipelineEngine:
                     messages.append(tool_message)
                     self._native_messages.append(tool_message)
                     written_files.extend(names)
+                    if mutated and first_write_turn is None:
+                        first_write_turn = turn_count + 1
+                        self._trace("step", "implementation_first_write", {
+                            "step_id": step_id,
+                            "first_write_turn": first_write_turn,
+                            "written_files": sorted(set(written_files)),
+                            "reads_searches": reads_searches,
+                        })
                     if mutated:
                         # Persist the exact tool-call/result pair now, not after
                         # the rest of a multi-call batch. The independent fence

@@ -9,7 +9,7 @@ from skillflow.core import SkillFlow, StepResult
 from skillflow.graph import PipelineGraph, StepNode, Transition
 from skillflow.output_targets import git
 from skillflow.tool_loader import ToolLoader
-from core.dpe_pipeline import PipelineEngine
+from core.dpe_pipeline import NativeTurnBudgetExhausted, PipelineEngine
 
 
 def run_fixture(tmp_path, monkeypatch, tools=None):
@@ -158,8 +158,10 @@ def test_coding_impl_relay_acknowledges_retained_bytes_before_targeted_work(tmp_
             assert "relay acknowledgement required" in messages[-1]["content"]
             return response("acknowledge_relay", retained_bytes=retained_bytes,
                             incomplete_items=["finish baseline wiring", "add targeted test"])
-        if n in (3, 4, 5, 6):
+        if n in (3, 4, 5):
             return response("read", path="baseline.py")
+        if n == 6:
+            return response("list")
         if n == 7:
             assert "targeted-read limit reached" in messages[-1]["content"]
             return response("create", file="relay_done.py", content="done = True\n")
@@ -177,3 +179,30 @@ def test_coding_impl_relay_acknowledges_retained_bytes_before_targeted_work(tmp_
     assert "early_progress_intervention" in events
     assert "implementation_first_write" in events
     assert (root / "relay_done.py").read_text() == "done = True\n"
+
+
+def test_budget_exhaustion_counts_repository_list_and_emits_actionable_report(
+        tmp_path, monkeypatch):
+    sf, rid, claim, root = run_fixture(tmp_path, monkeypatch)
+
+    def turn(messages, **kwargs):
+        return response("list")
+
+    e, ws = host(sf, rid, claim, root, turn)
+    e._draft_graph_name = lambda: "coding_impl"
+    e.factory.get_max_tool_turns = lambda _: 4
+    with pytest.raises(NativeTurnBudgetExhausted):
+        execute(e, ws, rid, claim)
+
+    payload = sf._conn.execute(
+        "SELECT payload_json FROM skillflow_trace "
+        "WHERE run_id = ? AND event = 'turn_budget_exhausted' ORDER BY seq DESC LIMIT 1",
+        (rid,),
+    ).fetchone()[0]
+    report = json.loads(payload)
+    assert report["reads_searches"] == 4
+    assert report["first_write_turn"] is None
+    assert report["failure_classes"] == ["re_grounding"]
+    assert report["early_progress_intervened"] is True
+    assert report["strategy_triggers"] == ["relay_targeted_context"]
+    assert "not reported" not in " ".join(report["remaining_delivery"])

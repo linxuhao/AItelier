@@ -1,0 +1,49 @@
+{
+  "fixture_version": 1,
+  "run_id": "4a2d71bf-2d29-40ee-9e85-43a91a4f3537",
+  "requirement_id": "brief-3-action-pick",
+  "captured_source": {
+    "trace_seq": 607,
+    "step": "2",
+    "event": "finish_step",
+    "ruling_source_id": "aitelier-run:4a2d71bf-2d29-40ee-9e85-43a91a4f3537/trace/607",
+    "owner_ruling_excerpt": "the ACTION_PICK null-safety card WITHDRAWN — target block measured absent on this base (cultivation.gd:2552 LAYOUT_NODES still the original three names, zero HFlowContainer occurrences, d97af6c not an ancestor of 1182b37d), item reassigned to the director with the d97af6c merge, with a standing prohibition against creating the block"
+  },
+  "planning_output": {
+    "trace_source_seq": 968,
+    "execution_order": [
+      [
+        "retire_gongfa_pick_scenarios_and_migrate_pins",
+        "rederive_hover_pin_as_invariants",
+        "fix_readme_manual_contract",
+        "fix_roster_panel_month_advance_route",
+        "record_design_budget_table",
+        "migrate_practice_target_receipt_route"
+      ],
+      [
+        "restore_save_decoder_ownership",
+        "retire_work_beats_idling_and_pins"
+      ],
+      [
+        "seal_single_action_month_residue"
+      ]
+    ]
+  },
+  "review_input": {
+    "trace_seq": 968,
+    "step": "3_review",
+    "brief_section_3_excerpt": "scripts/segments/cultivation.gd 的 ACTION_PICK 布局块（d97af6c 合入）把 body / feedback / OptionsBox / ConsequenceLabel / StatePanel / ChoicePanel 六个节点直接喂给 _place，而 _place 没有 null 守卫"
+  },
+  "review_output": {
+    "trace_seq": 979,
+    "step": "3_review",
+    "passed": false,
+    "summary": "Step 3 PM review complete: verdict written. passed=false — one blocking gap: brief §3's ACTION_PICK _place null-guard fix for scripts/segments/cultivation.gd has no owning card."
+  },
+  "invalid_retry_output": {
+    "trace_seq": 1023,
+    "card_id": "record_action_pick_block_absent",
+    "description": "Record the measured absence of the d97af6c ACTION_PICK layout block (STOP record)",
+    "owns": ["final/delivery_notes_record_action_pick_block_absent.md"]
+  }
+}

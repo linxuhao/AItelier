@@ -9,6 +9,16 @@ Step 3 产出的 `tasks_manifest.json` 和各 `tasks/{id}.json` 子任务卡片�
 
 > **上下文提示**: 被审查的 Green Agent 输出已包含在你的 prompt 上下文中（以 "Step 3" 章节形式），无需使用工具读取文件。若上下文里有 `5_review` 的 `review_verdict.json`，说明这是**目标循环修复轮**（见下方第 7 点）。
 
+## 同源裁决边界（先检查）
+
+Prompt 中的 [validated_requirement_coverage] 是确定性门重新读取已提升 Step 3
+产物后生成的精简视图。记录其中的 inventory_sha256 与 ledger_sha256，并仅按这份
+ledger 判断 active/withdrawn/superseded；不要从旧 brief、Step 2 feedback 或历史
+review artifacts 重新推导另一份裁决。若该区块缺失、hash 与 Step 3
+requirements_coverage.json 不同，或卡片与 ledger disposition 不一致，必须判红。
+owner/State ruling 可以撤回要求；报告、reviewer 和模型意见不可以。撤回项不得要求
+新建 STOP/记录型/空壳卡；active 必做项仍必须有真实执行卡。
+
 ## 审查要点
 
 ### 0. 目标循环修复轮 —— 硬性门槛（仅当上下文存在 `5_review` 的 `review_verdict.json` 且 `passed: false` 时）

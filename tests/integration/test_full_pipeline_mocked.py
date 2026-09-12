@@ -29,6 +29,7 @@ from skillflow.core import StepResult
 from skillflow.tool_loader import ToolLoader
 import skillflow as _skillflow_pkg
 import yaml
+from aitelier.tools.requirement_coverage.impl import hash_document
 
 
 # ── Mocked-agent harness (mirrors tests/integration/test_dpe_pipeline.py) ──
@@ -130,19 +131,48 @@ def _verdict_response(passed: bool, suggestions=None) -> str:
     })
 
 
+def _mock_requirement_documents():
+    inventory = {
+        "document_type": "requirement_inventory", "schema_version": 1,
+        "inventory_version": 1, "base_sha": "f" * 40,
+        "baseline": {"id": "mock-brief", "revision": 1},
+        "requirements": [{
+            "id": "add-two-numbers", "source_locator": "step1_goals.json#mvp_goals[0]",
+            "status": "active",
+        }],
+    }
+    inventory["inventory_sha256"] = hash_document(inventory)
+    ledger = {
+        "document_type": "coverage_ledger", "schema_version": 1,
+        "ledger_version": 1, "inventory_sha256": inventory["inventory_sha256"],
+        "base_sha": inventory["base_sha"], "baseline": inventory["baseline"],
+        "entries": [{"requirement_id": "add-two-numbers",
+                     "disposition": "card", "card_id": "task_1"}],
+    }
+    ledger["ledger_sha256"] = hash_document(ledger)
+    return inventory, ledger
+
+
+_MOCK_INVENTORY, _MOCK_LEDGER = _mock_requirement_documents()
+
+
 # The full DPE role sequence (configs/dpe_default.yaml), minus the inline
 # tool nodes git_sync_pre / 5_test which run real git/pytest and are not
 # agent steps. Each tuple: (step_id, agent_config, canned_response, expected_file).
 PIPELINE_STEPS = [
     ("1", "researcher", _content_response("step1_sota.md", "# SOTA"), "step1_sota.md"),
     ("1_review", "researcher_reviewer", _verdict_response(True), "review_verdict.json"),
-    ("2", "architect", _content_response("step2_design.md", "# Design"), "step2_design.md"),
+    ("2", "architect", json.dumps({"thoughts": "design", "actions": [
+        _write_action("step2_design.md", "# Design"),
+        _write_action("requirement_inventory.json", json.dumps(_MOCK_INVENTORY)),
+    ]}), "step2_design.md"),
     ("2_review", "architect_reviewer", _verdict_response(True), "review_verdict.json"),
     # Step 3 (PM) is multi-file: it accumulates task cards and only terminates
     # on an explicit end_step action (dpe_pipeline.py:726), so the mock emits both.
     ("3", "pm", json.dumps({"thoughts": "decomposing", "actions": [
-        _write_action("tasks_manifest.json", '{"total": 1}'),
+        _write_action("tasks_manifest.json", '{"execution_order": [["task_1"]]}'),
         _write_action("tasks/task_1.json", '{"id": "task_1"}'),
+        _write_action("requirements_coverage.json", json.dumps(_MOCK_LEDGER)),
         {"tool": "end_step", "params": {"summary": "1 task"}},
     ]}), "tasks_manifest.json"),
     ("3_review", "pm_reviewer", _verdict_response(True), "review_verdict.json"),
@@ -401,6 +431,11 @@ def _drive(sf, run_id, *, reject_at=None, stop_at="t_plan", max_ticks=40):
     executed = []
     checkpoints = 0
     rejected = set()
+    import subprocess
+    code_root = sf._workspace.get_project_code_path("p", run_id=run_id)
+    base_sha = subprocess.run(
+        ["git", "-C", str(code_root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True).stdout.strip()
     for _ in range(max_ticks):
         node = sf.advance_run(run_id)
         if node is None:
@@ -421,7 +456,7 @@ def _drive(sf, run_id, *, reject_at=None, stop_at="t_plan", max_ticks=40):
             rejected.add(sid)
         from tests.integration.test_full_pipeline_real_runner import _build_agent_response
         delivery = json.loads(_build_agent_response(
-            sid, claimed.inputs.get("_tool_schemas", {}),
+            sid, claimed.inputs.get("_tool_schemas", {}), base_sha=base_sha,
             review_passed=verdict == _VERDICT_PASS))
         for action in delivery["actions"]:
             if action["tool"] in ("end_step", "finish_step"):

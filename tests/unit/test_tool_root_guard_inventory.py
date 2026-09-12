@@ -61,6 +61,7 @@ GUARDED = {
     "repo_remove_file",         # direct code target + absolute root + symlink/path jail
     "godot_playtest_scenario",  # absolute project_root, no CWD fallback
     "restage",                  # raises on a missing root
+    "requirement_coverage",      # absolute workspace root; pure hash mode needs none
     "run_tests",                # refuses a non-absolute project_root
     "scaffold",                 # `… if (project_root or workspace_root) else None`
     "scaffold_bible",           # raises unless the chosen root is absolute

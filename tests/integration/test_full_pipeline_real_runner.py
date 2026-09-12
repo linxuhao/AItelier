@@ -14,6 +14,7 @@
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from core.db_manager import DBManager
 from core.workspace_manager import WorkspaceManager
 from aitelier.runner import AgentStepRunner
 from aitelier.gate_evidence import stamp_report
+from aitelier.tools.requirement_coverage.impl import hash_document
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -184,7 +186,30 @@ def _action(tool, **params):
     return {"tool": tool, "params": params}
 
 
-def _build_agent_response(step_id, tool_schemas, *, review_passed=True, revising_code=False):
+def _requirement_documents(base_sha):
+    inventory = {
+        "document_type": "requirement_inventory", "schema_version": 1,
+        "inventory_version": 1, "base_sha": base_sha,
+        "baseline": {"id": "mock-brief", "revision": 1},
+        "requirements": [{
+            "id": "add-two-numbers", "source_locator": "step1_goals.json#mvp_goals[0]",
+            "status": "active",
+        }],
+    }
+    inventory["inventory_sha256"] = hash_document(inventory)
+    ledger = {
+        "document_type": "coverage_ledger", "schema_version": 1,
+        "ledger_version": 1, "inventory_sha256": inventory["inventory_sha256"],
+        "base_sha": base_sha, "baseline": inventory["baseline"],
+        "entries": [{"requirement_id": "add-two-numbers",
+                     "disposition": "card", "card_id": "t1"}],
+    }
+    ledger["ledger_sha256"] = hash_document(ledger)
+    return inventory, ledger
+
+
+def _build_agent_response(step_id, tool_schemas, *, base_sha,
+                          review_passed=True, revising_code=False):
     """Return the JSON string a mocked agent would produce for this step."""
     writes = [k for k in tool_schemas if k.startswith("write_")]
 
@@ -200,6 +225,7 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True, revising
         ]})
 
     if step_id == "3":
+        _, ledger = _requirement_documents(base_sha)
         manifest = json.dumps({"execution_order": [["t1"]]})
         card = {"id": "t1", "description": "implement add",
                 "detailed_requirements": "Add two numbers without side effects.",
@@ -211,6 +237,7 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True, revising
         return json.dumps({"thoughts": "decompose", "actions": [
             _action("write_tasks_manifest", content=manifest),
             _action("write_task_card", id="t1", content=json.dumps(card)),
+            _action("write_coverage_ledger", content=json.dumps(ledger)),
             {"tool": "end_step", "params": {"summary": "1 task"}},
         ]})
 
@@ -219,8 +246,10 @@ def _build_agent_response(step_id, tool_schemas, *, review_passed=True, revising
     if "write_sota" in writes:
         return json.dumps({"thoughts": "sota", "actions": [_action("write_sota", content="# SOTA")]})
     if "write_design" in writes:
+        inventory, _ = _requirement_documents(base_sha)
         return json.dumps({"thoughts": "design", "actions": [
             _action("write_design", content="# Design"),
+            _action("write_requirement_inventory", content=json.dumps(inventory)),
             _action("write_linter_manifest", content=json.dumps({".py": "ruff"})),
         ]})
     if "write_plan" in writes:
@@ -269,7 +298,7 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
 
     # Hold the response for the step currently executing; the mocked agent
     # reads it. Steps run one at a time so a single slot is race-free.
-    current = {"response": "{}"}
+    current = {"response": "{}", "base_sha": None}
 
     def fake_get_agent(self, name):
         mg = MagicMock()
@@ -321,9 +350,15 @@ async def _drive_to_completion(sf, db, ws, run_id, monkeypatch, max_ticks=160,
         if claimed.step_id == reject_once_at and reject_once_at not in rejected:
             review_passed = False
             rejected.add(reject_once_at)
+        code_root = sf._workspace.get_project_code_path("p", run_id=run_id)
+        if current["base_sha"] is None:
+            current["base_sha"] = subprocess.run(
+                ["git", "-C", str(code_root), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True).stdout.strip()
+        base_sha = current["base_sha"]
         current["response"] = _build_agent_response(
             claimed.step_id, claimed.inputs.get("_tool_schemas", {}),
-            review_passed=review_passed,
+            base_sha=base_sha, review_passed=review_passed,
             revising_code=claimed.step_id == "t_impl" and "t_impl" in executed)
         executed.append(claimed.step_id)
         if observed_claims is not None:

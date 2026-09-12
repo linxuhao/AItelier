@@ -54,6 +54,26 @@
 ## 上游 checkpoint 的 owner 注记
 上下文里若有 Step 1 / Step 2 的 checkpoint 反馈(owner 在批准或驳回时写的),其中每一条「加卡 / 加要求 / 裁决」都是**必须**落进拆解的:加的卡按 owner 给的位置排进 execution_order,裁决写进相关卡的 `detailed_requirements`。漏掉一条 = 审查判红。
 
+## 需求覆盖台账（确定性门，必须交付）
+
+你收到的 [requirement_inventory] 是 Step 2 已批准清单的精简、内容寻址视图。
+必须同时写 requirements_coverage.json：
+
+1. 逐字复制 inventory_sha256、base_sha、baseline。发生任何不一致就停止，
+   不得用旧 brief、历史 reviewer 输出或模型意见覆盖。
+2. inventory 的每个 requirement 恰好一行：
+   - active 必须映射到 execution_order 中真实存在的 card_id；
+   - withdrawn/superseded 必须复制 inventory 的完整 authoritative ruling，
+     不得创建任务卡，包括 STOP、记录型或空壳卡。
+3. 不得添加 inventory 之外的 requirement，也不得留下没有 active requirement
+   支撑的额外卡。
+4. 调用 requirement_coverage(document=<不含 ledger_sha256 的完整对象>)，将返回
+   sha256 写入 ledger_sha256；内容改动后重算。
+
+Step 3 的确定性 validation 会在 checkpoint 与 3_review 之前校验所有行、
+manifest/card、authority、base/baseline 和两个 hash。3_review 将收到同一份已验证
+ledger 的同一 hash，而不会重新读取 Step 2 的历史反馈来猜裁决。
+
 ## 任务卡片字段
 
 | 字段 | 是否必需 | 描述 |
@@ -97,6 +117,7 @@
 - [ ] `execution_order` 是否覆盖了所有任务且无循环依赖？
 - [ ] 每个任务是否可以独立执行和验证？（无隐藏耦合）
 - [ ] 所有架构组件是否都已分配给某个任务？
+- [ ] requirements_coverage.json 是否逐项覆盖批准 inventory，active 项有真卡、撤回项只有权威 ruling，且 hash 已重算？
 - [ ] 每个任务的 `artifact_requirement` 和 `detailed_requirements` 是否足够具体，可供实现者使用？
 - [ ] 每个任务的 `interface_contract` 是否清晰描述了它所暴露的接口？
 - [ ] 每个任务的 `acceptance` 能不能被审稿人**不问你**就核出真假？`owns` 在同一 wave 内是否两两不相交？`stop_conditions` 有没有写清「什么情况下停」？

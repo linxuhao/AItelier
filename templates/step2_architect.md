@@ -32,6 +32,26 @@
 5. **技术选型建议**: 推荐合适的技术栈，基于SOTA调研结果
 6. **考虑扩展性**: 预留合理的扩展点，但避免过度设计
 
+## 有效需求清单（必须与设计一起交付）
+
+先读取 [requirement_authority_context] 中的真实 base_sha。在
+step2_design.md 之外必须写 requirement_inventory.json：
+
+- inventory_version 每次需求或 owner 裁决变化时递增；base_sha 必须逐字采用
+  authority context 的完整 SHA。
+- baseline 标识本轮适用的 brief/design 基线及其版本。
+- 每个真实必做项有稳定 id、精确 source_locator 和 status: active。
+- owner/State 撤回或取代的项仍保留同一个 id，但状态改为
+  withdrawn/superseded，并逐字段记录权威 ruling。reviewer、报告和模型意见
+  不是 authority，不能撤回要求。
+- 若本次输入来自 State attempt，state_contract 必须逐字钉住 project/node/revision/
+  contract_hash；否则写 null。发现 base、baseline 或 State 合同互相冲突时停止，
+  明确报告冲突，不要挑一个静默继续。
+- 写文件前调用 requirement_coverage(document=<不含 inventory_sha256 的完整对象>)，
+  把返回的 sha256 写入 inventory_sha256。任何内容变化后必须重算。
+
+这个清单是 Step 3 和 3_review 的共同裁决来源；不要把历史 review transcript 塞入清单。
+
 ## 输出格式
 产出 `step2_design.md`，内容示例：
 
@@ -85,6 +105,7 @@
 - [ ] 接口定义是否足够清晰，让 PM 可以据此拆分任务？
 - [ ] 是否避免了过度设计（不必要的抽象层）？
 - [ ] 是否产出了 `linter_manifest.json` 并匹配设计中的文件类型？
+- [ ] 是否产出了通过 requirement_coverage 校验的 requirement_inventory.json，且 hash/base/baseline/authority 与本轮一致？
 
 ## 错误处理
 - 如果目标定义不够清晰，基于合理假设补充设计细节

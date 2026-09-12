@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 _AGENT_TOOLS = {
     "researcher":            ["web_search", "web_fetch"],
     "researcher_reviewer":   [],
-    "architect":             ["web_search", "web_fetch", "read_file", "list_tree"],
+    "architect":             ["web_search", "web_fetch", "read_file", "list_tree", "requirement_coverage"],
     "architect_reviewer":    [],
-    "pm":                    ["web_search", "web_fetch", "read_file", "list_tree"],
+    "pm":                    ["web_search", "web_fetch", "read_file", "list_tree", "requirement_coverage"],
     "pm_reviewer":           [],
     "task_planner":          ["web_search", "web_fetch", "read_file", "list_tree"],
     "task_planner_reviewer": [],
@@ -72,12 +72,12 @@ def _get_tool_schemas_for_step(step_id: str) -> dict:
 
 CONSTRAINED_STEPS = {
     "1": ["write_sota"],
-    "2": ["write_design", "write_linter_manifest"],
+    "2": ["write_design", "write_linter_manifest", "write_requirement_inventory"],
     # README IS a content-mode output of step 5: it is written via the engine-
     # generated write tool (path bound to the step staging dir) and delivered to
     # the resolved project repo by step 5's on_deliver:repo_apply. Step 3 has no
     # repo_apply, so it emits only its task files.
-    "3": ["write_tasks_manifest", "write_task_card"],
+    "3": ["write_tasks_manifest", "write_task_card", "write_coverage_ledger"],
     "5": ["write_readme", "write_report"],
     "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card", "write_research_notes"],
 }

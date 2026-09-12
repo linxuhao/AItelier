@@ -1,0 +1,42 @@
+name: requirement_coverage
+description: >
+  Content-address and validate the DPE requirement inventory and exact-one task
+  coverage ledger. With document, return the canonical sha256 the architect or
+  PM must store. As a step validator, reject malformed authority, base/baseline
+  conflicts, missing or duplicate requirements, missing task cards, cards for
+  withdrawn work, and planner/reviewer ledger hash drift. As a context source,
+  return only the compact validated ledger and hashes, never historical review
+  artifacts.
+parameters:
+  document:
+    type: object
+    description: >
+      Optional proposed requirement_inventory or coverage_ledger JSON object.
+      The result gives the canonical hash after excluding only its own hash field.
+    required: false
+  workspace_root:
+    type: string
+    description: >
+      Step staging directory for validation, or project workspace root for a
+      context-source read. Injected by the engine; callers must not choose it.
+    required: false
+  project_root:
+    type: string
+    description: >
+      Current code checkout, used to expose and verify the exact base SHA.
+      Injected by the engine; callers must not choose it.
+    required: false
+  step_dir:
+    type: string
+    description: "Compatibility alias for a validation staging directory."
+    required: false
+  out_dir:
+    type: string
+    description: "Compatibility alias for a validation staging directory."
+    required: false
+  config_name:
+    type: string
+    description: >
+      Current graph name, used to select the matching run artifacts when a
+      project has several workflows. Injected by the engine.
+    required: false

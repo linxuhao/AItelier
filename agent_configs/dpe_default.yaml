@@ -56,7 +56,7 @@ architect:
   model: "glm"
   temperature: 0.2
   template: "step2_architect.md"
-  tools: ["semantic_search", "web_search", "web_fetch", "list_tree"]
+  tools: ["semantic_search", "web_search", "web_fetch", "list_tree", "requirement_coverage"]
   max_output_tokens: 32768
   native_tool_calling: true
   fallback_to_json_mode: true
@@ -82,7 +82,7 @@ pm:
   model: "glm"
   temperature: 0.2
   template: "step3_pm.md"
-  tools: ["semantic_search", "web_search", "web_fetch", "list_tree"]
+  tools: ["semantic_search", "web_search", "web_fetch", "list_tree", "requirement_coverage"]
   max_output_tokens: 32768
   native_tool_calling: true
   fallback_to_json_mode: true

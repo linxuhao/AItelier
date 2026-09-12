@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import json
 import threading
 
 import pytest
@@ -87,6 +88,49 @@ def test_search_is_project_scoped_filterable_redacted_and_stably_paginated(servi
     assert [first["entries"][0]["revision"], second["entries"][0]["revision"],
             third["entries"][0]["revision"]] == [1, 2, 3]
     assert first["truncated"] and second["truncated"] and not third["truncated"]
+
+
+def test_search_compares_time_instants_and_unicode_casefold(services, monkeypatch):
+    service, _ = services
+    timestamps = iter([
+        "2026-09-12T12:00:00.000000+00:00",
+        "2026-09-12T12:00:00.000001+00:00",
+    ])
+    monkeypatch.setattr("core.state_driver_notes.now", lambda: next(timestamps))
+    service.driver_notes.update("aitelier", "permanent", "Decision ÄPFEL", 0, "lead")
+    service.driver_notes.update("aitelier", "temporary", "one microsecond later", 1, "lead")
+
+    assert [row["revision"] for row in service.driver_notes.search(
+        "aitelier", "äpfel")["entries"]] == [1]
+    assert [row["revision"] for row in service.driver_notes.search(
+        "aitelier", "", created_after="2026-09-12T14:00:00+02:00")["entries"]] == [2]
+    assert service.driver_notes.search(
+        "aitelier", "", created_before="2026-09-12T12:00:00Z")["entries"] == []
+    assert [row["revision"] for row in service.driver_notes.search(
+        "aitelier", "", created_after="2026-09-12T12:00:00.000000Z")["entries"]] == [2]
+    assert service.driver_notes.search(
+        "aitelier", "", created_after="2026-09-12T12:00:00.000001Z")["entries"] == []
+    assert [row["revision"] for row in service.driver_notes.search(
+        "aitelier", "", created_before="2026-09-12T12:00:00.000001Z")["entries"]] == [1]
+
+
+def test_search_redacts_slack_tokens_and_identity_metadata(services):
+    service, _ = services
+    secret_actor = "sk_abcdefghijklmnop1234"
+    writer = StateService(StateDatabase(service.db.db_path), actor=secret_actor)
+    slack_token = "".join(("xo", "xb-1234567890-abcdefghijklmnop"))
+    writer.driver_notes.update(
+        "aitelier", "temporary",
+        f"handoff {slack_token} password=synthetic-password",
+        0, "api_key=director-secret")
+    result = writer.driver_notes.search("aitelier", "handoff", excerpt_chars=1000)
+    serialized = json.dumps(result)
+    assert secret_actor not in serialized
+    assert "director-secret" not in serialized
+    assert slack_token not in serialized
+    assert "synthetic-password" not in serialized
+    assert result["entries"][0]["actor"] == "[REDACTED]"
+    assert result["entries"][0]["director_identity"] == "api_key=[REDACTED]"
 
 
 @pytest.mark.parametrize("section", ["permanent", "temporary"])

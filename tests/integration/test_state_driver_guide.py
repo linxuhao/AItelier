@@ -34,6 +34,35 @@ def test_mcp_driver_onboarding_surfaces_are_discoverable_and_consistent(tmp_path
         assert search_schema["mutates"] is False
         assert search_schema["arguments"]["properties"]["excerpt_chars"]["maximum"] == 1000
         assert "search_driver_note_history" in STATE_DRIVER_GUIDE
+        operation = client.get("/openapi.json", headers={
+            "Authorization": "Bearer " + "x" * 40}).json()["paths"][
+            "/api/state/projects/{project_id}/driver-note/history/search"]["get"]
+        params = {item["name"]: item for item in operation["parameters"]}
+        assert params["query"]["schema"]["maxLength"] == 500
+        assert "Unicode case-insensitive" in params["query"]["description"]
+        assert "permanent" in json.dumps(params["section"]["schema"])
+        assert "temporary" in json.dumps(params["section"]["schema"])
+        assert any(item.get("maxLength") == 320
+                   for item in params["actor"]["schema"]["anyOf"])
+        assert any(item.get("maxLength") == 320
+                   for item in params["director_identity"]["schema"]["anyOf"])
+        assert params["after_revision"]["schema"]["minimum"] == 0
+        assert "Exclusive stable cursor" in params["after_revision"]["description"]
+        assert any(item.get("minimum") == 1
+                   for item in params["min_revision"]["schema"]["anyOf"])
+        assert any(item.get("maximum") == 2**63 - 1
+                   for item in params["max_revision"]["schema"]["anyOf"])
+        assert "Exclusive timezone-aware" in params["created_after"]["description"]
+        assert "Exclusive timezone-aware" in params["created_before"]["description"]
+        assert any(item.get("maxLength") == 64
+                   for item in params["created_after"]["schema"]["anyOf"])
+        assert params["created_after"]["schema"]["format"] == "date-time"
+        assert params["created_before"]["schema"]["format"] == "date-time"
+        assert params["limit"]["schema"]["maximum"] == 100
+        assert params["excerpt_chars"]["schema"]["minimum"] == 64
+        assert params["excerpt_chars"]["schema"]["maximum"] == 1000
+        assert "ordered by revision ascending" in operation["description"]
+        assert "next_after_revision" in operation["description"]
 
 
 def test_mcp_wait_returns_external_completion_and_remains_private(tmp_path):
@@ -123,7 +152,12 @@ def test_mcp_driver_notes_are_authorized_project_scoped_and_cas_protected(tmp_pa
             **write, "content": " release access_token=synthetic-secret", "expected_revision": 1,
             "operation": "append"}))
         search_args = {"project_id": "aitelier", "query": "release",
-                       "section": "temporary", "limit": 1, "excerpt_chars": 64}
+                       "section": "temporary", "actor": history["entries"][0]["actor"],
+                       "director_identity": "aitelier-director", "after_revision": 0,
+                       "min_revision": 1, "max_revision": 2,
+                       "created_after": "2000-01-01T00:00:00Z",
+                       "created_before": "2100-01-01T00:00:00+00:00",
+                       "limit": 1, "excerpt_chars": 64}
         mcp_search = result(rpc("state_graph_read", "search_driver_note_history", search_args))
         assert mcp_search["entries"][0]["revision"] == 1
         assert mcp_search["truncated"] is True

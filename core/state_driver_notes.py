@@ -51,18 +51,22 @@ def note_text(value: str) -> str:
     return value
 
 
-def _time_boundary(value: str | None, label: str) -> str | None:
+def _instant(value: str, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise StateGraphError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise StateGraphError(f"{label} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _time_boundary(value: str | None, label: str) -> datetime | None:
     if value is None:
         return None
     if not isinstance(value, str) or len(value) > 64:
         raise StateGraphError(f"{label} must be an ISO-8601 timestamp of at most 64 characters")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise StateGraphError(f"{label} must be an ISO-8601 timestamp") from exc
-    if parsed.tzinfo is None:
-        raise StateGraphError(f"{label} must include a timezone")
-    return parsed.astimezone(timezone.utc).isoformat()
+    return _instant(value, label)
 
 
 def _redact(value: str) -> str:
@@ -77,6 +81,7 @@ def _redact(value: str) -> str:
          r"auth[_-]?token|client[_-]?secret|secret)\s*[\"']?\s*[:=]\s*)"
          r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;\]}]+)", r"\1[REDACTED]"),
         (r"\b(?:sk|ghp|github_pat)_[A-Za-z0-9_\-]{16,}\b", "[REDACTED]"),
+        (r"(?i)\bxox[baprs]-[A-Za-z0-9-]{8,}\b", "[REDACTED]"),
         (r"\bAKIA[A-Z0-9]{16}\b", "[REDACTED]"),
     )
     for pattern, replacement in patterns:
@@ -88,8 +93,14 @@ def _excerpt(value: str, query: str, limit: int) -> str:
     redacted = _redact(value)
     if len(redacted) <= limit:
         return redacted
-    folded = redacted.casefold()
-    position = folded.find(query.casefold()) if query else 0
+    folded_parts, offsets = [], []
+    for index, character in enumerate(redacted):
+        part = character.casefold()
+        folded_parts.append(part)
+        offsets.extend([index] * len(part))
+    folded = "".join(folded_parts)
+    folded_position = folded.find(query.casefold()) if query else 0
+    position = offsets[folded_position] if folded_position >= 0 and offsets else folded_position
     if position < 0:
         position = 0
     start = max(0, min(position - limit // 3, len(redacted) - limit))
@@ -99,6 +110,10 @@ def _excerpt(value: str, query: str, limit: int) -> str:
     if start + limit < len(redacted):
         excerpt = excerpt[:-1] + "…"
     return excerpt
+
+
+def _matches(value: str, query: str) -> bool:
+    return not query or query.casefold() in value.casefold()
 
 
 class StateDriverNotes:
@@ -190,33 +205,39 @@ class StateDriverNotes:
         clauses = ["project_id=?", "revision>?"]
         args: list[object] = [project_id, after_revision]
         for sql, value in (("revision>=?", min_revision), ("revision<=?", max_revision),
-                           ("created_at>?", created_after), ("created_at<?", created_before),
                            ("section=?", section), ("actor=?", actor),
                            ("director_identity=?", director_identity)):
             if value is not None:
                 clauses.append(sql)
                 args.append(value)
-        if query:
-            clauses.append("instr(lower(CASE section WHEN 'permanent' THEN permanent_text "
-                           "ELSE temporary_text END), lower(?)) > 0")
-            args.append(query)
-        args.append(limit + 1)
+        selected = []
         with self.store.transaction() as conn:
             self.store._project(conn, project_id)
             rows = conn.execute(
                 "SELECT revision,actor,director_identity,operation,section,created_at,"
                 "CASE section WHEN 'permanent' THEN permanent_text ELSE temporary_text END AS changed_text "
                 "FROM state_driver_note_revisions WHERE " + " AND ".join(clauses) +
-                " ORDER BY revision ASC LIMIT ?", args).fetchall()
+                " ORDER BY revision ASC", args)
+            for row in rows:
+                created_at = _instant(row["created_at"], "stored driver note created_at")
+                if created_after is not None and created_at <= created_after:
+                    continue
+                if created_before is not None and created_at >= created_before:
+                    continue
+                if not _matches(row["changed_text"], query):
+                    continue
+                selected.append(row)
+                if len(selected) > limit:
+                    break
         entries = [{
             "revision": row["revision"], "section": row["section"],
-            "operation": row["operation"], "actor": row["actor"],
-            "director_identity": row["director_identity"],
+            "operation": row["operation"], "actor": _redact(row["actor"]),
+            "director_identity": _redact(row["director_identity"]),
             "created_at": row["created_at"],
             "excerpt": _excerpt(row["changed_text"], query, excerpt_chars),
-        } for row in rows[:limit]]
+        } for row in selected[:limit]]
         return {"project_id": project_id, "entries": entries,
-                "truncated": len(rows) > limit,
+                "truncated": len(selected) > limit,
                 "next_after_revision": entries[-1]["revision"] if entries else after_revision}
 
     def update(self, project_id: str, section: str, content: str, expected_revision: int,

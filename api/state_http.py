@@ -1,8 +1,9 @@
 """State-only HTTP routes reusable without importing the workflow host."""
 import inspect
 from functools import partial
+from typing import Annotated, Literal
 from anyio import to_thread
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from core.state_commands import READ_REQUESTS, WRITE_REQUESTS, describe, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 
@@ -52,14 +53,43 @@ def create_state_router(service_dependency, access_dependency):
             "project_id": project_id, "after_revision": after_revision, "limit": limit})
 
 
-    @router.get("/projects/{project_id}/driver-note/history/search")
+    @router.get(
+        "/projects/{project_id}/driver-note/history/search",
+        summary="Search driver note history",
+        description=("Returns bounded redacted excerpts from the section changed by each matching "
+                     "revision, ordered by revision ascending. Continue stable pagination with "
+                     "next_after_revision and the same filters."))
     def search_driver_note_history(
-            project_id: str, query: str = "", section: str | None = None,
-            actor: str | None = None, director_identity: str | None = None,
-            after_revision: int = 0, min_revision: int | None = None,
-            max_revision: int | None = None, created_after: str | None = None,
-            created_before: str | None = None, limit: int = 20,
-            excerpt_chars: int = 320, service=Depends(service_dependency)):
+            project_id: str,
+            query: Annotated[str, Query(
+                max_length=500,
+                description="Unicode case-insensitive literal text; empty lists filtered revisions.")] = "",
+            section: Annotated[Literal["permanent", "temporary"] | None, Query(
+                description="Exact changed-section filter.")] = None,
+            actor: Annotated[str | None, Query(
+                min_length=1, max_length=320, description="Exact authenticated actor filter.")] = None,
+            director_identity: Annotated[str | None, Query(
+                min_length=1, max_length=320, description="Exact recorded director identity filter.")] = None,
+            after_revision: Annotated[int, Query(
+                ge=0, le=2**63-1,
+                description="Exclusive stable cursor; results are ordered by revision ascending.")] = 0,
+            min_revision: Annotated[int | None, Query(
+                ge=1, le=2**63-1, description="Inclusive minimum revision.")] = None,
+            max_revision: Annotated[int | None, Query(
+                ge=1, le=2**63-1, description="Inclusive maximum revision.")] = None,
+            created_after: Annotated[str | None, Query(
+                max_length=64,
+                description="Exclusive timezone-aware ISO-8601 instant lower bound.",
+                json_schema_extra={"format": "date-time"})] = None,
+            created_before: Annotated[str | None, Query(
+                max_length=64,
+                description="Exclusive timezone-aware ISO-8601 instant upper bound.",
+                json_schema_extra={"format": "date-time"})] = None,
+            limit: Annotated[int, Query(
+                ge=1, le=100, description="Maximum entries returned per page.")] = 20,
+            excerpt_chars: Annotated[int, Query(
+                ge=64, le=1000, description="Maximum characters in each redacted excerpt.")] = 320,
+            service=Depends(service_dependency)):
         return _call(service, "search_driver_note_history", {
             "project_id": project_id, "query": query, "section": section,
             "actor": actor, "director_identity": director_identity,

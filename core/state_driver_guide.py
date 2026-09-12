@@ -45,9 +45,9 @@ from the caller's director identity. Identity is provenance, never authorization
 
 Use get_driver_note for current authority. Use search_driver_note_history only
 when a past decision, handoff, owner or phrase is needed: it searches the section
-changed by each revision, supports literal text plus section, actor,
+changed by each revision, supports Unicode case-insensitive literal text plus section, actor,
 director_identity, revision and timezone-aware time bounds, and returns redacted
-excerpts in ascending revision order. Continue with next_after_revision and the
+excerpts and identity metadata in ascending revision order. Continue with next_after_revision and the
 same filters; an empty query browses filtered revisions, while no matches returns
 an empty page. Fetch full snapshots with driver_note_history only after selecting
 specific revisions. Do not load the full history on every resume or compaction.

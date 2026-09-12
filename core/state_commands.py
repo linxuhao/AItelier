@@ -92,20 +92,31 @@ class DriverNoteHistory(Project):
 
 class SearchDriverNoteHistory(Project):
     query: str = Field(default="", max_length=500,
-                       description="Case-insensitive literal text; empty lists filtered revisions.")
-    section: Literal["permanent", "temporary"] | None = None
-    actor: str | None = Field(default=None, min_length=1, max_length=320)
-    director_identity: str | None = Field(default=None, min_length=1, max_length=320)
+                       description="Unicode case-insensitive literal text; empty lists filtered revisions.")
+    section: Literal["permanent", "temporary"] | None = Field(
+        default=None, description="Exact changed-section filter.")
+    actor: str | None = Field(
+        default=None, min_length=1, max_length=320,
+        description="Exact authenticated actor filter; returned metadata is redacted.")
+    director_identity: str | None = Field(
+        default=None, min_length=1, max_length=320,
+        description="Exact recorded director identity filter; returned metadata is redacted.")
     after_revision: int = Field(default=0, ge=0, le=2**63-1,
                                 description="Exclusive stable pagination cursor.")
-    min_revision: int | None = Field(default=None, ge=1, le=2**63-1)
-    max_revision: int | None = Field(default=None, ge=1, le=2**63-1)
+    min_revision: int | None = Field(
+        default=None, ge=1, le=2**63-1, description="Inclusive minimum revision.")
+    max_revision: int | None = Field(
+        default=None, ge=1, le=2**63-1, description="Inclusive maximum revision.")
     created_after: str | None = Field(default=None, max_length=64,
-                                       description="Exclusive timezone-aware ISO-8601 lower bound.")
+                                       description="Exclusive timezone-aware ISO-8601 lower bound.",
+                                       json_schema_extra={"format": "date-time"})
     created_before: str | None = Field(default=None, max_length=64,
-                                        description="Exclusive timezone-aware ISO-8601 upper bound.")
-    limit: int = Field(default=20, ge=1, le=100)
-    excerpt_chars: int = Field(default=320, ge=64, le=1000)
+                                        description="Exclusive timezone-aware ISO-8601 upper bound.",
+                                        json_schema_extra={"format": "date-time"})
+    limit: int = Field(default=20, ge=1, le=100,
+                       description="Maximum entries returned per page, ordered by revision ascending.")
+    excerpt_chars: int = Field(default=320, ge=64, le=1000,
+                               description="Maximum characters in each redacted excerpt.")
 
 
 class UpdateDriverNote(Project):

@@ -2,7 +2,15 @@ name: run_tests
 description: >
   Run the project's unit tests (pytest) over the current run worktree and write
   test_report.json {passed, returncode, summary, failures[], collection_errors[],
-  skipped?, import_error?, no_tests_collected?, node?, repo_gate?}. `node` (npm
+  skipped?, import_error?, no_tests_collected?, node?, repo_gate?, new_failures[],
+  passed_relative, baseline_failures[]}. `passed` is ABSOLUTE (did the whole
+  suite pass). `new_failures[]` holds only the failures that are NOT in the
+  known-red baseline and `passed_relative` is true when that list is empty —
+  so a round can be graded on what IT broke instead of on a red the repo
+  already carried. The baseline is a JSON file in the durable `state_dir` the
+  `stateful` capability injects (declare `capability: stateful` on the step, or
+  no baseline is kept and `passed_relative` degrades to "nothing is known-red");
+  it is seeded on the first run that finds none and afterwards only shrinks. `node` (npm
   install/build/test checks) is present when the repo holds a node project and
   a failing check also flips `passed`. `repo_gate` is present when the repo
   ships an executable `run_tests.sh` at its root — that script IS the repo's
@@ -27,6 +35,11 @@ parameters:
   out_dir:
     type: string
     description: "Directory to write test_report.json (set to $STEP_DIR)"
+  state_dir:
+    type: string
+    description: "Durable per-pipeline state dir, INJECTED by the `stateful`
+      capability — holds the known-red baseline. Never pass a path by hand."
+    required: false
     required: false
 
 # Its result carries passed/error, so a graph step running it MUST route the

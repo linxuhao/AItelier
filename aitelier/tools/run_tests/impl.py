@@ -650,15 +650,107 @@ def _run_repo_gate(repo: Path) -> dict | None:
     return result
 
 
+BASELINE_FILE = "run_tests_baseline.json"
+
+_FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
+_ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
+_GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
+
+
+def _failure_key(line: str) -> str:
+    """Identity of a failure, stripped of everything that varies run to run.
+
+    A baseline can only be compared against if the two sides are the same
+    string, and the raw `failures[]` entries are not: a FAILED line carries the
+    assertion message, a collection ERROR carries the exception text, and the
+    node / repo_gate entries embed a returncode plus the last 500-1500 bytes of
+    the command's output. Keyed on the test nodeid / module / gate name instead,
+    a test that keeps failing for a slightly different reason still counts as
+    the SAME known-red failure — which is the point: the baseline exists to
+    answer "did THIS round break something", not "is the wording identical".
+    """
+    line = line.strip()
+    for rx in (_ERROR_RE, _GATE_RE, _FAILED_RE):
+        m = rx.match(line)
+        if m:
+            return m.group(1)
+    return line[:200]
+
+
+def _apply_baseline(report: dict, state_dir: str) -> None:
+    """Add `new_failures[]` + `passed_relative` by diffing against known-red.
+
+    `passed` stays absolute (whatever the suite actually reported) — callers and
+    graphs already route on it. What it cannot say is whether the failures are
+    the ROUND's: a pipeline whose test gate routes on `passed` sends every lap
+    back to replanning while a single pre-existing red sits in the repo, and the
+    round burns its whole loop budget on a defect it did not introduce.
+
+    The baseline is SEEDED on the first run that finds none (so the pre-existing
+    red of the repo as it stands becomes the known set) and afterwards only ever
+    SHRINKS: a key that no longer fails is dropped, so a test that was fixed and
+    then broken again is reported as new. Nothing is ever added after the seed —
+    an added key would let this round's own regression enter the baseline and be
+    forgiven by the next lap.
+
+    Without a `state_dir` (the `stateful` capability is what injects one) there
+    is no durable place to keep the baseline, so the fields still appear, over
+    an empty baseline — never silently absent, which a reader routing on
+    `passed_relative` would see as a missing-field pass.
+    """
+    failures = [str(f) for f in report.get("failures", [])]
+    keys = [_failure_key(f) for f in failures]
+
+    path = Path(state_dir) / BASELINE_FILE if state_dir else None
+    baseline: list[str] = []
+    if path is not None and path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            baseline = [str(k) for k in (data or {}).get("failures", [])]
+        except (ValueError, OSError) as e:
+            report["baseline_error"] = f"unreadable baseline {path}: {e}"
+
+    known = set(baseline)
+    report["new_failures"] = [f for f, k in zip(failures, keys)
+                              if k not in known]
+    if path is not None and not path.is_file() and "baseline_error" not in report:
+        # Seed: this repo's current red IS the known red. Nothing is new
+        # relative to a baseline that was just taken from it.
+        known = set(keys)
+        report["new_failures"] = []
+        report["baseline_seeded"] = True
+    report["passed_relative"] = not report["new_failures"]
+    report["baseline_failures"] = sorted(known)
+
+    if path is None:
+        return
+    # Persist: the seed, or the pruned set (keys that stopped failing are
+    # dropped so a re-break is not forgiven).
+    keep = sorted(known & set(keys)) if not report.get("baseline_seeded") \
+        else sorted(known)
+    if keep == sorted(baseline) and path.is_file():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(
+            {"failures": keep, "updated_at": time.time()}, indent=2),
+            encoding="utf-8")
+    except OSError as e:
+        report["baseline_error"] = f"could not write {path}: {e}"
+
+
 def run_tests(*, project_root: str = "", out_dir: str = "",
               workspace_root: str = "", repo_gate: bool = True,
+              state_dir: str = "",
               **kwargs) -> dict:
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
-    Returns {written, passed}. The report holds {passed, returncode, summary,
-    failures[], collection_errors[], skipped?} for the reviewer to read, plus a
-    ``node`` section (npm install/build/test) when the repo contains a node
-    project.
+    Returns {written, passed, passed_relative, new_failures}. The report holds
+    {passed, returncode, summary, failures[], collection_errors[], skipped?} for
+    the reviewer to read, plus a ``node`` section (npm install/build/test) when
+    the repo contains a node project, and the baseline fields
+    {new_failures[], passed_relative, baseline_failures[]} — see
+    `_apply_baseline`.
     """
     report = {"passed": True, "returncode": 0, "summary": "", "failures": [],
               "collection_errors": []}
@@ -860,6 +952,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     f"{gate['output'][-1500:]}")
 
 
+    # Known-red baseline: `new_failures[]` + `passed_relative` on top of the
+    # absolute `passed`, so a reader can tell this round's breakage from the
+    # repo's standing red.
+    _apply_baseline(report, state_dir)
+
     # With no repo AND no out_dir there is nowhere to write — say so in the
     # return rather than defaulting to the CWD, which is the whole point above.
     #
@@ -887,4 +984,6 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     target_dir.mkdir(parents=True, exist_ok=True)
     (target_dir / "test_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
-    return {"written": "test_report.json", "passed": report["passed"]}
+    return {"written": "test_report.json", "passed": report["passed"],
+            "passed_relative": report["passed_relative"],
+            "new_failures": report["new_failures"]}

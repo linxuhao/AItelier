@@ -10,8 +10,9 @@ from tests.integration.test_native_parity import engine,_turn,_tc
 @pytest.fixture
 def revision(tmp_path,monkeypatch,engine):
  sf=SkillFlow(str(tmp_path/'sf.db'),workspace_base=str(tmp_path/'ws'))
- sf.register_graph(PipelineGraph(name='revision',begin='a',steps=[StepNode(id='a',step_type='agent',checkpoint=True,transitions=[Transition(to='b')]),StepNode(id='b',step_type='agent')]))
+ sf.register_graph(PipelineGraph(name='revision',begin='a',steps=[StepNode(id='a',step_type='agent',output_mode='write',output_carry_forward=True,checkpoint=True,transitions=[Transition(to='b')]),StepNode(id='b',step_type='agent')]))
  rid=sf.create_run('revision',project_id='p');sf.start_run(rid);sf.advance_run(rid);old=sf.claim_next_step(rid)
+ (Path(old.inputs['_output_dir'])/'untouched.json').write_text('prior card')
  sf.confirm_step(old.token,StepResult(outputs={'old':'yes'}));sf.advance_run(rid)
  # Use the production trace encoder and a complete exhausted conversation.
  engine._trace=lambda cat,ev,payload:sf.trace(rid,cat,ev,payload,step_id='a',step_instance_id=old.token.step_instance_id)
@@ -23,19 +24,21 @@ def revision(tmp_path,monkeypatch,engine):
  engine._trace_prompt_deltas(old_messages,2)
  monkeypatch.setattr(sf,'_append_feedback_log',lambda *a:None)
  monkeypatch.setattr(sf,'_read_feedback_log',lambda *a:'Previous instruction: do not remove X')
+ # A fresh execution discards unowned leftovers, then inherits its published baseline.
+ stale=sf._workspace.get_step_tmp_dir('p','revision','a');(stale/'stale.json').write_text('unpromoted garbage')
  sf.reject_checkpoint(rid,'a','remove X');new=sf.claim_next_step(rid)
  monkeypatch.setattr('api.dependencies.get_skillflow',lambda:sf)
  ws=WorkspaceManager(str(tmp_path/'ws'),projects_base=str(tmp_path/'projects'))
  code=tmp_path/'code';code.mkdir();monkeypatch.setattr(ws,'get_code_path',lambda *a,**k:code)
- final=ws._final_dir('p','a','revision');final.mkdir(parents=True,exist_ok=True);(final/'untouched.json').write_text('prior card')
- draft=ws._draft_dir('p','a','revision');draft.mkdir(parents=True,exist_ok=True);(draft/'stale.json').write_text('unpromoted garbage')
+ draft=Path(new.inputs['_output_dir'])
+ assert (draft/'untouched.json').read_text()=='prior card'
  eng=engine;eng._trace=lambda cat,ev,payload:sf.trace(rid,cat,ev,payload,step_id='a',step_instance_id=new.token.step_instance_id)
  eng.factory.get_max_tool_turns.return_value=2
  return sf,rid,old,new,eng,ws,draft
 
 def run_case(c):
  sf,rid,old,new,e,w,d=c
- return e.run_step(task_id=1,step_id='a',workspace=w,project_id='p',agent_config_name='pm',run_id=rid,step_instance_id=new.token.step_instance_id,claim_epoch=new.token.claim_epoch,output_dir=str(d),carry_forward=True,resolved_context=new.inputs['_resolved_context'],tool_schemas={'read_file':{},'edit':{}})
+ return e.run_step(task_id=1,step_id='a',workspace=w,project_id='p',agent_config_name='pm',run_id=rid,step_instance_id=new.token.step_instance_id,claim_epoch=new.token.claim_epoch,output_dir=str(d),carry_forward=new.inputs['_output_carry_forward'],resolved_context=new.inputs['_resolved_context'],tool_schemas={'read_file':{},'edit':{}})
 
 def test_fresh_budget_and_promoted_carry_forward(revision):
  sf,rid,old,new,e,w,d=revision
@@ -97,7 +100,8 @@ def test_crash_same_revision_resumes_own_turn_and_draft(revision):
 async def test_real_runner_forwards_carry_forward(revision,monkeypatch):
  from aitelier.runner import AgentStepRunner
  sf,rid,old,new,e,w,d=revision
- new.step_config['output']={'carry_forward':True}
+ # The resolved claim from the pinned graph outranks a contradictory raw echo.
+ new.step_config['output']={'carry_forward':False}
  db=MagicMock();db.get_repo_info.return_value={};db.get_project.return_value=None
  monkeypatch.setattr(w,'setup_workspace',lambda *a,**k:None)
  called=[]

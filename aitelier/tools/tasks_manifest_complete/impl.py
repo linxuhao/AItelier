@@ -1,36 +1,4 @@
-"""tasks_manifest_complete — the manifest and the cards on disk must agree.
-
-Step 3 is `output.mode: content`: promotion `rmtree`s the whole step directory
-and renames staging over it, so a file that is not in staging is DELETED. The
-agent's own prompt describes the opposite mental model —
-
-    2. Step staging (.tmp) — files you just wrote go here FIRST. They are
-       promoted to the step output dir when the step completes.
-    3. Step output — files from previous retries of this step (if any).
-    read_file and list_tree search in order: project root -> staging -> output.
-
-— a LAYERED read with nothing about a destructive write. An agent that has just
-been rejected reads that, sees its nine cards in step output, and re-emits only
-the ones it changed. That is the reasonable reading, and it silently destroys
-the rest.
-
-Live, 2026-08-26 (jinyong-hud): a re-plan wrote 2 of 9 cards. Promotion deleted
-the other 8 — git-confirmed in the artifact history:
-
-    + backlog_closure.json          11 +++++++++++
-    - contract_wiring.json          12 ------------
-    - health_bar_numbers.json        9 ---------
-    - hud_derivation.json           12 ------------
-    ... 8 deletions in one commit
-
-`tasks_manifest.json` still named all eight. The step's only validation was
-`file_exists` on the manifest, so this passed, and the break would not have
-surfaced until the task loop reached the first missing card — by then the cards
-were gone from the step dir and only recoverable from artifact history.
-
-This turns that into a step-local validation failure the agent can fix on the
-spot, with the reason spelled out.
-"""
+"""Validate agreement between the complete candidate's manifest and task cards."""
 
 import json
 from pathlib import Path
@@ -114,12 +82,10 @@ def tasks_manifest_complete(files: list[str] | None = None, *,
     parts = []
     if missing:
         parts.append(
-            f"tasks_manifest.json names {len(missing)} task(s) with NO card on "
-            f"disk: {', '.join(missing)}. This step is output.mode=content — "
-            f"promotion REPLACES the whole step directory, so a card you did "
-            f"not write into staging this run is DELETED, even though you can "
-            f"still read it from the previous run's step output. Re-emit EVERY "
-            f"card named in the manifest, not only the ones you changed.")
+            f"tasks_manifest.json names {len(missing)} task(s) missing from the "
+            f"candidate: {', '.join(missing)}. Add these cards, or remove their "
+            f"entries if those tasks were intentionally dropped. Validate the "
+            f"complete candidate before submitting.")
     if orphan:
         parts.append(
             f"{len(orphan)} card(s) exist but are not in execution_order: "

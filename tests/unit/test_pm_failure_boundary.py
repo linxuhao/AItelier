@@ -65,7 +65,6 @@ async def test_scheduler_exhaustion_fails_closed(tmp_path, monkeypatch, game, er
     calls = []
     draft = Path(sf._workspace.get_step_tmp_dir("p", "pm_boundary", "3"))
     draft.mkdir(parents=True, exist_ok=True)
-    (draft / "draft.txt").write_text("incomplete retained evidence")
     prior = draft.parent / "3"
     prior.mkdir(exist_ok=True)
     (prior / "tasks_manifest.json").write_text('{"execution_order":[["old"]]}')
@@ -73,6 +72,9 @@ async def test_scheduler_exhaustion_fails_closed(tmp_path, monkeypatch, game, er
     class Runner:
         async def execute(self, claim):
             calls.append(claim.step_id)
+            # Output belongs to the execution claimed by the scheduler.
+            # Files predating a first claim are unowned leftovers, not its work.
+            (Path(claim.inputs["_output_dir"]) / "draft.txt").write_text("incomplete retained evidence")
             raise error("PM exhausted; retained draft")
     monkeypatch.setattr(scheduler, "get_skillflow", lambda: sf)
     monkeypatch.setattr(scheduler, "_get_or_create_skillflow_run", lambda p: run)

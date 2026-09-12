@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="7" skipped="0" tests="7" time="0.265" timestamp="2026-09-12T08:35:19.640119+00:00" hostname="4baa6fd68dd2"><testcase classname="tests.test_artifact_revision" name="test_edit_one_card_publishes_complete_set_once" time="0.042"><failure message="AssertionError: assert 'completed' == 'paused'&#10;  &#10;  - paused&#10;  + completed">tests/test_artifact_revision.py:65: in test_edit_one_card_publishes_complete_set_once
+    claim = revise(sf, rid, claim)
+            ^^^^^^^^^^^^^^^^^^^^^^
+tests/test_artifact_revision.py:52: in revise
+    assert sf.get_run(rid)["status"] == "paused"
+E   AssertionError: assert 'completed' == 'paused'
+E     
+E     - paused
+E     + completed</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_deleted_card_is_absent_from_current_reads_and_edits" time="0.029"><failure message="AssertionError: assert 'completed' == 'paused'&#10;  &#10;  - paused&#10;  + completed">tests/test_artifact_revision.py:81: in test_deleted_card_is_absent_from_current_reads_and_edits
+    claim = revise(sf, rid, claim)
+            ^^^^^^^^^^^^^^^^^^^^^^
+tests/test_artifact_revision.py:52: in revise
+    assert sf.get_run(rid)["status"] == "paused"
+E   AssertionError: assert 'completed' == 'paused'
+E     
+E     - paused
+E     + completed</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_empty_candidate_survives_reclaim_and_publishes_empty_set" time="0.023"><failure message="AssertionError: assert 'completed' == 'paused'&#10;  &#10;  - paused&#10;  + completed">tests/test_artifact_revision.py:94: in test_empty_candidate_survives_reclaim_and_publishes_empty_set
+    claim = revise(sf, rid, claim)
+            ^^^^^^^^^^^^^^^^^^^^^^
+tests/test_artifact_revision.py:52: in revise
+    assert sf.get_run(rid)["status"] == "paused"
+E   AssertionError: assert 'completed' == 'paused'
+E     
+E     - paused
+E     + completed</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_new_run_does_not_inherit_previous_runs_artifacts" time="0.030"><failure message="assert {'tasks_manif... &quot;value&quot;: 1}'} == {}&#10;  &#10;  Left contains 4 more items:&#10;  {'tasks/A.json': b'{&quot;id&quot;: &quot;A&quot;, &quot;value&quot;: 1}',&#10;   'tasks/B.json': b'{&quot;id&quot;: &quot;B&quot;, &quot;value&quot;: 1}',&#10;   'tasks/C.json': b'{&quot;id&quot;: &quot;C&quot;, &quot;value&quot;: 1}',&#10;   'tasks_manifest.json': b'{&quot;execution_order&quot;: [[&quot;A&quot;, &quot;B&quot;, &quot;C&quot;]]}'}&#10;  Use -v to get more diff">tests/test_artifact_revision.py:113: in test_new_run_does_not_inherit_previous_runs_artifacts
+    assert files(Path(new.inputs["_output_dir"])) == {}
+E   assert {'tasks_manif... "value": 1}'} == {}
+E     
+E     Left contains 4 more items:
+E     {'tasks/A.json': b'{"id": "A", "value": 1}',
+E      'tasks/B.json': b'{"id": "B", "value": 1}',
+E      'tasks/C.json': b'{"id": "C", "value": 1}',
+E      'tasks_manifest.json': b'{"execution_order": [["A", "B", "C"]]}'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_failed_validation_leaves_publication_intact" time="0.029"><failure message="AssertionError: assert 'completed' == 'paused'&#10;  &#10;  - paused&#10;  + completed">tests/test_artifact_revision.py:121: in test_failed_validation_leaves_publication_intact
+    claim = revise(sf, rid, claim)
+            ^^^^^^^^^^^^^^^^^^^^^^
+tests/test_artifact_revision.py:52: in revise
+    assert sf.get_run(rid)["status"] == "paused"
+E   AssertionError: assert 'completed' == 'paused'
+E     
+E     - paused
+E     + completed</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_validation_retry_preserves_changes_and_deletions" time="0.027"><failure message="AssertionError: assert 'completed' == 'paused'&#10;  &#10;  - paused&#10;  + completed">tests/test_artifact_revision.py:137: in test_validation_retry_preserves_changes_and_deletions
+    claim = revise(sf, rid, claim)
+            ^^^^^^^^^^^^^^^^^^^^^^
+tests/test_artifact_revision.py:52: in revise
+    assert sf.get_run(rid)["status"] == "paused"
+E   AssertionError: assert 'completed' == 'paused'
+E     
+E     - paused
+E     + completed</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_no_change_revision_keeps_bytes" time="0.028"><failure message="AssertionError: assert 'completed' == 'paused'&#10;  &#10;  - paused&#10;  + completed">tests/test_artifact_revision.py:152: in test_no_change_revision_keeps_bytes
+    claim = revise(sf, rid, claim)
+            ^^^^^^^^^^^^^^^^^^^^^^
+tests/test_artifact_revision.py:52: in revise
+    assert sf.get_run(rid)["status"] == "paused"
+E   AssertionError: assert 'completed' == 'paused'
+E     
+E     - paused
+E     + completed</failure></testcase></testsuite></testsuites>

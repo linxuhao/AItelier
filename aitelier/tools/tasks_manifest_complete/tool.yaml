@@ -1,21 +1,15 @@
 name: tasks_manifest_complete
 description: >
-  Validation: every task named in tasks_manifest.json must have a card on disk,
-  and every card must be named in the manifest. Step 3 is `output.mode: content`
-  — promotion REPLACES the whole step directory — so an agent that re-emits only
-  the cards it changed silently deletes the rest, while the manifest keeps
-  naming them. Nothing caught that: the step validated `file_exists` on the
-  manifest alone. Live, 2026-08-26: a re-plan wrote 2 of 9 cards, promotion
-  deleted the other 8 (git-confirmed), validation passed, and the break would
-  not have surfaced until the task loop reached the first missing card — by
-  which time the deleted cards were gone from the step dir. Also fails when
-  EVERY manifest id is already in the live task loop's completed_items (a
-  re-plan made only of dispatched ids would run nothing); the result then
-  carries stale_ids. Returns {passed, error?, stale_ids?}.
+  Validate the complete artifact candidate: every task in tasks_manifest.json
+  has a card, and every card appears in execution_order. Report missing or
+  unlisted card IDs so the agent can repair the affected files and manifest.
+  Fail when all manifest IDs were already dispatched by this run's task loop;
+  a new repair task requires a new ID. Return passed, error and affected IDs.
+
 parameters:
   workspace_root:
     type: string
-    description: "Directory holding tasks_manifest.json and tasks/ — what StepValidator injects (the step's staging dir)."
+    description: "Directory holding tasks_manifest.json and tasks/ — the complete candidate injected by StepValidator."
     required: false
   step_dir:
     type: string

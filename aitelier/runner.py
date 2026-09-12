@@ -187,7 +187,8 @@ class AgentStepRunner:
                         # Fencing token (skillflow >=1.5.36). getattr so a
                         # hand-built or older token degrades to 0 = unfenced.
                         claim_epoch=getattr(step.token, 'claim_epoch', 0),
-                        carry_forward=bool((step.step_config.get('output') or {}).get('carry_forward', False)),
+                        carry_forward=bool(step.inputs.get('_output_carry_forward',
+                            (step.step_config.get('output') or {}).get('carry_forward', False))),
                     )
                 finally:
                     _odbg(f"{_cid} run_step EXIT thread={_tid} step={step_id} "

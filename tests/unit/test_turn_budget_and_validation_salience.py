@@ -141,12 +141,12 @@ class TestAValidationFailureIsAnInstruction:
         assert not block.lstrip().startswith("###")
         assert "[Previous Attempt Failed Validation" in block
 
-    def test_it_says_the_step_must_re_emit_everything(self):
-        # promotion REPLACES the step directory, so a file not written this
-        # attempt is deleted — the exact trap the PM fell into.
+    def test_it_repairs_the_current_candidate(self):
         block = PipelineEngine._validation_error_block("boom").lower()
-        assert "re-emit" in block
-        assert "not carried over" in block
+        assert "repair the reported errors" in block
+        assert "every required output is present" in block
+        assert "finish_step" in block
+        assert "not carried over" not in block
 
 
 class TestTheContextCopyIsDroppedByValue:

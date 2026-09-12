@@ -2410,7 +2410,9 @@ class PipelineEngine:
                 "step_id": step_id, "turns": resume["turns"],
                 "preview": f"Step {step_id} resumed at turn {resume['turns']} from the trace"})
         elif getattr(self, "_output_target", "artifact") != "code":
-            workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
+            # Candidate lifetime follows the execution instance, not conversation recovery.
+            if not getattr(self, "_carry_forward", False):
+                workspace.clean_draft_dir(project_id, step_id, self._draft_graph_name())
             # A relayed State attempt (continue_from) parked the failed
             # attempt's staged files under `_relay/<step>`; they go into the
             # fresh staging HERE, after the wipe above, and the park is
@@ -2423,14 +2425,6 @@ class PipelineEngine:
                 self._emit("relay_draft_seeded", {
                     "step_id": step_id, "files": len(relayed),
                     "preview": f"Step {step_id} starts from {len(relayed)} relayed draft file(s)"})
-            if getattr(self, "_carry_forward", False):
-                # Claim-time seeding precedes native fresh-history cleanup.
-                # Restore only promoted output, never a stale attempt's draft.
-                import shutil
-                prior = workspace._final_dir(project_id, step_id, self._draft_graph_name())
-                draft = workspace._draft_dir(project_id, step_id, self._draft_graph_name())
-                if prior.exists():
-                    shutil.copytree(prior, draft, dirs_exist_ok=True)
 
         feedback = ""
         # Carryover across attempts (parity with JSON mode) done the cache-optimal
@@ -3388,10 +3382,8 @@ class PipelineEngine:
         return (
             "\n\n[Previous Attempt Failed Validation — MUST FIX]\n"
             f"{validation_error}\n"
-            "This is not background context: the step you are running now IS "
-            "that retry. Fix exactly this before producing anything else, and "
-            "re-emit every file the step owes — a file you do not write this "
-            "attempt is not carried over."
+            "Repair the reported errors in the current candidate. Ensure every "
+            "required output is present, then call finish_step to submit it for validation."
         )
 
     @staticmethod
@@ -3443,6 +3435,13 @@ class PipelineEngine:
         self._step_instance_id = step_instance_id
         self._claim_epoch = claim_epoch
         self._carry_forward = carry_forward
+        if carry_forward:
+            self._resolved_context = dict(resolved_context or {})
+            self._resolved_context["Artifact revision"] = (
+                "The complete artifact candidate is available through source='self'. "
+                "Unchanged artifacts are preserved. Write only additions or changes. "
+                "Use the artifact delete tool for removals and update the manifest. "
+                "Validation and publication use this same complete candidate.")
 
         # Prefer native tool calling if agent config enables it
         if self.factory.is_native(agent_config_name):

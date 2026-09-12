@@ -1,0 +1,10 @@
+{
+  "runtime_commit": "3359857",
+  "source": "/home/linxuhao/AItelier/templates/forge_tool_impl.md",
+  "verification_checkout": "/home/linxuhao/AItelier/.claude/worktrees/artifact-delivery-verify-20260912",
+  "copied_file": "templates/forge_tool_impl.md",
+  "base_sha256": "c59be196c1bf2abf79791c6744be3f4efdaf509bcbd70e7a7cf21d3f17c0ef81",
+  "director_patch_sha256": "6b9ed99d585dd50d474ab210711100629d780f0e88efab3f58ecc18d30fba3a4",
+  "source_unchanged": true,
+  "included_in_repair_commit": false
+}

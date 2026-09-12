@@ -30,8 +30,10 @@ A tool is a directory `<name>/` with two files:
    dir to `sys.path`, then `import impl` / `from impl import <name>`).
 
 This step produces the tool bundle as an artifact. Include the test for downstream
-execution. `register_tool` validates the bundle by importing `impl.py` exactly as
-ToolLoader does. Keep imports valid and top-level code side-effect-free.
+execution — you CANNOT run that test file here: this step has no test runner, by
+design. The test ships with the tool and runs later. What checks your work in this
+step is `register_tool`, which validates the bundle by importing `impl.py` exactly
+as ToolLoader does. Keep imports valid and top-level code side-effect-free.
 
 ## Durable, cross-run state — NEVER pick your own folder
 If the tool must persist data that OUTLIVES a single run (positions carried day

@@ -29,8 +29,8 @@ An artifact revision publishes the complete required set. With `carry_forward`, 
 ## Build & Run
 
 ```bash
-# Install AItelier with the pinned reviewed engine wheel
-pip install --find-links=vendor/wheels -e .
+# Install AItelier with the exact-pinned reviewed public engine
+pip install -e .
 
 # Run CLI
 aitelier
@@ -62,17 +62,15 @@ docker compose logs -f          # tail
 - **Reader/writer auth** (`api/main.py:write_gate`): reads (GET) are open; mutating requests require an allowlisted **Cloudflare Access JWT** (`core/cf_access.py`, verified against `AITELIER_CF_TEAM_DOMAIN` + `AITELIER_CF_AUD`, email ∈ `AITELIER_WRITERS`) **or** the CLI's `AITELIER_ADMIN_TOKEN` (`X-AItelier-Admin-Token` header, honored only off-tunnel). The frontend read-only mode (`/api/me` → `can_write`) is UX only — the server gate is the control. Gate is inactive unless `AITELIER_CF_AUD` is set (local dev).
 - **API-key secret:** every LLM key (`ARK_API_KEY` is the shipped primary, `DEEPSEEK_API_KEY` the failover — see `model_routes.json`) is a **secret file** in `~/.aitelier-secrets/` (host dir overridable via `AITELIER_SECRETS_DIR` — compose's mount source follows it), whole-dir-mounted read-only at `/run/aitelier-secrets` (no per-key compose enumeration — any key name your provider tables declare resolves as soon as the file exists), NOT an env var, so test/build subprocesses that inherit `os.environ` don't receive it. `core/ai_router.py:_read_secret` resolves `/run/secrets/<name>` (legacy fallback) → `$AITELIER_SECRETS_DIR/<name>` (the mount) → `os.getenv`. Keep secrets out of `.env`/git (chmod 600).
 - **Git auth (clone/push/PR):** the host's `~/.ssh` / `~/.git-credentials` are **not** mounted into the container, so private-repo clone broke after containerization. Fixed with the same secret-file model: a **fine-grained GitHub PAT** at `~/.aitelier-secrets/GITHUB_TOKEN` (reaches the container via the whole-dir mount; the helper's path comes from `AITELIER_GITHUB_TOKEN_FILE`). `docker/git-credential-helper.sh` (wired via `GIT_CONFIG_*` in compose) feeds it to **github.com HTTPS remotes only** for clone/push; `core/git_ops.py:create_github_pr` reads the same secret for PR creation. An empty token file = "no credentials" (public clone still works). Chosen over bind-mounting `~/.git-credentials` because the container runs LLM-generated code — a scoped, revocable PAT has a far smaller blast radius than the host's whole credential store.
-- **SkillFlow output-target migration:** this checkout exact-pins the private
-  `1.5.72+aitelier.output3` wheel under `vendor/wheels`. Docker and local installs
-  use `pip install --find-links=vendor/wheels -e .`; the runtime checks the engine
-  supports the explicit target contract before starting. No PyPI publication was
-  performed. Rebuild the image to change the installed engine; restart alone does
-  not replace it. Ship an engine change: build the wheel in the skillflow checkout
-  under a NEW local version (`1.5.72+aitelier.outputN`), drop it in `vendor/wheels`,
-  bump the `skillflow-py==` pin in `pyproject.toml`, then
-  `docker compose build aitelier && up -d` — a `pip install` inside the running
-  container lives in the writable layer and is lost on the next recreation. Replacing this private pin with a public release is a separate
-  explicit release operation, with the same behavioral tests.
+- **SkillFlow output-target migration:** this checkout exact-pins the reviewed
+  public `skillflow-py==1.5.73` release from PyPI. Docker and local installs use
+  `pip install -e .`; the runtime checks the engine supports the explicit target
+  contract before starting. Rebuild the image to change the installed engine;
+  restart alone does not replace it. Ship a later engine change by publishing and
+  verifying a new SkillFlow release, bumping the exact `skillflow-py==` pin in
+  `pyproject.toml`, then running `docker compose build aitelier && up -d`. A
+  `pip install` inside the running container lives in the writable layer and is
+  lost on the next recreation.
 
 
 Env reference lives in `.env.example`.

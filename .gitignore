@@ -245,7 +245,6 @@ internal/
 llm_providers.json
 model_routes.json
 
-# Reviewed, exact-pinned private engine required by the artifact/code migration.
+# Historical private engine wheels stay out of new commits.
 !vendor/wheels/
 vendor/wheels/*
-!vendor/wheels/skillflow_py-1.5.72+aitelier.output3-py3-none-any.whl

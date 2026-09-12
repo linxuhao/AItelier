@@ -373,6 +373,5 @@ AItelier is open source under the [MIT license](LICENSE), as is the pipeline eng
 
 Code agents use `output.target: code` to write directly to their run worktree;
 plans and reports retain `output.target: artifact` and artifact publication.
-See [migration and restart guide](docs/output-target-migration.md). This checkout
-includes a private exact-pinned engine wheel; install with
-`pip install --find-links=vendor/wheels -e .`, or rebuild the Docker image.
+See [migration and restart guide](docs/output-target-migration.md). This checkout exact-pins the reviewed public engine release; install with
+`pip install -e .`, or rebuild the Docker image.

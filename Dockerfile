@@ -51,9 +51,9 @@ COPY . /app
 # rebuild + `up -d` is automatically live.
 COPY --from=frontend-build /app/web/dist /srv/web_dist
 ENV AITELIER_WEB_DIST=/srv/web_dist
-# Install the exact reviewed engine, not a mutable host checkout or old image
-# layer. The local-version pin can only resolve from this bundled wheel.
-RUN pip install --no-cache-dir --find-links=/app/vendor/wheels -e .
+# Install the exact reviewed public engine from PyPI, not a mutable host
+# checkout or an old image layer.
+RUN pip install --no-cache-dir -e .
 RUN python -c "from core.output_migration import require_output_engine; require_output_engine()"
 
 # Identity for in-container git commits (workspace_manager commits set no inline

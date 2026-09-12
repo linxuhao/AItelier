@@ -91,18 +91,17 @@ Do not use resumed legacy runs as evidence that the new storage mode is working.
 
 ## Installation and first observation
 
-This change includes a private, exact-pinned SkillFlow wheel
-`1.5.72+aitelier.output3` under `vendor/wheels`. It has not been published to PyPI.
-Docker installs it using `--find-links`; startup rejects an engine without the
-output-target contract. Rebuild the backend image, then recreate/restart it:
+This change uses the reviewed, exact-pinned public SkillFlow release
+`1.5.73` from PyPI. Docker installs it from the public index; startup rejects an
+engine without the output-target contract. Rebuild the backend image, then recreate/restart it:
 
 ```sh
 docker compose build aitelier
 docker compose up -d aitelier
 ```
 
-For an editable host installation use `pip install --find-links=vendor/wheels -e .`
-from the AItelier repository. Restarting an old image alone is insufficient.
+For an editable host installation use `pip install -e .` from the AItelier
+repository. Restarting an old image alone is insufficient.
 
 At boot the supporting runtime migrates known generated config copy contracts,
 validates before replacement, and backs up original bytes under

@@ -41,8 +41,8 @@ Agent-facing instruction:
 > publication use this same complete candidate.
 
 ## Deployment
-This behavior ships in the private `skillflow-py==1.5.72+aitelier.output3` wheel.
-Rebuild AItelier with that exact wheel; do not install it into a running service
+This behavior ships in the public `skillflow-py==1.5.73` release.
+Rebuild AItelier with that exact release; do not install it into a running service
 while an execution is changing artifacts. No database schema migration or graph
 rewrite is needed. `carry_forward: false` retains its existing output contract.
 Existing pinned graph versions and budget/review checkpoints are not modified.

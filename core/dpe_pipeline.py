@@ -919,6 +919,46 @@ class PipelineEngine:
                 f"Run '{run_id}' is {status}; attempt {attempt} of step "
                 f"'{step_id}' was not started.")
 
+    def _persist_write_scope_receipt(self) -> None:
+        """Expose scope decisions to the next reviewer without touching code."""
+        artifact_dir = getattr(self, "_artifact_dir", "")
+        if not artifact_dir or getattr(self, "_output_target", "artifact") != "code":
+            return
+        scope = getattr(self, "_write_scope", None)
+        payload = {
+            "policy": (scope.policy if scope is not None else
+                       "isolated-non-task-code-step"),
+            "task": scope.task if scope is not None else None,
+            "allowed_scope": scope.allowed() if scope is not None else None,
+            "violations": getattr(self, "_scope_violations", []),
+        }
+        try:
+            target = Path(artifact_dir) / "write_scope_receipt.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+            os.replace(tmp, target)
+        except OSError as exc:
+            self._emit("write_scope_receipt_error", {"error": str(exc)})
+
+    def _write_scope_refusal(self, tool_name: str, params: dict) -> dict | None:
+        """Refuse an unauthorized repo path before SkillFlow sees the call."""
+        from core.write_scope import is_repo_mutator, mutation_paths
+        scope = getattr(self, "_write_scope", None)
+        if scope is None or not is_repo_mutator(tool_name):
+            return None
+        for path in mutation_paths(tool_name, params, self._output_fixed):
+            if scope.authorizes(path):
+                continue
+            refusal = scope.refusal(tool_name, path)
+            self._scope_violations.append(refusal)
+            self._persist_write_scope_receipt()
+            self._emit("write_scope_violation", refusal)
+            self._trace("step", "write_scope_violation", refusal)
+            return refusal
+        return None
+
     def _exec_tool(self, action: dict) -> dict:
         """Execute a tool action via skillflow. All tool execution is delegated.
 
@@ -951,6 +991,9 @@ class PipelineEngine:
         # the injected one and point a root-resolving tool (semantic_search,
         # run_tests, …) at any path the container can see. Strip them here.
         params = _strip_agent_roots(action.get("params", {}))
+        refusal = self._write_scope_refusal(tool_name, params)
+        if refusal is not None:
+            return refusal
         return sf.execute_tool(
             tool_name, params,
             run_id=getattr(self, '_run_id', ''),
@@ -3412,7 +3455,8 @@ class PipelineEngine:
                  claim_epoch: int = 0,
                  carry_forward: bool = False,
                  output_target: str = "artifact", output_fixed: dict | None = None,
-                 config_name: str = "", artifact_dir: str = "") -> bool:
+                 config_name: str = "", artifact_dir: str = "",
+                 write_scope: Any = None) -> bool:
         """
         Dispatch to the appropriate step execution path.
 
@@ -3430,6 +3474,23 @@ class PipelineEngine:
         self._output_fixed = output_fixed or {}
         self._config_name = config_name
         self._artifact_dir = artifact_dir
+        self._scope_violations: list[dict] = []
+        self._write_scope = write_scope
+        if output_target == "code":
+            if write_scope is None:
+                # Standalone code workflows (for example coding_impl) have one
+                # writer in their isolated worktree and no task-card siblings.
+                # This is an explicit policy, distinct from a DPE loop item
+                # whose missing card is represented by a deny-all WriteScope.
+                policy = {"policy": "isolated-non-task-code-step"}
+                self._emit("write_scope_policy", policy)
+                self._trace("step", "write_scope_policy", policy)
+            else:
+                event = {"policy": write_scope.policy, "task": write_scope.task,
+                         "allowed_scope": write_scope.allowed()}
+                self._emit("write_scope_resolved", event)
+                self._trace("step", "write_scope_resolved", event)
+            self._persist_write_scope_receipt()
         self._max_tool_turns = max_tool_turns
         self._run_id = run_id
         self._step_instance_id = step_instance_id

@@ -33,7 +33,8 @@ def _safe_rel(rel) -> str | None:
 
 def repo_delete(source_dir: str = "", *, project_root: str = "",
                 workspace_root: str = "", step_id: str = "",
-                project_id: str = "", task_name: str = "", **kwargs) -> dict:
+                project_id: str = "", config_name: str = "", task_name: str = "",
+                owns=None, shared_hotspots=None, **kwargs) -> dict:
     src = Path(source_dir)
     if source_dir and not src.is_absolute():
         src = Path(workspace_root) / source_dir
@@ -56,6 +57,33 @@ def repo_delete(source_dir: str = "", *, project_root: str = "",
                 "error": f"repo_delete: project_root must be an absolute path "
                          f"(got {project_root!r}) — refusing to resolve against the process CWD"}
     repo = Path(project_root).resolve()
+
+    # Validate the whole queued transaction before the first git rm. Lifecycle
+    # hooks receive task_name from SkillFlow; a named task whose card is missing
+    # gets a deny-all scope instead of an accidental unrestricted deletion.
+    scope = None
+    if owns is not None:
+        from core.write_scope import WriteScope
+        scope = WriteScope(str(task_name or "code-task"), tuple(owns or ()),
+                           tuple(shared_hotspots or ()))
+    elif task_name:
+        from core.write_scope import scope_from_workspace
+        scope = scope_from_workspace(workspace_root, config_name, task_name)
+    scope_violations = []
+    if scope is not None:
+        for rel in queued:
+            safe = _safe_rel(rel)
+            if safe is None or not scope.authorizes(safe):
+                scope_violations.append(scope.refusal("repo_delete", rel))
+        if scope_violations:
+            return {
+                "passed": False, "deleted": [], "committed": False,
+                "scope_violations": scope_violations,
+                "error": (f"repo_delete: refusing queued transaction for task "
+                          f"{scope.task!r}; {len(scope_violations)} path(s) are "
+                          "outside its declared write authority"),
+            }
+
     removed, skipped = [], []
     for rel in queued:
         safe = _safe_rel(rel)

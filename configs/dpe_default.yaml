@@ -557,7 +557,7 @@ steps:
       # The current task being planned — resolved from the task_loop item
       # (current_task) so each iteration is scoped to its own task card.
       - source: { from: "repository", mode: "tool" }
-      - source: { step: "3", file: "tasks/$current_task.json" }
+      - source: { step: "3", file: "tasks/$current_task.json", required: true }
       # Bare on purpose — `output:` would relabel this past
       # drop_preamble_steps and duplicate the preamble. See t_impl_review.
       # `mode:` is INERT here while preamble_steps carries this step —
@@ -667,7 +667,7 @@ steps:
     timeout_seconds: 300
     context:
       - source: { from: "repository", mode: "tool" }
-      - source: { step: "3", file: "tasks/$current_task.json" }
+      - source: { step: "3", file: "tasks/$current_task.json", required: true }
       # Bare on purpose — `output:` would relabel this past
       # drop_preamble_steps and duplicate the preamble. See t_impl_review.
       # `mode:` is INERT here while preamble_steps carries this step —
@@ -718,6 +718,9 @@ steps:
     max_tool_turns: 20
     context:
       - source: { from: "repository", mode: "tool" }
+      # The reviewer needs the same structured authority the implementer had;
+      # closeout_gate compares the attributed diff against this exact card.
+      - source: { step: "3", file: "tasks/$current_task.json", required: true }
       # What the card just delivered (commits, files, +/- lines, protected
       # paths) and the review depth it implies — standard or deep, never skip.
       - source: { tool: "closeout_gate" }

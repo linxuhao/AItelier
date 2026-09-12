@@ -12,6 +12,7 @@ import time as _time
 from pathlib import Path
 
 from skillflow.core import ClaimedStep, StepResult
+from skillflow.workspace import _sanitize_item
 
 # ORPHAN-DBG (temporary diagnostic — remove after the orphaned-claim root cause
 # is pinned). Shared with core/scheduler.py via core.orphan_dbg so the run_step
@@ -139,6 +140,35 @@ class AgentStepRunner:
         output_dir = step.inputs.get("_output_dir", "")
         max_tool_turns = step.inputs.get("_max_tool_turns", 0)
         run_id = step.token.run_id
+        from core.write_scope import scope_from_context
+        resolved_scope = scope_from_context(resolved_context)
+        write_scope = resolved_scope if step.inputs.get("_has_code_output") else None
+
+        # closeout_gate originally saw only a git diff.  Re-run it with the
+        # structured card and the implementer's durable refusal receipt so the
+        # reviewer sees both actual and attempted scope violations.
+        if (resolved_scope is not None and isinstance(resolved_context, dict)
+                and "[closeout_gate]" in resolved_context):
+            try:
+                from aitelier.tools.closeout_gate.impl import closeout_gate
+                from core import run_isolation
+                code_root = run_isolation.resolve_for_resolver(self._db, run_id)
+                receipt = {}
+                review_artifact = Path(step.inputs.get("_artifact_dir", ""))
+                receipt_path = (review_artifact.parent.parent / "t_impl"
+                                / _sanitize_item(resolved_scope.task) / "write_scope_receipt.json")
+                if receipt_path.is_file():
+                    import json
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                result = closeout_gate(
+                    project_root=str(code_root or ""), owns=list(resolved_scope.owns),
+                    shared_hotspots=list(resolved_scope.shared_hotspots),
+                    task_name=resolved_scope.task,
+                    scope_violations=receipt.get("violations", []))
+                resolved_context["[closeout_gate]"] = result["content"]
+            except Exception as exc:
+                resolved_context["[closeout_gate]"] += (
+                    f"\n[write_scope] unable to evaluate task scope: {exc}; depth: deep")
         if step.inputs.get("_has_code_output"):
             from core import run_isolation
             from skillflow.exceptions import IsolationUnavailable
@@ -181,6 +211,7 @@ class AgentStepRunner:
                         output_fixed=step.inputs.get("_output_fixed", {}),
                         config_name=step.inputs.get("_config_name", ""),
                         artifact_dir=step.inputs.get("_artifact_dir", ""),
+                        write_scope=write_scope,
                         max_tool_turns=max_tool_turns,
                         run_id=run_id,
                         step_instance_id=step.token.step_instance_id,

@@ -26,8 +26,8 @@ description: >
   face. Casting is idempotent — a re-run reuses the existing look rather than
   minting a new one, so assets already in the repo stay consistent.
   For output.target=code, writes directly to the current run worktree;
-  for output.target=artifact, writes to its artifact destination. There is
-  no code staging, overlay, or repo_apply copy. Validation and review still apply.
+  for output.target=artifact, writes to its artifact destination.
+  Validation and review are required for delivery.
 parameters:
   prompt:
     type: string

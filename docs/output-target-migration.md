@@ -92,7 +92,7 @@ Do not use resumed legacy runs as evidence that the new storage mode is working.
 ## Installation and first observation
 
 This change includes a private, exact-pinned SkillFlow wheel
-`1.5.72+aitelier.output1` under `vendor/wheels`. It has not been published to PyPI.
+`1.5.72+aitelier.output2` under `vendor/wheels`. It has not been published to PyPI.
 Docker installs it using `--find-links`; startup rejects an engine without the
 output-target contract. Rebuild the backend image, then recreate/restart it:
 

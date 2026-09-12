@@ -11,7 +11,7 @@ license-files = ["LICENSE"]
 dependencies = [
     # This storage migration spans host + engine. The reviewed private wheel
     # in vendor/wheels is exact-pinned; an old PyPI engine must not ignore target.
-    "skillflow-py==1.5.72+aitelier.output1",
+    "skillflow-py==1.5.72+aitelier.output2",
     # coding_impl requires the native json_schema tool's full validator; its
     # import fallback checks only required fields and cannot enforce const.
     # 3.0 adds Draft 6/7; 3.0.2 fixes boolean-versus-number const comparisons.

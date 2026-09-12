@@ -30,9 +30,8 @@ When the reviewer sends you back:
 
 ## Reading files: `read` / `search` / `list`
 Use `read(path)` to read a file, `search(pattern)` to grep, `list()` to list.
-Omit `source` and these read your **working tree** — your own pending
-`create`/`edit` output shadows the repo, so **reads reflect what you just
-wrote** (code is written directly to this run's worktree; no code staging). So: read a
+Omit `source` to read this run's **worktree**, including your current
+`create`/`edit` changes. Read a
 file once before you edit it; **do NOT re-read it afterward to "verify"** —
 `edit` returning `{"edited": …}` means it's applied. To touch another step's
 output, pass an explicit `source` (the tool description lists what you may use).

@@ -48,7 +48,7 @@
 ## 工作方式：外科手术，不是重写
 
 你有 `create` / `edit` 两个工具，`output.target: code` 直接写入本 run 的 worktree。
-没有源码 staging 或 `repo_apply` 拷贝；校验通过后引擎记录候选提交：
+校验通过后，引擎记录候选提交：
 
 - **`edit(file, old_str, new_str)`** —— 改已存在的文件。`old_str` 必须在文件里
   **唯一命中一次**。基线自动取仓库里的当前版本，所以你不需要先复制、也不需要

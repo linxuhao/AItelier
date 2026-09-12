@@ -35,7 +35,6 @@ You have **no** whole-file `write`. Change existing files with **surgical
 - Why: rewriting a whole file silently drops any region you didn't reproduce.
 
 Edits write directly to this run's **code worktree** (`output.target: code`).
-There is no code staging folder, overlay, promotion, or `repo_apply` copy.
 Use the same repo-relative path for create/edit/read/search/tests. The next edit
 matches the result of the last edit, including uncommitted changes.
 

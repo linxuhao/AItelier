@@ -2570,7 +2570,7 @@ class PipelineEngine:
                     lead = (
                         f"[Resumed after a host restart at turn {resume['turns']}] "
                         f"The conversation above is exactly what you had; every "
-                        f"file you wrote is still staged ({staged}). Continue from "
+                        f"file you wrote is retained ({staged}). Continue from "
                         f"here — do not re-read or redo what is above. If your "
                         f"last tool calls are missing their results, they were "
                         f"lost in the restart: re-issue only those.")
@@ -2612,19 +2612,11 @@ class PipelineEngine:
                 user_prompt += self._validation_error_block(self._validation_error)
                 user_prompt += (
                     f"\n\n[Turn Budget: {max_turns} turns total, then forced output]\n"
-                    "You are a workflow automation step, not a chat assistant: your "
-                    "visible reply text is never shown to anyone and is discarded — "
-                    "only tool calls have any effect, and a reply with no tool call "
-                    "ends the step immediately.\n"
-                    "Plan your exploration, then call write_*/create_* to produce the "
-                    "required output. The moment all required files are written, call "
-                    "finish_step immediately. Do NOT re-read, re-list, search, or "
-                    "otherwise re-verify files you just wrote — writes are trusted and "
-                    "already staged, so re-verifying them only burns turns. Never end "
-                    "a turn with a plain-text 'done' / 'written successfully' note; "
-                    "your final action must be a tool call (the write tool, then "
-                    "finish_step). Do not exhaust all turns on exploration — leave at "
-                    "least 1 turn for writing.\n"
+                    "Use the provided output tools to save the required files to "
+                    "their declared destinations. Successful write results confirm "
+                    "the changes are saved. Complete the required checks, then call "
+                    "finish_step as your final tool call to submit the output for "
+                    "validation. Reserve at least one turn for writing.\n"
                     # Context, not just turns. The role template already says not
                     # to read whole files, but as the 6th bullet of a section about
                     # WRITING, 78k chars into the system message — so it is restated

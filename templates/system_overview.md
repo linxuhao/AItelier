@@ -8,9 +8,9 @@
 ## 核心设计原则
 
 ### 1. 输出目标与隔离
-- `output.target: code`：源码直接写本 run 独占的 worktree，不再经过 step staging。
+- `output.target: code`：源码写入本 run 独占的 worktree。
 - `output.target: artifact`：计划、任务卡、审核结论和报告留在 artifact 目录，校验后发布。
-- 源码、搜索、测试使用同一个 worktree；审核针对候选版本，不等于无校验直接放行。
+- 源码、搜索、测试使用同一个 worktree；候选版本通过校验和审核后交付。
 
 ### 2. 原子操作原则
 - 能用代码实现的原子操作就用代码实现

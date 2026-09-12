@@ -35,16 +35,15 @@ one, `passed: false`.
    having produced nothing the user asked for — and the answer-producing step is
    usually stranded on the give-up branch. Check this explicitly.
 4. **A tool that can fail has only an unconditional transition.** `run_tests`,
-   `draft_commit`, `repo_apply`, any `verify_*`/`check_*` — if its failure is not
+   `draft_commit`, any `verify_*`/`check_*` — if its failure is not
    routed, a failed check advances the run as if it had succeeded. **Follow the
    failure edge before you pass it**: if it leads (directly, or through gates that
    only forward) back to the step the SUCCESS edge goes to, the branch is decoration
    and the fail-open is intact. A gate executes nothing.
 5. **A validated `mode: write` agent omits `validation_on_exhaustion: fail`.**
-   Code destinations fail closed; artifact destinations retain the legacy
-   promote-on-error default unless explicitly overridden. Reject repository
-   makers without `output.target: code`, or code makers still declaring
-   copy/promotion/deferred-delete hooks. Also block any maker
+   Validated writers must fail when validation is exhausted. Repository makers
+   require `output.target: code`; plans and reports use `artifact`, with fixed
+   slots declaring their own target when needed. Also block any maker
    `_error` edge into review, or reviewer unconditional/`_error` edge that advances
    the item: execution failure, missing verdict, and exhausted review loops must
    remain failed for operator recovery.

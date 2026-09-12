@@ -1,0 +1,57 @@
+{
+  "runtime": "/tmp/aitelier-output-migration/venv/lib/python3.12/site-packages/skillflow/__init__.py",
+  "version": "1.5.72+aitelier.output2",
+  "configs": [
+    {
+      "file": "gen_dpe_state_game.roles.json",
+      "source_sha256": "2d2f82eb85891907a0149d3662f3135288a238b00e44be766d5eaa5403e109b7",
+      "changed_roles": [
+        {
+          "role": "gen_dpe_state_game__pm_reviewer",
+          "before_chars": 4018,
+          "after_chars": 3408
+        },
+        {
+          "role": "gen_dpe_state_game__task_implementer",
+          "before_chars": 4431,
+          "after_chars": 4410
+        },
+        {
+          "role": "gen_dpe_state_game__final_verifier",
+          "before_chars": 3913,
+          "after_chars": 3912
+        },
+        {
+          "role": "gen_dpe_state_game__game_designer",
+          "before_chars": 3781,
+          "after_chars": 3782
+        }
+      ]
+    },
+    {
+      "file": "gen_dsh_code_review.roles.json",
+      "source_sha256": "60b41fced34a28fc290ebd27519a557d58d8cf3aa00fe405e51875d7aef3bc2f",
+      "changed_roles": []
+    },
+    {
+      "file": "gen_gen_media_candidate.roles.json",
+      "source_sha256": "fd04e65abb5a82b5be0a1f02e1c98285b05e78ec4a0eb2d6a6bf92cea9b74eec",
+      "changed_roles": [
+        {
+          "role": "gen_gen_media_candidate__media_implementer",
+          "before_chars": 5168,
+          "after_chars": 4831
+        }
+      ]
+    }
+  ],
+  "live_files_changed": false,
+  "idempotent": true,
+  "wheel": {
+    "file": "vendor/wheels/skillflow_py-1.5.72+aitelier.output2-py3-none-any.whl",
+    "sha256": "3c716ddb7f1bf720d2dd9a065321ee87e5c37813555636feb6e66432bcb6bcab",
+    "matched_payload_files": 80,
+    "source_commit": "c3c406dbc5b921840f21a26a34d75de4ce84e94d"
+  },
+  "verified_at": "2026-09-12T02:43:02.871530+02:00"
+}

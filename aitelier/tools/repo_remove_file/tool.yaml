@@ -1,8 +1,8 @@
 name: repo_remove_file
 description: >
   Delete one obsolete code file directly in this run's worktree. The deletion is
-  immediately visible to read/search/tests; no deferred manifest or promotion.
-  Requires output.target=code. Validation and review still apply, and the candidate
+  immediately visible to read/search/tests.
+  Requires output.target=code. Validation and review gate delivery, and the candidate
   commit records the deletion. Paths must be repo-relative, never '..' or '.git'.
 parameters:
   name:

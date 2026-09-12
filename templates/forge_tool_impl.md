@@ -29,12 +29,9 @@ A tool is a directory `<name>/` with two files:
    contract on at least one real case. It must be runnable standalone (add the tool
    dir to `sys.path`, then `import impl` / `from impl import <name>`).
 
-You CANNOT run that test file here — this step has no test runner, by design: the
-files you write live in the step's staging directory, and every runner resolves
-paths against the project's code repository instead. The test ships with the tool
-and runs later. What checks your work in this step is `register_tool`, which
-imports `impl.py` exactly the way ToolLoader will and refuses to publish a module
-that does not import — so keep the imports real and the top level side-effect-free.
+This step produces the tool bundle as an artifact. Include the test for downstream
+execution. `register_tool` validates the bundle by importing `impl.py` exactly as
+ToolLoader does. Keep imports valid and top-level code side-effect-free.
 
 ## Durable, cross-run state — NEVER pick your own folder
 If the tool must persist data that OUTLIVES a single run (positions carried day

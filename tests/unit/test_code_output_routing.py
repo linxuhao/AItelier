@@ -52,10 +52,12 @@ def test_multifile_outputs_are_individually_accounted():
     assert PipelineEngine._written_names({'error':'failed','written':['a.py']})==['a.py']
 
 
-def test_layout_does_not_claim_code_has_a_second_copy():
-    assert 'no code staging' in WORKSPACE_LAYOUT
-    assert 'artifact-only' in WORKSPACE_LAYOUT
-    assert 'REPLACES this directory wholesale' not in WORKSPACE_LAYOUT
+def test_layout_describes_current_code_and_artifact_destinations():
+    assert "repo-relative paths in this run's worktree" in WORKSPACE_LAYOUT
+    assert 'step output folders' in WORKSPACE_LAYOUT
+    assert 'change receipts as artifacts' in WORKSPACE_LAYOUT
+    assert 'staging' not in WORKSPACE_LAYOUT
+    assert 'overlay' not in WORKSPACE_LAYOUT
 
 
 @pytest.mark.asyncio

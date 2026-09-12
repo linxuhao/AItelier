@@ -90,16 +90,15 @@ _EMITTER_SKEW = _check_emitter_agrees()
 # to land in the cacheable prefix rather than being re-billed per step.
 WORKSPACE_LAYOUT = (
     "[Workspace Layout]\n"
-    "Code and artifacts have separate destinations, declared by each output tool.\n"
-    "**Code** lives directly in this run's worktree. Code edits are immediately visible "
-    "to read/search and tests; semantic search uses the same worktree root. There is no code staging, overlay or "
-    "promotion. Validation and review are still required. Paths are repo-relative.\n"
-    "**Artifacts** (plans, task cards, verdicts, reports) live in step output folders, "
-    "not the code repository. Their temporary publication directory is artifact-only; "
-    "when a revision replaces an artifact set, re-emit the complete required set unless "
-    "carry_forward is declared. This rule NEVER deletes or replaces the code worktree.\n"
-    "Use an explicit step source to read another step's artifacts. A code step's artifact "
-    "folder contains a change receipt, not duplicate source files. Read actual code from repo."
+    "Each output tool declares its destination.\n"
+    "**Code**: use repo-relative paths in this run's worktree. "
+    "Read, search, semantic search and tests use that same worktree, including current edits. "
+    "Delivery requires validation and review.\n"
+    "**Artifacts**: plans, task cards, verdicts and reports belong in step output folders. "
+    "Each revision must contain the complete required artifact set; with carry_forward, "
+    "unchanged artifacts are preserved automatically. "
+    "Use an explicit step source to read another step's artifacts.\n"
+    "Code steps publish change receipts as artifacts. Read their source files from the worktree."
 )
 
 
@@ -412,11 +411,9 @@ class PromptAssembler:
                 if "write" in write_tools:
                     # AT-9: pin one canonical root for the generic write(file, …).
                     delivery += (
-                        "\nThe `write` tool's `file` is a repo-root-relative path "
-                        "including directories (e.g. `strkit/core.py`, "
-                        "`tests/test_core.py`). Use the EXACT path the task requires; "
-                        "do NOT prefix it with `project/`, and write each file once "
-                        "under a single path."
+                        "\nUse the output tool's declared destination as the root for its "
+                        "relative file paths (e.g. `strkit/core.py`, `tests/test_core.py`). "
+                        "Keep the exact path required by the task for each file."
                     )
                 sections.append(delivery)
         else:

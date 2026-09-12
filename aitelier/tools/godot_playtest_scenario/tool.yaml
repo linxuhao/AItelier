@@ -11,8 +11,7 @@ description: >
   repo's `playtest/` directory (one file per scenario) or, on projects that
   never split, `playtest_spec.yaml`; an unknown name is refused with the list of
   real ones, never quietly skipped. It tests the current run worktree, including
-  uncommitted code edits and the current playtest contract. There is no code
-  staging or overlay. Plans and reports remain separate artifacts.
+  uncommitted code edits and the current playtest contract.
   This is a PROBE, not a gate: it does not affect any verdict, and it does not
   replace the full run at 5_compile — that full run is the only thing that
   catches "fixing X broke Y", so a green single scenario is not a green build.

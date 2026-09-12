@@ -14,8 +14,8 @@ description: >
   later line is spoken against it; casting is idempotent, so a re-run keeps the
   voice already in the repo. Returns {written, source_url} or {written:[], error}.
   For output.target=code, writes directly to the current run worktree;
-  for output.target=artifact, writes to its artifact destination. There is
-  no code staging, overlay, or repo_apply copy. Validation and review still apply.
+  for output.target=artifact, writes to its artifact destination.
+  Validation and review are required for delivery.
 parameters:
   dest:
     type: string

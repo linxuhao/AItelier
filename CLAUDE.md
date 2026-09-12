@@ -1,14 +1,14 @@
 # Output destinations (current contract)
 
 `output.target` is `artifact` (default) or `code`, independent of `output.mode`.
-Code agents write directly into their run worktree; there is no code .tmp,
-overlay, promotion, repo_apply hook or deferred-delete manifest. Artifact folders
-are retained for plans/cards/reviews/reports and for `code_changes.json` receipts.
-Fixed slots can override the default (README code, verification report artifact).
-Validation failure retains code for repair and blocks delivery; code review is
-still separate. Historical references below describing code staging are old
-incident explanations, not the current output contract. See
-`docs/output-target-migration.md` for migration and restart instructions.
+Code agents write into their run worktree using repo-relative paths. Reads,
+searches and tests use the current contents of that worktree.
+Artifacts include plans, task cards, reviews, reports and `code_changes.json`
+receipts. Fixed slots declare their destinations individually: README uses code;
+a verification report uses artifact. The required artifact set is validated
+before publication, with unchanged files preserved when carry_forward is enabled.
+Validation failure retains the candidate for repair and blocks delivery. Code
+review determines acceptance. See `docs/output-target-migration.md` for deployment.
 
 # Director handoff — 2026-09-05
 For 武虾传奇 game tasks, read AGENTS.md here and the game repository AGENTS.md. Codex directs; Claude may implement assigned gameplay in an isolated worktree. The old pipeline-only workflow and old R6 queue are superseded. Do not start AItelier or publish without director assignment.
@@ -20,7 +20,9 @@ Under Developpement, no backward compatbility is needed.
 
 ## Project Overview
 
-AItelier is a multi-agent AI system that plans, architects, implements, and verifies software projects autonomously. It uses a Green (Maker) / Red (Checker) adversarial pattern defined as skillflow graph nodes — agents are stateless: each step reads its context from prior step outputs and writes results into a per-step staging directory (`{step}.tmp/`) that the engine validates and promotes to a final step directory (`{step}/`). All changes tracked via Git event sourcing. Promotion replaces the step's prior output — for a normal step the whole `{step}/`, for a **loop-body agent step** (skillflow ≥1.5.23) only that item's `{step}/{item}/` folder, so every fan-out item's output SURVIVES the loop (siblings are preserved; readers route by position — a same-loop reader gets its own item, an aggregator outside the loop gets all items, `scope: all` on the context source makes that explicit). A goal-loop re-run still overwrites the same step+item — so skillflow's **artifact history** (on by default, `SkillFlow(artifact_history=…)`) git-versions every promoted step output at the workspace root; recover any iteration with `get_skillflow().step_output_versions(pid, config, step)` + `git show <sha>:<config>/<step>/<file>`. Complements the durable trace (why) with the exact files (what).
+AItelier is a multi-agent AI system that plans, architects, implements, and verifies software projects. Green (Maker) and Red (Checker) agents execute SkillFlow graph nodes and consume resolved context from prior steps. Code outputs use the current run worktree; reads, searches and tests operate on its current files. Artifacts use per-step output folders and are published after validation.
+
+An artifact revision publishes the complete required set. With `carry_forward`, unchanged artifacts are preserved. Loop-body artifacts are scoped to the current item; in-loop readers receive that item and aggregators receive all items (`scope: all` makes this explicit). Artifact history versions published outputs at the workspace root; use `get_skillflow().step_output_versions(pid, config, step)` and `git show <sha>:<config>/<step>/<file>` to recover a version. Code candidates have path-scoped commits and artifact change receipts; review determines acceptance.
 
 **Pipeline execution is handled by [Skillflow](https://github.com/linxuhao/skillflow)** — a config-agnostic graph executor (PyPI: `skillflow-py`). AItelier is the host application: UI, DB, workspace management, LLM provider config, and pipeline-specific templates/tools.
 
@@ -61,7 +63,7 @@ docker compose logs -f          # tail
 - **API-key secret:** every LLM key (`ARK_API_KEY` is the shipped primary, `DEEPSEEK_API_KEY` the failover — see `model_routes.json`) is a **secret file** in `~/.aitelier-secrets/` (host dir overridable via `AITELIER_SECRETS_DIR` — compose's mount source follows it), whole-dir-mounted read-only at `/run/aitelier-secrets` (no per-key compose enumeration — any key name your provider tables declare resolves as soon as the file exists), NOT an env var, so test/build subprocesses that inherit `os.environ` don't receive it. `core/ai_router.py:_read_secret` resolves `/run/secrets/<name>` (legacy fallback) → `$AITELIER_SECRETS_DIR/<name>` (the mount) → `os.getenv`. Keep secrets out of `.env`/git (chmod 600).
 - **Git auth (clone/push/PR):** the host's `~/.ssh` / `~/.git-credentials` are **not** mounted into the container, so private-repo clone broke after containerization. Fixed with the same secret-file model: a **fine-grained GitHub PAT** at `~/.aitelier-secrets/GITHUB_TOKEN` (reaches the container via the whole-dir mount; the helper's path comes from `AITELIER_GITHUB_TOKEN_FILE`). `docker/git-credential-helper.sh` (wired via `GIT_CONFIG_*` in compose) feeds it to **github.com HTTPS remotes only** for clone/push; `core/git_ops.py:create_github_pr` reads the same secret for PR creation. An empty token file = "no credentials" (public clone still works). Chosen over bind-mounting `~/.git-credentials` because the container runs LLM-generated code — a scoped, revocable PAT has a far smaller blast radius than the host's whole credential store.
 - **SkillFlow output-target migration:** this checkout exact-pins the private
-  `1.5.72+aitelier.output1` wheel under `vendor/wheels`. Docker and local installs
+  `1.5.72+aitelier.output2` wheel under `vendor/wheels`. Docker and local installs
   use `pip install --find-links=vendor/wheels -e .`; the runtime checks the engine
   supports the explicit target contract before starting. No PyPI publication was
   performed. Rebuild the image to change the installed engine; restart alone does
@@ -114,7 +116,7 @@ Env reference lives in `.env.example`.
 2. DPE Pipeline (configs/dpe_default.yaml)
    git_sync_pre → Researcher (1) → 1_review → Architect (2) → 2_review
    → PM (3) → 3_review → task_loop
-   → [per task] t_plan → t_plan_review → t_impl (write + on_deliver repo_apply/repo_delete)
+   → [per task] t_plan → t_plan_review → t_impl (code worktree output)
    → t_impl_review
    → Final Verifier (5, content: verdict + README) → 5_test (tool) → 5_knowledge (tool) → 5_review → git_push_post (tool; push-or-skip, never fails the run) → done
    (node "1" uses agent_config `researcher` + template step1_5_researcher.md — the "1_5"

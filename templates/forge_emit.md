@@ -18,10 +18,10 @@ in the registry (the missing ones were just built), so reference them freely.
   `name`, unchanged steps, and their transitions identical. Author fresh CONTENT only
   for roles you added or changed — but still WRITE every file (see the output-directory
   note below; "keep the rest" means keep it identical, not skip writing it).
-  Preserve every unchanged output subfield too: mode, fixed,
+  Preserve every unchanged output subfield too: mode, target, fixed,
   allow_full_write, and carry_forward. In particular, a planner that
   carries a glob such as tasks/*.json across review retries must retain
-  carry_forward: true; dropping it deletes untouched sibling files at promotion.
+  carry_forward: true to preserve unchanged cards across revisions.
   To remove an output property intentionally, write its explicit empty/false value.
 - **`forge_palette`** — the live tool registry (now includes the just-built tools)
   + exemplar configs + the idiom/trap cheatsheet.
@@ -31,15 +31,10 @@ in the registry (the missing ones were just built), so reference them freely.
   section. READ them and fix EXACTLY what they flag; do not re-emit an unchanged
   graph. A repeated identical gate failure means you ignored the feedback.
 
-> ## Your output directory starts EMPTY on every attempt, and REPLACES the last one
-> You are shown your prior files as context, and it is tempting to write only what
-> changed. **Do not.** Promotion deletes your previous output directory and renames
-> this attempt's staging directory onto it, so anything you do not write this time is
-> GONE — a re-emit that writes only the templates destroys `pipeline.yaml` and
-> `role_table.yaml`, and the step fails validation with "File not found". Write the
-> COMPLETE file set every single attempt: the graph, the role table, and every
-> template — copying forward, verbatim, whatever you are not changing. "It is already
-> there" is never true here.
+## Required artifact set
+Each attempt must write `pipeline.yaml`, `role_table.yaml`, and every role template.
+Use the prior artifacts as the baseline: keep unchanged files verbatim and edit only
+the requested portions. Validation checks the complete set produced by this attempt.
 
 ## CRITICAL — use the EXACT skillflow YAML schema below
 Do NOT invent fields. The graph is validated by a strict linter, a registry-check,
@@ -286,10 +281,12 @@ maker's job to what's achievable, then the reviewer to that same bar).
   at all. **But once you declare an offer list it binds every step too** — a
   step whose `capability:` is not in it makes the graph fail REGISTRATION, so
   put every capability any step declares into the same list.
-- `output` is a **mapping**: `{mode: content|write}` and, for named files,
+- `output` is a **mapping**: `{mode: content|write, target: artifact|code}` and, for named files,
   `fixed: {slot: {file: "name"}}`. Not a list. `content` = the agent may write
   ONLY the declared `fixed` files (use for structured/known outputs); `write` =
   free-form file creation (use for a maker that authors arbitrary files).
+  `target` selects the code worktree or the step artifact folder independently of
+  `mode`; each fixed slot may declare its own `target`.
 - **`output.fixed` field reference** (getting these wrong is gate-INVISIBLE — no
   lint/registry/smoke check catches it, it only breaks at runtime):
   - `on_exists` — what to do if the file already exists. Valid values, EXACTLY:

@@ -67,7 +67,11 @@ docker compose logs -f          # tail
   use `pip install --find-links=vendor/wheels -e .`; the runtime checks the engine
   supports the explicit target contract before starting. No PyPI publication was
   performed. Rebuild the image to change the installed engine; restart alone does
-  not replace it. Replacing this private pin with a public release is a separate
+  not replace it. Ship an engine change: build the wheel in the skillflow checkout
+  under a NEW local version (`1.5.72+aitelier.outputN`), drop it in `vendor/wheels`,
+  bump the `skillflow-py==` pin in `pyproject.toml`, then
+  `docker compose build aitelier && up -d` — a `pip install` inside the running
+  container lives in the writable layer and is lost on the next recreation. Replacing this private pin with a public release is a separate
   explicit release operation, with the same behavioral tests.
 
 

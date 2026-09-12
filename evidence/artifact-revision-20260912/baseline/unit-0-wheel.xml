@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="6" time="0.528" timestamp="2026-09-12T09:01:07.063439+00:00" hostname="4baa6fd68dd2"><testcase classname="tests.unit.test_a_capability_grant_survives_the_deployed_engine" name="test_the_host_sends_no_project_root_for_a_repoless_run" time="0.001" /><testcase classname="tests.unit.test_a_capability_grant_survives_the_deployed_engine" name="test_an_unguarded_native_tool_resolves_the_process_cwd" time="0.001" /><testcase classname="tests.unit.test_a_capability_grant_survives_the_deployed_engine" name="test_the_scan_finds_the_native_tools_that_take_a_root" time="0.011" /><testcase classname="tests.unit.test_a_capability_grant_survives_the_deployed_engine" name="test_no_capability_grants_a_native_tool_that_resolves_its_own_root" time="0.367" /><testcase classname="tests.unit.test_a_capability_grant_survives_the_deployed_engine" name="test_tool_creation_still_grants_what_the_forge_needs" time="0.000" /><testcase classname="tests.unit.test_a_capability_grant_survives_the_deployed_engine" name="test_the_tool_build_template_promises_no_test_runner" time="0.001"><failure message="AssertionError: # Pipeline Forge — Build Tool&#10;  &#10;  You are the **Tool Implementer** of `pipeline_forge`. Build ONE skillflow tool from&#10;  its card, as real, working Python.&#10;  &#10;  ## Input&#10;  - **Step `tool_plan` → `tools/$current_tool.json`** — the tool to build (name,&#10;    purpose, interface_contract, params_schema).&#10;  - **`forge_palette`** — read existing tools' shapes if useful.&#10;  - On a re-run: the reviewer's feedback — fix exactly what it flagged.&#10;  &#10;  ## What a skillflow tool is&#10;  A tool is a directory `&lt;name&gt;/` with two files:&#10;  - `&lt;name&gt;/tool.yaml` — `name`, `description`, and `parameters` (each with `type`,&#10;    `description`, `required`).&#10;  - `&lt;name&gt;/impl.py` — exports a function named exactly `&lt;name&gt;` that takes the&#10;    declared params (plus `**kwargs` to absorb engine-injected args like&#10;    `workspace_root`, `project_root`, `run_id`, and `state_dir`) and **returns a&#10;    dict**. The dict's&#10;    keys become the transition flags — if the graph branches on this tool, return the&#10;    key it matches on (e.g. `return {&quot;passed&quot;: True, ...}`).&#10;  &#10;  ## Output — write THREE files (into your step output dir)&#10;  1. `&lt;name&gt;/tool.yaml`&#10;  2. `&lt;name&gt;/impl.py` — a complete, importable implementation. No placeholders, no&#10;     TODOs, no imports of things that don't exist. Handle errors by returning a dict&#10;     (e.g. `{&quot;passed&quot;: False, &quot;error&quot;: &quot;...&quot;}`), not by raising.&#10;  3. `&lt;name&gt;/test_&lt;name&gt;.py` — a pytest file that imports the impl and asserts its&#10;     contract on at least one real case. It must be runnable standalone (add the tool&#10;     dir to `sys.path`, then `import impl` / `from impl import &lt;name&gt;`).&#10;  &#10;  This step produces the tool bundle as an artifact. Include the test for downstream&#10;  execution. `register_tool` validates the bundle by importing `impl.py` exactly as&#10;  ToolLoader does. Keep imports valid and top-level code side-effect-free.&#10;  &#10;  ## Durable, cross-run state — NEVER pick your own folder&#10;  If the tool must persist data that OUTLIVES a single run (positions carried day&#10;  to day, an accumulating memo, a cache), do NOT compute a storage path yourself —&#10;  no `Path.home()`, no hardcoded absolute path. Those escape the workspace jail and,&#10;  in a container, the mounted volume (state is silently lost on recreation). Instead&#10;  the FRAMEWORK hands you a durable, per-pipeline directory as the `state_dir`&#10;  kwarg — write RELATIVE to it:&#10;  &#10;  ```python&#10;  from pathlib import Path&#10;  def remember(content: str, state_dir: str = &quot;&quot;, **kwargs) -&gt; dict:&#10;      if not state_dir:                     # not granted → tool misused&#10;          return {&quot;passed&quot;: False, &quot;error&quot;: &quot;no state_dir (step needs capability: stateful)&quot;}&#10;      f = Path(state_dir) / &quot;memo.md&quot;       # NEVER Path.home()/...&#10;      f.write_text(content, encoding=&quot;utf-8&quot;)&#10;      return {&quot;passed&quot;: True, &quot;path&quot;: str(f)}&#10;  ```&#10;  &#10;  `state_dir` is injected ONLY when the tool's graph step declares&#10;  `capability: stateful` — say so in your tool card's purpose so the emitter wires&#10;  it. The directory already exists; it is the same across every run of the pipeline.&#10;  &#10;  Where `&lt;name&gt;` is the value of `name` in the card. Keep it minimal and correct —&#10;  the smallest code that satisfies the interface_contract.&#10;  &#10;assert 'CANNOT run' in '# Pipeline Forge — Build Tool\n\nYou are the **Tool Implementer** of `pipeline_forge`. Build ONE skillflow tool from\...value of `name` in the card. Keep it minimal and correct —\nthe smallest code that satisfies the interface_contract.\n'">tests/unit/test_a_capability_grant_survives_the_deployed_engine.py:211: in test_the_tool_build_template_promises_no_test_runner
+    assert "CANNOT run" in text, text
+E   AssertionError: # Pipeline Forge — Build Tool
+E     
+E     You are the **Tool Implementer** of `pipeline_forge`. Build ONE skillflow tool from
+E     its card, as real, working Python.
+E     
+E     ## Input
+E     - **Step `tool_plan` → `tools/$current_tool.json`** — the tool to build (name,
+E       purpose, interface_contract, params_schema).
+E     - **`forge_palette`** — read existing tools' shapes if useful.
+E     - On a re-run: the reviewer's feedback — fix exactly what it flagged.
+E     
+E     ## What a skillflow tool is
+E     A tool is a directory `&lt;name&gt;/` with two files:
+E     - `&lt;name&gt;/tool.yaml` — `name`, `description`, and `parameters` (each with `type`,
+E       `description`, `required`).
+E     - `&lt;name&gt;/impl.py` — exports a function named exactly `&lt;name&gt;` that takes the
+E       declared params (plus `**kwargs` to absorb engine-injected args like
+E       `workspace_root`, `project_root`, `run_id`, and `state_dir`) and **returns a
+E       dict**. The dict's
+E       keys become the transition flags — if the graph branches on this tool, return the
+E       key it matches on (e.g. `return {"passed": True, ...}`).
+E     
+E     ## Output — write THREE files (into your step output dir)
+E     1. `&lt;name&gt;/tool.yaml`
+E     2. `&lt;name&gt;/impl.py` — a complete, importable implementation. No placeholders, no
+E        TODOs, no imports of things that don't exist. Handle errors by returning a dict
+E        (e.g. `{"passed": False, "error": "..."}`), not by raising.
+E     3. `&lt;name&gt;/test_&lt;name&gt;.py` — a pytest file that imports the impl and asserts its
+E        contract on at least one real case. It must be runnable standalone (add the tool
+E        dir to `sys.path`, then `import impl` / `from impl import &lt;name&gt;`).
+E     
+E     This step produces the tool bundle as an artifact. Include the test for downstream
+E     execution. `register_tool` validates the bundle by importing `impl.py` exactly as
+E     ToolLoader does. Keep imports valid and top-level code side-effect-free.
+E     
+E     ## Durable, cross-run state — NEVER pick your own folder
+E     If the tool must persist data that OUTLIVES a single run (positions carried day
+E     to day, an accumulating memo, a cache), do NOT compute a storage path yourself —
+E     no `Path.home()`, no hardcoded absolute path. Those escape the workspace jail and,
+E     in a container, the mounted volume (state is silently lost on recreation). Instead
+E     the FRAMEWORK hands you a durable, per-pipeline directory as the `state_dir`
+E     kwarg — write RELATIVE to it:
+E     
+E     ```python
+E     from pathlib import Path
+E     def remember(content: str, state_dir: str = "", **kwargs) -&gt; dict:
+E         if not state_dir:                     # not granted → tool misused
+E             return {"passed": False, "error": "no state_dir (step needs capability: stateful)"}
+E         f = Path(state_dir) / "memo.md"       # NEVER Path.home()/...
+E         f.write_text(content, encoding="utf-8")
+E         return {"passed": True, "path": str(f)}
+E     ```
+E     
+E     `state_dir` is injected ONLY when the tool's graph step declares
+E     `capability: stateful` — say so in your tool card's purpose so the emitter wires
+E     it. The directory already exists; it is the same across every run of the pipeline.
+E     
+E     Where `&lt;name&gt;` is the value of `name` in the card. Keep it minimal and correct —
+E     the smallest code that satisfies the interface_contract.
+E     
+E   assert 'CANNOT run' in '# Pipeline Forge — Build Tool\n\nYou are the **Tool Implementer** of `pipeline_forge`. Build ONE skillflow tool from\...value of `name` in the card. Keep it minimal and correct —\nthe smallest code that satisfies the interface_contract.\n'</failure></testcase></testsuite></testsuites>

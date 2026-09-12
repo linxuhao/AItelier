@@ -1,0 +1,47 @@
+{
+  "reports": {
+    "final-wheel/unit-0-wheel.xml": {
+      "tests": 712,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 711
+    },
+    "final-wheel/unit-1-wheel.xml": {
+      "tests": 685,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 8,
+      "passed": 677
+    },
+    "final-wheel/unit-2-wheel.xml": {
+      "tests": 800,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 800
+    },
+    "final-wheel/unit-3-wheel.xml": {
+      "tests": 773,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 773
+    },
+    "final-package/other-0-wheel.xml": {
+      "tests": 501,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "passed": 500
+    },
+    "final-package/engine-0-wheel.xml": {
+      "tests": 1137,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "passed": 1137
+    }
+  },
+  "network_tests_deselected": 11
+}

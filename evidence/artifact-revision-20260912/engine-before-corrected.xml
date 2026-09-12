@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="4" skipped="0" tests="7" time="0.298" timestamp="2026-09-12T08:35:35.241429+00:00" hostname="4baa6fd68dd2"><testcase classname="tests.test_artifact_revision" name="test_edit_one_card_publishes_complete_set_once" time="0.041" /><testcase classname="tests.test_artifact_revision" name="test_deleted_card_is_absent_from_current_reads_and_edits" time="0.036"><failure message="AssertionError: {'content': '1\t{&quot;id&quot;: &quot;B&quot;, &quot;value&quot;: 1}', 'start_line': 0, 'returned_lines': 1, 'total_lines': 1, ...}&#10;assert 'error' in {'content': '1\t{&quot;id&quot;: &quot;B&quot;, &quot;value&quot;: 1}', 'start_line': 0, 'returned_lines': 1, 'total_lines': 1, ...}">tests/test_artifact_revision.py:86: in test_deleted_card_is_absent_from_current_reads_and_edits
+    assert "error" in result, result
+E   AssertionError: {'content': '1\t{"id": "B", "value": 1}', 'start_line': 0, 'returned_lines': 1, 'total_lines': 1, ...}
+E   assert 'error' in {'content': '1\t{"id": "B", "value": 1}', 'start_line': 0, 'returned_lines': 1, 'total_lines': 1, ...}</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_empty_candidate_survives_reclaim_and_publishes_empty_set" time="0.030"><failure message="AssertionError: assert {'A.json': b'{}'} == {}&#10;  &#10;  Left contains 1 more item:&#10;  {'A.json': b'{}'}&#10;  Use -v to get more diff">tests/test_artifact_revision.py:101: in test_empty_candidate_survives_reclaim_and_publishes_empty_set
+    assert files(candidate) == {}
+E   AssertionError: assert {'A.json': b'{}'} == {}
+E     
+E     Left contains 1 more item:
+E     {'A.json': b'{}'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_new_run_does_not_inherit_previous_runs_artifacts" time="0.029"><failure message="assert {'tasks_manif... &quot;value&quot;: 1}'} == {}&#10;  &#10;  Left contains 4 more items:&#10;  {'tasks/A.json': b'{&quot;id&quot;: &quot;A&quot;, &quot;value&quot;: 1}',&#10;   'tasks/B.json': b'{&quot;id&quot;: &quot;B&quot;, &quot;value&quot;: 1}',&#10;   'tasks/C.json': b'{&quot;id&quot;: &quot;C&quot;, &quot;value&quot;: 1}',&#10;   'tasks_manifest.json': b'{&quot;execution_order&quot;: [[&quot;A&quot;, &quot;B&quot;, &quot;C&quot;]]}'}&#10;  Use -v to get more diff">tests/test_artifact_revision.py:114: in test_new_run_does_not_inherit_previous_runs_artifacts
+    assert files(Path(new.inputs["_output_dir"])) == {}
+E   assert {'tasks_manif... "value": 1}'} == {}
+E     
+E     Left contains 4 more items:
+E     {'tasks/A.json': b'{"id": "A", "value": 1}',
+E      'tasks/B.json': b'{"id": "B", "value": 1}',
+E      'tasks/C.json': b'{"id": "C", "value": 1}',
+E      'tasks_manifest.json': b'{"execution_order": [["A", "B", "C"]]}'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_failed_validation_leaves_publication_intact" time="0.039"><failure message="assert {'tasks_manif... &quot;value&quot;: 1}'} == {'tasks_manif... &quot;value&quot;: 1}'}&#10;  &#10;  Omitting 3 identical items, use -vv to show&#10;  Right contains 1 more item:&#10;  {'tasks/B.json': b'{&quot;id&quot;: &quot;B&quot;, &quot;value&quot;: 1}'}&#10;  Use -v to get more diff">tests/test_artifact_revision.py:127: in test_failed_validation_leaves_publication_intact
+    assert files(prior) == before
+E   assert {'tasks_manif... "value": 1}'} == {'tasks_manif... "value": 1}'}
+E     
+E     Omitting 3 identical items, use -vv to show
+E     Right contains 1 more item:
+E     {'tasks/B.json': b'{"id": "B", "value": 1}'}
+E     Use -v to get more diff</failure></testcase><testcase classname="tests.test_artifact_revision" name="test_validation_retry_preserves_changes_and_deletions" time="0.039" /><testcase classname="tests.test_artifact_revision" name="test_no_change_revision_keeps_bytes" time="0.037" /></testsuite></testsuites>

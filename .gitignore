@@ -248,4 +248,4 @@ model_routes.json
 # Reviewed, exact-pinned private engine required by the artifact/code migration.
 !vendor/wheels/
 vendor/wheels/*
-!vendor/wheels/skillflow_py-1.5.72+aitelier.output2-py3-none-any.whl
+!vendor/wheels/skillflow_py-1.5.72+aitelier.output3-py3-none-any.whl

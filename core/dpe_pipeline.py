@@ -2657,6 +2657,16 @@ class PipelineEngine:
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": user_prompt},
                 ]
+                # `_native_messages` is the backing store for the host-level
+                # recall_observation tool. It was first pointed at the empty
+                # list created before attempt setup, then this fresh-attempt
+                # branch REPLACED `messages` with a new list without updating
+                # the pointer. Result: repeat-call dedupe emitted a valid digest
+                # from the local `messages`, while recall_observation searched
+                # the abandoned empty list and failed 100% of fresh-step calls.
+                # Keep the published reference aligned whenever `messages` is
+                # rebound (resume does the same above).
+                self._native_messages = messages
                 self._delta_traced = 0
                 self._trace("prompt", "user_prompt", {
                     "attempt": attempt, "mode": "native",

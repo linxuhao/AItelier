@@ -140,9 +140,14 @@ def test_exec_tool_answers_recall_from_the_loop_messages_without_skillflow(monke
         {"tool": "recall_observation", "params": {"sha256": sha}})["error"]
 
 
-def test_the_native_loop_publishes_its_messages_and_offers_the_tool():
-    """The attribute the recall reads is set where the list is built AND where
-    a resume replaces it; the schema is injected next to ask_more_turns."""
+def test_the_native_loop_publishes_every_messages_list_and_offers_the_tool():
+    """Every binding of the live conversation must be published to recall.
+
+    There are three bindings today: the initial empty list, a resumed history,
+    and the fresh-attempt system/user list. The fresh binding is load-bearing:
+    without it repeat-read dedupe can hand the model a valid sha256 while
+    recall_observation searches the abandoned empty list and fails every call.
+    """
     src = inspect.getsource(PipelineEngine._run_native_step)
-    assert src.count("self._native_messages = messages") == 2
+    assert src.count("self._native_messages = messages") == 3
     assert '"recall_observation" not in self._tool_schemas' in src

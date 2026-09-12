@@ -134,8 +134,25 @@ class StateAttempts:
                 or prior["dependency_snapshot"] != canonical(deps)):
             raise StateConflict("the failed attempt targeted a different revision, contract or dependency snapshot; "
                                 "its draft cannot be continued — start a fresh attempt")
-        return {"attempt_id": prior["attempt_id"], "run_id": prior["run_id"],
-                "execution_project_id": prior["execution_project_id"], "error": prior["error"]}
+        prior_context = json.loads(prior["context_json"])
+        prior_relay = prior_context.get("relay_of")
+        if not isinstance(prior_relay, dict):
+            prior_relay = {}
+        # Preserve the origin across any number of relay hops. Without this a
+        # 6e4 -> 642 -> next continuation reports 642 as its first failure and
+        # hides that the same delivery has exhausted twice already.
+        first_failure_run_id = (
+            prior_relay.get("first_failure_run_id")
+            or prior_relay.get("run_id")
+            or prior["run_id"]
+        )
+        return {
+            "attempt_id": prior["attempt_id"],
+            "run_id": prior["run_id"],
+            "first_failure_run_id": first_failure_run_id,
+            "execution_project_id": prior["execution_project_id"],
+            "error": prior["error"],
+        }
 
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None):

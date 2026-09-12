@@ -54,7 +54,13 @@ def test_reference_failure_is_reported_as_regrounding_with_actual_progress():
     assert report["written_files"] == ["core/dpe_pipeline.py", "core/write_scope.py"]
     assert report["failure_class"] == "re_grounding"
     assert report["expansion_requested"] is False
-    assert report["remaining_delivery"] == ["not reported before exhaustion"]
+    assert report["remaining_delivery"] == [
+        "complete targeted validation for the retained changes in "
+        "core/dpe_pipeline.py, core/write_scope.py",
+        "call finish_step with the validation result and any remaining file list",
+    ]
+    assert report["failure_classes"] == ["re_grounding"]
+    assert report["strategy_triggers"] == ["relay_targeted_context"]
     assert report["escalation_policy"] == "relay_retained_work_then_split_if_repeated"
 
 
@@ -78,6 +84,7 @@ def test_state_seed_relay_retains_exact_bytes_and_incomplete_instruction():
     found = _relay_progress_context({"coding_impl/plan.md": seed})
     assert found == {
         "run_id": "6e4c67b9-2849-402b-96f4-bd8ddf4386be",
+        "first_failure_run_id": "6e4c67b9-2849-402b-96f4-bd8ddf4386be",
         "retained_files": {
             "core/dpe_pipeline.py": 195198,
             "core/write_scope.py": 8817,
@@ -101,6 +108,62 @@ def test_relay_ack_requires_exact_bytes_and_names_remaining_work():
     assert accepted["retained_files"]["core/write_scope.py"] == 8817
 
 
+def test_relay_ack_rejects_arbitrary_item_even_with_exact_bytes():
+    relay = _relay_progress_context(relay_context())
+    ok, denied = _relay_acknowledgement(
+        relay, {"retained_bytes": 204015, "incomplete_items": ["banana"]})
+    assert not ok
+    assert denied["status"] == "denied"
+    assert "known incomplete work" in denied["error"]
+    ok, _ = _relay_acknowledgement(
+        relay, {"retained_bytes": 204015, "incomplete_items": ["finish wiring"]})
+    assert not ok
+
+
+def test_chained_relay_keeps_original_first_failure():
+    context = relay_context()
+    context["relay"]["run_id"] = "642b3bd1-current-relay"
+    context["relay_of"] = {
+        "run_id": "642b3bd1-current-relay",
+        "first_failure_run_id": "6e4c67b9-original-failure",
+    }
+    relay = _relay_progress_context(context)
+    assert relay["run_id"] == "642b3bd1-current-relay"
+    assert relay["first_failure_run_id"] == "6e4c67b9-original-failure"
+    report = _budget_failure_report(
+        max_turns=40, first_write_turn=38, written_files=["tests/test_scope.py"],
+        reads_searches=49, tool_failures=0, expansion_requests=[], relay=relay)
+    assert report["first_failure_run_id"] == "6e4c67b9-original-failure"
+
+
+def test_large_late_write_failure_has_overlapping_classes_and_actions():
+    report = _budget_failure_report(
+        max_turns=40,
+        first_write_turn=36,
+        written_files=[f"file_{index}.py" for index in range(10)],
+        reads_searches=69,
+        tool_failures=0,
+        expansion_requests=[],
+        relay=None,
+    )
+    assert report["failure_classes"] == ["re_grounding", "task_too_big"]
+    assert report["strategy_triggers"] == ["relay_targeted_context", "split_task"]
+
+
+def test_edit_friction_and_model_exploration_are_distinct():
+    friction = _budget_failure_report(
+        max_turns=32, first_write_turn=None, written_files=[], reads_searches=3,
+        tool_failures=2, expansion_requests=[], relay=None)
+    exploration = _budget_failure_report(
+        max_turns=32, first_write_turn=None, written_files=[], reads_searches=3,
+        tool_failures=0, expansion_requests=[], relay=None)
+    assert friction["failure_classes"] == ["edit_friction"]
+    assert friction["strategy_triggers"] == ["switch_edit_method_or_executor"]
+    assert exploration["failure_classes"] == ["model_exploration"]
+    assert exploration["strategy_triggers"] == ["switch_model_or_external_executor"]
+    assert "not reported" not in " ".join(exploration["remaining_delivery"])
+
+
 def test_native_loop_refuses_operations_before_relay_ack_and_records_progress():
     source = inspect.getsource(PipelineEngine._run_native_step)
     refusal = source.index('if not relay_acknowledged and tool_name != "acknowledge_relay"')
@@ -111,6 +174,36 @@ def test_native_loop_refuses_operations_before_relay_ack_and_records_progress():
     assert '"reads_searches": reads_searches' in source
     assert '"relay_broad_survey_refused"' in source
     assert 'reads_searches > relay_read_limit' in source
+    assert "tool_name in _REPOSITORY_READ_TOOLS" in source
+
+
+def test_reclaim_rebuilds_progress_telemetry_from_durable_deltas():
+    rows = [
+        ("prompt_delta", {"segment": 0, "index": 0, "role": "system", "content": "s"}),
+        ("prompt_delta", {"segment": 0, "index": 1, "role": "user", "content": "u"}),
+        ("prompt_delta", {
+            "segment": 0, "index": 2, "role": "assistant", "content_null": True,
+            "tool_calls": [{"id": "list-1", "function": {"name": "list", "arguments": "{}"}}],
+        }),
+        ("prompt_delta", {
+            "segment": 0, "index": 3, "role": "tool", "tool_call_id": "list-1",
+            "content": json.dumps({"entries": ["a.py"]}),
+        }),
+        ("prompt_delta", {
+            "segment": 0, "index": 4, "role": "assistant", "content_null": True,
+            "tool_calls": [{"id": "edit-1", "function": {
+                "name": "edit", "arguments": json.dumps({"file": "a.py"})}}],
+        }),
+        ("prompt_delta", {
+            "segment": 0, "index": 5, "role": "tool", "tool_call_id": "edit-1",
+            "content": json.dumps({"edited": "a.py"}),
+        }),
+    ]
+    rebuilt = PipelineEngine._rebuild_from_deltas(rows, 8)
+    assert rebuilt["turns"] == 2
+    assert rebuilt["reads_searches"] == 1
+    assert rebuilt["first_write_turn"] == 2
+    assert rebuilt["tool_failures"] == 0
 
 
 def test_coding_template_forbids_broad_regrounding_on_relay():

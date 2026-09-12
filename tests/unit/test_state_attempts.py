@@ -533,6 +533,24 @@ def test_continue_from_records_the_relayed_attempt_and_is_idempotent(system):
     assert store.events("game")[-1]["payload"]["relay_of"]["attempt_id"] == a["attempt_id"]
 
 
+def test_chained_continue_from_preserves_original_first_failure(system):
+    _, attempts, sf = system
+    first = _fail(system, request="first-chain")
+    second = attempts.reserve(
+        "game", "a", 1, "feature", "relay-chain-1", "continue",
+        continue_from=first["attempt_id"],
+    )
+    assert second["context"]["relay_of"]["first_failure_run_id"] == first["run_id"]
+    sf.fail_run(launch(system, second), "Step implement: native turn budget exhausted (40/40)")
+    second = attempts.reconcile(second["attempt_id"], sf)
+    third = attempts.reserve(
+        "game", "a", 1, "feature", "relay-chain-2", "continue again",
+        continue_from=second["attempt_id"],
+    )
+    assert third["context"]["relay_of"]["run_id"] == second["run_id"]
+    assert third["context"]["relay_of"]["first_failure_run_id"] == first["run_id"]
+
+
 @pytest.mark.parametrize("wrong", ["not-failed", "other-node", "other-workflow", "unknown"])
 def test_continue_from_refuses_anything_but_a_failed_attempt_of_this_goal(system, wrong):
     _, attempts, sf = system

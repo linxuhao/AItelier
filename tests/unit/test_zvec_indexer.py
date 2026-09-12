@@ -75,7 +75,7 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
     assert result.stderr == ""
     calls = log.read_text().splitlines()
     assert [line.split()[1] for line in calls] == [str(linked), str(source)]
-    assert all("--glob !**/.zvec-grep/**" in line for line in calls)
+    assert all("--hidden --glob !**/.zvec-grep/**" in line for line in calls)
     assert (source / ".zvec-grep").is_dir()
     assert (linked / ".zvec-grep").is_dir()
     assert not (outside / ".zvec-grep").exists()

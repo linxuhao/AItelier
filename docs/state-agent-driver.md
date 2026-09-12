@@ -4,6 +4,7 @@ State owns product goals, versioned acceptance contracts, dependencies and evide
 
 ## Resume safely
 1. Read state_graph_help schemas, project_overview and the relevant get_node/attempt_detail. Recover durable IDs before acting. Use the current revision and frozen dependency receipts. Do not repeat an old task because its notification was delayed.
+   Read get_driver_note for the current project notebook. If a historical decision is missing, use search_driver_note_history with narrow filters and its revision cursor; do not inject the full append-only note history into routine resumes or compact recovery.
 2. Capture project_overview.event_seq BEFORE dispatching work (or retain the last wait next_after). Keep that cursor with project_id, selected filters, attempt IDs, run IDs, source SHA, worker ownership and pending checkpoint in your handoff. On context compaction, preserve these facts and report references; read current state after resuming.
 3. Before adding a node, search_nodes(project_id, query) over key/goal/acceptance/evidence — a ruling is often already a node (e.g. a map-facility cap was growth.facility-quota). Select ready goals. hold prevents new dispatch; it does not cancel workers. Use one writer per checkout, one controller per run and one active attempt per node. Independent nodes may run in parallel in isolated worktrees.
 

@@ -30,6 +30,10 @@ def test_mcp_driver_onboarding_surfaces_are_discoverable_and_consistent(tmp_path
         help_body = json.loads(help_result["content"][0]["text"])
         assert help_body["driver_guide"] == STATE_DRIVER_GUIDE
         assert help_body["driver_resource"] == "aitelier://state/driver-guide"
+        search_schema = help_body["operations"]["search_driver_note_history"]
+        assert search_schema["mutates"] is False
+        assert search_schema["arguments"]["properties"]["excerpt_chars"]["maximum"] == 1000
+        assert "search_driver_note_history" in STATE_DRIVER_GUIDE
 
 
 def test_mcp_wait_returns_external_completion_and_remains_private(tmp_path):
@@ -115,8 +119,29 @@ def test_mcp_driver_notes_are_authorized_project_scoped_and_cas_protected(tmp_pa
         history = result(rpc("state_graph_read", "driver_note_history",
                              {"project_id": "aitelier"}))
         assert history["entries"][0]["director_identity"] == "aitelier-director"
+        result(rpc("state_graph_write", "update_driver_note", {
+            **write, "content": " release access_token=synthetic-secret", "expected_revision": 1,
+            "operation": "append"}))
+        search_args = {"project_id": "aitelier", "query": "release",
+                       "section": "temporary", "limit": 1, "excerpt_chars": 64}
+        mcp_search = result(rpc("state_graph_read", "search_driver_note_history", search_args))
+        assert mcp_search["entries"][0]["revision"] == 1
+        assert mcp_search["truncated"] is True
+        rest_search = client.get(
+            "/api/state/projects/aitelier/driver-note/history/search",
+            params=search_args, headers=headers)
+        assert rest_search.status_code == 200
+        assert rest_search.json() == mcp_search
+        assert "synthetic-secret" not in json.dumps(mcp_search)
+        empty = result(rpc("state_graph_read", "search_driver_note_history", {
+            "project_id": "aitelier", "query": "does-not-exist"}))
+        assert empty["entries"] == [] and empty["next_after_revision"] == 0
+        schema = client.get("/api/state/schema", headers=headers).json()
+        rest_schema = schema["operations"]["search_driver_note_history"]
+        assert rest_schema["mutates"] is False
+        assert rest_schema["arguments"]["properties"]["excerpt_chars"]["maximum"] == 1000
         rest = client.get("/api/state/projects/aitelier/driver-note", headers=headers)
         assert rest.status_code == 200
-        assert rest.json()["temporary"] == "release handoff"
+        assert rest.json()["temporary"].startswith("release handoff release")
         foreign = client.get("/api/state/projects/wuxia-myth/driver-note", headers=headers)
         assert foreign.status_code == 200 and foreign.json()["revision"] == 0

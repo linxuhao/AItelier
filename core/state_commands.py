@@ -90,6 +90,24 @@ class DriverNoteHistory(Project):
     limit: int = Field(default=100, ge=1, le=500)
 
 
+class SearchDriverNoteHistory(Project):
+    query: str = Field(default="", max_length=500,
+                       description="Case-insensitive literal text; empty lists filtered revisions.")
+    section: Literal["permanent", "temporary"] | None = None
+    actor: str | None = Field(default=None, min_length=1, max_length=320)
+    director_identity: str | None = Field(default=None, min_length=1, max_length=320)
+    after_revision: int = Field(default=0, ge=0, le=2**63-1,
+                                description="Exclusive stable pagination cursor.")
+    min_revision: int | None = Field(default=None, ge=1, le=2**63-1)
+    max_revision: int | None = Field(default=None, ge=1, le=2**63-1)
+    created_after: str | None = Field(default=None, max_length=64,
+                                       description="Exclusive timezone-aware ISO-8601 lower bound.")
+    created_before: str | None = Field(default=None, max_length=64,
+                                        description="Exclusive timezone-aware ISO-8601 upper bound.")
+    limit: int = Field(default=20, ge=1, le=100)
+    excerpt_chars: int = Field(default=320, ge=64, le=1000)
+
+
 class UpdateDriverNote(Project):
     section: Literal["permanent", "temporary"]
     content: str = Field(max_length=100000)
@@ -285,7 +303,8 @@ READ_REQUESTS = {
     "export_design_markdown": DesignBaseline, "check_design_markdown": CheckDesignMarkdown,
     "list_projects": Empty, "get_graph": Project, "get_node": Node, "search_nodes": SearchNodes, "facet_lint": Project,
     "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange,
-    "get_driver_note": DriverNote, "driver_note_history": DriverNoteHistory, "get_attempt": Attempt,
+    "get_driver_note": DriverNote, "driver_note_history": DriverNoteHistory,
+    "search_driver_note_history": SearchDriverNoteHistory, "get_attempt": Attempt,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
     "project_run_summary": Project,
@@ -338,6 +357,7 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "get_node": service.node_context, "search_nodes": service.store.search_nodes, "frontier": service.store.frontier, "facet_lint": service.store.facet_lint,
         "wait_for_state_change": service.wait_for_state_change, "events": service.store.events,
         "get_driver_note": service.driver_notes.get, "driver_note_history": service.driver_notes.history,
+        "search_driver_note_history": service.driver_notes.search,
         "get_attempt": service.get_attempt,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,

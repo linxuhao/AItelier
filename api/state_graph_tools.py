@@ -36,7 +36,7 @@ def register_state_tools(tool, mcp, service_factory=None):
         return {**describe(), "driver_guide": STATE_DRIVER_GUIDE,
                 "driver_prompt": "state_graph_driver", "driver_resource": "aitelier://state/driver-guide"}
 
-    @tool("state_graph_read", "read", "Private State DAG query. Requires writer authorization even though it does not mutate. Actions include get_driver_note, driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help.")
+    @tool("state_graph_read", "read", "Private State DAG query. Requires writer authorization even though it does not mutate. Actions include get_driver_note, driver_note_history, search_driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change. Driver-note search returns bounded redacted excerpts in revision order. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help.")
     async def state_graph_read(action: str, arguments: dict) -> dict:
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
         try:

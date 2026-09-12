@@ -43,6 +43,17 @@ section with expected_revision, director_identity and operation=replace|append.
 The authenticated actor is derived from the transport and recorded separately
 from the caller's director identity. Identity is provenance, never authorization.
 
+Use get_driver_note for current authority. Use search_driver_note_history only
+when a past decision, handoff, owner or phrase is needed: it searches the section
+changed by each revision, supports literal text plus section, actor,
+director_identity, revision and timezone-aware time bounds, and returns redacted
+excerpts in ascending revision order. Continue with next_after_revision and the
+same filters; an empty query browses filtered revisions, while no matches returns
+an empty page. Fetch full snapshots with driver_note_history only after selecting
+specific revisions. Do not load the full history on every resume or compaction.
+Both permanent and temporary resulting sections are capped at 100000 characters;
+replace or append beyond that cap fails without a revision, history row or event.
+
 The note is isolated by project_id. A director handling aitelier and another
 handling wuxia-myth read, write and wait on different notes, revisions and event
 streams. A same-revision race has one winner; the loser must read the current

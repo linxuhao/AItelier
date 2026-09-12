@@ -52,6 +52,23 @@ def create_state_router(service_dependency, access_dependency):
             "project_id": project_id, "after_revision": after_revision, "limit": limit})
 
 
+    @router.get("/projects/{project_id}/driver-note/history/search")
+    def search_driver_note_history(
+            project_id: str, query: str = "", section: str | None = None,
+            actor: str | None = None, director_identity: str | None = None,
+            after_revision: int = 0, min_revision: int | None = None,
+            max_revision: int | None = None, created_after: str | None = None,
+            created_before: str | None = None, limit: int = 20,
+            excerpt_chars: int = 320, service=Depends(service_dependency)):
+        return _call(service, "search_driver_note_history", {
+            "project_id": project_id, "query": query, "section": section,
+            "actor": actor, "director_identity": director_identity,
+            "after_revision": after_revision, "min_revision": min_revision,
+            "max_revision": max_revision, "created_after": created_after,
+            "created_before": created_before, "limit": limit,
+            "excerpt_chars": excerpt_chars})
+
+
     @router.get("/attempts/{attempt_id}")
     def attempt(attempt_id: str, service=Depends(service_dependency)):
         return _call(service, "get_attempt", {"attempt_id": attempt_id})

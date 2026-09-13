@@ -20,7 +20,7 @@ from skillflow.graph import PipelineGraph, StepNode, Transition
 from core.config_registry import ConfigRegistry
 from core.db_manager import DBManager
 from core.state_graph import StateConflict, StateGraphError
-from core.state_service import StateService
+from core.state_service import SEED_HEADING, StateService
 from core.workspace_manager import WorkspaceManager
 
 
@@ -132,6 +132,58 @@ def test_standard_launcher_persists_seed_attempt_run_and_output_artifact(live):
     assert len(live.sf.list_runs()) == 2
 
 
+def test_authoritative_design_revision_is_frozen_through_real_launch_seed_and_claim(live):
+    service = live.service
+    service.create_project("ruling", "Authoritative ruling")
+    service.store.add_nodes("ruling", [spec("work")])
+    first = service.design.create_revision(
+        "ruling", "rule", 0, "Rule", "Use the old rule.",
+        "The old rule is the first approved decision.", [], {"mode": "all"},
+        lifecycle_status="approved",
+    )
+    service.design.create_baseline(
+        "ruling", "baseline-old", [{"design_id": "rule", "revision": first["revision"]}])
+    service.design.bind_node(
+        "ruling", "work", 1, "baseline-old",
+        [{"design_id": "rule", "revision": 1, "purpose": "context",
+          "coverage_scope": {"mode": "all"}}],
+        "Bind the approved rule.",
+    )
+    old = service.start_attempt("ruling", "work", 2, "state_fixture", "old")
+    from core.seed_publication import seed_dir
+    old_payload = (seed_dir(live.sf, old["execution_project_id"], "state_fixture") / "plan.md").read_text()
+    old_seed = json.loads(old_payload[len(SEED_HEADING):].strip())
+    assert old_seed["design_context"]["baseline_id"] == "baseline-old"
+    assert old["context"]["design_context"]["bindings"][0]["design"]["revision"] == 1
+    finish(live, old)
+
+    newer = service.design.create_revision(
+        "ruling", "rule", 1, "Rule", "Use the new rule.",
+        "The owner explicitly revised the decision.", [], {"mode": "all"},
+        lifecycle_status="approved",
+    )
+    service.design.create_baseline(
+        "ruling", "baseline-new", [{"design_id": "rule", "revision": newer["revision"]}],
+        expected_baseline_id="baseline-old",
+    )
+    service.store.revise_node("ruling", "work", 2, "Adopt the revised rule.")
+    service.design.bind_node(
+        "ruling", "work", 3, "baseline-new",
+        [{"design_id": "rule", "revision": 2, "purpose": "context",
+          "coverage_scope": {"mode": "all"}}],
+        "Bind the revised approved rule.",
+    )
+    current = service.start_attempt("ruling", "work", 4, "state_fixture", "new")
+    current_payload = (seed_dir(live.sf, current["execution_project_id"], "state_fixture") / "plan.md").read_text()
+    current_seed = json.loads(current_payload[len(SEED_HEADING):].strip())
+    assert current_seed["design_context"]["baseline_id"] == "baseline-new"
+    assert current["context"]["design_context"]["bindings"][0]["design"]["revision"] == 2
+    assert service.attempts.get(old["attempt_id"])["context"]["design_context"]["baseline_id"] == "baseline-old"
+    live.sf.advance_run(current["run_id"])
+    claim = live.sf.claim_next_step(current["run_id"])
+    assert claim is not None and claim.step_id == "work"
+
+
 def test_retry_does_not_create_a_second_workflow(live):
     a = start(live)
     again = start(live)
@@ -179,6 +231,241 @@ def test_unknown_launch_without_run_is_not_blindly_retried(live, monkeypatch):
     assert len(calls) == 1 and live.sf.list_runs() == []
     with pytest.raises(StateConflict):
         start(live, request_key="another")
+
+
+def _code_state_project(live, name="frozen"):
+    repo = live.tmp / (name + "-repo")
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@localhost"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "kept.txt").write_text("unchanged\n")
+    subprocess.run(["git", "add", "kept.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    live.db.ensure_project(name + "-source", name=name, repo_type="existing", repo_path=str(repo))
+    live.service.create_project(name, name, source_project_id=name + "-source")
+    live.service.store.add_nodes(name, [spec("work")])
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                          text=True, capture_output=True).stdout.strip()
+    return repo, head
+
+
+def _frozen(*checks):
+    return {"version": 1, "checks": list(checks)}
+
+
+def _required(cid, probe, expected, **arguments):
+    return {"id": cid, "probe": probe, "arguments": arguments,
+            "expected": expected}
+
+
+def test_frozen_base_mismatch_refuses_exact_regression_before_launch_claim_or_later_probe(
+        live, monkeypatch):
+    import core.frozen_attempt as frozen
+    import core.run_isolation as isolation
+    import core.run_launcher as launcher
+    from aitelier.runner import AgentStepRunner
+
+    repo, before = _code_state_project(live)
+    original = frozen._source_head
+    monkeypatch.setattr(frozen, "_source_head", lambda source: lambda args:
+                        "c6446bd6146a70704a94a57356c6f4dabbad4298")
+    calls = {"launch": 0, "claim": 0, "model": 0, "gate": 0,
+             "capability": 0, "base_pin": 0}
+    monkeypatch.setattr(launcher, "start_config_run", lambda *a, **k:
+                        calls.__setitem__("launch", calls["launch"] + 1))
+    monkeypatch.setattr(live.sf, "claim_next_step", lambda *a, **k:
+                        calls.__setitem__("claim", calls["claim"] + 1))
+    async def model_execute(*args, **kwargs):
+        calls["model"] += 1
+    monkeypatch.setattr(AgentStepRunner, "execute", model_execute)
+    monkeypatch.setattr(live.service.attempts, "claim_launch", lambda *a, **k:
+                        calls.__setitem__("gate", calls["gate"] + 1))
+    monkeypatch.setattr(live.sf, "capability_identity", lambda name:
+                        calls.__setitem__("capability", calls["capability"] + 1) or {})
+    monkeypatch.setattr(isolation, "request_base", lambda *a, **k:
+                        calls.__setitem__("base_pin", calls["base_pin"] + 1))
+    attempt = live.service.start_attempt(
+        "frozen", "work", 1, "state_code_fixture", "base-mismatch",
+        frozen_prerequisites=_frozen(
+            _required("source-base", "source_head",
+                      "91621acd58b7cf16f20aaae15c35a34001e826c5"),
+            _required("expensive-runtime", "runtime_capability", None, name="late"),
+        ),
+    )
+    assert attempt["status"] == "failed" and attempt["run_id"] is None
+    assert calls == {"launch": 0, "claim": 0, "model": 0, "gate": 0,
+                     "capability": 0, "base_pin": 0}
+    assert live.sf.list_runs(project_id=attempt["execution_project_id"]) == []
+    assert (repo / "kept.txt").read_text() == "unchanged\n"
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                          text=True, capture_output=True).stdout.strip() == before
+    event = [e for e in live.service.store.events("frozen")
+             if e["event_type"] == "attempt_preflight_failed"][-1]
+    check = event["payload"]["report"]["checks"][0]
+    assert check["required"] == "91621acd58b7cf16f20aaae15c35a34001e826c5"
+    assert check["actual"] == "c6446bd6146a70704a94a57356c6f4dabbad4298"
+    monkeypatch.setattr(frozen, "_source_head", original)
+
+
+@pytest.mark.parametrize("case", ["input-hash", "missing-capability", "unknown-shape"])
+def test_frozen_inputs_capabilities_and_unknown_shapes_fail_before_launch(live, monkeypatch, case):
+    import core.run_launcher as launcher
+
+    repo, head = _code_state_project(live, "frozen-" + case)
+    report = live.tmp / (case + ".json")
+    report.write_text("immutable input\n")
+    actual_hash = hashlib.sha256(report.read_bytes()).hexdigest()
+    launches = []
+    monkeypatch.setattr(launcher, "start_config_run", lambda *a, **k: launches.append(1))
+    if case == "input-hash":
+        checks = [_required("input", "sha256_file", "0" * 64, path=str(report))]
+    elif case == "missing-capability":
+        checks = [_required("runtime", "runtime_capability",
+                            {"name": "absent", "tools": [], "briefing": "", "owner": "host"},
+                            name="absent")]
+    else:
+        checks = [{**_required("source", "source_head", head), "extra": True}]
+    attempt = live.service.start_attempt(
+        "frozen-" + case, "work", 1, "state_code_fixture", case,
+        frozen_prerequisites=_frozen(*checks),
+    )
+    assert attempt["status"] == "failed" and not launches
+    assert live.sf.list_runs(project_id=attempt["execution_project_id"]) == []
+    assert (repo / "kept.txt").read_text() == "unchanged\n"
+    if case == "input-hash":
+        event = [e for e in live.service.store.events("frozen-" + case)
+                 if e["event_type"] == "attempt_preflight_failed"][-1]
+        got = event["payload"]["report"]["checks"][0]
+        assert got["required"] == "0" * 64 and got["actual"] == actual_hash
+
+
+def test_matching_frozen_prerequisites_launch_success_control(live):
+    repo, head = _code_state_project(live, "frozen-ok")
+    report = live.tmp / "input-ok.json"
+    report.write_text("bound report\n")
+    digest = hashlib.sha256(report.read_bytes()).hexdigest()
+    live.sf.register_capability("review", tools=[], briefing="review inputs", owner="host")
+    expected_capability = {"name": "review", "tools": [],
+                           "briefing": "review inputs", "owner": "host",
+                           "available": True, "tool_schema_sha256": {}}
+    attempt = live.service.start_attempt(
+        "frozen-ok", "work", 1, "state_code_fixture", "ok",
+        frozen_prerequisites=_frozen(
+            _required("source", "source_head", head),
+            _required("input", "sha256_file", digest, path=str(report)),
+            _required("runtime", "runtime_capability", expected_capability, name="review"),
+        ),
+    )
+    assert attempt["status"] == "running" and attempt["run_id"]
+    from core import run_isolation
+    isolation = run_isolation.record(live.db, attempt["run_id"])
+    assert isolation["base_sha"] == head
+    events = [e for e in live.service.store.events("frozen-ok")
+              if e["event_type"] == "attempt_preflight_passed"]
+    assert len(events) == 1 and events[0]["payload"]["report"]["passed"] is True
+    assert [c["actual"] for c in events[0]["payload"]["report"]["checks"]] == [
+        head, digest, expected_capability]
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=isolation["worktree_path"],
+                          check=True, text=True, capture_output=True).stdout.strip() == head
+    live.sf.advance_run(attempt["run_id"])
+    claim = live.sf.claim_next_step(attempt["run_id"])
+    assert claim is not None and claim.step_id == "work"
+
+
+def test_frozen_source_pin_survives_head_swap_before_worktree_creation(live, monkeypatch):
+    from core import run_isolation
+
+    repo, head = _code_state_project(live, "frozen-head-swap")
+    live.sf.register_capability("review", tools=[], briefing="review inputs", owner="host")
+    expected_capability = {"name": "review", "tools": [],
+                           "briefing": "review inputs", "owner": "host",
+                           "available": True, "tool_schema_sha256": {}}
+    original_request_base = run_isolation.request_base
+    moved = {}
+
+    def pin_then_move(db, project_id, base_sha, note=""):
+        result = original_request_base(db, project_id, base_sha, note=note)
+        (repo / "later.txt").write_text("new source head after successful preflight\n")
+        subprocess.run(["git", "add", "later.txt"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "move source after preflight"], cwd=repo, check=True)
+        moved["head"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                                         text=True, capture_output=True).stdout.strip()
+        return result
+
+    monkeypatch.setattr(run_isolation, "request_base", pin_then_move)
+    attempt = live.service.start_attempt(
+        "frozen-head-swap", "work", 1, "state_code_fixture", "head-swap",
+        frozen_prerequisites=_frozen(
+            _required("source", "source_head", head),
+            _required("runtime", "runtime_capability", expected_capability, name="review"),
+        ),
+    )
+
+    assert attempt["status"] == "running" and attempt["run_id"]
+    assert moved["head"] != head
+    isolation = run_isolation.record(live.db, attempt["run_id"])
+    assert isolation["base_sha"] == head
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=isolation["worktree_path"],
+                          check=True, text=True, capture_output=True).stdout.strip() == head
+    event = [e for e in live.service.store.events("frozen-head-swap")
+             if e["event_type"] == "attempt_preflight_passed"][-1]
+    assert event["payload"]["report"]["checks"][0] == {
+        "id": "source", "probe": "source_head", "required": head,
+        "actual": head, "passed": True,
+    }
+    live.sf.advance_run(attempt["run_id"])
+    claim = live.sf.claim_next_step(attempt["run_id"])
+    assert claim is not None and claim.step_id == "work"
+
+
+@pytest.mark.parametrize("invalid", [
+    None,
+    {"name": "review", "tools": ["inspect"], "briefing": "", "owner": "host",
+     "available": False, "tool_schema_sha256": {"inspect": None}},
+    "malformed",
+    {"name": "review", "available": True},
+])
+def test_mirrored_invalid_runtime_capability_refuses_before_every_side_effect(
+        live, monkeypatch, invalid):
+    import core.run_isolation as isolation
+    import core.run_launcher as launcher
+    from aitelier.runner import AgentStepRunner
+
+    repo, before = _code_state_project(live, "invalid-capability")
+    calls = {"launch": 0, "claim": 0, "model": 0, "gate": 0, "base_pin": 0}
+    monkeypatch.setattr(live.sf, "capability_identity", lambda name: invalid)
+    monkeypatch.setattr(launcher, "start_config_run", lambda *a, **k:
+                        calls.__setitem__("launch", calls["launch"] + 1))
+    monkeypatch.setattr(live.sf, "claim_next_step", lambda *a, **k:
+                        calls.__setitem__("claim", calls["claim"] + 1))
+    async def model_execute(*args, **kwargs):
+        calls["model"] += 1
+    monkeypatch.setattr(AgentStepRunner, "execute", model_execute)
+    monkeypatch.setattr(live.service.attempts, "claim_launch", lambda *a, **k:
+                        calls.__setitem__("gate", calls["gate"] + 1))
+    monkeypatch.setattr(isolation, "request_base", lambda *a, **k:
+                        calls.__setitem__("base_pin", calls["base_pin"] + 1))
+
+    attempt = live.service.start_attempt(
+        "invalid-capability", "work", 1, "state_code_fixture",
+        "mirrored-invalid-" + str(type(invalid).__name__),
+        frozen_prerequisites=_frozen(
+            _required("runtime", "runtime_capability", invalid, name="review")),
+    )
+
+    assert attempt["status"] == "failed" and attempt["run_id"] is None
+    assert calls == {"launch": 0, "claim": 0, "model": 0, "gate": 0,
+                     "base_pin": 0}
+    assert live.sf.list_runs(project_id=attempt["execution_project_id"]) == []
+    assert (repo / "kept.txt").read_text() == "unchanged\n"
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                          text=True, capture_output=True).stdout.strip() == before
+    event = [e for e in live.service.store.events("invalid-capability")
+             if e["event_type"] == "attempt_preflight_failed"][-1]
+    check = event["payload"]["report"]["checks"][0]
+    assert check["required"] == invalid and check["actual"] == invalid
+    assert check["passed"] is False
 
 
 def test_missing_or_unseeded_workflow_is_refused_before_attempt_creation(live):

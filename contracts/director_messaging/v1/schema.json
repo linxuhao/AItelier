@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aitelier.local/contracts/director-messaging/v1/schema.json",
+  "title": "AItelier director messaging v1",
+  "oneOf": [
+    {"$ref": "#/$defs/sendSuccess"},
+    {"$ref": "#/$defs/listSuccess"},
+    {"$ref": "#/$defs/transitionSuccess"},
+    {"$ref": "#/$defs/error"}
+  ],
+  "$defs": {
+    "schemaTag": {"const": "aitelier.director-messaging.v1"},
+    "databaseId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exact, non-normalized DB identifier; service enforces 1..320 code points after NFC for length measurement only."
+    },
+    "generatedId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "requestKey": {"type": "string", "minLength": 1, "maxLength": 320},
+    "directorIdentity": {"type": "string", "minLength": 1, "maxLength": 320},
+    "subject": {"type": "string", "minLength": 1, "maxLength": 200},
+    "body": {"type": "string", "maxLength": 8000},
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$"
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_id", "thread_id", "sender_project_id", "director_identity", "actor", "subject", "body", "created_at", "reply_to_delivery_id"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/generatedId"},
+        "thread_id": {"$ref": "#/$defs/generatedId"},
+        "sender_project_id": {"$ref": "#/$defs/databaseId"},
+        "director_identity": {"$ref": "#/$defs/directorIdentity"},
+        "actor": {"type": "string", "minLength": 1},
+        "subject": {"$ref": "#/$defs/subject"},
+        "body": {"$ref": "#/$defs/body"},
+        "created_at": {"$ref": "#/$defs/timestamp"},
+        "reply_to_delivery_id": {
+          "oneOf": [{"$ref": "#/$defs/generatedId"}, {"type": "null"}]
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["delivery_id", "message_id", "target_project_id", "delivery_seq", "status", "version"],
+      "properties": {
+        "delivery_id": {"$ref": "#/$defs/generatedId"},
+        "message_id": {"$ref": "#/$defs/generatedId"},
+        "target_project_id": {"$ref": "#/$defs/databaseId"},
+        "delivery_seq": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["unread", "acknowledged", "resolved"]},
+        "version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "sendRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": ["target_project_id"],
+          "properties": {
+            "broadcast": {"const": false},
+            "target_project_id": {"$ref": "#/$defs/databaseId"},
+            "reply_to_delivery_id": {"type": "null"}
+          }
+        },
+        {
+          "required": ["broadcast"],
+          "properties": {
+            "broadcast": {"const": true},
+            "target_project_id": {"type": "null"},
+            "reply_to_delivery_id": {"type": "null"}
+          }
+        },
+        {
+          "required": ["reply_to_delivery_id"],
+          "properties": {
+            "broadcast": {"const": false},
+            "target_project_id": {"type": "null"},
+            "reply_to_delivery_id": {"$ref": "#/$defs/databaseId"}
+          }
+        }
+      ],
+      "required": ["sender_project_id", "director_identity", "request_key", "subject", "body"],
+      "properties": {
+        "sender_project_id": {"$ref": "#/$defs/databaseId"},
+        "director_identity": {"$ref": "#/$defs/directorIdentity"},
+        "request_key": {"$ref": "#/$defs/requestKey"},
+        "subject": {"$ref": "#/$defs/subject"},
+        "body": {"$ref": "#/$defs/body"},
+        "target_project_id": {
+          "oneOf": [{"$ref": "#/$defs/databaseId"}, {"type": "null"}],
+          "default": null
+        },
+        "broadcast": {"type": "boolean", "default": false},
+        "reply_to_delivery_id": {
+          "oneOf": [{"$ref": "#/$defs/databaseId"}, {"type": "null"}],
+          "default": null
+        }
+      }
+    },
+    "listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/databaseId"},
+        "after": {"type": "integer", "minimum": 0, "default": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}
+      }
+    },
+    "transitionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "delivery_id", "expected_version", "request_key"],
+      "properties": {
+        "project_id": {"$ref": "#/$defs/databaseId"},
+        "delivery_id": {"$ref": "#/$defs/databaseId"},
+        "expected_version": {"type": "integer", "minimum": 1},
+        "request_key": {"$ref": "#/$defs/requestKey"}
+      }
+    },
+    "sendSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "result"],
+      "properties": {
+        "schema": {"$ref": "#/$defs/schemaTag"},
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["message", "deliveries", "replayed"],
+          "properties": {
+            "message": {"$ref": "#/$defs/message"},
+            "deliveries": {"type": "array", "minItems": 1, "maxItems": 200, "items": {"$ref": "#/$defs/delivery"}},
+            "replayed": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "listItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message", "delivery"],
+      "properties": {
+        "message": {"$ref": "#/$defs/message"},
+        "delivery": {"$ref": "#/$defs/delivery"}
+      }
+    },
+    "listSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "result"],
+      "properties": {
+        "schema": {"$ref": "#/$defs/schemaTag"},
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project_id", "items", "next_after"],
+          "properties": {
+            "project_id": {"$ref": "#/$defs/databaseId"},
+            "items": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/listItem"}},
+            "next_after": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "transitionSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "result"],
+      "properties": {
+        "schema": {"$ref": "#/$defs/schemaTag"},
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["delivery", "replayed"],
+          "properties": {
+            "delivery": {"$ref": "#/$defs/delivery"},
+            "replayed": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "errorCode": {
+      "enum": ["invalid_request", "unauthorized", "unknown_project", "unknown_delivery", "idempotency_conflict", "invalid_transition", "version_conflict", "recipient_limit", "no_recipients"]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "code", "detail"],
+      "properties": {
+        "schema": {"$ref": "#/$defs/schemaTag"},
+        "code": {"$ref": "#/$defs/errorCode"},
+        "detail": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["message"],
+          "properties": {"message": {"$ref": "#/$defs/errorCode"}}
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_type", "node_key", "payload"],
+      "properties": {
+        "event_type": {"const": "director_message_received"},
+        "node_key": {"type": "null"},
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["message_id", "thread_id", "delivery_id", "summary"],
+          "properties": {
+            "message_id": {"$ref": "#/$defs/generatedId"},
+            "thread_id": {"$ref": "#/$defs/generatedId"},
+            "delivery_id": {"$ref": "#/$defs/generatedId"},
+            "summary": {"type": "string", "maxLength": 320}
+          }
+        }
+      }
+    }
+  }
+}

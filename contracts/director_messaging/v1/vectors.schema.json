@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aitelier.local/contracts/director-messaging/v1/vectors.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "project_ids", "scenarios"],
+  "properties": {
+    "schema": {"const": "aitelier.director-messaging.conformance.v1"},
+    "project_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/scenario"}
+    }
+  },
+  "$defs": {
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "actor", "steps"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "actor": {"type": "string", "minLength": 1},
+        "project_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "steps": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/step"}}
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "arguments", "schema", "expect"],
+      "properties": {
+        "action": {"enum": ["send_director_message", "list_director_messages", "acknowledge_director_message", "resolve_director_message"]},
+        "actor": {"type": "string", "minLength": 1},
+        "arguments": {"type": "object"},
+        "schema": {"enum": ["sendSuccess", "listSuccess", "transitionSuccess", "error"]},
+        "expect": {"type": "object"},
+        "capture": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^/"}}
+      }
+    }
+  }
+}

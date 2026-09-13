@@ -1,0 +1,1 @@
+"""Director messaging contract package."""

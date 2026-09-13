@@ -560,6 +560,8 @@ def _code_roles(config_dir: Path, skip_configs: set[str]) -> set[str]:
                 visit(child)
 
     for path in sorted(config_dir.glob("gen_*.yaml")):
+        if path.stem in skip_configs:
+            continue
         try:
             document = yaml.safe_load(path.read_bytes())
         except (yaml.YAMLError, UnicodeError):
@@ -593,6 +595,8 @@ def _migrate_generated_role_prompts(
     code_roles = _code_roles(config_dir, skip_configs)
     verifier_roles = _readonly_verifier_roles(config_dir, skip_configs)
     for path in sorted(config_dir.glob("gen_*.roles.json")):
+        if path.name.removesuffix(".roles.json") in skip_configs:
+            continue
         original = path.read_bytes()
         try:
             roles = json.loads(original)
@@ -642,13 +646,16 @@ def _migrate_generated_role_prompts(
     return reports
 
 
-def migrate_generated_outputs(config_dir: Path) -> list[dict]:
+def migrate_generated_outputs(
+        config_dir: Path, *, skip_configs: set[str] | None = None) -> list[dict]:
     require_output_engine()
     from skillflow.graph import PipelineGraph
     skip_configs = skip_configs or set()
     backup_dir = config_dir.parent / "migration_backups" / "readonly-verifier-v2"
     reports = []
     for path in sorted(config_dir.glob("gen_*.yaml")):
+        if path.stem in skip_configs:
+            continue
         original = path.read_bytes()
         try:
             document = yaml.safe_load(original)
@@ -679,7 +686,8 @@ def migrate_generated_outputs(config_dir: Path) -> list[dict]:
         backup = write_migrated_config(path, original, rendered, backup_dir)
         reports.append({"path": str(path), "backup": str(backup), "before_sha256": sha,
                         "after_sha256": hashlib.sha256(rendered).hexdigest(), "changes": changes})
-    reports.extend(_migrate_generated_role_prompts(config_dir, backup_dir))
+    reports.extend(_migrate_generated_role_prompts(
+        config_dir, backup_dir, skip_configs))
     if reports:
         from skillflow.output_targets import atomic_json
         atomic_json(backup_dir / "last-migration.json", {"configs": reports,

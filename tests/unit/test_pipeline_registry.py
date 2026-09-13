@@ -445,6 +445,15 @@ def test_boot_rejects_paired_release_gate_role_before_migration_or_registration(
                 "gen_dpe_state_game__", "gen_valid_sibling__")
     valid.write_text(yaml.safe_dump(valid_document, sort_keys=False))
     valid_original = valid.read_bytes()
+    valid_verifier_role = next(
+        step["agent_config"] for step in valid_document["steps"]
+        if step["id"] == "5")
+    valid.with_suffix(".roles.json").write_text(json.dumps({
+        valid_verifier_role: {
+            "tools": ["list_tree"],
+            "system_prompt": "Final verifier writes reports only.",
+        },
+    }))
 
     assert pr.load_generated_configs(sf, registry) == ["gen_valid_sibling"]
     assert target.read_bytes() == original

@@ -74,7 +74,9 @@ def test_composed_game_finalizes_design_then_readme_before_verifier():
     )
     steps = _steps(graph)
     assert _targets(steps["5_evidence"]) == ["5_design"]
-    assert _targets(steps["5_game_evidence"]) == ["5_readme"]
+    assert _targets(steps["5_game_evidence"]) == ["5_readme", "5_release_wait"]
+    assert steps["5_game_evidence"]["transitions"][0]["match"] == {
+        "field": "passed", "value": True}
     assert _targets(steps["5_readme"]) == ["5_candidate_before"]
     assert _targets(steps["5_candidate_before"]) == ["5"]
     assert _targets(steps["5"]) == ["5_candidate_after"]
@@ -522,6 +524,45 @@ def test_captured_generated_game_migration_drops_flattened_stale_verifier_contex
     assert migrate_generated_outputs(root) == []
     assert graph_path.read_bytes() == graph_bytes
     assert role_path.read_bytes() == role_bytes
+
+
+def test_skipped_config_role_sidecar_is_byte_preserved_even_with_shared_role(tmp_path):
+    root = tmp_path / "configs"
+    root.mkdir()
+    graph = {
+        "name": "placeholder",
+        "begin": "work",
+        "end_conditions": {"combinator": "or", "conditions": [
+            {"type": "node_reached", "node": "done", "result": "completed"},
+        ]},
+        "steps": [
+            {"id": "work", "step_type": "agent", "agent_config": "shared",
+             "output": {"mode": "write", "target": "code"},
+             "transitions": [{"to": "done"}]},
+            {"id": "done", "step_type": "gate", "transitions": [{"to": None}]},
+        ],
+    }
+    for name in ("gen_unsafe", "gen_valid"):
+        graph["name"] = name
+        (root / f"{name}.yaml").write_text(
+            yaml.safe_dump(graph, sort_keys=False), encoding="utf-8")
+        (root / f"{name}.roles.json").write_text(json.dumps({
+            "shared": {
+                "system_prompt": "Write project files with create and edit.",
+                "tools": ["create", "edit"],
+            },
+        }), encoding="utf-8")
+    unsafe_graph = (root / "gen_unsafe.yaml").read_bytes()
+    unsafe_roles = (root / "gen_unsafe.roles.json").read_bytes()
+
+    reports = migrate_generated_outputs(root, skip_configs={"gen_unsafe"})
+
+    assert {Path(report["path"]).name for report in reports} == {
+        "gen_valid.roles.json"}
+    assert (root / "gen_unsafe.yaml").read_bytes() == unsafe_graph
+    assert (root / "gen_unsafe.roles.json").read_bytes() == unsafe_roles
+    valid_roles = json.loads((root / "gen_valid.roles.json").read_text())
+    assert valid_roles["shared"]["tools"] == ["apply_patch"]
 
 
 def test_forge_teaches_generated_verifiers_to_be_report_only():

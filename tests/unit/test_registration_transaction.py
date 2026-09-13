@@ -1,6 +1,7 @@
 """Fault injection for every host graph-publication entry point."""
 
 from pathlib import Path
+import json
 import threading
 
 import pytest
@@ -49,6 +50,30 @@ def _assert_absent(sf, name):
         assert sf._conn.execute(
             f"SELECT count(*) FROM {table} WHERE name=?", (name,)
         ).fetchone()[0] == 0
+
+
+def _write_forge_verifier_role(emit):
+    (emit / "templates").mkdir(exist_ok=True)
+    (emit / "templates" / "final_verifier.md").write_text(
+        "Final verifier writes reports only.")
+    (emit / "role_table.yaml").write_text(yaml.safe_dump({
+        "final_verifier": {
+            "tools": ["list_tree"],
+            "template": "templates/final_verifier.md",
+        },
+    }))
+
+
+def _write_boot_verifier_role(config_dir):
+    document = yaml.safe_load(SOURCE.read_text())
+    role = next(step["agent_config"] for step in document["steps"]
+                if step["id"] == "5")
+    path = config_dir / f"{NAME}.roles.json"
+    path.write_text(json.dumps({
+        role: {"tools": ["list_tree"],
+               "system_prompt": "Final verifier writes reports only."},
+    }))
+    return path, path.read_bytes()
 
 
 def test_direct_registration_commits_the_roles_it_preflighted(tmp_path,
@@ -131,6 +156,7 @@ def test_manifest_failure_rolls_back_every_publication_surface(tmp_path,
         "forge-project", "pipeline_forge", "emit_graph")
     emit.mkdir(parents=True)
     (emit / "pipeline.yaml").write_bytes(SOURCE.read_bytes())
+    _write_forge_verifier_role(emit)
     result = pr.register_forge_pipeline(
         sf, _FailingRegistry(), "run", "dpe state game")
     assert "injected manifest failure" in result["error"]
@@ -141,9 +167,11 @@ def test_manifest_failure_rolls_back_every_publication_surface(tmp_path,
     config_dir.mkdir(parents=True)
     boot_source = config_dir / f"{NAME}.yaml"
     boot_source.write_bytes(SOURCE.read_bytes())
+    boot_roles, original_boot_roles = _write_boot_verifier_role(config_dir)
     assert pr.load_generated_configs(sf, _FailingRegistry()) == []
     _assert_absent(sf, NAME)
     assert boot_source.read_bytes() == SOURCE.read_bytes()
+    assert boot_roles.read_bytes() == original_boot_roles
 
     sf, config_dir = _runtime(tmp_path / "bundle", monkeypatch)
     document = yaml.safe_load(SOURCE.read_text())
@@ -202,6 +230,7 @@ def test_persistence_failure_restores_files_and_live_state(
             "forge-project", "pipeline_forge", "emit_graph")
         emit.mkdir(parents=True)
         (emit / "pipeline.yaml").write_bytes(SOURCE.read_bytes())
+        _write_forge_verifier_role(emit)
         result = pr.register_forge_pipeline(
             sf, ConfigRegistry(), "run", "dpe state game")
         assert "injected persistence failure" in result["error"]

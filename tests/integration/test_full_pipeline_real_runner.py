@@ -74,7 +74,8 @@ def _stub_gate_tests(*args, out_dir="", run_id="", step_id="", **kwargs):
               else "TRACE_FINAL_TREE_CURRENT")
     report = _cycle_report(out_dir, run_id, step_id, marker)
     (Path(out_dir) / "test_report.json").write_text(json.dumps(report))
-    return {"passed": True, "written": "test_report.json"}
+    return {"passed": True, "release_evidence": "passed",
+            "written": "test_report.json"}
 
 
 def _stub_game_compile(*args, out_dir="", run_id="", step_id="", **kwargs):
@@ -84,14 +85,16 @@ def _stub_game_compile(*args, out_dir="", run_id="", step_id="", **kwargs):
     (target / "compile_report.json").write_text(json.dumps(compile_report))
     (target / "playtest_report.json").write_text(json.dumps(playtest_report))
     (target / "playtest_summary.md").write_text("TRACE_PLAYTEST_CURRENT")
-    return {"passed": True, "written": ["compile_report.json", "playtest_report.json"]}
+    return {"passed": True, "release_evidence": "passed",
+            "written": ["compile_report.json", "playtest_report.json"]}
 
 
 def _stub_game_vision(*args, out_dir="", run_id="", step_id="", **kwargs):
     report = _cycle_report(out_dir, run_id, step_id, "TRACE_VISION_CURRENT")
     report.update(blind=False, blind_reason="")
     (Path(out_dir) / "vision_report.json").write_text(json.dumps(report))
-    return {"passed": True, "written": "vision_report.json"}
+    return {"passed": True, "release_evidence": "passed",
+            "written": "vision_report.json"}
 
 
 def _build_real_pipeline(tmp_path, *, game=False):

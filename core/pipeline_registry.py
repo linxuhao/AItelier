@@ -26,6 +26,7 @@ Design (see the chat decision log):
 """
 
 import copy
+import json
 import logging
 import os
 from pathlib import Path
@@ -696,8 +697,6 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
         _namespace_agents(data, config_name)
         _inject_seed_context(data, config_name)
         _dedupe_context_sources(data)
-        from core.release_gate_migration import migrate_release_document
-        migrate_release_document(data)
 
         # Build namespaced roles from role_table.yaml + the emitted templates.
         prefix = config_name + _ROLE_SEP
@@ -721,8 +720,7 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
             prompt = tfile.read_text(encoding="utf-8") if tfile.exists() else _role_prompt(bare)
             roles[prefix + bare] = {
                 "model": "host",
-                "tools": (rcfg["tools"] if isinstance(rcfg.get("tools"), list)
-                          else ["read_file", "write"]),
+                "tools": rcfg.get("tools") or ["read_file", "write"],
                 "temperature": rcfg.get("temperature", 0.2),
                 "thinking": rcfg.get("thinking") or {"enable": True},
                 "system_prompt": prompt,
@@ -739,7 +737,7 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
             migrate_release_document,
             release_gate_ownership_error,
         )
-        ownership_error = release_gate_ownership_error(data, roles)
+        ownership_error = release_gate_ownership_error(data, roles, sf=sf)
         if ownership_error:
             return {"error": f"emitted pipeline failed validation: {ownership_error}"}
         migrate_release_document(data, roles=roles)
@@ -837,7 +835,6 @@ def set_pipeline_capabilities(sf, registry, config_name: str,
     circular.
     """
     import yaml
-    from core import capability_registry as caps
 
     if not config_name.startswith(GEN_PREFIX):
         return {"error": f"'{config_name}' is a built-in pipeline; its offer "
@@ -949,7 +946,7 @@ def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
             roles = json.loads(roles_file.read_text(encoding="utf-8"))
         yaml_text = f.read_text(encoding="utf-8")
         graph, hints = _validated_registration(
-            config_name, yaml_text, roles=roles)
+            config_name, yaml_text, roles=roles, sf=sf)
     except Exception as e:
         return {"error": f"reload failed: {e}"}
 

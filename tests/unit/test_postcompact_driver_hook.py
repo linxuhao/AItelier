@@ -249,6 +249,28 @@ Use search_driver_note_history for bounded recovery. Do not load driver_note_his
     assert len(context) <= 12_000
 
 
+def test_exact_compact_event_pair_retains_middle_of_huge_history_paragraph(tmp_path, state_server):
+    StateStub.revision = 91
+    StateStub.guide = f"""# State DAG director protocol
+## Resume safely
+{"A" * 3_100} Use search_driver_note_history for bounded recovery. Do not load the full driver_note_history. {"B" * 3_100}
+"""
+
+    assert invoke(tmp_path, state_server, event="PostCompact") == {"continue": True}
+    assert StateStub.requests == []
+
+    output = invoke(tmp_path, state_server, event="SessionStart")
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "driver_note_revision=91" in context
+    assert "search_driver_note_history for bounded recovery" in context
+    assert "Do not load the full driver_note_history" in context
+    assert len(context) <= 12_000
+    assert [request["params"]["name"] for request in StateStub.requests] == [
+        "state_graph_read", "state_graph_read", "state_graph_help",
+    ]
+
+
 def test_tracked_hook_config_uses_current_command_shape_and_move_safe_lookup():
     config = json.loads((REPO / ".codex" / "hooks.json").read_text())
     postcompact = config["hooks"]["PostCompact"][0]["hooks"][0]

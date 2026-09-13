@@ -74,6 +74,22 @@ def _bounded_section(text: str, limit: int) -> str:
     return text[:head] + marker + text[-(room - head) :]
 
 
+def _centered_excerpt(text: str, needle: str, limit: int = 400) -> str:
+    """Return a bounded live-source excerpt that always retains ``needle``."""
+    match_at = text.lower().find(needle.lower())
+    if match_at < 0:
+        return ""
+    start = max(0, match_at - (limit - len(needle)) // 2)
+    end = min(len(text), start + limit)
+    start = max(0, end - limit)
+    excerpt = text[start:end].strip()
+    if start:
+        excerpt = "... " + excerpt
+    if end < len(text):
+        excerpt += " ..."
+    return _redact(excerpt)
+
+
 def _guide_sections(guide: str, limit: int = 4_000) -> str:
     lines = guide.splitlines()
     sections: dict[str, list[str]] = {}
@@ -86,17 +102,25 @@ def _guide_sections(guide: str, limit: int = 4_000) -> str:
             sections[current].append(line)
     chosen = ["\n".join(sections[h]).strip() for h in GUIDE_HEADINGS if h in sections]
     selected = "\n\n".join(chosen)
-    history_paragraph = next(
-        (paragraph.strip() for paragraph in guide.split("\n\n")
-         if "search_driver_note_history" in paragraph),
+    search_excerpt = _centered_excerpt(guide, "search_driver_note_history")
+    warning_excerpt = next(
+        (
+            excerpt
+            for marker in (
+                "Do not load the full driver_note_history",
+                "Do not load driver_note_history in full",
+                "Do not load the full history",
+            )
+            if (excerpt := _centered_excerpt(guide, marker))
+        ),
         "",
     )
-    if not history_paragraph:
+    if not search_excerpt:
         return _bounded_section(selected, limit)
-    suffix = (
-        "\n\n## Selected live driver-note history search guidance\n"
-        + _bounded_section(history_paragraph, 900)
-    )
+    excerpts = [search_excerpt]
+    if warning_excerpt and warning_excerpt != search_excerpt:
+        excerpts.append(warning_excerpt)
+    suffix = "\n\n## Selected live driver-note history search guidance\n" + "\n".join(excerpts)
     return _bounded_section(selected, max(0, limit - len(suffix))) + suffix
 
 

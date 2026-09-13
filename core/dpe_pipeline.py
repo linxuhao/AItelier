@@ -1660,7 +1660,19 @@ class PipelineEngine:
         # the injected one and point a root-resolving tool (semantic_search,
         # run_tests, …) at any path the container can see. Strip them here.
         params = _strip_agent_roots(action.get("params", {}))
+        has_schema_boundary = hasattr(self, "_tool_schemas")
         schemas = getattr(self, "_tool_schemas", {}) or {}
+        # Native providers can return a function name that was never present in
+        # the advertised schema. JSON mode already classifies that as an
+        # unclaimed action; enforce the same boundary here before SkillFlow sees
+        # it. This is the final verifier's defense against a hallucinated
+        # write_readme/generic code mutation call reaching a globally registered
+        # tool merely because another role is allowed to use it.
+        if has_schema_boundary and tool_name not in schemas:
+            return {"error": (
+                f"Tool '{tool_name}' is not granted to this step. "
+                "Available tools: " + (", ".join(sorted(schemas)) or "(none)")
+            )}
         if tool_name == "apply_patch":
             if (getattr(self, "_output_target", "artifact") != "code"
                     or getattr(self, "_output_fixed", {}) or "apply_patch" not in schemas):

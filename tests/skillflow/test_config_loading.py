@@ -20,6 +20,7 @@ class TestV2ConfigLoading:
             "pm", "pm_reviewer", "task_planner", "task_planner_reviewer",
             "task_implementer", "task_implementer_reviewer",
             "task_verifier", "task_verifier_reviewer",
+            "delivery_documenter",
             "final_verifier", "final_verifier_reviewer",
         }
         for step in data["steps"]:

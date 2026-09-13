@@ -14,4 +14,4 @@
   - **每个资源都传 `seed`**，重跑才能复现同一套美术。
   - `.tscn` 引用贴图：`[ext_resource type="Texture2D" path="res://assets/bird.png" id="2"]` + 节点上 `texture = ExtResource("2")`；音频用 `AudioStreamPlayer` + `[ext_resource type="AudioStream" path="res://assets/sfx/flap.wav" id="3"]` + `stream = ExtResource("3")`。**这些 ext_resource 块同样受实现约定里的 `.tscn` 块顺序约束**（`[gd_scene]` → 全部 `[ext_resource]` → 全部 `[sub_resource]` → 全部 `[node]`）。
   - 2D 渲染顺序用节点树顺序或 `z_index`。
-  - **只有**当工具返回 `error`、或返回的 `warning` 提示抠图可能有问题时，才退回 `Polygon2D`/`ColorRect` 占位，并在 README 里写明哪一个是占位。
+  - **只有**当工具返回 `error`、或返回的 `warning` 提示抠图可能有问题时，才退回 `Polygon2D`/`ColorRect` 占位，并在交付说明中点名，供下游 README 所有者准确记录。

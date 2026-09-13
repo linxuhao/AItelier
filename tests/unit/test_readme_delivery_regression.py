@@ -10,15 +10,14 @@
 # `git commit`ed straight into AItelier's own repo instead of the delivered
 # project repo.
 #
-# Fix: README.md became a DECLARED content-mode output of step "5" (written via
-# the engine-generated `create_readme` write tool, whose path is engine-bound to
-# the step staging dir — the agent never chooses a path) and is delivered into
-# the RESOLVED project repo by the step's `on_deliver: repo_apply`. The custom
-# `readme_*` tools were deleted.
+# Fix: README.md became a DECLARED content-mode output of step "5_readme"
+# (written via an engine-generated slot tool whose path is bound to the resolved
+# run worktree — the agent never chooses a path). The final verifier is
+# report-only, and the custom `readme_*` tools remain deleted.
 #
 # These tests fail if any leg of that regression is reintroduced: the custom
-# tools coming back, an agent being wired to them, or step 5 losing either the
-# README content output or its repo_apply delivery.
+# tools coming back, an agent being wired to them, or README ownership moving
+# back into the final verifier interval.
 
 from pathlib import Path
 
@@ -44,8 +43,8 @@ def test_custom_readme_tools_are_gone():
     assert not survivors, (
         f"custom readme tool(s) reintroduced: {survivors}. They resolve an "
         "agent-supplied project_root against CWD (= AItelier's own repo in the "
-        "container) and can clobber it. README is delivered via content-mode "
-        "output + repo_apply instead."
+        "container) and can clobber it. README is delivered via an engine-bound "
+        "content output instead."
     )
 
 
@@ -62,36 +61,38 @@ def test_no_agent_config_wires_a_readme_tool():
     assert not offenders, f"agent config still wires readme_* tools: {offenders}"
 
 
-def test_step5_declares_readme_as_content_output():
-    """Step 5 must write README.md as a declared content-mode output, so the
+def test_named_readme_owner_declares_content_output():
+    """The earlier owner writes README.md as a declared content-mode output, so the
     write path is engine-bound and the agent cannot redirect it to CWD."""
     graph = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-    step5 = _step(graph, "5")
+    owner = _step(graph, "5_readme")
 
-    output = step5.get("output", {})
-    assert output.get("mode") == "content", "step 5 must stay content-mode"
+    output = owner.get("output", {})
+    assert output.get("mode") == "content", "README owner must stay content-mode"
 
     fixed = output.get("fixed", {})
     readme = fixed.get("readme")
-    assert readme is not None, "step 5 no longer declares a `readme` output"
+    assert readme is not None, "5_readme no longer declares a `readme` output"
     # accept both the string shorthand and the {file: ...} object form
     target = readme if isinstance(readme, str) else readme.get("file")
     assert target == "README.md", f"readme output must target README.md, got {target!r}"
 
 
-def test_step5_declares_readme_as_code_and_report_as_artifact():
-    """README and report have different destinations; neither needs a copy hook.
+def test_readme_owner_and_verifier_have_separate_destinations():
+    """README and report have separate owners and engine-bound destinations.
 
     The engine's mixed-slot end-to-end tests cover real writes, validation,
     commit and artifact publication with this shape.
     """
     graph = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-    step5 = _step(graph, "5")
-    assert step5["output"]["target"] == "artifact"
-    assert step5["output"]["fixed"]["readme"]["target"] == "code"
-    assert step5["output"]["fixed"]["readme"]["file"] == "README.md"
-    assert step5["output"]["fixed"]["report"]["target"] == "artifact"
-    assert "repo_apply" not in str(step5.get("lifecycle", {}))
+    owner = _step(graph, "5_readme")
+    verifier = _step(graph, "5")
+    assert owner["output"]["fixed"]["readme"]["target"] == "code"
+    assert owner["output"]["fixed"]["readme"]["file"] == "README.md"
+    assert set(verifier["output"]["fixed"]) == {"report"}
+    assert verifier["output"]["fixed"]["report"]["target"] == "artifact"
+    assert "repo_apply" not in str(owner.get("lifecycle", {}))
+    assert "repo_apply" not in str(verifier.get("lifecycle", {}))
 
 
 # ── Defense-in-depth: the other commit-writers must reject a CWD-relative path ──

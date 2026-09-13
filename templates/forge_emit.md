@@ -333,6 +333,11 @@ maker's job to what's achievable, then the reviewer to that same bar).
   must respect — put them in graph CONTEXT (a seed input, or an artifact a step
   produces and the others read via `{source: {...}}`) so the constraint sits in
   front of the model every turn. Buried in a role prompt, the model drifts off it.
+- **Final verifier boundary:** a final verifier is report-only. README generation
+  belongs to an explicit earlier maker with an engine-bound fixed code slot.
+  Place candidate snapshot/compare tool steps immediately around the verifier;
+  its fixed outputs and generated role prompt may expose report writes only,
+  never README writers or generic/optional-path code mutation tools.
 - **Feed a loader/fetcher tool's result straight into the next agent** with
   `{source: {tool: <tool_name>}}` — that injects the tool's RETURN value into the
   agent's context. Don't make the agent re-`read_file` what a prior tool produced.

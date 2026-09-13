@@ -57,14 +57,20 @@ cycle). Follow the cheatsheet EXACTLY:
   Give-up paths must end failed, never share the success terminal.
 - Declare `output.target: code` for repository mutations; code writes directly
   to the run worktree.
-  Plans/reports use `artifact` (the default); mixed fixed slots can override
-  `target` individually, e.g. report=artifact and README=code.
+  Plans/reports use `artifact` (the default); fixed slots can override `target`
+  individually. Keep repository delivery files in their named maker steps.
 - Every validated `output.mode: write` agent must declare
   `validation_on_exhaustion: fail` so exhausted validation remains a failure.
   Delivery requires valid output. Validation/execution errors and missing
   reviewer verdicts must remain failed; never add an unconditional or `_error`
   edge that credits the item or advances to its success successor.
 - Put an objective tool gate (tests/compile) BEFORE a reviewer where one exists.
+- A final verifier is **report-only**. If the pipeline needs a repository
+  `README.md`, give it to an explicit earlier documentation maker with one
+  engine-bound fixed README slot and let the final reviewer audit it. Snapshot
+  the resolved candidate immediately before the verifier and compare it
+  immediately after; neither native nor JSON verifier tools may expose README
+  writers, generic code mutators, or optional-path code writers.
 - Use manifest→loop fan-out for per-item work. A loop-body AGENT step publishes
   per-item artifacts (code steps publish a change receipt); the engine routes reads by position (in-loop reader →
   its own item; a step AFTER the loop → all items). Declare `scope: all` on the

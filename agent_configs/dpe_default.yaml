@@ -239,14 +239,27 @@ task_implementer_reviewer:
     effort: "low"
 
 
+delivery_documenter:
+  model: "glm"
+  temperature: 0.2
+  template: "delivery_documenter.md"
+  # The repository source injects read_file; README itself is a single
+  # engine-bound fixed output. No generic code mutator is granted.
+  tools: ["list_tree"]
+  max_output_tokens: 16384
+  max_tool_turns: 60
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking:
+    enable: true
+
+
 final_verifier:
   model: "glm"
   temperature: 0.2
   template: "step5_verifier.md"
-  # README.md is a declared content-mode output (see node "5" in dpe_default.yaml):
-  # the verifier writes it via the engine-generated create_readme write tool and it
-  # is delivered by the step's on_deliver repo_apply. No custom readme_* tools — the
-  # repository is read-only for the verifier (via `from: repository` context + list_tree).
+  # Step 5 is report-only. README.md is finalized by the earlier named
+  # delivery_documenter step through its own engine-bound fixed output.
   tools: ["list_tree"]
   max_output_tokens: 16384
   max_tool_turns: 100

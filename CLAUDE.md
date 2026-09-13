@@ -120,7 +120,9 @@ Env reference lives in `.env.example`.
    → PM (3) → 3_review → task_loop
    → [per task] t_plan → t_plan_review → t_impl (code worktree output)
    → t_impl_review
-   → Final Verifier (5, content: verdict + README) → 5_test (tool) → 5_knowledge (tool) → 5_review → git_push_post (tool; push-or-skip, never fails the run) → done
+   → 5_test (tool) → 5_evidence → Delivery README (5_readme)
+   → candidate snapshot → Final Verifier (5, report-only) → candidate integrity
+   → 5_knowledge (tool) → 5_review → git_push_post (tool; push-or-skip, never fails the run) → done
    (node "1" uses agent_config `researcher` + template step1_5_researcher.md — the "1_5"
     naming survives only in the filename, not the graph node id)
 

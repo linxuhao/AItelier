@@ -33,7 +33,7 @@ CHEATSHEET = """\
 5. Explicit output targets. Code agents use output: {mode: write, target: code}:
    writes go directly to the run worktree; no staging, repo_apply or repo_delete
    hooks. Artifact plans/reports retain target: artifact (the default). Fixed
-   slots may override target (e.g. README code, verification report artifact).
+   slots may override target; repository delivery files stay in named maker steps.
    Validation gates code commit/artifact publication; use surgical edit/create.
 6. Manifest -> loop fan-out for per-item work: a step emits a manifest
    {"execution_order": [[id,...],...]}; a `step_type: loop` node consumes it with
@@ -44,6 +44,10 @@ CHEATSHEET = """\
 7. Verdict routing: transitions branch on the verdict file, e.g.
    {to: next, match: {from_file: review_verdict.json, field: passed, value: true}}
    and the reject edge loops back to the maker with max_loop: 3.
+8. Final verifier = report-only. A repository README has an explicit earlier
+   documentation maker with one engine-bound fixed code slot. Hash the resolved
+   candidate immediately before and after the verifier. Do not give verifier
+   roles README writers, generic code mutators, or optional-path code writers.
 
 ## Step types
 - agent : executed by an LLM role (needs agent_config). Reads `context`, writes

@@ -24,6 +24,7 @@ anchors:
   pm: "3"                          # the PM/planner agent
   implementer: "t_impl"            # the per-task implementer agent
   post_verify_tests: "5_test"      # the edge out of the deterministic test gate
+  readme_owner: "5_readme"         # named README owner, before the verifier interval
   verifier_review: "5_review"      # the final verifier/reviewer
 
 # Host (AItelier) metadata — read by core/config_registry.py, ignored by skillflow.
@@ -50,6 +51,9 @@ x-aitelier:
     t_impl: "Implementer"
     t_impl_review: "Impl Review"
     "5": "Final Verifier"
+    "5_readme": "Delivery README"
+    "5_candidate_before": "Candidate Snapshot"
+    "5_candidate_after": "Candidate Integrity"
     "5_test": "Final Tests"
     "5_evidence": "Evidence Audit"
     "5_knowledge": "Knowledge Sync"
@@ -814,7 +818,7 @@ steps:
         max_loop: 3
 
 
-  # ─── Final Verify ───
+  # ─── Final Verify (report-only) ───
   - id: "5"
     step_type: "agent"
     agent_config: "final_verifier"
@@ -834,14 +838,11 @@ steps:
       fixed:
         report:
           file: final/verify_report.json
+          on_exists: replace
           format: '{"all_goals_met": bool, "goals": [{"goal": str, "status": "met" | "partial" | "unmet"
             | "blocked", "evidence": str}, ...], "verified_subtasks": [str, ...], "issues": [str,
             ...], "ready_for_deploy": bool}'
           target: artifact
-        readme:
-          file: README.md
-          format: Markdown 项目交付文档：项目简介、安装步骤、运行方法、关键接口/API 端点——反映仓库交付时的真实最终状态
-          target: code
       target: artifact
     validation:
     - files:
@@ -887,7 +888,7 @@ steps:
                   type: string
                   minLength: 1
     transitions:
-      - to: "5_knowledge"
+      - to: "5_candidate_after"
 
   # ─── Run unit tests (deterministic gate, BEFORE the verifier) ───
   # Runs pytest over the consolidated repo and writes test_report.json. Always
@@ -925,7 +926,60 @@ steps:
       out_dir: "$STEP_DIR"
       gates: '[["5_test", "test_report.json"]]'
     transitions:
+      - to: "5_readme"
+
+  # README is code, so a named maker owns it before final verification. Its
+  # only write surface is the engine-bound README slot; the existing final
+  # reviewer audits both README fidelity and the verifier's report.
+  - id: "5_readme"
+    step_type: "agent"
+    agent_config: "delivery_documenter"
+    context:
+      - source: { from: "repository", mode: "tool" }
+      - source: { step: "1" }
+      - source: { step: "2" }
+      - source: { step: "5_review" }
+      - source: { step: "5_test", output: "test_report.json", required: true }
+      - source: { step: "5_evidence", output: "evidence_report.json", required: true }
+      - source: { config: "meta_conversation", step: "finalize", output: "step1_goals.json", required: true }
+      - source: { tool: "dir_tree" }
+    output:
+      mode: "content"
+      fixed:
+        readme:
+          file: README.md
+          format: "Markdown project delivery guide: overview, installation, operation, and public interfaces, reflecting the resolved candidate"
+          on_exists: replace
+          target: code
+      target: artifact
+    transitions:
+      - to: "5_candidate_before"
+
+  # Hash the resolved code tree and README immediately around step 5. Reports
+  # live in step artifact directories, outside the candidate worktree.
+  - id: "5_candidate_before"
+    step_type: "tool"
+    tool_name: "candidate_integrity"
+    timeout_seconds: 120
+    tool_params:
+      project_root: "$PROJECT_ROOT"
+      out_dir: "$STEP_DIR"
+      phase: "snapshot"
+    transitions:
       - to: "5"
+
+  - id: "5_candidate_after"
+    step_type: "tool"
+    tool_name: "candidate_integrity"
+    timeout_seconds: 120
+    tool_params:
+      project_root: "$PROJECT_ROOT"
+      out_dir: "$STEP_DIR"
+      phase: "verify"
+      baseline_step: "5_candidate_before"
+    transitions:
+      - to: "5_knowledge"
+        match: { passed: true }
 
   # ─── Cross-run knowledge transfer (deterministic, NEVER fails) ───
   # Distills this run's review-verified knowledge (approved architecture +
@@ -960,6 +1014,7 @@ steps:
       # allowed to end green without that fact in front of it.
       - source: { tool: "loop_items_implemented" }
       - source: { step: "5" }
+      - source: { step: "5_candidate_after", output: "candidate_integrity_report.json", required: true }
       - source: { step: "5_test" }
       - source: { step: "5_evidence", output: "evidence_report.json", required: true }
       # { step: "5_compile" } is added by the game_harness addon (add_context),

@@ -266,6 +266,10 @@ def _build_agent_response(step_id, tool_schemas, *, base_sha,
         ]})
     if "write_plan" in writes:
         return json.dumps({"thoughts": "plan", "actions": [_action("write_plan", content="# Plan")]})
+    if "write_readme" in writes:
+        return json.dumps({"thoughts": "document", "actions": [
+            _action("write_readme", content="# Addition\nUse add(a, b) from main.py.\n"),
+        ]})
     if "write_report" in writes:
         # verify_report.json is a structured .json slot — string content is
         # json.loads-validated at write time, so it must be real JSON.
@@ -275,7 +279,6 @@ def _build_agent_response(step_id, tool_schemas, *, base_sha,
                              "issues": [], "ready_for_deploy": True})
         return json.dumps({"thoughts": "verify", "actions": [
             _action("write_report", content=report),
-            _action("write_readme", content="# Addition\nUse add(a, b) from main.py.\n"),
         ]})
 
     specific = [w for w in writes if not w.startswith("write_linter")]
@@ -414,6 +417,11 @@ class TestRealRunnerFullPipeline:
         """The entire real DPE graph completes via the real runner + engine
         with mocked agents — git_sync_pre → planning → task loop → final verify."""
         sf, db, ws, run_id = _build_real_pipeline(tmp_path)
+        root = sf._workspace.get_project_code_path("p", run_id=run_id)
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "README.md").write_text("# stale delivery\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "seed stale README"], cwd=root, check=True)
         status, executed, checkpoints = await _drive_to_completion(
             sf, db, ws, run_id, monkeypatch)
 
@@ -424,10 +432,21 @@ class TestRealRunnerFullPipeline:
             assert sid in executed, f"{sid} never ran: {executed}"
         # The three green checkpoints (steps 1, 2, 3) each paused the run.
         assert checkpoints == 3, f"expected 3 checkpoints, got {checkpoints}"
-        root = sf._workspace.get_project_code_path("p", run_id=run_id)
         assert (root / "main.py").read_text() == "def add(a, b):\n    return a + b\n"
-        assert (root / "README.md").is_file()
+        assert (root / "README.md").read_text() == "# Addition\nUse add(a, b) from main.py.\n"
         assert (root / "linter_manifest.json").is_file()
+        graph_name = sf._get_graph_name(run_id)
+        before_dir = sf._workspace.get_step_dir(
+            "p", graph_name, "5_candidate_before")
+        after_dir = sf._workspace.get_step_dir(
+            "p", graph_name, "5_candidate_after")
+        before = json.loads((before_dir / "candidate_snapshot.json").read_text())
+        after = json.loads((after_dir / "candidate_integrity_report.json").read_text())
+        assert after["passed"] is True
+        assert after["changed_paths"] == []
+        assert after["before"]["candidate_sha256"] == after["after"]["candidate_sha256"]
+        assert after["before"]["readme"]["sha256"] == after["after"]["readme"]["sha256"]
+        assert before["readme"]["sha256"] == after["before"]["readme"]["sha256"]
         artifact = sf._workspace.get_step_dir("p", sf._get_graph_name(run_id), "t_impl", item="t1")
         receipt = json.loads((artifact / "code_changes.json").read_text())
         assert receipt["files"] == ["main.py"]

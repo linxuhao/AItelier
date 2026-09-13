@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -17,6 +18,8 @@ COPY_TOOLS = {"repo_apply", "repo_delete"}
 CODE_SLOTS = {"linter_manifest", "readme"}
 ARTIFACT_SLOTS = {"design", "report"}
 GENERIC_CODE_MUTATORS = {"create", "edit", "write", "repo_remove_file"}
+VERIFIER_READ_TOOLS = {"list_tree", "semantic_search", "git_history",
+                       "web_search", "web_fetch"}
 STRICT_PATCH_GUIDANCE_EN = """Use `apply_patch(patch)` for Add/Update/Delete operations in this run's code
 worktree. Read affected ranges with `raw=true`; numbered output is not patch
 text. If context is stale or not found, reread and copy the current text exactly.
@@ -35,6 +38,14 @@ STRICT_PATCH_GUIDANCE_ZH = """## 写文件的工具：`apply_patch(patch)`
 
 不要整文件覆盖已有文件。找不到位置时先 semantic_search/search，再只读取
 相关范围。后续调用能读到本轮之前已应用的补丁。"""
+
+_VERIFIER_BOUNDARY = """# Final Verifier report-only boundary
+
+This role may create or replace only its declared verification report artifact.
+README.md belongs to the earlier delivery_documenter step. Do not call README
+writers, generic code mutators, optional-path code writers, or edit any candidate
+file. The resolved candidate and README are hashed immediately before and after
+this verifier; any byte change is a hard failure."""
 
 
 def _tools(value):
@@ -122,6 +133,153 @@ def migrate_document(document: dict) -> list[dict]:
 
     visit(document)
     return changes
+
+
+def _replace_targets(steps: list[dict], old: str, new: str, *, exclude=()) -> int:
+    count = 0
+    for step in steps:
+        if step.get("id") in exclude:
+            continue
+        for edge in step.get("transitions") or []:
+            if isinstance(edge, dict) and edge.get("to") == old:
+                edge["to"] = new
+                count += 1
+    return count
+
+
+def _single_successor(step: dict, label: str) -> str:
+    targets = [edge.get("to") for edge in (step.get("transitions") or [])
+               if isinstance(edge, dict) and edge.get("to")]
+    if len(targets) != 1:
+        raise ValueError(f"{label}: cannot migrate verifier with {len(targets)} successors")
+    return targets[0]
+
+
+def _drop_step_context(step: dict, source_step: str) -> None:
+    context = step.get("context")
+    if not isinstance(context, list):
+        return
+    step["context"] = [
+        item for item in context
+        if not (isinstance(item, dict)
+                and isinstance(item.get("source"), dict)
+                and item["source"].get("step") == source_step)
+    ]
+
+
+def migrate_readonly_verifier(document: dict) -> list[dict]:
+    """Split a generated DPE verifier's README and move it behind code owners.
+
+    This is intentionally shape-gated. A generated graph that does not have the
+    known DPE step ids is left untouched; a partial/colliding shape fails before
+    boot rewrites any bytes instead of guessing release topology.
+    """
+    steps = document.get("steps") if isinstance(document, dict) else None
+    if not isinstance(steps, list):
+        return []
+    by_id = {step.get("id"): step for step in steps if isinstance(step, dict)}
+    verifier = by_id.get("5")
+    if not verifier:
+        return []
+    output = verifier.get("output") or {}
+    fixed = output.get("fixed") or {}
+    readme_slots = [
+        name for name, slot in fixed.items()
+        if ((slot == "README.md") if isinstance(slot, str)
+            else isinstance(slot, dict) and slot.get("file") == "README.md")
+    ]
+    if not readme_slots:
+        return []
+    required = {"task_loop", "5_review"}
+    missing = sorted(required - set(by_id))
+    if missing:
+        raise ValueError("5: README-owning verifier is not a recognized DPE graph; "
+                         f"missing {', '.join(missing)}")
+    additions = {"5_readme", "5_candidate_before", "5_candidate_after"}
+    collisions = sorted(additions & set(by_id))
+    if collisions:
+        raise ValueError("5: partial read-only verifier migration; existing "
+                         + ", ".join(collisions))
+    if len(readme_slots) != 1:
+        raise ValueError("5: expected exactly one README output slot")
+
+    old_after_verifier = _single_successor(verifier, "5")
+    if not _replace_targets(steps, "5", old_after_verifier, exclude={"5"}):
+        raise ValueError("5: no predecessor found for README-owning verifier")
+
+    knowledge = by_id.get("5_knowledge")
+    if knowledge:
+        old_after_knowledge = _single_successor(knowledge, "5_knowledge")
+        if not _replace_targets(steps, "5_knowledge", old_after_knowledge,
+                                exclude={"5_knowledge"}):
+            raise ValueError("5_knowledge: no predecessor found during verifier migration")
+
+    incoming_review = _replace_targets(steps, "5_review", "5_readme",
+                                       exclude={"5_review", "5_knowledge"})
+    if not incoming_review:
+        raise ValueError("5_review: no post-candidate predecessor found")
+
+    # The game addon historically ran design/compile after the verifier and
+    # could therefore consume its report. Those steps now run before the
+    # report-only verifier; remove the stale backward reference so a prior
+    # iteration's report cannot leak into the candidate-building phase.
+    for step_id in ("5_design", "5_compile", "5_game_evidence"):
+        if step_id in by_id:
+            _drop_step_context(by_id[step_id], "5")
+
+    readme_slot = fixed.pop(readme_slots[0])
+    if isinstance(readme_slot, str):
+        readme_slot = {"file": readme_slot}
+    readme_slot = dict(readme_slot)
+    readme_slot.update(target="code", on_exists="replace")
+    output["target"] = "artifact"
+    for slot in fixed.values():
+        if isinstance(slot, dict) and slot.get("file") == "final/verify_report.json":
+            slot.setdefault("target", "artifact")
+            slot["on_exists"] = "replace"
+
+    owner = {
+        "id": "5_readme", "step_type": "agent",
+        "agent_config": "delivery_documenter",
+        "context": list(verifier.get("context") or []),
+        "output": {"mode": "content", "target": "artifact",
+                   "fixed": {"readme": readme_slot}},
+        "transitions": [{"to": "5_candidate_before"}],
+    }
+    if "5_design" in by_id or "5_compile" in by_id:
+        owner["config"] = {"extra_templates": ["game_harness/readme_owner.md"]}
+    before = {
+        "id": "5_candidate_before", "step_type": "tool",
+        "tool_name": "candidate_integrity", "timeout_seconds": 120,
+        "tool_params": {"project_root": "$PROJECT_ROOT", "out_dir": "$STEP_DIR",
+                        "phase": "snapshot"},
+        "transitions": [{"to": "5"}],
+    }
+    after_target = "5_knowledge" if knowledge else "5_review"
+    after = {
+        "id": "5_candidate_after", "step_type": "tool",
+        "tool_name": "candidate_integrity", "timeout_seconds": 120,
+        "tool_params": {"project_root": "$PROJECT_ROOT", "out_dir": "$STEP_DIR",
+                        "phase": "verify", "baseline_step": "5_candidate_before"},
+        "transitions": [{"to": after_target, "match": {"passed": True}}],
+    }
+    verifier["transitions"] = [{"to": "5_candidate_after"}]
+    if knowledge:
+        knowledge["transitions"] = [{"to": "5_review"}]
+    review_context = by_id["5_review"].setdefault("context", [])
+    integrity_source = {"source": {"step": "5_candidate_after",
+                                    "output": "candidate_integrity_report.json",
+                                    "required": True}}
+    if integrity_source not in review_context:
+        review_context.append(integrity_source)
+    steps.extend([owner, before, after])
+    labels = ((document.get("x-aitelier") or {}).get("labels"))
+    if isinstance(labels, dict):
+        labels.update({"5_readme": "Delivery README",
+                       "5_candidate_before": "Candidate Snapshot",
+                       "5_candidate_after": "Candidate Integrity"})
+    return [{"step": "5", "readonly_verifier": True,
+             "readme_owner": "5_readme", "moved_after": old_after_verifier}]
 
 
 def require_output_engine() -> None:
@@ -227,6 +385,33 @@ def migrate_role_prompt(prompt: str, *, strict_code: bool = False) -> str:
     return prompt
 
 
+def migrate_final_verifier_prompt(prompt: str) -> str:
+    """Remove known README ownership prose while retaining project additions."""
+    if prompt.startswith(_VERIFIER_BOUNDARY):
+        prompt = prompt[len(_VERIFIER_BOUNDARY):].lstrip("\n")
+    prompt = prompt.replace(
+        "你负责验证裁定，并产出/更新项目交付文档 `README.md`。",
+        "你负责验证裁定，并且是 report-only；README 由更早的命名所有者负责。",
+    )
+    prompt = prompt.replace(
+        "并产出/更新项目交付文档 `README.md`",
+        "；README 由更早的命名所有者负责",
+    )
+    prompt = re.sub(
+        r"\n4\. \*\*产出文档\*\*:.*?(?=\n## 关键约束)",
+        "\n",
+        prompt,
+        flags=re.DOTALL,
+    )
+    prompt = re.sub(r"^.*create_readme.*(?:\n|$)", "", prompt,
+                    flags=re.MULTILINE)
+    prompt = prompt.replace(
+        "- **写作为主**: 工具调用中至少 1/3 应是写入操作，不要只读不写",
+        "- **report-only**: 只写验证报告，不得修改 README 或候选代码",
+    )
+    return _VERIFIER_BOUNDARY + "\n\n" + prompt
+
+
 def _code_roles(config_dir: Path) -> set[str]:
     """Roles for explicit generic code outputs; artifacts keep staged create/edit."""
     names: set[str] = set()
@@ -254,9 +439,27 @@ def _code_roles(config_dir: Path) -> set[str]:
     return names
 
 
+def _readonly_verifier_roles(config_dir: Path) -> set[str]:
+    names = set()
+    for path in sorted(config_dir.glob("gen_*.yaml")):
+        try:
+            document = yaml.safe_load(path.read_bytes())
+        except (yaml.YAMLError, UnicodeError):
+            continue
+        for step in (document or {}).get("steps", []):
+            if (isinstance(step, dict) and step.get("id") == "5"
+                    and step.get("agent_config")
+                    and any(s.get("id") == "5_candidate_after"
+                            for s in (document or {}).get("steps", [])
+                            if isinstance(s, dict))):
+                names.add(step["agent_config"])
+    return names
+
+
 def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[dict]:
     reports = []
     code_roles = _code_roles(config_dir)
+    verifier_roles = _readonly_verifier_roles(config_dir)
     for path in sorted(config_dir.glob("gen_*.roles.json")):
         original = path.read_bytes()
         try:
@@ -274,6 +477,8 @@ def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[
             before = role.get("system_prompt")
             if isinstance(before, str):
                 after = migrate_role_prompt(before, strict_code=strict_code)
+                if name in verifier_roles:
+                    after = migrate_final_verifier_prompt(after)
                 if after != before:
                     role["system_prompt"] = after
                     changed.append(name)
@@ -288,6 +493,13 @@ def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[
                     if migrated != tools:
                         role["tools"] = migrated
                         tool_roles.append(name)
+            if name in verifier_roles and isinstance(role.get("tools"), list):
+                tools = role["tools"]
+                migrated = [tool for tool in tools if tool in VERIFIER_READ_TOOLS]
+                if migrated != tools:
+                    role["tools"] = migrated
+                    if name not in tool_roles:
+                        tool_roles.append(name)
         if changed or tool_roles:
             rendered = (json.dumps(roles, ensure_ascii=False, indent=2) + "\n").encode()
             backup = write_migrated_config(path, original, rendered, backup_dir)
@@ -301,7 +513,7 @@ def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[
 def migrate_generated_outputs(config_dir: Path) -> list[dict]:
     require_output_engine()
     from skillflow.graph import PipelineGraph
-    backup_dir = config_dir.parent / "migration_backups" / "output-target-v1"
+    backup_dir = config_dir.parent / "migration_backups" / "readonly-verifier-v2"
     reports = []
     for path in sorted(config_dir.glob("gen_*.yaml")):
         original = path.read_bytes()
@@ -312,6 +524,7 @@ def migrate_generated_outputs(config_dir: Path) -> list[dict]:
         if not isinstance(document, dict):
             continue
         changes = migrate_document(document)
+        changes.extend(migrate_readonly_verifier(document))
         if not changes:
             continue
         PipelineGraph._from_dict(document)  # validate everything before any write

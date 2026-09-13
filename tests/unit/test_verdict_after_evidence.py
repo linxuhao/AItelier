@@ -232,13 +232,16 @@ def test_composed_graph_has_no_verdict_before_evidence_or_verdict_cycle():
     steps = {s["id"]: s for s in graph["steps"]}
     assert [t["to"] for t in steps["task_loop"]["transitions"]] == ["t_plan", "5_test"]
     assert [t["to"] for t in steps["5_evidence"]["transitions"]] == ["5_design"]
-    assert [t["to"] for t in steps["5_game_evidence"]["transitions"]] == ["5"]
-    assert [t["to"] for t in steps["5"]["transitions"]] == ["5_knowledge"]
+    assert [t["to"] for t in steps["5_game_evidence"]["transitions"]] == ["5_readme"]
+    assert [t["to"] for t in steps["5_readme"]["transitions"]] == ["5_candidate_before"]
+    assert [t["to"] for t in steps["5_candidate_before"]["transitions"]] == ["5"]
+    assert [t["to"] for t in steps["5"]["transitions"]] == ["5_candidate_after"]
+    assert [t["to"] for t in steps["5_candidate_after"]["transitions"]] == ["5_knowledge"]
     assert all(t.get("to") != "5_test" for t in steps["5"]["transitions"])
 
     incoming = [s["id"] for s in graph["steps"]
                 if any(t.get("to") == "5" for t in s.get("transitions", []))]
-    assert incoming == ["5_game_evidence"]
+    assert incoming == ["5_candidate_before"]
 
 
 def test_game_verifier_declares_every_report_it_judges():

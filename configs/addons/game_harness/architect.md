@@ -4,7 +4,7 @@
 - **"打开即玩"——规划一套真实美术/音频资源，而不是占位图元**：实现步骤可以调 `gen_image_asset` / `gen_audio_asset` 直接生成贴图与音效，所以设计阶段要给出**资源清单**：需要哪些精灵（主角 / 障碍 / 收集品 / 背景 / 地面）、哪些音效（跳跃 / 得分 / 碰撞 / 失败）、是否要背景音乐，以及**一句贯穿全部精灵的统一风格描述**（如 "pixel art, flat colors, 16-bit retro, side view"）——风格不统一是生成美术最容易露怯的地方。**这句话只许写画风，绝不能点名游戏对象**：把物件清单（"green pipes, sandy ground, yellow bird"）写进统一风格句，会让生图模型把每样东西都画进每一张图，地面贴图里就会长出一只鸟。每个资源的主体只写在它自己那一条 prompt 里。**主场景自足**：加载即含相机 / 玩家 / 生成器 / UI / 碰撞体，按 F5 即玩。只有资源生成失败时才退回 Godot 内置图元（`Polygon2D` / `ColorRect` / `CSGBox3D`）作为占位。
 - **输入走 Godot Input 动作**：在 `project.godot` 的 `[input]` 段定义动作，或复用内置 `ui_accept`/`ui_select`（空格/回车）。tap/click/触屏统一用 `_input(event)` 判 `InputEventMouseButton` / `InputEventScreenTouch`，或 `Input.is_action_just_pressed("ui_accept")`。把"是否有任意输入"收敛到单一方法。**运行时冒烟测试会自动周期性按 `ui_accept`，让游戏至少响应它才能被自动 playtest 推进。**
 - **跨场景单例用 autoload**：`GameManager`、分数等设为 autoload（`project.godot` 的 `[autoload]` 段），用信号（`signal`/`emit`）广播状态变化。
-- **交付物清单里必须包含**：一份 `README.md`（说明装 Godot 4.4+、F5 开玩、操作键，以及美术/音效资源分别是什么、哪些是占位）。工程根 `.gitignore`（含 `.godot/`）由系统自动加入，无需设计。
+- **交付物清单里必须包含**：一份 `README.md`（说明装 Godot 4.4+、F5 开玩、操作键，以及美术/音效资源分别是什么、哪些是占位）。它由最终验证之前的命名文档所有者统一写入，任务实现者与 Final Verifier 都不拥有它。工程根 `.gitignore`（含 `.godot/`）由系统自动加入，无需设计。
 - **可运行性**：整仓脚本被自动 headless 导入解析校验、主场景被自动 headless 运行冒烟（捕获运行时异常 + 快照运行时各节点脚本变量状态）。确保脚本间接口（`class_name`/信号名/方法签名/节点路径）一致、主场景能被无头加载。
 - **linter_manifest**：`.gd` **不要写进 manifest** —— 它由 `gdscript_check` 闸门在每个实现步骤之后用 `godot --check-only` 逐文件解析（宿主控制，不经 manifest，免得一个拼错的后端名把闸门静默关掉）。manifest 只覆盖其它文本文件（`.json`/`.md` 用 `basic`）。只有 GDScript/场景时可为 `{}`。
 

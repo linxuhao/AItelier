@@ -74,14 +74,13 @@ def _first_overflowing_count() -> int:
 # ── Step accounting ────────────────────────────────────────────────────────
 
 def test_shape_is_derived_from_the_real_graph(live):
-    """Hardcoding 4 and 13 would go wrong the moment an addon splices a step in."""
+    """Hardcoding the graph shape would go wrong when a step is spliced in."""
     shape = _graph_shape(GRAPH)
     assert shape["body"] == 4, "the task loop body is t_plan/t_plan_review/t_impl/t_impl_review"
     # Every agent/tool node outside the body, plus the loop node itself (it is
     # marked completed when it drains). Gates leave no row and are excluded.
-    # 15 since the current-cycle evidence audit joined the chain: a finished
-    # round cannot reach the verifier until its deterministic reports are bound.
-    assert shape["linear"] == 15
+    # 18 includes the README owner plus the pre/post verifier integrity tools.
+    assert shape["linear"] == 18
     # Read, never pinned: the cap is an operational knob (200 -> 300 on
     # 2026-09-04, when a legitimate 21-card round died at step 204 inside the
     # final verification chain). A test that pins the number turns every future
@@ -93,11 +92,11 @@ def test_shape_is_derived_from_the_real_graph(live):
 
 def test_the_boltons_list_is_the_one_that_did_not_fit(live):
     """The boltons shape: a clean pass is linear + 4 per task; one fix round
-    is what overflows. 33 tasks measured 147 clean / 250 with the fix round
-    against the cap of 200 that was in force then."""
+    is what overflows. The current verifier boundary adds three linear steps to
+    each conservative pass; keep the historical 33-card example explicit."""
     shape = _graph_shape(GRAPH)
-    assert shape["linear"] + shape["body"] * 33 == 147
-    assert _required_steps(shape, 33) == 250
+    assert shape["linear"] + shape["body"] * 33 == 150
+    assert _required_steps(shape, 33) == 256
 
 
 # ── The verdict ────────────────────────────────────────────────────────────

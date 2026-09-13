@@ -44,6 +44,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[2] / "aitelier" / "tools"
 # resolves to None. It never reaches the process CWD.
 GUARDED = {
     "apply_state",              # raises unless BOTH roots are absolute
+    "candidate_integrity",      # refuses relative project and artifact roots
     "closeout_gate",            # refuses a non-absolute project_root (depth: deep)
     "completed_cards",          # _project_id: relative_to() outside the workspaces
                                 # dir raises -> "" -> no query, empty list. A bad

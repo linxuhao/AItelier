@@ -9,7 +9,7 @@
 - **输入用 Godot Input**：`Input.is_action_just_pressed("ui_accept")` 或 `_input(event)` 判 `InputEventMouseButton`/`InputEventScreenTouch`/`InputEventKey`。收敛到一个方法。**冒烟测试自动按 `ui_accept`——让游戏至少响应它**，否则状态快照会显示"一潭死水"。
 - **引用一致**：节点路径（`$Path` / `get_node`）、信号名、方法签名、`class_name`、autoload 名前后一致——任何一处错都会在导入解析或运行冒烟时暴露。
 - **每个 gameplay 脚本都必须真正接入场景**：写了一个需要运行时存在的节点脚本（玩家/敌人/生成器/边界/管理器），**必须挂到某个 `.tscn` 的节点上、或注册为 autoload、或由主脚本在 `_ready()` 里 `add_child(...)` 实例化**。否则解析通过却从未进入场景树 → 运行时形同不存在（解析闸门查不出，但运行冒烟 + 状态快照能暴露）。
-- **交付一份 `README.md`**：说明装 Godot 4.4+、Import 工程、F5 开玩、操作键，以及"怎么把占位节点（`Polygon2D`/`ColorRect`）换成 `Sprite2D`+贴图"。（工程 `.gitignore` 由系统自动加入。）
+- **不要编辑根 `README.md`**：它由任务循环之后的命名文档所有者统一更新。你只需让源码、资源与 `playtest_spec.yaml` 足够明确，使该所有者能准确记录 Godot 版本、F5 入口、操作键和占位资源替换方法。（工程 `.gitignore` 由系统自动加入。）
 - **纯逻辑测试可选**：如需单测,抽成不依赖场景树的普通 GDScript 类,保持最小。
 - **落地行为测试契约 `playtest_spec.yaml`（工程根）——这是别人给你出的卷子，不是你自己出的**：PM 已产出完整的 `playtest_spec.yaml`（场景剧本 + 断言）。**把它原样写到工程根 `playtest_spec.yaml`**，一个字都不要改。
   - **断言失败时改代码，不要改断言。** 严禁删断言、把 `"changed"` 弱化成 `"!= null"`、把阈值调松、或把按键从时间线里摘掉——这等于自己出卷自己判卷，也正是"闸门全绿、游戏不能玩"的来路。确实认为某条断言写错了（与架构师 `surface` 矛盾、或物理上不可能），**在交付说明里写清楚哪一条、为什么**，交给验收者裁决。

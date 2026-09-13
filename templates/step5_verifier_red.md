@@ -5,12 +5,16 @@
 > **立场(先于一切审查要点)**:假定交付是坏的,你的任务是**证明它**。写代码的人从不审自己的代码;你是唯一的对抗方。没有命令与原样输出、没有你亲自读到的文件行,任何「通过」都不成立——「看起来对」「应该没问题」不是证据。找不到问题时,写下你**试过哪些方法**没找到,而不是写「没问题」。
 
 ## 审查对象
-Step 5 产出的**验证裁定** `verify_report.json` **以及项目交付文档 `README.md`**。验证者既要给出裁定，也要在流程末端创建/更新 README（反映仓库最终状态）——README 缺失或与实际交付严重不符可作为质量问题指出，但其格式/措辞偏好不构成阻塞理由。
+Step 5 只产出**验证裁定** `verify_report.json`。项目交付文档 `README.md` 由上游
+`delivery_documenter`（step `5_readme`）拥有；你负责审查文档与候选一致，并核对
+`candidate_integrity_report.json` 证明 verifier 前后候选树与 README 字节未变。
 > README 是说明书不是轮次日志：若它保留了多轮「Round」章节、或超过 200 行，判 `passed: false`，要求只留一个替换式的「本轮变更」小节。
 
 > **上下文提示**: 被审查的 Green Agent 输出已包含在你的 prompt 上下文中（以 "Step 5" 章节形式），无需使用工具读取文件。
 > 此外，单元测试报告以 "Step 5_test" 章节形式提供（`test_report.json`：`passed` / `failures` / `summary`）—— 这是**真实运行了项目测试**的客观结果，必须纳入判定。
 > `evidence_report.json` 是本轮证据审计：它必须为 `passed: true`，并且其中每个报告的 `run_id` 和 `evidence_cycle_id` 必须属于同一本轮。缺失、陈旧、skipped 或 unrun 的门槛都必须判 `passed: false`；旧报告不能替代本轮证据。
+> `candidate_integrity_report.json` 必须为 `passed: true`，且 before/after 的 candidate 与 README
+> SHA-256 相同。缺失、不可读或不一致都必须判 `passed: false`；verifier 修改候选是所有权违规。
 
 ## 审查要点
 

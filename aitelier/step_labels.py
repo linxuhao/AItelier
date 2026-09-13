@@ -11,7 +11,8 @@ COARSE_MAP: dict[str, str] = {
     "t_plan": "3", "t_plan_review": "3",
     "t_impl": "3", "t_impl_review": "3",
     "t_verify": "3", "t_verify_review": "3",
-    "5": "5", "5_review": "5",
+    "5": "5", "5_readme": "5", "5_candidate_before": "5",
+    "5_candidate_after": "5", "5_review": "5",
 }
 
 # step_id → human-readable label (for TUI status bar, dashboard, notifications)
@@ -23,6 +24,8 @@ STEP_NAMES: dict[str, str] = {
     "t_impl": "Implementer", "t_impl_review": "Impl Review",
     "t_verify": "Verifier", "t_verify_review": "Verify Review",
     "5": "Final Verifier", "5_review": "Final Review",
+    "5_readme": "Delivery README", "5_candidate_before": "Candidate Snapshot",
+    "5_candidate_after": "Candidate Integrity",
 }
 
 # step_id set for steps that pause for human-in-the-loop checkpoint review.

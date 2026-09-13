@@ -247,7 +247,8 @@ def test_refusal_survives_reclaim_clean_delivery_and_review(monkeypatch, tmp_pat
     engine._run_tool_step = clean_delivery
     assert engine.run_step(
         task_id=1, step_id="t_impl", workspace=object(), project_id="p",
-        agent_config_name="role", resolved_context={}, tool_schemas={},
+        agent_config_name="role", resolved_context={},
+        tool_schemas={"create": {"name": "create"}},
         output_target="code", output_fixed={}, config_name="g",
         artifact_dir=str(artifact), write_scope=scope, run_id="run",
         step_instance_id=1, claim_epoch=2,

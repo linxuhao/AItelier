@@ -35,7 +35,9 @@
 - **`gate_timeout: true`**（闸门等超时了）→ **必须判 passed: false**，而且不要把它当成 `gate_skipped` 的同类。区别是实的：`gate_skipped` 是**服务不在**（环境事实，没东西可判）；`gate_timeout` 是**跑着呢，我们自己把电话挂了**——这一版代码一条都没被验证过，而原因在我们这边。把它读成通过，就是让闸门以「通过」的形式消失。feedback 里写明:要么场景数涨过了预算（调 `post_playtest` 的 timeout），要么有场景挂住（边车对每条场景另有 120 秒上限，所以整套越界通常意味着条数长了）。
 
 ### README 交付
-- 检查是否有 `README.md` 说明"装 Godot / F5 开玩 / 怎么换美术"。缺失或与实际严重不符可作为质量问题指出（但格式偏好不阻塞）。
+- README 由上游命名文档所有者产出，Final Verifier 不得修改。检查是否有 `README.md`
+  说明"装 Godot / F5 开玩 / 怎么换美术"，并核对 verifier 前后 integrity hash 一致。
+  缺失、与实际严重不符或 hash 改变是阻塞问题；纯格式偏好不阻塞。
 
 ### 设计档案与 UX 待办（`5_design` 就在你上游）
 

@@ -25,6 +25,7 @@ _AGENT_TOOLS = {
     "task_implementer_reviewer": [],
     "task_verifier":         ["read_file", "list_tree"],
     "task_verifier_reviewer": [],
+    "delivery_documenter":    ["read_file", "list_tree"],
     "final_verifier":        ["read_file", "list_tree"],
     "final_verifier_reviewer": [],
 }
@@ -73,12 +74,9 @@ def _get_tool_schemas_for_step(step_id: str) -> dict:
 CONSTRAINED_STEPS = {
     "1": ["write_sota"],
     "2": ["write_design", "write_linter_manifest", "write_requirement_inventory"],
-    # README IS a content-mode output of step 5: it is written via the engine-
-    # generated write tool (path bound to the step staging dir) and delivered to
-    # the resolved project repo by step 5's on_deliver:repo_apply. Step 3 has no
-    # repo_apply, so it emits only its task files.
     "3": ["write_tasks_manifest", "write_task_card", "write_coverage_ledger"],
-    "5": ["write_readme", "write_report"],
+    "5_readme": ["write_readme"],
+    "5": ["write_report"],
     "t_plan": ["write_plan", "write_subtask_manifest", "write_subtask_card", "write_research_notes"],
 }
 
@@ -93,7 +91,7 @@ class TestSkillflowToolSchemas:
         expected = sorted(CONSTRAINED_STEPS[step_id])
         assert write_tools == expected, f"{step_id}: expected {expected}, got {write_tools}"
 
-    @pytest.mark.parametrize("step_id", ["2", "3", "5", "t_plan"])
+    @pytest.mark.parametrize("step_id", ["2", "3", "5_readme", "5", "t_plan"])
     def test_constrained_step_has_read_tools(self, step_id):
         ts = _get_tool_schemas_for_step(step_id)
         read_tools = {k for k in ts if not k.startswith("write")}

@@ -311,6 +311,8 @@ overlay:
     fragment: "game_harness/pm.md"
   - add_template: "@implementer"
     fragment: "game_harness/implementer.md"
+  - add_template: "@readme_owner"
+    fragment: "game_harness/readme_owner.md"
 
   # ── TOOLSET (add_tools) ────────────────────────────────────────────────────
   # The single-scenario Godot probe, granted to the implementer on GAME runs
@@ -483,7 +485,7 @@ overlay:
           out_dir: "$STEP_DIR"
           gates: '[["5_test", "test_report.json"], ["5_compile", "compile_report.json"], ["5_compile", "playtest_report.json"], ["5_vision", "vision_report.json"], ["5_final_test", "test_report.json"]]'
         transitions:
-          - to: "5"
+          - to: "5_readme"
 
       - id: "5_final_test_replan"
         step_type: "gate"

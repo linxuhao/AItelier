@@ -10,10 +10,13 @@ indirect references and false-flags legitimate mentions, so it stays out.
    and a crude known-AI-ism density scan (套话 frequency — NOT semantic
    AI-detection; the real de-AI-ing is humanize itself + the human at CP#2).
 2. Humanize fidelity: diff against the approved draft on invariants that need NO
-   reading comprehension — title line, length, paragraph structure. humanize
-   re-emits the whole chapter with no surgical-edit constraint, so a deleted
-   scene or a renamed chapter would otherwise sail past Red's sign-off (Red
-   reviewed the DRAFT). Whether the CAST or the meaning survived is NOT checked
+   reading comprehension — title line, length GROWTH, paragraph structure.
+   Length SHRINK is advisory only: de-slopping necessarily shortens, so a hard
+   shrink cap deadlocks against the AI-ism gate above — see the note on
+   HUMANIZE_LEN_DELTA_MAX for the reproduction.
+   humanize re-emits the whole chapter with no surgical-edit constraint, so a
+   deleted scene or a renamed chapter would otherwise sail past Red's sign-off
+   (Red reviewed the DRAFT). Whether the CAST or the meaning survived is NOT checked
    here: that needs a reader (see the note above _para_count) — gross drift
    still shows up in the counts, and the rest is Red's + the human's at CP#2.
    The draft is the truth source and stays intact, so a violation loops back to
@@ -46,6 +49,24 @@ DEFAULT_MAX_CHARS = 6000
 # structure. It re-emits the WHOLE chapter (create_final) with no surgical-edit
 # constraint, so it can silently drift — and nothing downstream re-checks the
 # substance (Red reviewed the DRAFT; the human at CP#2 won't diff line by line).
+# ASYMMETRIC on purpose: growth is a hard violation, shrink is only an advisory.
+# Symmetric ±10% deadlocked against the AI-ism gate above, and the deadlock is
+# structural rather than a bad threshold: AI slop IS padding, so the chars that
+# must be deleted scale with the slop count while the budget scales with LENGTH
+# — a sloppy enough draft always exceeds it. Reproduced 2026-09-13 end-to-end
+# through the real humanizer:
+#   round 1  slop 28 -> 7 (density 8.12 -> 2.28, PASSES the AI-ism gate),
+#            paragraphs 50 -> 50, similarity 0.932 -> REJECTED at -11%
+#   round 2  fed that feedback back: length restored to -0.1%, and every one
+#            of the 28 slop phrases came back with it -> REJECTED at density 8.1
+# max_loop is 2, so the chapter dies. This is the same shape as the ceiling
+# deadlock recorded below, and it lands on the step's PRIMARY job.
+# Raising the cap only relocates it; the cap has to stop being hard.
+# What the shrink cap proxied for is covered by gates that do NOT fight
+# de-slopping: a deleted scene moves the paragraph count, a renamed chapter
+# trips the title check, and an unfinished chapter trips the length floor.
+# Whether the MEANING survived was never this tool's job (see _para_count) —
+# it belongs to humanize_review's A/B diff and the human at CP#2.
 HUMANIZE_LEN_DELTA_MAX = 10.0    # percent
 HUMANIZE_PARA_TOLERANCE = 0.15   # fraction of the draft's paragraph count
 
@@ -169,11 +190,17 @@ def continuity_check(*, project_root: str = "", workspace_root: str = "",
             d_count = ns.char_count(draft)
             if d_count:
                 delta = (count - d_count) / d_count * 100.0
-                if abs(delta) > HUMANIZE_LEN_DELTA_MAX:
+                if delta > HUMANIZE_LEN_DELTA_MAX:
                     violations.append(
-                        f"润色字数漂移 {delta:+.0f}%（初稿 {d_count} → 终稿 {count}），"
-                        f"超出 ±{HUMANIZE_LEN_DELTA_MAX:.0f}% —— 润色只改语言，"
-                        "不得增删情节/段落")
+                        f"润色字数涨了 {delta:+.0f}%（初稿 {d_count} → 终稿 {count}），"
+                        f"超出 +{HUMANIZE_LEN_DELTA_MAX:.0f}% —— 润色只改语言，"
+                        "不得增写情节/段落/解释")
+                elif delta < -HUMANIZE_LEN_DELTA_MAX:
+                    advisories.append(
+                        f"润色缩了 {delta:+.0f}%（初稿 {d_count} → 终稿 {count}）"
+                        f"，超过 -{HUMANIZE_LEN_DELTA_MAX:.0f}% —— 去掉套话注水会缩，"
+                        "本身正当（advisory）；删场景由上方段落结构检查拦截，"
+                        "语义保真由 humanize_review 比对。")
 
             d_paras, f_paras = _para_count(draft), _para_count(prose)
             if d_paras and abs(f_paras - d_paras) > max(2, d_paras * HUMANIZE_PARA_TOLERANCE):

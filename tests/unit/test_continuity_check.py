@@ -117,11 +117,46 @@ def test_a_missing_prose_fails(tmp_path):
 
 # ── The two rules the existing disjunction could not tell apart ─────────────
 
-def test_length_drift_beyond_the_band_fails_on_its_own(tmp_path):
+def test_length_growth_beyond_the_band_fails_on_its_own(tmp_path):
     draft = _chapter(paras=24)
     result, _ = _run(tmp_path, prose=_chapter(paras=30), draft=draft)
     assert result["passed"] is False
-    assert "润色字数漂移" in result["error"]
+    assert "润色字数涨了" in result["error"]
+
+
+def test_length_shrink_beyond_the_band_is_advisory_not_a_violation(tmp_path):
+    """De-slopping necessarily shortens, so a hard shrink cap deadlocks the step.
+
+    Measured 2026-09-13 end to end through the real humanizer: round 1 cut the
+    slop density from 8.12 to 2.28 per 1000 chars with the paragraph count
+    untouched (50 -> 50) and was rejected at -11%; fed that feedback back, round
+    2 restored the length and every one of the 28 slop phrases with it, and was
+    rejected by the AI-ism gate. max_loop is 2, so the chapter died between two
+    hard rules pulling opposite ways.
+
+    A shrink with the paragraph count INTACT is the signature of de-slopping,
+    not of a deleted scene. The cases the cap proxied for keep their own gates,
+    which is what the sibling tests below pin.
+    """
+    # Sized so only the shrink rule can speak: 3270 -> 2454 chars is -25%, and
+    # both sides stay clear of the 1500 floor, whose own test lives elsewhere.
+    draft = _chapter(paras=24, reps=8)
+    # Same paragraph count, each paragraph shorter: the de-slopping signature.
+    result, report = _run(tmp_path, prose=_chapter(paras=24, reps=6), draft=draft)
+    assert result["passed"] is True
+    assert "error" not in result
+    assert any("润色缩了" in a for a in report["advisories"])
+
+
+def test_a_deleted_scene_is_still_caught_after_shrink_went_advisory(tmp_path):
+    """The paragraph rule has to carry what the shrink cap used to."""
+    # 3270 -> 1638 chars: past the floor on both sides, so the paragraph rule
+    # is the only thing left that can object to half the chapter going missing.
+    draft = _chapter(paras=24, reps=8)
+    result, _ = _run(tmp_path, prose=_chapter(paras=12, reps=8), draft=draft)
+    assert result["passed"] is False
+    assert "润色改了段落结构" in result["error"]
+    assert "字数不足" not in result["error"]
 
 
 def test_paragraph_restructuring_fails_on_its_own(tmp_path):
@@ -132,7 +167,9 @@ def test_paragraph_restructuring_fails_on_its_own(tmp_path):
     result, _ = _run(tmp_path, prose=prose, draft=draft)
     assert result["passed"] is False
     assert "润色改了段落结构" in result["error"]
-    assert "润色字数漂移" not in result["error"]  # isolation: only the one rule fired
+    # Isolation: only the one rule fired. Must name a string the gate can still
+    # emit — asserting the absence of retired wording is vacuously true forever.
+    assert "润色字数涨了" not in result["error"]
 
 
 # ── Advisory must stay advisory ──────────────────────────────────────────────

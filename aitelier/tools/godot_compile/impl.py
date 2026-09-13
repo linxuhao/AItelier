@@ -12,9 +12,9 @@ the verifier's semantic issues.
 It ALWAYS succeeds as a step:
 - No ``project.godot`` in the repo → not a Godot project → pass without touching
   the builder (Python/web projects never need it).
-- Builder unreachable → pass with a LOUD ``gate_skipped`` note rather than
-  stalling the pipeline on an infra problem (a missing sidecar is not a code
-  defect — but the code shipped UNVERIFIED, so 5_review must see it).
+- Builder unreachable → a distinct, non-passing
+  ``infrastructure_unavailable`` report. A missing sidecar is not a code defect,
+  but the code is unverified and cannot release.
 """
 
 import json
@@ -184,13 +184,13 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
                 report = json.loads(resp.read())
         except (urllib.error.URLError, OSError, json.JSONDecodeError,
                 TimeoutError) as e:
-            # Infra problem, not a code defect → don't fail the run, but flag it
-            # LOUDLY: this branch only runs when the repo IS a Godot project, so a
-            # skip here means real GDScript shipped UNVERIFIED. gate_skipped lets
-            # 5_review surface that instead of reading a bare passed:true as clean.
+            # Infra problem, not a code defect. It is still non-passing: this
+            # branch only runs for a Godot project, so real GDScript is unverified.
             log_gate_skip("godot_compile", "godot-builder unreachable",
                           url=_BUILDER_URL, error=type(e).__name__)
-            report["gate_skipped"] = True
+            report.update(passed=False, gate_skipped=True,
+                          infrastructure_unavailable=True,
+                          evidence_state="infrastructure_unavailable")
             report["summary"] = (
                 external_deps.unreachable("GODOT_BUILDER_URL", _BUILDER_URL, e)
                 + " Compile gate skipped — GDScript NOT verified.")
@@ -219,7 +219,8 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
     # ── Chain the headless play-test (compile → if passed → playtest) ──
     # Play-testing code that didn't parse is pointless — the scene load would
     # fail and pile a redundant failure on top of the parse errors.
-    if report.get("passed", True) and _is_godot(repo):
+    if report.get("passed") is True and not report.get("gate_skipped") \
+            and not report.get("blind_builder") and _is_godot(repo):
         from aitelier.tools.godot_playtest.impl import godot_playtest
         pt = godot_playtest(project_root=str(repo), out_dir=str(target_dir))
         pt_passed = pt.get("passed", True)
@@ -241,6 +242,9 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
                                        if not report.get("passed", True)
                                        else "not_applicable"),
                    "summary": reason}
+        if not report.get("passed", True):
+            from aitelier.gate_evidence import report_state
+            skipped["upstream_state"] = report_state(report)
         (target_dir / "playtest_report.json").write_text(
             json.dumps(skipped, indent=2), encoding="utf-8")
         _write_playtest_summary(target_dir, skipped)
@@ -253,12 +257,41 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
 
 def godot_compile(*, project_root: str = "", out_dir: str = "",
                   workspace_root: str = "", run_id: str = "",
-                  evidence_cycle_from: str = "", **kwargs) -> dict:
+                  evidence_cycle_from: str = "", fail_fast_gates: str = "",
+                  **kwargs) -> dict:
     """Run compile/playtest, then bind both reports to this evidence cycle."""
+    target = Path(out_dir) if out_dir else Path(project_root or workspace_root)
+    if fail_fast_gates:
+        from aitelier.gate_evidence import (
+            first_upstream_blocker,
+            stamp_file,
+            upstream_failed_report,
+        )
+        blocker = first_upstream_blocker(target.parent, run_id, fail_fast_gates)
+        if blocker:
+            target.mkdir(parents=True, exist_ok=True)
+            compile_report = upstream_failed_report(blocker, "Godot compile")
+            compile_report.update(returncode=0, file_count=0, errors=[],
+                                  warning_count=0)
+            playtest_report = upstream_failed_report(blocker, "Godot play-test")
+            playtest_report.update(frames=0, errors=[], state={}, captures=[])
+            for name, report in (("compile_report.json", compile_report),
+                                 ("playtest_report.json", playtest_report)):
+                (target / name).write_text(json.dumps(report, indent=2),
+                                           encoding="utf-8")
+                if run_id and evidence_cycle_from:
+                    stamp_file(target / name, run_id=run_id,
+                               out_dir=str(target),
+                               cycle_from=evidence_cycle_from)
+            _write_playtest_summary(target, playtest_report)
+            return {"written": ["compile_report.json", "playtest_report.json",
+                                "playtest_summary.md"], "passed": False,
+                    "skipped_because": "upstream_failed",
+                    "upstream_state": (blocker.get("upstream_state")
+                                       or blocker.get("state"))}
     result = _godot_compile_unstamped(
         project_root=project_root, out_dir=out_dir,
         workspace_root=workspace_root, **kwargs)
-    target = Path(out_dir) if out_dir else Path(project_root or workspace_root)
     if run_id and evidence_cycle_from:
         from aitelier.gate_evidence import stamp_file
         for name in ("compile_report.json", "playtest_report.json"):

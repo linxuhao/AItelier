@@ -1,7 +1,6 @@
 # tests/unit/test_run_tests_gate.py
-# run_tests gate: real run when pytest is present; graceful SKIP (not fail) when
-# the runner can't be provisioned — so a missing test runner never masquerades
-# as failing tests and spins the goal-loop.
+# run_tests gate: real run when pytest is present; explicit non-passing
+# infrastructure evidence when the runner cannot be provisioned.
 import json
 import tempfile
 from pathlib import Path
@@ -25,7 +24,7 @@ def test_runs_when_pytest_present():
 
 
 def test_skips_when_runner_unavailable(monkeypatch):
-    """pytest not importable AND provisioning fails on EVERY retry → SKIP, not fail."""
+    """A missing runner is distinct infrastructure evidence and cannot pass."""
     monkeypatch.setattr(rt.importlib.util, "find_spec", lambda name: None)
     monkeypatch.setattr(rt.time, "sleep", lambda *_: None)  # no real backoff in tests
 
@@ -40,8 +39,10 @@ def test_skips_when_runner_unavailable(monkeypatch):
     out = Path(tempfile.mkdtemp())
     res = rt.run_tests(project_root=str(repo), out_dir=str(out))
     rep = _report(out)
-    assert res["passed"] is True          # gate does NOT fail the run
+    assert res["passed"] is False         # tool returns; release stays blocked
     assert rep["skipped"] is True
+    assert rep["infrastructure_unavailable"] is True
+    assert rep["evidence_state"] == "infrastructure_unavailable"
     assert "skipped" in rep["summary"].lower()
     assert "3 attempts" in rep["summary"]  # retried before giving up
     assert len(calls) == 3                 # one provisioning attempt per retry

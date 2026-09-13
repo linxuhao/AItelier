@@ -225,7 +225,7 @@ def test_any_other_blind_reason_still_reaches_the_human(dpe_game):
 
 def test_a_sighted_gate_is_untouched(dpe_game):
     assert _vision_target(dpe_game, '{"passed": true, "blind": false}') == "5_evidence"
-    assert _vision_target(dpe_game, '{"passed": false, "blind": false}') == "5_evidence"
+    assert _vision_target(dpe_game, '{"passed": false, "blind": false}') == "5_final_test"
 
 
 def test_an_unreadable_vision_report_still_reaches_the_human(dpe_game):
@@ -390,7 +390,14 @@ def test_final_report_is_resolved_for_review_and_replanning(dpe_game, tmp_path):
     final = next(n for n in graph.steps if n.id == "5_final_test")
     assert final.tool_name == "run_tests"
     assert final.tool_params == {
-        "out_dir": "$STEP_DIR", "evidence_cycle_from": "5_test"}
+        "out_dir": "$STEP_DIR", "repo_gate": False,
+        "evidence_cycle_from": "5_test",
+        "fail_fast_gates": (
+            '[["5_test", "test_report.json"], '
+            '["5_compile", "compile_report.json"], '
+            '["5_compile", "playtest_report.json"], '
+            '["5_vision", "vision_report.json"]]'),
+    }
     replan = next(n for n in graph.steps if n.id == "5_final_test_replan")
     assert [(t.to, t.max_loop) for t in replan.transitions] == [("3", 4)]
 

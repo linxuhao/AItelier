@@ -10,8 +10,11 @@ CYCLE_FIELD = "evidence_cycle_id"
 RUN_FIELD = "run_id"
 CYCLE_MANIFEST = ".evidence_cycle.json"
 _SKIP_MARKERS = ("gate_skipped", "skipped", "skipped_because", "blind",
-                 "no_tests_collected", "collection_errors")
+                 "no_tests_collected")
 _UNRUN_STATUSES = {"not_run", "not-run", "not run", "unrun", "unexecuted"}
+_PENDING_STATUSES = {"pending", "queued", "running", "in_progress", "in-progress"}
+_INFRA_STATUSES = {"infrastructure_unavailable", "infrastructure-unavailable",
+                   "infra_unavailable", "runner_unavailable"}
 
 
 def _read_json(path: Path) -> dict:
@@ -95,6 +98,87 @@ def stamp_file(path: Path, *, run_id: str, out_dir: str,
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 
+def report_state(report: dict) -> str:
+    """Return one release state without collapsing distinct non-pass outcomes."""
+    raw_passed = report.get("passed", report.get("all_passed", False))
+    if raw_passed is not True and raw_passed is not False:
+        return "unreadable"
+    status = str(report.get("evidence_state") or report.get("status") or "").strip().lower()
+    if report.get("pending") is True or status in _PENDING_STATUSES:
+        return "pending"
+    if (report.get("infrastructure_unavailable") is True
+            or status in _INFRA_STATUSES):
+        return "infrastructure_unavailable"
+    if report.get("blind") is True or report.get("blind_builder") is True:
+        return "blind"
+    markers = [name for name in _SKIP_MARKERS if report.get(name)]
+    unrun = (report.get("unrun") is True or report.get("ran") is False
+             or report.get("executed") is False or status in _UNRUN_STATUSES)
+    if markers or unrun:
+        return "skipped"
+    if raw_passed is False:
+        if report.get("passed_relative") is True:
+            return "known_failure"
+        return "failed"
+    return "passed"
+
+
+def first_upstream_blocker(graph_dir: Path, run_id: str, gates) -> dict | None:
+    """Return the first current-cycle gate that is not a clean pass.
+
+    This is the fail-fast decision shared by expensive downstream gates. A
+    missing manifest/report and a stale report are blockers too; running a new
+    gate cannot turn absent evidence into release evidence.
+    """
+    graph_dir = Path(graph_dir)
+    if isinstance(gates, str):
+        try:
+            gates = json.loads(gates)
+        except (TypeError, json.JSONDecodeError) as exc:
+            return {"step": "", "file": "", "state": "unreadable",
+                    "passed": False, "skipped_because": "invalid_gate_declaration",
+                    "summary": f"Fail-fast gate declaration is unreadable: {exc}"}
+    if not gates:
+        return None
+    try:
+        expected_cycle = _current_cycle(graph_dir, run_id)
+    except Exception as exc:
+        return {"step": "", "file": CYCLE_MANIFEST, "state": "stale",
+                "passed": False, "skipped_because": "evidence_cycle_missing",
+                "summary": f"Cannot establish current evidence cycle: {exc}"}
+    for pair in gates:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            return {"step": str(pair), "file": "", "state": "unreadable",
+                    "passed": False, "skipped_because": "invalid_gate_declaration",
+                    "summary": f"Invalid gate declaration: {pair!r}"}
+        step_id, filename = map(str, pair)
+        entry = _audit_one(graph_dir, step_id, filename, run_id, expected_cycle)
+        if not entry["passed"]:
+            try:
+                source = _read_json(graph_dir / step_id / filename)
+            except Exception:
+                source = {}
+            if source.get("upstream_state"):
+                entry["upstream_state"] = source["upstream_state"]
+            return entry
+    return None
+
+
+def upstream_failed_report(blocker: dict, gate: str) -> dict:
+    """Build the fresh marker a suppressed downstream gate writes."""
+    upstream = f"{blocker.get('step')}/{blocker.get('file')}".strip("/")
+    state = str(blocker.get("upstream_state") or blocker.get("state") or "failed")
+    return {
+        "passed": False,
+        "gate_skipped": True,
+        "skipped_because": "upstream_failed",
+        "upstream_state": state,
+        "upstream_gate": upstream,
+        "summary": (f"{gate} not run because upstream release evidence "
+                    f"{upstream or '<unknown>'} is {state}."),
+    }
+
+
 def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
     """Audit gate reports against an independent current-cycle identity."""
     graph_dir = Path(graph_dir)
@@ -106,6 +190,11 @@ def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
         "stale_reports": [],
         "missing_reports": [],
         "skipped_gates": [],
+        "failed_gates": [],
+        "known_failures": [],
+        "pending_gates": [],
+        "blind_gates": [],
+        "infrastructure_unavailable_gates": [],
         "gates_audited": [],
     }
     if not gates:
@@ -136,15 +225,26 @@ def audit_evidence(graph_dir: Path, run_id: str, gates: list) -> dict:
         if entry["passed"]:
             continue
         verdict["passed"] = False
-        bucket = ("stale_reports" if entry["state"] in ("stale", "unreadable")
-                  else "missing_reports" if entry["state"] == "missing"
-                  else "skipped_gates")
+        bucket = {
+            "stale": "stale_reports", "unreadable": "stale_reports",
+            "missing": "missing_reports", "skipped": "skipped_gates",
+            "failed": "failed_gates", "known_failure": "known_failures",
+            "pending": "pending_gates", "blind": "blind_gates",
+            "infrastructure_unavailable": "infrastructure_unavailable_gates",
+        }.get(entry["state"], "failed_gates")
         verdict[bucket].append(entry)
 
     if not verdict["passed"]:
-        verdict["state"] = ("stale" if verdict["stale_reports"]
-                            else "missing" if verdict["missing_reports"]
-                            else "skipped")
+        for state, bucket in (
+            ("stale", "stale_reports"), ("missing", "missing_reports"),
+            ("infrastructure_unavailable", "infrastructure_unavailable_gates"),
+            ("blind", "blind_gates"), ("pending", "pending_gates"),
+            ("known_failure", "known_failures"), ("failed", "failed_gates"),
+            ("skipped", "skipped_gates"),
+        ):
+            if verdict[bucket]:
+                verdict["state"] = state
+                break
     return verdict
 
 
@@ -176,25 +276,22 @@ def _audit_one(graph_dir: Path, step_id: str, filename: str, run_id: str,
                               f"expected {run_id!r}/{expected_cycle!r}"))
         return entry
 
-    raw_passed = report.get("passed", report.get("all_passed", False))
-    if raw_passed is not True and raw_passed is not False:
+    state = report_state(report)
+    if state == "unreadable":
+        raw_passed = report.get("passed", report.get("all_passed", False))
         entry.update(state="unreadable", passed=False,
                      skipped_because="invalid_passed_type",
                      summary=(f"{step_id}/{filename} has non-boolean pass status "
                               f"{raw_passed!r}"))
         return entry
-    passed = raw_passed is True
+    passed = state == "passed"
     because = report.get("skipped_because")
-    markers = [name for name in _SKIP_MARKERS if report.get(name)]
-    status = str(report.get("status", "")).strip().lower()
-    unrun = (report.get("unrun") is True or report.get("ran") is False
-             or report.get("executed") is False or status in _UNRUN_STATUSES)
-    if markers or unrun:
-        passed = False
-        because = because or ("gate_unrun" if unrun else "gate_skipped")
-        entry["state"] = "skipped"
+    if state == "skipped" and not because:
+        status = str(report.get("status", "")).strip().lower()
+        unrun = (report.get("unrun") is True or report.get("ran") is False
+                 or report.get("executed") is False or status in _UNRUN_STATUSES)
+        because = "gate_unrun" if unrun else "gate_skipped"
     entry.update(passed=passed, skipped_because=because,
+                 state=state,
                  gate_summary=str(report.get("summary", ""))[:400])
-    if not passed and entry["state"] == "fresh":
-        entry["state"] = "failed"
     return entry

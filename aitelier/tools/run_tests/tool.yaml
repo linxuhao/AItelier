@@ -19,13 +19,13 @@ description: >
   2026-09-10 a branch that regressed a game from 354/354 scripts parsing to 9
   parse errors reported 1788 passed, 0 failed here. A graph whose OWN steps
   already run the engine gate sets `repo_gate: false` in tool_params so the
-  same gate is not paid for twice (dpe_default's 5_test does; coding_impl does
-  not). Always succeeds as a step; the test
+  same gate is not paid for twice (dpe_game's run_tests steps do; coding_impl
+  does not). Always succeeds as a step; the test
   outcome is captured in the report for the verifier to act on. A suite that
   collected NOTHING is reported as passed:false + no_tests_collected:true — a
   gate that checked nothing has not passed. If no test runner can be provisioned
-  at all the gate is SKIPPED as passed:true, so a pass does not by itself prove
-  tests ran — read the report. Reports are artifacts, not source files; a code
+  at all the gate records a distinct, non-passing infrastructure_unavailable
+  outcome. Reports are artifacts, not source files; a code
   agent can read its report with read(source="self", path="test_report.json").
 parameters:
   project_root:
@@ -39,6 +39,10 @@ parameters:
   evidence_cycle_from:
     type: string
     description: "Step whose test_report.json carries the cycle id to inherit."
+    required: false
+  fail_fast_gates:
+    type: string
+    description: "JSON [[step,file],...] upstream reports; any non-pass writes a fresh upstream_failed test marker without invoking runners."
     required: false
   out_dir:
     type: string

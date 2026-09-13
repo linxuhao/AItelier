@@ -568,6 +568,8 @@ def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
         _namespace_agents(data, config_name)
         _inject_seed_context(data, config_name)
         _dedupe_context_sources(data)
+        from core.release_gate_migration import migrate_release_document
+        migrate_release_document(data)
         yaml_text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
     except yaml.YAMLError as e:
         return {"error": f"generated pipeline YAML is invalid: {e}"}
@@ -645,6 +647,8 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
         _namespace_agents(data, config_name)
         _inject_seed_context(data, config_name)
         _dedupe_context_sources(data)
+        from core.release_gate_migration import migrate_release_document
+        migrate_release_document(data)
 
         # Build namespaced roles from role_table.yaml + the emitted templates.
         prefix = config_name + _ROLE_SEP
@@ -1064,6 +1068,10 @@ def load_generated_configs(sf, registry) -> list[str]:
     from core.output_migration import migrate_generated_outputs
     for migration in migrate_generated_outputs(generated_configs_dir()):
         _log.info("output target migration: %s (backup %s)", migration["path"], migration["backup"])
+    from core.release_gate_migration import migrate_generated_release_gates
+    for migration in migrate_generated_release_gates(generated_configs_dir()):
+        _log.info("release fail-fast migration: %s (backup %s)",
+                  migration["path"], migration["backup"])
     out: list[str] = []
     skip = archived_names()
     for f in sorted(generated_configs_dir().glob(f"{GEN_PREFIX}*.yaml")):

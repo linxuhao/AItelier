@@ -27,4 +27,10 @@ def verify_evidence(*, out_dir: str = "", run_id: str = "", gates: str = "", **k
             "state": verdict["state"],
             "stale_reports": verdict["stale_reports"],
             "missing_reports": verdict["missing_reports"],
-            "skipped_gates": verdict["skipped_gates"]}
+            "skipped_gates": verdict["skipped_gates"],
+            "failed_gates": verdict["failed_gates"],
+            "known_failures": verdict["known_failures"],
+            "pending_gates": verdict["pending_gates"],
+            "blind_gates": verdict["blind_gates"],
+            "infrastructure_unavailable_gates":
+                verdict["infrastructure_unavailable_gates"]}

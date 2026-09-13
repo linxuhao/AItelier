@@ -1,8 +1,7 @@
 """Unit tests for the godot_compile tool (HTTP to godot-builder mocked).
 
 Docker-free: the godot-builder call is patched. Covers the non-Godot no-op, the
-pass/fail mapping, compile→playtest chaining, and the builder-unreachable
-gate_skipped degrade.
+pass/fail mapping, compile→playtest chaining, and builder-unavailable evidence.
 """
 
 import json
@@ -123,19 +122,23 @@ def test_parse_fail_records_errors(tmp_path, monkeypatch):
     assert report["errors"][0]["line"] == 7
 
 
-def test_builder_unreachable_degrades_to_pass(tmp_path, monkeypatch):
-    # Infra down must not stall the pipeline → pass with a LOUD gate_skipped flag.
+def test_builder_unreachable_is_distinct_nonpassing_infrastructure(tmp_path, monkeypatch):
+    # The tool step completes, but missing infrastructure is not release proof.
     _make_godot_project(tmp_path)
     _mock_urlopen(monkeypatch, fail=True)
     out = tmp_path / "out"
     r = godot_compile(project_root=str(tmp_path), out_dir=str(out))
-    assert r["passed"] is True
+    assert r["passed"] is False
     report = _read_report(out)
     # Names the config key, not just the URL it resolved to: the fix is to
     # start (or repoint) GODOT_BUILDER_URL, and the summary has to say so.
     assert "GODOT_BUILDER_URL" in report["summary"]
     assert "did not answer" in report["summary"]
     assert report["gate_skipped"] is True
+    assert report["infrastructure_unavailable"] is True
+    playtest = json.loads((out / "playtest_report.json").read_text())
+    assert playtest["passed"] is False
+    assert playtest["upstream_state"] == "infrastructure_unavailable"
 
 
 # ── The summary that survives the prompt ─────────────────────────────────────

@@ -12,9 +12,9 @@ the test toolchain — pytest + pytest-asyncio (REQUIRED by ``asyncio_mode=auto`
 configs; without it every async test errors out) + pytest-timeout — plus the
 project's declared dependencies (``requirements.txt``, or an editable install
 that reads ``pyproject.toml``/``setup.py``, INCLUDING its declared test extras).
-If the runner cannot be provisioned at all (e.g. no network), the gate is
-SKIPPED (passed=True) — a missing test runner must never masquerade as failing
-tests, which would spin the goal-loop chasing a phantom failure.
+If the runner cannot be provisioned at all (e.g. no network), the gate records
+``infrastructure_unavailable``. It remains distinct from a test failure and is
+non-passing because missing evidence cannot release a tree.
 
 Three outcomes, not two: pass, fail, and NO EVIDENCE. "pytest collected nothing"
 (exit 5) is the third, and it is not a pass — see the returncode handling in
@@ -514,10 +514,11 @@ def _resolve_pytest_python(repo: Path, report: dict) -> tuple[str | None, str | 
             if attempt < attempts:
                 time.sleep(2 * attempt)  # 2s, then 4s, before retrying
 
-    # All attempts failed → a persistent outage. SKIP (a missing runner must
-    # never masquerade as failing tests, which would spin the goal-loop).
+    # All attempts failed → a persistent outage. Keep it distinct from a test
+    # failure, but non-passing: a release cannot use a missing runner as proof.
     report.update(
-        passed=True, skipped=True, returncode=0,
+        passed=False, skipped=True, infrastructure_unavailable=True,
+        evidence_state="infrastructure_unavailable", returncode=0,
         summary=(f"pytest unavailable and could not be provisioned after "
                  f"{attempts} attempts ({type(last_err).__name__}: "
                  f"{str(last_err)[:200]}) — test gate skipped."),
@@ -744,6 +745,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
               state_dir: str = "", run_id: str = "",
               evidence_cycle_start: bool = False,
               evidence_cycle_from: str = "",
+              fail_fast_gates: str = "",
               **kwargs) -> dict:
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
@@ -756,6 +758,35 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     """
     report = {"passed": True, "returncode": 0, "summary": "", "failures": [],
               "collection_errors": []}
+
+    if fail_fast_gates:
+        if not out_dir or not Path(out_dir).is_absolute():
+            return {"written": None, "passed": False,
+                    "error": ("run_tests fail-fast requires an absolute "
+                              "out_dir=$STEP_DIR")}
+        from aitelier.gate_evidence import (
+            first_upstream_blocker,
+            stamp_report,
+            upstream_failed_report,
+        )
+        target_dir = Path(out_dir)
+        blocker = first_upstream_blocker(target_dir.parent, run_id,
+                                         fail_fast_gates)
+        if blocker:
+            report.update(upstream_failed_report(blocker, "Test gate"))
+            report.update(passed_relative=False, new_failures=[],
+                          baseline_failures=[])
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if run_id and evidence_cycle_from:
+                stamp_report(report, run_id=run_id, out_dir=str(target_dir),
+                             cycle_from=evidence_cycle_from)
+            (target_dir / "test_report.json").write_text(
+                json.dumps(report, indent=2), encoding="utf-8")
+            return {"written": "test_report.json", "passed": False,
+                    "passed_relative": False, "new_failures": [],
+                    "skipped_because": "upstream_failed",
+                    "upstream_state": (blocker.get("upstream_state")
+                                       or blocker.get("state"))}
 
     if not project_root or not Path(project_root).is_absolute():
         # The check is on `project_root` — the code repository — and on nothing
@@ -928,7 +959,13 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         node = _run_node_checks(repo)
         if node is not None:
             report["node"] = node
-            if not node["passed"]:
+            if node.get("skipped"):
+                report.update(passed=False, skipped=True,
+                              infrastructure_unavailable=True,
+                              evidence_state="infrastructure_unavailable")
+                report["failures"].append(
+                    "node gate unavailable: " + node.get("summary", ""))
+            elif not node["passed"]:
                 report["passed"] = False
                 for name, chk in node["checks"].items():
                     if not chk["passed"]:

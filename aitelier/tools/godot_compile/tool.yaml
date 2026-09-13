@@ -8,9 +8,9 @@ description: >
   captures[], PNGs of real rendered frames unpacked under frames/ next to the
   reports; if parsing
   failed or it's not a Godot project, write a 'skipped' playtest_report instead.
-  Always succeeds as a step; no-ops for non-Godot projects and degrades to a
-  LOUD gate_skipped pass if the builder is unreachable. Both outcomes are
-  captured for the verifier to act on.
+  Always succeeds as a step; no-ops for non-Godot projects and records a LOUD,
+  non-passing infrastructure_unavailable result if the builder is unreachable.
+  Both outcomes are captured for the verifier to act on.
 parameters:
   project_root:
     type: string
@@ -19,6 +19,10 @@ parameters:
   evidence_cycle_from:
     type: string
     description: "Step whose test_report.json carries the current verification-cycle id."
+    required: false
+  fail_fast_gates:
+    type: string
+    description: "JSON [[step,file],...] upstream reports; any non-pass writes fresh upstream_failed markers without compiling or play-testing."
     required: false
   out_dir:
     type: string

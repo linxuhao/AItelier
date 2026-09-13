@@ -67,6 +67,7 @@ overlay:
         tool_params:
           out_dir: "$STEP_DIR"
           evidence_cycle_from: "5_test"
+          fail_fast_gates: '[["5_test", "test_report.json"]]'
         # No transitions: a step LIST wires sequentially, so this falls through
         # to 5_vision below, and 5_vision inherits 5_test's original target.
         # A red compile is NOT routed around the readability gate — see the
@@ -114,6 +115,7 @@ overlay:
           from_step: "5_compile"
           out_dir: "$STEP_DIR"
           evidence_cycle_from: "5_test"
+          fail_fast_gates: '[["5_compile", "compile_report.json"], ["5_compile", "playtest_report.json"]]'
         # ── BLIND IS NOT FAILED ────────────────────────────────────────────
         # The gate has two ways to say `passed: false` and they call for
         # opposite responses:
@@ -161,9 +163,9 @@ overlay:
         # nothing marking it stale. Letting the step RUN keeps the report fresh
         # and honest; only where it goes afterwards changes.
         #
-        # It still goes through final tests and the current-cycle evidence
-        # audit. The missing rendered evidence therefore remains explicit and
-        # non-passing when the verifier and reviewer make their decisions.
+        # It still visits 5_final_test, which writes its own fresh
+        # upstream_failed marker without running another suite, then replans.
+        # Missing rendered evidence therefore stays explicit and non-passing.
         transitions:
           - to: "5_final_test"
             match:
@@ -172,6 +174,8 @@ overlay:
               value: "no_captures"
           - to: "5_vision_human"
             match: { from_file: "vision_report.json", field: "blind", value: true }
+          - to: "5_final_test"
+            match: { from_file: "vision_report.json", field: "passed", value: false }
           - to: "5_evidence"
 
       # The checkpoint modal surfaces the CHECKPOINT step's OWN dir, so restage
@@ -463,11 +467,16 @@ overlay:
         timeout_seconds: 1200
         tool_params:
           out_dir: "$STEP_DIR"
+          # game_harness owns the one full compile/play-test gate. This final
+          # unit pass checks the design writer's tree without invoking the
+          # repo's run_tests.sh and paying the same engine gate a second time.
+          repo_gate: false
           evidence_cycle_from: "5_test"
+          fail_fast_gates: '[["5_test", "test_report.json"], ["5_compile", "compile_report.json"], ["5_compile", "playtest_report.json"], ["5_vision", "vision_report.json"]]'
         # Read the report, not inherited flags. Missing/invalid evidence and
         # skipped runners or zero collected tests cannot release review/push.
-        # Even a pure Godot project needs checks of the final tree here: its
-        # earlier compile/playtest report predates the design writer.
+        # On the passing path this remains after 5_design. On a known upstream
+        # failure it writes a fresh marker and returns without another suite.
         transitions:
           - to: "5_final_test_replan"
             match: { from_file: "test_report.json", field: "skipped", value: true }

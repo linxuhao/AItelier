@@ -744,12 +744,39 @@ def _godot_vision_unstamped(*, project_root: str = "", out_dir: str = "",
 def godot_vision(*, project_root: str = "", out_dir: str = "",
                  workspace_root: str = "", config_name: str = "",
                  from_step: str = "5_compile", run_id: str = "",
-                 evidence_cycle_from: str = "", **kwargs) -> dict:
+                 evidence_cycle_from: str = "", fail_fast_gates: str = "",
+                 **kwargs) -> dict:
     """Judge frames, then bind the report to this evidence cycle."""
+    target = Path(out_dir) if out_dir else Path(project_root or workspace_root or ".")
+    if fail_fast_gates:
+        from aitelier.gate_evidence import (
+            first_upstream_blocker,
+            stamp_file,
+            upstream_failed_report,
+        )
+        blocker = first_upstream_blocker(target.parent, run_id, fail_fast_gates)
+        if blocker:
+            report = upstream_failed_report(blocker, "Godot vision")
+            # A skipped vision gate is not blind: nobody attempted to look
+            # because the release was already blocked. Blind remains reserved
+            # for a gate that needed to look and could not.
+            report.update(blind=False, blind_reason="", frames_checked=0,
+                          scenarios=0, calls=0, questions=[], failures=[],
+                          batches=[])
+            target.mkdir(parents=True, exist_ok=True)
+            path = target / "vision_report.json"
+            path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+            if run_id and evidence_cycle_from:
+                stamp_file(path, run_id=run_id, out_dir=str(target),
+                           cycle_from=evidence_cycle_from)
+            return {"written": "vision_report.json", "passed": False,
+                    "summary": report["summary"],
+                    "skipped_because": "upstream_failed",
+                    "upstream_state": (blocker.get("upstream_state")
+                                       or blocker.get("state"))}
     result = _godot_vision_unstamped(
         project_root=project_root, out_dir=out_dir, workspace_root=workspace_root,
         config_name=config_name, from_step=from_step, **kwargs)
-    target = Path(out_dir) if out_dir else Path(project_root or workspace_root or ".")
     if run_id and evidence_cycle_from:
         from aitelier.gate_evidence import stamp_file
         stamp_file(target / "vision_report.json", run_id=run_id,

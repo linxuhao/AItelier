@@ -409,6 +409,19 @@ class PromptAssembler:
                             "about. Full-file writes are for authoring from scratch "
                             "or when feedback demands a restructure."
                         )
+                        if "read" in (tool_schemas or {}):
+                            delivery += (
+                                "\nIf an edit returns an `old_str`-not-found or "
+                                "does-not-match error, preserve that first failure and "
+                                "do not retry the same text. Immediately call `read` "
+                                "for the same path with `raw=true, source=\"self\"`; "
+                                "use its exact returned text to construct one new local "
+                                "`old_str`, then retry the edit. Do not copy line numbers, "
+                                "projections, compacted context, or recalled summaries "
+                                "into `old_str`. Do not use fuzzy matching and do not "
+                                "rewrite the whole file. A raw read is the current staging "
+                                "candidate, so untouched bytes remain carried forward."
+                            )
                 if "write" in write_tools:
                     # AT-9: pin one canonical root for the generic write(file, …).
                     delivery += (

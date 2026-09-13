@@ -28,6 +28,7 @@ MARKER_NO_ACK = "none"
 DELIVERY_ATTEMPTED = "attempted"
 DELIVERY_NOOP = "noop"
 DELIVERY_FAILED = "failed"
+SESSION_BOOTSTRAP_SOURCES = frozenset({"startup", "resume", "compact"})
 GUIDE_HEADINGS = (
     "# State DAG director protocol",
     "## Resume safely",
@@ -530,11 +531,10 @@ def main() -> int:
     except json.JSONDecodeError:
         hook_input = {}
     event = hook_input.get("hook_event_name")
-    # Codex 0.153/0.154 exposes only the universal PostCompact output. Its
-    # systemMessage is an attributable warning, while model context is supported
-    # by SessionStart and UserPromptSubmit. Queue the latter as the next
-    # user-input fallback; the marker records an at-most-once attempt because
-    # Codex provides no acknowledgement that stdout reached the model.
+    # PostCompact has no model-context output. Queue the next supported
+    # SessionStart/UserPromptSubmit delivery. The marker records an at-most-once
+    # attempt because Codex provides no acknowledgement that stdout reached the
+    # model.
     if event == "PostCompact":
         queued = _mark_pending(hook_input)
         context = build_context()
@@ -545,7 +545,7 @@ def main() -> int:
                 MAX_CONTEXT_CHARS,
             )
         output = {"continue": True, "systemMessage": context}
-    elif event == "SessionStart" and hook_input.get("source") == "compact":
+    elif event == "SessionStart" and hook_input.get("source") in SESSION_BOOTSTRAP_SOURCES:
         delivery = _deliver_once(hook_input, "SessionStart", standalone=True)
         if delivery == DELIVERY_ATTEMPTED:
             return 0

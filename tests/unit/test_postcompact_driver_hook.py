@@ -104,7 +104,9 @@ def state_server():
         thread.join(timeout=2)
 
 
-def invoke(tmp_path, url, cwd=None, event="SessionStart", session_id="session-a"):
+def invoke(
+    tmp_path, url, cwd=None, event="SessionStart", session_id="session-a", source="compact"
+):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(exist_ok=True)
     helper = tmp_path / "headers"
@@ -124,7 +126,7 @@ def invoke(tmp_path, url, cwd=None, event="SessionStart", session_id="session-a"
         "model": "gpt-test",
     }
     if event == "SessionStart":
-        hook_input.update({"source": "compact", "permission_mode": "never"})
+        hook_input.update({"source": source, "permission_mode": "never"})
     elif event == "PostCompact":
         hook_input.update({"turn_id": "turn-compact", "trigger": "auto"})
     elif event == "UserPromptSubmit":
@@ -604,7 +606,7 @@ def test_tracked_hook_config_uses_current_command_shape_and_move_safe_lookup():
     postcompact = config["hooks"]["PostCompact"][0]["hooks"][0]
     handler = config["hooks"]["SessionStart"][0]["hooks"][0]
     prompt_handler = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
-    assert config["hooks"]["SessionStart"][0]["matcher"] == "^compact$"
+    assert config["hooks"]["SessionStart"][0]["matcher"] == "^(startup|resume|compact)$"
     assert postcompact["type"] == handler["type"] == prompt_handler["type"] == "command"
     assert postcompact["async"] is handler["async"] is prompt_handler["async"] is False
     assert postcompact["timeout"] == handler["timeout"] == prompt_handler["timeout"] == 20
@@ -616,3 +618,85 @@ def test_tracked_hook_config_uses_current_command_shape_and_move_safe_lookup():
     assert "git rev-parse --show-toplevel" in handler["command"]
     assert "/Users/" not in handler["command"] and "/home/" not in handler["command"]
     assert HOOK.stat().st_mode & 0o111
+
+
+@pytest.mark.parametrize("source", ["startup", "resume", "compact"])
+def test_supported_session_activation_sources_bootstrap_once(tmp_path, state_server, source):
+    output = invoke(
+        tmp_path,
+        state_server,
+        event="SessionStart",
+        session_id=f"activation-{source}",
+        source=source,
+    )
+    assert output["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "driver_note_revision=1" in output["hookSpecificOutput"]["additionalContext"]
+    assert invoke(
+        tmp_path,
+        state_server,
+        event="SessionStart",
+        session_id=f"activation-{source}",
+        source=source,
+    ) == {"continue": True}
+
+
+def test_reload_then_midturn_compact_uses_fresh_context_without_duplicate(
+    tmp_path, state_server
+):
+    resumed = invoke(
+        tmp_path,
+        state_server,
+        event="SessionStart",
+        session_id="recorded-long-session",
+        source="resume",
+    )
+    assert "driver_note_revision=1" in resumed["hookSpecificOutput"]["additionalContext"]
+
+    postcompact = invoke(
+        tmp_path,
+        state_server,
+        event="PostCompact",
+        session_id="recorded-long-session",
+    )
+    assert postcompact["continue"] is True
+    StateStub.revision = 2
+    compact_start = invoke(
+        tmp_path,
+        state_server,
+        event="SessionStart",
+        session_id="recorded-long-session",
+        source="compact",
+    )
+    assert "driver_note_revision=2" in compact_start["hookSpecificOutput"]["additionalContext"]
+    assert invoke(
+        tmp_path,
+        state_server,
+        event="UserPromptSubmit",
+        session_id="recorded-long-session",
+    ) == {"continue": True}
+    assert len(StateStub.requests) == 9
+
+
+@pytest.mark.parametrize("source", ["startup", "resume", "compact"])
+def test_supported_session_activation_sources_preserve_malformed_marker(
+    tmp_path, state_server, source, monkeypatch
+):
+    hook = load_hook_module()
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    marker = hook._pending_path({"session_id": f"malformed-{source}"})
+    assert marker is not None
+    marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    original = b'{"version":3,"generation":" ","status":"pending"}\n'
+    marker.write_bytes(original)
+
+    output = invoke(
+        tmp_path,
+        state_server,
+        event="SessionStart",
+        session_id=f"malformed-{source}",
+        source=source,
+    )
+    assert output["continue"] is True
+    assert "handoff recovery required" in output["systemMessage"]
+    assert marker.read_bytes() == original

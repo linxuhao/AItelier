@@ -95,6 +95,51 @@ def _unresolved(sf, tools: list[str]) -> list[str]:
     return missing
 
 
+def _release_graph_update_error(sf, name: str, candidate: dict) -> str:
+    """Reject a capability edit that would invalidate a live or persisted graph."""
+    import yaml
+    from core import pipeline_registry
+    from core.release_gate_migration import (
+        release_gate_ownership_error, release_graph_uses_capability)
+
+    # by-name-ok: registry mutation validates all live config definitions, no run
+    for graph_name, graph in list(getattr(sf, "_graphs", {}).items()):
+        to_dict = getattr(graph, "to_dict", None)
+        if not callable(to_dict):
+            continue
+        document = to_dict()
+        if not release_graph_uses_capability(document, name):
+            continue
+        error = release_gate_ownership_error(
+            document, sf=sf, capability_overrides={name: candidate})
+        if error:
+            return f"capability {name!r} would invalidate live graph " \
+                   f"{graph_name!r}: {error}"
+
+    config_dir = pipeline_registry.generated_configs_dir()
+    for path in sorted(config_dir.glob("gen_*.yaml")):
+        try:
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue
+        if not release_graph_uses_capability(document, name):
+            continue
+        roles = None
+        roles_path = path.with_suffix(".roles.json")
+        if roles_path.exists():
+            try:
+                roles = json.loads(roles_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                return (f"capability {name!r} cannot inspect persisted graph "
+                        f"{path.name!r} roles: {exc}")
+        error = release_gate_ownership_error(
+            document, roles, sf=sf, capability_overrides={name: candidate})
+        if error:
+            return f"capability {name!r} would invalidate persisted graph " \
+                   f"{path.name!r}: {error}"
+    return ""
+
+
 def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "host",
            context_provider=None, persist: bool = False,
            host: bool = False) -> dict:
@@ -146,9 +191,48 @@ def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "ho
         # on every start) passes host=True; nothing reachable from a step can.
         return {"error": f"capability {name!r} is defined by the host in code; "
                          f"it cannot be redefined at runtime. Pick another name."}
+    candidate = {
+        "tools": tools, "briefing": briefing, "owner": owner,
+        "context_provider": context_provider,
+    }
+    from core import datadir
+    from core.registration_transaction import RegistrationTransaction
+    cap_dir = datadir.capabilities_dir()
+
+    def publish():
+        release_error = _release_graph_update_error(sf, name, candidate)
+        if release_error:
+            return {"error": release_error}
+        sf.register_capability(
+            name, tools=tools, briefing=briefing, owner=owner,
+            context_provider=context_provider)
+        if persist:
+            cap_dir.mkdir(parents=True, exist_ok=True)
+            _write_atomic(cap_dir / f"{name}.json", {
+                "name": name, "tools": tools, "briefing": briefing,
+                "owner": owner,
+            })
+            # Re-defining lifts the tombstone. Without this the definition is
+            # live now but silently disappears at the next boot.
+            stale = archived_names()
+            if name in stale:
+                _write_atomic(_archive_dir() / ARCHIVE_INDEX,
+                              sorted(stale - {name}))
+                (_archive_dir() / f"{name}.json").unlink(missing_ok=True)
+        return None
+
     try:
-        sf.register_capability(name, tools=tools, briefing=briefing, owner=owner,
-                               context_provider=context_provider)
+        if all(hasattr(sf, attr) for attr in (
+                "_lock", "_conn", "_graphs", "_resolvers", "agent_registry")):
+            with RegistrationTransaction(sf, paths=[cap_dir]) as transaction:
+                error = publish()
+                if error:
+                    return error
+                transaction.commit()
+        else:
+            error = publish()
+            if error:
+                return error
     except TypeError as e:
         # A skillflow older than the contract this host calls (briefing=/owner=
         # arrived in 1.5.45). The dev box runs an editable checkout and the
@@ -160,19 +244,8 @@ def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "ho
                          f"(need >=1.5.45) — {e}"}
     except ValueError as e:
         return {"error": str(e)}
-    if persist:
-        _write_atomic(capabilities_dir() / f"{name}.json", {
-            "name": name, "tools": tools, "briefing": briefing, "owner": owner,
-        })
-        # Re-defining lifts the tombstone. Without this the definition is on
-        # disk and live in this process, and the next boot skips it — the
-        # capability silently disappears on restart, which is the archived-name
-        # trap already recorded for generated pipelines.
-        stale = archived_names()
-        if name in stale:
-            _write_atomic(_archive_dir() / ARCHIVE_INDEX,
-                          sorted(stale - {name}))
-            (_archive_dir() / f"{name}.json").unlink(missing_ok=True)
+    except Exception as e:
+        return {"error": f"capability {name!r} was not committed: {e}"}
     return {"ok": True, "name": name, "tools": tools, "owner": owner}
 
 

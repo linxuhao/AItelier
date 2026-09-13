@@ -345,41 +345,39 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
         raise BundleError(f"bundle's graph was rejected: {ownership_error}")
 
     existed = registry.get(config_name) is not None
-    # Registering live BEFORE writing: this is where the remaining checks live
-    # (`register_graph` re-validates and rejects unresolved agent_config refs), and
-    # a failure here must leave the disk untouched. The reverse half-state — live
-    # but not persisted — costs nothing: it is gone at the next restart, whereas a
-    # half-written config outlives every restart.
+    cdir = pr.generated_configs_dir()
+    yaml_dest = cdir / f"{config_name}.yaml"
+    roles_dest = cdir / f"{config_name}.roles.json"
+    baseline_dest = cdir / f"{config_name}.baseline.json"
+
+    def persist():
+        for tname, files in to_write.items():
+            d = tdir / tname
+            d.mkdir(parents=True, exist_ok=True)
+            for fname, text in files.items():
+                (d / fname).write_text(text, encoding="utf-8")
+        yaml_dest.write_text(yaml_text, encoding="utf-8")
+        if roles:
+            roles_dest.write_text(
+                json.dumps(roles, ensure_ascii=False, indent=2), encoding="utf-8")
+        # A baseline describes the graph it was recorded against. Bundles do not
+        # carry one; the imported pipeline must earn a new baseline locally.
+        baseline_dest.unlink(missing_ok=True)
+        pr._unarchive(config_name)
+
     try:
-        pr._register_forge_roles(sf, config_name, roles)
-        pr.ensure_host_agents(sf, parsed)
-        sf.register_graph(parsed)
+        pr._commit_registration(
+            sf, registry, config_name, parsed,
+            pr._gen_hints(parsed, roles, config_name), roles=roles,
+            paths=[yaml_dest, roles_dest, baseline_dest,
+                   cdir / "_archived",
+                   *(tdir / tname for tname in to_write)],
+            persist=persist)
+    except RuntimeError:
+        # ConfigRegistry failures historically surfaced directly to host callers.
+        raise
     except Exception as e:
         raise BundleError(f"bundle's graph was rejected: {e}") from e
-
-    # ── Commit ──
-    for tname, files in to_write.items():
-        d = tdir / tname
-        d.mkdir(parents=True, exist_ok=True)
-        for fname, text in files.items():
-            (d / fname).write_text(text, encoding="utf-8")
-
-    cdir = pr.generated_configs_dir()
-    (cdir / f"{config_name}.yaml").write_text(yaml_text, encoding="utf-8")
-    if roles:
-        (cdir / f"{config_name}.roles.json").write_text(
-            json.dumps(roles, ensure_ascii=False, indent=2), encoding="utf-8")
-    # A baseline describes the graph it was recorded against, and this is a
-    # DIFFERENT graph under the same name. Bundles deliberately do not carry one:
-    # a baseline is earned by driving the pipeline in the deployment that will run
-    # it. Keeping the old one would report every difference between two unrelated
-    # pipelines as a regression.
-    (cdir / f"{config_name}.baseline.json").unlink(missing_ok=True)
-    # Writing the files IS the intent to have this pipeline; a stale tombstone
-    # would delete it again at the next boot scan.
-    pr._unarchive(config_name)
-    registry.register_one(sf, config_name,
-                          hint_overrides=pr._gen_hints(parsed, roles, config_name))
 
     return {
         "config_name": config_name,

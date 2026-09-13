@@ -526,15 +526,45 @@ def _register_text(sf, registry, config_name: str, yaml_text: str,
     registry manifest with the generated-pipeline host hints. Raises on validation
     failure."""
     graph, hints = _validated_registration(
-        config_name, yaml_text, roles=roles)
-    ensure_host_agents(sf, graph)
-    sf.register_graph(graph)            # validates graph + agent_config refs
-    registry.register_one(sf, config_name, hint_overrides=hints)
+        config_name, yaml_text, roles=roles, sf=sf)
+    _commit_registration(sf, registry, config_name, graph, hints)
     return graph
 
 
+def _commit_registration(sf, registry, config_name: str, graph, hints,
+                         *, roles: dict | None = None, paths=(), persist=None,
+                         require_manifest: bool = False) -> None:
+    """Publish one fully validated graph and its files as one rollback unit."""
+    from core.registration_transaction import RegistrationTransaction
+
+    def publish():
+        if roles is not None:
+            _register_forge_roles(sf, config_name, roles)
+        ensure_host_agents(sf, graph)
+        sf.register_graph(graph)
+        manifest = (registry.register_one(sf, config_name, hint_overrides=hints)
+                    if registry is not None else None)
+        if manifest is None and (require_manifest or isinstance(
+                getattr(registry, "_manifests", None), dict)):
+            raise RuntimeError("config manifest did not register")
+        if persist is not None:
+            persist()
+
+    # Small unit-test doubles intentionally implement only the documented host
+    # calls. Real SkillFlow owns the registries and SQLite state snapshotted here.
+    if not all(hasattr(sf, attr) for attr in (
+            "_lock", "_conn", "_graphs", "_resolvers", "agent_registry")):
+        publish()
+        return
+
+    with RegistrationTransaction(
+            sf, registry, config_names=[config_name], paths=paths) as transaction:
+        publish()
+        transaction.commit()
+
+
 def _validated_registration(config_name: str, yaml_text: str,
-                            roles: dict | None = None):
+                            roles: dict | None = None, sf=None):
     """Parse all graph/host policy inputs without mutating live registries."""
     data = yaml.safe_load(yaml_text)
     if not isinstance(data, dict):
@@ -586,16 +616,22 @@ def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
     except yaml.YAMLError as e:
         return {"error": f"generated pipeline YAML is invalid: {e}"}
 
+    dest = generated_configs_dir() / f"{config_name}.yaml"
     try:
-        _register_text(sf, registry, config_name, yaml_text)
+        graph, hints = _validated_registration(
+            config_name, yaml_text, sf=sf)
+
+        def persist():
+            dest.write_text(yaml_text, encoding="utf-8")
+            # Persisting a config IS the intent to have it — a stale archive
+            # tombstone would make it disappear at the next boot scan.
+            _unarchive(config_name)
+
+        _commit_registration(
+            sf, registry, config_name, graph, hints,
+            paths=[dest, generated_configs_dir() / "_archived"], persist=persist)
     except Exception as e:
         return {"error": f"generated pipeline failed validation: {e}"}
-
-    dest = generated_configs_dir() / f"{config_name}.yaml"
-    dest.write_text(yaml_text, encoding="utf-8")
-    # Persisting a config IS the intent to have it — a stale archive tombstone
-    # would make it disappear at the next boot scan while the file sits on disk.
-    _unarchive(config_name)
     return {"config_name": config_name, "path": str(dest),
             "action": "updated" if existed else "created"}
 
@@ -757,21 +793,22 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
         hints = _gen_hints(graph, roles, config_name)
     except Exception as e:
         return {"error": f"emitted pipeline failed validation: {e}"}
+    dest = generated_configs_dir() / f"{config_name}.yaml"
+    roles_dest = generated_configs_dir() / f"{config_name}.roles.json"
     try:
-        _register_forge_roles(sf, config_name, roles)
-        ensure_host_agents(sf, graph)   # any role not in role_table → generic fallback
-        sf.register_graph(graph)
-        registry.register_one(sf, config_name, hint_overrides=hints)
+        def persist():
+            dest.write_text(yaml_text, encoding="utf-8")
+            # Persisting a config IS the intent to have it — a stale archive
+            # tombstone would make it disappear at the next boot scan.
+            _unarchive(config_name)
+            roles_dest.write_text(_json_dumps(roles), encoding="utf-8")
+
+        _commit_registration(
+            sf, registry, config_name, graph, hints, roles=roles,
+            paths=[dest, roles_dest, generated_configs_dir() / "_archived"],
+            persist=persist)
     except Exception as e:
         return {"error": f"emitted pipeline failed registration: {e}"}
-
-    dest = generated_configs_dir() / f"{config_name}.yaml"
-    dest.write_text(yaml_text, encoding="utf-8")
-    # Persisting a config IS the intent to have it — a stale archive tombstone
-    # would make it disappear at the next boot scan while the file sits on disk.
-    _unarchive(config_name)
-    (generated_configs_dir() / f"{config_name}.roles.json").write_text(
-        _json_dumps(roles), encoding="utf-8")
     return {"config_name": config_name, "path": str(dest),
             "action": "updated" if existed else "created",
             "roles": sorted(roles.keys())}
@@ -915,58 +952,13 @@ def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
     except Exception as e:
         return {"error": f"reload failed: {e}"}
 
-    marker = object()
-    with sf._lock:
-        old_agents = copy.deepcopy(sf.agent_registry._configs)
-        old_graph = sf._graphs.get(config_name, marker)
-        old_resolver = sf._resolvers.get(config_name, marker)
-        old_manifest = registry._manifests.get(config_name, marker)
-        graph_rows = [dict(row) for row in sf._conn.execute(
-            "SELECT * FROM skillflow_graphs WHERE name=?", (config_name,))]
-        version_rows = [dict(row) for row in sf._conn.execute(
-            "SELECT * FROM skillflow_graph_versions WHERE name=?", (config_name,))]
-        try:
-            if roles is not None:
-                _register_forge_roles(sf, config_name, roles)
-            ensure_host_agents(sf, graph)
-            sf.register_graph(graph)
-            if registry.register_one(
-                    sf, config_name, hint_overrides=hints) is None:
-                raise RuntimeError("config manifest did not register")
-        except Exception as e:
-            sf.agent_registry._configs = old_agents
-            if old_graph is marker:
-                sf._graphs.pop(config_name, None)
-            else:
-                sf._graphs[config_name] = old_graph
-            if old_resolver is marker:
-                sf._resolvers.pop(config_name, None)
-            else:
-                sf._resolvers[config_name] = old_resolver
-            if old_manifest is marker:
-                registry._manifests.pop(config_name, None)
-            else:
-                registry._manifests[config_name] = old_manifest
-            try:
-                sf._conn.execute("BEGIN IMMEDIATE")
-                for table, rows in (
-                        ("skillflow_graphs", graph_rows),
-                        ("skillflow_graph_versions", version_rows)):
-                    sf._conn.execute(f"DELETE FROM {table} WHERE name=?",
-                                     (config_name,))
-                    for row in rows:
-                        columns = tuple(row)
-                        placeholders = ", ".join("?" for _ in columns)
-                        sf._conn.execute(
-                            f"INSERT INTO {table} ({', '.join(columns)}) "
-                            f"VALUES ({placeholders})",
-                            tuple(row[column] for column in columns))
-                sf._conn.commit()
-            except Exception:
-                sf._conn.rollback()
-                return {"error": f"reload failed: {e}; live rollback failed"}
-            return {"error": f"reload failed: {e}"}
-        return {"config_name": config_name}
+    try:
+        _commit_registration(
+            sf, registry, config_name, graph, hints, roles=roles,
+            require_manifest=True)
+    except Exception as e:
+        return {"error": f"reload failed: {e}"}
+    return {"config_name": config_name}
 
 
 # Everything a generated pipeline owns on disk, so archive and un-archive cannot
@@ -1166,35 +1158,53 @@ def load_generated_configs(sf, registry) -> list[str]:
             continue
 
     from core.output_migration import migrate_generated_outputs
-    for migration in migrate_generated_outputs(
-            config_dir, skip_configs=unsafe_release_configs):
-        _log.info("output target migration: %s (backup %s)", migration["path"], migration["backup"])
     from core.release_gate_migration import migrate_generated_release_gates
-    for migration in migrate_generated_release_gates(
-            config_dir, skip_configs=unsafe_release_configs):
-        _log.info("release fail-fast migration: %s (backup %s)",
-                  migration["path"], migration["backup"])
+    from core.registration_transaction import RegistrationTransaction
+
+    names = [path.stem for path in sorted(
+        config_dir.glob(f"{GEN_PREFIX}*.yaml"))]
     out: list[str] = []
-    skip = archived_names()
-    for f in sorted(generated_configs_dir().glob(f"{GEN_PREFIX}*.yaml")):
-        if f.stem in skip:
-            continue    # a file restored by hand without clearing the archive list
-        try:
-            roles_file = f.with_suffix(".roles.json")
-            roles = None
-            if roles_file.exists():
-                import json
-                roles = json.loads(roles_file.read_text(encoding="utf-8"))
-            yaml_text = f.read_text(encoding="utf-8")
-            document = yaml.safe_load(yaml_text)
-            ownership_error = release_gate_ownership_error(
-                document, roles, sf=sf)
-            if ownership_error:
-                raise ValueError(ownership_error)
-            if roles is not None:
-                _register_forge_roles(sf, f.stem, roles)
-            _register_text(sf, registry, f.stem, yaml_text, roles=roles)
-            out.append(f.stem)
-        except Exception as e:
-            _log.warning("skipping invalid generated config %s: %s", f.name, e)
+    try:
+        # Migration and publication are one boot operation. A late manifest or
+        # engine failure restores the exact source plus backup directory, as well
+        # as every live and SQLite registry touched by earlier siblings.
+        with RegistrationTransaction(
+                sf, registry, config_names=names,
+                paths=[config_dir, config_dir.parent / "migration_backups"]
+                ) as boot_transaction:
+            for migration in migrate_generated_outputs(
+                    config_dir, skip_configs=unsafe_release_configs):
+                _log.info("output target migration: %s (backup %s)",
+                          migration["path"], migration["backup"])
+            for migration in migrate_generated_release_gates(
+                    config_dir, skip_configs=unsafe_release_configs):
+                _log.info("release fail-fast migration: %s (backup %s)",
+                          migration["path"], migration["backup"])
+
+            plans = []
+            skip = archived_names()
+            for f in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):
+                if f.stem in skip or f.stem in unsafe_release_configs:
+                    continue
+                try:
+                    roles_file = f.with_suffix(".roles.json")
+                    roles = None
+                    if roles_file.exists():
+                        roles = json.loads(roles_file.read_text(encoding="utf-8"))
+                    yaml_text = f.read_text(encoding="utf-8")
+                    graph, hints = _validated_registration(
+                        f.stem, yaml_text, roles=roles, sf=sf)
+                    plans.append((f, roles, graph, hints))
+                except Exception as e:
+                    _log.warning(
+                        "skipping invalid generated config %s: %s", f.name, e)
+
+            for f, roles, graph, hints in plans:
+                _commit_registration(
+                    sf, registry, f.stem, graph, hints, roles=roles)
+                out.append(f.stem)
+            boot_transaction.commit()
+    except Exception as e:
+        _log.warning("generated config boot registration rolled back: %s", e)
+        return []
     return out

@@ -86,6 +86,95 @@ def test_same_owner_edits_and_another_owner_conflicts(home):
     assert "error" in r and "already registered" in r["error"]
 
 
+def _release_capability_document(name):
+    source = (Path(__file__).resolve().parents[2]
+              / "evidence/output-target-migration-20260911/generated-configs"
+              / "gen_dpe_state_game.yaml")
+    document = yaml.safe_load(source.read_text(encoding="utf-8"))
+    document["capabilities"] = list(dict.fromkeys(
+        [*(document.get("capabilities") or []), name]))
+    next(step for step in document["steps"]
+         if step["id"] == "5_design")["capability"] = name
+    return document
+
+
+def _real_sf():
+    import skillflow
+    from skillflow import SkillFlow
+    from skillflow.tool_loader import ToolLoader
+    root = Path(__file__).resolve().parents[2]
+    return SkillFlow(
+        ":memory:", tool_loader=ToolLoader(
+            Path(skillflow.__file__).parent / "tools", root / "aitelier" / "tools"))
+
+
+def test_capability_edit_revalidates_live_release_graph(home):
+    from core.config_registry import ConfigRegistry
+    from core import pipeline_registry
+
+    sf = _real_sf()
+    sf.register_capability(
+        "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
+    assert caps.define(
+        sf, "mutable_release_tools", tools=["read_file"],
+        owner="gen:probe")["ok"]
+    document = _release_capability_document("mutable_release_tools")
+    pipeline_registry._register_text(
+        sf, ConfigRegistry(), "gen_dpe_state_game",
+        yaml.safe_dump(document, sort_keys=False), roles={})
+
+    rejected = caps.define(
+        sf, "mutable_release_tools", tools=["run_tests"], owner="gen:probe")
+    assert "would invalidate live graph" in rejected["error"]
+    assert sf.capabilities()["mutable_release_tools"]["tools"] == ["read_file"]
+
+    assert caps.define(
+        sf, "mutable_release_tools", tools=["write"], owner="gen:probe")["ok"]
+
+
+def test_capability_edit_revalidates_persisted_release_graph(home):
+    from core import datadir
+
+    sf = _real_sf()
+    sf.register_capability(
+        "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
+    assert caps.define(
+        sf, "mutable_release_tools", tools=["read_file"],
+        owner="gen:probe")["ok"]
+    config_dir = datadir.configs_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "gen_persisted.yaml").write_text(yaml.safe_dump(
+        _release_capability_document("mutable_release_tools"), sort_keys=False))
+
+    rejected = caps.define(
+        sf, "mutable_release_tools", tools=["run_tests"], owner="gen:probe")
+    assert "would invalidate persisted graph" in rejected["error"]
+    assert sf.capabilities()["mutable_release_tools"]["tools"] == ["read_file"]
+
+
+def test_capability_persist_failure_restores_live_and_disk(home, monkeypatch):
+    sf = _real_sf()
+    assert caps.define(
+        sf, "transactional", tools=["read_file"], owner="gen:probe",
+        persist=True)["ok"]
+    target = caps.capabilities_dir() / "transactional.json"
+    before = target.read_bytes()
+    real_write = caps._write_atomic
+
+    def fail_after_write(path, payload):
+        real_write(path, payload)
+        if path == target:
+            raise OSError("injected persistence failure")
+
+    monkeypatch.setattr(caps, "_write_atomic", fail_after_write)
+    result = caps.define(
+        sf, "transactional", tools=["write"], owner="gen:probe",
+        persist=True)
+    assert "not committed" in result["error"]
+    assert sf.capabilities()["transactional"]["tools"] == ["read_file"]
+    assert target.read_bytes() == before
+
+
 def test_archive_is_refused_while_a_pipeline_still_offers_it(home):
     """Invariant 2 — otherwise an offer list names something that is gone, and
     every card declaring it silently grants nothing."""

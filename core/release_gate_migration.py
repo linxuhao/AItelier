@@ -211,7 +211,7 @@ def _capability_names(step: dict, offers: list[str], path: tuple):
         f"release gate capability declaration at {path!r} is not inspectable")
 
 
-def _capability_gate_invocations(document: dict, sf):
+def _capability_gate_invocations(document: dict, sf, capability_overrides=None):
     """Yield gate tools any static or task-card-selected capability can grant."""
     raw_offers = document.get("capabilities", []) or []
     if not isinstance(raw_offers, list) or not all(
@@ -230,6 +230,8 @@ def _capability_gate_invocations(document: dict, sf):
             f"release gate capability registry is not inspectable: {exc}") from exc
     if not isinstance(catalog, dict):
         raise ValueError("release gate capability registry is not inspectable")
+    if capability_overrides:
+        catalog = {**catalog, **capability_overrides}
     for index, step in enumerate(document.get("steps", [])):
         if (not isinstance(step, dict)
                 or step.get("step_type", "agent") != "agent"):
@@ -251,7 +253,8 @@ def _capability_gate_invocations(document: dict, sf):
 
 
 def release_gate_ownership_error(
-        document: dict, roles: dict | None = None, sf=None) -> str:
+        document: dict, roles: dict | None = None, sf=None,
+        capability_overrides: dict | None = None) -> str:
     """Validate final effective callable grants for every release-graph step."""
     if not isinstance(document, dict) or not isinstance(document.get("steps"), list):
         return ""
@@ -285,7 +288,8 @@ def release_gate_ownership_error(
     try:
         actual = set(_gate_invocations(document))
         role_grants = set(_role_gate_invocations(document, roles, sf))
-        capability_grants = set(_capability_gate_invocations(document, sf))
+        capability_grants = set(_capability_gate_invocations(
+            document, sf, capability_overrides))
     except ValueError as exc:
         return str(exc)
     if actual != expected or role_grants or capability_grants:
@@ -295,6 +299,26 @@ def release_gate_ownership_error(
         return ("release gate ownership mismatch; "
                 f"unexpected={extra}, missing={missing}")
     return ""
+
+
+def release_graph_uses_capability(document: dict, name: str) -> bool:
+    """Whether a release graph can bind ``name`` statically or dynamically."""
+    if not isinstance(document, dict) or not isinstance(document.get("steps"), list):
+        return False
+    ids = {step.get("id") for step in document["steps"]
+           if isinstance(step, dict)}
+    if not set(_REQUIRED_STEPS).issubset(ids):
+        return False
+    offers = document.get("capabilities", [])
+    if isinstance(offers, list) and name in offers:
+        return True
+    for step in document["steps"]:
+        if not isinstance(step, dict):
+            continue
+        declared = step.get("capability")
+        if declared == name or (isinstance(declared, list) and name in declared):
+            return True
+    return False
 
 
 def _source_shape(document: dict, roles: dict | None = None

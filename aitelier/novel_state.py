@@ -87,6 +87,28 @@ def bible_exists(ws) -> bool:
     return bible_dir(ws).is_dir() and (bible_dir(ws) / "overview.md").is_file()
 
 
+def git_toplevel(repo_root) -> Path | None:
+    """Return Git's own worktree root, accepting both directories and gitfiles."""
+    root = Path(repo_root)
+    if not root.is_absolute() or not root.is_dir():
+        return None
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=root,
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    try:
+        return Path(result.stdout.strip()).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def is_git_worktree_root(repo_root) -> bool:
+    root = Path(repo_root)
+    top = git_toplevel(root)
+    return top is not None and top == root.resolve()
+
+
 def git_commit(repo_root, message: str, subpath: str = "novel") -> bool:
     """Best-effort commit of the novel tree into the project's git repo, so the
     downloadable code repo carries per-chapter history. No-op (returns False) if
@@ -94,7 +116,7 @@ def git_commit(repo_root, message: str, subpath: str = "novel") -> bool:
     (the files are on disk; the immutable chapter records are the source of truth).
     Git identity comes from the container's AItelier gitconfig (ambient env)."""
     root = Path(repo_root)
-    if not (root / ".git").is_dir():
+    if not is_git_worktree_root(root):
         return False
     try:
         subprocess.run(["git", "add", subpath], cwd=root, check=True,
@@ -119,7 +141,7 @@ def git_tag_genesis(repo_root) -> bool:
     """Stamp the current HEAD as the reconcile baseline. Idempotent-hostile on
     purpose: a second tagging attempt fails (scaffold must run once)."""
     root = Path(repo_root)
-    if not (root / ".git").is_dir():
+    if not is_git_worktree_root(root):
         return False
     try:
         subprocess.run(["git", "tag", GENESIS_TAG], cwd=root, check=True,
@@ -134,7 +156,7 @@ def git_tag_genesis(repo_root) -> bool:
 
 def has_genesis_tag(repo_root) -> bool:
     root = Path(repo_root)
-    if not (root / ".git").is_dir():
+    if not is_git_worktree_root(root):
         return False
     r = subprocess.run(["git", "rev-parse", "-q", "--verify",
                         f"refs/tags/{GENESIS_TAG}"], cwd=root,

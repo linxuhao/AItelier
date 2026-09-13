@@ -10,7 +10,8 @@
 # design↔Red 的每一圈重修里被反复打扰（旧版 checkpoint 挂在 design 上就是如此）。
 #
 # 之后的一切世界设定演进都发生在 novel_chapter 的记账循环里（events.yaml 分录
-# → bible 余额），本图不再重跑；scaffold_bible 对已存在的 bible 直接报错。
+# → bible 余额），本图不再重跑；scaffold_bible 对已完成的 index/genesis 直接报错，
+# 但会恢复此前 normalization 后失败的 commit/tag freeze。
 
 name: "novel_init"
 description: "网络小说初始化：立意讨论 → 世界设定七件套 → scaffold 小说状态树"

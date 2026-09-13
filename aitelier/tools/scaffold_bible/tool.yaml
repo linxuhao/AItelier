@@ -5,12 +5,18 @@ description: >
   characters.yaml, threads.yaml, arcs.yaml} — and normalizes them into the
   runtime layout: splits characters.yaml into per-character files (then DELETES
   characters.yaml), fills mechanical defaults, creates chapters/, rebuilds
-  state/index.yaml, git-commits the tree and tags it `novel-genesis` as the
-  reconcile baseline. Pure transform, no LLM. Fails loud (raises) when
+  state/index.yaml, commits exactly the normalized novel tree and tags that
+  commit `novel-genesis` as the reconcile baseline. Git discovery uses
+  `git rev-parse`, so normal checkouts and linked worktrees are both supported.
+  Completion is returned only after `git show` can read the tagged baseline.
+  A commit/tag failure raises with the first Git error and leaves a private
+  recovery record in the worktree gitdir; retrying this same tool resumes the
+  freeze without regenerating or losing the bible. Pure transform, no LLM. Fails loud when
   overview.md / compass.md / characters.yaml are missing or invalid, when an arc
-  has no plot nodes, or when state/index.yaml already exists (runs once per
-  novel). Returns {scaffolded, characters, threads, arcs, committed,
-  genesis_tagged}. There is no bible_seed.json input.
+  has no plot nodes, when the exact target is not a Git worktree root, or when a
+  completed index/genesis already exists (runs once per novel). Never overwrites
+  an existing genesis tag. Returns {scaffolded, characters, threads, arcs,
+  committed, genesis_tagged, commit, recovered}. There is no bible_seed.json input.
 parameters:
   project_root:
     type: string

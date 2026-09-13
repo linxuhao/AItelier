@@ -48,15 +48,22 @@ SEED_FILES = {
 }
 
 
+def _init_git(path):
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True)
+
+
 def _seed(tmp_path, git=False):
     """Scaffold a novel into tmp via the real tool. Simulates the design agent
     having already written the raw bible into the repo (novel/bible/, mode:write +
     repo_apply); scaffold_bible then normalizes it. Optionally git-init so the
     commit path is exercised."""
-    if git:
-        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
-        subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
+    # scaffold_bible is a freeze operation: a non-Git directory must fail closed.
+    # All journey tests therefore use a real repo; ``git`` remains accepted for
+    # older callers that explicitly requested one.
+    _init_git(tmp_path)
     bible_out = tmp_path / "novel" / "bible"
     bible_out.mkdir(parents=True)
     for fname, content in SEED_FILES.items():
@@ -105,11 +112,13 @@ def test_scaffold_refuses_rescaffold_and_bad_seed(tmp_path):
         scaffold_bible(workspace_root=str(tmp_path))
     empty = tmp_path / "empty_ws"
     empty.mkdir()
+    _init_git(empty)
     with pytest.raises(ValueError, match="did not write"):
         scaffold_bible(workspace_root=str(empty))
 
 
 def test_scaffold_rejects_nodeless_arc_and_bad_gate(tmp_path):
+    _init_git(tmp_path)
     bible_out = tmp_path / "novel" / "bible"
     bible_out.mkdir(parents=True)
     files = dict(SEED_FILES)
@@ -331,7 +340,9 @@ def test_reconcile_detects_hand_edited_drift(tmp_path):
 
 
 def test_reconcile_skips_without_git(tmp_path):
-    _seed(tmp_path)  # no git → no novel-genesis tag
+    _seed(tmp_path)
+    subprocess.run(["git", "tag", "-d", ns.GENESIS_TAG], cwd=tmp_path,
+                   check=True, capture_output=True)
     out = ns.reconcile(tmp_path)
     assert len(out) == 1 and "reconcile skipped" in out[0]
 

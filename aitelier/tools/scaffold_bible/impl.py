@@ -15,12 +15,148 @@ This tool normalizes them into the runtime layout and freezes the baseline:
     ``novel-genesis`` git TAG as the reconcile baseline (no duplicated snapshot
     directory — git is the history)
 
-Deterministic, no LLM. Guards against a second run via state/index.yaml.
+Deterministic, no LLM. A completed index/tag blocks a second run; a private
+gitdir recovery record distinguishes a failed freeze and makes retry safe.
 """
 
+import json
+import os
+import subprocess
 from pathlib import Path
 
 from aitelier import novel_state as ns
+
+
+_RECOVERY_FILE = "aitelier-novel-genesis-recovery.json"
+
+
+class _GitFailure(RuntimeError):
+    pass
+
+
+def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+        raise _GitFailure(f"git {' '.join(args)}: {detail}")
+    return result
+
+
+def _git_context(root: Path) -> tuple[Path, Path]:
+    top = ns.git_toplevel(root)
+    if top is None:
+        raise ValueError(f"scaffold_bible: {root} is not a Git worktree")
+    if top != root.resolve():
+        raise ValueError(
+            f"scaffold_bible: target must be the Git worktree root {top}, got {root}"
+        )
+    source_checkout = Path(__file__).resolve().parents[3]
+    if root.resolve() == source_checkout:
+        raise ValueError("scaffold_bible: refusing to scaffold into the AItelier source checkout")
+    git_dir = Path(_git(root, "rev-parse", "--absolute-git-dir").stdout.strip()).resolve()
+    return top, git_dir
+
+
+def _read_recovery(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"scaffold_bible: unreadable recovery record {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"scaffold_bible: invalid recovery record {path}")
+    return value
+
+
+def _write_recovery(path: Path, value: dict) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _remember_failure(path: Path, record: dict, exc: Exception) -> ValueError:
+    record.setdefault("first_error", str(exc))
+    record["phase"] = "freeze_failed"
+    _write_recovery(path, record)
+    return ValueError(
+        "scaffold_bible: Git freeze failed; normalized bible was preserved and "
+        f"retrying novel_init/scaffold is safe. First Git error: {record['first_error']}"
+    )
+
+
+def _tag_commit(root: Path) -> str:
+    result = _git(root, "rev-parse", "-q", "--verify",
+                  f"refs/tags/{ns.GENESIS_TAG}^{{commit}}", check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _baseline_readable(root: Path, commit: str) -> bool:
+    if not commit:
+        return False
+    required = [
+        "novel/bible/overview.md", "novel/bible/compass.md",
+        "novel/bible/world.yaml", "novel/bible/pacing.yaml",
+        "novel/bible/threads.yaml", "novel/bible/arcs.yaml",
+        "novel/state/index.yaml",
+    ]
+    for rel in required:
+        if _git(root, "cat-file", "-e", f"{commit}:{rel}", check=False).returncode:
+            return False
+    characters = _git(
+        root, "-c", "core.quotepath=false", "ls-tree", "-r", "--name-only", commit,
+        "novel/bible/characters", check=False)
+    return (characters.returncode == 0
+            and any(line.endswith(".yaml") for line in characters.stdout.splitlines())
+            and _git(root, "cat-file", "-e",
+                     f"{commit}:novel/bible/characters.yaml", check=False).returncode != 0)
+
+
+def _freeze(root: Path, recovery_path: Path, record: dict, *, recovering: bool
+            ) -> tuple[str, bool]:
+    """Commit exactly novel/ and create a verified, never-overwritten genesis tag."""
+    try:
+        commit = str(record.get("commit") or "")
+        if commit and not _baseline_readable(root, commit):
+            raise _GitFailure(f"recorded genesis commit {commit} is not readable")
+        if not commit:
+            dirty = _git(root, "status", "--porcelain", "--", "novel").stdout
+            if dirty:
+                _git(root, "add", "--", "novel")
+                _git(root, "commit", "--only", "-m", "世界设定：初始化归一化",
+                     "--", "novel")
+                commit = _git(root, "rev-parse", "HEAD").stdout.strip()
+            else:
+                additions = _git(
+                    root, "log", "--format=%H", "--diff-filter=A", "--",
+                    "novel/state/index.yaml").stdout.splitlines()
+                candidates = [sha for sha in additions if _baseline_readable(root, sha)]
+                if len(candidates) != 1:
+                    raise _GitFailure(
+                        "cannot identify one normalized genesis commit from "
+                        f"novel/state/index.yaml (candidates={candidates})")
+                commit = candidates[0]
+            if not _baseline_readable(root, commit):
+                raise _GitFailure(
+                    f"commit {commit or '<missing>'} does not contain the normalized novel baseline")
+            record["commit"] = commit
+            record["phase"] = "committed"
+            _write_recovery(recovery_path, record)
+
+        existing = _tag_commit(root)
+        if existing and existing != commit:
+            raise _GitFailure(
+                f"tag {ns.GENESIS_TAG} already points to {existing}; refusing to overwrite it")
+        if not existing:
+            _git(root, "tag", ns.GENESIS_TAG, commit)
+        tagged = _tag_commit(root)
+        if tagged != commit or not _baseline_readable(root, tagged):
+            raise _GitFailure(
+                f"tag {ns.GENESIS_TAG} is not a readable baseline for commit {commit}")
+    except _GitFailure as exc:
+        raise _remember_failure(recovery_path, record, exc) from exc
+    recovery_path.unlink(missing_ok=True)
+    return commit, recovering
 
 
 def _require(path: Path, label: str) -> str:
@@ -42,13 +178,37 @@ def scaffold_bible(*, project_root: str = "", workspace_root: str = "",
             "scaffold_bible: project_root/workspace_root must be an absolute path "
             f"(got project_root={project_root!r}, workspace_root={workspace_root!r}) "
             "— refusing to resolve against the process CWD")
-    ws = Path(_base)
+    ws = Path(_base).resolve()
+    _top, git_dir = _git_context(ws)
+    recovery_path = git_dir / _RECOVERY_FILE
+    recovery = _read_recovery(recovery_path)
     bib = ns.bible_dir(ws)
 
-    if (ns.state_dir(ws) / "index.yaml").exists():
+    index_exists = (ns.state_dir(ws) / "index.yaml").exists()
+    if not recovery and (_tag_commit(ws) or index_exists):
         raise ValueError(
-            "scaffold_bible: novel already scaffolded (state/index.yaml exists) "
+            "scaffold_bible: novel already scaffolded (genesis tag or state/index.yaml exists) "
             "— novel_init runs once per novel; edit the bible through chapter runs.")
+
+    recovering_normalized = bool(recovery and not (bib / "characters.yaml").exists())
+    if recovering_normalized:
+        for rel in ("overview.md", "compass.md", "world.yaml", "pacing.yaml",
+                    "threads.yaml", "arcs.yaml"):
+            _require(bib / rel, f"novel/bible/{rel}")
+        characters = list((bib / "characters").glob("*.yaml"))
+        if not characters:
+            raise ValueError(
+                "scaffold_bible: recovery found no normalized character cards; "
+                "bible left untouched for inspection")
+        ns.chapters_dir(ws).mkdir(parents=True, exist_ok=True)
+        ns.rebuild_index(ws)
+        commit, recovered = _freeze(
+            ws, recovery_path, recovery, recovering=True)
+        return {"scaffolded": True, "characters": len(characters),
+                "threads": len(ns.load_yaml(bib / "threads.yaml", []) or []),
+                "arcs": len(ns.load_yaml(bib / "arcs.yaml", []) or []),
+                "committed": True, "genesis_tagged": True,
+                "commit": commit, "recovered": recovered}
 
     overview = _require(bib / "overview.md", "novel/bible/overview.md")
     if not overview.strip():
@@ -98,6 +258,12 @@ def scaffold_bible(*, project_root: str = "", workspace_root: str = "",
                     f"scaffold_bible: thread '{t.get('name')}' earliest_reveal "
                     f"points at unknown node {ga}/{gn}")
 
+    # Record recovery before the first mutation. A process interrupted anywhere
+    # in normalization can safely repeat the idempotent writes or rebuild the
+    # derived index from the already-split cards.
+    recovery = recovery or {"started": True, "phase": "normalizing"}
+    _write_recovery(recovery_path, recovery)
+
     # ── Phase 2: normalize + write ──
     for card in characters:
         card.setdefault("status", "alive")
@@ -123,11 +289,14 @@ def scaffold_bible(*, project_root: str = "", workspace_root: str = "",
     ns.dump_yaml(bib / "arcs.yaml", arcs)
 
     ns.chapters_dir(ws).mkdir(parents=True, exist_ok=True)
+    recovery["phase"] = "normalized"
+    _write_recovery(recovery_path, recovery)
     ns.rebuild_index(ws)
 
-    committed = ns.git_commit(ws, "世界设定：初始化归一化")
-    tagged = ns.git_tag_genesis(ws) if committed else False
+    commit, recovered = _freeze(
+        ws, recovery_path, recovery, recovering=False)
 
     return {"scaffolded": True, "characters": len(characters),
             "threads": len(threads), "arcs": len(arcs),
-            "committed": committed, "genesis_tagged": tagged}
+            "committed": True, "genesis_tagged": True,
+            "commit": commit, "recovered": recovered}

@@ -367,14 +367,18 @@ def migrate_release_document(document: dict, roles: dict | None = None) -> list[
     return changes
 
 
-def migrate_generated_release_gates(config_dir: Path) -> list[dict]:
+def migrate_generated_release_gates(
+        config_dir: Path, *, skip_configs: set[str] | None = None) -> list[dict]:
     """Atomically migrate each valid saved graph; isolate malformed files."""
     from skillflow.output_targets import atomic_json
 
     config_dir = Path(config_dir)
+    skip_configs = skip_configs or set()
     backup_dir = config_dir.parent / "migration_backups" / "release-fail-fast-v3"
     reports = []
     for path in sorted(config_dir.glob("gen_*.yaml")):
+        if path.stem in skip_configs:
+            continue
         try:
             original = path.read_bytes()
             document = yaml.safe_load(original)

@@ -540,6 +540,11 @@ def _validated_registration(config_name: str, yaml_text: str,
     if not isinstance(data, dict):
         raise ValueError("generated pipeline YAML is not a mapping")
     data["name"] = config_name
+    from core.release_gate_migration import release_gate_ownership_error
+    ownership_error = release_gate_ownership_error(
+        data, _effective_roles(sf, data, roles))
+    if ownership_error:
+        raise ValueError(ownership_error)
     graph = PipelineGraph._from_dict(data)
     # Derive the hints BEFORE registering. `_gen_hints` reads the graph's shape and
     # can raise on a malformed one (a generated `validation:` written as a mapping
@@ -1136,11 +1141,39 @@ def load_generated_configs(sf, registry) -> list[str]:
     registered. Invalid files are skipped (logged), never fatal. A companion
     ``<name>.roles.json`` (forge-generated pipelines) restores the real role
     prompts before the graph registers."""
+    config_dir = generated_configs_dir()
+    from core.release_gate_migration import release_gate_ownership_error
+    unsafe_release_configs = set()
+    for path in sorted(config_dir.glob(f"{GEN_PREFIX}*.yaml")):
+        try:
+            document = yaml.safe_load(path.read_bytes())
+            if release_gate_ownership_error(document):
+                unsafe_release_configs.add(path.stem)
+                continue
+            roles_path = path.with_suffix(".roles.json")
+            roles = None
+            if roles_path.exists():
+                try:
+                    roles = json.loads(roles_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, UnicodeError):
+                    unsafe_release_configs.add(path.stem)
+                    continue
+                if not isinstance(roles, dict):
+                    unsafe_release_configs.add(path.stem)
+                    continue
+            if release_gate_ownership_error(
+                    document, _effective_roles(sf, document, roles)):
+                unsafe_release_configs.add(path.stem)
+        except (UnicodeError, yaml.YAMLError):
+            continue
+
     from core.output_migration import migrate_generated_outputs
-    for migration in migrate_generated_outputs(generated_configs_dir()):
+    for migration in migrate_generated_outputs(
+            config_dir, skip_configs=unsafe_release_configs):
         _log.info("output target migration: %s (backup %s)", migration["path"], migration["backup"])
     from core.release_gate_migration import migrate_generated_release_gates
-    for migration in migrate_generated_release_gates(generated_configs_dir()):
+    for migration in migrate_generated_release_gates(
+            config_dir, skip_configs=unsafe_release_configs):
         _log.info("release fail-fast migration: %s (backup %s)",
                   migration["path"], migration["backup"])
     out: list[str] = []
@@ -1154,9 +1187,15 @@ def load_generated_configs(sf, registry) -> list[str]:
             if roles_file.exists():
                 import json
                 roles = json.loads(roles_file.read_text(encoding="utf-8"))
+            yaml_text = f.read_text(encoding="utf-8")
+            document = yaml.safe_load(yaml_text)
+            ownership_error = release_gate_ownership_error(
+                document, _effective_roles(sf, document, roles))
+            if ownership_error:
+                raise ValueError(ownership_error)
+            if roles is not None:
                 _register_forge_roles(sf, f.stem, roles)
-            _register_text(sf, registry, f.stem, f.read_text(encoding="utf-8"),
-                           roles=roles)
+            _register_text(sf, registry, f.stem, yaml_text, roles=roles)
             out.append(f.stem)
         except Exception as e:
             _log.warning("skipping invalid generated config %s: %s", f.name, e)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from skillflow import SkillFlow
+from skillflow import PipelineGraph, SkillFlow
 
 from core import pipeline_registry as pr
 from core.config_registry import ConfigRegistry
@@ -481,6 +481,142 @@ def test_register_text_rejects_malformed_release_grants_before_live_mutation(
     assert not sf.list_graphs()
     assert role not in sf.agent_registry
     assert registry.get("gen_dpe_state_game") is None
+
+
+def _release_source_and_role():
+    source = (Path(__file__).resolve().parents[2]
+              / "evidence/output-target-migration-20260911/generated-configs"
+              / "gen_dpe_state_game.yaml")
+    document = yaml.safe_load(source.read_text())
+    role = next(step["agent_config"] for step in document["steps"]
+                if step["id"] == "5_design")
+    return source, document, role
+
+
+@pytest.mark.parametrize("grants", [
+    ["run_tests"],
+    {"run_tests": {"nested": True}},
+])
+def test_register_text_rejects_omitted_polluted_live_role(
+        tmp_path, registry, grants):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    _source, document, role = _release_source_and_role()
+    sf.register_agent_config_from_dict(role, {
+        "model": "host", "tools": grants, "system_prompt": "polluted"})
+    before = copy.deepcopy(sf.agent_registry.get(role).to_dict())
+
+    with pytest.raises(ValueError, match="release gate"):
+        pr._register_text(
+            sf, registry, "gen_dpe_state_game",
+            yaml.safe_dump(document, sort_keys=False), roles={})
+
+    assert not any(row["name"] == "gen_dpe_state_game"
+                   for row in sf.list_graphs())
+    assert sf.agent_registry.get(role).to_dict() == before
+    assert registry.get("gen_dpe_state_game") is None
+
+
+def test_register_text_reuses_legitimate_benign_live_role(tmp_path, registry):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    _source, document, role = _release_source_and_role()
+    sf.register_agent_config_from_dict(role, {
+        "model": "host", "tools": ["read_file"],
+        "system_prompt": "known benign"})
+    before = copy.deepcopy(sf.agent_registry.get(role).to_dict())
+
+    pr._register_text(
+        sf, registry, "gen_dpe_state_game",
+        yaml.safe_dump(document, sort_keys=False), roles={})
+
+    assert sf.agent_registry.get(role).to_dict() == before
+    assert registry.get("gen_dpe_state_game") is not None
+
+
+def _old_same_name_pipeline(tmp_path, registry, gdir, grants):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    source, _document, role = _release_source_and_role()
+    name = "gen_dpe_state_game"
+    sf.register_agent_config_from_dict(role, {
+        "model": "host", "tools": grants, "system_prompt": "old role"})
+    old = PipelineGraph._from_dict({
+        "name": name, "begin": "legacy",
+        "steps": [{"id": "legacy", "agent_config": role}],
+    })
+    sf.register_graph(old)
+    registry.register_one(sf, name)
+    gdir.mkdir(parents=True)
+    yaml_file = gdir / f"{name}.yaml"
+    yaml_file.write_bytes(source.read_bytes())
+    return sf, name, role, yaml_file
+
+
+@pytest.mark.parametrize("grants", [
+    ["run_tests"],
+    {"run_tests": {"nested": True}},
+])
+def test_reload_rejects_omitted_polluted_role_and_preserves_live_state_and_file(
+        tmp_path, registry, gdir, grants):
+    sf, name, role, yaml_file = _old_same_name_pipeline(
+        tmp_path, registry, gdir, grants)
+    before = _live_reload_snapshot(sf, registry, name, role)
+    yaml_bytes = yaml_file.read_bytes()
+
+    result = pr.reload_generated_pipeline(sf, registry, name)
+
+    assert "release gate" in result["error"]
+    assert yaml_file.read_bytes() == yaml_bytes
+    assert not yaml_file.with_suffix(".roles.json").exists()
+    _assert_live_reload_snapshot(sf, registry, name, role, before)
+
+
+def test_reload_reuses_omitted_benign_live_role(tmp_path, registry, gdir):
+    sf, name, role, _yaml_file = _old_same_name_pipeline(
+        tmp_path, registry, gdir, ["read_file"])
+    before_role = copy.deepcopy(sf.agent_registry.get(role).to_dict())
+
+    assert pr.reload_generated_pipeline(sf, registry, name) == {
+        "config_name": name}
+    assert sf.agent_registry.get(role).to_dict() == before_role
+    assert "5_test" in {step.id for step in sf._resolvers[name].graph.steps}
+
+
+@pytest.mark.parametrize("grants", [
+    ["run_tests"],
+    {"run_tests": {"nested": True}},
+])
+def test_boot_skips_migration_for_omitted_polluted_live_role(
+        tmp_path, registry, gdir, grants):
+    sf, name, role, yaml_file = _old_same_name_pipeline(
+        tmp_path, registry, gdir, grants)
+    before = _live_reload_snapshot(sf, registry, name, role)
+    yaml_bytes = yaml_file.read_bytes()
+
+    assert pr.load_generated_configs(sf, registry) == []
+    assert yaml_file.read_bytes() == yaml_bytes
+    assert not yaml_file.with_suffix(".roles.json").exists()
+    _assert_live_reload_snapshot(sf, registry, name, role, before)
+
+
+@pytest.mark.parametrize("grants", [
+    ["run_tests"],
+    {"run_tests": {"nested": True}},
+])
+def test_forge_update_rejects_omitted_polluted_role_before_publication(
+        tmp_path, registry, gdir, grants):
+    sf, name, role, _yaml_file = _old_same_name_pipeline(
+        tmp_path, registry, gdir, grants)
+    before = _live_reload_snapshot(sf, registry, name, role)
+    run_id = sf.create_run("pipeline_forge", {"project_id": "forge-update"})
+    emit = sf._workspace.get_step_dir(
+        "forge-update", "pipeline_forge", "emit_graph")
+    emit.mkdir(parents=True, exist_ok=True)
+    source, _document, _role = _release_source_and_role()
+    (emit / "pipeline.yaml").write_bytes(source.read_bytes())
+
+    result = pr.register_forge_pipeline(sf, registry, run_id, "dpe state game")
+
+    assert "release gate" in result["error"]
+    _assert_live_reload_snapshot(sf, registry, name, role, before)
 
 
 def _live_release_reload(tmp_path, registry, gdir):

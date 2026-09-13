@@ -1,9 +1,8 @@
 # agent_configs/novel_init.yaml — novel_init 图的角色配置。
-# 初始化是一次性的慢变层（错了污染全书）。
-# 2026-09-13: 三个角色从 smart 迁到专用的散文路由。smart 是按编程/推理选的
-# （ark/deepseek-v4-pro，effort 钉死 max），实测该配置在真实章节任务上把整个
-# max_tokens 烧在推理上、正文返回空串。设定评审走 novel_alt 而非 novel，是为了
-# 不让同一个模型评自己写的设定集——详见 model_routes.json 的 _novel_note。
+# 初始化是一次性的慢变层（错了污染全书）。brainstormer/designer 使用 prose 路由
+# novel，design_reviewer 使用独立的 novel_alt；角色不拥有供应商、端点或 effort。
+# tracked model_routes.example.json 声明公开默认值，部署方可在 gitignored
+# model_routes.json 中替换端点，但必须保留这两个内部别名。
 
 novel_brainstormer:
   model: "novel"

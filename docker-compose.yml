@@ -39,6 +39,9 @@ services:
       # never 127.0.0.1, so the app-level localhost guard must be relaxed.
       # Put Cloudflare Access (or equivalent auth) in front of the published port.
       AITELIER_ALLOW_EXTERNAL: "1"
+      # MCP Host allowlist is operator-configurable; `:*` is FastMCP's official
+      # wildcard-port form, so the public bare host and explicit ports pass.
+      AITELIER_MCP_ALLOWED_HOSTS: "${AITELIER_MCP_ALLOWED_HOSTS:-aitelier.linxuhao.app,aitelier.linxuhao.app:*}"
       # How many DIFFERENT projects the poller may advance per tick. The poll
       # takes this many active candidates, skips the ones whose per-project tick
       # lock is held, and asyncio.gathers the rest — so this is the real

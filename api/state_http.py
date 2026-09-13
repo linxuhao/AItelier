@@ -3,7 +3,7 @@ import inspect
 from functools import partial
 from typing import Annotated, Literal
 from anyio import to_thread
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from core.state_commands import READ_REQUESTS, WRITE_REQUESTS, describe, execute
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 
@@ -24,6 +24,23 @@ def create_state_router(service_dependency, access_dependency):
     @router.get("/schema")
     def schema():
         return describe()
+
+
+    @router.post("/director-messages/{action}")
+    async def director_message(action: str, request: Request,
+                               service=Depends(service_dependency)):
+        """Closed v1 REST adapter; router authorization runs before body parsing."""
+        from core.director_messaging_protocol import ACTIONS, DirectorMessageError
+        if action not in ACTIONS:
+            return DirectorMessageError("invalid_request").as_dict()
+        try:
+            arguments = await request.json()
+        except Exception:
+            return DirectorMessageError("invalid_request").as_dict()
+        if not isinstance(arguments, dict):
+            return DirectorMessageError("invalid_request").as_dict()
+        return execute(service, action, arguments,
+                       allow_write=action != "list_director_messages")
 
 
     @router.get("/projects")

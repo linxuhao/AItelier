@@ -64,6 +64,8 @@ class StateService:
         self.runtime_factory = runtime_factory
         from core.state_portfolio import StatePortfolio
         self.portfolio = StatePortfolio(self.store, actor)
+        from core.director_messaging import SQLiteDirectorMessaging
+        self.director_messages = SQLiteDirectorMessaging(self.store, actor)
 
     async def wait_for_state_change(self, project_id, after=0, node_keys=None, attempt_ids=None,
                                     note_after_revision=None, filter_mode="all", actionable_only=True,

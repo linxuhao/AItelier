@@ -66,7 +66,8 @@ def scan(store, project_id, after, node_keys, attempt_ids, note_after_revision,
             filter_args.append(note_after_revision)
         if filters:
             joiner = " OR " if filter_mode == "any" else " AND "
-            clauses.append("(" + joiner.join(filters) + ")")
+            clauses.append("(event_type='director_message_received' OR (" +
+                           joiner.join(filters) + "))")
             args.extend(filter_args)
         if actionable_only:
             clauses.append("event_type NOT IN (" + ",".join("?" for _ in _QUIET) + ")")

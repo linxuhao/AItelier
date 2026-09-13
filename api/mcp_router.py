@@ -211,6 +211,14 @@ def _wrap(mcp: FastMCP, fn: Callable, name: str) -> Callable:
         try:
             _authorize(name, mcp.get_context())
         except ToolDenied as e:
+            action = kwargs.get("action")
+            if action is None and args:
+                action = args[0]
+            if name in {"state_graph_read", "state_graph_write"} and action in {
+                    "send_director_message", "list_director_messages",
+                    "acknowledge_director_message", "resolve_director_message"}:
+                from core.director_messaging_protocol import DirectorMessageError
+                return {"result": DirectorMessageError("unauthorized").as_dict()}
             if name in {"state_graph_read", "state_graph_write"}:
                 from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
                 raise MCPToolError(f"denied: {e}") from e

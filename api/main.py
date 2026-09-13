@@ -384,6 +384,12 @@ async def write_gate(request: Request, call_next):
     code = authz.write_denial_reason(request)
     if not code:
         return await call_next(request)
+    state_action = request.url.path.rsplit("/", 1)[-1]
+    if request.url.path.startswith("/api/state/") and state_action in {
+            "send_director_message", "list_director_messages",
+            "acknowledge_director_message", "resolve_director_message"}:
+        from core.director_messaging_protocol import DirectorMessageError
+        return JSONResponse(DirectorMessageError("unauthorized").as_dict(), status_code=403)
     return JSONResponse(authz.denial_body(code), status_code=403)
 
 

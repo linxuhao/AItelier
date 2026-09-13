@@ -81,6 +81,28 @@ class WaitForStateChange(Project):
     limit: int = Field(default=100, ge=1, le=500)
 
 
+class SendDirectorMessage(Request):
+    sender_project_id: str
+    director_identity: str
+    request_key: str
+    subject: str
+    body: str
+    target_project_id: str | None = None
+    broadcast: bool = False
+    reply_to_delivery_id: str | None = None
+
+
+class ListDirectorMessages(Project):
+    after: int = 0
+    limit: int = 100
+
+
+class TransitionDirectorMessage(Project):
+    delivery_id: str
+    expected_version: int
+    request_key: str
+
+
 class DriverNote(Project):
     pass
 
@@ -337,6 +359,7 @@ READ_REQUESTS = {
     "project_run_summary": Project,
     "project_attempts": ProjectAttempts, "references": References,
     "run_owners": RunOwner, "attempt_detail": Attempt,
+    "list_director_messages": ListDirectorMessages,
 }
 WRITE_REQUESTS = {
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
@@ -349,12 +372,15 @@ WRITE_REQUESTS = {
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
     "start_external_attempt": StartExternalAttempt, "report_external_attempt": ExternalObservation,
     "update_driver_note": UpdateDriverNote,
+    "send_director_message": SendDirectorMessage,
+    "acknowledge_director_message": TransitionDirectorMessage,
+    "resolve_director_message": TransitionDirectorMessage,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 
 
 def describe() -> dict:
-    return {"architecture": "State DAG owns facts; optional SkillFlow or an external harness owns execution. Completion is only a candidate.",
+    return {"architecture": "State DAG owns facts; a separately authorized execution transport owns execution. Completion is only a candidate.",
             "trust": "Evidence is an authorized verifier attestation, not an automatic guarantee of truth.",
             "operations": {name: {"mutates": name in WRITE_REQUESTS, "arguments": model.model_json_schema()}
                            for name, model in REQUESTS.items()}}
@@ -367,9 +393,15 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise StateGraphError("mutating action is not available on the read surface")
     if not isinstance(arguments, dict):
         raise StateGraphError("arguments must be an object")
+    director_action = action in {
+        "send_director_message", "list_director_messages",
+        "acknowledge_director_message", "resolve_director_message"}
     try:
         args = REQUESTS[action].model_validate(arguments).model_dump()
     except ValidationError as exc:
+        if director_action:
+            from core.director_messaging_protocol import DirectorMessageError
+            return DirectorMessageError("invalid_request").as_dict()
         # Bounded validation errors without echoing whole inputs into logs.
         details = [{"field": ".".join(map(str, e["loc"])), "error": e["msg"]} for e in exc.errors(include_input=False)[:10]]
         raise StateGraphError(str(details)) from exc
@@ -404,8 +436,19 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "refresh_project": service.refresh_project,
         "start_external_attempt": service.start_external_attempt, "report_external_attempt": service.report_external_attempt,
         "update_driver_note": service.driver_notes.update,
+        "send_director_message": service.director_messages.send_director_message,
+        "list_director_messages": service.director_messages.list_director_messages,
+        "acknowledge_director_message": service.director_messages.acknowledge_director_message,
+        "resolve_director_message": service.director_messages.resolve_director_message,
     }
-    return handlers[action](**args)
+    try:
+        return handlers[action](**args)
+    except Exception as exc:
+        if director_action:
+            from core.director_messaging_protocol import DirectorMessageError
+            if isinstance(exc, DirectorMessageError):
+                return exc.as_dict()
+        raise
 
 
 # Compact entry points for the internal driver. Exact operation schemas are
@@ -416,7 +459,7 @@ DRIVER_TOOL_DEFINITIONS = [
     {"type": "function", "function": {"name": "state_graph_read", "description": "Read persistent state projects, node context, dependency frontier, attempts or evidence. This does not start workflows or certify completion.",
      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": list(READ_REQUESTS)}, "arguments": {"type": "object"}},
                     "required": ["action", "arguments"], "additionalProperties": False}}},
-    {"type": "function", "function": {"name": "state_graph_write", "description": "Manage State DAG goals and SkillFlow/external harness attempts using state_graph_help contracts. Start only ready nodes, preserve checkpoints, and never invent passing evidence. Workflow completion is not verification.",
+    {"type": "function", "function": {"name": "state_graph_write", "description": "Manage State DAG goals and workflow-backed or externally observed attempts using state_graph_help contracts. Start only ready nodes, preserve checkpoints, and never invent passing evidence. Workflow completion is not verification.",
      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": list(WRITE_REQUESTS)}, "arguments": {"type": "object"}},
                     "required": ["action", "arguments"], "additionalProperties": False}}},
 ]

@@ -506,6 +506,13 @@ class StateAttempts:
             self._eligible_candidate(conn, attempt)
             if attempt["artifact_ref"] != artifact:
                 raise StateConflict("evidence describes a different artifact")
+            candidate_report = conn.execute(
+                "SELECT attempt_id,observation_id FROM state_external_observations "
+                "WHERE report_sha256=? LIMIT 1", (report_sha256,)).fetchone()
+            if candidate_report:
+                raise StateConflict(
+                    "verifier evidence must have a report independent of every external "
+                    "candidate observation; produce a fresh review report")
             ctx = json.loads(attempt["context_json"])
             checks = {c["id"]: c for c in ctx["acceptance"]}
             if criterion_id not in checks:

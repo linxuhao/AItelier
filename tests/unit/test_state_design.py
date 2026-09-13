@@ -212,7 +212,7 @@ def test_old_receipt_remains_historical_after_explicit_rebinding(service):
     service.report_external_attempt(a['attempt_id'], 'done', 0, a['context_hash'], 'candidate',
         'reports/result.json', 'b' * 64, True, 'a' * 64, 'sha256')
     service.attempts.record_evidence(a['attempt_id'], 'e', 'behavior', 'pass', 'a' * 64,
-        'reports/test.json', 'b' * 64, 'reviewer')
+        'reports/test.json', 'c' * 64, 'reviewer')
     receipt = service.attempts.verify('game', 'work', 2, a['attempt_id'], 'reviewer')
     assert json.loads(receipt['provenance_json'])['design'] == {
         'baseline_id': 'b1', 'manifest_hash': a['context']['design_context']['manifest_hash'],

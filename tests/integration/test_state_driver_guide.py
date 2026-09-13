@@ -179,3 +179,62 @@ def test_mcp_driver_notes_are_authorized_project_scoped_and_cas_protected(tmp_pa
         assert rest.json()["temporary"].startswith("release handoff release")
         foreign = client.get("/api/state/projects/wuxia-myth/driver-note", headers=headers)
         assert foreign.status_code == 200 and foreign.json()["revision"] == 0
+
+
+def test_project_scoped_note_cas_race_reloads_before_submit_and_redacts_identity(tmp_path):
+    """Two isolated directors must lose/reload/submit against one revision."""
+    from concurrent.futures import ThreadPoolExecutor
+    from core.state_database import StateDatabase
+    from core.state_service import StateService
+    from core.state_graph import StateConflict
+
+    db = StateDatabase(str(tmp_path / "handoff.sqlite"))
+    first = StateService(db, actor="Authorization: Bearer synthetic-first")
+    second = StateService(db, actor="Authorization: Bearer synthetic-second")
+    first.create_project("project-a", "Project A")
+    first.create_project("project-b", "Project B")
+    for service in (first, second):
+        # Construction on the same isolated DB is intentional: this models
+        # two successors sharing State while project facts remain scoped.
+        assert service.driver_notes.get("project-a")["revision"] == 0
+    payload = {
+        "section": "temporary",
+        "expected_revision": 0,
+        "operation": "replace",
+    }
+
+    def submit(service, director_identity, content):
+        try:
+            return ("won", service.driver_notes.update(
+                "project-a", content=content, director_identity=director_identity, **payload))
+        except StateConflict:
+            current = service.driver_notes.get("project-a")
+            return ("lost", current)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(
+            lambda args: submit(*args),
+            ((first, "director_secret=synthetic-first", "first handoff"),
+             (second, "director_secret=synthetic-second", "second handoff")),
+        ))
+    assert {outcome[0] for outcome in outcomes} == {"won", "lost"}
+    winner = next(value for kind, value in outcomes if kind == "won")
+    loser_read = next(value for kind, value in outcomes if kind == "lost")
+    assert loser_read["revision"] == winner["revision"] == 1
+    deliberate = second if outcomes[1][0] == "lost" else first
+    committed = deliberate.driver_notes.update(
+        "project-a", section="temporary", content="reloaded handoff",
+        expected_revision=loser_read["revision"],
+        director_identity="director_secret=synthetic-retry", operation="append")
+    assert committed["revision"] == 2
+
+    assert first.driver_notes.get("project-b")["revision"] == 0
+    search = first.driver_notes.search(
+        "project-a", query="handoff", excerpt_chars=64)
+    assert search["entries"]
+    serialized = json.dumps(search, ensure_ascii=False)
+    assert "synthetic-first" not in serialized
+    assert "secret-first" not in serialized
+    assert all(entry["actor"] == "Authorization: Bearer [REDACTED]" for entry in search["entries"])
+    assert all("synthetic-" not in entry["director_identity"] for entry in search["entries"])
+    assert first.driver_notes.search("project-b", query="handoff")["entries"] == []

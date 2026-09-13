@@ -107,14 +107,23 @@ class _ScriptedNativeAgent:
             if message.get("role") == "tool"
             and "MIDDLE-UNIQUE" in str(message.get("content"))
         )
-        if "edit" not in called:
+        if called.count("edit") == 0:
+            self.emitted.append("edit_miss")
+            return _call("edit", file="report.md",
+                         old_str="MIDDLE-UNIQUE-WRONG-value",
+                         new_str="MIDDLE-UNIQUE-🌙-value")
+        if called.count("read") == 0:
+            self.emitted.append("read_raw")
+            return _call("read", path="report.md", source="self", raw=True,
+                         start_line=590, end_line=610)
+        if called.count("edit") == 1:
             exact = json.loads(recalled)["content"]
             assert "MIDDLE-UNIQUE-🙂-value" in exact
             self.emitted.append("edit")
             return _call("edit", file="report.md",
                          old_str="MIDDLE-UNIQUE-🙂-value",
                          new_str="MIDDLE-UNIQUE-🌙-value")
-        if "read" not in called:
+        if called.count("read") == 1:
             self.emitted.append("read")
             return _call("read", path="missing/target.md", source="self", raw=True)
         ambiguity = next(
@@ -140,7 +149,7 @@ def test_native_loop_projects_large_artifact_and_recovers_exact_middle(tmp_path,
         is_native=lambda _name: True,
         get_native_agent=lambda _name: agent,
         get_max_retries=lambda _name: 1,
-        get_max_tool_turns=lambda _name: 8,
+        get_max_tool_turns=lambda _name: 10,
         get_fallback_to_json=lambda _name: False,
     )
     engine.assembler = PromptAssembler()
@@ -184,7 +193,8 @@ def test_native_loop_projects_large_artifact_and_recovers_exact_middle(tmp_path,
         original.index(middle.encode()) + len("MIDDLE-UNIQUE-🌙-value".encode()):
     ] == original[original.index(middle.encode()) + len(middle.encode()):]
     assert agent.emitted == [
-        "artifact_dump", "recall_observation", "edit", "read", "finish_step"
+        "artifact_dump", "recall_observation", "edit_miss", "read_raw", "edit",
+        "read", "finish_step"
     ]
     assert any(
         event == "prompt_projection" and payload["original_chars"] > 16 * 1024

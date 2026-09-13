@@ -1,8 +1,12 @@
 # agent_configs/novel_init.yaml — novel_init 图的角色配置。
-# 初始化是一次性的慢变层（错了污染全书），三个角色全部用 pro。
+# 初始化是一次性的慢变层（错了污染全书）。
+# 2026-09-13: 三个角色从 smart 迁到专用的散文路由。smart 是按编程/推理选的
+# （ark/deepseek-v4-pro，effort 钉死 max），实测该配置在真实章节任务上把整个
+# max_tokens 烧在推理上、正文返回空串。设定评审走 novel_alt 而非 novel，是为了
+# 不让同一个模型评自己写的设定集——详见 model_routes.json 的 _novel_note。
 
 novel_brainstormer:
-  model: "smart"
+  model: "novel"
   template: "novel_brainstorm.md"
   tools: []
   native_tool_calling: true
@@ -11,7 +15,7 @@ novel_brainstormer:
     enable: true
 
 novel_designer:
-  model: "smart"
+  model: "novel"
   template: "novel_design.md"
   tools: ["apply_patch"]
   # bible_seed.json is a large single-file write; native tool-calling needs
@@ -24,7 +28,7 @@ novel_designer:
     enable: true
 
 novel_design_reviewer:
-  model: "smart"
+  model: "novel_alt"
   template: "novel_design_review.md"
   tools: []
   native_tool_calling: true

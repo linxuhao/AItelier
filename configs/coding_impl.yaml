@@ -87,14 +87,22 @@ steps:
     # Must exceed run_tests' worst case (venv + deps + pytest wall) so a slow
     # run isn't reclaimed mid-flight.
     #
-    # 1200 was SHORTER THAN THE GATE IT WAS TIMING for a Godot project.
+    # 1200 was SHORTER THAN THE GATE IT TIMES for a Godot project, and this
+    # raise is a margin, NOT a repair of an observed failure -- the difference
+    # matters, so both halves are recorded.
+    #
     # Measured 2026-09-13 on wuxia-commercial-batch-next: the project's own
     # run_tests.sh drives tools/godot_gate.py -> compile (~12 s) + the authored
-    # 172-scenario play-test (~1995 s exclusive). Every claim of this step
-    # therefore abandoned a gate that was still rendering, while the sidecar
-    # kept its render lock -- so the report was never delivered AND the retry
-    # queued behind a run nobody was waiting for. That is the same shape
-    # godot_gate.py's own 1800->3600 correction documents at its /playtest call.
+    # 172-scenario play-test (~1995 s exclusive), i.e. the budget was smaller
+    # than its own subject. PREDICTED consequence: a claim abandoned mid-render
+    # while the sidecar still holds its render lock, so the report never lands
+    # and the retry queues behind a run nobody awaits -- the shape godot_gate.py
+    # documents at its own 1800->3600 correction.
+    # OBSERVED, same day, run 6f75202d: the step ran ~2050 s past the 1200 s
+    # budget and COMPLETED. No reclaim happened. So the budget is not enforced
+    # as a hard mid-flight reclaim on this path, and the pathology above stayed
+    # theoretical. Keep the larger ceiling (a budget below its subject is still
+    # wrong on its face) but do not cite it as a fixed defect.
     # 4200 is a ceiling for pathology, not an estimate: the gate's internal
     # /playtest timeout is already 3600, so a step that outlives 4200 s is
     # wedged rather than slow.

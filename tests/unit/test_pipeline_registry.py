@@ -355,6 +355,91 @@ def test_load_generated_configs_on_boot(sf, registry, gdir):
     assert registry.get("gen_boot_demo") is not None
 
 
+def _forge_run_for_release_graph(tmp_path):
+    import skillflow as _sk
+    from skillflow import PipelineGraph
+    from skillflow.tool_loader import ToolLoader
+
+    loader = ToolLoader(Path(_sk.__file__).parent / "tools",
+                        Path(__file__).resolve().parents[2] / "aitelier" / "tools")
+    sf = SkillFlow(str(tmp_path / "sf.db"), tool_loader=loader,
+                   workspace_base=str(tmp_path / "ws"),
+                   projects_base=str(tmp_path / "projects"))
+    forge = {
+        "name": "pipeline_forge", "begin": "done",
+        "steps": [{"id": "done", "step_type": "gate",
+                   "transitions": [{"to": None}]}],
+    }
+    sf.register_graph(PipelineGraph._from_dict(forge))
+    return sf, sf.create_run("pipeline_forge", {"project_id": "p"})
+
+
+@pytest.mark.parametrize("surface", ["extra_tools", "role_tools"])
+def test_forge_rejects_alternate_release_gate_before_live_or_file_mutation(
+        tmp_path, registry, gdir, surface):
+    sf, run_id = _forge_run_for_release_graph(tmp_path)
+    config_name = pr.config_name_for("dpe state game")
+    emit = sf._workspace.get_step_dir("p", "pipeline_forge", "emit_graph")
+    emit.mkdir(parents=True, exist_ok=True)
+    source = (Path(__file__).resolve().parents[2]
+              / "evidence/output-target-migration-20260911/generated-configs"
+              / "gen_dpe_state_game.yaml")
+    document = yaml.safe_load(source.read_text())
+    if surface == "extra_tools":
+        next(step for step in document["steps"]
+             if step["id"] == "5_design").setdefault("config", {})[
+                 "extra_tools"] = ["run_tests"]
+    (emit / "pipeline.yaml").write_text(
+        yaml.safe_dump(document, sort_keys=False))
+    (emit / "role_table.yaml").write_text(yaml.safe_dump({
+        "architect": {"tools": ["run_tests"] if surface == "role_tools" else [],
+                      "template": "templates/architect.md"},
+    }))
+    (emit / "templates").mkdir()
+    (emit / "templates" / "architect.md").write_text("ARCHITECT")
+
+    result = pr.register_forge_pipeline(sf, registry, run_id, "dpe state game")
+
+    assert "release gate ownership mismatch" in result["error"]
+    assert not any(row["name"] == config_name for row in sf.list_graphs())
+    assert f"{config_name}__architect" not in sf.agent_registry
+    assert registry.get(config_name) is None
+    assert not gdir.exists()
+
+
+def test_boot_rejects_paired_release_gate_role_before_migration_or_registration(
+        sf, registry, gdir):
+    gdir.mkdir(parents=True)
+    source = (Path(__file__).resolve().parents[2]
+              / "evidence/output-target-migration-20260911/generated-configs"
+              / "gen_dpe_state_game.yaml")
+    target = gdir / "gen_dpe_state_game.yaml"
+    target.write_bytes(source.read_bytes())
+    original = target.read_bytes()
+    document = yaml.safe_load(original)
+    role = next(step["agent_config"] for step in document["steps"]
+                if step["id"] == "5_design")
+    role_file = target.with_suffix(".roles.json")
+    role_file.write_text(json.dumps({role: {"tools": ["run_tests"]}}))
+    original_role = role_file.read_bytes()
+    valid = gdir / "gen_valid_sibling.yaml"
+    valid_document = yaml.safe_load(source.read_text())
+    for step in valid_document["steps"]:
+        if isinstance(step.get("agent_config"), str):
+            step["agent_config"] = step["agent_config"].replace(
+                "gen_dpe_state_game__", "gen_valid_sibling__")
+    valid.write_text(yaml.safe_dump(valid_document, sort_keys=False))
+    valid_original = valid.read_bytes()
+
+    assert pr.load_generated_configs(sf, registry) == ["gen_valid_sibling"]
+    assert target.read_bytes() == original
+    assert role_file.read_bytes() == original_role
+    assert role not in sf.agent_registry
+    assert registry.get("gen_dpe_state_game") is None
+    assert valid.read_bytes() != valid_original
+    assert registry.get("gen_valid_sibling") is not None
+
+
 def test_no_output_yaml_returns_error(sf, registry, gdir, monkeypatch):
     _patch_output(monkeypatch, None)
     res = pr.register_generated_pipeline(sf, registry, "x", "whatever")

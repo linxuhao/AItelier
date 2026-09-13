@@ -107,13 +107,76 @@ def _gate_invocations(value, path=()):
             if (key in {"tool", "tool_name"} and isinstance(child, str)
                     and child in _GATE_TOOLS):
                 yield child_path, child
+            if key == "extra_tools" and isinstance(child, list):
+                for index, tool in enumerate(child):
+                    if isinstance(tool, str) and tool in _GATE_TOOLS:
+                        yield child_path + (index,), tool
             yield from _gate_invocations(child, child_path)
     elif isinstance(value, list):
         for index, child in enumerate(value):
             yield from _gate_invocations(child, path + (index,))
 
 
-def _source_shape(document: dict) -> tuple[dict[str, dict], bool] | None:
+def _role_gate_invocations(document: dict, roles: dict | None):
+    """Yield gate tools granted by paired roles used by this graph."""
+    if not isinstance(roles, dict):
+        return
+    used = {
+        step.get("agent_config")
+        for step in document.get("steps", [])
+        if isinstance(step, dict) and isinstance(step.get("agent_config"), str)
+    }
+    for role in sorted(used):
+        config = roles.get(role)
+        tools = config.get("tools") if isinstance(config, dict) else None
+        if not isinstance(tools, list):
+            continue
+        for index, tool in enumerate(tools):
+            if isinstance(tool, str) and tool in _GATE_TOOLS:
+                yield ("roles", role, "tools", index), tool
+
+
+def release_gate_ownership_error(document: dict, roles: dict | None = None) -> str:
+    """Return why a release-shaped graph has an unsafe executable gate owner."""
+    if not isinstance(document, dict) or not isinstance(document.get("steps"), list):
+        return ""
+    raw_steps = document["steps"]
+    if not all(isinstance(step, dict) and isinstance(step.get("id"), str)
+               and step["id"] for step in raw_steps):
+        return ""
+    ids = [step["id"] for step in raw_steps]
+    if not set(_REQUIRED_STEPS).issubset(ids):
+        return ""
+    if len(ids) != len(set(ids)):
+        return "release gate graph has duplicate step ids"
+    steps = {step["id"]: step for step in raw_steps}
+    wrong_types = [
+        step_id for step_id, (step_type, tool) in _REQUIRED_STEPS.items()
+        if (steps[step_id].get("step_type") != step_type
+            or (tool is not None and steps[step_id].get("tool_name") != tool))
+    ]
+    if wrong_types:
+        return f"release gate steps have wrong type/tool: {wrong_types}"
+
+    indices = {step["id"]: index for index, step in enumerate(raw_steps)}
+    expected = {
+        (("steps", indices["5_test"], "tool_name"), "run_tests"),
+        (("steps", indices["5_compile"], "tool_name"), "godot_compile"),
+        (("steps", indices["5_vision"], "tool_name"), "godot_vision"),
+        (("steps", indices["5_final_test"], "tool_name"), "run_tests"),
+    }
+    actual = set(_gate_invocations(document))
+    role_grants = set(_role_gate_invocations(document, roles))
+    if actual != expected or role_grants:
+        extra = sorted(actual - expected) + sorted(role_grants)
+        missing = sorted(expected - actual)
+        return ("release gate ownership mismatch; "
+                f"unexpected={extra}, missing={missing}")
+    return ""
+
+
+def _source_shape(document: dict, roles: dict | None = None
+                  ) -> tuple[dict[str, dict], bool] | None:
     """Accept only the complete original, r2, or r3 generated-game topology."""
     if not isinstance(document, dict) or not isinstance(document.get("steps"), list):
         return None
@@ -127,19 +190,7 @@ def _source_shape(document: dict) -> tuple[dict[str, dict], bool] | None:
     steps = {step["id"]: step for step in raw_steps}
     if any(step_id not in steps for step_id in _REQUIRED_STEPS):
         return None
-    if any(steps[step_id].get("step_type") != step_type
-           or (tool is not None and steps[step_id].get("tool_name") != tool)
-           for step_id, (step_type, tool) in _REQUIRED_STEPS.items()):
-        return None
-
-    indices = {step["id"]: index for index, step in enumerate(raw_steps)}
-    expected_invocations = {
-        (("steps", indices["5_test"], "tool_name"), "run_tests"),
-        (("steps", indices["5_compile"], "tool_name"), "godot_compile"),
-        (("steps", indices["5_vision"], "tool_name"), "godot_vision"),
-        (("steps", indices["5_final_test"], "tool_name"), "run_tests"),
-    }
-    if set(_gate_invocations(document)) != expected_invocations:
+    if release_gate_ownership_error(document, roles):
         return None
 
     for step_id in ("5_test", "5_compile", "5_vision", "5_final_test"):
@@ -207,7 +258,7 @@ def _source_shape(document: dict) -> tuple[dict[str, dict], bool] | None:
     return steps, has_wait
 
 
-def migrate_release_document(document: dict) -> list[dict]:
+def migrate_release_document(document: dict, roles: dict | None = None) -> list[dict]:
     """Transactionally migrate only the complete generated-game graph shape."""
     from skillflow.graph import GraphResolver, PipelineGraph
 
@@ -215,12 +266,12 @@ def migrate_release_document(document: dict) -> list[dict]:
         PipelineGraph._from_dict(document)
     except Exception:
         return []
-    source = _source_shape(document)
+    source = _source_shape(document, roles)
     if source is None:
         return []
 
     candidate = copy.deepcopy(document)
-    candidate_source = _source_shape(candidate)
+    candidate_source = _source_shape(candidate, roles)
     if candidate_source is None:
         return []
     steps, has_wait = candidate_source
@@ -298,7 +349,13 @@ def migrate_generated_release_gates(config_dir: Path) -> list[dict]:
         try:
             original = path.read_bytes()
             document = yaml.safe_load(original)
-            changes = migrate_release_document(document)
+            roles = None
+            roles_path = path.with_suffix(".roles.json")
+            if roles_path.exists():
+                roles = json.loads(roles_path.read_text(encoding="utf-8"))
+                if not isinstance(roles, dict):
+                    raise ValueError("generated roles file is not a mapping")
+            changes = migrate_release_document(document, roles=roles)
             if not changes:
                 continue
             rendered = yaml.safe_dump(document, allow_unicode=True,

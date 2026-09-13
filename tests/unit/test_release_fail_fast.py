@@ -387,12 +387,48 @@ def _bad_graph(mutator):
     lambda steps, _doc: steps["5_compile"].update(step_type="gate"),
     lambda steps, _doc: steps["5_design"].update(
         validation=[{"tool": "run_tests"}]),
+    lambda steps, _doc: steps["5_design"].setdefault("config", {}).update(
+        extra_tools=["run_tests"]),
+    lambda steps, _doc: steps["5_design"].setdefault("config", {}).update(
+        extra_tools=["godot_playtest"]),
     lambda _steps, doc: doc["steps"].append({
         "id": "extra_compile", "step_type": "tool",
         "tool_name": "godot_compile", "transitions": [{"to": "5_review"}]}),
 ])
 def test_migration_rejects_adversarial_shape_without_partial_mutation(mutator):
     _bad_graph(mutator)
+
+
+def test_skillflow_executes_gate_granted_through_extra_tools(tmp_path):
+    import skillflow
+    from skillflow import PipelineGraph, SkillFlow
+    from skillflow.graph import StepNode
+    from skillflow.tool_loader import ToolLoader
+
+    loader = ToolLoader(Path(skillflow.__file__).parent / "tools",
+                        ROOT / "aitelier" / "tools")
+    sf = SkillFlow(str(tmp_path / "state.db"), tool_loader=loader,
+                   workspace_base=str(tmp_path / "workspace"))
+    sf.register_graph(PipelineGraph(
+        name="extra_tools_probe", begin="design",
+        steps=[StepNode(id="design", config={"extra_tools": ["run_tests"]})]))
+    run_id = sf.create_run("extra_tools_probe", project_id="p")
+    sf.start_run(run_id)
+    sf.advance_run(run_id)
+    claim = sf.claim_next_step(run_id)
+    assert "run_tests" in claim.inputs["_tool_schemas"]
+    calls = []
+    loader.register_dynamic_tool(
+        "run_tests", claim.inputs["_tool_schemas"]["run_tests"],
+        lambda **kwargs: calls.append(kwargs) or {"passed": True})
+
+    result = sf.execute_tool(
+        "run_tests", {}, run_id=run_id, step_id=claim.step_id,
+        step_instance_id=claim.token.step_instance_id,
+        claim_epoch=claim.token.claim_epoch)
+
+    assert result["passed"] is True
+    assert len(calls) == 1
 
 
 def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
@@ -422,6 +458,21 @@ def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
     duplicate_gate.write_text(
         yaml.safe_dump(duplicate_gate_document, sort_keys=False))
     duplicate_gate_bytes = duplicate_gate.read_bytes()
+    extra_gate = config_dir / "gen_e_extra_gate.yaml"
+    extra_gate_document = yaml.safe_load(source.read_text())
+    next(step for step in extra_gate_document["steps"]
+         if step["id"] == "5_design").setdefault("config", {})[
+             "extra_tools"] = ["run_tests"]
+    extra_gate.write_text(yaml.safe_dump(extra_gate_document, sort_keys=False))
+    extra_gate_bytes = extra_gate.read_bytes()
+    role_gate = config_dir / "gen_f_role_gate.yaml"
+    role_gate.write_bytes(source.read_bytes())
+    role_gate_bytes = role_gate.read_bytes()
+    role_name = next(step["agent_config"] for step in extra_gate_document["steps"]
+                     if step["id"] == "5_design")
+    role_file = role_gate.with_suffix(".roles.json")
+    role_file.write_text(json.dumps({role_name: {"tools": ["run_tests"]}}))
+    role_bytes = role_file.read_bytes()
     good = config_dir / "gen_z_good.yaml"
     good.write_bytes(source.read_bytes())
     reports = migrate_generated_release_gates(config_dir)
@@ -429,5 +480,8 @@ def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
     assert null_params.read_bytes() == null_bytes
     assert wrong_type.read_bytes() == wrong_type_bytes
     assert duplicate_gate.read_bytes() == duplicate_gate_bytes
+    assert extra_gate.read_bytes() == extra_gate_bytes
+    assert role_gate.read_bytes() == role_gate_bytes
+    assert role_file.read_bytes() == role_bytes
     assert [Path(report["path"]).name for report in reports] == ["gen_z_good.yaml"]
     _assert_game_release_contract(yaml.safe_load(good.read_text()))

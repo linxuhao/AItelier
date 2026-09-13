@@ -541,7 +541,7 @@ def validate_readonly_verifier(document: dict, roles: dict) -> None:
         raise ValueError("final verifier role prompt lacks report-only boundary")
 
 
-def _code_roles(config_dir: Path) -> set[str]:
+def _code_roles(config_dir: Path, skip_configs: set[str]) -> set[str]:
     """Roles for explicit generic code outputs; artifacts keep staged create/edit."""
     names: set[str] = set()
 
@@ -568,9 +568,11 @@ def _code_roles(config_dir: Path) -> set[str]:
     return names
 
 
-def _readonly_verifier_roles(config_dir: Path) -> set[str]:
+def _readonly_verifier_roles(config_dir: Path, skip_configs: set[str]) -> set[str]:
     names = set()
     for path in sorted(config_dir.glob("gen_*.yaml")):
+        if path.stem in skip_configs:
+            continue
         try:
             document = yaml.safe_load(path.read_bytes())
         except (yaml.YAMLError, UnicodeError):
@@ -585,10 +587,11 @@ def _readonly_verifier_roles(config_dir: Path) -> set[str]:
     return names
 
 
-def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[dict]:
+def _migrate_generated_role_prompts(
+        config_dir: Path, backup_dir: Path, skip_configs: set[str]) -> list[dict]:
     reports = []
-    code_roles = _code_roles(config_dir)
-    verifier_roles = _readonly_verifier_roles(config_dir)
+    code_roles = _code_roles(config_dir, skip_configs)
+    verifier_roles = _readonly_verifier_roles(config_dir, skip_configs)
     for path in sorted(config_dir.glob("gen_*.roles.json")):
         original = path.read_bytes()
         try:
@@ -642,6 +645,7 @@ def _migrate_generated_role_prompts(config_dir: Path, backup_dir: Path) -> list[
 def migrate_generated_outputs(config_dir: Path) -> list[dict]:
     require_output_engine()
     from skillflow.graph import PipelineGraph
+    skip_configs = skip_configs or set()
     backup_dir = config_dir.parent / "migration_backups" / "readonly-verifier-v2"
     reports = []
     for path in sorted(config_dir.glob("gen_*.yaml")):

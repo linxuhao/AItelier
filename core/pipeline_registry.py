@@ -683,6 +683,18 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
                 if key in rcfg:
                     roles[prefix + bare][key] = rcfg[key]
 
+        # Reject conflicting release-gate ownership while graph and roles are
+        # still local values, then normalize release routing before layering the
+        # report-only README/snapshot/verifier/integrity boundary onto it.
+        from core.release_gate_migration import (
+            migrate_release_document,
+            release_gate_ownership_error,
+        )
+        ownership_error = release_gate_ownership_error(data, roles)
+        if ownership_error:
+            return {"error": f"emitted pipeline failed validation: {ownership_error}"}
+        migrate_release_document(data, roles=roles)
+
         # Forge can emit the legacy DPE verifier shape even though boot-time
         # migration is correct. Apply and validate the same contract here,
         # while graph and role data are still plain in-memory values: neither

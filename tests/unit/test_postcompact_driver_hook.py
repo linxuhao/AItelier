@@ -248,6 +248,67 @@ def test_malformed_regular_marker_is_preserved_and_reports_recovery(
         assert marker.read_text() == raw
 
 
+@pytest.mark.parametrize(
+    "marker_fields",
+    [
+        pytest.param({"version": 2, "status": "pending"}, id="v2-pending"),
+        pytest.param({"version": 3, "status": "pending"}, id="v3-pending"),
+        pytest.param(
+            {"version": 3, "status": "delivery_attempted", "acknowledgement": "none"},
+            id="v3-delivery-attempted",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "generation",
+    [
+        pytest.param("", id="empty"),
+        pytest.param(" \t\n", id="whitespace"),
+        pytest.param(7, id="wrong-type"),
+    ],
+)
+def test_malformed_generation_marker_is_preserved_across_context_events(
+    tmp_path, state_server, monkeypatch, marker_fields, generation
+):
+    hook = load_hook_module()
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    marker = hook._pending_path({"session_id": "invalid-generation-session"})
+    assert marker is not None
+    marker.parent.mkdir(mode=0o700, parents=True)
+    raw = json.dumps({**marker_fields, "generation": generation}, separators=(",", ":"))
+    marker.write_text(raw)
+
+    postcompact = invoke(
+        tmp_path, state_server, event="PostCompact", session_id="invalid-generation-session"
+    )
+    assert "follow-up could not be queued" in postcompact["systemMessage"]
+    assert marker.read_text() == raw
+    for event in ("SessionStart", "UserPromptSubmit"):
+        output = invoke(
+            tmp_path, state_server, event=event, session_id="invalid-generation-session"
+        )
+        assert set(output) == {"continue", "systemMessage"}
+        assert "handoff recovery required" in output["systemMessage"]
+        assert marker.read_text() == raw
+
+
+@pytest.mark.parametrize("generation", ["", " \t\n", None, False, 0, 1.5, [], {}])
+def test_invalid_generation_never_matches_legal_writer_invariant(
+    tmp_path, monkeypatch, generation
+):
+    hook = load_hook_module()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    hook_input = {
+        "session_id": f"writer-generation-{type(generation).__name__}",
+        "turn_id": generation,
+    }
+    assert hook._mark_pending(hook_input) is False
+    marker = hook._pending_path(hook_input)
+    assert marker is not None and not marker.exists()
+
+
 def test_forced_delivery_persistence_failure_never_repeats_context(tmp_path, monkeypatch):
     hook = load_hook_module()
     codex_home = tmp_path / "codex-home"

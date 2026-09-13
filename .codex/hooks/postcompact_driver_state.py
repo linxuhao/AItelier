@@ -86,6 +86,10 @@ def _release_marker(lock_fd: int | None) -> None:
         os.close(lock_fd)
 
 
+def _valid_generation(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _read_marker(path: Path) -> tuple[str, dict[str, str] | None]:
     try:
         marker_stat = path.lstat()
@@ -102,7 +106,7 @@ def _read_marker(path: Path) -> tuple[str, dict[str, str] | None]:
             marker = json.loads(handle.read(4_097))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return "invalid", None
-    if not isinstance(marker, dict) or not isinstance(marker.get("generation"), str):
+    if not isinstance(marker, dict) or not _valid_generation(marker.get("generation")):
         return "invalid", None
     if marker.get("version") == 2:
         if marker.get("status") == "pending":
@@ -178,8 +182,8 @@ def _mark_pending(hook_input: dict[str, Any]) -> bool:
     if path is None:
         return False
     try:
-        generation = str(hook_input.get("turn_id", ""))
-        if not generation:
+        generation = hook_input.get("turn_id")
+        if not _valid_generation(generation):
             return False
         state, current = _read_marker(path)
         if state == "invalid":

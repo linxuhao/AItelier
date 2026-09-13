@@ -21,6 +21,13 @@ MAX_CONTEXT_CHARS = 12_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0
 PENDING_DIR_NAME = "project-handoff-pending"
+MARKER_VERSION = 3
+MARKER_PENDING = "pending"
+MARKER_ATTEMPTED = "delivery_attempted"
+MARKER_NO_ACK = "none"
+DELIVERY_ATTEMPTED = "attempted"
+DELIVERY_NOOP = "noop"
+DELIVERY_FAILED = "failed"
 GUIDE_HEADINGS = (
     "# State DAG director protocol",
     "## Resume safely",
@@ -79,25 +86,64 @@ def _release_marker(lock_fd: int | None) -> None:
         os.close(lock_fd)
 
 
-def _read_marker(path: Path) -> dict[str, str] | None:
+def _read_marker(path: Path) -> tuple[str, dict[str, str] | None]:
+    try:
+        marker_stat = path.lstat()
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "invalid", None
+    if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_uid != os.getuid():
+        return "invalid", None
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(path, flags)
         with os.fdopen(fd, "r", encoding="utf-8") as handle:
             marker = json.loads(handle.read(4_097))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(marker, dict) or marker.get("version") != 2:
-        return None
-    if marker.get("status") not in {"pending", "delivered"}:
-        return None
-    if not isinstance(marker.get("generation"), str):
-        return None
-    return marker
+        return "invalid", None
+    if not isinstance(marker, dict) or not isinstance(marker.get("generation"), str):
+        return "invalid", None
+    if marker.get("version") == 2:
+        if marker.get("status") == "pending":
+            return "valid", {
+                "version": str(MARKER_VERSION),
+                "generation": marker["generation"],
+                "status": MARKER_PENDING,
+            }
+        if marker.get("status") == "delivered":
+            return "valid", {
+                "version": str(MARKER_VERSION),
+                "generation": marker["generation"],
+                "status": MARKER_ATTEMPTED,
+                "acknowledgement": MARKER_NO_ACK,
+            }
+        return "invalid", None
+    if marker.get("version") != MARKER_VERSION:
+        return "invalid", None
+    if marker.get("status") == MARKER_PENDING:
+        return "valid", {
+            "version": str(MARKER_VERSION),
+            "generation": marker["generation"],
+            "status": MARKER_PENDING,
+        }
+    if (
+        marker.get("status") == MARKER_ATTEMPTED
+        and marker.get("acknowledgement") == MARKER_NO_ACK
+    ):
+        return "valid", {
+            "version": str(MARKER_VERSION),
+            "generation": marker["generation"],
+            "status": MARKER_ATTEMPTED,
+            "acknowledgement": MARKER_NO_ACK,
+        }
+    return "invalid", None
 
 
 def _write_marker(path: Path, marker: dict[str, Any]) -> bool:
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    replaced = False
+    parent_fd: int | None = None
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(tmp, flags, 0o600)
@@ -106,13 +152,25 @@ def _write_marker(path: Path, marker: dict[str, Any]) -> bool:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        replaced = True
+        parent_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        parent_fd = os.open(path.parent, parent_flags)
+        os.fsync(parent_fd)
         return True
     except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if not replaced:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         return False
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def _mark_pending(hook_input: dict[str, Any]) -> bool:
@@ -123,13 +181,15 @@ def _mark_pending(hook_input: dict[str, Any]) -> bool:
         generation = str(hook_input.get("turn_id", ""))
         if not generation:
             return False
-        current = _read_marker(path)
-        if current == {"version": 2, "generation": generation, "status": "delivered"}:
+        state, current = _read_marker(path)
+        if state == "invalid":
+            return False
+        if current and current["generation"] == generation and current["status"] == MARKER_ATTEMPTED:
             return True
         return _write_marker(path, {
-            "version": 2,
+            "version": MARKER_VERSION,
             "generation": generation,
-            "status": "pending",
+            "status": MARKER_PENDING,
         })
     finally:
         _release_marker(lock_fd)
@@ -414,31 +474,49 @@ def _write_output(output: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -> bool:
-    """Persist delivery before emitting context, so failures fail closed."""
+def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -> str:
+    """Persist one no-ACK delivery attempt before emitting context."""
     path, lock_fd = _acquire_marker(hook_input)
     if path is None:
-        return False
+        return DELIVERY_FAILED if standalone else DELIVERY_NOOP
     try:
-        marker = _read_marker(path)
-        if marker is None:
+        state, marker = _read_marker(path)
+        if state == "invalid":
+            return DELIVERY_FAILED
+        if state == "missing":
             if not standalone:
-                return False
-            marker = {"version": 2, "generation": "session-start", "status": "pending"}
-        if marker["status"] != "pending":
-            return False
+                return DELIVERY_NOOP
+            marker = {
+                "version": MARKER_VERSION,
+                "generation": "session-start",
+                "status": MARKER_PENDING,
+            }
+        if marker["status"] != MARKER_PENDING:
+            return DELIVERY_NOOP
         context = build_context()
-        if not _write_marker(path, {**marker, "status": "delivered"}):
-            return False
+        if not _write_marker(path, {
+            "version": MARKER_VERSION,
+            "generation": marker["generation"],
+            "status": MARKER_ATTEMPTED,
+            "acknowledgement": MARKER_NO_ACK,
+        }):
+            return DELIVERY_FAILED
         _write_output({
             "hookSpecificOutput": {
                 "hookEventName": event,
                 "additionalContext": context,
             }
         })
-        return True
+        return DELIVERY_ATTEMPTED
     finally:
         _release_marker(lock_fd)
+
+
+def _delivery_recovery_context() -> str:
+    return _bounded_section(f"""# AItelier compact handoff recovery required
+project_id={PROJECT_ID}
+The local handoff marker was malformed, unreadable, or its no-ACK delivery attempt could not be persisted. No model context was injected and no work was dispatched by this hook.
+Reconnect the configured AItelier MCP and reconcile the exact State driver note, owner, run, checkpoint, attempt, and current generation before continuing. Do not infer successful delivery from this message.""", MAX_CONTEXT_CHARS)
 
 
 def main() -> int:
@@ -450,9 +528,9 @@ def main() -> int:
     event = hook_input.get("hook_event_name")
     # Codex 0.153/0.154 exposes only the universal PostCompact output. Its
     # systemMessage is an attributable warning, while model context is supported
-    # by SessionStart and UserPromptSubmit. Queue the latter as the guaranteed
-    # next user-input fallback; SessionStart consumes the same marker when a
-    # client does emit source=compact, so the model receives the context once.
+    # by SessionStart and UserPromptSubmit. Queue the latter as the next
+    # user-input fallback; the marker records an at-most-once attempt because
+    # Codex provides no acknowledgement that stdout reached the model.
     if event == "PostCompact":
         queued = _mark_pending(hook_input)
         context = build_context()
@@ -464,13 +542,19 @@ def main() -> int:
             )
         output = {"continue": True, "systemMessage": context}
     elif event == "SessionStart" and hook_input.get("source") == "compact":
-        if _deliver_once(hook_input, "SessionStart", standalone=True):
+        delivery = _deliver_once(hook_input, "SessionStart", standalone=True)
+        if delivery == DELIVERY_ATTEMPTED:
             return 0
         output = {"continue": True}
+        if delivery == DELIVERY_FAILED:
+            output["systemMessage"] = _delivery_recovery_context()
     elif event == "UserPromptSubmit":
-        if _deliver_once(hook_input, "UserPromptSubmit", standalone=False):
+        delivery = _deliver_once(hook_input, "UserPromptSubmit", standalone=False)
+        if delivery == DELIVERY_ATTEMPTED:
             return 0
         output = {"continue": True}
+        if delivery == DELIVERY_FAILED:
+            output["systemMessage"] = _delivery_recovery_context()
     else:
         output = {"continue": True}
     _write_output(output)

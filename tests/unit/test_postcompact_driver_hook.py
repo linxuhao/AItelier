@@ -221,8 +221,31 @@ def test_damaged_marker_fails_closed_for_repeated_model_context_events(tmp_path,
         outputs = []
         hook._write_output = outputs.append
         for _ in range(2):
-            assert hook._deliver_once(hook_input, event, standalone=standalone) is False
+            assert hook._deliver_once(hook_input, event, standalone=standalone) == hook.DELIVERY_FAILED
         assert outputs == []
+
+
+def test_malformed_regular_marker_is_preserved_and_reports_recovery(
+    tmp_path, state_server, monkeypatch
+):
+    hook = load_hook_module()
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    marker = hook._pending_path({"session_id": "malformed-session"})
+    assert marker is not None
+    marker.parent.mkdir(mode=0o700, parents=True)
+    raw = "{malformed marker}"
+    marker.write_text(raw)
+    postcompact = invoke(tmp_path, state_server, event="PostCompact", session_id="malformed-session")
+    assert "follow-up could not be queued" in postcompact["systemMessage"]
+    assert marker.read_text() == raw
+    for event in ("SessionStart", "UserPromptSubmit"):
+        output = invoke(tmp_path, state_server, event=event, session_id="malformed-session")
+        assert set(output) == {"continue", "systemMessage"}
+        assert "handoff recovery required" in output["systemMessage"]
+        assert "malformed" in output["systemMessage"]
+        assert marker.read_text() == raw
 
 
 def test_forced_delivery_persistence_failure_never_repeats_context(tmp_path, monkeypatch):
@@ -241,9 +264,64 @@ def test_forced_delivery_persistence_failure_never_repeats_context(tmp_path, mon
     for event, standalone in (("SessionStart", True), ("UserPromptSubmit", False)):
         outputs.clear()
         for _ in range(2):
-            assert hook._deliver_once(hook_input, event, standalone=standalone) is False
+            assert hook._deliver_once(hook_input, event, standalone=standalone) == hook.DELIVERY_FAILED
         assert outputs == []
     assert json.loads(marker.read_text())["status"] == "pending"
+
+
+def test_delivery_lock_failure_is_fail_closed_for_both_context_events(monkeypatch):
+    hook = load_hook_module()
+    monkeypatch.setattr(hook, "_acquire_marker", lambda _hook_input: (None, None))
+    for event, standalone, expected in (
+        ("SessionStart", True, hook.DELIVERY_FAILED),
+        ("UserPromptSubmit", False, hook.DELIVERY_NOOP),
+    ):
+        assert hook._deliver_once({"session_id": "lock-failure"}, event, standalone=standalone) == expected
+
+
+def test_stdout_failure_leaves_explicit_no_ack_attempt_and_blocks_retry(tmp_path, monkeypatch):
+    hook = load_hook_module()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    hook_input = {"session_id": "stdout-failure-session", "turn_id": "generation-1"}
+    marker = hook._pending_path(hook_input)
+    assert marker is not None
+    marker.parent.mkdir(mode=0o700, parents=True)
+    marker.write_text(json.dumps({"version": 3, "generation": "generation-1", "status": "pending"}))
+    monkeypatch.setattr(hook, "build_context", lambda: "synthetic context")
+
+    def broken_output(_output):
+        raise OSError("synthetic broken stdout")
+
+    monkeypatch.setattr(hook, "_write_output", broken_output)
+    with pytest.raises(OSError, match="synthetic broken stdout"):
+        hook._deliver_once(hook_input, "SessionStart", standalone=True)
+    attempted = json.loads(marker.read_text())
+    assert attempted == {
+        "acknowledgement": "none",
+        "generation": "generation-1",
+        "status": "delivery_attempted",
+        "version": 3,
+    }
+
+    outputs = []
+    monkeypatch.setattr(hook, "_write_output", outputs.append)
+    assert hook._deliver_once(hook_input, "SessionStart", standalone=True) == hook.DELIVERY_NOOP
+    assert outputs == []
+
+
+def test_marker_write_fsyncs_file_and_parent_directory(tmp_path, monkeypatch):
+    hook = load_hook_module()
+    marker = tmp_path / "pending.json"
+    fsync_kinds = []
+    real_fsync = hook.os.fsync
+
+    def recording_fsync(fd):
+        fsync_kinds.append(hook.stat.S_ISDIR(hook.os.fstat(fd).st_mode))
+        real_fsync(fd)
+
+    monkeypatch.setattr(hook.os, "fsync", recording_fsync)
+    assert hook._write_marker(marker, {"version": 3, "generation": "g1", "status": "pending"})
+    assert fsync_kinds == [False, True]
 
 
 def test_malformed_or_unrelated_event_fails_open_without_state_access(tmp_path, state_server):

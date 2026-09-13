@@ -1,8 +1,8 @@
 # artifacts.read-edit-roundtrip@2 candidate report
 
-Attempt: `attempt-6ed66a1052084dc0bd5f36629926e2bd`  
-Context hash: `5936057c2cd9446baaa97f3b7a23fd3abc938188cfe71c644c1a4c526154c28c`  
-Contract hash: `e478ed6a3a35e0b3db6ca647df900ba00507d7cea219c5d7bd663398797e8d60`  
+Attempt: `attempt-5124ee635412490b815bb4b5e52eca15`
+Context hash: `3498727c2ae1588467b450dfe72d26f7c17706078cd5135a9cfc9a1e2a1970ac`
+Contract hash: `e478ed6a3a35e0b3db6ca647df900ba00507d7cea219c5d7bd663398797e8d60`
 Base: `d64967c7974012ca928918ea7945b374847a3e96`
 
 ## Candidate change

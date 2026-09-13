@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import urllib.error
@@ -14,11 +15,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_ID = "aitelier"
 MAX_CONTEXT_CHARS = 12_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0
+PENDING_DIR_NAME = "project-handoff-pending"
 GUIDE_HEADINGS = (
     "# State DAG director protocol",
     "## Resume safely",
@@ -34,6 +35,56 @@ class SourceUnavailable(RuntimeError):
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _pending_path(hook_input: dict[str, Any]) -> Path | None:
+    """Return a checkout- and session-scoped handoff marker path."""
+    session_id = hook_input.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    checkout = str(Path(__file__).resolve().parents[2])
+    key = _sha256(f"{PROJECT_ID}\0{checkout}\0{session_id}")
+    return codex_home / PENDING_DIR_NAME / f"{key}.json"
+
+
+def _mark_pending(hook_input: dict[str, Any]) -> bool:
+    path = _pending_path(hook_input)
+    if path is None:
+        return False
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_stat = path.parent.lstat()
+        if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid():
+            return False
+        os.chmod(path.parent, 0o700)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o600)
+        os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
+def _pending(hook_input: dict[str, Any]) -> bool:
+    path = _pending_path(hook_input)
+    if path is None:
+        return False
+    try:
+        marker_stat = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(marker_stat.st_mode) and marker_stat.st_uid == os.getuid()
+
+
+def _clear_pending(hook_input: dict[str, Any]) -> None:
+    path = _pending_path(hook_input)
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _redact(text: str) -> str:
@@ -227,6 +278,7 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
     nodes = overview.get("nodes") if isinstance(overview.get("nodes"), list) else []
     counts: dict[str, int] = {}
     selected: list[str] = []
+    active: list[str] = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -234,15 +286,33 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
         counts[status] = counts.get(status, 0) + 1
         readiness = str(node.get("readiness", "unknown"))
         next_action = node.get("next_action")
+        latest = node.get("latest_attempt")
+        if readiness == "in_progress" and isinstance(latest, dict):
+            run_id = latest.get("run_id") or "none"
+            active.append(
+                f"- {node.get('node_key', node.get('key', '?'))}: "
+                f"attempt_id={latest.get('attempt_id', 'unknown')} "
+                f"run_id={run_id} "
+                f"attempt_status={latest.get('status', 'unknown')}"
+            )
         if readiness == "ready" and next_action in {"new_attempt", "candidate_review"}:
+            candidate = ""
+            if next_action == "candidate_review" and isinstance(latest, dict):
+                candidate = (
+                    f" attempt_id={latest.get('attempt_id', 'unknown')}"
+                    f" artifact_ref={latest.get('artifact_ref', 'unknown')}"
+                )
             selected.append(
                 f"- {node.get('node_key', node.get('key', '?'))}: node={status} "
-                f"readiness=ready next_action={next_action}"
+                f"readiness=ready next_action={next_action}{candidate}"
             )
     selected = selected[:8]
+    active = active[:8]
     return "\n".join([
         f"event_seq={overview.get('event_seq', 'unknown')}",
         "node_status_counts=" + json.dumps(counts, sort_keys=True, separators=(",", ":")),
+        "bounded active ownership (readiness=in_progress, max 8; retain identities):",
+        *(active or ["- none listed"]),
         "bounded actionable frontier (readiness=ready, max 8; reconcile exact records before acting):",
         *(selected or ["- none listed"]),
     ])
@@ -298,19 +368,44 @@ def main() -> int:
     except json.JSONDecodeError:
         hook_input = {}
     event = hook_input.get("hook_event_name")
-    # Current Codex loads PostCompact but does not accept additionalContext
-    # from that event.  It then emits SessionStart(source=compact), whose
-    # documented output contract injects context into the immediate continuation.
+    clear_after_output = False
+    # Codex 0.153/0.154 exposes only the universal PostCompact output. Its
+    # systemMessage is an attributable warning, while model context is supported
+    # by SessionStart and UserPromptSubmit. Queue the latter as the guaranteed
+    # next user-input fallback; SessionStart consumes the same marker when a
+    # client does emit source=compact, so the model receives the context once.
     if event == "PostCompact":
-        output = {"continue": True}
-    else:
+        queued = _mark_pending(hook_input)
+        context = build_context()
+        if not queued:
+            context = _bounded_section(
+                context + "\n\nAutomatic model-context follow-up could not be queued; "
+                "use the recovery calls above before director work.",
+                MAX_CONTEXT_CHARS,
+            )
+        output = {"continue": True, "systemMessage": context}
+    elif event == "SessionStart" and hook_input.get("source") == "compact":
         output = {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
                 "additionalContext": build_context(),
             }
         }
+        clear_after_output = True
+    elif event == "UserPromptSubmit" and _pending(hook_input):
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": build_context(),
+            }
+        }
+        clear_after_output = True
+    else:
+        output = {"continue": True}
     sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+    if clear_after_output:
+        _clear_pending(hook_input)
     return 0
 
 

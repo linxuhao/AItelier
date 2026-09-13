@@ -27,6 +27,20 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'root=$(git rev-parse --show-toplevel) && exec \"$root/.codex/hooks/postcompact-driver-state.sh\"'",
+            "async": false,
+            "timeout": 20,
+            "additionalContextLimit": 0,
+            "statusMessage": "Restoring queued AItelier director state..."
+          }
+        ]
+      }
     ]
   }
 }

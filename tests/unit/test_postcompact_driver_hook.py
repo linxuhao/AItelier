@@ -1,13 +1,12 @@
 import json
 import os
 import subprocess
-import sys
 import threading
+from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-
 
 REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / ".codex" / "hooks" / "postcompact-driver-state.sh"
@@ -94,7 +93,7 @@ def state_server():
         thread.join(timeout=2)
 
 
-def invoke(tmp_path, url, cwd=None, event="SessionStart"):
+def invoke(tmp_path, url, cwd=None, event="SessionStart", session_id="session-a"):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(exist_ok=True)
     helper = tmp_path / "headers"
@@ -103,10 +102,23 @@ def invoke(tmp_path, url, cwd=None, event="SessionStart"):
     (codex_home / "config.toml").write_text(
         f'[mcp_servers.aitelier]\nurl = "{url}"\nhttp_headers_helper = "{helper}"\n'
     )
+    hook_input = {
+        "session_id": session_id,
+        "transcript_path": str(tmp_path / "rollout.jsonl"),
+        "cwd": str(cwd or tmp_path),
+        "hook_event_name": event,
+        "model": "gpt-test",
+    }
+    if event == "SessionStart":
+        hook_input.update({"source": "compact", "permission_mode": "never"})
+    elif event == "PostCompact":
+        hook_input.update({"turn_id": "turn-compact", "trigger": "auto"})
+    elif event == "UserPromptSubmit":
+        hook_input.update({"turn_id": "turn-next", "permission_mode": "never", "prompt": "continue"})
     result = subprocess.run(
-        [str(HOOK)], input=json.dumps({"hook_event_name": event, "source": "compact"}),
+        [str(HOOK)], input=json.dumps(hook_input),
         text=True, capture_output=True, cwd=cwd or tmp_path,
-        env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=10,
+        env={**os.environ, "CODEX_HOME": str(codex_home)}, timeout=10, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
@@ -124,7 +136,7 @@ def test_hook_emits_legal_bounded_fresh_project_context_from_any_cwd(tmp_path, s
     assert "driver_note_revision=1" in context
     assert "state_event_cursor=57" in context
     assert "ready: node=OPEN readiness=ready next_action=new_attempt" in context
-    assert "busy" not in context
+    assert "busy: attempt_id=attempt-1 run_id=none attempt_status=running" in context
     assert "DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION" not in context
     assert "helper-secret" not in context and "forbidden-secret" not in context
     assert "[REDACTED]" in context
@@ -154,12 +166,77 @@ def test_unreachable_state_still_emits_bounded_recovery_context(tmp_path):
     assert "secret" not in context.lower()
 
 
-def test_postcompact_lifecycle_event_is_a_legal_noop_before_compact_session_start(tmp_path, state_server):
-    assert invoke(tmp_path, state_server, event="PostCompact") == {"continue": True}
+def test_postcompact_marker_failure_never_blocks_and_is_actionable(tmp_path, state_server):
+    blocked_home = tmp_path / "not-a-directory"
+    blocked_home.write_text("file blocks marker directory")
+    hook_input = {
+        "session_id": "session-marker-failure",
+        "turn_id": "turn-compact",
+        "transcript_path": str(tmp_path / "rollout.jsonl"),
+        "cwd": str(tmp_path),
+        "hook_event_name": "PostCompact",
+        "model": "gpt-test",
+        "trigger": "auto",
+    }
+    result = subprocess.run(
+        [str(HOOK)], input=json.dumps(hook_input), text=True, capture_output=True,
+        cwd=tmp_path, env={
+            **os.environ,
+            "CODEX_HOME": str(blocked_home),
+            "AITELIER_MCP_URL": state_server,
+        }, timeout=10, check=False,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    output = json.loads(result.stdout)
+    assert output["continue"] is True
+    assert "driver_note_revision=1" in output["systemMessage"]
+    assert "follow-up could not be queued" in output["systemMessage"]
+    assert len(output["systemMessage"]) <= 12_000
+
+
+def test_malformed_or_unrelated_event_fails_open_without_state_access(tmp_path, state_server):
+    result = subprocess.run(
+        [str(HOOK)], input="not json", text=True, capture_output=True,
+        cwd=tmp_path, env={**os.environ, "AITELIER_MCP_URL": state_server}, timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0 and result.stderr == ""
+    assert json.loads(result.stdout) == {"continue": True}
     assert StateStub.requests == []
 
 
-def test_credentials_are_redacted_and_frontier_excludes_closed_or_busy_history(tmp_path, state_server):
+def test_recorded_postcompact_then_user_prompt_order_injects_fresh_context(tmp_path, state_server):
+    postcompact = invoke(tmp_path, state_server, event="PostCompact")
+    assert postcompact["continue"] is True
+    assert "driver_note_revision=1" in postcompact["systemMessage"]
+    assert "forbidden-secret" not in postcompact["systemMessage"]
+    assert "[REDACTED]" in postcompact["systemMessage"]
+    assert len(postcompact["systemMessage"]) <= 12_000
+
+    StateStub.revision = 2
+    follow_up = invoke(tmp_path, state_server, event="UserPromptSubmit")
+    assert set(follow_up) == {"hookSpecificOutput"}
+    assert follow_up["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    context = follow_up["hookSpecificOutput"]["additionalContext"]
+    assert "driver_note_revision=2" in context
+    assert "permanent revision 2" in context
+
+    # The marker is consumed after the supported model-context event.
+    assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
+    assert len(StateStub.requests) == 6
+
+
+def test_session_and_project_marker_isolation(tmp_path, state_server):
+    invoke(tmp_path, state_server, event="PostCompact", session_id="session-a")
+    assert invoke(tmp_path, state_server, event="UserPromptSubmit", session_id="session-b") == {"continue": True}
+    output = invoke(tmp_path, state_server, event="UserPromptSubmit", session_id="session-a")
+    assert output["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "project_id=aitelier (fixed project isolation)" in output["hookSpecificOutput"]["additionalContext"]
+    wire = json.dumps(StateStub.requests)
+    assert "wuxia-myth" not in wire and "DRIVER_STATE.md" not in wire
+
+
+def test_credentials_are_redacted_and_frontier_retains_only_active_or_actionable_state(tmp_path, state_server):
     synthetic_values = [
         "synthetic-password", "synthetic-passphrase", "synthetic-private", "synthetic-credential",
         "synthetic-basic", "synthetic-url-password", "SYNTHETICPEMBODY",
@@ -196,7 +273,8 @@ passphrase=synthetic-passphrase
     assert "[REDACTED" in context
     assert "open-ready: node=OPEN readiness=ready next_action=new_attempt" in context
     assert "candidate-ready: node=CANDIDATE readiness=ready next_action=candidate_review" in context
-    assert "verified-history" not in context and "open-busy" not in context and "open-blocked" not in context
+    assert "open-busy: attempt_id=live run_id=none attempt_status=running" in context
+    assert "verified-history" not in context and "open-blocked" not in context
 
 
 def test_bounded_multilingual_context_is_complete_with_spilling_disabled(tmp_path, state_server):
@@ -256,8 +334,9 @@ def test_exact_compact_event_pair_retains_middle_of_huge_history_paragraph(tmp_p
 {"A" * 3_100} Use search_driver_note_history for bounded recovery. Do not load the full driver_note_history. {"B" * 3_100}
 """
 
-    assert invoke(tmp_path, state_server, event="PostCompact") == {"continue": True}
-    assert StateStub.requests == []
+    postcompact = invoke(tmp_path, state_server, event="PostCompact")
+    assert postcompact["continue"] is True
+    assert "driver_note_revision=91" in postcompact["systemMessage"]
 
     output = invoke(tmp_path, state_server, event="SessionStart")
     context = output["hookSpecificOutput"]["additionalContext"]
@@ -266,23 +345,54 @@ def test_exact_compact_event_pair_retains_middle_of_huge_history_paragraph(tmp_p
     assert "search_driver_note_history for bounded recovery" in context
     assert "Do not load the full driver_note_history" in context
     assert len(context) <= 12_000
+    # SessionStart consumes the pending marker, so the next user prompt cannot
+    # inject the same bootstrap a second time.
+    assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
     assert [request["params"]["name"] for request in StateStub.requests] == [
         "state_graph_read", "state_graph_read", "state_graph_help",
+        "state_graph_read", "state_graph_read", "state_graph_help",
     ]
+
+
+def test_context_retains_active_run_checkpoint_attempt_and_candidate_without_mutation(tmp_path, state_server):
+    StateStub.temporary = (
+        "Keep checkpoint checkpoint-pending-7 pending for run run-live-7; "
+        "owner remains director-a."
+    )
+    StateStub.nodes = [
+        {"node_key": "running-node", "status": "OPEN", "readiness": "in_progress", "next_action": None,
+         "latest_attempt": {"attempt_id": "attempt-live-7", "run_id": "run-live-7", "status": "running"}},
+        {"node_key": "candidate-node", "status": "CANDIDATE", "readiness": "ready",
+         "next_action": "candidate_review", "latest_attempt": {
+             "attempt_id": "attempt-candidate-8", "artifact_ref": "candidate-sha-8", "status": "candidate"}},
+    ]
+    before = deepcopy((StateStub.temporary, StateStub.nodes, StateStub.revision))
+
+    output = invoke(tmp_path, state_server, event="PostCompact")
+    context = output["systemMessage"]
+    assert "checkpoint-pending-7" in context and "owner remains director-a" in context
+    assert "attempt_id=attempt-live-7 run_id=run-live-7 attempt_status=running" in context
+    assert "attempt_id=attempt-candidate-8 artifact_ref=candidate-sha-8" in context
+    assert (StateStub.temporary, StateStub.nodes, StateStub.revision) == before
+    assert {request["params"]["name"] for request in StateStub.requests} == {
+        "state_graph_read", "state_graph_help",
+    }
 
 
 def test_tracked_hook_config_uses_current_command_shape_and_move_safe_lookup():
     config = json.loads((REPO / ".codex" / "hooks.json").read_text())
     postcompact = config["hooks"]["PostCompact"][0]["hooks"][0]
     handler = config["hooks"]["SessionStart"][0]["hooks"][0]
+    prompt_handler = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
     assert config["hooks"]["SessionStart"][0]["matcher"] == "^compact$"
-    assert postcompact["type"] == handler["type"] == "command"
-    assert postcompact["async"] is handler["async"] is False
-    assert postcompact["timeout"] == handler["timeout"] == 20
+    assert postcompact["type"] == handler["type"] == prompt_handler["type"] == "command"
+    assert postcompact["async"] is handler["async"] is prompt_handler["async"] is False
+    assert postcompact["timeout"] == handler["timeout"] == prompt_handler["timeout"] == 20
     assert "additionalContextLimit" not in postcompact
     # Zero disables Codex spilling. The script's own MAX_CONTEXT_CHARS remains
     # the strict safety boundary for complete mixed-language delivery.
-    assert handler["additionalContextLimit"] == 0
+    assert handler["additionalContextLimit"] == prompt_handler["additionalContextLimit"] == 0
+    assert handler["command"] == prompt_handler["command"] == postcompact["command"]
     assert "git rev-parse --show-toplevel" in handler["command"]
     assert "/Users/" not in handler["command"] and "/home/" not in handler["command"]
     assert HOOK.stat().st_mode & 0o111

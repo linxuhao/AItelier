@@ -2314,7 +2314,13 @@ def _sweep_ended_leases() -> None:
     _last_lease_sweep = now
     try:
         from api.dependencies import get_skillflow
-        report = run_isolation.reconcile_all_leases(db, get_skillflow())
+        sf = get_skillflow()
+        report = run_isolation.reconcile_all_leases(db, sf)
+        # Index demand follows the same terminal + operation-audit boundary as
+        # checkout ownership.  Publish release before asking the worktree
+        # reaper; the sidecar settles it asynchronously.
+        from core import run_resources
+        resource_report = run_resources.reconcile(db, sf)
     except Exception:
         import logging
         logging.getLogger("aitelier.scheduler").warning(
@@ -2330,12 +2336,15 @@ def _sweep_ended_leases() -> None:
         if _lease_sweep_reported.get(rid) != reason:
             _lease_sweep_reported[rid] = reason
             tick_log("", "lease_retained", run=rid[:8], reason=reason)
+    for item in resource_report.get("retained", []):
+        tick_log("", "index_retained", run=item["run_id"][:8],
+                 reason=(item.get("reason") or "")[:200])
 
     # Lease release only says the run is terminal + quiet. Reaping is a second,
     # stricter decision: clean tree + locally provable integration (or explicit
     # discard). Merely pushed/open-PR work remains on disk.
     try:
-        reap = run_isolation.reap_released_worktrees(db, get_skillflow())
+        reap = run_isolation.reap_released_worktrees(db, sf)
     except Exception:
         import logging
         logging.getLogger("aitelier.scheduler").warning(

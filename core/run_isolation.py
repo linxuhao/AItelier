@@ -911,6 +911,19 @@ def reap_released_worktrees(db, sf) -> dict:
         if not ok:
             kept.append({"run_id": rid, "reason": why})
             continue
+        # The checkout is the native index's identity.  Never remove it while
+        # its derived resource is ready, pending release, busy, or unknown.
+        # When lifecycle management is disabled there is no registered native
+        # resource and the existing worktree policy remains unchanged.
+        from core import run_resources
+        ctl = None
+        if run_resources.enabled():
+            ctl = run_resources.control()
+            resource = ctl.get(rid)
+            if not ctl.settled(resource, "released"):
+                kept.append({"run_id": rid,
+                             "reason": "native index release is not settled"})
+                continue
         ok, why = _remove_run_worktree(rec)
         if not ok:
             kept.append({"run_id": rid, "reason": why})
@@ -920,6 +933,8 @@ def reap_released_worktrees(db, sf) -> dict:
                          (("reaped_discarded" if discarded else f"reaped_merged_into:{integration_ref}"),
                           why[:500], rid))
             conn.commit()
+        if ctl is not None:
+            ctl.forget(rid)
         removed.append({"run_id": rid, "reason": why})
     return {"removed": removed, "retained": kept}
 

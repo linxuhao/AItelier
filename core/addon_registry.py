@@ -128,7 +128,32 @@ def register_addon_combo(sf, registry, base_name: str, addon_names: list[str],
     skillflow composes + registers the graph (re-validating reachability / cycles
     / agent refs); the host then decorates it with a ``ConfigManifest`` seeded
     from the base's hints. Returns the composed config name."""
-    cfg_name = sf.compose_config(base_name, addon_names, name=name)
+    from skillflow.compose import compose_graph
+    from skillflow.exceptions import SkillFlowError
+    from skillflow.graph import PipelineGraph
+
+    if base_name not in sf._graphs:
+        raise SkillFlowError(f"compose_config: unknown base graph '{base_name}'")
+    overlays = []
+    for addon_name in addon_names:
+        spec = sf._overlays.get(addon_name)
+        if spec is None:
+            raise SkillFlowError(f"compose_config: unknown overlay '{addon_name}'")
+        declared = spec.get("base", "")
+        if declared and declared != base_name:
+            raise SkillFlowError(
+                f"overlay '{addon_name}' binds to base '{declared}', not "
+                f"'{base_name}'")
+        overlays.append(spec)
+    cfg_name = name or sf.composed_config_name(base_name, addon_names)
+    merged = compose_graph(sf._graphs[base_name].to_dict(), overlays)
+    merged["name"] = cfg_name
+    graph = PipelineGraph._from_dict(merged)
+    from core.release_gate_migration import release_gate_ownership_error
+    ownership_error = release_gate_ownership_error(merged, sf=sf)
+    if ownership_error:
+        raise SkillFlowError(ownership_error)
+    sf.register_graph(graph)
     if registry is not None:
         registry.register_one(sf, cfg_name, hint_overrides=_base_hints(base_name))
     return cfg_name

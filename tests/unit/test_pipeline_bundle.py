@@ -24,6 +24,7 @@ Each has a test that fails if the defence is removed.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -184,6 +185,74 @@ def test_importing_under_its_own_name_is_idempotent(home):
     cfg, _ = home
     assert list(json.loads((cfg / "gen_alpha.roles.json").read_text())) \
         == ["gen_alpha__author"]
+
+
+def _release_bundle_runtime(tmp_path):
+    import skillflow
+    from skillflow import SkillFlow
+    from skillflow.tool_loader import ToolLoader
+
+    root = Path(__file__).resolve().parents[2]
+    loader = ToolLoader(Path(skillflow.__file__).parent / "tools",
+                        root / "aitelier" / "tools")
+    sf = SkillFlow(str(tmp_path / "release.db"), tool_loader=loader,
+                   workspace_base=str(tmp_path / "workspace"),
+                   projects_base=str(tmp_path / "projects"))
+    sf.register_capability(
+        "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
+    source = (root / "evidence/output-target-migration-20260911"
+              / "generated-configs/gen_dpe_state_game.yaml")
+    graph = yaml.safe_load(source.read_text())
+    role = next(step["agent_config"] for step in graph["steps"]
+                if step["id"] == "5_design")
+    bundle = {
+        pb.BUNDLE_KEY: pb.BUNDLE_VERSION,
+        "config_name": "gen_dpe_state_game",
+        "graph_yaml": yaml.safe_dump(graph, sort_keys=False),
+        "roles": {role: {"model": "host", "tools": ["read_file"],
+                           "system_prompt": "benign bundle role"}},
+        "tools": {},
+    }
+    return sf, bundle, graph, role
+
+
+@pytest.mark.parametrize("surface", ["role", "capability", "unknown_capability"])
+def test_release_bundle_rejects_unowned_effective_grants_before_mutation(
+        home, tmp_path, surface):
+    from core.config_registry import ConfigRegistry
+
+    cfg_dir, tools_dir = home
+    sf, bundle, graph, role = _release_bundle_runtime(tmp_path)
+    if surface == "role":
+        bundle["roles"][role]["tools"] = ["run_tests"]
+    else:
+        name = "unsafe_release_gate"
+        graph.setdefault("capabilities", []).append(name)
+        next(step for step in graph["steps"]
+             if step["id"] == "5_design")["capability"] = name
+        bundle["graph_yaml"] = yaml.safe_dump(graph, sort_keys=False)
+        if surface == "capability":
+            sf.register_capability(name, tools=["run_tests"])
+
+    with pytest.raises(BundleError, match="release gate"):
+        pb.import_pipeline(sf, ConfigRegistry(), bundle)
+
+    assert "gen_dpe_state_game" not in sf._graphs
+    assert sf.agent_registry.get(role) is None
+    assert list(cfg_dir.iterdir()) == []
+    assert list(tools_dir.iterdir()) == []
+
+
+def test_release_bundle_accepts_benign_effective_grants(home, tmp_path):
+    from core.config_registry import ConfigRegistry
+
+    sf, bundle, _graph, role = _release_bundle_runtime(tmp_path)
+    result = pb.import_pipeline(sf, ConfigRegistry(), bundle)
+
+    assert result["config_name"] == "gen_dpe_state_game"
+    assert sf.agent_registry.get(role).tools == ["read_file"]
+    assert sf.capabilities()["game_assets"]["tools"] == [
+        "gen_image_asset", "gen_audio_asset"]
 
 
 # ── 2. Tombstone ─────────────────────────────────────────────────────────────

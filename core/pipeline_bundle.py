@@ -339,6 +339,10 @@ def import_pipeline(sf, registry, bundle: dict, *, name: str | None = None,
     if issues:
         raise BundleError("bundle's graph is not a valid pipeline: "
                           + "; ".join(issues))
+    from core.release_gate_migration import release_gate_ownership_error
+    ownership_error = release_gate_ownership_error(graph, roles, sf=sf)
+    if ownership_error:
+        raise BundleError(f"bundle's graph was rejected: {ownership_error}")
 
     existed = registry.get(config_name) is not None
     # Registering live BEFORE writing: this is where the remaining checks live

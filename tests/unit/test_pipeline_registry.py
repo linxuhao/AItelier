@@ -366,6 +366,8 @@ def _forge_run_for_release_graph(tmp_path):
     sf = SkillFlow(str(tmp_path / "sf.db"), tool_loader=loader,
                    workspace_base=str(tmp_path / "ws"),
                    projects_base=str(tmp_path / "projects"))
+    sf.register_capability(
+        "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
     forge = {
         "name": "pipeline_forge", "begin": "done",
         "steps": [{"id": "done", "step_type": "gate",
@@ -420,6 +422,8 @@ def test_forge_rejects_alternate_release_gate_before_live_or_file_mutation(
 ])
 def test_boot_rejects_paired_release_gate_role_before_migration_or_registration(
         sf, registry, gdir, grants):
+    sf.register_capability(
+        "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
     gdir.mkdir(parents=True)
     source = (Path(__file__).resolve().parents[2]
               / "evidence/output-target-migration-20260911/generated-configs"
@@ -532,6 +536,95 @@ def test_register_text_reuses_legitimate_benign_live_role(tmp_path, registry):
     assert registry.get("gen_dpe_state_game") is not None
 
 
+def _add_capability(document, name="unsafe_release_gate"):
+    document.setdefault("capabilities", []).append(name)
+    next(step for step in document["steps"]
+         if step["id"] == "5_design")["capability"] = name
+
+
+@pytest.mark.parametrize("grants", [
+    ["run_tests"],
+    {"run_tests": {"mapping_keys_execute": True}},
+])
+def test_register_text_rejects_effective_capability_gate_before_publication(
+        tmp_path, registry, grants):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    _source, document, _role = _release_source_and_role()
+    _add_capability(document)
+    sf.register_capability("unsafe_release_gate", tools=grants)
+
+    with pytest.raises(ValueError, match="release gate.*capability"):
+        pr._register_text(
+            sf, registry, "gen_dpe_state_game",
+            yaml.safe_dump(document, sort_keys=False), roles={})
+
+    assert "gen_dpe_state_game" not in sf._graphs
+    assert registry.get("gen_dpe_state_game") is None
+
+
+def test_register_text_rejects_unknown_capability_provider(tmp_path, registry):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    _source, document, _role = _release_source_and_role()
+    _add_capability(document, "missing_provider")
+
+    with pytest.raises(ValueError, match="not registered or inspectable"):
+        pr._register_text(
+            sf, registry, "gen_dpe_state_game",
+            yaml.safe_dump(document, sort_keys=False), roles={})
+
+    assert "gen_dpe_state_game" not in sf._graphs
+
+
+def test_register_text_rejects_uninspectable_capability_provider(
+        tmp_path, registry, monkeypatch):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    _source, document, _role = _release_source_and_role()
+    monkeypatch.setattr(sf, "capabilities", lambda: {
+        "game_assets": {"tools": {"run_tests": {"hidden": True}}}})
+
+    with pytest.raises(ValueError, match="tools are not inspectable"):
+        pr._register_text(
+            sf, registry, "gen_dpe_state_game",
+            yaml.safe_dump(document, sort_keys=False), roles={})
+
+    assert "gen_dpe_state_game" not in sf._graphs
+
+
+def test_register_text_rejects_reused_live_gate_schema(tmp_path, registry):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    _source, document, role = _release_source_and_role()
+    for name in {step.get("agent_config") for step in document["steps"]
+                 if step.get("agent_config")}:
+        sf.register_agent_config_from_dict(name, {
+            "model": "host", "tools": ["read_file"],
+            "system_prompt": "known live role"})
+    live = sf.agent_registry.get(role)
+    live.tool_schemas["run_tests"] = sf._tool_loader.load_schema("run_tests")
+    before = copy.deepcopy(live.to_dict())
+
+    with pytest.raises(ValueError, match="release gate ownership mismatch"):
+        pr._register_text(
+            sf, registry, "gen_dpe_state_game",
+            yaml.safe_dump(document, sort_keys=False), roles={})
+
+    assert sf.agent_registry.get(role).to_dict() == before
+    assert "gen_dpe_state_game" not in sf._graphs
+
+
+def test_register_text_accepts_bounded_benign_dynamic_capability(
+        tmp_path, registry):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    _source, document, _role = _release_source_and_role()
+
+    pr._register_text(
+        sf, registry, "gen_dpe_state_game",
+        yaml.safe_dump(document, sort_keys=False), roles={})
+
+    assert sf.capabilities()["game_assets"]["tools"] == [
+        "gen_image_asset", "gen_audio_asset"]
+    assert registry.get("gen_dpe_state_game") is not None
+
+
 def _old_same_name_pipeline(tmp_path, registry, gdir, grants):
     sf, _run_id = _forge_run_for_release_graph(tmp_path)
     source, _document, role = _release_source_and_role()
@@ -617,6 +710,48 @@ def test_forge_update_rejects_omitted_polluted_role_before_publication(
 
     assert "release gate" in result["error"]
     _assert_live_reload_snapshot(sf, registry, name, role, before)
+
+
+@pytest.mark.parametrize("surface", ["reload", "boot", "forge"])
+def test_generated_entrypoints_reject_capability_gate_transactionally(
+        tmp_path, registry, gdir, surface):
+    if surface == "reload":
+        sf, name, role, yaml_file = _old_same_name_pipeline(
+            tmp_path, registry, gdir, ["read_file"])
+        before = _live_reload_snapshot(sf, registry, name, role)
+    else:
+        sf, run_id = _forge_run_for_release_graph(tmp_path)
+        name = "gen_dpe_state_game"
+        role = None
+        before = None
+        gdir.mkdir(parents=True, exist_ok=True)
+        yaml_file = gdir / f"{name}.yaml"
+    sf.register_capability("unsafe_release_gate", tools=["run_tests"])
+    source, document, _role = _release_source_and_role()
+    _add_capability(document)
+    yaml_bytes = yaml.safe_dump(document, sort_keys=False).encode()
+
+    if surface == "forge":
+        emit = sf._workspace.get_step_dir("p", "pipeline_forge", "emit_graph")
+        emit.mkdir(parents=True, exist_ok=True)
+        (emit / "pipeline.yaml").write_bytes(yaml_bytes)
+        result = pr.register_forge_pipeline(sf, registry, run_id, "dpe state game")
+        assert "release gate" in result["error"]
+        assert not yaml_file.exists()
+    else:
+        yaml_file.write_bytes(yaml_bytes)
+        original = yaml_file.read_bytes()
+        result = (pr.reload_generated_pipeline(sf, registry, name)
+                  if surface == "reload" else
+                  {"loaded": pr.load_generated_configs(sf, registry)})
+        assert ("release gate" in result.get("error", "")
+                if surface == "reload" else result == {"loaded": []})
+        assert yaml_file.read_bytes() == original
+    if before is not None:
+        _assert_live_reload_snapshot(sf, registry, name, role, before)
+    else:
+        assert name not in sf._graphs
+        assert registry.get(name) is None
 
 
 def _live_release_reload(tmp_path, registry, gdir):

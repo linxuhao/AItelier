@@ -33,6 +33,8 @@ def sf_with_addons():
                 pass
     sf.register_graph(PipelineGraph.from_yaml(_CONFIGS / "dpe_default.yaml"))
     ar.declare_addons(sf)
+    sf.register_capability(
+        "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
     with patch("api.dependencies.get_skillflow", return_value=sf):
         yield sf
 
@@ -72,6 +74,65 @@ def test_register_addon_combo_auto_resolves_alias(sf_with_addons):
     name = ar.register_addon_combo(sf_with_addons, None, "dpe_default_v2",
                                    ["game_harness"])
     assert name == "dpe_game"
+
+
+def _release_addon_runtime(tmp_path):
+    import skillflow
+    from skillflow.tool_loader import ToolLoader
+    from core import pipeline_registry as pr
+    from core.config_registry import ConfigRegistry
+
+    loader = ToolLoader(Path(skillflow.__file__).parent / "tools",
+                        _ROOT / "aitelier" / "tools")
+    sf = SkillFlow(str(tmp_path / "release.db"), tool_loader=loader,
+                   workspace_base=str(tmp_path / "workspace"),
+                   projects_base=str(tmp_path / "projects"))
+    sf.register_capability(
+        "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
+    source = (_ROOT / "evidence/output-target-migration-20260911"
+              / "generated-configs/gen_dpe_state_game.yaml")
+    pr._register_text(
+        sf, ConfigRegistry(), "gen_dpe_state_game", source.read_text(), roles={})
+    return sf
+
+
+def test_addon_combo_rejects_release_gate_before_graph_publication(tmp_path):
+    from skillflow.exceptions import SkillFlowError
+
+    sf = _release_addon_runtime(tmp_path)
+    sf.register_overlay("unsafe_addon", {
+        "name": "unsafe_addon", "base": "gen_dpe_state_game",
+        "overlay": [{"add_tools": "5_design", "tools": ["run_tests"]}],
+    })
+    registry = MagicMock()
+    before_base = sf._graphs["gen_dpe_state_game"]
+
+    with pytest.raises(SkillFlowError, match="release gate ownership mismatch"):
+        ar.register_addon_combo(
+            sf, registry, "gen_dpe_state_game", ["unsafe_addon"],
+            name="gen_dpe_state_game_unsafe")
+
+    assert sf._graphs["gen_dpe_state_game"] is before_base
+    assert "gen_dpe_state_game_unsafe" not in sf._graphs
+    assert not any(row["name"] == "gen_dpe_state_game_unsafe"
+                   for row in sf.list_graphs())
+    registry.register_one.assert_not_called()
+
+
+def test_addon_combo_accepts_benign_final_effective_grants(tmp_path):
+    sf = _release_addon_runtime(tmp_path)
+    sf.register_overlay("benign_addon", {
+        "name": "benign_addon", "base": "gen_dpe_state_game",
+        "overlay": [{"add_tools": "5_design", "tools": ["read_file"]}],
+    })
+
+    name = ar.register_addon_combo(
+        sf, None, "gen_dpe_state_game", ["benign_addon"],
+        name="gen_dpe_state_game_benign")
+
+    node = next(step for step in sf._graphs[name].steps
+                if step.id == "5_design")
+    assert node.config["extra_tools"] == ["read_file"]
 
 
 def test_describe_config_delegates(sf_with_addons):

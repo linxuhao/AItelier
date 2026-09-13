@@ -541,8 +541,7 @@ def _validated_registration(config_name: str, yaml_text: str,
         raise ValueError("generated pipeline YAML is not a mapping")
     data["name"] = config_name
     from core.release_gate_migration import release_gate_ownership_error
-    ownership_error = release_gate_ownership_error(
-        data, _effective_roles(sf, data, roles))
+    ownership_error = release_gate_ownership_error(data, roles, sf=sf)
     if ownership_error:
         raise ValueError(ownership_error)
     graph = PipelineGraph._from_dict(data)
@@ -1161,8 +1160,7 @@ def load_generated_configs(sf, registry) -> list[str]:
                 if not isinstance(roles, dict):
                     unsafe_release_configs.add(path.stem)
                     continue
-            if release_gate_ownership_error(
-                    document, _effective_roles(sf, document, roles)):
+            if release_gate_ownership_error(document, roles, sf=sf):
                 unsafe_release_configs.add(path.stem)
         except (UnicodeError, yaml.YAMLError):
             continue
@@ -1190,7 +1188,7 @@ def load_generated_configs(sf, registry) -> list[str]:
             yaml_text = f.read_text(encoding="utf-8")
             document = yaml.safe_load(yaml_text)
             ownership_error = release_gate_ownership_error(
-                document, _effective_roles(sf, document, roles))
+                document, roles, sf=sf)
             if ownership_error:
                 raise ValueError(ownership_error)
             if roles is not None:

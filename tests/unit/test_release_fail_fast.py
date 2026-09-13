@@ -407,8 +407,11 @@ def test_migration_rejects_adversarial_shape_without_partial_mutation(mutator):
     pytest.param("role", ["run_tests"], id="paired-role-json-array"),
     pytest.param("role", {"run_tests": {"nested": True}},
                  id="paired-role-mapping-keys"),
+    pytest.param("capability", ["run_tests"], id="capability-list"),
+    pytest.param("capability", {"run_tests": {"nested": True}},
+                 id="capability-mapping-keys"),
 ])
-def test_skillflow_executes_every_persisted_tool_grant_shape(
+def test_skillflow_executes_every_effective_tool_grant_shape(
         tmp_path, surface, grants):
     import skillflow
     from skillflow import PipelineGraph, SkillFlow
@@ -419,12 +422,18 @@ def test_skillflow_executes_every_persisted_tool_grant_shape(
                         ROOT / "aitelier" / "tools")
     sf = SkillFlow(str(tmp_path / "state.db"), tool_loader=loader,
                    workspace_base=str(tmp_path / "workspace"))
-    node = StepNode(id="design", config={"extra_tools": grants}) \
-        if surface == "config" else StepNode(id="design", agent_config="paired")
+    node = (StepNode(id="design", config={"extra_tools": grants})
+            if surface == "config" else
+            StepNode(id="design", capability="release_probe")
+            if surface == "capability" else
+            StepNode(id="design", agent_config="paired"))
     if surface == "role":
         sf.register_agent_config_from_dict("paired", {"tools": grants})
+    if surface == "capability":
+        sf.register_capability("release_probe", tools=grants)
     sf.register_graph(PipelineGraph(
-        name="tool_grant_probe", begin="design", steps=[node]))
+        name="tool_grant_probe", begin="design", steps=[node],
+        capabilities=["release_probe"] if surface == "capability" else []))
     run_id = sf.create_run("tool_grant_probe", project_id="p")
     sf.start_run(run_id)
     sf.advance_run(run_id)

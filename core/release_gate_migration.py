@@ -137,31 +137,122 @@ def _gate_invocations(value, path=()):
             yield from _gate_invocations(child, path + (index,))
 
 
-def _role_gate_invocations(document: dict, roles: dict | None):
-    """Yield gate tools granted by paired roles used by this graph."""
-    if not isinstance(roles, dict):
-        return
-    used = {
-        step.get("agent_config")
-        for step in document.get("steps", [])
-        if isinstance(step, dict) and isinstance(step.get("agent_config"), str)
-    }
-    for role in sorted(used):
-        if role not in roles:
-            continue
+def _effective_role(sf, roles: dict | None, role: str):
+    """Return the role config registration will bind, plus cached live schemas."""
+    if isinstance(roles, dict) and role in roles:
         config = roles[role]
         if not isinstance(config, dict):
             raise ValueError(f"release gate paired role {role!r} must be a mapping")
-        if "tools" not in config:
+        return config, {}
+    if sf is not None:
+        registry = getattr(sf, "agent_registry", None)
+        get = getattr(registry, "get", None)
+        if not callable(get):
+            raise ValueError("release gate agent registry is not inspectable")
+        live = get(role)
+        if live is not None:
+            schemas = getattr(live, "tool_schemas", None)
+            if not isinstance(schemas, dict):
+                raise ValueError(
+                    f"release gate live role {role!r} schemas are not inspectable")
+            return {"tools": getattr(live, "tools", None)}, schemas
+    # This is exactly ensure_host_agents' deterministic missing-role fallback.
+    return {"tools": ["read_file", "write"]}, {}
+
+
+def _role_gate_invocations(document: dict, roles: dict | None, sf=None):
+    """Yield gate tools from every final bound role and its live schema cache."""
+    for index, step in enumerate(document.get("steps", [])):
+        if not isinstance(step, dict) or step.get("step_type", "agent") != "agent":
             continue
-        path = ("roles", role, "tools")
-        for tool_path, tool in _tool_grants(config["tools"], path):
+        role = step.get("agent_config")
+        if not isinstance(role, str) or not role:
+            continue
+        config, schemas = _effective_role(sf, roles, role)
+        tools = config.get("tools", ["read_file", "write"])
+        path = ("steps", index, "effective_role", role, "tools")
+        for tool_path, tool in _tool_grants(tools, path):
             if tool in _GATE_TOOLS:
                 yield tool_path, tool
+        for tool in schemas:
+            if not isinstance(tool, str) or not tool:
+                raise ValueError(
+                    f"release gate live role {role!r} schema names are malformed")
+            if tool in _GATE_TOOLS:
+                yield (("steps", index, "effective_role", role,
+                        "tool_schemas", tool), tool)
 
 
-def release_gate_ownership_error(document: dict, roles: dict | None = None) -> str:
-    """Return why a release-shaped graph has an unsafe executable gate owner."""
+def _capability_names(step: dict, offers: list[str], path: tuple):
+    declared = step.get("capability", "")
+    if declared in (None, ""):
+        return []
+    if isinstance(declared, str):
+        return [declared]
+    if isinstance(declared, list):
+        if not all(isinstance(name, str) and name for name in declared):
+            raise ValueError(
+                f"release gate capability declaration at {path!r} must contain "
+                "non-empty strings")
+        return declared
+    if isinstance(declared, dict):
+        if not isinstance(declared.get("from_item"), str) \
+                or not declared["from_item"]:
+            raise ValueError(
+                f"release gate dynamic capability at {path!r} has no from_item")
+        card = declared.get("card")
+        if card is not None and (not isinstance(card, str) or not card):
+            raise ValueError(
+                f"release gate dynamic capability at {path!r} has malformed card")
+        # Task-card data can select any offered capability. The offer list is the
+        # runtime's own bound, so inventory every member before publication.
+        return offers
+    raise ValueError(
+        f"release gate capability declaration at {path!r} is not inspectable")
+
+
+def _capability_gate_invocations(document: dict, sf):
+    """Yield gate tools any static or task-card-selected capability can grant."""
+    raw_offers = document.get("capabilities", []) or []
+    if not isinstance(raw_offers, list) or not all(
+            isinstance(name, str) and name for name in raw_offers):
+        raise ValueError(
+            "release gate capability offers must be a list of non-empty strings")
+    if sf is None:
+        return
+    accessor = getattr(sf, "capabilities", None)
+    if not callable(accessor):
+        raise ValueError("release gate capability registry is not inspectable")
+    try:
+        catalog = accessor()
+    except Exception as exc:
+        raise ValueError(
+            f"release gate capability registry is not inspectable: {exc}") from exc
+    if not isinstance(catalog, dict):
+        raise ValueError("release gate capability registry is not inspectable")
+    for index, step in enumerate(document.get("steps", [])):
+        if (not isinstance(step, dict)
+                or step.get("step_type", "agent") != "agent"):
+            continue
+        path = ("steps", index, "capability")
+        for name in _capability_names(step, raw_offers, path):
+            config = catalog.get(name)
+            if not isinstance(config, dict):
+                raise ValueError(
+                    f"release gate capability {name!r} is not registered or inspectable")
+            tools = config.get("tools")
+            if not isinstance(tools, list) or not all(
+                    isinstance(tool, str) and tool for tool in tools):
+                raise ValueError(
+                    f"release gate capability {name!r} tools are not inspectable")
+            for tool_index, tool in enumerate(tools):
+                if tool in _GATE_TOOLS:
+                    yield (path + (name, "tools", tool_index), tool)
+
+
+def release_gate_ownership_error(
+        document: dict, roles: dict | None = None, sf=None) -> str:
+    """Validate final effective callable grants for every release-graph step."""
     if not isinstance(document, dict) or not isinstance(document.get("steps"), list):
         return ""
     raw_steps = document["steps"]
@@ -193,11 +284,13 @@ def release_gate_ownership_error(document: dict, roles: dict | None = None) -> s
     }
     try:
         actual = set(_gate_invocations(document))
-        role_grants = set(_role_gate_invocations(document, roles))
+        role_grants = set(_role_gate_invocations(document, roles, sf))
+        capability_grants = set(_capability_gate_invocations(document, sf))
     except ValueError as exc:
         return str(exc)
-    if actual != expected or role_grants:
-        extra = sorted(actual - expected) + sorted(role_grants)
+    if actual != expected or role_grants or capability_grants:
+        extra = (sorted(actual - expected) + sorted(role_grants)
+                 + sorted(capability_grants))
         missing = sorted(expected - actual)
         return ("release gate ownership mismatch; "
                 f"unexpected={extra}, missing={missing}")

@@ -869,6 +869,52 @@ def _remove_run_worktree(rec: dict) -> tuple[bool, str]:
     return True, f"removed {path}; branch and commits preserved"
 
 
+def _reap_intent(disposition: str) -> tuple[bool, str | None] | None:
+    """Decode the durable decision written immediately before Git removal."""
+    if disposition == "reaping_discarded":
+        return True, None
+    prefix = "reaping_merged_into:"
+    if disposition.startswith(prefix) and disposition[len(prefix):]:
+        return False, disposition[len(prefix):]
+    return None
+
+
+def _missing_reap_is_owned(rec: dict, *, discarded: bool,
+                           target: str | None) -> tuple[bool, str]:
+    """Prove a pending reap names the exact tree Git has already removed."""
+    path = Path(rec.get("worktree_path") or "")
+    managed = datadir.worktrees_dir().absolute()
+    expected = managed / rec["run_id"]
+    if (rec.get("mode") not in (MODE_WORKTREE, MODE_READ_SNAPSHOT)
+            or not path.is_absolute() or path != expected
+            or managed.resolve() != managed or os.path.lexists(path)):
+        return False, "pending reap no longer has an exact absent managed path"
+    listed = _git(rec.get("source_repo") or "", "worktree", "list", "--porcelain")
+    if listed.returncode:
+        return False, "source Git worktree inventory is unavailable"
+    paths = [line[len("worktree "):] for line in listed.stdout.splitlines()
+             if line.startswith("worktree ")]
+    if str(path) in paths:
+        return False, "source Git still records the pending worktree"
+    if not discarded:
+        branch = rec.get("branch")
+        if rec.get("mode") == MODE_WORKTREE:
+            exists = _git(rec["source_repo"], "show-ref", "--verify",
+                          f"refs/heads/{branch}")
+            if not branch or exists.returncode:
+                return False, "the preserved run branch is unavailable"
+            tip = branch
+        else:
+            tip = rec.get("base_sha")
+            exists = _git(rec["source_repo"], "cat-file", "-e", f"{tip}^{{commit}}")
+            if not tip or exists.returncode:
+                return False, "the recorded snapshot commit is unavailable"
+        merged = _git(rec["source_repo"], "merge-base", "--is-ancestor", tip, target)
+        if not target or merged.returncode:
+            return False, f"preserved run history is not merged into {target}"
+    return True, f"reconciled removed {path}; branch and commits preserved"
+
+
 def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                            now: float | None = None) -> dict:
     """Reclaim quiet, integrated/discarded, idle roots after index release.
@@ -896,12 +942,41 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                 row, why = resources.terminal_quiet(sf, rid)
                 if row is None:
                     raise ValueError(why)
-                discarded = rec.get("disposition") == "discarded"
-                target = None
-                if not discarded:
-                    target, why = _source_current_ref(rec)
-                    if not target:
+                intent = _reap_intent(rec.get("disposition") or "")
+                if intent:
+                    discarded, target = intent
+                else:
+                    discarded = rec.get("disposition") == "discarded"
+                    target = None
+                    if not discarded:
+                        target, why = _source_current_ref(rec)
+                        if not target:
+                            raise ValueError(why)
+                if intent and not os.path.lexists(rec["worktree_path"]):
+                    with db.get_connection() as conn:
+                        admissions = conn.execute(
+                            "SELECT COUNT(*) FROM checkout_write_admissions WHERE canonical_checkout=?",
+                            (rec["worktree_path"],)).fetchone()[0]
+                    if admissions:
+                        raise ValueError("host write admissions have not retired")
+                    ledger = ctl.get(rid) if ctl else None
+                    if ctl and ledger is not None and not ctl.settled(ledger, "released"):
+                        raise ValueError("semantic release is not positively acknowledged")
+                    ok, why = _missing_reap_is_owned(
+                        rec, discarded=discarded, target=target)
+                    if not ok:
                         raise ValueError(why)
+                    if ctl and ledger is not None:
+                        ctl.forget(rid)
+                    final = ("reaped_discarded" if discarded
+                             else f"reaped_merged_into:{target}")
+                    with db.get_connection() as conn:
+                        conn.execute(
+                            "UPDATE run_isolation SET disposition=?,note=? WHERE run_id=?",
+                            (final, why[:500], rid))
+                        conn.commit()
+                    removed.append({"run_id": rid, "reason": why})
+                    continue
                 ok, why = is_disposable(db, rid, run_status=row["status"], admitted_ops=0,
                                         integration_ref=target, require_merge=not discarded)
                 if not ok:
@@ -933,16 +1008,22 @@ def reap_released_worktrees(db, sf, *, min_idle_seconds: float | None = None,
                 fresh, why = resources.terminal_quiet(sf, rid)
                 if fresh is None:
                     raise ValueError(why)
+                pending = ("reaping_discarded" if discarded
+                           else f"reaping_merged_into:{target}")
+                with db.get_connection() as conn:
+                    conn.execute("UPDATE run_isolation SET disposition=? WHERE run_id=?",
+                                 (pending, rid))
+                    conn.commit()
                 ok, why = _remove_run_worktree(rec)
                 if not ok:
                     raise ValueError(why)
+                if ctl:
+                    ctl.forget(rid)
                 with db.get_connection() as conn:
                     conn.execute("UPDATE run_isolation SET disposition=?,note=? WHERE run_id=?",
                                  ("reaped_discarded" if discarded else f"reaped_merged_into:{target}",
                                   why[:500], rid))
                     conn.commit()
-                if ctl:
-                    ctl.forget(rid)
                 removed.append({"run_id": rid, "reason": why})
         except Exception as exc:
             kept.append({"run_id": rid, "reason": str(exc)[:500]})

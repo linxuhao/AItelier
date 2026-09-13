@@ -144,9 +144,11 @@ def search_lease(root: str):
     """Keep a read lease through search/fallback, with a bounded readiness wait."""
     path = Path(root)
     managed = datadir.worktrees_dir().absolute()
-    if path.is_relative_to(managed) and path.resolve() != path:
+    resolved = path.resolve()
+    if resolved.is_relative_to(managed.resolve()) and (
+            not path.is_absolute() or path.absolute() != resolved):
         raise ValueError("managed search path is a symlink or alias")
-    path = path.resolve()
+    path = resolved
     root = str(path)
     if not enabled() or not path.is_relative_to(managed):
         yield None

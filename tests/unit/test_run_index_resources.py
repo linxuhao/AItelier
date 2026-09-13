@@ -136,6 +136,21 @@ def test_search_waits_for_its_root_and_same_call_falls_back(rig, monkeypatch):
         assert ("apple_only_identifier" if path == a else "banana_only_identifier") in result["content"]
 
 
+@pytest.mark.parametrize("location", ["outside", "inside"])
+def test_search_rejects_absolute_symlink_aliases(rig, tmp_path, location):
+    rec = rig.run()
+    parent = tmp_path if location == "outside" else datadir.worktrees_dir()
+    alias = parent / f"{location}-managed-alias"
+    alias.symlink_to(Path(rec["worktree_path"]), target_is_directory=True)
+    assert alias.is_absolute()
+    assert alias.is_relative_to(datadir.worktrees_dir()) is (location == "inside")
+    before = dict(rig.ctl.get(rec["run_id"]))
+    with pytest.raises(ValueError, match="symlink or alias"):
+        with resources.search_lease(str(alias)):
+            pass
+    assert rig.ctl.get(rec["run_id"]) == before
+
+
 def test_reader_blocks_drop_and_reaper_until_positive_acknowledgement(rig):
     rec = rig.run()
     rig.ctl.process_once(execute=rig.execute)
@@ -206,6 +221,37 @@ def test_default_24_hour_idle_gate_then_preserves_branch_on_reap(rig):
     assert result["removed"]
     assert git(rig.source, "show-ref", "--verify", "refs/heads/"+rec["branch"])
     assert ri.record(rig.db, rec["run_id"])["disposition"] != "discarded"
+
+
+def test_reaper_reconciles_crash_after_real_git_worktree_remove(rig, monkeypatch):
+    rec = rig.run()
+    finish(rig, rec)
+    root = Path(rec["worktree_path"])
+    remove = ri._remove_run_worktree
+
+    def remove_then_crash(value):
+        ok, reason = remove(value)
+        assert ok, reason
+        raise SystemExit("fixture crash after git worktree remove")
+
+    monkeypatch.setattr(ri, "_remove_run_worktree", remove_then_crash)
+    with pytest.raises(SystemExit, match="fixture crash"):
+        ri.reap_released_worktrees(rig.db, rig.sf, min_idle_seconds=0)
+    assert not root.exists()
+    pending = ri.record(rig.db, rec["run_id"])
+    assert pending["disposition"] == "reaping_merged_into:main"
+    assert rig.ctl.settled(rig.ctl.get(rec["run_id"]), "released")
+
+    monkeypatch.setattr(ri, "_remove_run_worktree", remove)
+    result = ri.reap_released_worktrees(rig.db, rig.sf, min_idle_seconds=0)
+    assert result["retained"] == []
+    assert result["removed"] == [{
+        "run_id": rec["run_id"],
+        "reason": f"reconciled removed {root}; branch and commits preserved",
+    }]
+    assert ri.record(rig.db, rec["run_id"])["disposition"] == "reaped_merged_into:main"
+    assert rig.ctl.get(rec["run_id"]) is None
+    assert git(rig.source, "show-ref", "--verify", "refs/heads/"+rec["branch"])
 
 
 def test_activity_resets_the_idle_window_and_sweep_does_not(rig):

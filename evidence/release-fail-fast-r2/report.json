@@ -1,0 +1,106 @@
+{
+  "schema": "release.fail-fast@2",
+  "generated_at": "2026-09-13T03:06:26Z",
+  "state_attempt": {
+    "attempt_id": "attempt-5e4e8a35c0d74e54860660fd238f4861",
+    "contract_hash": "3f62aafb1700b176f776c096daa5b9426f9c0e7cc27b67d99afa6fee133c25b7",
+    "context_hash": "88a141e404c44dbe5d26dc51d19ecb5cc79b3f1887deae60b778e4c737e4bf81"
+  },
+  "provenance": {
+    "base_sha": "d64967c7974012ca928918ea7945b374847a3e96",
+    "base_tree": "3349ef5aba00dc53ce9efff0e5e935e8aa8dff5c",
+    "implementation_sha": "d03272e9ca2c983eca42beecd9d52ed551986c85",
+    "implementation_tree": "e0856139ddefd75fd95cfe3e9d71f47c036e8449",
+    "branch": "codex/release-fail-fast-r2",
+    "worktree": "/Users/linxuhao/AItelier-worktrees/release-fail-fast-r2"
+  },
+  "result": {
+    "canonical_game_gate_owner": "5_compile/godot_compile",
+    "run_tests_repo_gate": false,
+    "fail_fast_chain": [
+      "5_test -> 5_compile",
+      "5_compile -> 5_vision",
+      "5_vision failure -> 5_final_test marker -> replan",
+      "5_design success -> 5_final_test"
+    ],
+    "fresh_marker": "Every suppressed downstream gate writes a current-run/current-cycle passed:false report with skipped_because=upstream_failed.",
+    "nonpassing_states": [
+      "known_failure",
+      "pending",
+      "skipped",
+      "blind",
+      "infrastructure_unavailable",
+      "failed",
+      "missing",
+      "stale",
+      "unreadable"
+    ],
+    "generated_pipeline_migration": "New registrations and boot-loaded gen_* configs with the exact game-gate shape receive the same parameters and routing. Original bytes are retained in migration_backups/release-fail-fast-v2 before atomic replacement; historical pinned graph versions are not repointed."
+  },
+  "live_generated_config_read_only_validation": {
+    "path": "/home/linxuhao/.AItelier/configs/gen_dpe_state_game.yaml",
+    "before_sha256": "e046bfd3af3faa76dbc5e06a1f4742a9961bfb518da9a338cbb1eff2bf92f906",
+    "dry_migrated_sha256": "e626b5f65597f07f8cbb9b12063814f83aa3e853c42ab50f1a415d22bbef77ae",
+    "validated_by": "PipelineGraph._from_dict",
+    "idempotent": true,
+    "remote_write_performed": false
+  },
+  "verification": {
+    "related_final": {
+      "command": ".venv/bin/python -m pytest -q tests/unit/test_release_fail_fast.py tests/unit/test_verdict_after_evidence.py tests/unit/test_addon_registry.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_run_tests_gate.py tests/unit/test_run_tests_surfaces_install_failure.py tests/unit/test_run_tests_refuses_the_process_cwd.py tests/unit/test_run_tests_known_red_baseline.py tests/unit/test_pipeline_registry.py tests/unit/test_output_migration.py",
+      "result": "244 passed, 2 warnings",
+      "log_sha256": "e8285f1a276183d22704a1b7c8d7f5ab0d86d18eaa0887ddfc7599d24820485f"
+    },
+    "ruff_owned_critical": {
+      "command": ".venv/bin/ruff check --select F,E9 on owned Python files",
+      "result": "All checks passed",
+      "log_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    "compileall": "passed",
+    "git_diff_check": "passed",
+    "full_unit": {
+      "command": ".venv/bin/python -m pytest -q tests/unit",
+      "result": "3115 passed, 8 skipped, 10 failed, 5 warnings",
+      "log_sha256": "5f349c7c527da5895ed462f84a702bebc5a5a5cfdcf5f01cc7090aeab65b885c",
+      "failures_outside_changed_surfaces": [
+        "tests/unit/test_scheduler_reclaim.py: 5 process-owner/reclaim assertions",
+        "tests/unit/test_web_tools.py: 4 SEARXNG_URL-dependent assertions",
+        "tests/unit/test_zvec_indexer.py: 1 filesystem mtime ordering assertion"
+      ]
+    }
+  },
+  "preserved_first_failures": [
+    {
+      "stage": "baseline command",
+      "result": "zsh: command not found: python",
+      "log_sha256": "5e4e795afaf7b2ac3694348801079911c9a51af17a801a9a9ee5368403a2d58a"
+    },
+    {
+      "stage": "system python3 baseline",
+      "result": "No module named pytest",
+      "log_sha256": "e33688c9c0c9a5aedf876266cc617f2c572e0d1ad4ec27d79c0e93a9f6ccc385"
+    },
+    {
+      "stage": "existing shared venv baseline",
+      "result": "ModuleNotFoundError: No module named mcp during conftest collection",
+      "log_sha256": "a5c4c0472b83772fd79a47f6bc9dad77a1392c2aec990fffe259b599ab909639"
+    },
+    {
+      "stage": "first implementation focused run",
+      "result": "74 passed, 2 expected old-contract failures",
+      "log_sha256": "1e251eb3758b39c36b4ef59bf2c355c9e1640358929aaac5d11a3208a7e118c8"
+    },
+    {
+      "stage": "first related run",
+      "result": "241 passed, 2 expected old infrastructure-pass failures",
+      "log_sha256": "20022cbc0bd19366c0c56db19fa6a99db06353befcc912127b886c828dfc4c26"
+    }
+  ],
+  "boundaries": {
+    "shared_checkout_written": false,
+    "wuxia_repository_written": false,
+    "state_evidence_written": false,
+    "push_publish_deploy_or_checkpoint": false,
+    "separate_operation_owner_candidate_used": false
+  }
+}

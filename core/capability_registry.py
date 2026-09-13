@@ -335,7 +335,10 @@ def load_generated(sf) -> list[str]:
         for f in sorted(capabilities_dir().glob("*.json")):
             try:
                 d = json.loads(f.read_text(encoding="utf-8"))
-            except Exception:
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"capability definition {f} is unreadable: {exc}") from exc
+            except OSError:
                 log.warning("unreadable capability definition %s", f, exc_info=True)
                 continue
             if not isinstance(d, dict):

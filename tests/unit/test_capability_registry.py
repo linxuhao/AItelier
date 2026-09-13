@@ -228,7 +228,14 @@ def test_persisted_definitions_come_back_on_boot(home):
     assert fresh._capabilities["gen_thing"]["briefing"] == "b"
 
 
-def test_malformed_persisted_tools_abort_boot_before_valid_siblings_remain(home):
+@pytest.mark.parametrize(("bad_bytes", "case"), [
+    (json.dumps({"name": "bad", "tools": 42, "briefing": ""}).encode(),
+     "tools_scalar"),
+    (b"{", "invalid_json"),
+    (b"\xff", "invalid_unicode"),
+])
+def test_malformed_persisted_capability_rolls_back_whole_boot(
+        home, bad_bytes, case):
     sf = _real_sf()
     sf.register_capability("sentinel", tools=["write"], owner="host")
     before_mapping = sf._capabilities
@@ -236,13 +243,34 @@ def test_malformed_persisted_tools_abort_boot_before_valid_siblings_remain(home)
     directory = caps.capabilities_dir()
     (directory / "a_good.json").write_text(json.dumps({
         "name": "good", "tools": ["read_file"], "briefing": ""}))
-    (directory / "b_bad.json").write_text(json.dumps({
-        "name": "bad", "tools": 42, "briefing": ""}))
+    (directory / "b_bad.json").write_bytes(bad_bytes)
+    before_tree = [(str(path.relative_to(directory)), path.is_dir(),
+                    None if path.is_dir() else path.read_bytes())
+                   for path in sorted(directory.rglob("*"))]
 
     assert caps.load_generated(sf) == []
     assert sf._capabilities is before_mapping
     assert sf._capabilities["sentinel"] is before_sentinel
     assert "good" not in sf._capabilities and "bad" not in sf._capabilities
+    assert [(str(path.relative_to(directory)), path.is_dir(),
+             None if path.is_dir() else path.read_bytes())
+            for path in sorted(directory.rglob("*"))] == before_tree, case
+
+
+def test_empty_and_valid_capability_directories_boot_successfully(home):
+    sf = _real_sf()
+    sf.register_capability("sentinel", tools=["write"], owner="host")
+    sentinel = sf._capabilities["sentinel"]
+    directory = caps.capabilities_dir()
+
+    assert caps.load_generated(sf) == []
+    assert sf._capabilities["sentinel"] is sentinel
+
+    (directory / "good.json").write_text(json.dumps({
+        "name": "good", "tools": ["read_file"], "briefing": "safe"}))
+    assert caps.load_generated(sf) == ["good"]
+    assert sf._capabilities["sentinel"] is sentinel
+    assert sf.capabilities()["good"]["tools"] == ["read_file"]
 
 
 # ── the migration itself ──────────────────────────────────────────────────

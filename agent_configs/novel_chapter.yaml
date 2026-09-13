@@ -1,12 +1,8 @@
 # agent_configs/novel_chapter.yaml — 章循环角色配置。
-# 模型路由（按"这一步错了污染多远"分档）：
-#   novel     = 章纲/正文 —— ollamacloud/deepseek-v4.1-flash @low。2026-09-13 实测
-#               它在硬设定约束上与旗舰打平（均 1.75 条违规），价格在 flash 档。
-#   novel_alt = 去AI味/正文评审 —— ollamacloud/glm-5.3 @low，异族模型。去AI味那步
-#               的职责就是抹掉模型指纹，评审那步在判写手的文笔；三者同模型时是
-#               自己抹自己、自己判自己。glm-5.3 记设定细节最好（4/4）。
-#           弱模型判文学质量≈随机，评审必须用强模型（调研结论）。
-#   flash = 章纲审查（结构化对照）/细纲审查/记账分录提取（信息抽取）。
+# 路由所有权：角色只选择稳定的内部别名；实际供应商、端点和 effort 属于部署方
+# gitignored model_routes.json。novel 负责章纲/正文，novel_alt 负责去 AI 味与正文
+# 评审，使生成者和文字判断者保持不同路由；flash 负责结构化对照与信息抽取。
+# tracked model_routes.example.json 为干净 checkout 声明可运行的公开默认值。
 
 novel_outliner:
   model: "novel"

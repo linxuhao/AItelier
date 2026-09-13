@@ -2,7 +2,8 @@
   "_comment": [
     "EXAMPLE. Copy to model_routes.json and edit — the real file is gitignored,",
     "like .env. The INTERNAL NAMES are the repo's contract: agent_configs and the",
-    "vision gate reference `flash` / `glm` / `smart` / `vision`, so those keys",
+    "vision gate and novel pipelines reference `flash` / `glm` / `smart` /",
+    "`novel` / `novel_alt` / `vision`, so those keys",
     "must exist. WHICH endpoints serve them is entirely yours — the lists below",
     "are one operator's answer, not a requirement. (A `pro` route used to sit",
     "here; it was deleted once its candidate list and `smart`'s had become the",
@@ -126,6 +127,20 @@
       "deepseek/deepseek-v4-pro": "max"
     }
   },
+  "_novel_note": [
+    "`novel` and `novel_alt` are separate stable role contracts: prose makers",
+    "use `novel`; prose reviewers and rewriters use `novel_alt`. The example",
+    "reuses public endpoints already declared by `flash` and `glm`; it does not",
+    "publish or constrain any deployment's private endpoint ordering or effort.",
+    "A deployment may replace both candidate lists, but must keep both aliases",
+    "and must not silently map either one to the code/reasoning `smart` route."
+  ],
+  "novel": [
+    "deepseek/deepseek-flash"
+  ],
+  "novel_alt": [
+    "ark/glm-5.3"
+  ],
   "_vision_note": [
     "ONE judge. The hosted candidates were removed 2026-08-26, measured:",
     "neither ever finished a run — two attempts, both blind (4 of 47 scenarios,",

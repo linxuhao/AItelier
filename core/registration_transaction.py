@@ -81,33 +81,38 @@ class RegistrationTransaction:
 
     def __enter__(self):
         self.sf._lock.acquire()
-        agents = self.sf.agent_registry._configs
-        self._agent_mapping = agents
-        self._agent_objects = dict(agents)
-        self._agent_values = copy.deepcopy(agents)
-        self._capability_mapping = getattr(self.sf, "_capabilities", {})
-        self._capabilities = dict(self._capability_mapping)
-        # by-name-ok: registration rollback snapshots config definitions, no run
-        self._graphs = {
-            name: self.sf._graphs.get(name, _MISSING)
-            for name in self.config_names}
-        # by-name-ok: registration rollback snapshots config definitions, no run
-        self._resolvers = {
-            name: self.sf._resolvers.get(name, _MISSING)
-            for name in self.config_names}
-        manifests = getattr(self.registry, "_manifests", None)
-        self._manifests = ({
-            name: manifests.get(name, _MISSING) for name in self.config_names}
-            if isinstance(manifests, dict) else None)
-        self._rows = {}
-        for name in self.config_names:
-            self._rows[name] = {
-                table: [dict(row) for row in self.sf._conn.execute(
-                    f"SELECT * FROM {table} WHERE name=?", (name,))]
-                for table in ("skillflow_graphs", "skillflow_graph_versions")
-            }
-        self._files = {path: _capture(path) for path in self.paths}
-        return self
+        try:
+            agents = self.sf.agent_registry._configs
+            self._agent_mapping = agents
+            self._agent_objects = dict(agents)
+            self._agent_values = copy.deepcopy(agents)
+            self._capability_mapping = getattr(self.sf, "_capabilities", {})
+            self._capabilities = dict(self._capability_mapping)
+            # by-name-ok: registration rollback snapshots definitions, no run
+            self._graphs = {
+                name: self.sf._graphs.get(name, _MISSING)
+                for name in self.config_names}
+            # by-name-ok: registration rollback snapshots definitions, no run
+            self._resolvers = {
+                name: self.sf._resolvers.get(name, _MISSING)
+                for name in self.config_names}
+            manifests = getattr(self.registry, "_manifests", None)
+            self._manifests = ({
+                name: manifests.get(name, _MISSING) for name in self.config_names}
+                if isinstance(manifests, dict) else None)
+            self._rows = {}
+            for name in self.config_names:
+                self._rows[name] = {
+                    table: [dict(row) for row in self.sf._conn.execute(
+                        f"SELECT * FROM {table} WHERE name=?", (name,))]
+                    for table in ("skillflow_graphs", "skillflow_graph_versions")
+                }
+            self._files = {path: _capture(path) for path in self.paths}
+            return self
+        except Exception:
+            # __exit__ is not called when __enter__ raises.
+            self.sf._lock.release()
+            raise
 
     def commit(self):
         self._committed = True

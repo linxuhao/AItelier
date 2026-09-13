@@ -228,6 +228,23 @@ def test_persisted_definitions_come_back_on_boot(home):
     assert fresh._capabilities["gen_thing"]["briefing"] == "b"
 
 
+def test_malformed_persisted_tools_abort_boot_before_valid_siblings_remain(home):
+    sf = _real_sf()
+    sf.register_capability("sentinel", tools=["write"], owner="host")
+    before_mapping = sf._capabilities
+    before_sentinel = sf._capabilities["sentinel"]
+    directory = caps.capabilities_dir()
+    (directory / "a_good.json").write_text(json.dumps({
+        "name": "good", "tools": ["read_file"], "briefing": ""}))
+    (directory / "b_bad.json").write_text(json.dumps({
+        "name": "bad", "tools": 42, "briefing": ""}))
+
+    assert caps.load_generated(sf) == []
+    assert sf._capabilities is before_mapping
+    assert sf._capabilities["sentinel"] is before_sentinel
+    assert "good" not in sf._capabilities and "bad" not in sf._capabilities
+
+
 # ── the migration itself ──────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent.parent
 

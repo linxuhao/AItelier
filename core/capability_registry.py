@@ -95,6 +95,23 @@ def _unresolved(sf, tools: list[str]) -> list[str]:
     return missing
 
 
+def _normalize_tools(tools) -> list[str]:
+    """Normalize the executable iterable shapes supported by SkillFlow 1.5.75."""
+    if tools is None:
+        return []
+    if isinstance(tools, dict):
+        values = list(tools)
+    elif isinstance(tools, (list, tuple)):
+        values = list(tools)
+    else:
+        raise ValueError(
+            "capability tools must be a list or mapping of non-empty names")
+    if not all(isinstance(tool, str) and tool for tool in values):
+        raise ValueError(
+            "capability tools must be a list or mapping of non-empty names")
+    return values
+
+
 def _release_graph_update_error(sf, name: str, candidate: dict) -> str:
     """Reject a capability edit that would invalidate a live or persisted graph."""
     import yaml
@@ -149,7 +166,10 @@ def define(sf, name: str = "", *, tools=(), briefing: str = "", owner: str = "ho
     restart brings it back — that is the path the forge uses. Built-in ones are
     code and are registered with `persist=False` on every boot.
     """
-    tools = list(tools or ())
+    try:
+        tools = _normalize_tools(tools)
+    except ValueError as exc:
+        return {"error": str(exc)}
     # The name becomes a FILENAME. `/` and a leading `.` were rejected and
     # everything else waved through, so a 300-char name reached _write_atomic and
     # came back as OSError(ENAMETOOLONG) from a function documented to report
@@ -309,28 +329,63 @@ def archive(sf, name: str, *, purge: bool = False) -> dict:
 
 def load_generated(sf) -> list[str]:
     """Boot scan: register every persisted capability. Returns the names."""
-    loaded = []
-    skip = archived_names()
-    for f in sorted(capabilities_dir().glob("*.json")):
-        try:
-            d = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
-            log.warning("unreadable capability definition %s", f, exc_info=True)
-            continue
-        name = d.get("name") or f.stem
-        if name in skip:
-            continue
-        # The owner is NOT read from the file. This directory IS the generated
-        # namespace; a JSON claiming `owner: "host"` for a name the host does not
-        # define would otherwise mint a permanently un-editable capability from
-        # data on disk.
-        r = define(sf, name, tools=d.get("tools") or [],
-                   briefing=d.get("briefing") or "", owner=f"gen:{name}")
-        if r.get("ok"):
+    def load_batch():
+        definitions = []
+        skip = archived_names()
+        for f in sorted(capabilities_dir().glob("*.json")):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+            except Exception:
+                log.warning("unreadable capability definition %s", f, exc_info=True)
+                continue
+            if not isinstance(d, dict):
+                raise ValueError(f"capability definition {f} is not an object")
+            name = d.get("name") or f.stem
+            if name in skip:
+                continue
+            briefing = d.get("briefing") or ""
+            if not isinstance(name, str) or not isinstance(briefing, str):
+                raise ValueError(
+                    f"capability definition {f} has malformed name/briefing")
+            tools = _normalize_tools(d.get("tools"))
+            definitions.append((name, tools, briefing))
+
+        loaded = []
+        for name, tools, briefing in definitions:
+            # The owner is NOT read from the file. This directory IS the generated
+            # namespace; a JSON claiming `owner: "host"` for a name the host does
+            # not define would otherwise mint an uneditable capability from disk.
+            r = define(
+                sf, name, tools=tools, briefing=briefing, owner=f"gen:{name}")
+            if not r.get("ok"):
+                raise ValueError(r["error"])
             loaded.append(name)
-        else:
-            log.warning("capability %s not registered: %s", name, r["error"])
-    return loaded
+        return loaded
+
+    if all(hasattr(sf, attr) for attr in (
+            "_lock", "_conn", "_graphs", "_resolvers", "agent_registry")):
+        from core.registration_transaction import RegistrationTransaction
+        with RegistrationTransaction(
+                sf, paths=[capabilities_dir()]) as transaction:
+            try:
+                loaded = load_batch()
+            except Exception as exc:
+                log.warning("generated capability boot rolled back: %s", exc)
+                return []
+            transaction.commit()
+            return loaded
+
+    # Minimal compatibility for unit doubles without SkillFlow's registries/DB.
+    capability_mapping = getattr(sf, "_capabilities", {})
+    before = dict(capability_mapping)
+    try:
+        return load_batch()
+    except Exception as exc:
+        capability_mapping.clear()
+        capability_mapping.update(before)
+        sf._capabilities = capability_mapping
+        log.warning("generated capability boot rolled back: %s", exc)
+        return []
 
 
 def palette(sf, config_name: str = "") -> dict:

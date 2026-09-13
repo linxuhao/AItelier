@@ -527,7 +527,8 @@ def _register_text(sf, registry, config_name: str, yaml_text: str,
     failure."""
     graph, hints = _validated_registration(
         config_name, yaml_text, roles=roles, sf=sf)
-    _commit_registration(sf, registry, config_name, graph, hints)
+    _commit_registration(
+        sf, registry, config_name, graph, hints, roles=roles)
     return graph
 
 

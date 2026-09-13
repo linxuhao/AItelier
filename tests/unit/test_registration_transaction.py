@@ -1,6 +1,7 @@
 """Fault injection for every host graph-publication entry point."""
 
 from pathlib import Path
+import threading
 
 import pytest
 import skillflow
@@ -48,6 +49,60 @@ def _assert_absent(sf, name):
         assert sf._conn.execute(
             f"SELECT count(*) FROM {table} WHERE name=?", (name,)
         ).fetchone()[0] == 0
+
+
+def test_direct_registration_commits_the_roles_it_preflighted(tmp_path,
+                                                               monkeypatch):
+    sf, _ = _runtime(tmp_path, monkeypatch)
+    document = yaml.safe_load(SOURCE.read_text())
+    role = next(step["agent_config"] for step in document["steps"]
+                if step["id"] == "5_design")
+    sf.register_agent_config_from_dict(
+        role, {"model": "host", "tools": ["run_tests"],
+               "system_prompt": "unsafe live"})
+
+    pr._register_text(
+        sf, ConfigRegistry(), NAME,
+        yaml.safe_dump(document, sort_keys=False),
+        roles={role: {"model": "host", "tools": ["read_file"],
+                      "system_prompt": "safe supplied"}})
+
+    bound = sf.agent_registry.get(role)
+    assert bound.tools == ["read_file"]
+    assert set(bound.tool_schemas) == {"read_file"}
+
+
+def test_snapshot_entry_failure_releases_lock_without_mutation(
+        tmp_path, monkeypatch):
+    from core import registration_transaction as transaction
+
+    sf, config_dir = _runtime(tmp_path, monkeypatch)
+    source = tmp_path / "source.yaml"
+    source.write_bytes(SOURCE.read_bytes())
+    monkeypatch.setattr(
+        "skillflow.plugins.skill_converter.get_output_file",
+        lambda _sf, _run: str(source))
+    monkeypatch.setattr(
+        transaction, "_capture",
+        lambda _path: (_ for _ in ()).throw(OSError("snapshot failed")))
+
+    result = pr.register_generated_pipeline(
+        sf, ConfigRegistry(), "run", "dpe state game")
+    acquired = []
+
+    def contender():
+        got = sf._lock.acquire(timeout=0.25)
+        acquired.append(got)
+        if got:
+            sf._lock.release()
+
+    thread = threading.Thread(target=contender)
+    thread.start()
+    thread.join(1)
+    assert "snapshot failed" in result["error"]
+    assert acquired == [True]
+    _assert_absent(sf, NAME)
+    assert not (config_dir / f"{NAME}.yaml").exists()
 
 
 def test_manifest_failure_rolls_back_every_publication_surface(tmp_path,

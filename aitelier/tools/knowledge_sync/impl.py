@@ -27,8 +27,10 @@ Design choices that keep this safe and simple:
 """
 
 import json
+import os
 import re
 import subprocess
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -65,23 +67,35 @@ def knowledge_sync(*, project_root: str = "", workspace_root: str = "",
             return {"written": False,
                     "reason": "no distillable artifacts (design/verify) found"}
 
-        # Ensure the file is ignored BEFORE writing it, so a concurrent git add
-        # never stages it.
-        _ensure_excluded(repo)
+        kpath = repo / _KNOWLEDGE_REL
+        existing = kpath.read_text(encoding="utf-8", errors="replace") \
+            if kpath.exists() else ""
+        merged = _merge(existing, pid, section).encode("utf-8")
+
+        # Establish and verify the effective exclude before changing knowledge.
         try:
-            migration = _migrate_tracked_knowledge(repo)
+            _ensure_excluded(repo)
+        except Exception as exc:
+            tracked = _git(repo, "ls-files", "--error-unmatch", "--",
+                           _KNOWLEDGE_REL.as_posix())
+            if tracked.returncode == 0:
+                return _migration_refusal(
+                    owner="unproven",
+                    reason=f"the effective Git exclude is unavailable ({exc})")
+            return _untracked_refusal(
+                reason=f"the effective Git exclude is unavailable ({exc})")
+        try:
+            migration = _migrate_tracked_knowledge(repo, merged)
         except Exception as exc:
             return _migration_refusal(
                 owner="unproven", reason=f"migration check failed ({exc})")
         if isinstance(migration, dict):
             return migration
 
-        kpath = repo / _KNOWLEDGE_REL
-        kpath.parent.mkdir(parents=True, exist_ok=True)
-        existing = kpath.read_text(encoding="utf-8", errors="replace") \
-            if kpath.exists() else ""
-        merged = _merge(existing, pid, section)
-        kpath.write_text(merged, encoding="utf-8")
+        if migration is None:
+            refusal = _write_untracked_knowledge(repo, kpath, merged)
+            if refusal is not None:
+                return refusal
         result = {"written": True, "path": str(kpath), "section": pid}
         if migration:
             result["migration"] = migration
@@ -203,19 +217,22 @@ def _split_sections(text: str) -> list[tuple[str, str]]:
 # ── Git ignore wiring ─────────────────────────────────────────────────────
 
 
-def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+def _git(repo: Path, *args: str,
+         env: dict | None = None) -> subprocess.CompletedProcess:
     command = ["git", *args]
     try:
         return subprocess.run(
             command, cwd=repo, capture_output=True, text=True,
-            errors="replace", check=False, timeout=60)
+            errors="replace", check=False, timeout=60,
+            env=({**os.environ, **env} if env else None))
     except (OSError, subprocess.TimeoutExpired) as exc:
         return subprocess.CompletedProcess(command, 128, "", str(exc))
 
 
-def _migration_refusal(*, owner: str, reason: str) -> dict:
+def _migration_refusal(*, owner: str, reason: str,
+                       recovery_action: str | None = None) -> dict:
     path = _KNOWLEDGE_REL.as_posix()
-    action = (
+    action = recovery_action or (
         f"Back up and review {path}; make the worktree clean without altering "
         f"it, run `git rm --cached -- {path}`, verify that this is the only "
         "staged path, then run `git commit -m "
@@ -230,7 +247,93 @@ def _migration_refusal(*, owner: str, reason: str) -> dict:
     }
 
 
-def _migrate_tracked_knowledge(repo: Path) -> str | dict | None:
+def _untracked_refusal(*, reason: str) -> dict:
+    path = _KNOWLEDGE_REL.as_posix()
+    action = (
+        "Run `git rev-parse --git-common-dir`, ensure its `info/exclude` "
+        f"contains `{_EXCLUDE_LINE}`, then verify `git check-ignore -- {path}` "
+        f"and `git status --porcelain=v1 --untracked-files=all -- {path}` "
+        "before rerunning knowledge_sync.")
+    return {
+        "written": False,
+        "error": (f"untracked {path} cannot be handed off safely: {reason}; "
+                  f"owner=untracked. Recovery: {action}"),
+        "tracked_path": path,
+        "owner": "untracked",
+        "recovery_action": action,
+    }
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    tmp = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _restore_knowledge(path: Path, *, existed: bool, content: bytes) -> bool:
+    try:
+        if existed:
+            _atomic_write(path, content)
+        else:
+            path.unlink(missing_ok=True)
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+        return path.read_bytes() == content if existed else not path.exists()
+    except OSError:
+        return False
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _write_untracked_knowledge(repo: Path, kpath: Path,
+                               content: bytes) -> dict | None:
+    """Write an untracked file and roll it back unless Git proves it ignored."""
+    existed = kpath.exists()
+    try:
+        before = kpath.read_bytes() if existed else b""
+    except OSError as exc:
+        return _untracked_refusal(reason=f"existing knowledge is unreadable ({exc})")
+    if kpath.is_symlink() or (existed and not kpath.is_file()):
+        return _untracked_refusal(reason="the knowledge path is not a regular file")
+    pre_status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all",
+                      "--", _KNOWLEDGE_REL.as_posix())
+    if pre_status.returncode or pre_status.stdout:
+        return _untracked_refusal(
+            reason="the exact path's clean untracked state is unavailable")
+    try:
+        _atomic_write(kpath, content)
+    except OSError as exc:
+        return _untracked_refusal(reason=f"the knowledge write failed ({exc})")
+    ignored = _git(repo, "check-ignore", "--quiet", "--",
+                   _KNOWLEDGE_REL.as_posix())
+    final_status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all",
+                        "--", _KNOWLEDGE_REL.as_posix())
+    if ignored.returncode or final_status.returncode or final_status.stdout:
+        restored = _restore_knowledge(kpath, existed=existed, content=before)
+        detail = ("knowledge bytes were restored" if restored
+                  else "knowledge-byte rollback could not be verified")
+        return _untracked_refusal(
+            reason=f"the clean ignored handoff could not be verified; {detail}")
+    return None
+
+
+def _migrate_tracked_knowledge(repo: Path,
+                               replacement: bytes) -> str | dict | None:
     """Commit removal of the exact generated path from Git tracking, or refuse.
 
     The working file is preserved byte-for-byte. Migration is allowed only when
@@ -282,39 +385,113 @@ def _migrate_tracked_knowledge(repo: Path) -> str | dict | None:
     before_head = _git(repo, "rev-parse", "HEAD")
     if before_head.returncode or not before_head.stdout.strip():
         return _migration_refusal(owner=owner, reason="repository HEAD is unavailable")
-    removed = _git(repo, "rm", "--cached", "--quiet", "--", rel)
-    if removed.returncode:
-        return _migration_refusal(owner=owner, reason="Git refused exact-path index removal")
-    tree = _git(repo, "write-tree")
-    if tree.returncode or not tree.stdout.strip():
-        _git(repo, "reset", "-q", "HEAD", "--", rel)
-        return _migration_refusal(owner=owner, reason="Git could not write the exact migration tree")
-    committed = _git(
-        repo, "commit-tree", tree.stdout.strip(), "-p", before_head.stdout.strip(),
-        "-m", "AItelier: untrack generated knowledge")
-    if committed.returncode or not committed.stdout.strip():
-        _git(repo, "reset", "-q", "HEAD", "--", rel)
+    index_result = _git(repo, "rev-parse", "--git-path", "index")
+    if index_result.returncode or not index_result.stdout.strip():
         return _migration_refusal(
-            owner=owner,
-            reason=f"Git could not create the exact migration commit ({(committed.stderr or committed.stdout).strip()[:200]})")
-    updated = _git(repo, "update-ref", "HEAD", committed.stdout.strip(),
-                   before_head.stdout.strip())
-    if updated.returncode:
-        _git(repo, "reset", "-q", "HEAD", "--", rel)
-        return _migration_refusal(
-            owner=owner, reason="repository HEAD changed while migration was prepared")
+            owner=owner, reason="repository index path is unavailable")
+    index_path = Path(index_result.stdout.strip())
+    if not index_path.is_absolute():
+        index_path = (repo / index_path).resolve()
+    temp_index = None
+    lock_path = index_path.with_name(index_path.name + ".lock")
+    lock_fd = None
+    knowledge_changed = False
+    try:
+        index_before = index_path.read_bytes()
+        index_mode = index_path.stat().st_mode & 0o777
+        fd, raw_index = tempfile.mkstemp(
+            prefix="index.aitelier-", dir=index_path.parent)
+        os.close(fd)
+        temp_index = Path(raw_index)
+        temp_index.write_bytes(index_before)
+        _atomic_write(kpath, replacement)
+        knowledge_changed = True
 
-    parent = _git(repo, "rev-parse", "HEAD^")
-    names = _git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
-    still_tracked = _git(repo, "ls-files", "--error-unmatch", "--", rel)
-    final_status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
-    if (parent.returncode or parent.stdout.strip() != before_head.stdout.strip()
-            or names.returncode or names.stdout.splitlines() != [rel]
-            or still_tracked.returncode == 0 or final_status.returncode
-            or final_status.stdout or kpath.read_bytes() != working):
+        temp_env = {"GIT_INDEX_FILE": str(temp_index)}
+        removed = _git(repo, "rm", "--cached", "--quiet", "--", rel,
+                       env=temp_env)
+        if removed.returncode:
+            raise RuntimeError("Git refused exact-path index removal")
+        tree = _git(repo, "write-tree", env=temp_env)
+        if tree.returncode or not tree.stdout.strip():
+            raise RuntimeError("Git could not write the exact migration tree")
+        committed = _git(
+            repo, "commit-tree", tree.stdout.strip(), "-p",
+            before_head.stdout.strip(), "-m",
+            "AItelier: untrack generated knowledge")
+        if committed.returncode or not committed.stdout.strip():
+            detail = (committed.stderr or committed.stdout).strip()[:200]
+            raise RuntimeError(
+                f"Git could not create the exact migration commit ({detail})")
+
+        commit = committed.stdout.strip()
+        parent = _git(repo, "rev-parse", f"{commit}^")
+        names = _git(repo, "diff-tree", "--no-commit-id", "--name-status", "-r",
+                     before_head.stdout.strip(), commit)
+        omitted = _git(repo, "ls-tree", "-r", "--name-only", commit, "--", rel)
+        if (parent.returncode
+                or parent.stdout.strip() != before_head.stdout.strip()
+                or names.returncode
+                or names.stdout.splitlines() != [f"D\t{rel}"]
+                or omitted.returncode or omitted.stdout
+                or kpath.read_bytes() != replacement):
+            raise RuntimeError(
+                "prospective migration exactness could not be verified")
+        if index_path.read_bytes() != index_before:
+            raise RuntimeError("repository index changed while migration was prepared")
+        lock_fd = os.open(
+            lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.fchmod(lock_fd, index_mode)
+        with os.fdopen(lock_fd, "wb") as lock_handle:
+            lock_fd = None
+            lock_handle.write(temp_index.read_bytes())
+            lock_handle.flush()
+            os.fsync(lock_handle.fileno())
+        lock_fd = None
+        if index_path.read_bytes() != index_before:
+            raise RuntimeError("repository index changed while migration lock was held")
+        updated = _git(repo, "update-ref", "HEAD", commit,
+                       before_head.stdout.strip())
+        if updated.returncode:
+            raise RuntimeError("repository HEAD changed while migration was prepared")
+        try:
+            os.replace(lock_path, index_path)
+        except OSError as exc:
+            rolled_back = _git(repo, "update-ref", "HEAD",
+                               before_head.stdout.strip(), commit)
+            restored = _restore_knowledge(kpath, existed=True, content=working)
+            current = _git(repo, "rev-parse", "HEAD")
+            if rolled_back.returncode == 0 and restored:
+                knowledge_changed = False
+                raise RuntimeError(
+                    f"index publication failed and was rolled back exactly ({exc})")
+            actual = (current.stdout.strip()
+                      if current.returncode == 0 else "unavailable")
+            action = (
+                f"Stop and inspect HEAD={actual}, expected prior HEAD="
+                f"{before_head.stdout.strip()}, and `{index_path}`; do not run "
+                "an automatic git rm until the ref/index pair is reconciled.")
+            return _migration_refusal(
+                owner=owner,
+                reason="migration publication failed and exact rollback could "
+                "not be verified",
+                recovery_action=action)
+        return "untracked_generated_knowledge"
+    except (OSError, RuntimeError) as exc:
+        restored = (not knowledge_changed or _restore_knowledge(
+            kpath, existed=True, content=working))
         return _migration_refusal(
-            owner=owner, reason="post-migration exactness or cleanliness could not be verified")
-    return "untracked_generated_knowledge"
+            owner=owner, reason=f"migration publication refused ({exc}); "
+            f"knowledge bytes restored={str(restored).lower()}")
+    finally:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        for cleanup in (lock_path, temp_index):
+            if cleanup is not None:
+                _safe_unlink(cleanup)
 
 
 def _ensure_excluded(repo: Path) -> None:
@@ -328,18 +505,9 @@ def _ensure_excluded(repo: Path) -> None:
     # ``info/exclude`` below that administrative directory has no effect and
     # leaves the generated knowledge file dirty. Ask Git for the authoritative
     # path instead of parsing its implementation-specific .git file ourselves.
-    try:
-        resolved = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return
+    resolved = _git(repo, "rev-parse", "--git-common-dir")
     if resolved.returncode != 0 or not resolved.stdout.strip():
-        return
+        raise RuntimeError("Git could not resolve its common directory")
     git_dir = Path(resolved.stdout.strip())
     if not git_dir.is_absolute():
         git_dir = (repo / git_dir).resolve()
@@ -348,10 +516,15 @@ def _ensure_excluded(repo: Path) -> None:
     exclude = info / "exclude"
     current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     if any(ln.strip() == _EXCLUDE_LINE for ln in current.splitlines()):
-        return
-    sep = "" if current.endswith("\n") or not current else "\n"
-    exclude.write_text(
-        current + sep + f"{_EXCLUDE_LINE}\n", encoding="utf-8")
+        pass
+    else:
+        sep = "" if current.endswith("\n") or not current else "\n"
+        exclude.write_text(
+            current + sep + f"{_EXCLUDE_LINE}\n", encoding="utf-8")
+    ignored = _git(repo, "check-ignore", "--no-index", "--quiet", "--",
+                   _KNOWLEDGE_REL.as_posix())
+    if ignored.returncode:
+        raise RuntimeError("Git did not confirm the effective exclude")
 
 
 # ── small helpers ─────────────────────────────────────────────────────────

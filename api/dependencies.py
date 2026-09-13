@@ -216,7 +216,8 @@ def get_skillflow():
     """
     global _skillflow_instance
     if _skillflow_instance is None:
-        from skillflow import SkillFlow, PipelineGraph
+        from skillflow import PipelineGraph
+        from core.skillflow_host import AItelierSkillFlow
         from core.output_migration import require_output_engine
         require_output_engine()
         from pathlib import Path
@@ -241,10 +242,11 @@ def get_skillflow():
         # ~7 intervals — room for a slow completion — and still well under
         # skillflow's own 300 default, so a truly dead worker is recovered
         # inside three minutes rather than five.
-        sf = SkillFlow(SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
-                     projects_base=PROJECTS_PATH, stale_threshold_seconds=180,
-                     code_path_resolver=_existing_repo_code_path,
-                     trace_db_path=WS_PATH)
+        sf = AItelierSkillFlow(
+            SKILLFLOW_DB_PATH, tool_loader=tool_loader, workspace_base=WS_PATH,
+            projects_base=PROJECTS_PATH, stale_threshold_seconds=180,
+            code_path_resolver=_existing_repo_code_path,
+            trace_db_path=WS_PATH)
 
         # Capability registry: a step's `capability` keyword → framework-
         # provisioned toolset + injected context. LEAST PRIVILEGE — neither the

@@ -680,6 +680,21 @@ def recover_claims_on_startup():
     """
     sf = get_skillflow()
     try:
+        # r9, 2026-09-12: 5_final_test's first run_tests was still admitted
+        # when restart recovery reset its claim to pending. The scheduler then
+        # admitted a second run_tests at 21:43:29; only at 21:43:54 did the
+        # periodic audit record that the old owner was lost. Reconcile FIRST and
+        # retain every claim whose run still has an operation. Owner death or an
+        # unobservable owner does not prove a subprocess/effect ended.
+        if hasattr(sf, "reconcile_active_operations"):
+            sf.reconcile_active_operations(
+                trigger="startup_before_claim_recovery")
+        else:
+            sf.audit_operation_owners()
+        active_runs = {
+            row["run_id"] for row in sf._conn.execute(
+                "SELECT DISTINCT run_id FROM skillflow_active_ops").fetchall()
+        }
         stale = sf._conn.execute(
             "SELECT id, run_id, step_id FROM skillflow_steps "
             "WHERE status = 'claimed' ORDER BY id"
@@ -695,6 +710,8 @@ def recover_claims_on_startup():
         reopened = superseded = 0
         with sf._lock:
             for row in stale:
+                if row["run_id"] in active_runs:
+                    continue
                 live = newest[(row["run_id"], row["step_id"])] == row["id"]
                 if live:
                     sf._conn.execute(
@@ -718,13 +735,26 @@ def recover_claims_on_startup():
                 # In particular a rejected checkpoint has an older completed
                 # sibling: clearing its pointer replays that old checkpoint.
             sf._conn.commit()
-        import logging
         logging.getLogger("aitelier.scheduler").info(
             f"Startup recovery: reopened {reopened} claim(s), closed "
             f"{superseded} superseded instance(s)"
         )
     except Exception:
-        pass  # Best-effort; scheduler will recover via stale threshold later
+        # Fail closed. Reopening before owner reconciliation is the exact order
+        # that replayed r9's long run_tests beside its orphaned child process.
+        logging.getLogger("aitelier.scheduler").warning(
+            "startup operation reconciliation failed; claims retained",
+            exc_info=True)
+
+
+def _has_unsettled_operation(sf, run_id: str) -> bool:
+    try:
+        return sf._conn.execute(
+            "SELECT 1 FROM skillflow_active_ops WHERE run_id = ? LIMIT 1",
+            (run_id,),
+        ).fetchone() is not None
+    except Exception:
+        return False
 
 
 def _has_active_claim(sf, run_id: str) -> bool:
@@ -749,6 +779,11 @@ def _has_active_claim(sf, run_id: str) -> bool:
                 no /proc). Fall back to the old window, which is all there was
                 before and is still the only thing available there.
     """
+    # An admission is stronger than a claim clock or owner probe: until its own
+    # finally or an evidence-bearing release settles it, no driver may re-enter
+    # the run even when the claim owner is dead or unobservable.
+    if _has_unsettled_operation(sf, run_id):
+        return True
     try:
         row = sf._conn.execute(
             "SELECT step_id, claimed_at, claimed_by FROM skillflow_steps "
@@ -839,8 +874,8 @@ async def _check_hung_claims():
         agent step inside a single ten-minute LLM call emits no trace to
         heartbeat with. 8 reclaims against 13 t_impl executions on one run, each
         one throwing away work that was still being done.
-      The reap runs FIRST, so anything the warning scan still finds 'claimed' is
-      by construction under the reclaim threshold.
+      Operation-owner reconciliation runs first. The reap follows, so anything
+      the warning scan still finds 'claimed' is under the reclaim threshold.
       - Warnings are rate-limited by _HUNG_WARNING_COOLDOWN to avoid log spam.
     """
     import time as _time
@@ -851,10 +886,24 @@ async def _check_hung_claims():
     try:
         sf = get_skillflow()
 
-        # Reap first — this is the authority the loop was missing. skillflow's
-        # reaper is safe to run on a fixed interval (activity clock + the
-        # never-stale tool guard), it just had nowhere to run FROM. Returns the
-        # run ids it reset to pending.
+        # Operation reconciliation precedes claim recovery. The production
+        # AItelierSkillFlow also fences advance_run/claim_next_step, so even if
+        # SkillFlow resets a dead claim to pending, it cannot be claimed or
+        # admitted while the old operation remains unsettled.
+        try:
+            if hasattr(sf, "reconcile_active_operations"):
+                _ops = sf.reconcile_active_operations(
+                    trigger="periodic_before_claim_recovery")
+            else:
+                _ops = sf.audit_operation_owners()
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning("operation-owner reconciliation failed; claim "
+                           "recovery skipped: %s", e)
+            return
+
+        # Reap after reconciliation. SkillFlow's reaper is safe to run on a
+        # fixed interval (activity clock + the never-stale tool guard); it just
+        # had nowhere to run FROM. Returns the run ids it reset to pending.
         try:
             reclaimed = sf.recover_stale_claims(sf._stale_threshold) or []
         except Exception as e:
@@ -877,19 +926,15 @@ async def _check_hung_claims():
         # cancellation forbids claiming — a path that depended on claiming could
         # never run when it matters. Independence is not evidence; visibility is
         # all this provides.
-        try:
-            _ops = sf.audit_operation_owners()
-            if _ops.get("lost"):
-                logger.warning("admitted operation(s) whose owner is GONE remain "
-                               "recorded and still block the cancellation — "
-                               "operator release required: %s",
-                               ", ".join(_ops["lost"]))
-            if _ops.get("unknown"):
-                logger.warning("admitted operation(s) with an unobservable owner "
-                               "remain recorded (not assumed gone): %s",
-                               ", ".join(_ops["unknown"]))
-        except Exception as e:                                   # noqa: BLE001
-            logger.warning("operation-owner audit failed: %s", e)
+        if _ops.get("lost"):
+            logger.warning("admitted operation(s) whose owner is GONE remain "
+                           "recorded and still block retry/cancellation — "
+                           "operator release required: %s",
+                           ", ".join(_ops["lost"]))
+        if _ops.get("unknown"):
+            logger.warning("admitted operation(s) with an unobservable owner "
+                           "remain recorded (not assumed gone): %s",
+                           ", ".join(_ops["unknown"]))
         for _rid in reclaimed:
             try:
                 _pid = (sf.get_run(_rid) or {}).get("project_id") or "unknown"

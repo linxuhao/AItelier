@@ -28,6 +28,10 @@ CREATE TABLE skillflow_steps (
     last_error TEXT, updated_at TEXT);
 CREATE TABLE skillflow_runs (
     id TEXT PRIMARY KEY, status TEXT, current_node TEXT, updated_at TEXT);
+CREATE TABLE skillflow_active_ops (
+    id INTEGER PRIMARY KEY, run_id TEXT, step_instance_id INTEGER,
+    claim_epoch INTEGER DEFAULT 0, owner TEXT, owner_lost_at TEXT,
+    kind TEXT, detail TEXT, admitted_at TEXT);
 """
 
 
@@ -54,6 +58,33 @@ class _SF:
     def rows(self):
         return {r["id"]: dict(r) for r in
                 self._conn.execute("SELECT * FROM skillflow_steps")}
+
+    def operation(self, id, run, instance, owner, state="alive"):
+        self._conn.execute(
+            "INSERT INTO skillflow_active_ops "
+            "(id, run_id, step_instance_id, claim_epoch, owner, owner_lost_at, "
+            "kind, detail, admitted_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (id, run, instance, 1, owner,
+             "2026-09-12 21:43:54" if state == "dead" else None,
+             "tool_step", "run_tests", "2026-09-12 21:15:10"))
+        self._conn.commit()
+
+    def audit_operation_owners(self, run_id=None):
+        rows = self._conn.execute(
+            "SELECT owner, owner_lost_at FROM skillflow_active_ops"
+            + (" WHERE run_id = ?" if run_id else ""),
+            (run_id,) if run_id else (),
+        ).fetchall()
+        return {
+            "lost": ["tool_step:run_tests" for r in rows if r["owner_lost_at"]],
+            "unknown": [],
+            "alive": sum(not bool(r["owner_lost_at"]) for r in rows),
+            "recovery_required": any(bool(r["owner_lost_at"]) for r in rows),
+            "hint": "",
+        }
+
+    def trace(self, *args, **kwargs):
+        pass
 
     def run_row(self, id):
         return dict(self._conn.execute(
@@ -92,6 +123,46 @@ def test_a_single_claim_is_still_simply_reopened(sf):
 
     assert sf.rows()[10]["status"] == "pending"
     assert sf.rows()[10]["claimed_by"] is None
+
+
+@pytest.mark.parametrize("owner_state", ["alive", "dead", "unknown"])
+def test_an_unsettled_tool_operation_blocks_startup_reopen(sf, monkeypatch,
+                                                           owner_state):
+    """The r9 order: reconcile the old run_tests before touching its claim.
+
+    Owner death and an unobservable owner both say that the old invocation may
+    still have a child process.  Neither licenses replay; a live owner keeps its
+    original claim as well.
+    """
+    sf.run("r1", "running", "5_final_test")
+    sf.step(10, "r1", "5_final_test", "claimed",
+            "tool-inline host=old pid=7", "2026-09-12T21:15:10Z")
+    sf.operation(91, "r1", 10, "old-owner", owner_state)
+    monkeypatch.setattr(
+        scheduler, "owner_is_dead",
+        lambda owner: {"alive": False, "dead": True, "unknown": None}[owner_state],
+    )
+
+    scheduler.recover_claims_on_startup()
+
+    row = sf.rows()[10]
+    assert row["status"] == "claimed"
+    assert row["claimed_by"] == "tool-inline host=old pid=7"
+
+
+def test_startup_recovery_fails_closed_when_operation_audit_fails(sf,
+                                                                 monkeypatch):
+    sf.run("r1", "running", "5_final_test")
+    sf.step(10, "r1", "5_final_test", "claimed",
+            "tool-inline host=old pid=7", "2026-09-12T21:15:10Z")
+
+    def unavailable():
+        raise RuntimeError("operation ledger unavailable")
+
+    monkeypatch.setattr(sf, "audit_operation_owners", unavailable)
+    scheduler.recover_claims_on_startup()
+
+    assert sf.rows()[10]["status"] == "claimed"
 
 
 def test_different_steps_are_each_reopened(sf):

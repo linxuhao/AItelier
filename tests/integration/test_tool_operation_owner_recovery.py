@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import threading
 import time
 from pathlib import Path
 
@@ -109,6 +110,9 @@ def test_recovery_records_identity_and_blocks_all_owner_states(
         "WHERE event='operation_recovery_decision' ORDER BY seq", ())
     payload = json.loads(traces[0][0])
     assert payload == {
+        "decision_id": sf._recovery_decision_id((
+            "test_restart_before_claim_recovery", op_id, state,
+            operation["owner_lost_at"])),
         "trigger": "test_restart_before_claim_recovery",
         "decision": decision,
         "owner_state": state,
@@ -159,6 +163,9 @@ def test_release_requires_evidence_and_only_then_allows_retry(tmp_path,
         op_id,
         evidence="REF recovery-test: child process joined; active marker absent")
     assert released["released"] is True
+    assert released["operation_id"] == op_id
+    assert released["step_instance_id"] == row["id"]
+    assert released["claim_epoch"] == 1
     monkeypatch.setattr(scheduler, "get_skillflow", lambda: sf)
     scheduler.recover_claims_on_startup()
     reopened = sf._conn.execute(
@@ -172,7 +179,171 @@ def test_release_requires_evidence_and_only_then_allows_retry(tmp_path,
         "WHERE event='op_released_by_operator'", ())[0][0])
     assert payload["owner"]
     assert payload["owner_lost_at"]
+    assert payload["operation_id"] == op_id
+    assert payload["admitted_at"]
+    assert payload["step_instance_id"] == row["id"]
+    assert payload["claim_epoch"] == 1
     assert payload["evidence"].startswith("REF recovery-test")
+    assert payload["settlement_evidence"] == payload["evidence"]
+
+
+def test_release_keeps_operation_when_provenance_trace_is_not_durable(
+        tmp_path, monkeypatch):
+    sf = _engine(tmp_path / "sf.db", tmp_path / "ws", tmp_path / "projects",
+                 tmp_path / "repo")
+    run_id = sf.create_run("owner_recovery_gate", {"project_id": "p"},
+                           project_id="p")
+    sf.start_run(run_id)
+    op_id = sf._admit_op("tool_step", run_id, detail="run_tests")
+
+    real_trace = sf.trace
+    monkeypatch.setattr(sf, "trace", lambda *args, **kwargs: None)
+    with pytest.raises(RuntimeError, match="not durably recorded"):
+        sf.release_operation(op_id, evidence="REF trace-failure: effects quiescent")
+    assert [row["id"] for row in sf.unsettled_operations(run_id)] == [op_id]
+
+    monkeypatch.setattr(sf, "trace", real_trace)
+    assert sf.release_operation(
+        op_id, evidence="REF trace-retry: effects quiescent")["released"] is True
+    assert sf.unsettled_operations(run_id) == []
+
+
+def test_recovery_trace_failure_retries_then_deduplicates_durably(
+        tmp_path, monkeypatch):
+    db_path = tmp_path / "sf.db"
+    workspace = tmp_path / "ws"
+    projects = tmp_path / "projects"
+    repo = tmp_path / "repo"
+    sf = _engine(db_path, workspace, projects, repo)
+    run_id = sf.create_run("owner_recovery_gate", {"project_id": "p"},
+                           project_id="p")
+    sf.start_run(run_id)
+    sf._admit_op("tool_step", run_id, detail="run_tests")
+
+    from skillflow import identity
+
+    import core.skillflow_host as host
+    monkeypatch.setattr(identity, "owner_is_dead", lambda owner: False)
+    monkeypatch.setattr(host, "owner_is_dead", lambda owner: False)
+    real_trace = sf.trace
+    dropped = False
+
+    def drop_once(run, category, event, payload=None, **kwargs):
+        nonlocal dropped
+        if event == "operation_recovery_decision" and not dropped:
+            dropped = True
+            return None
+        return real_trace(run, category, event, payload, **kwargs)
+
+    monkeypatch.setattr(sf, "trace", drop_once)
+    sf.reconcile_active_operations(run_id, trigger="retryable_trace")
+    assert sf.trace_query(
+        run_id,
+        "SELECT 1 FROM skillflow_trace "
+        "WHERE run_id=? AND event='operation_recovery_decision'", (run_id,)) == []
+
+    sf.reconcile_active_operations(run_id, trigger="retryable_trace")
+    sf.reconcile_active_operations(run_id, trigger="retryable_trace")
+    traces = sf.trace_query(
+        run_id,
+        "SELECT payload_json FROM skillflow_trace "
+        "WHERE run_id=? AND event='operation_recovery_decision'", (run_id,))
+    assert len(traces) == 1
+    assert json.loads(traces[0]["payload_json"])["decision_id"]
+
+    # A second host has an empty memory cache but consults the durable decision.
+    recovered = _engine(db_path, workspace, projects, repo)
+    monkeypatch.setattr(recovered, "trace", lambda *args, **kwargs: pytest.fail(
+        "durable recovery decision should suppress a duplicate trace"))
+    recovered.reconcile_active_operations(run_id, trigger="retryable_trace")
+
+
+def test_two_controllers_cannot_admit_after_both_pass_preflight(
+        tmp_path, monkeypatch):
+    """Reproduce the reviewed cutover interleaving with the real run_tests tool."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    effect = repo / "effect"
+    gate = repo / "run_tests.sh"
+    gate.write_text(f"#!/bin/bash\nset -eu\necho ran >> {effect!s}\n")
+    gate.chmod(0o755)
+
+    db_path = tmp_path / "sf.db"
+    workspace = tmp_path / "ws"
+    projects = tmp_path / "projects"
+    old = _engine(db_path, workspace, projects, repo)
+    run_id = old.create_run("owner_recovery_gate", {"project_id": "p"},
+                            project_id="p")
+    old.start_run(run_id)
+    fresh = _engine(db_path, workspace, projects, repo)
+
+    both_preflighted = threading.Barrier(2)
+    old_admitted = threading.Event()
+    old_preflight = old._operation_blocks_reentry
+    fresh_preflight = fresh._operation_blocks_reentry
+
+    def preflight(real):
+        def wrapped(run, trigger):
+            blocked = real(run, trigger)
+            assert blocked is False
+            both_preflighted.wait(timeout=5)
+            return blocked
+        return wrapped
+
+    monkeypatch.setattr(old, "_operation_blocks_reentry", preflight(old_preflight))
+    monkeypatch.setattr(
+        fresh, "_operation_blocks_reentry", preflight(fresh_preflight))
+    real_old_admit = old._admit_op
+    real_fresh_admit = fresh._admit_op
+
+    def admit_then_lose_owner(*args, **kwargs):
+        op_id = real_old_admit(*args, **kwargs)
+        old_admitted.set()
+        # The process can disappear after the durable admission returns but
+        # before advance_run enters the finally that would retire it.
+        raise RuntimeError(f"injected owner death after admission op={op_id}")
+
+    def wait_then_admit(*args, **kwargs):
+        assert old_admitted.wait(timeout=5)
+        return real_fresh_admit(*args, **kwargs)
+
+    monkeypatch.setattr(old, "_admit_op", admit_then_lose_owner)
+    monkeypatch.setattr(fresh, "_admit_op", wait_then_admit)
+    results = []
+    errors = []
+
+    def drive(engine, label):
+        try:
+            results.append((label, engine.advance_run(run_id)))
+        except RuntimeError as exc:  # the old runtime's injected death
+            errors.append((label, str(exc)))
+
+    threads = [
+        threading.Thread(target=drive, args=(old, "old")),
+        threading.Thread(target=drive, args=(fresh, "fresh")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert errors == [("old", "injected owner death after admission op=1")]
+    assert results == [("fresh", None)]
+    operations = fresh.unsettled_operations(run_id)
+    assert [row["id"] for row in operations] == [1]
+    assert operations[0]["step_instance_id"] is not None
+    assert operations[0]["claim_epoch"] == 1
+    assert not effect.exists()
+
+    monkeypatch.setattr(fresh, "_operation_blocks_reentry", fresh_preflight)
+    monkeypatch.setattr(fresh, "_admit_op", real_fresh_admit)
+    fresh.release_operation(
+        1, evidence="REF adversarial-cutover: old process injected before claim; "
+        "no child launched and effect marker absent")
+    fresh.advance_run(run_id)
+    assert effect.read_text().splitlines() == ["ran"]
+    assert fresh.unsettled_operations(run_id) == []
 
 
 def test_recovery_binds_pre_fix_tool_operation_to_claim_identity(tmp_path,

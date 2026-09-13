@@ -1,0 +1,104 @@
+{
+  "schema": "release.fail-fast-candidate-report@3",
+  "generated_at": "2026-09-13T03:47:01Z",
+  "state_attempt": {
+    "attempt_id": "attempt-041eec3657184fbd8b08321123378ed3",
+    "project_id": "aitelier",
+    "node_key": "release.fail-fast",
+    "revision": 2,
+    "contract_hash": "3f62aafb1700b176f776c096daa5b9426f9c0e7cc27b67d99afa6fee133c25b7",
+    "context_hash": "180ce768644830ff3a72162ca90ed2f7d30c7ba12011f41423a67f58b8f895e8",
+    "state_write_performed": false
+  },
+  "provenance": {
+    "exact_base": "d64967c7974012ca928918ea7945b374847a3e96",
+    "exact_base_tree": "3349ef5aba00dc53ce9efff0e5e935e8aa8dff5c",
+    "superseded_candidate": "2b539057dc8f39482e9b2614566aa175144e3ecd",
+    "superseded_candidate_tree": "c593ab02cf0fc68995c1af4e041bd60c3f6f561a",
+    "implementation_commit": "421a6381787eb070a9b06ae2b19cee6776401294",
+    "implementation_tree": "adc5292913a6a4db39616dbc3dee27faf24b8889",
+    "branch": "codex/release-fail-fast-r2",
+    "worktree": "/Users/linxuhao/AItelier-worktrees/release-fail-fast-r2"
+  },
+  "review_input": {
+    "path": "/Users/linxuhao/AItelier-review-evidence/release-fail-fast-r2-2b539057/independent-review.json",
+    "sha256": "47b57161a1fd42eded6793c1b40e68a24e9ab5f053f2d5650389ad4c2fa675ce",
+    "bytes": 11651,
+    "decision": "blocked",
+    "resolved_findings": [
+      "F1-generated-migration-shape-guard",
+      "F2-unresolved-evidence-replan-loop"
+    ]
+  },
+  "implementation": {
+    "evidence_contract": "Every stamped gate report retains its detailed evidence_state and adds release_evidence=passed|known_failure|unresolved. Only confirmed failed/known_failure states use upstream_failed markers and the PM replan path. Missing, stale, unreadable, pending, skipped, blind, and infrastructure_unavailable stay nonpassing and use upstream_unresolved plus 5_release_wait.",
+    "known_failure_route": "5_test -> 5_compile -> 5_vision -> 5_final_test -> 5_final_test_replan -> 3",
+    "unresolved_route": "release gate -> 5_release_wait; checkpoint approval starts a fresh 5_test evidence cycle; explicit rejection alone routes to 3",
+    "canonical": "5_test retains direct ownership handoff to 5_compile; 5_compile owns the only Godot compile/playtest gate; 5_vision owns readability; 5_final_test runs after 5_design; both run_tests nodes have repo_gate=false.",
+    "migration": "The persisted generated-game migration accepts only the complete original, prior-r2, or target topology with exact ordered branches, post-design path, human-vision path, and unique tool ownership. It mutates a deep copy, validates the complete target graph, and commits to the caller only after success. Each saved file is independently contained; malformed YAML, tool_params:null, wrong routes, reordered branches, missing paths, duplicate ids, and duplicate gate owners remain byte-exact and cannot abort later files."
+  },
+  "behavioral_probe": {
+    "canonical_validation_issues": [],
+    "generated_validation_issues": [],
+    "known_failure": {
+      "5_compile": "5_vision",
+      "5_vision": "5_final_test",
+      "5_final_test": "5_final_test_replan"
+    },
+    "unresolved_states": [
+      "pending",
+      "missing",
+      "stale",
+      "unreadable",
+      "infrastructure_unavailable",
+      "skipped"
+    ],
+    "unresolved_targets": {
+      "5_compile": "5_release_wait",
+      "5_vision": "5_release_wait",
+      "5_final_test": "5_release_wait"
+    },
+    "canonical_owners": {
+      "run_tests": ["5_test", "5_final_test"],
+      "godot_compile": ["5_compile"],
+      "godot_vision": ["5_vision"]
+    },
+    "generated_owners": {
+      "run_tests": ["5_test", "5_final_test"],
+      "godot_compile": ["5_compile"],
+      "godot_vision": ["5_vision"]
+    },
+    "generated_migration_changes": 13,
+    "generated_second_migration_changes": []
+  },
+  "tests": {
+    "focused_final": {
+      "command": ".venv/bin/python -m pytest -q -p no:cacheprovider tests/unit/test_release_fail_fast.py tests/unit/test_verdict_after_evidence.py tests/unit/test_addon_registry.py tests/unit/test_vision_handoff.py tests/unit/test_godot_compile.py tests/unit/test_godot_vision.py tests/unit/test_run_tests_gate.py tests/unit/test_run_tests_surfaces_install_failure.py tests/unit/test_run_tests_refuses_the_process_cwd.py tests/unit/test_run_tests_known_red_baseline.py tests/unit/test_pipeline_registry.py tests/unit/test_output_migration.py",
+      "result": "284 passed, 2 warnings"
+    },
+    "full_unit_first_run": {
+      "command": ".venv/bin/python -m pytest -q -p no:cacheprovider tests/unit",
+      "result": "3143 passed, 8 skipped, 11 failed, 5 warnings",
+      "related_first_failure": "tests/unit/test_vision_handoff.py::test_a_gate_that_could_see_is_not_sent_to_a_human expected the superseded unconditional fallback; corrected to assert the explicit passed branch and unresolved fallback, then covered by focused_final.",
+      "unrelated_preserved_failures": [
+        "5 tests/unit/test_scheduler_reclaim.py process-owner/reclaim failures; the separately verified operation-owner candidate was excluded",
+        "4 tests/unit/test_web_tools.py failures because SEARXNG_URL is unset",
+        "1 tests/unit/test_zvec_indexer.py filesystem mtime ordering failure"
+      ]
+    },
+    "static": {
+      "ruff": ".venv/bin/ruff check --select E9,F63,F7,F82,B017 ... => All checks passed",
+      "compileall": "passed on all changed Python files",
+      "git_diff_check": "passed",
+      "graph_validation": "canonical and migrated generated graphs returned zero issues"
+    }
+  },
+  "boundaries": {
+    "shared_checkout_written": false,
+    "wuxia_repository_written": false,
+    "state_evidence_written": false,
+    "remote_config_written": false,
+    "push_publish_deploy_checkpoint_performed": false,
+    "operation_owner_candidate_used": false
+  }
+}

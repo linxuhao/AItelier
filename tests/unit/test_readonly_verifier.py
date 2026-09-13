@@ -326,6 +326,72 @@ def test_forge_registration_never_exposes_legacy_verifier_boundary(
     assert migrate_generated_outputs(generated) == []
 
 
+@pytest.mark.parametrize("variant", [
+    "missing_boundary", "missing_boundary_code_slot", "code_slot",
+])
+def test_forge_registration_rejects_incomplete_or_code_writing_verifier_before_live_mutation(
+        tmp_path, monkeypatch, variant):
+    from skillflow import PipelineGraph, SkillFlow
+
+    from core import pipeline_registry as registry_module
+    from core.config_registry import ConfigRegistry
+
+    generated = tmp_path / "generated"
+    monkeypatch.setenv("AITELIER_GENERATED_CONFIGS_DIR", str(generated))
+    sf = SkillFlow(str(tmp_path / "sf.db"), workspace_base=str(tmp_path / "ws"),
+                   projects_base=str(tmp_path / "projects"))
+    sf.register_agent_config_from_dict("forge", {"model": "host"})
+    sf.register_graph(PipelineGraph._from_dict({
+        "name": "pipeline_forge", "begin": "forge",
+        "end_conditions": {"combinator": "or", "conditions": [
+            {"type": "node_reached", "node": "done", "result": "completed"}]},
+        "steps": [
+            {"id": "forge", "step_type": "agent", "agent_config": "forge",
+             "transitions": [{"to": "done"}]},
+            {"id": "done", "step_type": "gate", "transitions": [{"to": None}]},
+        ],
+    }))
+    run_id = sf.create_run("pipeline_forge", {"project_id": "p"})
+    emit = sf._workspace.get_step_dir("p", "pipeline_forge", "emit_graph")
+    (emit / "templates").mkdir(parents=True)
+    graph = _forge_legacy_readme_graph()
+    verifier = next(step for step in graph["steps"] if step["id"] == "5")
+    if variant.startswith("missing_boundary"):
+        del verifier["output"]["fixed"]["readme"]
+    if variant.endswith("code_slot"):
+        verifier["output"]["fixed"]["patch"] = {
+            "file": "dangerous.py", "target": "code"}
+    (emit / "pipeline.yaml").write_text(
+        yaml.safe_dump(graph), encoding="utf-8")
+    (emit / "role_table.yaml").write_text(yaml.safe_dump({
+        "worker": {"tools": []},
+        "reviewer": {"tools": ["list_tree"]},
+        "final_verifier": {
+            "template": "templates/final_verifier.md",
+            "tools": ["list_tree", "apply_patch"],
+        },
+    }), encoding="utf-8")
+    (emit / "templates" / "final_verifier.md").write_text(
+        "Verifier may call apply_patch.", encoding="utf-8")
+
+    calls = {"roles": 0, "graph": 0}
+    monkeypatch.setattr(
+        registry_module, "_register_forge_roles",
+        lambda *args, **kwargs: calls.__setitem__("roles", calls["roles"] + 1))
+    monkeypatch.setattr(
+        sf, "register_graph",
+        lambda *args, **kwargs: calls.__setitem__("graph", calls["graph"] + 1))
+
+    result = registry_module.register_forge_pipeline(
+        sf, ConfigRegistry(), run_id, f"reject {variant}")
+
+    expected = ("boundary is missing" if variant.startswith("missing_boundary")
+                else "exactly one report output")
+    assert expected in result.get("error", ""), result
+    assert calls == {"roles": 0, "graph": 0}
+    assert not generated.exists()
+
+
 def test_saved_generated_dpe_moves_readme_and_verifier_without_losing_custom_prompt(tmp_path):
     root = tmp_path / "configs"
     root.mkdir()
@@ -411,6 +477,46 @@ def test_saved_generated_dpe_moves_readme_and_verifier_without_losing_custom_pro
     assert "产出/更新项目交付文档" not in prompt
     assert prompt.endswith(custom_tail)
     assert roles["gen_game__final_verifier"]["tools"] == ["list_tree"]
+
+    graph_bytes, role_bytes = graph_path.read_bytes(), role_path.read_bytes()
+    assert migrate_generated_outputs(root) == []
+    assert graph_path.read_bytes() == graph_bytes
+    assert role_path.read_bytes() == role_bytes
+
+
+def test_captured_generated_game_migration_drops_flattened_stale_verifier_context(
+        tmp_path):
+    root = tmp_path / "configs"
+    root.mkdir()
+    source = (ROOT / "evidence" / "output-target-migration-20260911"
+              / "generated-configs" / "gen_dpe_state_game.yaml")
+    graph_path = root / source.name
+    graph_path.write_bytes(source.read_bytes())
+    role_path = graph_path.with_suffix(".roles.json")
+    role_path.write_text(json.dumps({
+        "gen_dpe_state_game__final_verifier": {
+            "system_prompt": "Final verifier writes README with apply_patch.",
+            "tools": ["list_tree", "apply_patch"],
+        },
+    }), encoding="utf-8")
+    originals = {graph_path.name: graph_path.read_bytes(),
+                 role_path.name: role_path.read_bytes()}
+
+    reports = migrate_generated_outputs(root)
+
+    assert len(reports) == 2
+    for report in reports:
+        name = Path(report["path"]).name
+        assert Path(report["backup"]).read_bytes() == originals[name]
+    migrated = yaml.safe_load(graph_path.read_text(encoding="utf-8"))
+    steps = _steps(migrated)
+    for step_id in ("5_design", "5_compile", "5_game_evidence"):
+        if step_id not in steps:
+            continue
+        for item in steps[step_id].get("context", []):
+            source_spec = item.get("source", item)
+            assert source_spec.get("step") != "5"
+            assert source_spec.get("step_id") != "5"
 
     graph_bytes, role_bytes = graph_path.read_bytes(), role_path.read_bytes()
     assert migrate_generated_outputs(root) == []

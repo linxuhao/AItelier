@@ -159,11 +159,19 @@ def _drop_step_context(step: dict, source_step: str) -> None:
     context = step.get("context")
     if not isinstance(context, list):
         return
+
+    def reads_step(item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        nested = item.get("source")
+        source = nested if isinstance(nested, dict) else item
+        return (source.get("step") == source_step
+                or (source.get("source_type") == "step"
+                    and source.get("step_id") == source_step))
+
     step["context"] = [
         item for item in context
-        if not (isinstance(item, dict)
-                and isinstance(item.get("source"), dict)
-                and item["source"].get("step") == source_step)
+        if not reads_step(item)
     ]
 
 
@@ -454,6 +462,8 @@ def validate_readonly_verifier(document: dict, roles: dict) -> None:
     by_id = {step.get("id"): step for step in steps if isinstance(step, dict)}
     boundary = {"5_readme", "5_candidate_before", "5_candidate_after"}
     if not (boundary & set(by_id)):
+        if {"task_loop", "5", "5_review"} <= set(by_id):
+            raise ValueError("read-only verifier boundary is missing")
         return
     missing = sorted(boundary - set(by_id))
     if missing:

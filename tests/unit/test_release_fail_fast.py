@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from aitelier.gate_evidence import audit_evidence, first_upstream_blocker
+from aitelier.gate_evidence import (
+    audit_evidence,
+    first_upstream_blocker,
+    release_disposition,
+)
 from aitelier.tools.godot_compile import impl as compile_impl
 from aitelier.tools.godot_vision import impl as vision_impl
 from aitelier.tools.run_tests import impl as tests_impl
@@ -53,6 +57,8 @@ def test_upstream_states_stay_distinct_and_nonpassing(tmp_path, values, state):
                                      [["5_test", "test_report.json"]])
     assert blocker["state"] == state
     assert blocker["passed"] is False
+    assert release_disposition(values) == (
+        "known_failure" if state == "known_failure" else "unresolved")
     verdict = audit_evidence(tmp_path, RUN,
                              [["5_test", "test_report.json"]])
     assert verdict["passed"] is False
@@ -147,11 +153,14 @@ def _canonical_game():
 def _assert_game_release_contract(document):
     steps = {step["id"]: step for step in document["steps"]}
     assert [t["to"] for t in steps["5_test"]["transitions"]] == ["5_compile"]
-    assert [t["to"] for t in steps["5_compile"]["transitions"]] == ["5_vision"]
-    assert any(t.get("to") == "5_final_test"
-               and t.get("match", {}).get("field") == "passed"
-               and t.get("match", {}).get("value") is False
-               for t in steps["5_vision"]["transitions"])
+    assert [t["to"] for t in steps["5_compile"]["transitions"]] == [
+        "5_vision", "5_vision", "5_release_wait"]
+    assert [t["to"] for t in steps["5_vision"]["transitions"]] == [
+        "5_final_test", "5_vision_human", "5_final_test", "5_evidence"
+        if "5_evidence" in steps else "5_knowledge", "5_release_wait"]
+    assert [t["to"] for t in steps["5_final_test"]["transitions"]] == [
+        "5_game_evidence" if "5_game_evidence" in steps else "5_review",
+        "5_final_test_replan", "5_release_wait"]
     assert all(step.get("tool_params", {}).get("repo_gate") is False
                for step in document["steps"]
                if step.get("tool_name") == "run_tests")
@@ -163,6 +172,12 @@ def _assert_game_release_contract(document):
     assert "5_vision" in steps["5_final_test"]["tool_params"]["fail_fast_gates"]
     assert any(t.get("to") == "5_final_test"
                for t in steps["5_design"]["transitions"])
+    wait = steps["5_release_wait"]
+    assert wait["checkpoint"] is True
+    assert wait["checkpoint_reject_to"] == "3"
+    assert wait["transitions"] == [{
+        "to": "5_test", "match": {"from": "checkpoint", "value": "approved"},
+        "max_loop": 4}]
 
 
 def test_canonical_game_has_one_full_gate_and_fail_fast_chain():
@@ -179,6 +194,21 @@ def test_saved_generated_game_is_migrated_to_the_same_release_contract():
     assert migrate_release_document(copy.deepcopy(document)) == []
 
 
+def test_prior_r2_generated_shape_upgrades_transactionally():
+    path = (ROOT / "evidence/output-target-migration-20260911/generated-configs/"
+            "gen_dpe_state_game.yaml")
+    document = yaml.safe_load(path.read_text())
+    steps = {step["id"]: step for step in document["steps"]}
+    steps["5_vision"]["transitions"].insert(2, {
+        "to": "5_final_test", "match": {
+            "from_file": "vision_report.json", "field": "passed",
+            "value": False}})
+    before = copy.deepcopy(document)
+    assert migrate_release_document(document)
+    assert document != before
+    _assert_game_release_contract(document)
+
+
 def test_generated_game_migration_is_atomic_backed_up_and_idempotent(tmp_path):
     source = (ROOT / "evidence/output-target-migration-20260911/generated-configs/"
               "gen_dpe_state_game.yaml")
@@ -193,3 +223,193 @@ def test_generated_game_migration_is_atomic_backed_up_and_idempotent(tmp_path):
     assert Path(reports[0]["backup"]).read_bytes() == original
     _assert_game_release_contract(yaml.safe_load(target.read_text()))
     assert migrate_generated_release_gates(config_dir) == []
+
+
+def _resolver(document):
+    from skillflow.graph import GraphResolver, PipelineGraph
+    return GraphResolver(PipelineGraph._from_dict(document))
+
+
+@pytest.mark.parametrize(("values", "state"), [
+    ({"passed": False, "pending": True}, "pending"),
+    ({"passed": True, "skipped": True}, "skipped"),
+    ({"passed": False, "infrastructure_unavailable": True},
+     "infrastructure_unavailable"),
+])
+def test_unresolved_test_evidence_writes_distinct_marker_and_holds(
+        tmp_path, monkeypatch, values, state):
+    _cycle(tmp_path)
+    _report(tmp_path, "5_test", **values)
+    out = tmp_path / "5_compile"
+    monkeypatch.setattr(compile_impl, "_godot_compile_unstamped",
+                        lambda **_: pytest.fail("compile must not run"))
+    result = compile_impl.godot_compile(
+        project_root=str(tmp_path), out_dir=str(out), run_id=RUN,
+        evidence_cycle_from="5_test", fail_fast_gates=GATES)
+    marker = json.loads((out / "compile_report.json").read_text())
+    assert result["release_evidence"] == "unresolved"
+    assert marker["skipped_because"] == "upstream_unresolved"
+    assert marker["upstream_state"] == state
+    assert marker["evidence_cycle_id"] == CYCLE
+    assert _resolver(_canonical_game()).next_node(
+        "5_compile", result, {}) == "5_release_wait"
+
+
+@pytest.mark.parametrize("setup", ["missing", "stale", "unreadable"])
+def test_absent_or_invalid_test_evidence_holds_without_replan(
+        tmp_path, monkeypatch, setup):
+    _cycle(tmp_path)
+    if setup == "stale":
+        _report(tmp_path, "5_test", evidence_cycle_id="old")
+    elif setup == "unreadable":
+        path = tmp_path / "5_test" / "test_report.json"
+        path.parent.mkdir()
+        path.write_text("{bad json")
+    out = tmp_path / "5_compile"
+    monkeypatch.setattr(compile_impl, "_godot_compile_unstamped",
+                        lambda **_: pytest.fail("compile must not run"))
+    result = compile_impl.godot_compile(
+        project_root=str(tmp_path), out_dir=str(out), run_id=RUN,
+        evidence_cycle_from="5_test", fail_fast_gates=GATES)
+    assert result["release_evidence"] == "unresolved"
+    assert result["upstream_state"] == setup
+    resolver = _resolver(_canonical_game())
+    assert resolver.next_node("5_compile", result, {}) == "5_release_wait"
+    assert resolver.resolve_transition(
+        "5_release_wait", {}, {}, checkpoint_approved=True)[1] == "5_test"
+
+
+def test_known_failure_marker_chain_reaches_replan_and_stays_fresh(
+        tmp_path, monkeypatch):
+    _cycle(tmp_path)
+    _report(tmp_path, "5_test", passed=False, passed_relative=True)
+    monkeypatch.setattr(compile_impl, "_godot_compile_unstamped",
+                        lambda **_: pytest.fail("compile must not run"))
+    compile_result = compile_impl.godot_compile(
+        project_root=str(tmp_path), out_dir=str(tmp_path / "5_compile"),
+        run_id=RUN, evidence_cycle_from="5_test", fail_fast_gates=GATES)
+    resolver = _resolver(_canonical_game())
+    assert compile_result["release_evidence"] == "known_failure"
+    assert resolver.next_node("5_compile", compile_result, {}) == "5_vision"
+
+    monkeypatch.setattr(vision_impl, "_godot_vision_unstamped",
+                        lambda **_: pytest.fail("vision must not run"))
+    vision_result = vision_impl.godot_vision(
+        project_root=str(tmp_path), workspace_root=str(tmp_path.parent),
+        config_name=tmp_path.name, out_dir=str(tmp_path / "5_vision"),
+        run_id=RUN, evidence_cycle_from="5_test",
+        fail_fast_gates=json.dumps([
+            ["5_compile", "compile_report.json"],
+            ["5_compile", "playtest_report.json"],
+        ]))
+    assert vision_result["release_evidence"] == "known_failure"
+    assert resolver.next_node("5_vision", vision_result, {}) == "5_final_test"
+
+    monkeypatch.setattr(tests_impl, "_resolve_pytest_python",
+                        lambda *_: pytest.fail("pytest must not run"))
+    final_result = tests_impl.run_tests(
+        project_root=str(tmp_path), out_dir=str(tmp_path / "5_final_test"),
+        run_id=RUN, evidence_cycle_from="5_test", repo_gate=False,
+        fail_fast_gates=json.dumps([
+            ["5_test", "test_report.json"],
+            ["5_compile", "compile_report.json"],
+            ["5_compile", "playtest_report.json"],
+            ["5_vision", "vision_report.json"],
+        ]))
+    assert final_result["release_evidence"] == "known_failure"
+    assert resolver.next_node("5_final_test", final_result, {}) == \
+        "5_final_test_replan"
+    for step, filename in (
+        ("5_compile", "compile_report.json"),
+        ("5_compile", "playtest_report.json"),
+        ("5_vision", "vision_report.json"),
+        ("5_final_test", "test_report.json"),
+    ):
+        report = json.loads((tmp_path / step / filename).read_text())
+        assert report["skipped_because"] == "upstream_failed"
+        assert report["evidence_cycle_id"] == CYCLE
+
+
+@pytest.mark.parametrize("state", [
+    "pending", "missing", "stale", "unreadable",
+    "infrastructure_unavailable", "skipped",
+])
+def test_both_canonical_and_generated_graphs_hold_every_unresolved_class(state):
+    generated = yaml.safe_load((
+        ROOT / "evidence/output-target-migration-20260911/generated-configs/"
+        "gen_dpe_state_game.yaml").read_text())
+    assert migrate_release_document(generated)
+    for document in (_canonical_game(), generated):
+        resolver = _resolver(document)
+        flags = {"passed": False, "release_evidence": "unresolved",
+                 "evidence_state": state}
+        assert resolver.next_node("5_compile", flags, {}) == "5_release_wait"
+        assert resolver.next_node("5_vision", flags, {}) == "5_release_wait"
+        assert resolver.next_node("5_final_test", flags, {}) == "5_release_wait"
+        assert "5_final_test_replan" not in {
+            resolver.next_node("5_compile", flags, {}),
+            resolver.next_node("5_vision", flags, {}),
+            resolver.next_node("5_final_test", flags, {}),
+        }
+
+
+def _bad_graph(mutator):
+    document = yaml.safe_load((
+        ROOT / "evidence/output-target-migration-20260911/generated-configs/"
+        "gen_dpe_state_game.yaml").read_text())
+    mutator({step["id"]: step for step in document["steps"]}, document)
+    before = copy.deepcopy(document)
+    assert migrate_release_document(document) == []
+    assert document == before
+    return document
+
+
+@pytest.mark.parametrize("mutator", [
+    lambda steps, _doc: steps["5_test"].update(transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_compile"].update(transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_vision"].update(transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_vision"].update(
+        transitions=list(reversed(steps["5_vision"]["transitions"]))),
+    lambda steps, _doc: steps["5_vision_human"].update(
+        transitions=[{"to": "5_knowledge"}]),
+    lambda steps, _doc: steps["5_vision_judged"].update(
+        transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_knowledge"].update(
+        transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_design"].update(transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_final_test"].update(transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_final_test"].update(
+        transitions=list(reversed(steps["5_final_test"]["transitions"]))),
+    lambda steps, _doc: steps["5_final_test_replan"].update(
+        transitions=[{"to": "5_review"}]),
+    lambda steps, _doc: steps["5_compile"].update(tool_params=None),
+    lambda steps, _doc: steps["5_compile"].update(transitions=None),
+    lambda _steps, doc: doc["steps"].append({
+        "id": "extra_compile", "step_type": "tool",
+        "tool_name": "godot_compile", "transitions": [{"to": "5_review"}]}),
+])
+def test_migration_rejects_adversarial_shape_without_partial_mutation(mutator):
+    _bad_graph(mutator)
+
+
+def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
+    source = (ROOT / "evidence/output-target-migration-20260911/generated-configs/"
+              "gen_dpe_state_game.yaml")
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    malformed = config_dir / "gen_a_bad.yaml"
+    malformed.write_text("steps:\n  - id: 5_test\n    tool_params:\n")
+    bad_bytes = malformed.read_bytes()
+    null_params = config_dir / "gen_b_null.yaml"
+    null_document = yaml.safe_load(source.read_text())
+    next(step for step in null_document["steps"]
+         if step["id"] == "5_compile")["tool_params"] = None
+    null_params.write_text(yaml.safe_dump(null_document, sort_keys=False))
+    null_bytes = null_params.read_bytes()
+    good = config_dir / "gen_z_good.yaml"
+    good.write_bytes(source.read_bytes())
+    reports = migrate_generated_release_gates(config_dir)
+    assert malformed.read_bytes() == bad_bytes
+    assert null_params.read_bytes() == null_bytes
+    assert [Path(report["path"]).name for report in reports] == ["gen_z_good.yaml"]
+    _assert_game_release_contract(yaml.safe_load(good.read_text()))

@@ -1,13 +1,17 @@
-"""One-time hardening for persisted generated Godot release pipelines."""
+"""One-time hardening for the exact persisted generated Godot pipeline."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import yaml
 
 from core.output_migration import write_migrated_config
+
+_LOG = logging.getLogger(__name__)
 
 TEST_GATE = json.dumps([["5_test", "test_report.json"]])
 COMPILE_GATES = json.dumps([
@@ -20,6 +24,53 @@ PRE_FINAL_GATES = json.dumps([
     ["5_compile", "playtest_report.json"],
     ["5_vision", "vision_report.json"],
 ])
+ALL_GATES = json.dumps([
+    ["5_test", "test_report.json"],
+    ["5_compile", "compile_report.json"],
+    ["5_compile", "playtest_report.json"],
+    ["5_vision", "vision_report.json"],
+    ["5_final_test", "test_report.json"],
+])
+
+_NO_CAPTURES = {"to": "5_final_test", "match": {
+    "from_file": "vision_report.json", "field": "blind_reason",
+    "value": "no_captures"}}
+_BLIND = {"to": "5_vision_human", "match": {
+    "from_file": "vision_report.json", "field": "blind", "value": True}}
+_R2_VISION_FAILURE = {"to": "5_final_test", "match": {
+    "from_file": "vision_report.json", "field": "passed", "value": False}}
+
+
+def _edge(to: str, *, field: str | None = None, value=None,
+          max_loop: int | None = None) -> dict:
+    edge: dict = {"to": to}
+    if field is not None:
+        edge["match"] = {"field": field, "value": value}
+    if max_loop is not None:
+        edge["max_loop"] = max_loop
+    return edge
+
+
+_TARGET_COMPILE = [
+    _edge("5_vision", field="release_evidence", value="known_failure"),
+    _edge("5_vision", field="release_evidence", value="passed"),
+    _edge("5_release_wait"),
+]
+_TARGET_VISION = [
+    _NO_CAPTURES,
+    _BLIND,
+    _edge("5_final_test", field="release_evidence", value="known_failure"),
+    _edge("5_knowledge", field="release_evidence", value="passed"),
+    _edge("5_release_wait"),
+]
+_TARGET_FINAL = [
+    _edge("5_review", field="release_evidence", value="passed"),
+    _edge("5_final_test_replan", field="release_evidence",
+          value="known_failure"),
+    _edge("5_release_wait"),
+]
+_TARGET_WAIT = [{"to": "5_test", "match": {
+    "from": "checkpoint", "value": "approved"}, "max_loop": 4}]
 
 
 def _set(params: dict, key: str, value, changes: list[dict], step: str) -> None:
@@ -29,86 +80,213 @@ def _set(params: dict, key: str, value, changes: list[dict], step: str) -> None:
     changes.append({"step": step, "parameter": key, "value": value})
 
 
-def migrate_release_document(document: dict) -> list[dict]:
-    """Give a generated game graph the same single-owner fail-fast contract.
+def _same_edges(actual, expected) -> bool:
+    return isinstance(actual, list) and actual == expected
 
-    The shape is intentionally narrow. A model-generated pipeline with different
-    gate ids needs an explicit review; guessing which arbitrary test node owns a
-    release would be less safe than leaving it unchanged.
-    """
-    if not isinstance(document, dict):
-        return []
-    steps = {step.get("id"): step for step in document.get("steps", [])
-             if isinstance(step, dict) and step.get("id")}
+
+def _source_shape(document: dict) -> tuple[dict[str, dict], bool] | None:
+    """Accept only the complete original, r2, or r3 generated-game topology."""
+    if not isinstance(document, dict) or not isinstance(document.get("steps"), list):
+        return None
+    raw_steps = document["steps"]
+    if not all(isinstance(step, dict) and isinstance(step.get("id"), str)
+               and step["id"] for step in raw_steps):
+        return None
+    ids = [step["id"] for step in raw_steps]
+    if len(ids) != len(set(ids)):
+        return None
+    steps = {step["id"]: step for step in raw_steps}
     required = {
-        "5_test": "run_tests", "5_compile": "godot_compile",
-        "5_vision": "godot_vision", "5_final_test": "run_tests",
+        "3": None,
+        "5_test": "run_tests",
+        "5_compile": "godot_compile",
+        "5_vision": "godot_vision",
+        "5_vision_human": "restage",
+        "5_vision_judged": "vision_human_pass",
+        "5_knowledge": "knowledge_sync",
+        "5_design": None,
+        "5_final_test": "run_tests",
+        "5_final_test_replan": None,
+        "5_review": None,
     }
-    if any(steps.get(step, {}).get("tool_name") != tool
-           for step, tool in required.items()):
+    if any(step_id not in steps for step_id in required):
+        return None
+    if any(tool is not None and steps[step_id].get("tool_name") != tool
+           for step_id, tool in required.items()):
+        return None
+
+    if [s["id"] for s in raw_steps if s.get("tool_name") == "godot_compile"] != ["5_compile"]:
+        return None
+    if [s["id"] for s in raw_steps if s.get("tool_name") == "godot_vision"] != ["5_vision"]:
+        return None
+    if {s["id"] for s in raw_steps if s.get("tool_name") == "run_tests"} != {
+            "5_test", "5_final_test"}:
+        return None
+
+    for step_id in ("5_test", "5_compile", "5_vision", "5_final_test"):
+        if not isinstance(steps[step_id].get("tool_params", {}), dict):
+            return None
+    if not all(isinstance(step.get("transitions", []), list)
+               and all(isinstance(edge, dict)
+                       for edge in step.get("transitions", []))
+               for step in raw_steps):
+        return None
+
+    base_routes = (
+        _same_edges(steps["5_test"].get("transitions"), [{"to": "5_compile"}])
+        and _same_edges(steps["5_vision_human"].get("transitions"), [{
+            "match": {"from": "checkpoint", "value": "approved"},
+            "to": "5_vision_judged"}])
+        and _same_edges(steps["5_vision_judged"].get("transitions"), [
+            {"to": "5_knowledge"}])
+        and _same_edges(steps["5_knowledge"].get("transitions"), [
+            {"to": "5_design"}])
+        and _same_edges(steps["5_design"].get("transitions"), [
+            {"match": {"_error": True}, "to": "5_final_test"},
+            {"to": "5_final_test"}])
+        and _same_edges(steps["5_final_test_replan"].get("transitions"), [
+            {"max_loop": 4, "to": "3"}])
+    )
+    if not base_routes:
+        return None
+
+    old_vision = [_NO_CAPTURES, _BLIND, {"to": "5_knowledge"}]
+    r2_vision = [_NO_CAPTURES, _BLIND, _R2_VISION_FAILURE,
+                 {"to": "5_knowledge"}]
+    old_final = [
+        {"match": {"field": "skipped", "from_file": "test_report.json",
+                   "value": True}, "to": "5_final_test_replan"},
+        {"match": {"field": "no_tests_collected",
+                   "from_file": "test_report.json", "value": True},
+         "to": "5_final_test_replan"},
+        {"match": {"field": "passed", "from_file": "test_report.json",
+                   "value": True}, "to": "5_review"},
+        {"to": "5_final_test_replan"},
+    ]
+    has_wait = "5_release_wait" in steps
+    old_or_r2 = (
+        not has_wait
+        and _same_edges(steps["5_compile"].get("transitions"),
+                        [{"to": "5_vision"}])
+        and (steps["5_vision"].get("transitions") in (old_vision, r2_vision))
+        and _same_edges(steps["5_final_test"].get("transitions"), old_final)
+    )
+    target = (
+        has_wait
+        and _same_edges(steps["5_compile"].get("transitions"), _TARGET_COMPILE)
+        and _same_edges(steps["5_vision"].get("transitions"), _TARGET_VISION)
+        and _same_edges(steps["5_final_test"].get("transitions"), _TARGET_FINAL)
+        and steps["5_release_wait"].get("tool_name") == "verify_evidence"
+        and steps["5_release_wait"].get("checkpoint") is True
+        and steps["5_release_wait"].get("checkpoint_reject_to") == "3"
+        and isinstance(steps["5_release_wait"].get("tool_params"), dict)
+        and _same_edges(steps["5_release_wait"].get("transitions"), _TARGET_WAIT)
+    )
+    if not (old_or_r2 or target):
+        return None
+    return steps, has_wait
+
+
+def migrate_release_document(document: dict) -> list[dict]:
+    """Transactionally migrate only the complete generated-game graph shape."""
+    from skillflow.graph import GraphResolver, PipelineGraph
+
+    try:
+        PipelineGraph._from_dict(document)
+    except Exception:
+        return []
+    source = _source_shape(document)
+    if source is None:
         return []
 
+    candidate = copy.deepcopy(document)
+    candidate_source = _source_shape(candidate)
+    if candidate_source is None:
+        return []
+    steps, has_wait = candidate_source
     changes: list[dict] = []
-    # game_harness's godot_compile owns the repo's full compile/playtest gate.
-    # run_tests keeps pytest/npm ownership but must not shell run_tests.sh too.
-    for step in document["steps"]:
-        if not isinstance(step, dict) or step.get("tool_name") != "run_tests":
-            continue
-        params = step.setdefault("tool_params", {})
-        _set(params, "repo_gate", False, changes, str(step.get("id")))
 
-    test_params = steps["5_test"].setdefault("tool_params", {})
-    _set(test_params, "evidence_cycle_start", True, changes, "5_test")
+    for step_id in ("5_test", "5_final_test"):
+        _set(steps[step_id]["tool_params"], "repo_gate", False,
+             changes, step_id)
+    _set(steps["5_test"]["tool_params"], "evidence_cycle_start", True,
+         changes, "5_test")
+    _set(steps["5_compile"]["tool_params"], "evidence_cycle_from", "5_test",
+         changes, "5_compile")
+    _set(steps["5_compile"]["tool_params"], "fail_fast_gates", TEST_GATE,
+         changes, "5_compile")
+    _set(steps["5_vision"]["tool_params"], "evidence_cycle_from", "5_test",
+         changes, "5_vision")
+    _set(steps["5_vision"]["tool_params"], "fail_fast_gates", COMPILE_GATES,
+         changes, "5_vision")
+    _set(steps["5_final_test"]["tool_params"], "evidence_cycle_from", "5_test",
+         changes, "5_final_test")
+    _set(steps["5_final_test"]["tool_params"], "fail_fast_gates",
+         PRE_FINAL_GATES, changes, "5_final_test")
 
-    compile_params = steps["5_compile"].setdefault("tool_params", {})
-    _set(compile_params, "evidence_cycle_from", "5_test", changes, "5_compile")
-    _set(compile_params, "fail_fast_gates", TEST_GATE, changes, "5_compile")
+    for step_id, transitions in (
+        ("5_compile", _TARGET_COMPILE),
+        ("5_vision", _TARGET_VISION),
+        ("5_final_test", _TARGET_FINAL),
+    ):
+        if steps[step_id]["transitions"] != transitions:
+            steps[step_id]["transitions"] = copy.deepcopy(transitions)
+            changes.append({"step": step_id, "transitions": transitions})
 
-    vision_params = steps["5_vision"].setdefault("tool_params", {})
-    _set(vision_params, "evidence_cycle_from", "5_test", changes, "5_vision")
-    _set(vision_params, "fail_fast_gates", COMPILE_GATES, changes, "5_vision")
+    if not has_wait:
+        wait = {
+            "id": "5_release_wait",
+            "step_type": "tool",
+            "tool_name": "verify_evidence",
+            "timeout_seconds": 120,
+            "tool_params": {"out_dir": "$STEP_DIR", "gates": ALL_GATES},
+            "checkpoint": True,
+            "checkpoint_label": (
+                "Release evidence unresolved — retry verification after recovery"),
+            "checkpoint_reject_to": "3",
+            "transitions": copy.deepcopy(_TARGET_WAIT),
+        }
+        candidate["steps"].append(wait)
+        changes.append({"step": "5_release_wait", "added": True})
+    else:
+        _set(steps["5_release_wait"]["tool_params"], "out_dir", "$STEP_DIR",
+             changes, "5_release_wait")
+        _set(steps["5_release_wait"]["tool_params"], "gates", ALL_GATES,
+             changes, "5_release_wait")
 
-    final_params = steps["5_final_test"].setdefault("tool_params", {})
-    _set(final_params, "evidence_cycle_from", "5_test", changes, "5_final_test")
-    _set(final_params, "fail_fast_gates", PRE_FINAL_GATES, changes, "5_final_test")
-
-    transitions = steps["5_vision"].setdefault("transitions", [])
-    false_edge = {"to": "5_final_test", "match": {
-        "from_file": "vision_report.json", "field": "passed", "value": False}}
-    if false_edge not in transitions:
-        # A blind report is also passed:false, but it must retain its human
-        # checkpoint. Put this edge after the blind branch and before fallback.
-        at = next((i + 1 for i, edge in enumerate(transitions)
-                   if edge.get("match", {}).get("field") == "blind"), None)
-        if at is None:
-            at = next((i for i, edge in enumerate(transitions)
-                       if not edge.get("match")), len(transitions))
-        transitions.insert(at, false_edge)
-        changes.append({"step": "5_vision", "transition": false_edge})
+    try:
+        graph = PipelineGraph._from_dict(candidate)
+        if GraphResolver(graph).validate():
+            return []
+    except Exception:
+        return []
+    if not changes:
+        return []
+    document.clear()
+    document.update(candidate)
     return changes
 
 
 def migrate_generated_release_gates(config_dir: Path) -> list[dict]:
-    """Atomically migrate saved generated game configs, retaining exact bytes."""
-    from skillflow.graph import PipelineGraph
+    """Atomically migrate each valid saved graph; isolate malformed files."""
     from skillflow.output_targets import atomic_json
 
     config_dir = Path(config_dir)
-    backup_dir = config_dir.parent / "migration_backups" / "release-fail-fast-v2"
+    backup_dir = config_dir.parent / "migration_backups" / "release-fail-fast-v3"
     reports = []
     for path in sorted(config_dir.glob("gen_*.yaml")):
-        original = path.read_bytes()
         try:
+            original = path.read_bytes()
             document = yaml.safe_load(original)
-        except (yaml.YAMLError, UnicodeError):
+            changes = migrate_release_document(document)
+            if not changes:
+                continue
+            rendered = yaml.safe_dump(document, allow_unicode=True,
+                                      sort_keys=False).encode()
+            backup = write_migrated_config(path, original, rendered, backup_dir)
+        except Exception as exc:
+            _LOG.warning("skipping release migration for %s: %s", path.name, exc)
             continue
-        changes = migrate_release_document(document)
-        if not changes:
-            continue
-        PipelineGraph._from_dict(document)
-        rendered = yaml.safe_dump(document, allow_unicode=True,
-                                  sort_keys=False).encode()
-        backup = write_migrated_config(path, original, rendered, backup_dir)
         reports.append({
             "path": str(path), "backup": str(backup),
             "before_sha256": hashlib.sha256(original).hexdigest(),

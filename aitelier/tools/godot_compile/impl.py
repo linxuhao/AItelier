@@ -264,6 +264,7 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
     if fail_fast_gates:
         from aitelier.gate_evidence import (
             first_upstream_blocker,
+            release_disposition,
             stamp_file,
             upstream_failed_report,
         )
@@ -286,7 +287,8 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
             _write_playtest_summary(target, playtest_report)
             return {"written": ["compile_report.json", "playtest_report.json",
                                 "playtest_summary.md"], "passed": False,
-                    "skipped_because": "upstream_failed",
+                    "release_evidence": release_disposition(compile_report),
+                    "skipped_because": compile_report["skipped_because"],
                     "upstream_state": (blocker.get("upstream_state")
                                        or blocker.get("state"))}
     result = _godot_compile_unstamped(
@@ -300,7 +302,13 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
         try:
             reports = [json.loads((target / name).read_text(encoding="utf-8"))
                        for name in ("compile_report.json", "playtest_report.json")]
-            result["passed"] = all(bool(r.get("passed", False)) for r in reports)
+            from aitelier.gate_evidence import release_disposition
+            dispositions = [release_disposition(report) for report in reports]
+            result["passed"] = all(value == "passed" for value in dispositions)
+            result["release_evidence"] = (
+                "unresolved" if "unresolved" in dispositions else
+                "known_failure" if "known_failure" in dispositions else
+                "passed")
         except Exception:
             result["passed"] = False
     return result

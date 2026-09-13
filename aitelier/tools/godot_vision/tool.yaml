@@ -42,7 +42,7 @@ parameters:
     required: false
   fail_fast_gates:
     type: string
-    description: "JSON [[step,file],...] upstream reports; any non-pass writes a fresh non-blind upstream_failed marker without calling a vision model."
+    description: "JSON [[step,file],...] upstream reports; confirmed failures and unresolved evidence get distinct fresh non-blind markers without calling a vision model."
     required: false
   out_dir:
     type: string

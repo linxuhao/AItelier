@@ -15,6 +15,7 @@ _UNRUN_STATUSES = {"not_run", "not-run", "not run", "unrun", "unexecuted"}
 _PENDING_STATUSES = {"pending", "queued", "running", "in_progress", "in-progress"}
 _INFRA_STATUSES = {"infrastructure_unavailable", "infrastructure-unavailable",
                    "infra_unavailable", "runner_unavailable"}
+_KNOWN_FAILURE_STATES = {"failed", "known_failure"}
 
 
 def _read_json(path: Path) -> dict:
@@ -66,6 +67,8 @@ def stamp_report(report: dict, *, run_id: str, out_dir: str,
     if start_cycle:
         cycle = f"{run_id}:{uuid4().hex}"
         report[CYCLE_FIELD] = cycle
+        report["evidence_state"] = report_state(report)
+        report["release_evidence"] = release_disposition(report)
         _write_cycle_manifest(graph_dir, run_id=run_id, cycle=cycle,
                               generated_at=generated_at)
         return report
@@ -81,6 +84,8 @@ def stamp_report(report: dict, *, run_id: str, out_dir: str,
         report["passed"] = False
         report["skipped_because"] = "evidence_cycle_missing"
         report["evidence_stamp_error"] = f"{_manifest_path(graph_dir)}: {exc}"
+    report["evidence_state"] = report_state(report)
+    report["release_evidence"] = release_disposition(report)
     return report
 
 
@@ -100,7 +105,7 @@ def stamp_file(path: Path, *, run_id: str, out_dir: str,
 
 def report_state(report: dict) -> str:
     """Return one release state without collapsing distinct non-pass outcomes."""
-    raw_passed = report.get("passed", report.get("all_passed", False))
+    raw_passed = report.get("passed", report.get("all_passed"))
     if raw_passed is not True and raw_passed is not False:
         return "unreadable"
     status = str(report.get("evidence_state") or report.get("status") or "").strip().lower()
@@ -121,6 +126,24 @@ def report_state(report: dict) -> str:
             return "known_failure"
         return "failed"
     return "passed"
+
+
+def release_disposition(report: dict) -> str:
+    """Collapse a report only as far as release routing safely allows.
+
+    A confirmed product failure may suppress expensive downstream work and
+    re-enter planning. Evidence that is absent, stale, pending, blind, skipped,
+    unreadable, or blocked by infrastructure needs verification instead.
+    """
+    state = str(report.get("upstream_state") or report_state(report))
+    if (not report.get("upstream_state")
+            and report.get("skipped_because") == "upstream_failed"):
+        state = "failed"
+    if state == "passed":
+        return "passed"
+    if state in _KNOWN_FAILURE_STATES:
+        return "known_failure"
+    return "unresolved"
 
 
 def first_upstream_blocker(graph_dir: Path, run_id: str, gates) -> dict | None:
@@ -165,15 +188,24 @@ def first_upstream_blocker(graph_dir: Path, run_id: str, gates) -> dict | None:
 
 
 def upstream_failed_report(blocker: dict, gate: str) -> dict:
-    """Build the fresh marker a suppressed downstream gate writes."""
+    """Build a fresh marker without conflating failure and uncertainty."""
     upstream = f"{blocker.get('step')}/{blocker.get('file')}".strip("/")
     state = str(blocker.get("upstream_state") or blocker.get("state") or "failed")
+    if (not blocker.get("upstream_state") and state == "skipped"
+            and blocker.get("skipped_because") == "upstream_failed"):
+        disposition = "known_failure"
+    else:
+        disposition = release_disposition({"passed": False,
+                                           "upstream_state": state})
+    because = ("upstream_failed" if disposition == "known_failure"
+               else "upstream_unresolved")
     return {
         "passed": False,
         "gate_skipped": True,
-        "skipped_because": "upstream_failed",
+        "skipped_because": because,
         "upstream_state": state,
         "upstream_gate": upstream,
+        "release_evidence": disposition,
         "summary": (f"{gate} not run because upstream release evidence "
                     f"{upstream or '<unknown>'} is {state}."),
     }

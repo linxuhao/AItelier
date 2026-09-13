@@ -42,7 +42,7 @@ parameters:
     required: false
   fail_fast_gates:
     type: string
-    description: "JSON [[step,file],...] upstream reports; any non-pass writes a fresh upstream_failed test marker without invoking runners."
+    description: "JSON [[step,file],...] upstream reports; a confirmed failure writes upstream_failed and unresolved evidence writes upstream_unresolved, without invoking runners."
     required: false
   out_dir:
     type: string

@@ -751,6 +751,7 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
     if fail_fast_gates:
         from aitelier.gate_evidence import (
             first_upstream_blocker,
+            release_disposition,
             stamp_file,
             upstream_failed_report,
         )
@@ -771,7 +772,8 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
                            cycle_from=evidence_cycle_from)
             return {"written": "vision_report.json", "passed": False,
                     "summary": report["summary"],
-                    "skipped_because": "upstream_failed",
+                    "release_evidence": release_disposition(report),
+                    "skipped_because": report["skipped_because"],
                     "upstream_state": (blocker.get("upstream_state")
                                        or blocker.get("state"))}
     result = _godot_vision_unstamped(
@@ -784,6 +786,8 @@ def godot_vision(*, project_root: str = "", out_dir: str = "",
         try:
             report = json.loads((target / "vision_report.json").read_text(encoding="utf-8"))
             result["passed"] = bool(report.get("passed", False))
+            from aitelier.gate_evidence import release_disposition
+            result["release_evidence"] = release_disposition(report)
         except Exception:
             result["passed"] = False
     return result

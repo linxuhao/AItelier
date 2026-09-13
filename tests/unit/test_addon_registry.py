@@ -193,12 +193,21 @@ def test_fix_authors_see_the_playtest_summary(sf_with_addons):
 # PREVIOUS round's vision_report.json standing for 5_review / @pm / 5_design.
 def _vision_target(sf, report):
     from skillflow.graph import GraphResolver
+    import json
+    from aitelier.gate_evidence import release_disposition
     def reader(path):
         if report is None or path != "vision_report.json":
             raise FileNotFoundError(path)
         return report
+    flags = {}
+    if report is not None:
+        try:
+            body = json.loads(report)
+            flags["release_evidence"] = release_disposition(body)
+        except (TypeError, json.JSONDecodeError):
+            pass
     return GraphResolver(sf._graphs["dpe_game"]).next_node(
-        "5_vision", {}, {}, file_reader=reader)
+        "5_vision", flags, {}, file_reader=reader)
 
 
 @pytest.fixture
@@ -231,8 +240,8 @@ def test_a_sighted_gate_is_untouched(dpe_game):
 def test_an_unreadable_vision_report_still_reaches_the_human(dpe_game):
     # Failing SAFE: an absent or unparseable report must not be read as
     # "the build did not compile" and quietly routed past the gate.
-    assert _vision_target(dpe_game, None) == "5_evidence"
-    assert _vision_target(dpe_game, "not json") == "5_evidence"
+    assert _vision_target(dpe_game, None) == "5_release_wait"
+    assert _vision_target(dpe_game, "not json") == "5_release_wait"
 
 
 def test_5_compile_still_falls_through_to_the_gate(dpe_game):
@@ -352,21 +361,29 @@ def test_design_delivery_always_retests(dpe_game, flags):
 @pytest.mark.parametrize("report, expected", [
     ('{"passed": true}', "5_game_evidence"),
     ('{"passed": false, "summary": "design contract broken"}', "5_final_test_replan"),
-    ('{"passed": true, "skipped": true}', "5_final_test_replan"),
-    ('{"passed": true, "no_tests_collected": true}', "5_final_test_replan"),
-    ('{}', "5_final_test_replan"),
-    ('invalid json', "5_final_test_replan"),
-    (None, "5_final_test_replan"),
+    ('{"passed": true, "skipped": true}', "5_release_wait"),
+    ('{"passed": true, "no_tests_collected": true}', "5_release_wait"),
+    ('{}', "5_release_wait"),
+    ('invalid json', "5_release_wait"),
+    (None, "5_release_wait"),
 ])
 def test_final_tree_report_controls_release(dpe_game, report, expected):
+    import json
+    from aitelier.gate_evidence import release_disposition
     def reader(path):
         assert path == "test_report.json"
         if report is None:
             raise FileNotFoundError(path)
         return report
     resolver = GraphResolver(dpe_game._graphs["dpe_game"])
+    flags = {"passed": True}
+    if report is not None:
+        try:
+            flags["release_evidence"] = release_disposition(json.loads(report))
+        except json.JSONDecodeError:
+            pass
     # An earlier passing flag must never mask the final report's failure.
-    assert resolver.next_node("5_final_test", {"passed": True}, {},
+    assert resolver.next_node("5_final_test", flags, {},
                               file_reader=reader) == expected
 
 
@@ -428,6 +445,7 @@ def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expec
     graph = PipelineGraph._from_dict({
         "name": "final_tree_regression", "begin": "5_test",
         "steps": [initial, design, final, nodes["5_final_test_replan"],
+                  nodes["5_release_wait"],
                   {"id": "3", "step_type": "agent", "agent_config": "game_designer", "transitions": []},
                   {"id": "5_review", "step_type": "agent", "agent_config": "game_designer", "transitions": []}],
     })
@@ -448,7 +466,8 @@ def test_engine_retests_the_tree_written_by_design(tmp_path, break_design, expec
         observed.append(passed)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         (Path(out_dir) / "test_report.json").write_text(json.dumps({"passed": passed}))
-        return {"passed": passed}
+        return {"passed": passed,
+                "release_evidence": "passed" if passed else "known_failure"}
 
     sf = SkillFlow(str(tmp_path / "engine.db"), tool_loader=loader,
                    workspace_base=str(tmp_path / "ws"),
@@ -535,4 +554,4 @@ def test_real_empty_godot_suite_cannot_pass_final_tree_gate(dpe_game, tmp_path):
     resolver = GraphResolver(dpe_game._graphs["dpe_game"])
     target = resolver.next_node("5_final_test", result, {},
                                 file_reader=lambda path: (output / path).read_text())
-    assert target == "5_final_test_replan"
+    assert target == "5_release_wait"

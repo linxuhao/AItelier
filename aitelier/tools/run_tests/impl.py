@@ -766,6 +766,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                               "out_dir=$STEP_DIR")}
         from aitelier.gate_evidence import (
             first_upstream_blocker,
+            release_disposition,
             stamp_report,
             upstream_failed_report,
         )
@@ -784,7 +785,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 json.dumps(report, indent=2), encoding="utf-8")
             return {"written": "test_report.json", "passed": False,
                     "passed_relative": False, "new_failures": [],
-                    "skipped_because": "upstream_failed",
+                    "release_evidence": release_disposition(report),
+                    "skipped_because": report["skipped_because"],
                     "upstream_state": (blocker.get("upstream_state")
                                        or blocker.get("state"))}
 
@@ -1028,6 +1030,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                      cycle_from=evidence_cycle_from)
     (target_dir / "test_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
+    from aitelier.gate_evidence import release_disposition
     return {"written": "test_report.json", "passed": report["passed"],
+            "release_evidence": release_disposition(report),
             "passed_relative": report["passed_relative"],
             "new_failures": report["new_failures"]}

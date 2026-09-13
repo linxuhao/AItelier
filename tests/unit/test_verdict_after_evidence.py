@@ -232,7 +232,10 @@ def test_composed_graph_has_no_verdict_before_evidence_or_verdict_cycle():
     steps = {s["id"]: s for s in graph["steps"]}
     assert [t["to"] for t in steps["task_loop"]["transitions"]] == ["t_plan", "5_test"]
     assert [t["to"] for t in steps["5_evidence"]["transitions"]] == ["5_design"]
-    assert [t["to"] for t in steps["5_game_evidence"]["transitions"]] == ["5_readme"]
+    assert [t["to"] for t in steps["5_game_evidence"]["transitions"]] == [
+        "5_readme", "5_release_wait"]
+    assert steps["5_game_evidence"]["transitions"][0]["match"] == {
+        "field": "passed", "value": True}
     assert [t["to"] for t in steps["5_readme"]["transitions"]] == ["5_candidate_before"]
     assert [t["to"] for t in steps["5_candidate_before"]["transitions"]] == ["5"]
     assert [t["to"] for t in steps["5"]["transitions"]] == ["5_candidate_after"]

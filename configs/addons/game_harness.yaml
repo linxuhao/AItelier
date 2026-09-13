@@ -68,12 +68,15 @@ overlay:
           out_dir: "$STEP_DIR"
           evidence_cycle_from: "5_test"
           fail_fast_gates: '[["5_test", "test_report.json"]]'
-        # No transitions: a step LIST wires sequentially, so this falls through
-        # to 5_vision below, and 5_vision inherits 5_test's original target.
-        # A red compile is NOT routed around the readability gate — see the
-        # blind-branch discrimination on 5_vision, which is the right layer:
-        # godot_vision's own report is fresh and honest either way, and skipping
-        # the step left the PREVIOUS iteration's vision_report.json standing.
+        transitions:
+          - to: "5_vision"
+            match: { field: "release_evidence", value: "known_failure" }
+          - to: "5_vision"
+            match: { field: "release_evidence", value: "passed" }
+          # Missing, stale, pending, unreadable and infrastructure-unavailable
+          # evidence are not product failures. Hold for a fresh verification
+          # cycle instead of spending a PM loop inventing a code fix.
+          - to: "5_release_wait"
       # 2b. THE READABILITY GATE. 5_compile asserts STATE; this asserts that
       #     a player can SEE the state. jinyong-turn, 2026-08-22: scenario
       #     `two_phase_skill_unlock_and_hp_gate` passed 20/20 asserting
@@ -142,10 +145,9 @@ overlay:
         # be waved through is the precise defect this gate exists to catch.
         #
         # ── AND `blind` HAS TWO CAUSES, WHICH ALSO DIVERGE ────────────────
-        # `no_captures` means the PLAY-TEST RENDERED NOTHING — in practice the
-        # build failed to parse, so godot_compile skipped the play-test and the
-        # report carries frames: 0. There is no judge to find and no frame to
-        # look at; the cure is replanning, which is 5_review's job.
+        # `no_captures` means the PLAY-TEST RENDERED NOTHING. There is no judge
+        # to find and no frame to look at, so the final gate records whether
+        # this is a confirmed failure or unresolved evidence before routing.
         # Live, jinyong-numbers 2026-09-01: three GDScript parse errors in
         # tests/ took the build down and the round then paused for hours on
         # "请看帧,按六问裁决" with frames_checked: 0 — a person asked to answer
@@ -163,9 +165,9 @@ overlay:
         # nothing marking it stale. Letting the step RUN keeps the report fresh
         # and honest; only where it goes afterwards changes.
         #
-        # It still visits 5_final_test, which writes its own fresh
-        # upstream_failed marker without running another suite, then replans.
-        # Missing rendered evidence therefore stays explicit and non-passing.
+        # It still visits 5_final_test, which writes its own fresh marker
+        # without running another suite. Missing rendered evidence then waits
+        # for verification; a confirmed failure alone enters replanning.
         transitions:
           - to: "5_final_test"
             match:
@@ -175,8 +177,10 @@ overlay:
           - to: "5_vision_human"
             match: { from_file: "vision_report.json", field: "blind", value: true }
           - to: "5_final_test"
-            match: { from_file: "vision_report.json", field: "passed", value: false }
+            match: { field: "release_evidence", value: "known_failure" }
           - to: "5_evidence"
+            match: { field: "release_evidence", value: "passed" }
+          - to: "5_release_wait"
 
       # The checkpoint modal surfaces the CHECKPOINT step's OWN dir, so restage
       # the gate's report into it — otherwise the reviewer is asked to judge a
@@ -478,13 +482,11 @@ overlay:
         # On the passing path this remains after 5_design. On a known upstream
         # failure it writes a fresh marker and returns without another suite.
         transitions:
-          - to: "5_final_test_replan"
-            match: { from_file: "test_report.json", field: "skipped", value: true }
-          - to: "5_final_test_replan"
-            match: { from_file: "test_report.json", field: "no_tests_collected", value: true }
           - to: "5_game_evidence"
-            match: { from_file: "test_report.json", field: "passed", value: true }
+            match: { field: "release_evidence", value: "passed" }
           - to: "5_final_test_replan"
+            match: { field: "release_evidence", value: "known_failure" }
+          - to: "5_release_wait"
 
       - id: "5_game_evidence"
         step_type: "tool"
@@ -495,11 +497,31 @@ overlay:
           gates: '[["5_test", "test_report.json"], ["5_compile", "compile_report.json"], ["5_compile", "playtest_report.json"], ["5_vision", "vision_report.json"], ["5_final_test", "test_report.json"]]'
         transitions:
           - to: "5_readme"
+            match: { field: "passed", value: true }
+          - to: "5_release_wait"
 
       - id: "5_final_test_replan"
         step_type: "gate"
         transitions:
           - to: "3"
+            max_loop: 4
+
+      # Uncertain evidence cannot authorize release and cannot diagnose a code
+      # defect. The checkpoint records the complete failed audit, then approval
+      # starts a new evidence cycle; rejection is the only route to replanning.
+      - id: "5_release_wait"
+        step_type: "tool"
+        tool_name: "verify_evidence"
+        timeout_seconds: 120
+        tool_params:
+          out_dir: "$STEP_DIR"
+          gates: '[["5_test", "test_report.json"], ["5_compile", "compile_report.json"], ["5_compile", "playtest_report.json"], ["5_vision", "vision_report.json"], ["5_final_test", "test_report.json"]]'
+        checkpoint: true
+        checkpoint_label: "Release evidence unresolved — retry verification after recovery"
+        checkpoint_reject_to: "3"
+        transitions:
+          - to: "5_test"
+            match: { from: "checkpoint", value: "approved" }
             max_loop: 4
 
   # Both consumers receive the report from the final repository tree. The

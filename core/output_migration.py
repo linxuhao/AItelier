@@ -167,7 +167,8 @@ def _drop_step_context(step: dict, source_step: str) -> None:
     ]
 
 
-def migrate_readonly_verifier(document: dict) -> list[dict]:
+def migrate_readonly_verifier(
+        document: dict, *, readme_agent_config: str = "delivery_documenter") -> list[dict]:
     """Split a generated DPE verifier's README and move it behind code owners.
 
     This is intentionally shape-gated. A generated graph that does not have the
@@ -240,7 +241,7 @@ def migrate_readonly_verifier(document: dict) -> list[dict]:
 
     owner = {
         "id": "5_readme", "step_type": "agent",
-        "agent_config": "delivery_documenter",
+        "agent_config": readme_agent_config,
         "context": list(verifier.get("context") or []),
         "output": {"mode": "content", "target": "artifact",
                    "fixed": {"readme": readme_slot}},
@@ -405,11 +406,129 @@ def migrate_final_verifier_prompt(prompt: str) -> str:
     )
     prompt = re.sub(r"^.*create_readme.*(?:\n|$)", "", prompt,
                     flags=re.MULTILINE)
+    prompt = re.sub(
+        r"^.*(?:write_readme|edit_readme|apply_patch|repo_remove_file).*(?:\n|$)",
+        "", prompt, flags=re.MULTILINE | re.IGNORECASE,
+    )
     prompt = prompt.replace(
         "- **写作为主**: 工具调用中至少 1/3 应是写入操作，不要只读不写",
         "- **report-only**: 只写验证报告，不得修改 README 或候选代码",
     )
     return _VERIFIER_BOUNDARY + "\n\n" + prompt
+
+
+def migrate_readonly_verifier_roles(document: dict, roles: dict) -> list[dict]:
+    """Apply the report-only boundary to in-memory, already-namespaced roles."""
+    steps = document.get("steps") if isinstance(document, dict) else None
+    if not isinstance(steps, list) or not isinstance(roles, dict):
+        return []
+    verifier = next((step for step in steps
+                     if isinstance(step, dict) and step.get("id") == "5"), None)
+    if not verifier or not verifier.get("agent_config"):
+        return []
+    name = verifier["agent_config"]
+    role = roles.get(name)
+    if not isinstance(role, dict):
+        return []
+    changes = []
+    prompt = role.get("system_prompt")
+    if isinstance(prompt, str):
+        migrated = migrate_final_verifier_prompt(prompt)
+        if migrated != prompt:
+            role["system_prompt"] = migrated
+            changes.append("prompt")
+    tools = role.get("tools")
+    if isinstance(tools, list):
+        migrated_tools = [tool for tool in tools if tool in VERIFIER_READ_TOOLS]
+        if migrated_tools != tools:
+            role["tools"] = migrated_tools
+            changes.append("tools")
+    return [{"role": name, "readonly_verifier": changes}] if changes else []
+
+
+def validate_readonly_verifier(document: dict, roles: dict) -> None:
+    """Reject a partial report-only DPE boundary before it can become live."""
+    steps = document.get("steps") if isinstance(document, dict) else None
+    if not isinstance(steps, list):
+        return
+    by_id = {step.get("id"): step for step in steps if isinstance(step, dict)}
+    boundary = {"5_readme", "5_candidate_before", "5_candidate_after"}
+    if not (boundary & set(by_id)):
+        return
+    missing = sorted(boundary - set(by_id))
+    if missing:
+        raise ValueError("partial read-only verifier boundary; missing "
+                         + ", ".join(missing))
+    verifier = by_id.get("5")
+    if not verifier:
+        raise ValueError("read-only verifier boundary has no step 5")
+
+    def targets(step_id: str) -> list[str | None]:
+        return [edge.get("to") for edge in by_id[step_id].get("transitions", [])
+                if isinstance(edge, dict)]
+
+    if targets("5_readme") != ["5_candidate_before"]:
+        raise ValueError("README owner must immediately precede candidate snapshot")
+    if targets("5_candidate_before") != ["5"]:
+        raise ValueError("candidate snapshot must immediately precede verifier")
+    if targets("5") != ["5_candidate_after"]:
+        raise ValueError("verifier must immediately precede candidate comparison")
+    after_edges = by_id["5_candidate_after"].get("transitions") or []
+    if (len(after_edges) != 1 or not isinstance(after_edges[0], dict)
+            or after_edges[0].get("match") != {"passed": True}):
+        raise ValueError("candidate comparison must gate its only successor on passed=true")
+
+    fixed = ((verifier.get("output") or {}).get("fixed") or {})
+    if set(fixed) != {"report"}:
+        raise ValueError("final verifier must declare exactly one report output")
+    report = fixed["report"]
+    if (not isinstance(report, dict) or report.get("target") != "artifact"
+            or report.get("file") != "final/verify_report.json"):
+        raise ValueError("final verifier report must be the engine-bound artifact slot")
+    if verifier.get("lifecycle"):
+        raise ValueError("final verifier must not have lifecycle writers")
+
+    owner = by_id["5_readme"]
+    owner_fixed = ((owner.get("output") or {}).get("fixed") or {})
+    readme = owner_fixed.get("readme")
+    if (owner.get("output", {}).get("mode") != "content"
+            or set(owner_fixed) != {"readme"}
+            or not str(owner.get("agent_config") or "").endswith("delivery_documenter")
+            or not isinstance(readme, dict)
+            or readme.get("file") != "README.md"
+            or readme.get("target") != "code"
+            or owner.get("lifecycle")):
+        raise ValueError("README owner must use one engine-bound fixed code slot")
+    owner_role = roles.get(owner.get("agent_config")) if isinstance(roles, dict) else None
+    if isinstance(owner_role, dict):
+        owner_tools = owner_role.get("tools")
+        if (not isinstance(owner_tools, list)
+                or any(tool not in VERIFIER_READ_TOOLS for tool in owner_tools)):
+            raise ValueError("README owner role contains an optional-path writer")
+
+    for step_id, phase in (("5_candidate_before", "snapshot"),
+                           ("5_candidate_after", "verify")):
+        step = by_id[step_id]
+        params = step.get("tool_params") or {}
+        if (step.get("step_type") != "tool"
+                or step.get("tool_name") != "candidate_integrity"
+                or params.get("project_root") != "$PROJECT_ROOT"
+                or params.get("out_dir") != "$STEP_DIR"
+                or params.get("phase") != phase
+                or (phase == "verify"
+                    and params.get("baseline_step") != "5_candidate_before")):
+            raise ValueError(f"{step_id} is not an engine-bound candidate_integrity step")
+
+    role_name = verifier.get("agent_config")
+    role = roles.get(role_name) if isinstance(roles, dict) else None
+    if not isinstance(role, dict):
+        raise ValueError("final verifier role is missing; refusing generic fallback")
+    tools = role.get("tools")
+    if not isinstance(tools, list) or any(tool not in VERIFIER_READ_TOOLS for tool in tools):
+        raise ValueError("final verifier role contains a non-read tool")
+    prompt = role.get("system_prompt")
+    if not isinstance(prompt, str) or not prompt.startswith(_VERIFIER_BOUNDARY):
+        raise ValueError("final verifier role prompt lacks report-only boundary")
 
 
 def _code_roles(config_dir: Path) -> set[str]:
@@ -524,10 +643,23 @@ def migrate_generated_outputs(config_dir: Path) -> list[dict]:
         if not isinstance(document, dict):
             continue
         changes = migrate_document(document)
-        changes.extend(migrate_readonly_verifier(document))
+        readonly_changes = migrate_readonly_verifier(document)
+        changes.extend(readonly_changes)
         if not changes:
             continue
         PipelineGraph._from_dict(document)  # validate everything before any write
+        if readonly_changes:
+            # Validate the paired sidecar before atomically replacing either
+            # file. A missing/stale verifier role must not leave a migrated graph
+            # on disk that would boot with the generic write-capable fallback.
+            roles_path = path.with_suffix(".roles.json")
+            if not roles_path.is_file():
+                raise ValueError(f"{path.name}: read-only verifier role sidecar is missing")
+            roles = json.loads(roles_path.read_bytes())
+            if not isinstance(roles, dict):
+                raise ValueError(f"{roles_path.name}: role sidecar is not a mapping")
+            migrate_readonly_verifier_roles(document, roles)
+            validate_readonly_verifier(document, roles)
         rendered = yaml.safe_dump(document, allow_unicode=True, sort_keys=False).encode()
         sha = hashlib.sha256(original).hexdigest()
         backup = write_migrated_config(path, original, rendered, backup_dir)

@@ -595,7 +595,8 @@ def _register_forge_roles(sf, config_name: str, roles: dict) -> None:
             continue
         role_config = {
             "model": cfg.get("model") or "host",
-            "tools": cfg.get("tools") or ["read_file", "write"],
+            "tools": (cfg["tools"] if isinstance(cfg.get("tools"), list)
+                      else ["read_file", "write"]),
             "system_prompt": cfg.get("system_prompt") or _role_prompt(role),
             "temperature": cfg.get("temperature", 0.2),
             "thinking": cfg.get("thinking") or {"enable": True},
@@ -667,11 +668,53 @@ def register_forge_pipeline(sf, registry, run_id: str, name: str) -> dict:
             prompt = tfile.read_text(encoding="utf-8") if tfile.exists() else _role_prompt(bare)
             roles[prefix + bare] = {
                 "model": "host",
-                "tools": rcfg.get("tools") or ["read_file", "write"],
+                "tools": (rcfg["tools"] if isinstance(rcfg.get("tools"), list)
+                          else ["read_file", "write"]),
                 "temperature": rcfg.get("temperature", 0.2),
                 "thinking": rcfg.get("thinking") or {"enable": True},
                 "system_prompt": prompt,
             }
+            for key in ("native_tool_calling", "fallback_to_json_mode",
+                        "max_tool_turns", "max_output_tokens"):
+                if key in rcfg:
+                    roles[prefix + bare][key] = rcfg[key]
+
+        # Forge can emit the legacy DPE verifier shape even though boot-time
+        # migration is correct. Apply and validate the same contract here,
+        # while graph and role data are still plain in-memory values: neither
+        # the legacy README slot nor its mutator tools/prompt may become live
+        # for even one registration attempt.
+        from core.output_migration import (
+            migrate_readonly_verifier,
+            migrate_readonly_verifier_roles,
+            validate_readonly_verifier,
+        )
+        readme_role = prefix + "delivery_documenter"
+        migrate_readonly_verifier(data, readme_agent_config=readme_role)
+        owner_step = next(
+            (step for step in data.get("steps", [])
+             if isinstance(step, dict) and step.get("id") == "5_readme"), None)
+        if owner_step is not None:
+            owner_step["agent_config"] = readme_role
+            verifier_role = next(
+                (step.get("agent_config") for step in data.get("steps", [])
+                 if isinstance(step, dict) and step.get("id") == "5"), "")
+            verifier_settings = roles.get(verifier_role, {})
+            delivery_template = (Path(__file__).resolve().parents[1]
+                                 / "templates" / "delivery_documenter.md")
+            roles[readme_role] = {
+                "model": "host",
+                "tools": ["list_tree"],
+                "temperature": 0.2,
+                "thinking": {"enable": True},
+                "system_prompt": delivery_template.read_text(encoding="utf-8"),
+                "native_tool_calling": verifier_settings.get(
+                    "native_tool_calling", True),
+                "fallback_to_json_mode": verifier_settings.get(
+                    "fallback_to_json_mode", True),
+            }
+        migrate_readonly_verifier_roles(data, roles)
+        validate_readonly_verifier(data, roles)
         yaml_text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
     except Exception as e:
         return {"error": f"emitted pipeline is invalid: {e}"}

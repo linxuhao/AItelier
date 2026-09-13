@@ -1,4 +1,5 @@
 """Byte-for-byte candidate boundary around the report-only final verifier."""
+
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +8,6 @@ import os
 import stat
 import tempfile
 from pathlib import Path
-
 
 _SNAPSHOT = "candidate_snapshot.json"
 _REPORT = "candidate_integrity_report.json"
@@ -30,6 +30,16 @@ def _root(value: str, label: str, *, must_exist: bool) -> Path:
     if not parent.is_dir():
         raise ValueError(f"candidate_integrity {label} parent is not a directory")
     return parent / path.name
+
+
+def _artifact_root(value: str, repo: Path) -> Path:
+    """Resolve the engine artifact root and keep it outside hashed bytes."""
+    if not value or not Path(value).is_absolute():
+        raise ValueError("candidate_integrity requires absolute out_dir")
+    output = Path(value).resolve(strict=False)
+    if output == repo or output.is_relative_to(repo):
+        raise ValueError("candidate_integrity out_dir must be outside project_root")
+    return _root(value, "out_dir", must_exist=False)
 
 
 def _file_hash(path: Path) -> tuple[int, str]:
@@ -123,7 +133,7 @@ def candidate_integrity(*, project_root: str = "", out_dir: str = "",
     """Write the pre-verifier snapshot or compare the post-verifier bytes."""
     try:
         repo = _root(project_root, "project_root", must_exist=True)
-        output = _root(out_dir, "out_dir", must_exist=False)
+        output = _artifact_root(out_dir, repo)
         if phase not in {"snapshot", "verify"}:
             raise ValueError("candidate_integrity phase must be snapshot or verify")
         current = _snapshot(repo)

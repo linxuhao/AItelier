@@ -128,3 +128,5 @@ def test_revision_prompt_preserves_first_failure_and_requires_native_raw_retry(t
     assert "raw=true, source=\"self\"" in prompt
     assert "Do not use fuzzy matching" in prompt
     assert "do not rewrite the whole file" in prompt
+    assert "recall_observation" in prompt
+    assert "start_line" in prompt and "end_line" in prompt

@@ -403,6 +403,12 @@ def _project_native_messages(messages: list[dict], *,
         if not (isinstance(message, dict) and message.get("role") == "tool"
                 and isinstance(message.get("content"), str)):
             continue
+        # A recall is already a bounded slice. Its envelope includes the
+        # original observation size, so serialising even a small slice can
+        # exceed the projection threshold and immediately hide the bytes the
+        # model just requested. Preserve the bounded reply as-is.
+        if message.get("name") == "recall_observation":
+            continue
         content = message["content"]
         if len(content) > limit:
             projected[i]["content"] = _compact_marker(content, "tool result")
@@ -4131,6 +4137,7 @@ class PipelineEngine:
                     tool_message = {
                         "role": "tool",
                         "tool_call_id": tc["id"],
+                        "name": tool_name,
                         "content": result_str,
                     }
                     messages.append(tool_message)

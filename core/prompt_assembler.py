@@ -420,7 +420,13 @@ class PromptAssembler:
                                 "projections, compacted context, or recalled summaries "
                                 "into `old_str`. Do not use fuzzy matching and do not "
                                 "rewrite the whole file. A raw read is the current staging "
-                                "candidate, so untouched bytes remain carried forward."
+                                "candidate, so untouched bytes remain carried forward. "
+                                "Keep recovery bounded: page a large file with "
+                                "`start_line`/`end_line` around the target. If a tool result "
+                                "is projected behind an `_aitelier_compacted` marker, call "
+                                "`recall_observation` with its shown `sha256` and a narrow "
+                                "`grep` or `start`/`end` range (at most 16K characters); "
+                                "do not rerun the broad tool or request a whole-file rewrite."
                             )
                 if "write" in write_tools:
                     # AT-9: pin one canonical root for the generic write(file, …).

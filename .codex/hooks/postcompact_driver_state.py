@@ -415,18 +415,10 @@ def _write_output(output: dict[str, Any]) -> None:
 
 
 def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -> bool:
-    """Atomically emit one model-context delivery for the current generation."""
+    """Persist delivery before emitting context, so failures fail closed."""
     path, lock_fd = _acquire_marker(hook_input)
     if path is None:
-        if not standalone:
-            return False
-        _write_output({
-            "hookSpecificOutput": {
-                "hookEventName": event,
-                "additionalContext": build_context(),
-            }
-        })
-        return True
+        return False
     try:
         marker = _read_marker(path)
         if marker is None:
@@ -435,13 +427,15 @@ def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -
             marker = {"version": 2, "generation": "session-start", "status": "pending"}
         if marker["status"] != "pending":
             return False
+        context = build_context()
+        if not _write_marker(path, {**marker, "status": "delivered"}):
+            return False
         _write_output({
             "hookSpecificOutput": {
                 "hookEventName": event,
-                "additionalContext": build_context(),
+                "additionalContext": context,
             }
         })
-        _write_marker(path, {**marker, "status": "delivered"})
         return True
     finally:
         _release_marker(lock_fd)

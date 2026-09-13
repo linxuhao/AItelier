@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import subprocess
@@ -11,6 +12,15 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 HOOK = REPO / ".codex" / "hooks" / "postcompact-driver-state.sh"
+HOOK_PY = REPO / ".codex" / "hooks" / "postcompact_driver_state.py"
+
+
+def load_hook_module():
+    spec = importlib.util.spec_from_file_location("postcompact_driver_state_candidate", HOOK_PY)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class StateStub(BaseHTTPRequestHandler):
@@ -196,6 +206,44 @@ def test_postcompact_marker_failure_never_blocks_and_is_actionable(tmp_path, sta
     assert "driver_note_revision=1" in output["systemMessage"]
     assert "follow-up could not be queued" in output["systemMessage"]
     assert len(output["systemMessage"]) <= 12_000
+
+
+def test_damaged_marker_fails_closed_for_repeated_model_context_events(tmp_path, monkeypatch):
+    hook = load_hook_module()
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    hook_input = {"session_id": "damaged-session", "turn_id": "turn-damaged"}
+    marker = hook._pending_path(hook_input)
+    assert marker is not None
+    marker.parent.mkdir(mode=0o700, parents=True)
+    marker.mkdir(mode=0o700)
+    for event, standalone in (("SessionStart", True), ("UserPromptSubmit", False)):
+        outputs = []
+        hook._write_output = outputs.append
+        for _ in range(2):
+            assert hook._deliver_once(hook_input, event, standalone=standalone) is False
+        assert outputs == []
+
+
+def test_forced_delivery_persistence_failure_never_repeats_context(tmp_path, monkeypatch):
+    hook = load_hook_module()
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    hook_input = {"session_id": "write-failure-session", "turn_id": "turn-write-failure"}
+    marker = hook._pending_path(hook_input)
+    assert marker is not None
+    marker.parent.mkdir(mode=0o700, parents=True)
+    marker.write_text(json.dumps({"version": 2, "generation": "turn-write-failure", "status": "pending"}))
+    monkeypatch.setattr(hook, "build_context", lambda: "synthetic context")
+    monkeypatch.setattr(hook, "_write_marker", lambda *_args: False)
+    outputs = []
+    monkeypatch.setattr(hook, "_write_output", outputs.append)
+    for event, standalone in (("SessionStart", True), ("UserPromptSubmit", False)):
+        outputs.clear()
+        for _ in range(2):
+            assert hook._deliver_once(hook_input, event, standalone=standalone) is False
+        assert outputs == []
+    assert json.loads(marker.read_text())["status"] == "pending"
 
 
 def test_malformed_or_unrelated_event_fails_open_without_state_access(tmp_path, state_server):

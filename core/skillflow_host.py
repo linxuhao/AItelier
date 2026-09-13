@@ -190,6 +190,67 @@ class AItelierSkillFlow(SkillFlow):
                 continue
         return False
 
+    def _append_recovery_decision(self, run_id: str, decision_id: str,
+                                  payload: dict, *, step_id: str | None,
+                                  step_instance_id: int | None) -> bool:
+        """Atomically append one durable decision across host processes.
+
+        The key and public trace row share one ``BEGIN IMMEDIATE`` transaction
+        in the actual trace database. A failed append rolls both back, while a
+        racing host that loses the primary-key insert observes the committed
+        decision without writing a second trace row.
+        """
+        if not run_id or not self._trace_enabled:
+            return False
+        project_id = self._get_project_id(run_id)
+        trace_conn = self._get_trace_conn(project_id) if project_id else None
+        target = trace_conn or self._conn
+        clean = {key: self._clip(value) for key, value in payload.items()}
+        serialized = self._serialize(clean)
+        try:
+            with self._lock:
+                target.execute("BEGIN IMMEDIATE;")
+                try:
+                    target.execute(
+                        "CREATE TABLE IF NOT EXISTS "
+                        "aitelier_operation_recovery_decisions ("
+                        "decision_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, "
+                        "payload_json TEXT NOT NULL, "
+                        "created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+                    inserted = target.execute(
+                        "INSERT OR IGNORE INTO "
+                        "aitelier_operation_recovery_decisions "
+                        "(decision_id, run_id, payload_json) VALUES (?, ?, ?)",
+                        (decision_id, run_id, serialized)).rowcount
+                    if inserted:
+                        target.execute(
+                            "INSERT INTO skillflow_trace "
+                            "(run_id, step_id, step_instance_id, seq, category, "
+                            "event, payload_json) "
+                            "SELECT ?, ?, ?, COALESCE(MAX(seq), 0) + 1, "
+                            "'step', 'operation_recovery_decision', ? "
+                            "FROM skillflow_trace WHERE run_id = ?",
+                            (run_id, step_id or None, step_instance_id,
+                             serialized, run_id))
+                    else:
+                        existing = target.execute(
+                            "SELECT run_id, payload_json FROM "
+                            "aitelier_operation_recovery_decisions "
+                            "WHERE decision_id = ?", (decision_id,)).fetchone()
+                        if (not existing or existing["run_id"] != run_id
+                                or existing["payload_json"] != serialized):
+                            raise RuntimeError(
+                                f"recovery decision identity collision: {decision_id}")
+                    target.commit()
+                    return True
+                except Exception:
+                    target.rollback()
+                    raise
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "operation recovery decision trace unavailable", exc_info=True)
+            return False
+
     def reconcile_active_operations(self, run_id: str | None = None, *,
                                     trigger: str) -> dict:
         """Observe owners first and durably record the recovery decision.
@@ -221,11 +282,6 @@ class AItelierSkillFlow(SkillFlow):
             if key in self._operation_recovery_decisions:
                 continue
             decision_id = self._recovery_decision_id(key)
-            if self._trace_has_identity(
-                    row["run_id"], "operation_recovery_decision",
-                    "decision_id", decision_id):
-                self._operation_recovery_decisions.add(key)
-                continue
             step_id = None
             step_instance_id = row.get("step_instance_id")
             if step_instance_id:
@@ -234,22 +290,19 @@ class AItelierSkillFlow(SkillFlow):
                         "SELECT step_id FROM skillflow_steps WHERE id = ?",
                         (step_instance_id,)).fetchone()
                     step_id = step["step_id"] if step else None
-            self.trace(
-                row["run_id"], "step", "operation_recovery_decision",
-                {"decision_id": decision_id, "trigger": trigger, "decision": decision,
-                 "owner_state": state, "operation_id": row["id"],
-                 "kind": row["kind"], "detail": row["detail"],
-                 "owner": row["owner"], "owner_lost_at": row["owner_lost_at"],
-                 "admitted_at": row["admitted_at"],
-                 "step_instance_id": step_instance_id,
-                 "claim_epoch": row["claim_epoch"]},
-                step_id=step_id, step_instance_id=step_instance_id)
-            # SkillFlow trace is deliberately best-effort and reports no write
-            # result. Confirm the record through its durable read surface before
-            # caching the key; a swallowed write failure must retry next time.
-            if self._trace_has_identity(
-                    row["run_id"], "operation_recovery_decision",
-                    "decision_id", decision_id):
+            payload = {
+                "decision_id": decision_id, "trigger": trigger,
+                "decision": decision, "owner_state": state,
+                "operation_id": row["id"], "kind": row["kind"],
+                "detail": row["detail"], "owner": row["owner"],
+                "owner_lost_at": row["owner_lost_at"],
+                "admitted_at": row["admitted_at"],
+                "step_instance_id": step_instance_id,
+                "claim_epoch": row["claim_epoch"],
+            }
+            if self._append_recovery_decision(
+                    row["run_id"], decision_id, payload, step_id=step_id,
+                    step_instance_id=step_instance_id):
                 self._operation_recovery_decisions.add(key)
         return {**audit, "operations": operations}
 

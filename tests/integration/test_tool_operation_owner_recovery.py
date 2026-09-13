@@ -30,7 +30,7 @@ def _graph() -> PipelineGraph:
 
 
 def _engine(db_path: Path, workspace: Path, projects: Path,
-            repo: Path) -> AItelierSkillFlow:
+            repo: Path, trace_db: Path | None = None) -> AItelierSkillFlow:
     loader = ToolLoader(Path(skillflow_package.__file__).parent / "tools")
     loader.add_tools_dir(_ROOT / "aitelier" / "tools")
     native = loader.is_native
@@ -38,7 +38,8 @@ def _engine(db_path: Path, workspace: Path, projects: Path,
     sf = AItelierSkillFlow(
         str(db_path), tool_loader=loader, workspace_base=str(workspace),
         projects_base=str(projects), stale_threshold_seconds=0.05,
-        code_path_resolver=lambda project_id, run_id=None: repo)
+        code_path_resolver=lambda project_id, run_id=None: repo,
+        trace_db_path=str(trace_db) if trace_db else None)
     sf.register_graph(_graph())
     return sf
 
@@ -47,6 +48,29 @@ def _invoke_long_gate(db_path: str, workspace: str, projects: str,
                       repo: str, run_id: str) -> None:
     sf = _engine(Path(db_path), Path(workspace), Path(projects), Path(repo))
     sf.advance_run(run_id)
+
+
+def _race_recovery_decision(db_path: str, workspace: str, projects: str,
+                            repo: str, trace_db: str, run_id: str, barrier,
+                            results) -> None:
+    """One independent recovery host used by the spawn-process race test."""
+    from skillflow import identity
+
+    import core.skillflow_host as host
+
+    identity.owner_is_dead = lambda owner: None
+    host.owner_is_dead = lambda owner: None
+    sf = _engine(Path(db_path), Path(workspace), Path(projects), Path(repo),
+                 Path(trace_db))
+    real_append = sf._append_recovery_decision
+
+    def append_after_barrier(*args, **kwargs):
+        barrier.wait(timeout=10)
+        return real_append(*args, **kwargs)
+
+    sf._append_recovery_decision = append_after_barrier
+    report = sf.reconcile_active_operations(run_id, trigger="two_process_race")
+    results.put(("done", report["operations"][0]["id"]))
 
 
 def _wait_for(path: Path, timeout: float = 15) -> None:
@@ -214,7 +238,8 @@ def test_recovery_trace_failure_retries_then_deduplicates_durably(
     workspace = tmp_path / "ws"
     projects = tmp_path / "projects"
     repo = tmp_path / "repo"
-    sf = _engine(db_path, workspace, projects, repo)
+    trace_db = tmp_path / "trace"
+    sf = _engine(db_path, workspace, projects, repo, trace_db)
     run_id = sf.create_run("owner_recovery_gate", {"project_id": "p"},
                            project_id="p")
     sf.start_run(run_id)
@@ -225,23 +250,20 @@ def test_recovery_trace_failure_retries_then_deduplicates_durably(
     import core.skillflow_host as host
     monkeypatch.setattr(identity, "owner_is_dead", lambda owner: False)
     monkeypatch.setattr(host, "owner_is_dead", lambda owner: False)
-    real_trace = sf.trace
-    dropped = False
-
-    def drop_once(run, category, event, payload=None, **kwargs):
-        nonlocal dropped
-        if event == "operation_recovery_decision" and not dropped:
-            dropped = True
-            return None
-        return real_trace(run, category, event, payload, **kwargs)
-
-    monkeypatch.setattr(sf, "trace", drop_once)
+    trace_conn = sf._get_trace_conn("p")
+    trace_conn.execute(
+        "CREATE TRIGGER fail_recovery_trace BEFORE INSERT ON skillflow_trace "
+        "WHEN NEW.event = 'operation_recovery_decision' "
+        "BEGIN SELECT RAISE(ABORT, 'injected durable write failure'); END")
+    trace_conn.commit()
     sf.reconcile_active_operations(run_id, trigger="retryable_trace")
     assert sf.trace_query(
         run_id,
         "SELECT 1 FROM skillflow_trace "
         "WHERE run_id=? AND event='operation_recovery_decision'", (run_id,)) == []
 
+    trace_conn.execute("DROP TRIGGER fail_recovery_trace")
+    trace_conn.commit()
     sf.reconcile_active_operations(run_id, trigger="retryable_trace")
     sf.reconcile_active_operations(run_id, trigger="retryable_trace")
     traces = sf.trace_query(
@@ -252,10 +274,61 @@ def test_recovery_trace_failure_retries_then_deduplicates_durably(
     assert json.loads(traces[0]["payload_json"])["decision_id"]
 
     # A second host has an empty memory cache but consults the durable decision.
-    recovered = _engine(db_path, workspace, projects, repo)
-    monkeypatch.setattr(recovered, "trace", lambda *args, **kwargs: pytest.fail(
-        "durable recovery decision should suppress a duplicate trace"))
+    recovered = _engine(db_path, workspace, projects, repo, trace_db)
     recovered.reconcile_active_operations(run_id, trigger="retryable_trace")
+    traces = recovered.trace_query(
+        run_id,
+        "SELECT payload_json FROM skillflow_trace "
+        "WHERE run_id=? AND event='operation_recovery_decision'", (run_id,))
+    assert len(traces) == 1
+
+
+def test_two_processes_append_one_durable_recovery_decision(tmp_path):
+    """Independent spawned hosts race after a true process-shared barrier."""
+    db_path = tmp_path / "sf.db"
+    workspace = tmp_path / "ws"
+    projects = tmp_path / "projects"
+    repo = tmp_path / "repo"
+    trace_db = tmp_path / "trace"
+    sf = _engine(db_path, workspace, projects, repo, trace_db)
+    run_id = sf.create_run("owner_recovery_gate", {"project_id": "p"},
+                           project_id="p")
+    sf.start_run(run_id)
+    op_id = sf._admit_op("tool_step", run_id, detail="run_tests")
+
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    args = tuple(map(str, (db_path, workspace, projects, repo, trace_db))) + (
+        run_id, barrier, results)
+    processes = [
+        context.Process(target=_race_recovery_decision, args=args)
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+        assert not process.is_alive()
+        assert process.exitcode == 0
+
+    assert sorted(results.get(timeout=2) for _ in processes) == [
+        ("done", op_id), ("done", op_id)]
+    traces = sf.trace_query(
+        run_id,
+        "SELECT payload_json FROM skillflow_trace "
+        "WHERE run_id=? AND event='operation_recovery_decision'", (run_id,))
+    assert len(traces) == 1
+    payload = json.loads(traces[0]["payload_json"])
+    assert payload["operation_id"] == op_id
+    assert payload["trigger"] == "two_process_race"
+    decisions = sf.trace_query(
+        run_id,
+        "SELECT decision_id, payload_json FROM "
+        "aitelier_operation_recovery_decisions WHERE run_id=?", (run_id,))
+    assert len(decisions) == 1
+    assert decisions[0]["decision_id"] == payload["decision_id"]
+    assert json.loads(decisions[0]["payload_json"]) == payload
 
 
 def test_two_controllers_cannot_admit_after_both_pass_preflight(

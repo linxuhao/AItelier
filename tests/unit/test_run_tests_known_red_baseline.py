@@ -108,6 +108,8 @@ def test_failure_keys_drop_what_varies_run_to_run():
     # Gate entries embed a returncode and an output tail; keyed on the gate.
     assert _failure_key("repo_gate:run_tests.sh failed (rc=1): 9 parse errors") \
         == "repo_gate:run_tests.sh"
+    assert _failure_key("repo_gate:run_tests.sh#compile/autoload failed: old") \
+        == "repo_gate:run_tests.sh#compile/autoload"
     assert _failure_key("node:build failed (rc=2): blah") == "node:build"
     assert _failure_key("ERROR tests/test_c.py - ImportError: no module x") \
         == "tests/test_c.py"
@@ -120,3 +122,97 @@ def test_an_unreadable_baseline_is_reported_not_silently_reseeded(tmp_path):
     assert "unreadable baseline" in r["baseline_error"]
     assert r["new_failures"] == [RED_A]      # nothing is known-red
     assert r["passed_relative"] is False
+
+
+def _gate_record(case_id, detail, **extra):
+    value = {"case_id": case_id, "status": "failed", "detail": detail,
+             **extra}
+    return "AITELIER_REPO_GATE_CASE=" + json.dumps(value)
+
+
+def _write_repo_gate(repo, *lines):
+    script = repo / "run_tests.sh"
+    body = "#!/bin/sh\n" + "\n".join(
+        "printf '%s\\n' " + repr(line) for line in lines) + "\nexit 1\n"
+    script.write_text(body)
+    script.chmod(0o755)
+
+
+def _run_repo(repo, out, state):
+    from aitelier.tools.run_tests.impl import run_tests
+    result = run_tests(project_root=str(repo), out_dir=str(out),
+                       state_dir=str(state))
+    report = json.loads((out / "test_report.json").read_text())
+    assert result["passed"] is False and report["passed"] is False
+    return report
+
+
+def test_real_repo_gate_a_then_a_plus_b_exposes_b_and_keeps_detail_stable(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    _write_repo_gate(repo, _gate_record("A", "first detail"))
+    first = _run_repo(repo, tmp_path / "out-a", state)
+    assert first["baseline_seeded"] is True
+    assert first["new_failures"] == []
+
+    _write_repo_gate(repo, _gate_record("A", "different human detail"),
+                     _gate_record("B", "new case"))
+    second = _run_repo(repo, tmp_path / "out-ab", state)
+    assert second["passed_relative"] is False
+    assert len(second["new_failures"]) == 1
+    assert "#B failed: new case" in second["new_failures"][0]
+    assert second["baseline_failures"] == ["repo_gate:run_tests.sh#A"]
+
+
+def test_real_repo_gate_fixed_then_rebroken_case_becomes_new(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    _write_repo_gate(repo, _gate_record("A", "a"), _gate_record("B", "b"))
+    _run_repo(repo, tmp_path / "out-seed", state)
+    _write_repo_gate(repo, _gate_record("A", "a remains"))
+    _run_repo(repo, tmp_path / "out-fixed", state)
+    assert json.loads((state / BASELINE_FILE).read_text())["failures"] == [
+        "repo_gate:run_tests.sh#A"]
+    _write_repo_gate(repo, _gate_record("A", "a"), _gate_record("B", "back"))
+    again = _run_repo(repo, tmp_path / "out-again", state)
+    assert len(again["new_failures"]) == 1
+    assert "#B failed: back" in again["new_failures"][0]
+
+
+def test_repo_gate_without_state_dir_stays_strict(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_repo_gate(repo, _gate_record("A", "a"))
+    from aitelier.tools.run_tests.impl import run_tests
+    out = tmp_path / "out"
+    result = run_tests(project_root=str(repo), out_dir=str(out), state_dir="")
+    report = json.loads((out / "test_report.json").read_text())
+    assert result["passed_relative"] is False
+    assert report["new_failures"] == [
+        "repo_gate:run_tests.sh#A failed: a"]
+
+
+def test_unreliable_repo_gate_identity_never_seeds_or_changes_baseline(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    _write_repo_gate(repo, _gate_record("A", "known"))
+    _run_repo(repo, tmp_path / "out-seed", state)
+    before = (state / BASELINE_FILE).read_bytes()
+
+    variants = {
+        "missing": ["ordinary failure prose"],
+        "duplicate": [_gate_record("A", "one"), _gate_record("A", "two")],
+        "malformed": ["AITELIER_REPO_GATE_CASE={not json"],
+        "ambiguous": [_gate_record("A", "detail", id="B")],
+        "truncated": ["x" * 2100, _gate_record("A", "tail")],
+    }
+    for name, lines in variants.items():
+        _write_repo_gate(repo, *lines)
+        report = _run_repo(repo, tmp_path / ("out-" + name), state)
+        assert report["passed_relative"] is False, name
+        assert report["new_failures"], name
+        assert "failure_identity_error" in report["repo_gate"], name
+        assert (state / BASELINE_FILE).read_bytes() == before, name

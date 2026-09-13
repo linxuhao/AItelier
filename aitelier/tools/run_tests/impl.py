@@ -554,7 +554,8 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int) -> dict:
         stdout, stderr = proc.communicate(timeout=timeout)
         out = ((stdout or "") + "\n" + (stderr or "")).strip()
         return {"passed": proc.returncode == 0,
-                "returncode": proc.returncode, "output": out[-2000:]}
+                "returncode": proc.returncode, "output": out[-2000:],
+                "output_truncated": len(out) > 2000}
     except subprocess.TimeoutExpired:
         _kill_group(proc)
         return {"passed": False, "returncode": -1,
@@ -656,6 +657,58 @@ BASELINE_FILE = "run_tests_baseline.json"
 _FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
 _ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
 _GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
+_REPO_GATE_CASE_PREFIX = "AITELIER_REPO_GATE_CASE="
+_REPO_GATE_CASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$")
+
+
+def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
+    """Read trustworthy per-case identities from one failed repository gate.
+
+    Gate prose is not an identity protocol.  A repository opts in by emitting
+    one JSON record per failed case as::
+
+        AITELIER_REPO_GATE_CASE={"case_id":"compile/autoload","status":"failed","detail":"..."}
+
+    The retained command output is bounded, so any truncation makes the set
+    incomplete and unusable.  One malformed or duplicate record likewise
+    invalidates the whole set instead of mixing reliable and script-wide keys.
+    """
+    if gate.get("output_truncated"):
+        return [], "repository gate output was truncated"
+    records: list[dict] = []
+    seen: set[str] = set()
+    for line in str(gate.get("output", "")).splitlines():
+        if not line.startswith(_REPO_GATE_CASE_PREFIX):
+            continue
+        raw = line[len(_REPO_GATE_CASE_PREFIX):]
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return [], "repository gate emitted malformed case JSON"
+        if not isinstance(value, dict):
+            return [], "repository gate case record must be an object"
+        case_id = value.get("case_id")
+        alias = value.get("id")
+        if alias is not None and case_id is not None and alias != case_id:
+            return [], "repository gate case identity is ambiguous"
+        if case_id is None:
+            case_id = alias
+        if (not isinstance(case_id, str)
+                or not _REPO_GATE_CASE_ID_RE.fullmatch(case_id)):
+            return [], "repository gate case identity is missing or malformed"
+        if case_id in seen:
+            return [], f"repository gate case identity is duplicated: {case_id}"
+        if value.get("status") != "failed":
+            return [], f"repository gate case status is malformed: {case_id}"
+        detail = value.get("detail", "")
+        if not isinstance(detail, str):
+            return [], f"repository gate case detail is malformed: {case_id}"
+        seen.add(case_id)
+        records.append({"case_id": case_id, "status": "failed",
+                        "detail": detail[:1000]})
+    if not records:
+        return [], "repository gate did not emit per-case identities"
+    return records, None
 
 
 def _failure_key(line: str) -> str:
@@ -710,6 +763,16 @@ def _apply_baseline(report: dict, state_dir: str) -> None:
             baseline = [str(k) for k in (data or {}).get("failures", [])]
         except (ValueError, OSError) as e:
             report["baseline_error"] = f"unreadable baseline {path}: {e}"
+
+    identity_error = report.get("failure_identity_error")
+    if identity_error:
+        prior = report.get("baseline_error")
+        report["baseline_error"] = (f"{prior}; {identity_error}" if prior
+                                    else str(identity_error))
+        report["new_failures"] = failures
+        report["passed_relative"] = False
+        report["baseline_failures"] = sorted(set(baseline))
+        return
 
     known = set(baseline)
     report["new_failures"] = [f for f, k in zip(failures, keys)
@@ -987,10 +1050,21 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             report["repo_gate"] = gate
             if not gate["passed"]:
                 report["passed"] = False
-                report["failures"].append(
-                    f"repo_gate:{gate['script']} failed "
-                    f"(rc={gate['returncode']}): "
-                    f"{gate['output'][-1500:]}")
+                cases, identity_error = _repo_gate_failure_cases(gate)
+                if identity_error is not None:
+                    gate["failure_identity_error"] = identity_error
+                    report["failure_identity_error"] = identity_error
+                    report["failures"].append(
+                        f"repo_gate:{gate['script']} failed "
+                        f"(rc={gate['returncode']}): "
+                        f"{gate['output'][-1500:]}")
+                else:
+                    gate["failure_cases"] = cases
+                    for case in cases:
+                        detail = case["detail"] or "reported failed"
+                        report["failures"].append(
+                            f"repo_gate:{gate['script']}#{case['case_id']} "
+                            f"failed: {detail}")
 
 
     # Known-red baseline: `new_failures[]` + `passed_relative` on top of the

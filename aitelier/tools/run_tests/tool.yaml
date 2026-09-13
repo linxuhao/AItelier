@@ -15,7 +15,12 @@ description: >
   a failing check also flips `passed`. `repo_gate` is present when the repo
   ships an executable `run_tests.sh` at its root — that script IS the repo's
   own declared gate (a Godot game's engine gate, say) and a failure flips
-  `passed` too. pytest alone cannot see a product it does not build: on
+  `passed` too. A failing repository gate can participate in known-red only by
+  emitting one complete line per failed case as
+  `AITELIER_REPO_GATE_CASE={"case_id":"stable/id","status":"failed","detail":"..."}`.
+  Missing, duplicate, malformed, ambiguous, or truncated case identities make
+  `passed_relative` false and do not seed or change the baseline. pytest alone
+  cannot see a product it does not build: on
   2026-09-10 a branch that regressed a game from 354/354 scripts parsing to 9
   parse errors reported 1788 passed, 0 failed here. A graph whose OWN steps
   already run the engine gate sets `repo_gate: false` in tool_params so the

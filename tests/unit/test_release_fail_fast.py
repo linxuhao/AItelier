@@ -384,6 +384,9 @@ def _bad_graph(mutator):
         transitions=[{"to": "5_review"}]),
     lambda steps, _doc: steps["5_compile"].update(tool_params=None),
     lambda steps, _doc: steps["5_compile"].update(transitions=None),
+    lambda steps, _doc: steps["5_compile"].update(step_type="gate"),
+    lambda steps, _doc: steps["5_design"].update(
+        validation=[{"tool": "run_tests"}]),
     lambda _steps, doc: doc["steps"].append({
         "id": "extra_compile", "step_type": "tool",
         "tool_name": "godot_compile", "transitions": [{"to": "5_review"}]}),
@@ -406,10 +409,25 @@ def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
          if step["id"] == "5_compile")["tool_params"] = None
     null_params.write_text(yaml.safe_dump(null_document, sort_keys=False))
     null_bytes = null_params.read_bytes()
+    wrong_type = config_dir / "gen_c_wrong_type.yaml"
+    wrong_type_document = yaml.safe_load(source.read_text())
+    next(step for step in wrong_type_document["steps"]
+         if step["id"] == "5_compile")["step_type"] = "gate"
+    wrong_type.write_text(yaml.safe_dump(wrong_type_document, sort_keys=False))
+    wrong_type_bytes = wrong_type.read_bytes()
+    duplicate_gate = config_dir / "gen_d_duplicate_gate.yaml"
+    duplicate_gate_document = yaml.safe_load(source.read_text())
+    next(step for step in duplicate_gate_document["steps"]
+         if step["id"] == "5_design")["validation"] = [{"tool": "run_tests"}]
+    duplicate_gate.write_text(
+        yaml.safe_dump(duplicate_gate_document, sort_keys=False))
+    duplicate_gate_bytes = duplicate_gate.read_bytes()
     good = config_dir / "gen_z_good.yaml"
     good.write_bytes(source.read_bytes())
     reports = migrate_generated_release_gates(config_dir)
     assert malformed.read_bytes() == bad_bytes
     assert null_params.read_bytes() == null_bytes
+    assert wrong_type.read_bytes() == wrong_type_bytes
+    assert duplicate_gate.read_bytes() == duplicate_gate_bytes
     assert [Path(report["path"]).name for report in reports] == ["gen_z_good.yaml"]
     _assert_game_release_contract(yaml.safe_load(good.read_text()))

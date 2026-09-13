@@ -72,6 +72,21 @@ _TARGET_FINAL = [
 _TARGET_WAIT = [{"to": "5_test", "match": {
     "from": "checkpoint", "value": "approved"}, "max_loop": 4}]
 
+_REQUIRED_STEPS = {
+    "3": ("agent", None),
+    "5_test": ("tool", "run_tests"),
+    "5_compile": ("tool", "godot_compile"),
+    "5_vision": ("tool", "godot_vision"),
+    "5_vision_human": ("tool", "restage"),
+    "5_vision_judged": ("tool", "vision_human_pass"),
+    "5_knowledge": ("tool", "knowledge_sync"),
+    "5_design": ("agent", None),
+    "5_final_test": ("tool", "run_tests"),
+    "5_final_test_replan": ("gate", None),
+    "5_review": ("agent", None),
+}
+_GATE_TOOLS = {"run_tests", "godot_compile", "godot_playtest", "godot_vision"}
+
 
 def _set(params: dict, key: str, value, changes: list[dict], step: str) -> None:
     if params.get(key) == value:
@@ -82,6 +97,20 @@ def _set(params: dict, key: str, value, changes: list[dict], step: str) -> None:
 
 def _same_edges(actual, expected) -> bool:
     return isinstance(actual, list) and actual == expected
+
+
+def _gate_invocations(value, path=()):
+    """Yield every executable gate reference, including nested hook arrays."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = path + (key,)
+            if (key in {"tool", "tool_name"} and isinstance(child, str)
+                    and child in _GATE_TOOLS):
+                yield child_path, child
+            yield from _gate_invocations(child, child_path)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _gate_invocations(child, path + (index,))
 
 
 def _source_shape(document: dict) -> tuple[dict[str, dict], bool] | None:
@@ -96,31 +125,21 @@ def _source_shape(document: dict) -> tuple[dict[str, dict], bool] | None:
     if len(ids) != len(set(ids)):
         return None
     steps = {step["id"]: step for step in raw_steps}
-    required = {
-        "3": None,
-        "5_test": "run_tests",
-        "5_compile": "godot_compile",
-        "5_vision": "godot_vision",
-        "5_vision_human": "restage",
-        "5_vision_judged": "vision_human_pass",
-        "5_knowledge": "knowledge_sync",
-        "5_design": None,
-        "5_final_test": "run_tests",
-        "5_final_test_replan": None,
-        "5_review": None,
-    }
-    if any(step_id not in steps for step_id in required):
+    if any(step_id not in steps for step_id in _REQUIRED_STEPS):
         return None
-    if any(tool is not None and steps[step_id].get("tool_name") != tool
-           for step_id, tool in required.items()):
+    if any(steps[step_id].get("step_type") != step_type
+           or (tool is not None and steps[step_id].get("tool_name") != tool)
+           for step_id, (step_type, tool) in _REQUIRED_STEPS.items()):
         return None
 
-    if [s["id"] for s in raw_steps if s.get("tool_name") == "godot_compile"] != ["5_compile"]:
-        return None
-    if [s["id"] for s in raw_steps if s.get("tool_name") == "godot_vision"] != ["5_vision"]:
-        return None
-    if {s["id"] for s in raw_steps if s.get("tool_name") == "run_tests"} != {
-            "5_test", "5_final_test"}:
+    indices = {step["id"]: index for index, step in enumerate(raw_steps)}
+    expected_invocations = {
+        (("steps", indices["5_test"], "tool_name"), "run_tests"),
+        (("steps", indices["5_compile"], "tool_name"), "godot_compile"),
+        (("steps", indices["5_vision"], "tool_name"), "godot_vision"),
+        (("steps", indices["5_final_test"], "tool_name"), "run_tests"),
+    }
+    if set(_gate_invocations(document)) != expected_invocations:
         return None
 
     for step_id in ("5_test", "5_compile", "5_vision", "5_final_test"):
@@ -176,6 +195,7 @@ def _source_shape(document: dict) -> tuple[dict[str, dict], bool] | None:
         and _same_edges(steps["5_compile"].get("transitions"), _TARGET_COMPILE)
         and _same_edges(steps["5_vision"].get("transitions"), _TARGET_VISION)
         and _same_edges(steps["5_final_test"].get("transitions"), _TARGET_FINAL)
+        and steps["5_release_wait"].get("step_type") == "tool"
         and steps["5_release_wait"].get("tool_name") == "verify_evidence"
         and steps["5_release_wait"].get("checkpoint") is True
         and steps["5_release_wait"].get("checkpoint_reject_to") == "3"

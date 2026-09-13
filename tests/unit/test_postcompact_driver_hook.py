@@ -211,12 +211,41 @@ def test_bounded_multilingual_context_is_complete_with_spilling_disabled(tmp_pat
 ## Wait instead of repeatedly querying
 保留 cursor WAIT-COMPLETE
 ## Director notebook: context, not a second State database
+Use search_driver_note_history for bounded recovery. Do not load driver_note_history in full.
 项目隔离 GUIDE-END
 """
     context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
     for marker in ("永久导演笔记 START", "结束 END", "临时状态 START", "尾部 END",
                    "GUIDE-START", "RESUME-COMPLETE", "DISPATCH-COMPLETE", "WAIT-COMPLETE", "GUIDE-END"):
         assert marker in context
+    assert "search_driver_note_history for bounded recovery" in context
+    assert "Do not load driver_note_history in full" in context
+    assert len(context) <= 12_000
+
+
+def test_large_live_guide_retains_bounded_history_search_guidance(tmp_path, state_server):
+    StateStub.guide = f"""# State DAG director protocol
+{"P" * 3_000}
+
+## Resume safely
+{"R" * 3_000}
+
+## Dispatch through either executor
+{"D" * 3_000}
+
+## Wait instead of repeatedly querying
+{"W" * 3_000}
+
+## Director notebook: context, not a second State database
+{"N" * 3_000}
+
+Use search_driver_note_history for bounded recovery. Do not load driver_note_history in full.
+
+{"T" * 3_000}
+"""
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    assert "search_driver_note_history for bounded recovery" in context
+    assert "Do not load driver_note_history in full" in context
     assert len(context) <= 12_000
 
 

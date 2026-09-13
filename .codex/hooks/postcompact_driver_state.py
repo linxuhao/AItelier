@@ -85,7 +85,19 @@ def _guide_sections(guide: str, limit: int = 4_000) -> str:
         if current is not None:
             sections[current].append(line)
     chosen = ["\n".join(sections[h]).strip() for h in GUIDE_HEADINGS if h in sections]
-    return _bounded_section("\n\n".join(chosen), limit)
+    selected = "\n\n".join(chosen)
+    history_paragraph = next(
+        (paragraph.strip() for paragraph in guide.split("\n\n")
+         if "search_driver_note_history" in paragraph),
+        "",
+    )
+    if not history_paragraph:
+        return _bounded_section(selected, limit)
+    suffix = (
+        "\n\n## Selected live driver-note history search guidance\n"
+        + _bounded_section(history_paragraph, 900)
+    )
+    return _bounded_section(selected, max(0, limit - len(suffix))) + suffix
 
 
 def _codex_config() -> dict[str, Any]:

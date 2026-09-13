@@ -111,11 +111,13 @@ class StateAttempts:
 
     def reserve(self, project_id: str, node_key: str, expected_revision: int,
                 workflow: str, request_key: str, instruction: str = "",
-                continue_from: str | None = None, relay_digest: str | None = None) -> dict:
+                continue_from: str | None = None, relay_digest: str | None = None,
+                frozen_prerequisites: dict | None = None) -> dict:
         """Idempotent intent, persisted before a workflow can be launched."""
         key(workflow, "workflow")
         return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
-                             continue_from=continue_from, relay_digest=relay_digest)
+                             continue_from=continue_from, relay_digest=relay_digest,
+                             frozen_prerequisites=frozen_prerequisites)
 
     @staticmethod
     def _relay_source(conn, prior_id, project_id, node_key, workflow, node, deps):
@@ -155,13 +157,23 @@ class StateAttempts:
         }
 
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
-                 external=None, continue_from=None, relay_digest=None):
+                 external=None, continue_from=None, relay_digest=None,
+                 frozen_prerequisites=None):
         """Common atomic ownership/pin guard for every execution adapter."""
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
         if not isinstance(instruction, str) or len(instruction) > 20000:
             raise StateGraphError("instruction must be text of at most 20000 characters")
         request = {"revision": expected_revision, "workflow": workflow, "instruction": instruction}
+        if frozen_prerequisites is not None:
+            if external is not None:
+                raise StateGraphError("frozen_prerequisites apply to SkillFlow attempts only")
+            if not isinstance(frozen_prerequisites, dict):
+                raise StateGraphError("frozen_prerequisites must be an object")
+            # SkillFlow performs the strict versioned shape validation before
+            # any host probe. Canonicalization here proves it can be frozen.
+            canonical(frozen_prerequisites)
+            request["frozen_prerequisites"] = frozen_prerequisites
         if external is not None:
             request["external"] = external
         if continue_from is not None:
@@ -191,6 +203,8 @@ class StateAttempts:
             ctx = {"state_project_id": project_id, "node_key": node_key, "revision": expected_revision,
                    "goal": node["goal"], "acceptance": json.loads(node["contract_json"]),
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
+            if frozen_prerequisites is not None:
+                ctx["frozen_prerequisites"] = frozen_prerequisites
             if continue_from is not None:
                 ctx["relay_of"] = self._relay_source(conn, continue_from, project_id, node_key, workflow, node, deps)
                 if relay_digest is not None:
@@ -228,6 +242,30 @@ class StateAttempts:
                                "workflow": workflow, "revision": expected_revision, "external": external,
                                "relay_of": ctx.get("relay_of")})
             return _public(self._attempt(conn, aid))
+
+    def record_preflight(self, attempt_id: str, report: dict, error: str | None = None) -> dict:
+        """Durably trace required/actual identities before launch admission."""
+        if not isinstance(report, dict):
+            raise StateGraphError("preflight report must be an object")
+        canonical(report)
+        with self.store.transaction(write=True) as conn:
+            attempt = self._attempt(conn, attempt_id)
+            if attempt["status"] != "reserved" or attempt["run_id"]:
+                raise StateConflict("preflight belongs to an unlaunched reserved attempt")
+            payload = {"attempt_id": attempt_id, "report": report}
+            if error is not None:
+                error = text(error, "preflight failure", 4000)
+                payload["error"] = error
+                conn.execute(
+                    "UPDATE state_attempts SET status='failed',error=?,updated_at=? WHERE attempt_id=?",
+                    (error, now(), attempt_id),
+                )
+            self.store._event(
+                conn, attempt["project_id"], attempt["node_key"],
+                "attempt_preflight_failed" if error is not None else "attempt_preflight_passed",
+                payload,
+            )
+            return _public(self._attempt(conn, attempt_id))
 
     def pin_relay(self, attempt_id: str, relay: dict) -> dict:
         """Freeze what the relay actually inherited (base, commits, staged
@@ -506,6 +544,13 @@ class StateAttempts:
             self._eligible_candidate(conn, attempt)
             if attempt["artifact_ref"] != artifact:
                 raise StateConflict("evidence describes a different artifact")
+            candidate_report = conn.execute(
+                "SELECT attempt_id,observation_id FROM state_external_observations "
+                "WHERE report_sha256=? LIMIT 1", (report_sha256,)).fetchone()
+            if candidate_report:
+                raise StateConflict(
+                    "verifier evidence must have a report independent of every external "
+                    "candidate observation; produce a fresh review report")
             ctx = json.loads(attempt["context_json"])
             checks = {c["id"]: c for c in ctx["acceptance"]}
             if criterion_id not in checks:

@@ -86,6 +86,14 @@ class ExternalAttempts:
             # a new attempt, not a silently edited completion receipt.
             if a['status'] == 'candidate' and status != 'failed':
                 raise StateConflict('candidate completion is immutable; record evidence or start a new attempt')
+            if status == 'candidate':
+                used = conn.execute(
+                    'SELECT attempt_id,observation_id FROM state_external_observations '
+                    'WHERE report_sha256=? LIMIT 1', (report_sha256,)).fetchone()
+                if used:
+                    raise StateConflict(
+                        'candidate report digest was already bound to an earlier observation; '
+                        'produce a fresh report for this candidate')
             current = self.attempts._pins_current(conn, a)
             result_status = 'superseded' if terminal and not current else status
             version = expected_version + 1

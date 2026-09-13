@@ -82,3 +82,8 @@ def native_context_dir() -> Path:
 
 def orphan_log_path() -> Path:
     return aitelier_home() / "orphan_dbg.log"
+
+
+def semantic_index_control_dir() -> Path:
+    """Small host/sidecar demand ledger, outside all agent worktrees."""
+    return aitelier_home() / "semantic-index-control"

@@ -5,7 +5,7 @@ Extra fields (including status=VERIFIED and spoofed reviewer identity) fail.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -139,6 +139,18 @@ class ListAttempts(Node):
     limit: int = 100
 
 
+class FrozenPrerequisiteCheck(Request):
+    id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    probe: Literal["source_head", "sha256_file", "runtime_capability"]
+    arguments: dict
+    expected: Any
+
+
+class FrozenPrerequisites(Request):
+    version: Literal[1]
+    checks: list[FrozenPrerequisiteCheck] = Field(min_length=1, max_length=64)
+
+
 class StartAttempt(Node):
     expected_revision: int
     workflow: str
@@ -154,6 +166,10 @@ class StartAttempt(Node):
     # file differs from what the director read — the copy is bound to the
     # inspected draft.
     relay_digest: str | None = None
+    # Exact, executor-neutral checks interpreted by SkillFlow before launch.
+    # The descriptor is frozen into the attempt and validated fail-closed by
+    # the framework; AItelier supplies only read-only host probes.
+    frozen_prerequisites: FrozenPrerequisites | None = None
 
 
 class StartExternalAttempt(Node):

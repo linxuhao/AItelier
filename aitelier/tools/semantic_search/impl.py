@@ -107,7 +107,12 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
     if fts:
         args["fts"] = [str(f) for f in fts]
     try:
-        msg = _call(args)
+        # A managed run worktree owns a native index resource.  Hold its read
+        # lease across the whole provider call so terminal cleanup cannot drop
+        # the index or reap the checkout underneath an in-flight search.
+        from core.run_resources import search_lease
+        with search_lease(args["root"]) as degraded:
+            msg = _call(args)
     except Exception as e:                                       # sidecar down, timeout, bad URL
         return {"error": f"semantic_search unavailable: {type(e).__name__}: {e}",
                 "hint": "the zvec-grep sidecar is not answering — use `search` (exact) and `read`"}
@@ -120,6 +125,14 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
     parts = [c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text"]
     text = "\n".join(p for p in parts if p).strip()
     if result.get("isError"):
+        try:
+            from core.run_resources import invalidate
+            invalidate(args["root"])
+        except Exception:
+            pass
         return {"error": f"semantic_search: {text or 'tool error'}", "hint": "use `search`/`read`"}
-    return {"query": q, "root": args["root"], "limit": lim,
-            "content": text or "(no results)"}
+    answer = {"query": q, "root": args["root"], "limit": lim,
+              "content": text or "(no results)"}
+    if degraded:
+        answer["index_status"] = degraded
+    return answer

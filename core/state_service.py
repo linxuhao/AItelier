@@ -102,7 +102,7 @@ class StateService:
         if self.runtime_factory is not None and (self.sf is None or self.registry is None):
             try:
                 self.sf, self.registry = self.runtime_factory()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - all probe failures must refuse launch
                 raise StateConflict(f"workflow runtime is unavailable: {type(exc).__name__}") from exc
         if self.ws is None or self.sf is None or self.registry is None:
             raise StateGraphError("workflow composition is unavailable")
@@ -176,7 +176,7 @@ class StateService:
                                      artifact=artifact, artifact_kind=artifact_kind, detail=detail)
 
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction="",
-                      continue_from=None, relay_digest=None):
+                      continue_from=None, relay_digest=None, frozen_prerequisites=None):
         if relay_digest is not None and continue_from is None:
             raise StateGraphError("relay_digest only accompanies continue_from")
         if continue_from is not None and relay_digest is None:
@@ -200,7 +200,8 @@ class StateService:
         if continue_from is not None and manifest.repo_mode != "code":
             raise StateGraphError("continue_from needs a code-producing workflow; only a worktree can carry a draft forward")
         attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
-                                        continue_from=continue_from, relay_digest=relay_digest)
+                                        continue_from=continue_from, relay_digest=relay_digest,
+                                        frozen_prerequisites=frozen_prerequisites)
         return self._launch_or_recover(attempt, manifest, source)
 
     def _launch_or_recover(self, attempt, manifest, source):
@@ -223,6 +224,35 @@ class StateService:
         attempt = self.attempts.pin_host_contract(aid, {
             "source_repo": source, "seed_file": manifest.seed_file, "output_step": manifest.output_step,
             "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})
+        prerequisites = attempt["context"].get("frozen_prerequisites")
+        if prerequisites is not None:
+            trace = []
+            try:
+                from core.frozen_attempt import materialize
+                report = materialize(prerequisites, source=source, sf=self.sf,
+                                     trace=trace.append)
+                # A successful source identity check must also pin the future
+                # worktree. Comparing HEAD and then launching from a moving HEAD
+                # would leave a time-of-check/time-of-use gap.
+                source_checks = [c for c in report["checks"]
+                                 if c.get("probe") == "source_head"]
+                if source_checks and manifest.repo_mode == "code":
+                    if len(source_checks) != 1:
+                        raise StateConflict("a code attempt may freeze exactly one source_head")
+                    from core import run_isolation
+                    run_isolation.request_base(
+                        self.db, attempt["execution_project_id"],
+                        source_checks[0]["actual"],
+                        note=f"frozen State attempt {aid}",
+                    )
+            except Exception as exc:
+                report = getattr(exc, "report", None) or {
+                    "version": 1, "checks": trace, "passed": False,
+                    "error": f"{type(exc).__name__}: {exc}"[:1000],
+                }
+                return self.attempts.record_preflight(
+                    aid, report, f"frozen prerequisite refusal: {exc}")
+            attempt = self.attempts.record_preflight(aid, report)
         relay = None
         if attempt["context"].get("relay_of"):
             try:

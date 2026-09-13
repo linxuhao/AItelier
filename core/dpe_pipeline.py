@@ -81,12 +81,14 @@ _MAX_TURN_GRANTS = 2
 _GRANT_TURNS_MAX = 8
 _NATIVE_HISTORY_TOOL_CHARS = 16 * 1024
 _NATIVE_REASONING_MARKER_CHARS = 512
-# recall_observation: one call returns at most this many chars of a compacted
-# result (or this many grep matches). A recall that could return the whole
-# result would undo the projection above one call at a time.
+# recall_observation: the complete JSON reply, including metadata, stays below
+# this provider-visible bound. A recall that could return the whole result
+# would undo the projection above one call at a time.
 _RECALL_MAX_CHARS = 16 * 1024
 _RECALL_MAX_MATCHES = 40
 _RECALL_CONTEXT_LINES = 2
+_RECALL_GREP_PATTERN_MAX_CHARS = 1024
+_RECALL_GREP_LINE_MAX_CHARS = 2048
 
 
 def _relay_progress_context(value: Any) -> dict | None:
@@ -403,12 +405,6 @@ def _project_native_messages(messages: list[dict], *,
         if not (isinstance(message, dict) and message.get("role") == "tool"
                 and isinstance(message.get("content"), str)):
             continue
-        # A recall is already a bounded slice. Its envelope includes the
-        # original observation size, so serialising even a small slice can
-        # exceed the projection threshold and immediately hide the bytes the
-        # model just requested. Preserve the bounded reply as-is.
-        if message.get("name") == "recall_observation":
-            continue
         content = message["content"]
         if len(content) > limit:
             projected[i]["content"] = _compact_marker(content, "tool result")
@@ -541,15 +537,15 @@ def _recall_observation(messages: list[dict], sha256: str = "", *,
     dropped and had no way to get it back except re-running the tool —
     which for a search, a playtest or a test run is a different result.
 
-    Deliberately bounded: a `grep` returns numbered matching lines with a
-    little context; a range returns at most _RECALL_MAX_CHARS and says where
-    to continue. Returning the whole result would re-inflate the prompt the
-    projection just bounded.
+    Deliberately bounded: the complete JSON reply stays below
+    _RECALL_MAX_CHARS. A `grep` returns numbered matching lines with a little
+    context; a range says where to continue. Returning the whole result would
+    re-inflate the prompt the projection just bounded.
     """
     key = str(sha256 or "").strip().lower()
-    if len(key) < 8:
+    if len(key) < 8 or len(key) > 64 or any(ch not in "0123456789abcdef" for ch in key):
         return {"error": "sha256 must be the id shown in the compacted marker "
-                         "(at least its first 8 hex chars)"}
+                         "(at least its first 8 and at most 64 hex chars)"}
     hit = None
     for m in messages:
         if not (isinstance(m, dict) and m.get("role") == "tool"
@@ -565,32 +561,73 @@ def _recall_observation(messages: list[dict], sha256: str = "", *,
                          "than the 256K the trace keeps."}
     digest = _observation_digest(hit)
     if grep:
+        if len(grep) > _RECALL_GREP_PATTERN_MAX_CHARS:
+            return {"error": "grep regex exceeds the 1024-character limit"}
         try:
             rx = re.compile(grep)
         except re.error as e:
             return {"error": f"grep is not a valid regex: {e}"}
         lines = hit.splitlines()
-        matched = [i for i, ln in enumerate(lines) if rx.search(ln)]
+        matched = [(i, match) for i, ln in enumerate(lines)
+                   if (match := rx.search(ln))]
         shown = []
-        for i in matched[:_RECALL_MAX_MATCHES]:
-            lo, hi = max(0, i - _RECALL_CONTEXT_LINES), min(len(lines), i + _RECALL_CONTEXT_LINES + 1)
-            shown.append({"line": i + 1,
-                          "text": "\n".join(f"{n + 1}: {lines[n]}" for n in range(lo, hi))})
+        clipped = False
+        for i, match in matched[:_RECALL_MAX_MATCHES]:
+            lo = max(0, i - _RECALL_CONTEXT_LINES)
+            hi = min(len(lines), i + _RECALL_CONTEXT_LINES + 1)
+            context = []
+            for n in range(lo, hi):
+                line = lines[n]
+                if len(line) > _RECALL_GREP_LINE_MAX_CHARS:
+                    if n == i:
+                        centre = (match.start() + match.end()) // 2
+                        start_at = max(0, centre - _RECALL_GREP_LINE_MAX_CHARS // 2)
+                        end_at = min(len(line), start_at + _RECALL_GREP_LINE_MAX_CHARS)
+                        start_at = max(0, end_at - _RECALL_GREP_LINE_MAX_CHARS)
+                        line = (("…" if start_at else "") + line[start_at:end_at]
+                                + ("…" if end_at < len(lines[n]) else ""))
+                    else:
+                        line = line[:_RECALL_GREP_LINE_MAX_CHARS] + "…"
+                    clipped = True
+                context.append(f"{n + 1}: {line}")
+            entry = {"line": i + 1, "text": "\n".join(context)}
+            candidate = {
+                "sha256": digest, "original_chars": len(hit), "grep": grep,
+                "matches": len(matched), "shown": len(shown) + 1,
+                "lines": [*shown, entry],
+                "truncated": clipped or len(matched) > len(shown) + 1,
+            }
+            if len(json.dumps(candidate, ensure_ascii=False)) >= _RECALL_MAX_CHARS:
+                clipped = True
+                break
+            shown.append(entry)
         return {"sha256": digest, "original_chars": len(hit), "grep": grep,
                 "matches": len(matched), "shown": len(shown), "lines": shown,
-                "truncated": len(matched) > len(shown)}
+                "truncated": clipped or len(matched) > len(shown)}
     try:
         lo = max(0, int(start or 0))
         hi = len(hit) if end is None else max(lo, int(end))
     except (TypeError, ValueError):
         return {"error": "start/end must be integers (character offsets)"}
-    hi = min(hi, lo + _RECALL_MAX_CHARS, len(hit))
-    out = {"sha256": digest, "original_chars": len(hit),
-           "start": lo, "end": hi, "content": hit[lo:hi],
-           "truncated": hi < len(hit)}
-    if hi < len(hit):
-        out["next_start"] = hi
-    return out
+    requested_hi = min(hi, lo + _RECALL_MAX_CHARS, len(hit))
+
+    def _range_result(actual_hi: int) -> dict:
+        out = {"sha256": digest, "original_chars": len(hit),
+               "start": lo, "end": actual_hi, "content": hit[lo:actual_hi],
+               "truncated": actual_hi < len(hit)}
+        if actual_hi < len(hit):
+            out["next_start"] = actual_hi
+        return out
+
+    low, high = 0, max(0, requested_hi - lo)
+    while low < high:
+        size = (low + high + 1) // 2
+        candidate = _range_result(lo + size)
+        if len(json.dumps(candidate, ensure_ascii=False)) < _RECALL_MAX_CHARS:
+            low = size
+        else:
+            high = size - 1
+    return _range_result(lo + low)
 
 
 # A step that re-reads the same file spends its budget on text it already has.

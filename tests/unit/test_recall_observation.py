@@ -62,11 +62,13 @@ def test_a_slice_is_bounded_and_says_where_to_continue():
     msgs, old = _history()
     sha = _compacted_marker(msgs)["sha256"]
     res = _recall_observation(msgs, sha)                 # no range: from 0
-    assert len(res["content"]) == _RECALL_MAX_CHARS < len(old)
-    assert res["truncated"] is True and res["next_start"] == _RECALL_MAX_CHARS
+    assert len(json.dumps(res, ensure_ascii=False)) < _RECALL_MAX_CHARS
+    assert 0 < len(res["content"]) < _RECALL_MAX_CHARS < len(old)
+    assert res["truncated"] is True and res["next_start"] == res["end"]
     nxt = _recall_observation(msgs, sha, start=res["next_start"])
-    assert nxt["content"] == old[_RECALL_MAX_CHARS:2 * _RECALL_MAX_CHARS]
-    assert res["content"] + nxt["content"] == old[:2 * _RECALL_MAX_CHARS]
+    assert len(json.dumps(nxt, ensure_ascii=False)) < _RECALL_MAX_CHARS
+    assert nxt["content"] == old[res["end"]:nxt["end"]]
+    assert res["content"] + nxt["content"] == old[:nxt["end"]]
 
 
 def test_grep_returns_numbered_lines_with_context_and_is_capped():
@@ -82,6 +84,35 @@ def test_grep_returns_numbered_lines_with_context_and_is_capped():
     many = _recall_observation(msgs, sha, grep=r"^line 1\d\d\d:")
     assert many["matches"] == 1000
     assert many["shown"] == _RECALL_MAX_MATCHES and many["truncated"] is True
+
+
+def test_grep_of_a_50205_char_observation_bounds_long_and_multiple_matches():
+    needle = "MIDDLE-UNIQUE"
+    second = "\nsecond MIDDLE-UNIQUE"
+    old = ("x" * 25_000 + needle
+           + "y" * (50_205 - 25_000 - len(needle) - len(second))
+           + second)
+    assert len(old) == 50_205
+    sha = _observation_digest(old)
+    res = _recall_observation([_tool(old, "c1")], sha, grep=needle)
+    wire = json.dumps(res, ensure_ascii=False)
+
+    assert len(wire) < _RECALL_MAX_CHARS
+    assert res["matches"] == res["shown"] == 2
+    assert needle in res["lines"][0]["text"]
+    projected, report = _project_native_messages(
+        [{"role": "tool", "name": "recall_observation",
+          "tool_call_id": "recall", "content": wire}]
+    )
+    assert projected[0]["content"] == wire
+    assert report["compacted_tool_results"] == 0
+
+    oversized, report = _project_native_messages(
+        [{"role": "tool", "name": "recall_observation",
+          "tool_call_id": "recall", "content": "z" * (_RECALL_MAX_CHARS + 1)}]
+    )
+    assert json.loads(oversized[0]["content"])["_aitelier_compacted"] is True
+    assert report["compacted_tool_results"] == 1
 
 
 def test_a_prefix_of_the_id_is_enough_and_the_full_result_still_wins():

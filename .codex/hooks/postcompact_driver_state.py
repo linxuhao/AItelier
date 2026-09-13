@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -48,43 +49,90 @@ def _pending_path(hook_input: dict[str, Any]) -> Path | None:
     return codex_home / PENDING_DIR_NAME / f"{key}.json"
 
 
-def _mark_pending(hook_input: dict[str, Any]) -> bool:
+def _acquire_marker(hook_input: dict[str, Any]) -> tuple[Path | None, int | None]:
     path = _pending_path(hook_input)
     if path is None:
-        return False
+        return None, None
+    lock_fd: int | None = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         parent_stat = path.parent.lstat()
         if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid():
-            return False
+            return None, None
         os.chmod(path.parent, 0o700)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags, 0o600)
-        os.close(fd)
-        return True
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(path.with_suffix(".lock"), flags, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return path, lock_fd
     except OSError:
-        return False
+        if lock_fd is not None:
+            os.close(lock_fd)
+        return None, None
 
 
-def _pending(hook_input: dict[str, Any]) -> bool:
-    path = _pending_path(hook_input)
-    if path is None:
-        return False
-    try:
-        marker_stat = path.lstat()
-    except OSError:
-        return False
-    return stat.S_ISREG(marker_stat.st_mode) and marker_stat.st_uid == os.getuid()
-
-
-def _clear_pending(hook_input: dict[str, Any]) -> None:
-    path = _pending_path(hook_input)
-    if path is None:
+def _release_marker(lock_fd: int | None) -> None:
+    if lock_fd is None:
         return
     try:
-        path.unlink(missing_ok=True)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+def _read_marker(path: Path) -> dict[str, str] | None:
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            marker = json.loads(handle.read(4_097))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(marker, dict) or marker.get("version") != 2:
+        return None
+    if marker.get("status") not in {"pending", "delivered"}:
+        return None
+    if not isinstance(marker.get("generation"), str):
+        return None
+    return marker
+
+
+def _write_marker(path: Path, marker: dict[str, Any]) -> bool:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(marker, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        return True
     except OSError:
-        pass
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
+def _mark_pending(hook_input: dict[str, Any]) -> bool:
+    path, lock_fd = _acquire_marker(hook_input)
+    if path is None:
+        return False
+    try:
+        generation = str(hook_input.get("turn_id", ""))
+        if not generation:
+            return False
+        current = _read_marker(path)
+        if current == {"version": 2, "generation": generation, "status": "delivered"}:
+            return True
+        return _write_marker(path, {
+            "version": 2,
+            "generation": generation,
+            "status": "pending",
+        })
+    finally:
+        _release_marker(lock_fd)
 
 
 def _redact(text: str) -> str:
@@ -361,6 +409,44 @@ This is a bounded resume aid, not the full DAG, note history, trace, or evidence
     return _bounded_section(context, MAX_CONTEXT_CHARS)
 
 
+def _write_output(output: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -> bool:
+    """Atomically emit one model-context delivery for the current generation."""
+    path, lock_fd = _acquire_marker(hook_input)
+    if path is None:
+        if not standalone:
+            return False
+        _write_output({
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": build_context(),
+            }
+        })
+        return True
+    try:
+        marker = _read_marker(path)
+        if marker is None:
+            if not standalone:
+                return False
+            marker = {"version": 2, "generation": "session-start", "status": "pending"}
+        if marker["status"] != "pending":
+            return False
+        _write_output({
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": build_context(),
+            }
+        })
+        _write_marker(path, {**marker, "status": "delivered"})
+        return True
+    finally:
+        _release_marker(lock_fd)
+
+
 def main() -> int:
     raw_input = sys.stdin.read(MAX_INPUT_CHARS)
     try:
@@ -368,7 +454,6 @@ def main() -> int:
     except json.JSONDecodeError:
         hook_input = {}
     event = hook_input.get("hook_event_name")
-    clear_after_output = False
     # Codex 0.153/0.154 exposes only the universal PostCompact output. Its
     # systemMessage is an attributable warning, while model context is supported
     # by SessionStart and UserPromptSubmit. Queue the latter as the guaranteed
@@ -385,27 +470,16 @@ def main() -> int:
             )
         output = {"continue": True, "systemMessage": context}
     elif event == "SessionStart" and hook_input.get("source") == "compact":
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": build_context(),
-            }
-        }
-        clear_after_output = True
-    elif event == "UserPromptSubmit" and _pending(hook_input):
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": build_context(),
-            }
-        }
-        clear_after_output = True
+        if _deliver_once(hook_input, "SessionStart", standalone=True):
+            return 0
+        output = {"continue": True}
+    elif event == "UserPromptSubmit":
+        if _deliver_once(hook_input, "UserPromptSubmit", standalone=False):
+            return 0
+        output = {"continue": True}
     else:
         output = {"continue": True}
-    sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-    if clear_after_output:
-        _clear_pending(hook_input)
+    _write_output(output)
     return 0
 
 

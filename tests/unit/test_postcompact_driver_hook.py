@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -97,11 +98,14 @@ def invoke(tmp_path, url, cwd=None, event="SessionStart", session_id="session-a"
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(exist_ok=True)
     helper = tmp_path / "headers"
-    helper.write_text("#!/bin/sh\nprintf '%s' '{\"X-AItelier-Admin-Token\":\"helper-secret\"}'\n")
-    helper.chmod(0o700)
-    (codex_home / "config.toml").write_text(
-        f'[mcp_servers.aitelier]\nurl = "{url}"\nhttp_headers_helper = "{helper}"\n'
-    )
+    if not helper.exists():
+        helper.write_text("#!/bin/sh\nprintf '%s' '{\"X-AItelier-Admin-Token\":\"helper-secret\"}'\n")
+        helper.chmod(0o700)
+    config = codex_home / "config.toml"
+    if not config.exists():
+        config.write_text(
+            f'[mcp_servers.aitelier]\nurl = "{url}"\nhttp_headers_helper = "{helper}"\n'
+        )
     hook_input = {
         "session_id": session_id,
         "transcript_path": str(tmp_path / "rollout.jsonl"),
@@ -146,9 +150,9 @@ def test_hook_emits_legal_bounded_fresh_project_context_from_any_cwd(tmp_path, s
 
 
 def test_next_hook_invocation_reads_new_note_revision_without_cache(tmp_path, state_server):
-    first = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    first = invoke(tmp_path, state_server, session_id="session-a")["hookSpecificOutput"]["additionalContext"]
     StateStub.revision = 2
-    second = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    second = invoke(tmp_path, state_server, session_id="session-b")["hookSpecificOutput"]["additionalContext"]
     assert "driver_note_revision=1" in first
     assert "driver_note_revision=2" in second
     assert "permanent revision 2" in second
@@ -223,6 +227,35 @@ def test_recorded_postcompact_then_user_prompt_order_injects_fresh_context(tmp_p
 
     # The marker is consumed after the supported model-context event.
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
+    assert len(StateStub.requests) == 6
+
+
+def test_concurrent_user_prompt_fallbacks_atomically_inject_once(tmp_path, state_server):
+    invoke(tmp_path, state_server, event="PostCompact")
+    barrier = threading.Barrier(2)
+
+    def submit():
+        barrier.wait(timeout=5)
+        return invoke(tmp_path, state_server, event="UserPromptSubmit")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outputs = list(executor.map(lambda _index: submit(), range(2)))
+
+    injected = [output for output in outputs if "hookSpecificOutput" in output]
+    noops = [output for output in outputs if output == {"continue": True}]
+    assert len(injected) == len(noops) == 1
+    assert injected[0]["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert len(StateStub.requests) == 6
+
+
+def test_user_prompt_then_late_compact_session_start_does_not_inject_twice(tmp_path, state_server):
+    postcompact = invoke(tmp_path, state_server, event="PostCompact")
+    prompt = invoke(tmp_path, state_server, event="UserPromptSubmit")
+    late_start = invoke(tmp_path, state_server, event="SessionStart")
+
+    assert "systemMessage" in postcompact
+    assert prompt["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert late_start == {"continue": True}
     assert len(StateStub.requests) == 6
 
 

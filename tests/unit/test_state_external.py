@@ -1,4 +1,5 @@
 """Custom-harness lifecycle and schema upgrade on actual isolated SQLite."""
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,10 @@ from core.state_external import ExternalAttempts
 
 ARTIFACT='a'*64
 REPORT='b'*64
+EVIDENCE_REPORT='c'*64
+
+def candidate_report(attempt, observation_id='completion-1'):
+    return hashlib.sha256((attempt['attempt_id'] + ':' + observation_id).encode()).hexdigest()
 
 
 def spec(k,deps=None):
@@ -33,7 +38,7 @@ def register(system,node='a',rid='job-1',request='req-1',revision=1):
 
 def report(system,a,status='candidate',oid='completion-1',version=None,**kwargs):
     body=dict(attempt_id=a['attempt_id'],observation_id=oid,expected_version=a['observation_version'] if version is None else version,
-        context_hash=a['context_hash'],status=status,report_ref='reports/'+oid+'.json',report_sha256=REPORT,
+        context_hash=a['context_hash'],status=status,report_ref='reports/'+oid+'.json',report_sha256=candidate_report(a, oid) if status=='candidate' else REPORT,
         quiescent=status in {'candidate','failed'},artifact=ARTIFACT if status=='candidate' else None,
         artifact_kind='sha256' if status=='candidate' else None,detail='Real fixture harness declaration')
     body.update(kwargs)
@@ -43,7 +48,7 @@ def report(system,a,status='candidate',oid='completion-1',version=None,**kwargs)
 def accept(system,a):
     for check in ['behaviour','review']:
         system[1].record_evidence(a['attempt_id'],a['attempt_id']+'-'+check,check,'pass',ARTIFACT,
-            'reports/'+check,REPORT,'verifier-subagent')
+            'reports/'+check,EVIDENCE_REPORT,'verifier-subagent')
     return system[1].verify('game',a['node_key'],a['node_revision'],a['attempt_id'],'director-acceptance')
 
 
@@ -65,15 +70,15 @@ def test_external_completion_shares_candidate_evidence_and_acceptance_semantics(
     assert s.get_node('game','b')['readiness']=='ready'
     provenance=json.loads(rec['provenance_json'])
     assert provenance['execution_kind']=='external' and provenance['external_id']=='job-1'
-    assert provenance['report_sha256']==REPORT and provenance['quiescent'] is True
+    assert provenance['report_sha256']==candidate_report(r) and provenance['quiescent'] is True
     assert provenance['observation_id']=='completion-1'
     assert a.verify('game','a',1,r['attempt_id'],'director')==rec
 
 
 def test_failing_or_missing_criterion_never_verifies(system):
     s,a,_=system;r=report(system,register(system))
-    a.record_evidence(r['attempt_id'],'bad-test','behaviour','fail',ARTIFACT,'reports/failed',REPORT,'test-agent')
-    a.record_evidence(r['attempt_id'],'good-review','review','pass',ARTIFACT,'reports/review',REPORT,'review-agent')
+    a.record_evidence(r['attempt_id'],'bad-test','behaviour','fail',ARTIFACT,'reports/failed',EVIDENCE_REPORT,'test-agent')
+    a.record_evidence(r['attempt_id'],'good-review','review','pass',ARTIFACT,'reports/review',EVIDENCE_REPORT,'review-agent')
     with pytest.raises(StateConflict,match='behaviour'):a.verify('game','a',1,r['attempt_id'],'director')
     assert s.get_node('game','b')['readiness']=='blocked'
 
@@ -261,3 +266,52 @@ def test_workflow_and_external_reservations_compete_for_same_goal(system):
     a.reserve('game','a',1,'workflow','first-workflow')
     with pytest.raises(StateConflict):register(system)
     assert len(a.list('game','a'))==1
+
+
+def test_candidate_report_digest_cannot_be_reused_by_a_later_attempt(system):
+    first = report(system, register(system))
+    second = register(system, rid="job-2", request="req-2")
+    with pytest.raises(StateConflict, match="fresh report"):
+        report(
+            system,
+            second,
+            oid="completion-2",
+            report_sha256=candidate_report(first),
+        )
+    assert system[1].get(second["attempt_id"])["status"] == "running"
+    assert system[1].get(second["attempt_id"])["observation_version"] == 0
+
+
+def test_candidate_or_old_observation_report_is_not_independent_evidence(system):
+    first = report(system, register(system))
+    with pytest.raises(StateConflict, match="independent"):
+        system[1].record_evidence(
+            first["attempt_id"], "self-review", "review", "pass", ARTIFACT,
+            "reports/self-review.json", candidate_report(first), "verifier-subagent",
+        )
+
+    second = report(
+        system,
+        register(system, rid="job-2", request="req-2"),
+        oid="completion-2",
+    )
+    with pytest.raises(StateConflict, match="independent"):
+        system[1].record_evidence(
+            second["attempt_id"], "stale-review", "review", "pass", ARTIFACT,
+            "reports/copied-old-review.json", candidate_report(first),
+            "verifier-subagent",
+        )
+
+
+def test_fresh_independent_report_can_cover_all_current_criteria(system):
+    candidate = report(system, register(system))
+    for criterion in ("behaviour", "review"):
+        system[1].record_evidence(
+            candidate["attempt_id"], f"fresh-{criterion}", criterion, "pass",
+            ARTIFACT, "reports/current-independent.json", EVIDENCE_REPORT,
+            "verifier-subagent",
+        )
+    receipt = system[1].verify(
+        "game", "a", 1, candidate["attempt_id"], "director-acceptance"
+    )
+    assert receipt["artifact_ref"] == ARTIFACT

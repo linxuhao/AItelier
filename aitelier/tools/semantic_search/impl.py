@@ -86,7 +86,7 @@ def _call(arguments: dict) -> dict:
     return {}
 
 
-def semantic_search(query: str, limit: int = 8, globs: list | None = None,
+def _semantic_search(query: str, limit: int = 8, globs: list | None = None,
                     fts: list | None = None, *, project_root: str = "",
                     **kwargs) -> dict:
     if not project_root or not Path(project_root).is_absolute():
@@ -116,10 +116,76 @@ def semantic_search(query: str, limit: int = 8, globs: list | None = None,
         text = err.get("message", str(err)) if isinstance(err, dict) else str(err)
         return {"error": f"semantic_search: {text}",
                 "hint": "index missing or query rejected — use `search`/`read`"}
-    result = msg.get("result") or {}
+    result = msg.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("content"), list):
+        return {"error": "semantic_search: malformed MCP result"}
     parts = [c.get("text", "") for c in (result.get("content") or []) if c.get("type") == "text"]
     text = "\n".join(p for p in parts if p).strip()
     if result.get("isError"):
         return {"error": f"semantic_search: {text or 'tool error'}", "hint": "use `search`/`read`"}
     return {"query": q, "root": args["root"], "limit": lim,
             "content": text or "(no results)"}
+
+
+def _lexical_fallback(query, limit, globs, fts, root, reason):
+    """Reuse the engine's source search; report literal, not semantic results."""
+    import fnmatch
+    import re
+    from skillflow.read_tools import unified_search
+    terms = [str(t)[:128] for t in fts[:16]] if fts else re.findall(r"[\w-]+", query)[:16]
+    pattern = "|".join(re.escape(t) for t in terms if t) or re.escape(query)
+    result = unified_search({"working_tree": [("code", root)], "named": {}, "allowed": []},
+                            pattern, max_results=min(200, limit * 4))
+    positive = [str(g) for g in (globs or []) if not str(g).startswith("!")]
+    negative = [str(g)[1:] for g in (globs or []) if str(g).startswith("!")]
+    kept = []
+    base = Path(root).resolve()
+    for hit in result.get("matches", []):
+        name = hit.get("path") or hit.get("file") or ""
+        target = base / name
+        if not name or target.is_symlink() or not target.resolve().is_relative_to(base):
+            continue
+        def matches(glob):
+            return fnmatch.fnmatchcase(name, glob) or (
+                glob.startswith("**/") and fnmatch.fnmatchcase(name, glob[3:]))
+        if (positive and not any(matches(g) for g in positive)) or any(matches(g) for g in negative):
+            continue
+        kept.append(hit)
+        if len(kept) >= limit:
+            break
+    text = "\n".join(str(hit) for hit in kept)
+    return {"query": query, "root": root, "limit": limit,
+            "mode": "literal_fallback", "degraded": True, "reason": reason[:600],
+            "matching": "literal tokens, not semantic ranking or FTS-expression equivalence",
+            "content": text[:8000] or "(no literal matches)",
+            "truncated": bool(result.get("truncated") or len(text) > 8000),
+            "fallback_error": result.get("error")}
+
+
+def semantic_search(query: str, limit: int = 8, globs: list | None = None,
+                    fts: list | None = None, *, project_root: str = "", **kwargs) -> dict:
+    if not project_root or not Path(project_root).is_absolute() or not (query or "").strip():
+        return _semantic_search(query, limit, globs, fts, project_root=project_root)
+    from core.run_resources import invalidate, search_lease
+    root = str(Path(project_root).resolve())
+    try:
+        lim = max(1, min(int(limit), _MAX_LIMIT))
+    except (TypeError, ValueError):
+        lim = 8
+    try:
+        with search_lease(project_root) as preparation_error:
+            if preparation_error:
+                return _lexical_fallback(query, lim, globs, fts, root, preparation_error)
+            result = _semantic_search(query, lim, globs, fts, project_root=root)
+            if "error" not in result:
+                return {**result, "mode": "semantic", "degraded": False}
+            reason = result["error"]
+            if "INDEX_MISSING" in reason or "index missing" in reason.lower():
+                invalidate(root)
+            return _lexical_fallback(query, lim, globs, fts, root, reason)
+    except Exception as exc:
+        # Without a resource lease, reading source as a fallback could race
+        # terminal checkout removal. Return a visible degradation, not a retry.
+        return {"query": query, "root": root, "limit": lim, "degraded": True,
+                "mode": "unavailable", "reason": f"{type(exc).__name__}: {exc}"[:600],
+                "content": "(search unavailable; no unleased source read performed)"}

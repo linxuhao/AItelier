@@ -84,8 +84,9 @@ def test_missing_root_is_an_error_not_cwd(monkeypatch, tmp_path):
     assert "error" in semantic_search("x", project_root="rel/path")
 
 
-def test_sidecar_down_is_an_honest_error(monkeypatch, tmp_path):
+def test_sidecar_down_is_visible_same_call_degradation(monkeypatch, tmp_path):
     monkeypatch.setenv("ZVEC_GREP_SERVER_URL", "http://127.0.0.1:1/mcp")
     monkeypatch.setattr(impl, "_session_id", None)
     r = semantic_search("x", project_root=str(tmp_path))
-    assert "unavailable" in r["error"] and "search" in r["hint"]
+    assert r["degraded"] and r["mode"] == "literal_fallback"
+    assert "unavailable" in r["reason"] and "error" not in r

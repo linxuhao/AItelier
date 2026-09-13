@@ -13,10 +13,13 @@ description: >
   spelling.
   `search` is the right tool for an exact identifier, a quotation, a regex, or
   when you need EVERY occurrence: it is exhaustive where this is ranked.
-  Errors (index missing, sidecar down) come back as {error, hint}; fall back
-  to `search`/`read` — never treat an error as "nothing exists". A new
-  project's index, including an isolated run worktree, is built automatically
-  within about a minute of creation.
+  The host prepares the exact run worktree and bounds the readiness wait.
+  When preparation or semantic search is unavailable, the same call returns
+  labelled literal-source results (`mode: literal_fallback`, `degraded: true`).
+  These are not semantic rankings or an exhaustive occurrence list. If the
+  root cannot be safely read while a lifecycle operation owns it, the call
+  reports `mode: unavailable` without reading another checkout. Never interpret
+  degradation or an empty bounded fallback as proof that something does not exist.
 parameters:
   query:
     type: string

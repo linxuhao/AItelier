@@ -645,6 +645,8 @@ def recover_leases_on_startup():
         logging.getLogger("aitelier.scheduler").warning(
             "startup lease reconciliation failed", exc_info=True)
         return
+    _log_resource_retention("semantic_index_retained",
+                            report.get("index_resources", {}).get("retained", []))
     for rid in report.get("released", []):
         tick_log("", "lease_released", run=rid[:8], reason="startup")
     for r in report.get("retained", []):
@@ -2250,6 +2252,24 @@ MAX_CONCURRENT_PROJECTS = int(_os.getenv("AITELIER_MAX_CONCURRENT_PROJECTS", "4"
 _LEASE_SWEEP_INTERVAL_S = float(_os.getenv("AITELIER_LEASE_SWEEP_SECONDS", "60"))
 _last_lease_sweep = 0.0
 _lease_sweep_reported: dict = {}
+_resource_sweep_reported: dict = {}
+
+
+def _log_resource_retention(kind: str, items: list[dict]) -> None:
+    """Log changed refusal reasons; retain no entries for resolved resources."""
+    observed = set()
+    for item in items:
+        rid, reason = item["run_id"], str(item.get("reason") or "")[:200]
+        key = (kind, rid)
+        observed.add(key)
+        # A ticking idle countdown is one unchanged decision, not a new event.
+        decision = "idle threshold pending" if reason.startswith("idle ") else reason
+        if _resource_sweep_reported.get(key) != decision:
+            tick_log("", kind, run=rid[:8], reason=reason)
+            _resource_sweep_reported[key] = decision
+    for key in list(_resource_sweep_reported):
+        if key[0] == kind and key not in observed:
+            _resource_sweep_reported.pop(key, None)
 
 
 def _sweep_ended_leases() -> None:
@@ -2275,6 +2295,8 @@ def _sweep_ended_leases() -> None:
         logging.getLogger("aitelier.scheduler").warning(
             "lease sweep failed", exc_info=True)
         return
+    _log_resource_retention("semantic_index_retained",
+                            report.get("index_resources", {}).get("retained", []))
     for rid in report.get("released", []):
         _lease_sweep_reported.pop(rid, None)
         tick_log("", "lease_released", run=rid[:8], reason="sweep")
@@ -2296,6 +2318,7 @@ def _sweep_ended_leases() -> None:
         logging.getLogger("aitelier.scheduler").warning(
             "worktree reap sweep failed", exc_info=True)
         return
+    _log_resource_retention("worktree_retained", reap.get("retained", []))
     for item in reap.get("removed", []):
         tick_log("", "worktree_reaped", run=item["run_id"][:8],
                  reason=(item.get("reason") or "")[:200])

@@ -83,17 +83,27 @@ def _bible_patch() -> str:
 
 def _prose(chapter: int, *, polished: bool) -> str:
     verb = "压在" if polished else "按在"
-    opening = (
-        f"# 第{chapter}章：茶盏下的掌门令\n\n"
-        f"迟舟看见青禾接过掌门令，以为她终于服从。青禾没有解释，只把令牌{verb}茶盏下。"
+    if chapter == 1:
+        extra = "她本想再解释一句，话到唇边又停住。" if not polished else ""
+        return (
+            "# 第1章：茶盏下的掌门令\n\n"
+            "山门的雨敲着窗纸。迟舟看见青禾接过掌门令，肩头一松，以为她终于服从。"
+            f"青禾没有解释，只把令牌{verb}茶盏下。{extra}"
+            "腕间铜铃隔着袖口发烫，她想起姐姐离山前也曾握过它，却没有说出这件事。"
+            "门外脚步逼近，迟舟伸手去取令牌，她先一步推开茶盏。\n\n"
+            "“掌门的路，不是我的路。”青禾把令牌退回桌沿，“我要下山找她。”"
+            "迟舟望着她发红的手腕，这才明白自己误会了她。"
+        )
+    extra = "桥下的水声一遍遍撞回崖壁，像有人在黑暗里答她。" if not polished else ""
+    return (
+        "# 第2章：风里的回声\n\n"
+        "夜风沿山道倒卷，青禾在断桥前蹲下。泥里的半枚鞋印和姐姐旧靴缺口相同，"
+        "却在断裂的石栏边戛然而止。她想起昨夜压在茶盏下的掌门令，也想起迟舟误把沉默当成服从。"
+        "迟舟提灯赶到，没有再替她作决定，只把一截绳索放在她手边。\n\n"
+        "铜铃忽然烫过腕骨。青禾摩挲铃背的旧痕；关于它的来历，姐姐从未留下只字片语。"
+        "她循着热意望向对岸，看见湿岩上还有一道新鲜擦痕。"
+        f"{extra}青禾把绳索系紧：“天亮前渡河。”"
     )
-    body = "铜铃贴着她腕骨发热，她仍把来历咽回去。门外风声一阵紧过一阵。" * 10
-    ending = "\n\n她推开茶盏，明确拒绝掌门令：‘这条路我自己选。’迟舟这才明白自己误会了她。"
-    if chapter == 2:
-        opening = "# 第2章：风里的回声\n\n青禾记得茶盏下那枚掌门令，也记得迟舟的误会。"
-        body = "铜铃仍在发热，却没有交代来历。青禾沿着山道追查姐姐留下的脚印。" * 10
-        ending = "\n\n脚印在断桥边消失，她决定天亮前渡河。"
-    return opening + body + ending
 
 
 def _events(chapter: int) -> dict:
@@ -368,12 +378,14 @@ async def test_two_chapter_delivery_cycle_in_real_linked_worktrees(tmp_path, mon
         summary = (chapter_dir / "summary.md").read_text(encoding="utf-8")
         assert events["chapter"] == chapter
         assert "青禾" in summary
-        assert "铜铃" in prose and "来历" in prose
+        assert "铜铃" in prose
         assert "编辑" not in prose and "修改意见" not in prose
         if chapter == 1:
-            assert "茶盏下" in prose and "误会" in prose and "拒" in prose
+            assert "茶盏下" in prose and "误会" in prose and "姐姐" in prose
+            assert "掌门的路，不是我的路" in prose and "退回桌沿" in prose
         else:
-            assert "茶盏" in prose and "误会" in prose and "断桥" in prose
+            assert "茶盏" in prose and "误把沉默当成服从" in prose
+            assert "断桥" in prose and "来历" in prose
             outline_context = next(
                 o["context"] for o in observations if o["step"] == "outline"
             )

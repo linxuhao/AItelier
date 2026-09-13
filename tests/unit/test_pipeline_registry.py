@@ -374,9 +374,14 @@ def _forge_run_for_release_graph(tmp_path):
     return sf, sf.create_run("pipeline_forge", {"project_id": "p"})
 
 
-@pytest.mark.parametrize("surface", ["extra_tools", "role_tools"])
+@pytest.mark.parametrize(("surface", "grants"), [
+    ("extra_tools", ["run_tests"]),
+    ("extra_tools", {"run_tests": {"nested": True}}),
+    ("role_tools", ["run_tests"]),
+    ("role_tools", {"run_tests": {"nested": True}}),
+])
 def test_forge_rejects_alternate_release_gate_before_live_or_file_mutation(
-        tmp_path, registry, gdir, surface):
+        tmp_path, registry, gdir, surface, grants):
     sf, run_id = _forge_run_for_release_graph(tmp_path)
     config_name = pr.config_name_for("dpe state game")
     emit = sf._workspace.get_step_dir("p", "pipeline_forge", "emit_graph")
@@ -388,11 +393,11 @@ def test_forge_rejects_alternate_release_gate_before_live_or_file_mutation(
     if surface == "extra_tools":
         next(step for step in document["steps"]
              if step["id"] == "5_design").setdefault("config", {})[
-                 "extra_tools"] = ["run_tests"]
+                 "extra_tools"] = grants
     (emit / "pipeline.yaml").write_text(
         yaml.safe_dump(document, sort_keys=False))
     (emit / "role_table.yaml").write_text(yaml.safe_dump({
-        "architect": {"tools": ["run_tests"] if surface == "role_tools" else [],
+        "architect": {"tools": grants if surface == "role_tools" else [],
                       "template": "templates/architect.md"},
     }))
     (emit / "templates").mkdir()
@@ -400,15 +405,20 @@ def test_forge_rejects_alternate_release_gate_before_live_or_file_mutation(
 
     result = pr.register_forge_pipeline(sf, registry, run_id, "dpe state game")
 
-    assert "release gate ownership mismatch" in result["error"]
+    assert "release gate" in result["error"]
     assert not any(row["name"] == config_name for row in sf.list_graphs())
     assert f"{config_name}__architect" not in sf.agent_registry
     assert registry.get(config_name) is None
     assert not gdir.exists()
 
 
+@pytest.mark.parametrize("grants", [
+    ["run_tests"],
+    {"run_tests": {"nested": True}},
+    "run_tests",
+])
 def test_boot_rejects_paired_release_gate_role_before_migration_or_registration(
-        sf, registry, gdir):
+        sf, registry, gdir, grants):
     gdir.mkdir(parents=True)
     source = (Path(__file__).resolve().parents[2]
               / "evidence/output-target-migration-20260911/generated-configs"
@@ -420,7 +430,7 @@ def test_boot_rejects_paired_release_gate_role_before_migration_or_registration(
     role = next(step["agent_config"] for step in document["steps"]
                 if step["id"] == "5_design")
     role_file = target.with_suffix(".roles.json")
-    role_file.write_text(json.dumps({role: {"tools": ["run_tests"]}}))
+    role_file.write_text(json.dumps({role: {"tools": grants}}))
     original_role = role_file.read_bytes()
     valid = gdir / "gen_valid_sibling.yaml"
     valid_document = yaml.safe_load(source.read_text())
@@ -438,6 +448,38 @@ def test_boot_rejects_paired_release_gate_role_before_migration_or_registration(
     assert registry.get("gen_dpe_state_game") is None
     assert valid.read_bytes() != valid_original
     assert registry.get("gen_valid_sibling") is not None
+
+
+@pytest.mark.parametrize(("surface", "grants"), [
+    ("extra_tools", {"run_tests": {"nested": True}}),
+    ("role_tools", {"run_tests": {"nested": True}}),
+    ("extra_tools", "run_tests"),
+    ("role_tools", [{"run_tests": {}}]),
+])
+def test_register_text_rejects_malformed_release_grants_before_live_mutation(
+        sf, registry, surface, grants):
+    source = (Path(__file__).resolve().parents[2]
+              / "evidence/output-target-migration-20260911/generated-configs"
+              / "gen_dpe_state_game.yaml")
+    document = yaml.safe_load(source.read_text())
+    role = next(step["agent_config"] for step in document["steps"]
+                if step["id"] == "5_design")
+    roles = None
+    if surface == "extra_tools":
+        next(step for step in document["steps"]
+             if step["id"] == "5_design").setdefault("config", {})[
+                 "extra_tools"] = grants
+    else:
+        roles = {role: {"tools": grants}}
+
+    with pytest.raises(ValueError, match="release gate"):
+        pr._register_text(
+            sf, registry, "gen_dpe_state_game",
+            yaml.safe_dump(document, sort_keys=False), roles=roles)
+
+    assert not sf.list_graphs()
+    assert role not in sf.agent_registry
+    assert registry.get("gen_dpe_state_game") is None
 
 
 def test_no_output_yaml_returns_error(sf, registry, gdir, monkeypatch):

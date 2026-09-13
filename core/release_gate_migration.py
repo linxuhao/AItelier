@@ -99,6 +99,26 @@ def _same_edges(actual, expected) -> bool:
     return isinstance(actual, list) and actual == expected
 
 
+def _tool_grants(value, path):
+    """Normalize the documented string-list grant; reject other iterables.
+
+    SkillFlow 1.5.75 also iterates mapping keys at claim and execution time, so
+    a mapping is executable despite being outside the documented contract.
+    Reject it rather than treating unknown values as harmless metadata.
+    """
+    if not isinstance(value, list):
+        shape = "mapping keys are executable" if isinstance(value, dict) \
+            else f"got {type(value).__name__}"
+        raise ValueError(
+            f"release gate tool grants at {path!r} must be a list of "
+            f"non-empty strings ({shape})")
+    if not all(isinstance(tool, str) and tool for tool in value):
+        raise ValueError(
+            f"release gate tool grants at {path!r} must be a list of "
+            "non-empty strings")
+    yield from ((path + (index,), tool) for index, tool in enumerate(value))
+
+
 def _gate_invocations(value, path=()):
     """Yield every executable gate reference, including nested hook arrays."""
     if isinstance(value, dict):
@@ -107,10 +127,10 @@ def _gate_invocations(value, path=()):
             if (key in {"tool", "tool_name"} and isinstance(child, str)
                     and child in _GATE_TOOLS):
                 yield child_path, child
-            if key == "extra_tools" and isinstance(child, list):
-                for index, tool in enumerate(child):
-                    if isinstance(tool, str) and tool in _GATE_TOOLS:
-                        yield child_path + (index,), tool
+            if key == "extra_tools":
+                for tool_path, tool in _tool_grants(child, child_path):
+                    if tool in _GATE_TOOLS:
+                        yield tool_path, tool
             yield from _gate_invocations(child, child_path)
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -127,13 +147,17 @@ def _role_gate_invocations(document: dict, roles: dict | None):
         if isinstance(step, dict) and isinstance(step.get("agent_config"), str)
     }
     for role in sorted(used):
-        config = roles.get(role)
-        tools = config.get("tools") if isinstance(config, dict) else None
-        if not isinstance(tools, list):
+        if role not in roles:
             continue
-        for index, tool in enumerate(tools):
-            if isinstance(tool, str) and tool in _GATE_TOOLS:
-                yield ("roles", role, "tools", index), tool
+        config = roles[role]
+        if not isinstance(config, dict):
+            raise ValueError(f"release gate paired role {role!r} must be a mapping")
+        if "tools" not in config:
+            continue
+        path = ("roles", role, "tools")
+        for tool_path, tool in _tool_grants(config["tools"], path):
+            if tool in _GATE_TOOLS:
+                yield tool_path, tool
 
 
 def release_gate_ownership_error(document: dict, roles: dict | None = None) -> str:
@@ -157,6 +181,8 @@ def release_gate_ownership_error(document: dict, roles: dict | None = None) -> s
     ]
     if wrong_types:
         return f"release gate steps have wrong type/tool: {wrong_types}"
+    if roles is not None and not isinstance(roles, dict):
+        return "release gate paired roles must be a mapping"
 
     indices = {step["id"]: index for index, step in enumerate(raw_steps)}
     expected = {
@@ -165,8 +191,11 @@ def release_gate_ownership_error(document: dict, roles: dict | None = None) -> s
         (("steps", indices["5_vision"], "tool_name"), "godot_vision"),
         (("steps", indices["5_final_test"], "tool_name"), "run_tests"),
     }
-    actual = set(_gate_invocations(document))
-    role_grants = set(_role_gate_invocations(document, roles))
+    try:
+        actual = set(_gate_invocations(document))
+        role_grants = set(_role_gate_invocations(document, roles))
+    except ValueError as exc:
+        return str(exc)
     if actual != expected or role_grants:
         extra = sorted(actual - expected) + sorted(role_grants)
         missing = sorted(expected - actual)

@@ -17,6 +17,7 @@ from aitelier.tools.run_tests import impl as tests_impl
 from core.release_gate_migration import (
     migrate_generated_release_gates,
     migrate_release_document,
+    release_gate_ownership_error,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -399,7 +400,16 @@ def test_migration_rejects_adversarial_shape_without_partial_mutation(mutator):
     _bad_graph(mutator)
 
 
-def test_skillflow_executes_gate_granted_through_extra_tools(tmp_path):
+@pytest.mark.parametrize(("surface", "grants"), [
+    pytest.param("config", ["run_tests"], id="config-yaml-list"),
+    pytest.param("config", {"run_tests": {"nested": True}},
+                 id="config-mapping-keys"),
+    pytest.param("role", ["run_tests"], id="paired-role-json-array"),
+    pytest.param("role", {"run_tests": {"nested": True}},
+                 id="paired-role-mapping-keys"),
+])
+def test_skillflow_executes_every_persisted_tool_grant_shape(
+        tmp_path, surface, grants):
     import skillflow
     from skillflow import PipelineGraph, SkillFlow
     from skillflow.graph import StepNode
@@ -409,10 +419,13 @@ def test_skillflow_executes_gate_granted_through_extra_tools(tmp_path):
                         ROOT / "aitelier" / "tools")
     sf = SkillFlow(str(tmp_path / "state.db"), tool_loader=loader,
                    workspace_base=str(tmp_path / "workspace"))
+    node = StepNode(id="design", config={"extra_tools": grants}) \
+        if surface == "config" else StepNode(id="design", agent_config="paired")
+    if surface == "role":
+        sf.register_agent_config_from_dict("paired", {"tools": grants})
     sf.register_graph(PipelineGraph(
-        name="extra_tools_probe", begin="design",
-        steps=[StepNode(id="design", config={"extra_tools": ["run_tests"]})]))
-    run_id = sf.create_run("extra_tools_probe", project_id="p")
+        name="tool_grant_probe", begin="design", steps=[node]))
+    run_id = sf.create_run("tool_grant_probe", project_id="p")
     sf.start_run(run_id)
     sf.advance_run(run_id)
     claim = sf.claim_next_step(run_id)
@@ -429,6 +442,38 @@ def test_skillflow_executes_gate_granted_through_extra_tools(tmp_path):
 
     assert result["passed"] is True
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("surface", "grants"), [
+    ("config", {"run_tests": {"nested": True}}),
+    ("role", {"run_tests": {"nested": True}}),
+    ("config", "run_tests"),
+    ("role", "run_tests"),
+    ("config", [{"run_tests": {}}]),
+    ("role", [{"run_tests": {}}]),
+    ("config", None),
+    ("role", None),
+])
+def test_migration_fails_closed_for_unsupported_tool_grant_containers(
+        surface, grants):
+    document = yaml.safe_load((
+        ROOT / "evidence/output-target-migration-20260911/generated-configs/"
+        "gen_dpe_state_game.yaml").read_text())
+    role = next(step["agent_config"] for step in document["steps"]
+                if step["id"] == "5_design")
+    roles = None
+    if surface == "config":
+        next(step for step in document["steps"]
+             if step["id"] == "5_design").setdefault("config", {})[
+                 "extra_tools"] = grants
+    else:
+        roles = {role: {"tools": grants}}
+    before = copy.deepcopy(document)
+
+    assert "must be a list of non-empty strings" in release_gate_ownership_error(
+        document, roles)
+    assert migrate_release_document(document, roles=roles) == []
+    assert document == before
 
 
 def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
@@ -473,6 +518,27 @@ def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
     role_file = role_gate.with_suffix(".roles.json")
     role_file.write_text(json.dumps({role_name: {"tools": ["run_tests"]}}))
     role_bytes = role_file.read_bytes()
+    mapping_gate = config_dir / "gen_g_mapping_gate.yaml"
+    mapping_document = yaml.safe_load(source.read_text())
+    next(step for step in mapping_document["steps"]
+         if step["id"] == "5_design").setdefault("config", {})[
+             "extra_tools"] = {"run_tests": {"nested": True}}
+    mapping_gate.write_text(yaml.safe_dump(mapping_document, sort_keys=False))
+    mapping_bytes = mapping_gate.read_bytes()
+    mapping_role_gate = config_dir / "gen_h_mapping_role_gate.yaml"
+    mapping_role_gate.write_bytes(source.read_bytes())
+    mapping_role_bytes = mapping_role_gate.read_bytes()
+    mapping_role_file = mapping_role_gate.with_suffix(".roles.json")
+    mapping_role_file.write_text(json.dumps({
+        role_name: {"tools": {"run_tests": {"nested": True}}}}))
+    mapping_role_file_bytes = mapping_role_file.read_bytes()
+    malformed_grant = config_dir / "gen_i_malformed_grant.yaml"
+    malformed_document = yaml.safe_load(source.read_text())
+    next(step for step in malformed_document["steps"]
+         if step["id"] == "5_design").setdefault("config", {})[
+             "extra_tools"] = "run_tests"
+    malformed_grant.write_text(yaml.safe_dump(malformed_document, sort_keys=False))
+    malformed_bytes = malformed_grant.read_bytes()
     good = config_dir / "gen_z_good.yaml"
     good.write_bytes(source.read_bytes())
     reports = migrate_generated_release_gates(config_dir)
@@ -483,5 +549,9 @@ def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
     assert extra_gate.read_bytes() == extra_gate_bytes
     assert role_gate.read_bytes() == role_gate_bytes
     assert role_file.read_bytes() == role_bytes
+    assert mapping_gate.read_bytes() == mapping_bytes
+    assert mapping_role_gate.read_bytes() == mapping_role_bytes
+    assert mapping_role_file.read_bytes() == mapping_role_file_bytes
+    assert malformed_grant.read_bytes() == malformed_bytes
     assert [Path(report["path"]).name for report in reports] == ["gen_z_good.yaml"]
     _assert_game_release_contract(yaml.safe_load(good.read_text()))

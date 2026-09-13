@@ -891,3 +891,51 @@ def test_investigate_config_declares_that_it_owns_no_repository(live):
     hints = yaml.safe_load((root / "configs" / "investigate.yaml").read_text())["x-aitelier"]
     assert hints["repo_mode"] == "none"
     assert hints["output_step"] == "investigate"
+
+
+def test_successor_restores_owner_cursor_and_pending_checkpoint_without_duplicate_dispatch(live):
+    """An isolated successor rereads durable handoff facts before acting."""
+    graph = PipelineGraph(name="handoff_checkpoint_fixture", begin="work", steps=[
+        StepNode(id="work", checkpoint=True, transitions=[Transition(to="after_review")]),
+        StepNode(id="after_review")])
+    live.sf.register_graph(graph)
+    live.registry.register_one(live.sf, graph.name, hint_overrides={"scheduler_owned": True,
+        "repo_mode": "none", "seed_file": "plan.md", "output_step": "work"})
+    live.service.store.add_nodes("game", [spec("running")])
+    running = start(live, "running")
+    checkpoint = start(live, "a", workflow=graph.name, request_key="checkpoint-handoff")
+    live.sf.advance_run(checkpoint["run_id"])
+    claim = live.sf.claim_next_step(checkpoint["run_id"])
+    live.sf.confirm_step(claim.token, StepResult(outputs={"candidate": "pending decision"}))
+    live.sf.advance_run(checkpoint["run_id"])
+    assert live.sf.get_run(checkpoint["run_id"])["status"] == "paused"
+
+    cursor = live.service.portfolio.overview("game")["event_seq"]
+    owners = live.service.portfolio.run_owners(checkpoint["run_id"])
+    assert owners["links"] == [{
+        "project_id": "game", "title": "Long-running game", "node_key": "a",
+        "attempt_id": checkpoint["attempt_id"], "relation": "attempt",
+    }]
+
+    successor = StateService(live.db, live.ws, live.sf, live.registry, live.service.attach_driver,
+                             actor="successor")
+    recovered = successor.recover_attempt(checkpoint["attempt_id"])
+    assert recovered["attempt_id"] == checkpoint["attempt_id"]
+    assert recovered["run_id"] == checkpoint["run_id"]
+    assert recovered["status"] == "paused"
+    snapshot = successor.portfolio.overview("game")
+    assert snapshot["event_seq"] >= cursor
+    by_node = {node["node_key"]: node for node in snapshot["nodes"]}
+    assert by_node["running"]["latest_attempt"]["attempt_id"] == running["attempt_id"]
+    assert by_node["running"]["latest_attempt"]["status"] == "running"
+    assert by_node["a"]["latest_attempt"]["attempt_id"] == checkpoint["attempt_id"]
+    assert by_node["a"]["latest_attempt"]["status"] == "paused"
+
+    duplicate = successor.start_attempt("game", "a", 1, graph.name, "checkpoint-handoff")
+    assert duplicate["attempt_id"] == checkpoint["attempt_id"]
+    assert duplicate["run_id"] == checkpoint["run_id"]
+    assert duplicate["status"] == "paused"
+    assert len(live.sf.list_runs(project_id=checkpoint["execution_project_id"])) == 1
+    with pytest.raises(StateConflict):
+        successor.verify_node("game", "a", 1, checkpoint["attempt_id"])
+    assert live.sf.get_run(checkpoint["run_id"])["status"] == "paused"

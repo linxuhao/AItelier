@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import urllib.error
@@ -14,11 +16,18 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_ID = "aitelier"
 MAX_CONTEXT_CHARS = 12_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0
+PENDING_DIR_NAME = "project-handoff-pending"
+MARKER_VERSION = 3
+MARKER_PENDING = "pending"
+MARKER_ATTEMPTED = "delivery_attempted"
+MARKER_NO_ACK = "none"
+DELIVERY_ATTEMPTED = "attempted"
+DELIVERY_NOOP = "noop"
+DELIVERY_FAILED = "failed"
 GUIDE_HEADINGS = (
     "# State DAG director protocol",
     "## Resume safely",
@@ -34,6 +43,160 @@ class SourceUnavailable(RuntimeError):
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _pending_path(hook_input: dict[str, Any]) -> Path | None:
+    """Return a checkout- and session-scoped handoff marker path."""
+    session_id = hook_input.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+    checkout = str(Path(__file__).resolve().parents[2])
+    key = _sha256(f"{PROJECT_ID}\0{checkout}\0{session_id}")
+    return codex_home / PENDING_DIR_NAME / f"{key}.json"
+
+
+def _acquire_marker(hook_input: dict[str, Any]) -> tuple[Path | None, int | None]:
+    path = _pending_path(hook_input)
+    if path is None:
+        return None, None
+    lock_fd: int | None = None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_stat = path.parent.lstat()
+        if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid():
+            return None, None
+        os.chmod(path.parent, 0o700)
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        lock_fd = os.open(path.with_suffix(".lock"), flags, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return path, lock_fd
+    except OSError:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        return None, None
+
+
+def _release_marker(lock_fd: int | None) -> None:
+    if lock_fd is None:
+        return
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+def _valid_generation(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _read_marker(path: Path) -> tuple[str, dict[str, str] | None]:
+    try:
+        marker_stat = path.lstat()
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "invalid", None
+    if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_uid != os.getuid():
+        return "invalid", None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            marker = json.loads(handle.read(4_097))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid", None
+    if not isinstance(marker, dict) or not _valid_generation(marker.get("generation")):
+        return "invalid", None
+    if marker.get("version") == 2:
+        if marker.get("status") == "pending":
+            return "valid", {
+                "version": str(MARKER_VERSION),
+                "generation": marker["generation"],
+                "status": MARKER_PENDING,
+            }
+        if marker.get("status") == "delivered":
+            return "valid", {
+                "version": str(MARKER_VERSION),
+                "generation": marker["generation"],
+                "status": MARKER_ATTEMPTED,
+                "acknowledgement": MARKER_NO_ACK,
+            }
+        return "invalid", None
+    if marker.get("version") != MARKER_VERSION:
+        return "invalid", None
+    if marker.get("status") == MARKER_PENDING:
+        return "valid", {
+            "version": str(MARKER_VERSION),
+            "generation": marker["generation"],
+            "status": MARKER_PENDING,
+        }
+    if (
+        marker.get("status") == MARKER_ATTEMPTED
+        and marker.get("acknowledgement") == MARKER_NO_ACK
+    ):
+        return "valid", {
+            "version": str(MARKER_VERSION),
+            "generation": marker["generation"],
+            "status": MARKER_ATTEMPTED,
+            "acknowledgement": MARKER_NO_ACK,
+        }
+    return "invalid", None
+
+
+def _write_marker(path: Path, marker: dict[str, Any]) -> bool:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    replaced = False
+    parent_fd: int | None = None
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(marker, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        replaced = True
+        parent_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        parent_fd = os.open(path.parent, parent_flags)
+        os.fsync(parent_fd)
+        return True
+    except OSError:
+        if not replaced:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def _mark_pending(hook_input: dict[str, Any]) -> bool:
+    path, lock_fd = _acquire_marker(hook_input)
+    if path is None:
+        return False
+    try:
+        generation = hook_input.get("turn_id")
+        if not _valid_generation(generation):
+            return False
+        state, current = _read_marker(path)
+        if state == "invalid":
+            return False
+        if current and current["generation"] == generation and current["status"] == MARKER_ATTEMPTED:
+            return True
+        return _write_marker(path, {
+            "version": MARKER_VERSION,
+            "generation": generation,
+            "status": MARKER_PENDING,
+        })
+    finally:
+        _release_marker(lock_fd)
 
 
 def _redact(text: str) -> str:
@@ -227,6 +390,7 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
     nodes = overview.get("nodes") if isinstance(overview.get("nodes"), list) else []
     counts: dict[str, int] = {}
     selected: list[str] = []
+    active: list[str] = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -234,15 +398,33 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
         counts[status] = counts.get(status, 0) + 1
         readiness = str(node.get("readiness", "unknown"))
         next_action = node.get("next_action")
+        latest = node.get("latest_attempt")
+        if readiness == "in_progress" and isinstance(latest, dict):
+            run_id = latest.get("run_id") or "none"
+            active.append(
+                f"- {node.get('node_key', node.get('key', '?'))}: "
+                f"attempt_id={latest.get('attempt_id', 'unknown')} "
+                f"run_id={run_id} "
+                f"attempt_status={latest.get('status', 'unknown')}"
+            )
         if readiness == "ready" and next_action in {"new_attempt", "candidate_review"}:
+            candidate = ""
+            if next_action == "candidate_review" and isinstance(latest, dict):
+                candidate = (
+                    f" attempt_id={latest.get('attempt_id', 'unknown')}"
+                    f" artifact_ref={latest.get('artifact_ref', 'unknown')}"
+                )
             selected.append(
                 f"- {node.get('node_key', node.get('key', '?'))}: node={status} "
-                f"readiness=ready next_action={next_action}"
+                f"readiness=ready next_action={next_action}{candidate}"
             )
     selected = selected[:8]
+    active = active[:8]
     return "\n".join([
         f"event_seq={overview.get('event_seq', 'unknown')}",
         "node_status_counts=" + json.dumps(counts, sort_keys=True, separators=(",", ":")),
+        "bounded active ownership (readiness=in_progress, max 8; retain identities):",
+        *(active or ["- none listed"]),
         "bounded actionable frontier (readiness=ready, max 8; reconcile exact records before acting):",
         *(selected or ["- none listed"]),
     ])
@@ -291,6 +473,56 @@ This is a bounded resume aid, not the full DAG, note history, trace, or evidence
     return _bounded_section(context, MAX_CONTEXT_CHARS)
 
 
+def _write_output(output: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -> str:
+    """Persist one no-ACK delivery attempt before emitting context."""
+    path, lock_fd = _acquire_marker(hook_input)
+    if path is None:
+        return DELIVERY_FAILED if standalone else DELIVERY_NOOP
+    try:
+        state, marker = _read_marker(path)
+        if state == "invalid":
+            return DELIVERY_FAILED
+        if state == "missing":
+            if not standalone:
+                return DELIVERY_NOOP
+            marker = {
+                "version": MARKER_VERSION,
+                "generation": "session-start",
+                "status": MARKER_PENDING,
+            }
+        if marker["status"] != MARKER_PENDING:
+            return DELIVERY_NOOP
+        context = build_context()
+        if not _write_marker(path, {
+            "version": MARKER_VERSION,
+            "generation": marker["generation"],
+            "status": MARKER_ATTEMPTED,
+            "acknowledgement": MARKER_NO_ACK,
+        }):
+            return DELIVERY_FAILED
+        _write_output({
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": context,
+            }
+        })
+        return DELIVERY_ATTEMPTED
+    finally:
+        _release_marker(lock_fd)
+
+
+def _delivery_recovery_context() -> str:
+    return _bounded_section(f"""# AItelier compact handoff recovery required
+project_id={PROJECT_ID}
+The local handoff marker was malformed, unreadable, or its no-ACK delivery attempt could not be persisted. No model context was injected and no work was dispatched by this hook.
+Reconnect the configured AItelier MCP and reconcile the exact State driver note, owner, run, checkpoint, attempt, and current generation before continuing. Do not infer successful delivery from this message.""", MAX_CONTEXT_CHARS)
+
+
 def main() -> int:
     raw_input = sys.stdin.read(MAX_INPUT_CHARS)
     try:
@@ -298,19 +530,38 @@ def main() -> int:
     except json.JSONDecodeError:
         hook_input = {}
     event = hook_input.get("hook_event_name")
-    # Current Codex loads PostCompact but does not accept additionalContext
-    # from that event.  It then emits SessionStart(source=compact), whose
-    # documented output contract injects context into the immediate continuation.
+    # Codex 0.153/0.154 exposes only the universal PostCompact output. Its
+    # systemMessage is an attributable warning, while model context is supported
+    # by SessionStart and UserPromptSubmit. Queue the latter as the next
+    # user-input fallback; the marker records an at-most-once attempt because
+    # Codex provides no acknowledgement that stdout reached the model.
     if event == "PostCompact":
+        queued = _mark_pending(hook_input)
+        context = build_context()
+        if not queued:
+            context = _bounded_section(
+                context + "\n\nAutomatic model-context follow-up could not be queued; "
+                "use the recovery calls above before director work.",
+                MAX_CONTEXT_CHARS,
+            )
+        output = {"continue": True, "systemMessage": context}
+    elif event == "SessionStart" and hook_input.get("source") == "compact":
+        delivery = _deliver_once(hook_input, "SessionStart", standalone=True)
+        if delivery == DELIVERY_ATTEMPTED:
+            return 0
         output = {"continue": True}
+        if delivery == DELIVERY_FAILED:
+            output["systemMessage"] = _delivery_recovery_context()
+    elif event == "UserPromptSubmit":
+        delivery = _deliver_once(hook_input, "UserPromptSubmit", standalone=False)
+        if delivery == DELIVERY_ATTEMPTED:
+            return 0
+        output = {"continue": True}
+        if delivery == DELIVERY_FAILED:
+            output["systemMessage"] = _delivery_recovery_context()
     else:
-        output = {
-            "hookSpecificOutput": {
-                "hookEventName": "SessionStart",
-                "additionalContext": build_context(),
-            }
-        }
-    sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")) + "\n")
+        output = {"continue": True}
+    _write_output(output)
     return 0
 
 

@@ -18,6 +18,7 @@ Declared keys (all optional; defaults in :data:`_DEFAULTS`):
                      False → runs are driven imperatively by the butler
     has_task_loop    True  → DPE-style per-task loop (tasks table, manifest sync)
     seed_file        workspace file the start path writes the seed input into
+    seed_default     optional nonempty text used for an absent/blank seed
     output_step      step id whose output is the run's final artifact
     checkpoint_kind  default kind for every checkpoint ("file-review"|"conversational")
     checkpoint_kinds per-step override map {step_id: kind}
@@ -40,6 +41,7 @@ _DEFAULTS: dict = {
     "scheduler_owned": True,
     "has_task_loop": False,
     "seed_file": None,
+    "seed_default": None,
     "output_step": None,
     "registers_generated_pipeline": False,
     "registers_generated_addon": False,
@@ -90,6 +92,8 @@ class ConfigManifest:
     has_task_loop: bool = False
     scheduler_owned: bool = True
     seed_file: str | None = None
+    # Nonempty input published when an optional seed is absent or blank.
+    seed_default: str | None = field(default=None, kw_only=True)
     output_step: str | None = None
     # Self-description for the butler's pipeline catalog: what SEED this config
     # expects, in what shape. A human "what it does" line is derived from the
@@ -119,6 +123,12 @@ class ConfigManifest:
     label_overrides: dict[str, str] = field(default_factory=dict)   # step_id -> label
     checkpoint_kind: str = "file-review"
     checkpoint_kinds: dict[str, str] = field(default_factory=dict)  # step_id -> kind
+
+    def __post_init__(self):
+        if self.seed_default is not None:
+            if (not isinstance(self.seed_default, str)
+                    or not self.seed_default.strip() or not self.seed_file):
+                raise ValueError("seed_default requires a seed_file and nonempty text")
 
     @property
     def _graph(self):
@@ -169,6 +179,7 @@ class ConfigManifest:
             "has_task_loop": self.has_task_loop,
             "scheduler_owned": self.scheduler_owned,
             "seed_file": self.seed_file,
+            "seed_default": self.seed_default,
             "output_step": self.output_step,
             "preamble_steps": self.preamble_steps,
         }
@@ -240,6 +251,7 @@ class ConfigRegistry:
             has_task_loop=bool(hints.get("has_task_loop")),
             scheduler_owned=bool(hints.get("scheduler_owned")),
             seed_file=hints.get("seed_file"),
+            seed_default=hints.get("seed_default"),
             output_step=hints.get("output_step"),
             input_hint=hints.get("input_hint") or "",
             registers_generated_pipeline=bool(hints.get("registers_generated_pipeline")),

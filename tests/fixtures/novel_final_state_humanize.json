@@ -1,0 +1,175 @@
+{
+  "execution_status": "not_run_against_llm",
+  "purpose": "Semantic review/evaluation rubric; examples are authored fixtures, not model outputs. Offline tests validate wiring and fixture integrity only.",
+  "cases": [
+    {
+      "id": "zombie-feedback",
+      "role": "novel_writer",
+      "tags": [
+        "negative_editorial_echo"
+      ],
+      "context": "获批场景只有新人进入门厅、听见楼上脚步声；无僵尸认知或排查。",
+      "input": "checkpoint reject：电影A没有僵尸。请修正误写的僵尸拍子并承接脚步声。",
+      "acceptable_example": "他推开门。楼上传来脚步声。",
+      "rejected_example": "他来到了电影A。这里没有僵尸，也不会有任何丧尸。",
+      "rubric": "修正不符合约束的事件与因果依赖，不引入僵尸排查、否定或解释，也不造新怪物。"
+    },
+    {
+      "id": "negative-evidence",
+      "role": "novel_humanizer",
+      "tags": [
+        "meaningful_negation"
+      ],
+      "context": "追踪者的脚步一直逼近，主角正在判断门后是否有人。",
+      "input": "他贴住门板。门后没有脚步声。",
+      "acceptable_example": "他贴着门板。门后没有脚步声。",
+      "rejected_example": "他贴着门板。",
+      "rubric": "保留否定观察这个独有线索，不能因出现“没有”就删句。"
+    },
+    {
+      "id": "uncertainty",
+      "role": "novel_humanize_reviewer",
+      "tags": [
+        "uncertainty"
+      ],
+      "context": "主角躲在窗下，只能看见院子的一角。",
+      "input": "初稿：他没有看见追踪者。终稿：追踪者已经离开了。",
+      "acceptable_example": "passed=false；视角受限的未观察到被改成客观离开。",
+      "rejected_example": "passed=true；都是否定追踪者在场。",
+      "rubric": "保留观察范围与确定程度。"
+    },
+    {
+      "id": "pure-meta",
+      "role": "novel_humanize_reviewer",
+      "tags": [
+        "pure_editorial_leak"
+      ],
+      "context": "括注明确来自作者修改任务；正文没有僵尸事件或规则揭示。",
+      "input": "初稿：他推开门。（已按要求删去僵尸。）楼上传来脚步声。终稿：他推开门。楼上传来脚步声。",
+      "acceptable_example": "passed=true；删除纯编辑说明，叙事事实保留。",
+      "rejected_example": "passed=false；括注是初稿独有信息，必须恢复。",
+      "rubric": "编辑层文本不受独有叙事信息保真规则保护。"
+    },
+    {
+      "id": "unique-rule",
+      "role": "novel_humanizer",
+      "tags": [
+        "unique_information",
+        "meaningful_negation"
+      ],
+      "context": "人物第一次获知火焰只能让影子后退，这条限制会影响逃生。",
+      "input": "“火烧不死它，只能逼退。”守门人说。",
+      "acceptable_example": "“火烧不死它，只能逼退。”守门人说。",
+      "rejected_example": "守门人举起火把。",
+      "rubric": "保留唯一的规则信息；不能借含蓄或去解释删掉能力限制。"
+    },
+    {
+      "id": "emotion",
+      "role": "novel_humanize_reviewer",
+      "tags": [
+        "emotion"
+      ],
+      "context": "人物是失望，不是愤怒；没有手部动作的铺垫。",
+      "input": "初稿：“随你便。”她很失望。终稿：“随你便。”她愤怒地攥紧拳头。",
+      "acceptable_example": "passed=false；情绪、强度与行为均被改变。",
+      "rejected_example": "passed=true；把抽象情绪改成动作就是语言润色。",
+      "rubric": "showing 不能自动授权改变情绪或新增动作。"
+    },
+    {
+      "id": "new-prop",
+      "role": "novel_humanize_reviewer",
+      "tags": [
+        "invented_props"
+      ],
+      "context": "场景在没有桌椅、杯子的隧道中。",
+      "input": "初稿：“走吧。”他说。终稿：“走吧。”他放下杯子。",
+      "acceptable_example": "passed=false；新增杯子和动作没有依据。",
+      "rejected_example": "passed=true；换掉“说”让文字更像人写的。",
+      "rubric": "自然对话标签可以重复，不为去AI味造道具。"
+    },
+    {
+      "id": "retreat-not-destroy",
+      "role": "novel_humanize_reviewer",
+      "tags": [
+        "damage_semantics"
+      ],
+      "context": "物理冲击只能暂时逼退灵体，不能消灭；其后还有追击。",
+      "input": "初稿：影子退到了门后，敲门声仍在。终稿：影子消散，威胁彻底消失。",
+      "acceptable_example": "passed=false；暂时逼退变为消灭并改变后续因果。",
+      "rejected_example": "passed=true；消散只是更漂亮的同义词。",
+      "rubric": "保留能力效果、时效和后续危险。"
+    },
+    {
+      "id": "hook",
+      "role": "novel_humanize_reviewer",
+      "tags": [
+        "hook"
+      ],
+      "context": "章末故意不公开转身者的身份。",
+      "input": "初稿：那人转过身来—— 终稿：那人转过身来，正是队长。",
+      "acceptable_example": "passed=false；补出了被悬置的身份。",
+      "rejected_example": "passed=true；结尾更完整流畅。",
+      "rubric": "不能为了完整感揭开悬念。"
+    },
+    {
+      "id": "number",
+      "role": "novel_humanize_reviewer",
+      "tags": [
+        "number"
+      ],
+      "context": "账户余额明确为300点。",
+      "input": "初稿：他还剩三百点。终稿：他还剩三十点。",
+      "acceptable_example": "passed=false；余额数字发生变化。",
+      "rejected_example": "passed=true；句式相同所以保真。",
+      "rubric": "内容而非句式决定数字一致性。"
+    },
+    {
+      "id": "latest-ruling",
+      "role": "novel_outline_reviewer",
+      "tags": [
+        "superseded_feedback"
+      ],
+      "context": "第一轮要求导师本章死亡；第二轮用户明确改为本章受伤、下章死亡。",
+      "input": "本章章纲：导师受伤但仍存活，掩护新人撤退。",
+      "acceptable_example": "按第二轮当前裁定审核；不得因第一轮未满足而要求本章杀死导师。",
+      "rejected_example": "必须逐轮满足全部反馈，所以本章仍要导师死亡。",
+      "rubric": "同事项明确替代的旧要求失效，其他约束保持。"
+    },
+    {
+      "id": "ledger-edit",
+      "role": "novel_finalizer",
+      "tags": [
+        "ledger_text_edit"
+      ],
+      "context": "终稿只写进入门厅听见楼上脚步；编辑要求删除误写的僵尸段落。",
+      "input": "提取本章事实、摘要与状态变化。",
+      "acceptable_example": "摘要只记进入门厅后的相关线索；不生成清除僵尸或已确认无僵尸的事件。",
+      "rejected_example": "events：主角清除了僵尸。summary：本章已删除僵尸。",
+      "rubric": "编辑行为不是剧情事实，文本清理不等于世界事件。"
+    },
+    {
+      "id": "ledger-scoped-rule",
+      "role": "novel_finalize_reviewer",
+      "tags": [
+        "ledger_rule_scope"
+      ],
+      "context": "可见批准记录明确规定：只对世界A，火焰可以逼退但不能消灭灵体；主角尚不知情。",
+      "input": "分录拟更新世界A的火焰规则，reason标明批准来源；不增加人物发现、伏笔回收或节点完成。",
+      "acceptable_example": "规则范围、来源及最终值相符可通过，不要求正文强塞规则说明。",
+      "rejected_example": "将规则推广全世界，补记主角已知，并要求正文声明它。",
+      "rubric": "规范裁定与叙事事件分层，规则成立不等于角色知晓。"
+    },
+    {
+      "id": "text-skill-not-lore",
+      "role": "novel_finalizer",
+      "tags": [
+        "ledger_rule_scope"
+      ],
+      "context": "用户要求后续章节都不要用“嘴角微扬”这样的套话，这是文风偏好。",
+      "input": "判断是否写入world_setting。",
+      "acceptable_example": "不写入世界规则；这条编辑偏好留在编辑层。",
+      "rejected_example": "world_setting：本世界人物不能嘴角微扬。",
+      "rubric": "长期有效的写作偏好仍不是世界事实。"
+    }
+  ]
+}

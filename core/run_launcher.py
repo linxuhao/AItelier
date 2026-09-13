@@ -298,6 +298,11 @@ def start_config_run(db, ws, config_name: str, project_id: str, *,
         files[manifest.seed_file] = seed_text
     for fname, content in seed_inputs.items():
         files[fname] = content if isinstance(content, str) else json.dumps(content)
+    # Optional inputs also publish a complete immutable seed before scheduling.
+    # ConfigManifest validates defaults; configs without one remain unchanged.
+    default_seed = getattr(manifest, "seed_default", None)
+    if isinstance(default_seed, str) and not files.get(manifest.seed_file, "").strip():
+        files[manifest.seed_file] = default_seed
     if files:
         # Written atomically, and PUBLISHED (marker last) before the run exists.
         # The order is the whole point: the poller refuses to create a run for a

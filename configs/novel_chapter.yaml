@@ -35,11 +35,17 @@ anchors:
 x-aitelier:
   label: "Novel Chapter"
   scheduler_owned: true
+  seed_file: "director_brief.md"
+  seed_default: >-
+    本章未提供额外 director_brief。按 bible、剧情前沿与有效 checkpoint 裁定规划本章；
+    不推测上一章导演意图，不增加任何已发生的事实。
   output_step: "finalize"
   input_hint: >-
-    对一个已运行过 novel_init 的项目写下一章（无需 seed；写哪一章由图头 probe
-    自动算）。每章两个 checkpoint：章纲讨论（reject+反馈=改章纲）与终稿+状态变更
-    确认（reject+反馈=正文返工重走全链）。
+    对已运行过 novel_init 的项目写下一章，章号由 probe 自动计算。可选 seed_text 是
+    本章 director_brief（目的/读者体验/推进与禁止推进/人物/伏笔/节奏）；省略或空白则
+    无额外导演指令。run_pipeline 用 against_project 指向小说仓库，每次创建独立
+    execution project，brief 不继承到下一章。checkpoints=ask 保留章纲与终稿审批；
+    reject+反馈修订，approve 不携带反馈。brief 是计划，不是 bible 或已发生事件。
   labels:
     probe: "上下文装配"
     outline: "章纲"
@@ -84,6 +90,7 @@ steps:
     agent_config: "novel_outliner"
     timeout_seconds: 600
     context:
+      - source: { config: "novel_chapter", output: "director_brief.md" }
       - source: { step: "probe" }            # 整本 bible + 上章结尾 + 滚动摘要
       - source: { step: "outline" }          # 上一版章纲（修订时保留未被指出的部分，防打地鼠）
       - source: { step: "outline_review" }   # Red 驳回意见（首轮为空）
@@ -107,6 +114,7 @@ steps:
     agent_config: "novel_outline_reviewer"
     timeout_seconds: 300
     context:
+      - source: { config: "novel_chapter", output: "director_brief.md" }
       - source: { step: "probe" }
       - source: { step: "outline" }
       - source: { step: "outline_review" }   # Red 驳回意见（首轮为空）
@@ -153,6 +161,8 @@ steps:
     agent_config: "novel_writer"
     timeout_seconds: 900
     context:
+      - source: { config: "novel_chapter", output: "director_brief.md" }
+      - source: { feedback_of: "outline" }
       - source: { step: "probe" }            # 上章结尾/角色卡/节奏约定
       - source: { step: "outline" }
       - source: { step: "draft" }            # 上一版正文（修订时保留未被指出的段落，防打地鼠）
@@ -178,6 +188,8 @@ steps:
     agent_config: "novel_chapter_reviewer"
     timeout_seconds: 600
     context:
+      - source: { config: "novel_chapter", output: "director_brief.md" }
+      - source: { feedback_of: "outline" }
       - source: { step: "probe" }
       - source: { step: "outline" }
       - source: { step: "draft" }            # 审初稿（未润色）
@@ -208,6 +220,9 @@ steps:
     agent_config: "novel_humanizer"
     timeout_seconds: 600
     context:
+      - source: { config: "novel_chapter", output: "director_brief.md" }
+      - source: { feedback_of: "outline" }
+      - source: { feedback_of: "draft" }
       - source: { step: "draft" }            # 实质已过审的初稿（润色基底）
       - source: { step: "humanize" }         # 上一版润色（continuity 打回时保留、只修违规处）
       - source: { step: "continuity" }       # 机检违规清单（首轮为空）
@@ -280,6 +295,7 @@ steps:
     agent_config: "novel_finalizer"
     timeout_seconds: 300
     context:
+      - source: { config: "novel_chapter", output: "director_brief.md" }
       - source: { step: "probe" }
       - source: { step: "outline" }
       - source: { step: "humanize" }
@@ -366,6 +382,9 @@ steps:
     agent_config: "novel_finalize_reviewer"
     timeout_seconds: 300
     context:
+      - source: { config: "novel_chapter", output: "director_brief.md" }
+      - source: { feedback_of: "outline" }
+      - source: { feedback_of: "draft" }
       - source: { step: "probe" }            # 当前状态（对照：变更是否真的是变更）
       - source: { step: "outline" }          # 章纲的节点推进声明（对照虚报）
       - source: { step: "humanize" }         # 终稿正文（真相源）

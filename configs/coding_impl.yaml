@@ -86,7 +86,19 @@ steps:
     tool_name: "run_tests"
     # Must exceed run_tests' worst case (venv + deps + pytest wall) so a slow
     # run isn't reclaimed mid-flight.
-    timeout_seconds: 1200
+    #
+    # 1200 was SHORTER THAN THE GATE IT WAS TIMING for a Godot project.
+    # Measured 2026-09-13 on wuxia-commercial-batch-next: the project's own
+    # run_tests.sh drives tools/godot_gate.py -> compile (~12 s) + the authored
+    # 172-scenario play-test (~1995 s exclusive). Every claim of this step
+    # therefore abandoned a gate that was still rendering, while the sidecar
+    # kept its render lock -- so the report was never delivered AND the retry
+    # queued behind a run nobody was waiting for. That is the same shape
+    # godot_gate.py's own 1800->3600 correction documents at its /playtest call.
+    # 4200 is a ceiling for pathology, not an estimate: the gate's internal
+    # /playtest timeout is already 3600, so a step that outlives 4200 s is
+    # wedged rather than slow.
+    timeout_seconds: 4200
     tool_params:
       out_dir: "$STEP_DIR"
     # A failed tool invocation must not consume a report from a prior attempt.

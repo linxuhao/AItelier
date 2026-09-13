@@ -23,6 +23,8 @@ def _make_repo(tmp_path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init")
+    _git(repo, "config", "user.email", "knowledge@test.invalid")
+    _git(repo, "config", "user.name", "Knowledge test")
     (repo / "README.md").write_text("hi", encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init")
@@ -159,6 +161,79 @@ def test_report_only_no_design(tmp_path):
     text = (repo / ".aitelier" / "knowledge.md").read_text()
     assert "Architecture" not in text         # no design → section omitted
     assert "x" in text
+
+
+def test_tracked_generated_knowledge_is_migrated_exactly(tmp_path):
+    repo = _make_repo(tmp_path)
+    ws = _make_workspace(tmp_path, report={"all_goals_met": False})
+    assert _call(repo, ws, "legacy")["written"] is True
+    original = (repo / ".aitelier" / "knowledge.md").read_bytes()
+    assert _git(repo, "add", "-f", "--", ".aitelier/knowledge.md").returncode == 0
+    assert _git(repo, "commit", "-qm", "legacy tracked knowledge").returncode == 0
+    legacy_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    # Reproduce an older knowledge_sync having rewritten the tracked file.
+    (repo / ".aitelier" / "knowledge.md").write_bytes(
+        original.replace(b"goals_met=false", b"goals_met=true"))
+    assert _git(repo, "status", "--porcelain").stdout == \
+        " M .aitelier/knowledge.md\n"
+
+    (ws / GRAPH / "5" / "final" / "verify_report.json").write_text(
+        json.dumps({"all_goals_met": True}), encoding="utf-8")
+    res = _call(repo, ws, "legacy")
+
+    assert res["written"] is True and res["migration"] == "untracked_generated_knowledge"
+    assert _git(repo, "ls-files", "--error-unmatch", ".aitelier/knowledge.md").returncode != 0
+    assert _git(repo, "check-ignore", ".aitelier/knowledge.md").returncode == 0
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all").stdout == ""
+    assert _git(repo, "diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD").stdout == \
+        "D\t.aitelier/knowledge.md\n"
+    assert _git(repo, "rev-parse", "HEAD^").stdout.strip() == legacy_head
+    updated = (repo / ".aitelier" / "knowledge.md").read_bytes()
+    assert updated != original and b"goals_met=true" in updated
+
+
+def test_tracked_unowned_knowledge_fails_closed_with_recovery(tmp_path):
+    repo = _make_repo(tmp_path)
+    path = repo / ".aitelier" / "knowledge.md"
+    path.parent.mkdir()
+    path.write_text("user-owned notes\n", encoding="utf-8")
+    _git(repo, "add", ".aitelier/knowledge.md")
+    _git(repo, "commit", "-qm", "user tracked file")
+    before_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    before = path.read_bytes()
+
+    res = _call(repo, _make_workspace(tmp_path), "legacy")
+
+    assert res["written"] is False and "error" in res
+    assert res["tracked_path"] == ".aitelier/knowledge.md"
+    assert res["owner"] == "unproven"
+    assert "git rm --cached -- .aitelier/knowledge.md" in res["recovery_action"]
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert path.read_bytes() == before
+    assert _git(repo, "status", "--porcelain", "--untracked-files=all").stdout == ""
+
+
+def test_tracked_generated_knowledge_does_not_adopt_unrelated_changes(tmp_path):
+    repo = _make_repo(tmp_path)
+    ws = _make_workspace(tmp_path)
+    assert _call(repo, ws, "legacy")["written"] is True
+    _git(repo, "add", "-f", "--", ".aitelier/knowledge.md")
+    _git(repo, "commit", "-qm", "legacy tracked knowledge")
+    unrelated = repo / "README.md"
+    unrelated.write_text("owner change", encoding="utf-8")
+    before_head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    before_knowledge = (repo / ".aitelier" / "knowledge.md").read_bytes()
+
+    res = _call(repo, ws, "legacy")
+
+    assert res["written"] is False and "error" in res
+    assert res["tracked_path"] == ".aitelier/knowledge.md"
+    assert res["owner"] == "aitelier-generated"
+    assert "make the worktree clean" in res["recovery_action"].lower()
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == before_head
+    assert unrelated.read_text(encoding="utf-8") == "owner change"
+    assert (repo / ".aitelier" / "knowledge.md").read_bytes() == before_knowledge
+    assert _git(repo, "diff", "--name-only").stdout == "README.md\n"
 
 
 def test_loadable_via_tool_loader():

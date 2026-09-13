@@ -3,8 +3,9 @@ description: >
   Distill review-verified knowledge from this run (architecture decisions +
   what works + known issues) into a git-IGNORED `.aitelier/knowledge.md` in the
   project repo, so the NEXT DPE run on the same repo starts with the prior run's
-  wisdom. Never committed (added to .git/info/exclude), safe to delete. Always
-  succeeds as a step; writes nothing if no distillable artifacts exist yet.
+  wisdom. Never committed (added to .git/info/exclude), safe to delete. A
+  recognized tracked legacy copy is migrated by an exact-path commit; ambiguous
+  ownership or unrelated dirty work fails the step with a recovery action.
 parameters:
   project_root:
     type: string

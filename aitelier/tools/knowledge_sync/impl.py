@@ -22,7 +22,8 @@ Design choices that keep this safe and simple:
     no DeepSeek cost.
   - **One section per project, deduped.** A run rewrites its own section (so the
     goal-loop's repeated passes don't pile up); newest ``_MAX_SECTIONS`` kept.
-  - **Never raises.** A bad/missing artifact degrades to "wrote nothing".
+  - **Fail closed on unsafe legacy tracking.** A recognized generated file can
+    be migrated exactly; ambiguous ownership or unrelated work is left intact.
 """
 
 import json
@@ -48,7 +49,8 @@ def knowledge_sync(*, project_root: str = "", workspace_root: str = "",
                    out_dir: str = "", **kwargs) -> dict:
     """Distill this run's knowledge into <repo>/.aitelier/knowledge.md.
 
-    Returns {written: bool, path, section, reason}. Always succeeds.
+    Returns {written: bool, path, section, reason/error}. Unsafe legacy
+    tracking returns an ``error`` so the tool step stops before a code claim.
     """
     try:
         repo = Path(project_root).resolve() if project_root else None
@@ -66,6 +68,13 @@ def knowledge_sync(*, project_root: str = "", workspace_root: str = "",
         # Ensure the file is ignored BEFORE writing it, so a concurrent git add
         # never stages it.
         _ensure_excluded(repo)
+        try:
+            migration = _migrate_tracked_knowledge(repo)
+        except Exception as exc:
+            return _migration_refusal(
+                owner="unproven", reason=f"migration check failed ({exc})")
+        if isinstance(migration, dict):
+            return migration
 
         kpath = repo / _KNOWLEDGE_REL
         kpath.parent.mkdir(parents=True, exist_ok=True)
@@ -73,9 +82,12 @@ def knowledge_sync(*, project_root: str = "", workspace_root: str = "",
             if kpath.exists() else ""
         merged = _merge(existing, pid, section)
         kpath.write_text(merged, encoding="utf-8")
-        return {"written": True, "path": str(kpath), "section": pid}
-    except Exception as e:  # a knowledge write must never fail the run
-        return {"written": False, "reason": f"error: {e}"}
+        result = {"written": True, "path": str(kpath), "section": pid}
+        if migration:
+            result["migration"] = migration
+        return result
+    except Exception as e:
+        return {"written": False, "error": f"knowledge_sync failed closed: {e}"}
 
 
 # ── Distillation ──────────────────────────────────────────────────────────
@@ -189,6 +201,121 @@ def _split_sections(text: str) -> list[tuple[str, str]]:
 
 
 # ── Git ignore wiring ─────────────────────────────────────────────────────
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    command = ["git", *args]
+    try:
+        return subprocess.run(
+            command, cwd=repo, capture_output=True, text=True,
+            errors="replace", check=False, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(command, 128, "", str(exc))
+
+
+def _migration_refusal(*, owner: str, reason: str) -> dict:
+    path = _KNOWLEDGE_REL.as_posix()
+    action = (
+        f"Back up and review {path}; make the worktree clean without altering "
+        f"it, run `git rm --cached -- {path}`, verify that this is the only "
+        "staged path, then run `git commit -m "
+        "'AItelier: untrack generated knowledge'` and rerun knowledge_sync.")
+    return {
+        "written": False,
+        "error": (f"tracked {path} cannot be migrated safely: {reason}; "
+                  f"owner={owner}. Recovery: {action}"),
+        "tracked_path": path,
+        "owner": owner,
+        "recovery_action": action,
+    }
+
+
+def _migrate_tracked_knowledge(repo: Path) -> str | dict | None:
+    """Commit removal of the exact generated path from Git tracking, or refuse.
+
+    The working file is preserved byte-for-byte. Migration is allowed only when
+    both HEAD and the working copy carry AItelier's generated header, the exact
+    path has no staged changes, and no other working-tree change exists.
+    """
+    rel = _KNOWLEDGE_REL.as_posix()
+    tracked = _git(repo, "ls-files", "--error-unmatch", "--", rel)
+    if tracked.returncode == 1:
+        return None
+    if tracked.returncode != 0:
+        return _migration_refusal(
+            owner="unproven", reason="Git could not establish whether the path is tracked")
+
+    kpath = repo / _KNOWLEDGE_REL
+    try:
+        working = kpath.read_bytes()
+    except OSError as exc:
+        return _migration_refusal(
+            owner="unproven", reason=f"the tracked working file is unreadable ({exc})")
+    head = _git(repo, "show", f"HEAD:{rel}")
+    marker = _HEADER.encode("utf-8")
+    working_owned = working.startswith(marker) and bool(_MARKER_RE.search(
+        working.decode("utf-8", errors="replace")))
+    head_owned = head.returncode == 0 and head.stdout.startswith(_HEADER) \
+        and bool(_MARKER_RE.search(head.stdout))
+    owner = ("aitelier-generated" if working_owned and head_owned
+             and kpath.is_file() and not kpath.is_symlink() else "unproven")
+    if owner != "aitelier-generated":
+        return _migration_refusal(
+            owner=owner, reason="AItelier ownership is not proven in HEAD and the working file")
+
+    full = _git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    scoped = _git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                  "--", rel)
+    if full.returncode or scoped.returncode:
+        return _migration_refusal(owner=owner, reason="Git status is unavailable")
+    if full.stdout != scoped.stdout:
+        return _migration_refusal(owner=owner, reason="unrelated working-tree changes are present")
+    staged = _git(repo, "diff", "--cached", "--quiet", "--", rel)
+    if staged.returncode != 0:
+        reason = ("the exact path has staged changes" if staged.returncode == 1
+                  else "the exact path's staged state is unavailable")
+        return _migration_refusal(owner=owner, reason=reason)
+    ignored = _git(repo, "check-ignore", "--no-index", "--quiet", "--", rel)
+    if ignored.returncode != 0:
+        return _migration_refusal(owner=owner, reason="the effective Git exclude is unavailable")
+
+    before_head = _git(repo, "rev-parse", "HEAD")
+    if before_head.returncode or not before_head.stdout.strip():
+        return _migration_refusal(owner=owner, reason="repository HEAD is unavailable")
+    removed = _git(repo, "rm", "--cached", "--quiet", "--", rel)
+    if removed.returncode:
+        return _migration_refusal(owner=owner, reason="Git refused exact-path index removal")
+    tree = _git(repo, "write-tree")
+    if tree.returncode or not tree.stdout.strip():
+        _git(repo, "reset", "-q", "HEAD", "--", rel)
+        return _migration_refusal(owner=owner, reason="Git could not write the exact migration tree")
+    committed = _git(
+        repo, "commit-tree", tree.stdout.strip(), "-p", before_head.stdout.strip(),
+        "-m", "AItelier: untrack generated knowledge")
+    if committed.returncode or not committed.stdout.strip():
+        _git(repo, "reset", "-q", "HEAD", "--", rel)
+        return _migration_refusal(
+            owner=owner,
+            reason=f"Git could not create the exact migration commit ({(committed.stderr or committed.stdout).strip()[:200]})")
+    updated = _git(repo, "update-ref", "HEAD", committed.stdout.strip(),
+                   before_head.stdout.strip())
+    if updated.returncode:
+        _git(repo, "reset", "-q", "HEAD", "--", rel)
+        return _migration_refusal(
+            owner=owner, reason="repository HEAD changed while migration was prepared")
+
+    parent = _git(repo, "rev-parse", "HEAD^")
+    names = _git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+    still_tracked = _git(repo, "ls-files", "--error-unmatch", "--", rel)
+    final_status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all")
+    if (parent.returncode or parent.stdout.strip() != before_head.stdout.strip()
+            or names.returncode or names.stdout.splitlines() != [rel]
+            or still_tracked.returncode == 0 or final_status.returncode
+            or final_status.stdout or kpath.read_bytes() != working):
+        return _migration_refusal(
+            owner=owner, reason="post-migration exactness or cleanliness could not be verified")
+    return "untracked_generated_knowledge"
+
 
 def _ensure_excluded(repo: Path) -> None:
     """Append `.aitelier/` to .git/info/exclude (untracked, per-clone) once.

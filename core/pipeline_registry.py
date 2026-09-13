@@ -525,6 +525,17 @@ def _register_text(sf, registry, config_name: str, yaml_text: str,
     its name to *config_name*, register host agents + the graph live, and add a
     registry manifest with the generated-pipeline host hints. Raises on validation
     failure."""
+    graph, hints = _validated_registration(
+        config_name, yaml_text, roles=roles)
+    ensure_host_agents(sf, graph)
+    sf.register_graph(graph)            # validates graph + agent_config refs
+    registry.register_one(sf, config_name, hint_overrides=hints)
+    return graph
+
+
+def _validated_registration(config_name: str, yaml_text: str,
+                            roles: dict | None = None):
+    """Parse all graph/host policy inputs without mutating live registries."""
     data = yaml.safe_load(yaml_text)
     if not isinstance(data, dict):
         raise ValueError("generated pipeline YAML is not a mapping")
@@ -536,10 +547,7 @@ def _register_text(sf, registry, config_name: str, yaml_text: str,
     # believing registration had failed — a config that runs, with no files and no
     # roles behind it. Nothing here mutates until everything that can fail has run.
     hints = _gen_hints(graph, roles, config_name)
-    ensure_host_agents(sf, graph)
-    sf.register_graph(graph)            # validates graph + agent_config refs
-    registry.register_one(sf, config_name, hint_overrides=hints)
-    return graph
+    return graph, hints
 
 
 def register_generated_pipeline(sf, registry, run_id: str, name: str) -> dict:
@@ -896,14 +904,65 @@ def reload_generated_pipeline(sf, registry, config_name: str) -> dict:
         roles_file = f.with_suffix(".roles.json")
         roles = None
         if roles_file.exists():
-            import json
             roles = json.loads(roles_file.read_text(encoding="utf-8"))
-            _register_forge_roles(sf, config_name, roles)
-        _register_text(sf, registry, config_name, f.read_text(encoding="utf-8"),
-                       roles=roles)
-        return {"config_name": config_name}
+        yaml_text = f.read_text(encoding="utf-8")
+        graph, hints = _validated_registration(
+            config_name, yaml_text, roles=roles)
     except Exception as e:
         return {"error": f"reload failed: {e}"}
+
+    marker = object()
+    with sf._lock:
+        old_agents = copy.deepcopy(sf.agent_registry._configs)
+        old_graph = sf._graphs.get(config_name, marker)
+        old_resolver = sf._resolvers.get(config_name, marker)
+        old_manifest = registry._manifests.get(config_name, marker)
+        graph_rows = [dict(row) for row in sf._conn.execute(
+            "SELECT * FROM skillflow_graphs WHERE name=?", (config_name,))]
+        version_rows = [dict(row) for row in sf._conn.execute(
+            "SELECT * FROM skillflow_graph_versions WHERE name=?", (config_name,))]
+        try:
+            if roles is not None:
+                _register_forge_roles(sf, config_name, roles)
+            ensure_host_agents(sf, graph)
+            sf.register_graph(graph)
+            if registry.register_one(
+                    sf, config_name, hint_overrides=hints) is None:
+                raise RuntimeError("config manifest did not register")
+        except Exception as e:
+            sf.agent_registry._configs = old_agents
+            if old_graph is marker:
+                sf._graphs.pop(config_name, None)
+            else:
+                sf._graphs[config_name] = old_graph
+            if old_resolver is marker:
+                sf._resolvers.pop(config_name, None)
+            else:
+                sf._resolvers[config_name] = old_resolver
+            if old_manifest is marker:
+                registry._manifests.pop(config_name, None)
+            else:
+                registry._manifests[config_name] = old_manifest
+            try:
+                sf._conn.execute("BEGIN IMMEDIATE")
+                for table, rows in (
+                        ("skillflow_graphs", graph_rows),
+                        ("skillflow_graph_versions", version_rows)):
+                    sf._conn.execute(f"DELETE FROM {table} WHERE name=?",
+                                     (config_name,))
+                    for row in rows:
+                        columns = tuple(row)
+                        placeholders = ", ".join("?" for _ in columns)
+                        sf._conn.execute(
+                            f"INSERT INTO {table} ({', '.join(columns)}) "
+                            f"VALUES ({placeholders})",
+                            tuple(row[column] for column in columns))
+                sf._conn.commit()
+            except Exception:
+                sf._conn.rollback()
+                return {"error": f"reload failed: {e}; live rollback failed"}
+            return {"error": f"reload failed: {e}"}
+        return {"config_name": config_name}
 
 
 # Everything a generated pipeline owns on disk, so archive and un-archive cannot

@@ -2,6 +2,7 @@
 runnable: namespacing, host-agent auto-registration, live register + manifest,
 in-place update, boot-time load, and graceful failures."""
 
+import copy
 import json
 import textwrap
 from pathlib import Path
@@ -480,6 +481,93 @@ def test_register_text_rejects_malformed_release_grants_before_live_mutation(
     assert not sf.list_graphs()
     assert role not in sf.agent_registry
     assert registry.get("gen_dpe_state_game") is None
+
+
+def _live_release_reload(tmp_path, registry, gdir):
+    sf, _run_id = _forge_run_for_release_graph(tmp_path)
+    gdir.mkdir(parents=True)
+    source = (Path(__file__).resolve().parents[2]
+              / "evidence/output-target-migration-20260911/generated-configs"
+              / "gen_dpe_state_game.yaml")
+    config_name = "gen_dpe_state_game"
+    yaml_file = gdir / f"{config_name}.yaml"
+    yaml_file.write_bytes(source.read_bytes())
+    document = yaml.safe_load(source.read_text())
+    role = next(step["agent_config"] for step in document["steps"]
+                if step["id"] == "5_design")
+    role_file = yaml_file.with_suffix(".roles.json")
+    role_file.write_text(json.dumps({role: {
+        "tools": ["read_file"], "system_prompt": "benign role"}}))
+    assert pr.reload_generated_pipeline(sf, registry, config_name) == {
+        "config_name": config_name}
+    return sf, config_name, role, yaml_file, role_file
+
+
+def _live_reload_snapshot(sf, registry, config_name, role):
+    return {
+        "graph": copy.deepcopy(sf._resolvers[config_name].graph.to_dict()),
+        "role": copy.deepcopy(sf.agent_registry.get(role).to_dict()),
+        "manifest": registry.get(config_name),
+        "graph_rows": [dict(row) for row in sf._conn.execute(
+            "SELECT * FROM skillflow_graphs WHERE name=?", (config_name,))],
+        "versions": [dict(row) for row in sf._conn.execute(
+            "SELECT * FROM skillflow_graph_versions WHERE name=?", (config_name,))],
+    }
+
+
+def _assert_live_reload_snapshot(sf, registry, config_name, role, before):
+    assert sf._resolvers[config_name].graph.to_dict() == before["graph"]
+    assert sf.agent_registry.get(role).to_dict() == before["role"]
+    assert registry.get(config_name) is before["manifest"]
+    assert [dict(row) for row in sf._conn.execute(
+        "SELECT * FROM skillflow_graphs WHERE name=?", (config_name,))
+    ] == before["graph_rows"]
+    assert [dict(row) for row in sf._conn.execute(
+        "SELECT * FROM skillflow_graph_versions WHERE name=?", (config_name,))
+    ] == before["versions"]
+
+
+def test_reload_rejects_mapping_role_without_mutating_files_or_live_state(
+        tmp_path, registry, gdir):
+    sf, name, role, yaml_file, role_file = _live_release_reload(
+        tmp_path, registry, gdir)
+    before = _live_reload_snapshot(sf, registry, name, role)
+    role_file.write_text(json.dumps({
+        role: {"tools": {"run_tests": {"nested": True}}}}))
+    yaml_bytes, role_bytes = yaml_file.read_bytes(), role_file.read_bytes()
+
+    result = pr.reload_generated_pipeline(sf, registry, name)
+
+    assert "mapping keys are executable" in result["error"]
+    assert yaml_file.read_bytes() == yaml_bytes
+    assert role_file.read_bytes() == role_bytes
+    assert sf.agent_registry.get(role).tools == ["read_file"]
+    assert set(sf.agent_registry.get(role).tool_schemas) == {"read_file"}
+    _assert_live_reload_snapshot(sf, registry, name, role, before)
+
+
+def test_reload_restores_exact_live_state_when_manifest_registration_fails(
+        tmp_path, registry, gdir, monkeypatch):
+    sf, name, role, yaml_file, role_file = _live_release_reload(
+        tmp_path, registry, gdir)
+    before = _live_reload_snapshot(sf, registry, name, role)
+    document = yaml.safe_load(yaml_file.read_text())
+    document["description"] = "validated replacement"
+    yaml_file.write_text(yaml.safe_dump(document, sort_keys=False))
+    role_file.write_text(json.dumps({role: {
+        "tools": ["list_tree"], "system_prompt": "replacement role"}}))
+    yaml_bytes, role_bytes = yaml_file.read_bytes(), role_file.read_bytes()
+
+    def fail_manifest(*_args, **_kwargs):
+        raise RuntimeError("injected manifest failure")
+
+    monkeypatch.setattr(registry, "register_one", fail_manifest)
+    result = pr.reload_generated_pipeline(sf, registry, name)
+
+    assert "injected manifest failure" in result["error"]
+    assert yaml_file.read_bytes() == yaml_bytes
+    assert role_file.read_bytes() == role_bytes
+    _assert_live_reload_snapshot(sf, registry, name, role, before)
 
 
 def test_no_output_yaml_returns_error(sf, registry, gdir, monkeypatch):

@@ -1,179 +1,767 @@
 {
-  "run_id": "raw-edit-correction-20260913-1048",
-  "model_requested": "deepseek/deepseek-flash",
+  "attempt_id": "attempt-b026b5b915e64fcbb077d742ed0ccce3",
+  "context_hash": "ef1d154d82932b8682499ba2a8cbff9640f5e7ed1945e904030b0c15b04af1bb",
+  "contract_hash": "e478ed6a3a35e0b3db6ca647df900ba00507d7cea219c5d7bd663398797e8d60",
+  "candidate_commit": "df614111cebe8c7df3e95adfe9fb4bc4bed134b4",
+  "candidate_tree": "15917fc785fb0a91b3fbff78cc2b586b81a900b4",
   "skillflow_version": "1.5.75",
-  "candidate_path": "/home/linxuhao/.AItelier/workspaces/raw-edit-correction-20260913-1048/revision.tmp",
-  "promoted_path": "/home/linxuhao/.AItelier/workspaces/raw-edit-correction-20260913-1048/revision",
-  "tool_names": [
-    "edit",
-    "read"
-  ],
-  "turns": [
+  "model_requested": "deepseek/deepseek-flash",
+  "provider_responses": [
     {
-      "seq": 1,
-      "request_sha256": "e6f30d33cf334254c6f81941b4b111d35fae82fcb419ac73c28dc6477b37f38a",
+      "response_id": "49410d51-2aba-4e2f-b5cb-18f8f0c4f218",
       "served_by": "deepseek/deepseek-flash",
-      "model_route": null,
-      "usage": {
-        "prompt_tokens": 644,
-        "completion_tokens": 98,
-        "cache_hit_tokens": 0,
-        "cache_miss_tokens": 644,
-        "hit_ratio": 0.0,
-        "served_by": "deepseek/deepseek-flash"
-      },
-      "elapsed_s": 1.244,
-      "assistant_text": "I'll follow the sequence exactly, one call per turn.\n\n**Step 1:** Attempt the edit with absent old text.",
-      "tool_calls": [
-        {
-          "id": "call_00_PJEI0DezEh1vmZo5beqT5296",
-          "name": "edit",
-          "args": {
-            "file": "report.md",
-            "old_str": "stale projection",
-            "new_str": "unused"
-          },
-          "result": {
-            "error": "edit: 'old_str' not found in 'report.md'",
-            "hint": "Re-read the file with raw=true, omitting source for the current worktree, or source='self' for this step's own output. Copy exact original text, including tabs, spaces and line endings, without display line-number prefixes. No whitespace-fuzzy replacement is performed."
-          }
-        }
-      ],
-      "truncated": false
+      "model": "deepseek/deepseek-flash",
+      "request_fingerprint": "22d2c5def5fcc9a9bc4ac1daea352bfcae6675404555b6d10433a7d68a5ae383"
     },
     {
-      "seq": 2,
-      "request_sha256": "7629c832b0189fd559bee303ad9ce62ea64ce56b5354f3485191c2d8f15d5a72",
+      "response_id": "03213f12-7644-45ca-8e24-e9335eb89d04",
       "served_by": "deepseek/deepseek-flash",
-      "model_route": null,
-      "usage": {
-        "prompt_tokens": 834,
-        "completion_tokens": 100,
-        "cache_hit_tokens": 640,
-        "cache_miss_tokens": 194,
-        "hit_ratio": 0.7674,
-        "served_by": "deepseek/deepseek-flash"
-      },
-      "elapsed_s": 1.183,
-      "assistant_text": "Step 1 failed as expected — `stale projection` is absent. Preserving that failure.\n\n**Step 2:** Read the current candidate text exactly.",
-      "tool_calls": [
-        {
-          "id": "call_00_gtWqeShretgTRUSWiW6R8977",
-          "name": "read",
-          "args": {
-            "path": "report.md",
-            "source": "self",
-            "raw": true
-          },
-          "result": {
-            "content": "标题\r\n\tunchanged🙂\r\nneedle\t🙂\r\n尾部\r\n",
-            "start_line": 0,
-            "returned_lines": 4,
-            "total_lines": 4,
-            "truncated": false,
-            "source": "candidate",
-            "path": "report.md"
-          }
-        }
-      ],
-      "truncated": false
+      "model": "deepseek/deepseek-flash",
+      "request_fingerprint": "0f73c535d3775af07b222d648b38465cdb96db9a34f113779a641e7c8c6541c9"
     },
     {
-      "seq": 3,
-      "request_sha256": "40f6ac5b1fce1d702f64abbae74c676574bc1a8c9088ba92ac965d130c3e1c8e",
+      "response_id": "2d103ce2-9cbd-4a83-8fad-673ebd34d6bb",
       "served_by": "deepseek/deepseek-flash",
-      "model_route": null,
-      "usage": {
-        "prompt_tokens": 1016,
-        "completion_tokens": 138,
-        "cache_hit_tokens": 768,
-        "cache_miss_tokens": 248,
-        "hit_ratio": 0.7559,
-        "served_by": "deepseek/deepseek-flash"
-      },
-      "elapsed_s": 1.175,
-      "assistant_text": "Step 2 returned the exact candidate text. The target line is `needle\\t🙂` (tab between `needle` and the emoji), with CRLF line endings.\n\n**Step 3:** Replace exactly `needle\\t🙂` with `needle\\t🌙`.",
-      "tool_calls": [
-        {
-          "id": "call_00_DBMLdZsYMwJKdtIfcSoX3886",
-          "name": "edit",
-          "args": {
-            "file": "report.md",
-            "old_str": "needle\t🙂",
-            "new_str": "needle\t🌙"
-          },
-          "result": {
-            "edited": "report.md"
-          }
-        }
-      ],
-      "truncated": false
+      "model": "deepseek/deepseek-flash",
+      "request_fingerprint": "1f7510a42195c98aa589f96b3d1448d9f100788e34bd1fcd719358b98774562b"
     },
     {
-      "seq": 4,
-      "request_sha256": "50eaec9f09bb99d8aa5a05764d3b8d27a147a832b2a19ded4bc62504a47decd0",
+      "response_id": "31cfec7b-6fe6-47f1-ada2-3310efe01edd",
       "served_by": "deepseek/deepseek-flash",
-      "model_route": null,
-      "usage": {
-        "prompt_tokens": 1173,
-        "completion_tokens": 109,
-        "cache_hit_tokens": 1024,
-        "cache_miss_tokens": 149,
-        "hit_ratio": 0.873,
-        "served_by": "deepseek/deepseek-flash"
-      },
-      "elapsed_s": 0.781,
-      "assistant_text": "Step 3 succeeded — the exact tab-separated `needle\t🙂` was replaced with `needle\t🌙`.\n\n**Step 4:** Read the intentionally ambiguous path.",
-      "tool_calls": [
-        {
-          "id": "call_00_1F0ua43JhOPh6tgKJ5bO9880",
-          "name": "read",
-          "args": {
-            "path": "missing/target.md",
-            "raw": true,
-            "source": "self"
-          },
-          "result": {
-            "error": "File not found: missing/target.md",
-            "candidates": [
-              {
-                "path": "a/target.md",
-                "source": "candidate"
-              },
-              {
-                "path": "b/target.md",
-                "source": "candidate"
-              }
-            ],
-            "hint": "several files share that basename — re-call read with one of these exact paths"
-          }
-        }
-      ],
-      "truncated": false
+      "model": "deepseek/deepseek-flash",
+      "request_fingerprint": "245dd511653693fa895c7b0bcaf5e869905f4387bf7f31d350408b8ee07dbe6f"
     },
     {
-      "seq": 5,
-      "request_sha256": "190c196c8949b5d860c1940bf39821ee1e4d764ea298c9fd8af5dbdd4b1770d5",
+      "response_id": "6bb63d26-5450-4b28-9ff6-8396a9a49d56",
       "served_by": "deepseek/deepseek-flash",
-      "model_route": null,
-      "usage": {
-        "prompt_tokens": 1368,
-        "completion_tokens": 162,
-        "cache_hit_tokens": 1152,
-        "cache_miss_tokens": 216,
-        "hit_ratio": 0.8421,
-        "reasoning_tokens": 0,
-        "served_by": "deepseek/deepseek-flash"
-      },
-      "elapsed_s": 1.642,
-      "assistant_text": "Step 4 returned the ambiguity as expected: `missing/target.md` does not resolve, and two candidates share the basename — `a/target.md` and `b/target.md`.\n\nI am refusing to guess between them and will not edit either. Stopping here as instructed.\n\n**Sequence summary:**\n1. ✅ Edit with `stale projection` → failed (old_str absent); failure preserved.\n2. ✅ Read `report.md` (source=self, raw=true) → exact candidate text obtained.\n3. ✅ Edit `needle\\t🙂` → `needle\\t🌙` → succeeded.\n4. ✅ Read `missing/target.md` → ambiguous (a/target.md, b/target.md); no guess, no edit.\n\nNo further tool calls made.",
-      "tool_calls": [],
-      "truncated": false
+      "model": "deepseek/deepseek-flash",
+      "request_fingerprint": "266669fa4f9719b60e40eccffa05d680ddd4248987cc97a01def87f8bf9b3b60"
+    },
+    {
+      "response_id": "02ff29f2-ffda-4358-ab0d-f80afd2ec4f6",
+      "served_by": "deepseek/deepseek-flash",
+      "model": "deepseek/deepseek-flash",
+      "request_fingerprint": "55b3a42543f27778a0116c333bcab537923abf26ab617d58112a3f529e061901"
+    },
+    {
+      "response_id": "9e79b1dd-eaaf-49c1-ab81-c682b07a0381",
+      "served_by": "deepseek/deepseek-flash",
+      "model": "deepseek/deepseek-flash",
+      "request_fingerprint": "754a81efe75eb06217d0d2b48932334c00b31fe4c0c47d0c49de561d84651a4f"
     }
   ],
-  "started_at": "2026-09-13T02:46:12Z",
+  "native_trace_events": [
+    {
+      "category": "prompt",
+      "event": "user_prompt",
+      "payload": {
+        "attempt": 1,
+        "mode": "native",
+        "system": "You are performing an exact artifact recovery. Follow the recovery sequence in the assignment one tool call at a time. Preserve every first failure and refuse ambiguity.",
+        "user": "\n\n[Output Delivery — REQUIRED]\nYou are in native tool-calling mode. Produce every output file by CALLING the matching write tool (`create`, `edit`). Do NOT paste file contents as text, Markdown, or a JSON object in your reply — anything not written via a tool call is discarded and the step will fail validation. The step is complete only once you have called the write tool(s) for all required files.\nWhen REVISING a previous version (reviewer/user feedback in context), PREFER the edit tool(s) (`edit`): change exactly the flagged spots — the unflagged rest is carried through verbatim. Rewriting the whole file from memory silently corrupts parts nobody complained about. Full-file writes are for authoring from scratch or when feedback demands a restructure.\nIf an edit returns an `old_str`-not-found or does-not-match error, preserve that first failure and do not retry the same text. Immediately call `read` for the same path with `raw=true, source=\"self\"`; use its exact returned text to construct one new local `old_str`, then retry the edit. Do not copy line numbers, projections, compacted context, or recalled summaries into `old_str`. Do not use fuzzy matching and do not rewrite the whole file. A raw read is the current staging candidate, so untouched bytes remain carried forward. Keep recovery bounded: page a large file with `start_line`/`end_line` around the target. If a tool result is projected behind an `_aitelier_compacted` marker, call `recall_observation` with its shown `sha256` and a narrow `grep` or `start`/`end` range (at most 16K characters); do not rerun the broad tool or request a whole-file rewrite.\n\n[Workspace Layout]\nEach output tool declares its destination.\n**Code**: use repo-relative paths in this run's worktree. Read, search, semantic search and tests use that same worktree, including current edits. Delivery requires validation and review.\n**Artifacts**: plans, task cards, verdicts and reports belong in step output folders. Each revision must contain the complete required artifact set; with carry_forward, unchanged artifacts are preserved automatically. Use an explicit step source to read another step's artifacts.\nCode steps publish change receipts as artifacts. Read their source files from the worktree.\n\n[Today]\nThe current date is 2026-09-13 (UTC, the clock every timestamp in this system uses). Use exactly this date whenever you write one (changelog rows, delivery notes, decision records, design docs). Do NOT infer a date from a neighbouring entry, a filename, an example or a prior round — those are other days, and copying them forward is how a project record ends up dated in the future.\n\n[Pre-resolved Context]\n### assignment\nRecover report.md with the exact bounded sequence. The candidate contains 700 CRLF prefix lines, one unique middle snippet exactly MIDDLE-UNIQUE-🙂-value, then 700 CRLF suffix lines. 1) First call edit(file=report.md, old_str=STALE-PROJECTION, new_str=unused) so the strict miss is recorded; preserve that first failure. 2) Call read(path=report.md, source=self, raw=true, start_line=695, end_line=705) to reread current raw staging bytes and locate the exact middle snippet. Do not edit from projections or line-number prefixes. 3) Call artifact_dump once. Its result is over 16 KiB and will be sent as an _aitelier_compacted marker. Use recall_observation with that marker sha256 and exactly start=9500, end=10200, a bounded slice around the unique middle snippet; do not rerun artifact_dump or request a whole-file rewrite. 4) Call exactly one strict edit replacing only the exact middle snippet with MIDDLE-UNIQUE-🌙-value. 5) Call read(path=missing/target.md, source=self, raw=true); if it returns candidates a/target.md and b/target.md, refuse to guess and make no further edit. Then call finish_step. Never call write/create or rewrite the whole report.\n\n### Artifact revision\nThe complete artifact candidate is available through source='self'. Unchanged artifacts are preserved. Write only additions or changes. Use the artifact delete tool for removals and update the manifest. Validation and publication use this same complete candidate.\n\n[Turn Budget: 9 turns total, then forced output]\nUse the provided output tools to save the required files to their declared destinations. Successful write results confirm the changes are saved. Complete the required checks, then call finish_step as your final tool call to submit the output for validation. Reserve at least one turn for writing.\nRead narrowly: `search` with a `glob` and `context_lines` to FIND, `read` with `start_line`/`end_line` to read a known region. Reading a large file whole spends the context you need for the edit itself.\n\n[Language]\nYou MUST respond in English. All text, code comments, checkpoint messages, project briefs, and UI strings MUST be in English."
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 1,
+        "index": 0,
+        "role": "system",
+        "content": "You are performing an exact artifact recovery. Follow the recovery sequence in the assignment one tool call at a time. Preserve every first failure and refuse ambiguity.",
+        "attempt": 1,
+        "segment": 0
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 1,
+        "index": 1,
+        "role": "user",
+        "content": "\n\n[Output Delivery — REQUIRED]\nYou are in native tool-calling mode. Produce every output file by CALLING the matching write tool (`create`, `edit`). Do NOT paste file contents as text, Markdown, or a JSON object in your reply — anything not written via a tool call is discarded and the step will fail validation. The step is complete only once you have called the write tool(s) for all required files.\nWhen REVISING a previous version (reviewer/user feedback in context), PREFER the edit tool(s) (`edit`): change exactly the flagged spots — the unflagged rest is carried through verbatim. Rewriting the whole file from memory silently corrupts parts nobody complained about. Full-file writes are for authoring from scratch or when feedback demands a restructure.\nIf an edit returns an `old_str`-not-found or does-not-match error, preserve that first failure and do not retry the same text. Immediately call `read` for the same path with `raw=true, source=\"self\"`; use its exact returned text to construct one new local `old_str`, then retry the edit. Do not copy line numbers, projections, compacted context, or recalled summaries into `old_str`. Do not use fuzzy matching and do not rewrite the whole file. A raw read is the current staging candidate, so untouched bytes remain carried forward. Keep recovery bounded: page a large file with `start_line`/`end_line` around the target. If a tool result is projected behind an `_aitelier_compacted` marker, call `recall_observation` with its shown `sha256` and a narrow `grep` or `start`/`end` range (at most 16K characters); do not rerun the broad tool or request a whole-file rewrite.\n\n[Workspace Layout]\nEach output tool declares its destination.\n**Code**: use repo-relative paths in this run's worktree. Read, search, semantic search and tests use that same worktree, including current edits. Delivery requires validation and review.\n**Artifacts**: plans, task cards, verdicts and reports belong in step output folders. Each revision must contain the complete required artifact set; with carry_forward, unchanged artifacts are preserved automatically. Use an explicit step source to read another step's artifacts.\nCode steps publish change receipts as artifacts. Read their source files from the worktree.\n\n[Today]\nThe current date is 2026-09-13 (UTC, the clock every timestamp in this system uses). Use exactly this date whenever you write one (changelog rows, delivery notes, decision records, design docs). Do NOT infer a date from a neighbouring entry, a filename, an example or a prior round — those are other days, and copying them forward is how a project record ends up dated in the future.\n\n[Pre-resolved Context]\n### assignment\nRecover report.md with the exact bounded sequence. The candidate contains 700 CRLF prefix lines, one unique middle snippet exactly MIDDLE-UNIQUE-🙂-value, then 700 CRLF suffix lines. 1) First call edit(file=report.md, old_str=STALE-PROJECTION, new_str=unused) so the strict miss is recorded; preserve that first failure. 2) Call read(path=report.md, source=self, raw=true, start_line=695, end_line=705) to reread current raw staging bytes and locate the exact middle snippet. Do not edit from projections or line-number prefixes. 3) Call artifact_dump once. Its result is over 16 KiB and will be sent as an _aitelier_compacted marker. Use recall_observation with that marker sha256 and exactly start=9500, end=10200, a bounded slice around the unique middle snippet; do not rerun artifact_dump or request a whole-file rewrite. 4) Call exactly one strict edit replacing only the exact middle snippet with MIDDLE-UNIQUE-🌙-value. 5) Call read(path=missing/target.md, source=self, raw=true); if it returns candidates a/target.md and b/target.md, refuse to guess and make no further edit. Then call finish_step. Never call write/create or rewrite the whole report.\n\n### Artifact revision\nThe complete artifact candidate is available through source='self'. Unchanged artifacts are preserved. Write only additions or changes. Use the artifact delete tool for removals and update the manifest. Validation and publication use this same complete candidate.\n\n[Turn Budget: 9 turns total, then forced output]\nUse the provided output tools to save the required files to their declared destinations. Successful write results confirm the changes are saved. Complete the required checks, then call finish_step as your final tool call to submit the output for validation. Reserve at least one turn for writing.\nRead narrowly: `search` with a `glob` and `context_lines` to FIND, `read` with `start_line`/`end_line` to read a known region. Reading a large file whole spends the context you need for the edit itself.\n\n[Language]\nYou MUST respond in English. All text, code comments, checkpoint messages, project briefs, and UI strings MUST be in English.",
+        "attempt": 1,
+        "segment": 0
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "context_budget_unknown",
+      "payload": {
+        "attempt": 1,
+        "turn": 1,
+        "limit": null,
+        "estimated_prompt_tokens": 4053,
+        "output_reserve": 1024,
+        "handoff": false,
+        "unknown": true
+      }
+    },
+    {
+      "category": "usage",
+      "event": "token_usage",
+      "payload": {
+        "step_id": "design",
+        "attempt": 1,
+        "turn": 1,
+        "context_segment": 0,
+        "outbound_fingerprint": "22d2c5def5fcc9a9bc4ac1daea352bfcae6675404555b6d10433a7d68a5ae383",
+        "outbound_first_changed_position": 0,
+        "outbound_append_only": false,
+        "outbound_message_count": 2,
+        "prompt_tokens": 3404,
+        "completion_tokens": 105,
+        "cache_hit_tokens": 2816,
+        "cache_miss_tokens": 588,
+        "hit_ratio": 0.8273,
+        "served_by": "deepseek/deepseek-flash"
+      }
+    },
+    {
+      "category": "response",
+      "event": "agent_response",
+      "payload": {
+        "attempt": 1,
+        "turn": 1,
+        "text": "I'll follow the exact bounded sequence, one tool call at a time.\n\n**Step 1:** Record the strict miss with the stale projection.",
+        "reasoning_content": "",
+        "tool_calls": [
+          {
+            "name": "edit",
+            "arguments": "{\"file\": \"report.md\", \"old_str\": \"STALE-PROJECTION\", \"new_str\": \"unused\"}"
+          }
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 1,
+        "index": 2,
+        "role": "assistant",
+        "content": "I'll follow the exact bounded sequence, one tool call at a time.\n\n**Step 1:** Record the strict miss with the stale projection.",
+        "attempt": 1,
+        "segment": 0,
+        "tool_calls": "[{\"id\": \"call_00_gSty0jPxf7ddBWnurPVj9996\", \"type\": \"function\", \"function\": {\"name\": \"edit\", \"arguments\": \"{\\\"file\\\": \\\"report.md\\\", \\\"old_str\\\": \\\"STALE-PROJECTION\\\", \\\"new_str\\\": \\\"unused\\\"}\"}}]"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 1,
+        "index": 3,
+        "role": "tool",
+        "content": "{\"error\": \"edit: 'old_str' not found in 'report.md'\", \"hint\": \"Re-read the file with raw=true, omitting source for the current worktree, or source='self' for this step's own output. Copy exact original text, including tabs, spaces and line endings, without display line-number prefixes. No whitespace-fuzzy replacement is performed.\"}",
+        "attempt": 1,
+        "segment": 0,
+        "tool_call_id": "call_00_gSty0jPxf7ddBWnurPVj9996",
+        "name": "edit"
+      }
+    },
+    {
+      "category": "usage",
+      "event": "token_usage",
+      "payload": {
+        "step_id": "design",
+        "attempt": 1,
+        "turn": 2,
+        "context_segment": 0,
+        "outbound_fingerprint": "0f73c535d3775af07b222d648b38465cdb96db9a34f113779a641e7c8c6541c9",
+        "outbound_first_changed_position": 3,
+        "outbound_append_only": true,
+        "outbound_message_count": 4,
+        "prompt_tokens": 3601,
+        "completion_tokens": 129,
+        "cache_hit_tokens": 3456,
+        "cache_miss_tokens": 145,
+        "hit_ratio": 0.9597,
+        "served_by": "deepseek/deepseek-flash"
+      }
+    },
+    {
+      "category": "response",
+      "event": "agent_response",
+      "payload": {
+        "attempt": 1,
+        "turn": 2,
+        "text": "First failure preserved: `old_str` not found. Now step 2 — reread the raw staging bytes around the middle snippet.",
+        "reasoning_content": "",
+        "tool_calls": [
+          {
+            "name": "read",
+            "arguments": "{\"path\": \"report.md\", \"source\": \"self\", \"raw\": true, \"start_line\": 695, \"end_line\": 705}"
+          }
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 2,
+        "index": 4,
+        "role": "assistant",
+        "content": "First failure preserved: `old_str` not found. Now step 2 — reread the raw staging bytes around the middle snippet.",
+        "attempt": 1,
+        "segment": 0,
+        "tool_calls": "[{\"id\": \"call_00_G1GbtcZEDfr7EeoT2eCm4127\", \"type\": \"function\", \"function\": {\"name\": \"read\", \"arguments\": \"{\\\"path\\\": \\\"report.md\\\", \\\"source\\\": \\\"self\\\", \\\"raw\\\": true, \\\"start_line\\\": 695, \\\"end_line\\\": 705}\"}}]"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 2,
+        "index": 5,
+        "role": "tool",
+        "content": "{\"content\": \"prefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nMIDDLE-UNIQUE-🙂-value\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\n\", \"start_line\": 695, \"returned_lines\": 10, \"total_lines\": 1401, \"truncated\": true, \"source\": \"candidate\", \"path\": \"report.md\"}",
+        "attempt": 1,
+        "segment": 0,
+        "tool_call_id": "call_00_G1GbtcZEDfr7EeoT2eCm4127",
+        "name": "read"
+      }
+    },
+    {
+      "category": "usage",
+      "event": "token_usage",
+      "payload": {
+        "step_id": "design",
+        "attempt": 1,
+        "turn": 3,
+        "context_segment": 0,
+        "outbound_fingerprint": "1f7510a42195c98aa589f96b3d1448d9f100788e34bd1fcd719358b98774562b",
+        "outbound_first_changed_position": 5,
+        "outbound_append_only": true,
+        "outbound_message_count": 6,
+        "prompt_tokens": 3843,
+        "completion_tokens": 51,
+        "cache_hit_tokens": 3584,
+        "cache_miss_tokens": 259,
+        "hit_ratio": 0.9326,
+        "served_by": "deepseek/deepseek-flash"
+      }
+    },
+    {
+      "category": "response",
+      "event": "agent_response",
+      "payload": {
+        "attempt": 1,
+        "turn": 3,
+        "text": "The exact middle snippet is `MIDDLE-UNIQUE-🙂-value`. Now step 3 — call `artifact_dump` once.",
+        "reasoning_content": "",
+        "tool_calls": [
+          {
+            "name": "artifact_dump",
+            "arguments": "{}"
+          }
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 3,
+        "index": 6,
+        "role": "assistant",
+        "content": "The exact middle snippet is `MIDDLE-UNIQUE-🙂-value`. Now step 3 — call `artifact_dump` once.",
+        "attempt": 1,
+        "segment": 0,
+        "tool_calls": "[{\"id\": \"call_00_jtJkUi5HvZ6kHFWdlHEH4659\", \"type\": \"function\", \"function\": {\"name\": \"artifact_dump\", \"arguments\": \"{}\"}}]"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 3,
+        "index": 7,
+        "role": "tool",
+        "content": "{\"content\": \"prefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nprefix bytes\\r\\nMIDDLE-UNIQUE-🙂-value\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\nsuffix bytes\\r\\n\"}",
+        "attempt": 1,
+        "segment": 0,
+        "observation_ref": "1f259df09ebee8fddda1df3dba127a3d0e85e3565ca14a5a6834c01dee6592b9",
+        "tool_call_id": "call_00_jtJkUi5HvZ6kHFWdlHEH4659",
+        "name": "artifact_dump"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 4,
+        "original_chars": 28408,
+        "projected_chars": 6847,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    },
+    {
+      "category": "usage",
+      "event": "token_usage",
+      "payload": {
+        "step_id": "design",
+        "attempt": 1,
+        "turn": 4,
+        "context_segment": 0,
+        "outbound_fingerprint": "245dd511653693fa895c7b0bcaf5e869905f4387bf7f31d350408b8ee07dbe6f",
+        "outbound_first_changed_position": 7,
+        "outbound_append_only": true,
+        "outbound_message_count": 8,
+        "prompt_tokens": 4201,
+        "completion_tokens": 98,
+        "cache_hit_tokens": 3840,
+        "cache_miss_tokens": 361,
+        "hit_ratio": 0.9141,
+        "served_by": "deepseek/deepseek-flash"
+      }
+    },
+    {
+      "category": "response",
+      "event": "agent_response",
+      "payload": {
+        "attempt": 1,
+        "turn": 4,
+        "text": "The dump is compacted. Now recall the bounded slice around the unique middle snippet.",
+        "reasoning_content": "",
+        "tool_calls": [
+          {
+            "name": "recall_observation",
+            "arguments": "{\"sha256\": \"1f259df09ebee8fd\", \"start\": 9500, \"end\": 10200}"
+          }
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 4,
+        "index": 8,
+        "role": "assistant",
+        "content": "The dump is compacted. Now recall the bounded slice around the unique middle snippet.",
+        "attempt": 1,
+        "segment": 0,
+        "tool_calls": "[{\"id\": \"call_00_IEHHuqaMST9ec9tP7ALi1707\", \"type\": \"function\", \"function\": {\"name\": \"recall_observation\", \"arguments\": \"{\\\"sha256\\\": \\\"1f259df09ebee8fd\\\", \\\"start\\\": 9500, \\\"end\\\": 10200}\"}}]"
+      }
+    },
+    {
+      "category": "step",
+      "event": "observation_recalled",
+      "payload": {
+        "sha256": "1f259df09ebee8fd",
+        "grep": null,
+        "start": 9500,
+        "end": 10200,
+        "returned_chars": 700,
+        "matches": null,
+        "error": null
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 4,
+        "index": 9,
+        "role": "tool",
+        "content": "{\"sha256\": \"1f259df09ebee8fd\", \"original_chars\": 22440, \"start\": 9500, \"end\": 10200, \"content\": \"nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix bytes\\\\r\\\\nprefix byte\", \"truncated\": true, \"next_start\": 10200}",
+        "attempt": 1,
+        "segment": 0,
+        "tool_call_id": "call_00_IEHHuqaMST9ec9tP7ALi1707",
+        "name": "recall_observation"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 5,
+        "original_chars": 29418,
+        "projected_chars": 7857,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    },
+    {
+      "category": "usage",
+      "event": "token_usage",
+      "payload": {
+        "step_id": "design",
+        "attempt": 1,
+        "turn": 5,
+        "context_segment": 0,
+        "outbound_fingerprint": "266669fa4f9719b60e40eccffa05d680ddd4248987cc97a01def87f8bf9b3b60",
+        "outbound_first_changed_position": 9,
+        "outbound_append_only": true,
+        "outbound_message_count": 10,
+        "prompt_tokens": 4629,
+        "completion_tokens": 129,
+        "cache_hit_tokens": 4224,
+        "cache_miss_tokens": 405,
+        "hit_ratio": 0.9125,
+        "served_by": "deepseek/deepseek-flash"
+      }
+    },
+    {
+      "category": "response",
+      "event": "agent_response",
+      "payload": {
+        "attempt": 1,
+        "turn": 5,
+        "text": "The slice confirms the surrounding prefix bytes; the unique snippet is `MIDDLE-UNIQUE-🙂-value` as read from raw staging bytes. Now step 4 — exactly one strict edit.",
+        "reasoning_content": "",
+        "tool_calls": [
+          {
+            "name": "edit",
+            "arguments": "{\"file\": \"report.md\", \"new_str\": \"MIDDLE-UNIQUE-🌙-value\", \"old_str\": \"MIDDLE-UNIQUE-🙂-value\"}"
+          }
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 5,
+        "index": 10,
+        "role": "assistant",
+        "content": "The slice confirms the surrounding prefix bytes; the unique snippet is `MIDDLE-UNIQUE-🙂-value` as read from raw staging bytes. Now step 4 — exactly one strict edit.",
+        "attempt": 1,
+        "segment": 0,
+        "tool_calls": "[{\"id\": \"call_00_ReQkM0SOFhYRwM2kCMGZ7488\", \"type\": \"function\", \"function\": {\"name\": \"edit\", \"arguments\": \"{\\\"file\\\": \\\"report.md\\\", \\\"new_str\\\": \\\"MIDDLE-UNIQUE-🌙-value\\\", \\\"old_str\\\": \\\"MIDDLE-UNIQUE-🙂-value\\\"}\"}}]"
+      }
+    },
+    {
+      "category": "step",
+      "event": "side_effect_completed",
+      "payload": {
+        "tool": "edit",
+        "call_key": "0ef54db29d851d60eb72cb4558a38bf1bfdcec255a4c30f201ae6fb3338cfdad",
+        "result_ref": "c7ed83cf35a3fd894d68782b5a468da581e95f4a696781e467e9a2db902f60dc",
+        "result_json": "{\"edited\": \"report.md\", \"path\": \"design/report.md\", \"note\": \"staged; readable by later steps at this path\"}",
+        "written_files": [
+          "report.md"
+        ],
+        "effect": ""
+      }
+    },
+    {
+      "category": "step",
+      "event": "implementation_first_write",
+      "payload": {
+        "step_id": "design",
+        "first_write_turn": 5,
+        "written_files": [
+          "report.md"
+        ],
+        "reads_searches": 1
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 5,
+        "index": 11,
+        "role": "tool",
+        "content": "{\"edited\": \"report.md\", \"path\": \"design/report.md\", \"note\": \"staged; readable by later steps at this path\"}",
+        "attempt": 1,
+        "segment": 0,
+        "tool_call_id": "call_00_ReQkM0SOFhYRwM2kCMGZ7488",
+        "name": "edit"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 6,
+        "original_chars": 29689,
+        "projected_chars": 8128,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    },
+    {
+      "category": "usage",
+      "event": "token_usage",
+      "payload": {
+        "step_id": "design",
+        "attempt": 1,
+        "turn": 6,
+        "context_segment": 0,
+        "outbound_fingerprint": "55b3a42543f27778a0116c333bcab537923abf26ab617d58112a3f529e061901",
+        "outbound_first_changed_position": 11,
+        "outbound_append_only": true,
+        "outbound_message_count": 12,
+        "prompt_tokens": 4801,
+        "completion_tokens": 83,
+        "cache_hit_tokens": 4608,
+        "cache_miss_tokens": 193,
+        "hit_ratio": 0.9598,
+        "served_by": "deepseek/deepseek-flash"
+      }
+    },
+    {
+      "category": "response",
+      "event": "agent_response",
+      "payload": {
+        "attempt": 1,
+        "turn": 6,
+        "text": "Edit applied. Now step 5 — read the ambiguous path.",
+        "reasoning_content": "",
+        "tool_calls": [
+          {
+            "name": "read",
+            "arguments": "{\"path\": \"missing/target.md\", \"raw\": true, \"source\": \"self\"}"
+          }
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 6,
+        "index": 12,
+        "role": "assistant",
+        "content": "Edit applied. Now step 5 — read the ambiguous path.",
+        "attempt": 1,
+        "segment": 0,
+        "tool_calls": "[{\"id\": \"call_00_gltZa0g3apcnFzo2uSnN4320\", \"type\": \"function\", \"function\": {\"name\": \"read\", \"arguments\": \"{\\\"path\\\": \\\"missing/target.md\\\", \\\"raw\\\": true, \\\"source\\\": \\\"self\\\"}\"}}]"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 6,
+        "index": 13,
+        "role": "tool",
+        "content": "{\"error\": \"File not found: missing/target.md\", \"candidates\": [{\"path\": \"a/target.md\", \"source\": \"candidate\"}, {\"path\": \"b/target.md\", \"source\": \"candidate\"}], \"hint\": \"several files share that basename — re-call read with one of these exact paths\"}",
+        "attempt": 1,
+        "segment": 0,
+        "tool_call_id": "call_00_gltZa0g3apcnFzo2uSnN4320",
+        "name": "read"
+      }
+    },
+    {
+      "category": "step",
+      "event": "turn_budget_low",
+      "payload": {
+        "step_id": "design",
+        "remaining": 3,
+        "max_turns": 9,
+        "written_files": [
+          "report.md"
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 7,
+        "index": 14,
+        "role": "user",
+        "content": "[Turn Budget: 3 of 9 turns remain] Stop exploring. If every output this step owes is already written, call finish_step THIS turn: do not spend the remaining turns re-reading, re-listing or re-counting what you wrote — verification is the next step's job, and a step that is cut off while checking itself looks identical to one that never finished. Otherwise finish EVERY output this step owes — if you declared a manifest, index or list, every item it names must exist before you call finish_step. If real work remains (files or scenarios you have not written yet), call ask_more_turns(turns=N, reason=\"what remains\") NOW — at most 2 grants of up to 8 turns per step. Only when that is exhausted, say so explicitly in the output you do write rather than leaving items silently missing.",
+        "attempt": 1,
+        "segment": 0
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 7,
+        "original_chars": 30773,
+        "projected_chars": 9212,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    },
+    {
+      "category": "usage",
+      "event": "token_usage",
+      "payload": {
+        "step_id": "design",
+        "attempt": 1,
+        "turn": 7,
+        "context_segment": 0,
+        "outbound_fingerprint": "754a81efe75eb06217d0d2b48932334c00b31fe4c0c47d0c49de561d84651a4f",
+        "outbound_first_changed_position": 13,
+        "outbound_append_only": true,
+        "outbound_message_count": 15,
+        "prompt_tokens": 5144,
+        "completion_tokens": 377,
+        "cache_hit_tokens": 4864,
+        "cache_miss_tokens": 280,
+        "hit_ratio": 0.9456,
+        "served_by": "deepseek/deepseek-flash"
+      }
+    },
+    {
+      "category": "response",
+      "event": "agent_response",
+      "payload": {
+        "attempt": 1,
+        "turn": 7,
+        "text": "The read returned two candidates (`a/target.md` and `b/target.md`). Per the assignment, I refuse to guess and make no further edit. The required sequence is complete.",
+        "reasoning_content": "",
+        "tool_calls": [
+          {
+            "name": "finish_step",
+            "arguments": "{\"summary\": \"Executed the exact bounded recovery sequence for report.md:\\n\\n1. First call: edit(file=report.md, old_str=STALE-PROJECTION, new_str=unused) → strict miss recorded (\\\"'old_str' not found in 'report.md'\\\"). First failure preserved, not retried.\\n2. read(path=report.md, source=self, raw=true, start_line=695, end_line=705) → located the exact middle snippet `MIDDLE-UNIQUE-🙂-value` from raw staging bytes (no line-number prefixes used).\\n3. artifact_dump called once → result over 16 KiB, returned as an _aitelier_compacted marker (sha256=1f259df09ebee8fd). Recovered a bounded slice via recall_observation(sha256=1f259df09ebee8fd, start=9500, end=10200) around the unique middle snippet; artifact_dump was not rerun.\\n4. Exactly one strict edit applied: replaced only `MIDDLE-UNIQUE-🙂-value` with `MIDDLE-UNIQUE-🌙-value` (staged at design/report.md). No whole-file rewrite, no create/write used.\\n5. read(path=missing/target.md, source=self, raw=true) → returned candidates a/target.md and b/target.md. Refused to guess; made no further edit.\\n\\nSequence complete; no additional artifacts owed.\"}"
+          }
+        ]
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 7,
+        "index": 15,
+        "role": "assistant",
+        "content": "The read returned two candidates (`a/target.md` and `b/target.md`). Per the assignment, I refuse to guess and make no further edit. The required sequence is complete.",
+        "attempt": 1,
+        "segment": 0,
+        "tool_calls": "[{\"id\": \"call_00_M0GagnQPE5rUV03DAI9T1809\", \"type\": \"function\", \"function\": {\"name\": \"finish_step\", \"arguments\": \"{\\\"summary\\\": \\\"Executed the exact bounded recovery sequence for report.md:\\\\n\\\\n1. First call: edit(file=report.md, old_str=STALE-PROJECTION, new_str=unused) → strict miss recorded (\\\\\\\"'old_str' not found in 'report.md'\\\\\\\"). First failure preserved, not retried.\\\\n2. read(path=report.md, source=self, raw=true, start_line=695, end_line=705) → located the exact middle snippet `MIDDLE-UNIQUE-🙂-value` from raw staging bytes (no line-number prefixes used).\\\\n3. artifact_dump called once → result over 16 KiB, returned as an _aitelier_compacted marker (sha256=1f259df09ebee8fd). Recovered a bounded slice via recall_observation(sha256=1f259df09ebee8fd, start=9500, end=10200) around the unique middle snippet; artifact_dump was not rerun.\\\\n4. Exactly one strict edit applied: replaced only `MIDDLE-UNIQUE-🙂-value` with `MIDDLE-UNIQUE-🌙-value` (staged at design/report.md). No whole-file rewrite, no create/write used.\\\\n5. read(path=missing/target.md, source=self, raw=true) → returned candidates a/target.md and b/target.md. Refused to guess; made no further edit.\\\\n\\\\nSequence complete; no additional artifacts owed.\\\"}\"}}]"
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_delta",
+      "payload": {
+        "turn": 7,
+        "index": 16,
+        "role": "tool",
+        "content": "{\"status\": \"completed\", \"summary\": \"Executed the exact bounded recovery sequence for report.md:\\n\\n1. First call: edit(file=report.md, old_str=STALE-PROJECTION, new_str=unused) → strict miss recorded (\\\"'old_str' not found in 'report.md'\\\"). First failure preserved, not retried.\\n2. read(path=report.md, source=self, raw=true, start_line=695, end_line=705) → located the exact middle snippet `MIDDLE-UNIQUE-🙂-value` from raw staging bytes (no line-number prefixes used).\\n3. artifact_dump called once → result over 16 KiB, returned as an _aitelier_compacted marker (sha256=1f259df09ebee8fd). Recovered a bounded slice via recall_observation(sha256=1f259df09ebee8fd, start=9500, end=10200) around the unique middle snippet; artifact_dump was not rerun.\\n4. Exactly one strict edit applied: replaced only `MIDDLE-UNIQUE-🙂-value` with `MIDDLE-UNIQUE-🌙-value` (staged at design/report.md). No whole-file rewrite, no create/write used.\\n5. read(path=missing/target.md, source=self, raw=true) → returned candidates a/target.md and b/target.md. Refused to guess; made no further edit.\\n\\nSequence complete; no additional artifacts owed.\"}",
+        "attempt": 1,
+        "segment": 0,
+        "tool_call_id": "call_00_M0GagnQPE5rUV03DAI9T1809",
+        "name": "finish_step"
+      }
+    }
+  ],
+  "assembled_prompt_payloads": [
+    {
+      "category": "prompt",
+      "event": "user_prompt",
+      "payload": {
+        "attempt": 1,
+        "mode": "native",
+        "system": "You are performing an exact artifact recovery. Follow the recovery sequence in the assignment one tool call at a time. Preserve every first failure and refuse ambiguity.",
+        "user": "\n\n[Output Delivery — REQUIRED]\nYou are in native tool-calling mode. Produce every output file by CALLING the matching write tool (`create`, `edit`). Do NOT paste file contents as text, Markdown, or a JSON object in your reply — anything not written via a tool call is discarded and the step will fail validation. The step is complete only once you have called the write tool(s) for all required files.\nWhen REVISING a previous version (reviewer/user feedback in context), PREFER the edit tool(s) (`edit`): change exactly the flagged spots — the unflagged rest is carried through verbatim. Rewriting the whole file from memory silently corrupts parts nobody complained about. Full-file writes are for authoring from scratch or when feedback demands a restructure.\nIf an edit returns an `old_str`-not-found or does-not-match error, preserve that first failure and do not retry the same text. Immediately call `read` for the same path with `raw=true, source=\"self\"`; use its exact returned text to construct one new local `old_str`, then retry the edit. Do not copy line numbers, projections, compacted context, or recalled summaries into `old_str`. Do not use fuzzy matching and do not rewrite the whole file. A raw read is the current staging candidate, so untouched bytes remain carried forward. Keep recovery bounded: page a large file with `start_line`/`end_line` around the target. If a tool result is projected behind an `_aitelier_compacted` marker, call `recall_observation` with its shown `sha256` and a narrow `grep` or `start`/`end` range (at most 16K characters); do not rerun the broad tool or request a whole-file rewrite.\n\n[Workspace Layout]\nEach output tool declares its destination.\n**Code**: use repo-relative paths in this run's worktree. Read, search, semantic search and tests use that same worktree, including current edits. Delivery requires validation and review.\n**Artifacts**: plans, task cards, verdicts and reports belong in step output folders. Each revision must contain the complete required artifact set; with carry_forward, unchanged artifacts are preserved automatically. Use an explicit step source to read another step's artifacts.\nCode steps publish change receipts as artifacts. Read their source files from the worktree.\n\n[Today]\nThe current date is 2026-09-13 (UTC, the clock every timestamp in this system uses). Use exactly this date whenever you write one (changelog rows, delivery notes, decision records, design docs). Do NOT infer a date from a neighbouring entry, a filename, an example or a prior round — those are other days, and copying them forward is how a project record ends up dated in the future.\n\n[Pre-resolved Context]\n### assignment\nRecover report.md with the exact bounded sequence. The candidate contains 700 CRLF prefix lines, one unique middle snippet exactly MIDDLE-UNIQUE-🙂-value, then 700 CRLF suffix lines. 1) First call edit(file=report.md, old_str=STALE-PROJECTION, new_str=unused) so the strict miss is recorded; preserve that first failure. 2) Call read(path=report.md, source=self, raw=true, start_line=695, end_line=705) to reread current raw staging bytes and locate the exact middle snippet. Do not edit from projections or line-number prefixes. 3) Call artifact_dump once. Its result is over 16 KiB and will be sent as an _aitelier_compacted marker. Use recall_observation with that marker sha256 and exactly start=9500, end=10200, a bounded slice around the unique middle snippet; do not rerun artifact_dump or request a whole-file rewrite. 4) Call exactly one strict edit replacing only the exact middle snippet with MIDDLE-UNIQUE-🌙-value. 5) Call read(path=missing/target.md, source=self, raw=true); if it returns candidates a/target.md and b/target.md, refuse to guess and make no further edit. Then call finish_step. Never call write/create or rewrite the whole report.\n\n### Artifact revision\nThe complete artifact candidate is available through source='self'. Unchanged artifacts are preserved. Write only additions or changes. Use the artifact delete tool for removals and update the manifest. Validation and publication use this same complete candidate.\n\n[Turn Budget: 9 turns total, then forced output]\nUse the provided output tools to save the required files to their declared destinations. Successful write results confirm the changes are saved. Complete the required checks, then call finish_step as your final tool call to submit the output for validation. Reserve at least one turn for writing.\nRead narrowly: `search` with a `glob` and `context_lines` to FIND, `read` with `start_line`/`end_line` to read a known region. Reading a large file whole spends the context you need for the edit itself.\n\n[Language]\nYou MUST respond in English. All text, code comments, checkpoint messages, project briefs, and UI strings MUST be in English."
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 4,
+        "original_chars": 28408,
+        "projected_chars": 6847,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    },
+    {
+      "category": "step",
+      "event": "observation_recalled",
+      "payload": {
+        "sha256": "1f259df09ebee8fd",
+        "grep": null,
+        "start": 9500,
+        "end": 10200,
+        "returned_chars": 700,
+        "matches": null,
+        "error": null
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 5,
+        "original_chars": 29418,
+        "projected_chars": 7857,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 6,
+        "original_chars": 29689,
+        "projected_chars": 8128,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    },
+    {
+      "category": "prompt",
+      "event": "prompt_projection",
+      "payload": {
+        "attempt": 1,
+        "turn": 7,
+        "original_chars": 30773,
+        "projected_chars": 9212,
+        "compacted_tool_results": 1,
+        "compacted_reasoning": 0,
+        "observation_char_limit": 16384,
+        "stable_at_first_send": true
+      }
+    }
+  ],
+  "route_snapshot": {
+    "path": "/app/model_routes.json",
+    "sha256": "edeb94775cc3a8a6a164499ef3075b62178c73a298b25c68aeb947d8003852b7"
+  },
+  "candidate_paths": {
+    "checkout": "/home/linxuhao/.AItelier/workspaces/r4-native-loop-df61411/checkout",
+    "candidate": "/home/linxuhao/.AItelier/workspaces/r4-native-loop-df61411/real-trace/artifacts/p/artifact_projection/design.tmp",
+    "promoted": "/home/linxuhao/.AItelier/workspaces/r4-native-loop-df61411/real-trace/artifacts/p/artifact_projection/design"
+  },
+  "result": {
+    "engine_ok": true,
+    "bytes_exact_expected": true,
+    "original_sha256": "a2b76aadaad099186d2ca25d869029035571c9fd25fd141231831fca77657d2c",
+    "final_sha256": "354743420cec8a2985c0851e288627bbb35c32f153b7b04a5d53f898b2715781",
+    "whole_rewrite": false,
+    "target_replaced": true,
+    "untouched_regions_byte_identical": true
+  },
   "pricing_provenance": {
     "source": "container /app/model_routes.json _deepseek_ids_note",
+    "route_snapshot_sha256": "edeb94775cc3a8a6a164499ef3075b62178c73a298b25c68aeb947d8003852b7",
     "endpoint": "deepseek/deepseek-flash",
     "model_family_note": "deepseek-flash is documented there as DeepSeek-V4.1-Flash",
     "rates_usd_per_million_tokens_off_peak": {
@@ -182,12 +770,5 @@
       "output": 0.6
     },
     "peak_multiplier": 2.0
-  },
-  "candidate_files_after": {
-    "report.md": "0630133d37030a3cc358ea7e37e532abf188303933f04fa8c3190c6b0af6034e",
-    "a/target.md": "87428fc522803d31065e7bce3cf03fe475096631e5e07bbd7a0fde60c4cf25c7",
-    "b/target.md": "0263829989b6fd954f72baaf2fc64bc2e2f01d692d4de72986ea808f6e99813f"
-  },
-  "candidate_report_bytes": "标题\r\n\tunchanged🙂\r\nneedle\t🌙\r\n尾部\r\n",
-  "finished_at": "2026-09-13T02:46:19Z"
+  }
 }

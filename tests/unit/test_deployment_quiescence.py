@@ -808,17 +808,146 @@ def test_finalize_rejects_clearance_missing_a_durable_binding_field(
     assert json.loads(journal.read_text())["latest"] == persisted
 
 
+@pytest.mark.parametrize("event_id", [
+    7, True, None, "not-a-uuid", "A" * 32, "a" * 31,
+])
+def test_finalize_rejects_matching_malformed_persisted_event_ids_without_rewrite(
+        tmp_path, event_id):
+    journal = tmp_path / "journal.json"
+    clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=journal)
+    state = json.loads(journal.read_text())
+    state["events"][-1]["event_id"] = event_id
+    state["latest"]["event_id"] = event_id
+    journal.write_text(json.dumps(state, sort_keys=True))
+    corrupt_bytes = journal.read_bytes()
+    clearance["event"]["event_id"] = event_id
+
+    with pytest.raises(dq.DeploymentBlocked, match="event_id is malformed"):
+        dq.finalize(clearance, success=True, journal=journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+def test_finalize_rejects_orphan_latest_without_rewrite(tmp_path):
+    journal = tmp_path / "journal.json"
+    clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=journal)
+    state = json.loads(journal.read_text())
+    orphan = {**state["latest"], "event_id": "f" * 32}
+    state["latest"] = orphan
+    journal.write_text(json.dumps(state, sort_keys=True))
+    corrupt_bytes = journal.read_bytes()
+    clearance["event"] = orphan
+
+    with pytest.raises(dq.DeploymentBlocked, match="orphaned"):
+        dq.finalize(clearance, success=True, journal=journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+def test_finalize_rejects_divergent_latest_without_rewrite(tmp_path):
+    journal = tmp_path / "journal.json"
+    clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=journal)
+    state = json.loads(journal.read_text())
+    state["latest"]["blockers"] = {"tampered": []}
+    journal.write_text(json.dumps(state, sort_keys=True))
+    corrupt_bytes = journal.read_bytes()
+
+    with pytest.raises(dq.DeploymentBlocked, match="divergent"):
+        dq.finalize(clearance, success=True, journal=journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+def test_finalize_rejects_reordered_transition_history_without_rewrite(tmp_path):
+    journal = tmp_path / "journal.json"
+    observation = _producer_shaped_observation()
+    dq.authorize("restart", observation, journal=journal)
+    clearance = dq.authorize("restart", observation, journal=journal)
+    state = json.loads(journal.read_text())
+    state["events"][0], state["events"][1] = (
+        state["events"][1], state["events"][0])
+    journal.write_text(json.dumps(state, sort_keys=True))
+    corrupt_bytes = journal.read_bytes()
+
+    with pytest.raises(dq.DeploymentBlocked, match="broken event order"):
+        dq.finalize(clearance, success=True, journal=journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+def test_finalize_rejects_truncated_transition_history_without_rewrite(tmp_path):
+    journal = tmp_path / "journal.json"
+    observation = _producer_shaped_observation()
+    first = dq.authorize("restart", observation, journal=journal)
+    dq.finalize(first, success=False, journal=journal)
+    clearance = dq.authorize("restart", observation, journal=journal)
+    state = json.loads(journal.read_text())
+    del state["events"][0]
+    journal.write_text(json.dumps(state, sort_keys=True))
+    corrupt_bytes = journal.read_bytes()
+
+    with pytest.raises(dq.DeploymentBlocked, match="broken event order"):
+        dq.finalize(clearance, success=True, journal=journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+@pytest.mark.parametrize("operation", ["authorize", "reconcile"])
+def test_mutation_paths_reject_missing_latest_without_overwriting_evidence(
+        tmp_path, operation):
+    journal = tmp_path / "journal.json"
+    dq.authorize("restart", _producer_shaped_observation(), journal=journal)
+    state = json.loads(journal.read_text())
+    del state["latest"]
+    journal.write_text(json.dumps(state, sort_keys=True))
+    corrupt_bytes = journal.read_bytes()
+
+    with pytest.raises(dq.DeploymentBlocked, match="missing"):
+        if operation == "authorize":
+            dq.authorize(
+                "restart", _producer_shaped_observation(), journal=journal)
+        else:
+            dq.reconcile(
+                observation=_producer_shaped_observation(), journal=journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+def test_compatible_empty_and_minimal_legacy_journals_remain_usable(tmp_path):
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"version": 1, "events": []}))
+    empty_clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=empty)
+    assert empty_clearance["event"]["status"] == "authorized"
+
+    legacy = tmp_path / "legacy.json"
+    legacy_event = {
+        "event_id": "a" * 32,
+        "status": "aborted",
+        "usable": False,
+    }
+    legacy.write_text(json.dumps({
+        "version": 1, "events": [legacy_event], "latest": legacy_event,
+    }))
+    legacy_clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=legacy)
+    result = dq.finalize(legacy_clearance, success=True, journal=legacy)
+    assert result["event"]["status"] == "completed"
+    assert result["event"]["usable"] is True
+
+
 def test_corrupt_journal_fails_closed(tmp_path):
     journal = tmp_path / "journal.json"
     journal.write_text("{}")
+    corrupt_bytes = journal.read_bytes()
     with pytest.raises(dq.DeploymentBlocked, match="malformed"):
         dq.authorize("restart", {"quiescent": True, "digest": "f" * 64,
                                   "blockers": {}, "errors": []}, journal=journal)
-    backups = list(tmp_path.glob("journal.json.corrupt.*"))
-    assert backups and backups[0].read_bytes() == b"{}"
-    recovered = json.loads(journal.read_text())
-    assert recovered["latest"]["status"] == "aborted"
-    assert recovered["latest"]["usable"] is False
+    assert journal.read_bytes() == corrupt_bytes
+    assert list(tmp_path.glob("journal.json.corrupt.*")) == []
 
 
 def test_malformed_override_is_aborted_and_unusable(tmp_path):

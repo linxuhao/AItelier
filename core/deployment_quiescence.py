@@ -46,6 +46,7 @@ CLEARANCE_EVENT_BINDING_FIELDS = (
 CLEARANCE_EVENT_IDENTITY_FIELDS = (
     "event_id", "action", "inventory_digest",
 )
+JOURNAL_EVENT_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 SIDECAR_DESIRED = frozenset({"ready", "released"})
 SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
 EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled"})
@@ -278,50 +279,52 @@ def _load_journal(path: Path) -> dict:
         raise DeploymentBlocked(
             f"deployment quiescence journal is unreadable at {path}: {exc}; "
             "refusing to replay or start a deployment action") from exc
-    if (not isinstance(value, dict) or value.get("version") != 1
-            or not isinstance(value.get("events"), list)):
+    if (type(value) is not dict or type(value.get("version")) is not int
+            or value["version"] != 1 or type(value.get("events")) is not list):
         raise DeploymentBlocked(
             f"deployment quiescence journal at {path} is malformed; "
             "refusing to replay or start a deployment action")
+    events = value["events"]
+    for index, event in enumerate(events):
+        if type(event) is not dict:
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has a malformed "
+                f"event at index {index}; refusing to replay or start a "
+                "deployment action")
+        event_id = event.get("event_id")
+        if (type(event_id) is not str
+                or JOURNAL_EVENT_ID_PATTERN.fullmatch(event_id) is None):
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} event_id is "
+                f"malformed at index {index}; refusing to replay or start a "
+                "deployment action")
+        if "prior_event_id" in event:
+            prior_event_id = event["prior_event_id"]
+            if (type(prior_event_id) is not str
+                    or JOURNAL_EVENT_ID_PATTERN.fullmatch(prior_event_id) is None
+                    or index == 0
+                    or prior_event_id != events[index - 1].get("event_id")):
+                raise DeploymentBlocked(
+                    f"deployment quiescence journal at {path} has a broken "
+                    f"event order at index {index}; refusing to replay or "
+                    "start a deployment action")
+    if events:
+        latest = value.get("latest")
+        if type(latest) is not dict or _digest(latest) != _digest(events[-1]):
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has missing, orphaned, "
+                "or divergent latest evidence; refusing to replay or start a "
+                "deployment action")
+    elif "latest" in value and value["latest"] is not None:
+        raise DeploymentBlocked(
+            f"deployment quiescence journal at {path} has orphaned latest "
+            "evidence; refusing to replay or start a deployment action")
     return value
 
 
-def _recover_corrupt_journal(path: Path, reason: str) -> dict:
-    """Preserve malformed bytes and replace them with explicit failed evidence."""
-    raw = b""
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        pass
-    digest = hashlib.sha256(raw).hexdigest()
-    backup = path.with_name(f"{path.name}.corrupt.{digest[:16]}")
-    if path.exists() and not backup.exists():
-        try:
-            backup.write_bytes(raw)
-            os.chmod(backup, 0o600)
-        except OSError:
-            # The original is still retained if quarantine cannot be written;
-            # the replacement below remains fail-closed evidence.
-            backup = None
-    event = {"event_id": uuid.uuid4().hex, "at": _now(),
-             "action": "unknown", "status": "aborted", "usable": False,
-             "reason": f"corrupt deployment journal: {reason}",
-             "corrupt_sha256": digest}
-    if backup is not None:
-        event["preserved_bytes"] = str(backup)
-    _atomic_write(path, {"version": 1, "events": [event], "latest": event})
-    return event
-
-
 def _ensure_journal(path: Path) -> None:
-    try:
-        _load_journal(path)
-    except DeploymentBlocked as exc:
-        event = _recover_corrupt_journal(path, str(exc))
-        raise DeploymentBlocked(
-            f"deployment quiescence journal was malformed and converted to "
-            f"aborted/unusable "
-            f"evidence {event['event_id']} at {path}") from exc
+    """Validate a journal without replacing the bytes that prove corruption."""
+    _load_journal(path)
 
 
 @contextmanager

@@ -268,13 +268,16 @@ def operation_admission_fence():
 
 
 def _atomic_write(path: Path, value: dict) -> None:
+    _atomic_write_bytes(path, (json.dumps(value, sort_keys=True, indent=2,
+                                         ensure_ascii=True) + "\n").encode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     tmp = Path(raw)
     try:
         os.fchmod(fd, 0o600)
-        payload = (json.dumps(value, sort_keys=True, indent=2,
-                              ensure_ascii=True) + "\n").encode("utf-8")
         with os.fdopen(fd, "wb") as stream:
             stream.write(payload)
             stream.flush()
@@ -293,20 +296,30 @@ def _atomic_write(path: Path, value: dict) -> None:
         raise
 
 
-def _load_journal(path: Path) -> dict:
-    if not path.exists():
-        return {"version": 1, "events": []}
+def _read_journal_json(path: Path) -> dict:
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError(f"non-finite JSON: {value}")
+
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_bytes(), object_pairs_hook=unique_keys,
+                          parse_constant=reject_constant)
     except (OSError, ValueError) as exc:
-        raise DeploymentBlocked(
-            f"deployment quiescence journal is unreadable at {path}: {exc}; "
-            "refusing to replay or start a deployment action") from exc
+        raise DeploymentBlocked(f"deployment journal is unreadable at {path}: {exc}") from exc
+
+
+def _validate_journal(value: dict, path: Path) -> None:
     if (type(value) is not dict or type(value.get("version")) is not int
-            or value["version"] != 1 or type(value.get("events")) is not list):
-        raise DeploymentBlocked(
-            f"deployment quiescence journal at {path} is malformed; "
-            "refusing to replay or start a deployment action")
+            or value["version"] not in {1, 2}
+            or type(value.get("events")) is not list):
+        raise DeploymentBlocked(f"deployment journal at {path} is malformed")
     events = value["events"]
     seen_event_ids: set[str] = set()
     for index, event in enumerate(events):
@@ -344,7 +357,7 @@ def _load_journal(path: Path) -> dict:
         if legacy_genesis:
             continue
         status = event.get("status")
-        expected_state = JOURNAL_EVENT_STATES.get(status)
+        expected_state = JOURNAL_EVENT_STATES.get(status) if type(status) is str else None
         if expected_state is None:
             raise DeploymentBlocked(
                 f"deployment quiescence journal at {path} has an unknown "
@@ -356,7 +369,7 @@ def _load_journal(path: Path) -> dict:
                 f"deployment quiescence journal at {path} has contradictory "
                 f"pending/usable state at index {index}; refusing to replay "
                 "or start a deployment action")
-        if event.get("action") not in DEPLOY_ACTIONS:
+        if type(event.get("action")) is not str or event["action"] not in DEPLOY_ACTIONS:
             raise DeploymentBlocked(
                 f"deployment quiescence journal at {path} has a malformed "
                 f"action at index {index}; refusing to replay or start a "
@@ -414,7 +427,190 @@ def _load_journal(path: Path) -> dict:
         raise DeploymentBlocked(
             f"deployment quiescence journal at {path} has orphaned latest "
             "evidence; refusing to replay or start a deployment action")
+
+
+def _anchor_path(path: Path) -> Path:
+    return path.with_name(path.name + ".anchor.json")
+
+
+def _chain(journal: dict) -> list[str]:
+    previous = None
+    hashes = []
+    for position, event in enumerate(journal["events"]):
+        previous = _digest({"version": 2, "journal_id": journal["journal_id"],
+                            "position": position, "previous_hash": previous,
+                            "event": event})
+        hashes.append(previous)
+    return hashes
+
+
+def _checkpoint(journal: dict) -> dict:
+    return {"version": 2, "journal_id": journal["journal_id"],
+            "event_count": len(journal["events"]),
+            "genesis_hash": journal["chain"][0] if journal["chain"] else None,
+            "head_hash": journal["chain"][-1] if journal["chain"] else None,
+            "journal_hash": _digest(journal)}
+
+
+def _load_journal(path: Path) -> dict:
+    anchor_path = _anchor_path(path)
+    if not path.exists():
+        if anchor_path.exists() or path.with_name(path.name + ".legacy-v1.backup").exists():
+            raise DeploymentBlocked("deployment journal missing with durable anchor/backup")
+        return {"version": 2, "journal_id": uuid.uuid4().hex, "events": [], "chain": []}
+    value = _read_journal_json(path)
+    _validate_journal(value, path)
+    if value["version"] != 2:
+        raise DeploymentBlocked("legacy deployment journal requires explicit hash-pinned migration")
+    if (set(value) - {"version", "journal_id", "events", "latest", "chain", "migration"}
+            or type(value.get("journal_id")) is not str
+            or JOURNAL_EVENT_ID_PATTERN.fullmatch(value["journal_id"]) is None
+            or value.get("chain") != _chain(value)):
+        raise DeploymentBlocked("deployment journal content-hash chain is malformed or broken")
+    anchor = _read_journal_json(anchor_path)
+    if _digest(anchor) != _digest(_checkpoint(value)):
+        raise DeploymentBlocked("deployment journal durable anchor mismatch; refusing recovery/replay")
     return value
+
+
+def _persist_journal(path: Path, journal: dict) -> None:
+    """Write-ahead checkpoint: a crash between the two renames blocks all use.
+
+    No automatic repair chooses a winner. The last acknowledged pair is durable;
+    an interrupted transaction is evidence, never a usable deployment completion.
+    Callers hold the journal lock across load, append and both durable writes.
+    """
+    journal["chain"] = _chain(journal)
+    _atomic_write(_anchor_path(path), _checkpoint(journal))
+    _atomic_write(path, journal)
+
+
+def _normalize_deployed_legacy(value: dict) -> dict:
+    """Only the deployed v1 producer grammar, not arbitrary missing-field repair."""
+    if (type(value) is not dict or set(value) != {"version", "events", "latest"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or type(value["events"]) is not list or not value["events"]
+            or value["latest"] != value["events"][-1]):
+        raise DeploymentBlocked("malformed deployed legacy journal")
+    normalized = _plain_json_snapshot(value)
+    previous_time = None
+    for index, event in enumerate(normalized["events"]):
+        if type(event) is not dict:
+            raise DeploymentBlocked("malformed deployed legacy event")
+        status = event.get("status")
+        if type(status) is not str:
+            raise DeploymentBlocked("malformed deployed legacy status")
+        base = {"event_id", "at", "action", "status", "usable"}
+        prior = normalized["events"][index - 1] if index else None
+        if status in {"authorized", "overridden"}:
+            required = base | {"pending", "inventory_digest", "blockers", "errors"}
+            if status == "overridden":
+                required.add("audit")
+            if set(event) != required:
+                raise DeploymentBlocked("unknown deployed legacy authorization schema")
+            if (type(event["blockers"]) is not dict or type(event["errors"]) is not list
+                    or any(type(error) is not str for error in event["errors"])):
+                raise DeploymentBlocked("malformed deployed legacy inventory evidence")
+            if status == "overridden" and (
+                    type(event["audit"]) is not dict
+                    or set(event["audit"]) != {"actor", "reason", "ticket"}
+                    or not all(_nonempty_string(v) for v in event["audit"].values())):
+                raise DeploymentBlocked("malformed deployed legacy audit")
+        elif status == "completed":
+            if (set(event) != base | {"prior_event_id", "replayed"}
+                    or not prior or prior["status"] not in {"authorized", "overridden"}
+                    or event["prior_event_id"] != prior["event_id"]):
+                raise DeploymentBlocked("unbound deployed legacy completion")
+            event["pending"] = False
+            event["inventory_digest"] = prior["inventory_digest"]
+        elif status == "aborted":
+            if set(event) != base | {"inventory_digest", "blockers", "errors", "reason"}:
+                raise DeploymentBlocked("unknown deployed legacy refusal schema")
+            if (not _nonempty_string(event["reason"])
+                    or type(event["blockers"]) is not dict or type(event["errors"]) is not list
+                    or any(type(error) is not str for error in event["errors"])):
+                raise DeploymentBlocked("malformed deployed legacy refusal")
+            event["pending"] = False
+        else:
+            raise DeploymentBlocked("unsupported deployed legacy status")
+        try:
+            timestamp = datetime.fromisoformat(event["at"])
+            if timestamp.tzinfo is None or (previous_time and timestamp < previous_time):
+                raise ValueError("unordered or timezone-less timestamp")
+        except (TypeError, ValueError) as exc:
+            raise DeploymentBlocked("malformed deployed legacy chronology") from exc
+        previous_time = timestamp
+        if prior:
+            event["prior_event_id"] = prior["event_id"]
+    normalized["latest"] = normalized["events"][-1]
+    return normalized
+
+
+def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
+                           legacy_format: str, journal: Path | str | None = None) -> dict:
+    """Explicit one-time trust boundary; never called by authorization or loading.
+
+    The operator verifies the original bytes/provenance. Legacy files have no
+    authenticated root; structural validity cannot establish historical completeness.
+    The original bytes are backed up before a v2 checkpoint is written. A migration
+    barrier requires a fresh authorization afterwards. Unsettled legacy gates
+    are refused rather than interpreted as completed or safe to resume.
+    """
+    if (type(expected_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+            or not _nonempty_string(actor) or not _nonempty_string(provenance)
+            or legacy_format not in {"linked-v1", "deployed-v1"}):
+        raise ValueError("migration requires SHA-256, actor, provenance and a known legacy format")
+    path = Path(journal) if journal is not None else evidence_path()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    with _journal_lock(path):
+        value = _read_journal_json(path)
+        if type(value) is dict and value.get("version") == 2:
+            current = _load_journal(path)
+            migration = current.get("migration", {})
+            if (migration.get("source_sha256") != expected_sha256
+                    or migration.get("legacy_format") != legacy_format
+                    or not backup.exists()
+                    or hashlib.sha256(backup.read_bytes()).hexdigest() != expected_sha256):
+                raise DeploymentBlocked("migration provenance/backup does not match")
+            return current
+        if _anchor_path(path).exists():
+            raise DeploymentBlocked("legacy journal has an anchor; interrupted migration or rollback")
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise DeploymentBlocked("legacy journal does not match the reviewed SHA-256")
+        # Re-read under the same lock and require the exact pinned snapshot.
+        if _read_journal_json(path) != value or path.read_bytes() != raw:
+            raise DeploymentBlocked("legacy journal changed during migration")
+        if legacy_format == "deployed-v1":
+            value = _normalize_deployed_legacy(value)
+        elif (type(value) is not dict or value.get("version") != 1
+              or set(value) - {"version", "events", "latest"}):
+            raise DeploymentBlocked("malformed linked legacy journal")
+        _validate_journal(value, path)
+        if (value.get("latest") or {}).get("pending") is True:
+            raise DeploymentBlocked("unsettled legacy authorization is ambiguous; migration refused")
+        migration = {"source_sha256": expected_sha256, "source_bytes": len(raw),
+                     "legacy_format": legacy_format, "actor": actor,
+                     "provenance": provenance, "at": _now(),
+                     "backup": backup.name}
+        value.update(version=2, journal_id=uuid.uuid4().hex, migration=migration)
+        latest = value.get("latest") or {}
+        if latest.get("action") in DEPLOY_ACTIONS:
+            _append_to(value, {"action": latest["action"], "status": "aborted",
+                               "pending": False, "usable": False, "replayed": False,
+                               "inventory_digest": latest.get("inventory_digest"),
+                               "reason": "legacy migration barrier; fresh authorization required"})
+        _validate_journal(value, path)
+        if backup.exists():
+            if backup.read_bytes() != raw:
+                raise DeploymentBlocked("legacy backup already exists with different bytes")
+        else:
+            _atomic_write_bytes(backup, raw)
+        if path.read_bytes() != raw:
+            raise DeploymentBlocked("legacy journal changed before migration commit")
+        _persist_journal(path, value)
+        return value
 
 
 def _ensure_journal(path: Path) -> None:
@@ -454,7 +650,7 @@ def _append_event(path: Path, event: dict) -> dict:
     with _journal_lock(path):
         journal = _load_journal(path)
         appended = _append_to(journal, event)
-        _atomic_write(path, journal)
+        _persist_journal(path, journal)
         return appended
 
 
@@ -1129,7 +1325,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                        "inventory_digest": observation_value["digest"],
                                        "blockers": observation_value["blockers"],
                                        "errors": observation_value["errors"]})
-            _atomic_write(path, state)
+            _persist_journal(path, state)
             return {"allowed": True, "replayed": False, "event": event}
         else:
             valid, reason = _valid_override(action, observation_value, override_value)
@@ -1151,7 +1347,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                        "inventory_digest": observation_value["digest"],
                                        "blockers": observation_value["blockers"],
                                        "errors": observation_value["errors"]})
-            _atomic_write(path, state)
+            _persist_journal(path, state)
             return {"allowed": True, "replayed": False, "event": event}
         event = _append_to(state, {"action": action, "status": "aborted",
                                    "pending": False, "usable": False,
@@ -1159,7 +1355,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                    "inventory_digest": observation_value.get("digest"),
                                    "blockers": observation_value.get("blockers"),
                                    "errors": observation_value.get("errors")})
-        _atomic_write(path, state)
+        _persist_journal(path, state)
     raise DeploymentBlocked(
         f"refusing {action}: cross-project deployment is not quiescent; "
         f"evidence {event['event_id']} is aborted/unusable ({reason})")
@@ -1212,7 +1408,7 @@ def finalize(clearance: dict, *, success: bool, error: str | None = None,
             "inventory_digest": latest["inventory_digest"],
             **({} if success else {"reason": str(error or "deployment action failed")[:500]}),
         })
-        _atomic_write(path, state)
+        _persist_journal(path, state)
     return {"allowed": bool(success), "replayed": False, "event": event}
 
 
@@ -1241,7 +1437,7 @@ def reconcile(*, observation: dict, journal: Path | str | None = None) -> dict:
                                        "replayed": False,
                                        "reason": "deployment authorization was interrupted",
                                        "inventory_digest": latest.get("inventory_digest")})
-            _atomic_write(path, state)
+            _persist_journal(path, state)
             return {"reconciled": False, "replayed": False, "event": event}
         if not latest or latest.get("status") != "aborted":
             return {"reconciled": False, "replayed": False,
@@ -1261,14 +1457,14 @@ def reconcile(*, observation: dict, journal: Path | str | None = None) -> dict:
                                        "inventory_digest": observation_value.get("digest"),
                                        "blockers": observation_value.get("blockers"),
                                        "errors": observation_value.get("errors")})
-            _atomic_write(path, state)
+            _persist_journal(path, state)
             return {"reconciled": False, "replayed": False, "event": event}
         event = _append_to(state, {"action": latest.get("action"),
                                    "status": "reconciled_quiescent",
                                    "pending": False, "usable": False,
                                    "replayed": False,
                                    "inventory_digest": observation_value["digest"]})
-        _atomic_write(path, state)
+        _persist_journal(path, state)
         return {"reconciled": True, "replayed": False, "event": event}
 
 
@@ -1283,3 +1479,19 @@ def load_override(path: str | Path | None) -> dict | None:
     if not isinstance(value, dict):
         return {"_invalid_override": "override must be a JSON object"}
     return value
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Explicit deployment journal v1 migration")
+    parser.add_argument("--journal", type=Path, default=None)
+    parser.add_argument("--expected-sha256", required=True)
+    parser.add_argument("--actor", required=True)
+    parser.add_argument("--provenance", required=True)
+    parser.add_argument("--legacy-format", choices=("linked-v1", "deployed-v1"), required=True)
+    args = parser.parse_args()
+    result = migrate_legacy_journal(**vars(args))
+    print(json.dumps({"version": result["version"], "journal_id": result["journal_id"],
+                      "migration": result["migration"],
+                      "latest_status": (result.get("latest") or {}).get("status")}))

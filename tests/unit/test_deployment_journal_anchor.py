@@ -1,0 +1,421 @@
+"""Storage-fault controls, including independently rehashed stale-history attacks."""
+import copy
+import hashlib
+import json
+
+import pytest
+
+from core import deployment_quiescence as dq
+
+
+def quiet():
+    value = {"schema_version": 1, "observed_at": "2026-09-14T10:00:00+00:00",
+             "projects": [], "runs": [], "sidecar_owners": [],
+             "godot_render_owners": [], "external_owners": [],
+             "registered_external_owners": [], "blockers": {}, "errors": [],
+             "quiescent": True}
+    value["digest"] = dq._observation_digest(value)
+    return value
+
+
+def canonical_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=True).encode()).hexdigest()
+
+
+def rehash(value):
+    previous = None
+    value["chain"] = []
+    for position, event in enumerate(value["events"]):
+        previous = canonical_hash({"version": 2, "journal_id": value["journal_id"],
+                                   "position": position, "previous_hash": previous,
+                                   "event": event})
+        value["chain"].append(previous)
+    value["latest"] = copy.deepcopy(value["events"][-1])
+
+
+def write(path, value):
+    path.write_text(json.dumps(value, sort_keys=True))
+
+
+def history(path):
+    first = dq.authorize("restart", quiet(), journal=path)
+    dq.finalize(first, success=True, journal=path)
+    stale = dq.authorize("restart", quiet(), journal=path)
+    dq.finalize(stale, success=False, journal=path)
+    return stale
+
+
+def invoke(operation, path, clearance):
+    if operation == "load":
+        return dq._load_journal(path)
+    if operation == "authorize":
+        return dq.authorize("restart", quiet(), journal=path)
+    if operation == "reconcile":
+        return dq.reconcile(observation=quiet(), journal=path)
+    if operation == "finalize":
+        return dq.finalize(clearance, success=True, journal=path)
+    from cli import server
+    return server._finish_deployment(clearance, success=True)
+
+
+@pytest.mark.parametrize("operation", ["load", "authorize", "reconcile", "finalize", "cli"])
+@pytest.mark.parametrize("damage", ["stale-middle", "rehashed-middle", "prefix", "suffix", "v1-clone"])
+def test_truncation_and_reroot_refused_by_every_path(tmp_path, monkeypatch, operation, damage):
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path))
+    path = dq.evidence_path()
+    stale = history(path)
+    value = json.loads(path.read_bytes())
+    if damage in {"stale-middle", "rehashed-middle", "v1-clone"}:
+        survivor = copy.deepcopy(stale["event"])
+        survivor.pop("prior_event_id")
+        value["events"] = [survivor]
+        value["latest"] = copy.deepcopy(survivor)
+        if damage == "v1-clone":
+            value = {"version": 1, "events": [survivor], "latest": survivor}
+            dq._anchor_path(path).unlink()  # even a clone to a new location is not auto-migrated
+        elif damage == "rehashed-middle":
+            rehash(value)
+    elif damage == "prefix":
+        value["events"] = value["events"][2:]
+        value["events"][0].pop("prior_event_id")
+        rehash(value)
+    else:
+        value["events"].pop()
+        rehash(value)
+    write(path, value)
+    before = {p: p.read_bytes() for p in path.parent.iterdir() if p.is_file()}
+    fence = dq.acquire_cutover_fence() if operation == "cli" else None
+    stale["_cutover_fence"] = fence
+    expected = ("anchor mismatch" if damage in {"rehashed-middle", "prefix", "suffix"}
+                else "explicit hash-pinned migration" if damage == "v1-clone"
+                else "content-hash chain")
+    with pytest.raises(dq.DeploymentBlocked, match=expected):
+        invoke(operation, path, stale)
+    if fence:
+        assert fence.closed
+    for p, data in before.items():
+        assert p.read_bytes() == data
+
+
+@pytest.mark.parametrize("damage", ["missing", "different-journal", "count", "boolean-count", "head", "partial"])
+def test_anchor_loss_or_mismatch_never_regenerates(tmp_path, damage):
+    path = tmp_path / "journal.json"
+    clearance = dq.authorize("restart", quiet(), journal=path)
+    anchor_path = dq._anchor_path(path)
+    anchor = json.loads(anchor_path.read_bytes())
+    if damage == "missing":
+        anchor_path.unlink()
+    elif damage == "partial":
+        anchor_path.write_bytes(b'{"version":2,')
+    else:
+        field, replacement = {
+            "different-journal": ("journal_id", "f" * 32),
+            "count": ("event_count", 0), "boolean-count": ("event_count", True),
+            "head": ("head_hash", "0" * 64),
+        }[damage]
+        anchor[field] = replacement
+        write(anchor_path, anchor)
+    before = path.read_bytes()
+    anchor_before = anchor_path.read_bytes() if anchor_path.exists() else None
+    with pytest.raises(dq.DeploymentBlocked):
+        dq.finalize(clearance, success=True, journal=path)
+    assert path.read_bytes() == before
+    assert (anchor_path.read_bytes() if anchor_path.exists() else None) == anchor_before
+
+
+@pytest.mark.parametrize("damage", ["partial", "missing", "content", "duplicate-json-key", "nan"])
+def test_journal_damage_is_preserved(tmp_path, damage):
+    path = tmp_path / "journal.json"
+    clearance = dq.authorize("restart", quiet(), journal=path)
+    if damage == "missing":
+        path.unlink()
+    elif damage == "partial":
+        path.write_bytes(b'{"version": 2,')
+    elif damage == "duplicate-json-key":
+        path.write_bytes(path.read_bytes().replace(b'"version": 2', b'"version": 1, "version": 2'))
+    elif damage == "nan":
+        path.write_bytes(path.read_bytes().replace(b'"version": 2', b'"extra": NaN, "version": 2'))
+    else:
+        value = json.loads(path.read_bytes())
+        value["events"][0]["reason"] = "changed while retaining event ID"
+        value["latest"] = copy.deepcopy(value["events"][0])
+        write(path, value)
+    before = path.read_bytes() if path.exists() else None
+    with pytest.raises(dq.DeploymentBlocked):
+        dq.finalize(clearance, success=True, journal=path)
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+@pytest.mark.parametrize("initial", [False, True])
+@pytest.mark.parametrize("step", ["before-anchor", "after-anchor", "before-journal", "after-journal"])
+def test_write_ahead_crash_boundaries(tmp_path, monkeypatch, initial, step):
+    path = tmp_path / "journal.json"
+    clearance = None if initial else dq.authorize("restart", quiet(), journal=path)
+    old = path.read_bytes() if path.exists() else None
+    real = dq._atomic_write
+
+    def interrupted(target, value):
+        which = "anchor" if target == dq._anchor_path(path) else "journal"
+        if step == "before-" + which:
+            raise OSError("injected power loss before durable rename")
+        real(target, value)
+        if step == "after-" + which:
+            raise OSError("injected power loss after durable rename")
+
+    monkeypatch.setattr(dq, "_atomic_write", interrupted)
+    with pytest.raises(OSError, match="injected power loss"):
+        if initial:
+            dq.authorize("restart", quiet(), journal=path)
+        else:
+            dq.finalize(clearance, success=True, journal=path)
+    monkeypatch.setattr(dq, "_atomic_write", real)
+    if step in {"after-anchor", "before-journal"}:
+        with pytest.raises(dq.DeploymentBlocked):
+            dq._load_journal(path)
+        assert (path.read_bytes() if path.exists() else None) == old
+    elif step == "before-anchor":
+        loaded = dq._load_journal(path)
+        assert (loaded.get("latest") or {}).get("usable") is not True
+    else:
+        loaded = dq._load_journal(path)
+        # A crash AFTER both fsynced writes is an already committed transaction.
+        assert loaded["latest"]["usable"] is (not initial)
+
+
+@pytest.mark.parametrize("fail_call", [1, 2])
+def test_atomic_replace_failure_keeps_original_or_blocks(tmp_path, monkeypatch, fail_call):
+    path = tmp_path / "journal.json"
+    clearance = dq.authorize("restart", quiet(), journal=path)
+    before = path.read_bytes()
+    real = dq.os.replace
+    calls = 0
+
+    def fail(source, target):
+        nonlocal calls
+        calls += 1
+        if calls == fail_call:
+            raise OSError("rename failed")
+        return real(source, target)
+
+    monkeypatch.setattr(dq.os, "replace", fail)
+    with pytest.raises(OSError, match="rename failed"):
+        dq.finalize(clearance, success=True, journal=path)
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob(".journal.json.*"))
+    if fail_call == 1:
+        assert dq._load_journal(path)["latest"]["pending"] is True
+    else:
+        with pytest.raises(dq.DeploymentBlocked, match="anchor mismatch"):
+            dq._load_journal(path)
+
+
+def deployed_legacy():
+    # Exact observed five-event producer schemas; operational payloads are synthetic.
+    def pending(n, action):
+        return {"event_id": str(n) * 32, "at": f"2026-09-14T10:0{n}:00+00:00",
+                "status": "overridden", "action": action, "pending": True,
+                "usable": False, "inventory_digest": str(n) * 64,
+                "blockers": {}, "errors": [],
+                "audit": {"actor": "fixture", "reason": "fixture", "ticket": "fixture"}}
+
+    def completed(n, action):
+        return {"event_id": str(n) * 32, "at": f"2026-09-14T10:0{n}:00+00:00",
+                "status": "completed", "action": action, "usable": True,
+                "prior_event_id": str(n - 1) * 32, "replayed": False}
+
+    events = [pending(1, "redeploy"), completed(2, "redeploy"),
+              {"event_id": "3" * 32, "at": "2026-09-14T10:03:00+00:00",
+               "status": "aborted", "action": "restart", "usable": False,
+               "inventory_digest": "3" * 64, "blockers": {}, "errors": [], "reason": "blocked"},
+              pending(4, "restart"), completed(5, "restart")]
+    return {"version": 1, "events": events, "latest": copy.deepcopy(events[-1])}
+
+
+def migrate(path, mode="deployed-v1", **kwargs):
+    return dq.migrate_legacy_journal(
+        journal=path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        actor="test", provenance="reviewed test fixture", legacy_format=mode, **kwargs)
+
+
+def test_deployed_migration_preserves_bytes_provenance_and_requires_fresh_gate(tmp_path):
+    path = tmp_path / "journal.json"
+    original = deployed_legacy()
+    write(path, original)
+    raw = path.read_bytes()
+    with pytest.raises(dq.DeploymentBlocked):
+        dq.authorize("restart", quiet(), journal=path)
+    migrated = migrate(path)
+    assert path.with_name(path.name + ".legacy-v1.backup").read_bytes() == raw
+    assert migrated["migration"]["source_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert migrated["migration"]["source_bytes"] == len(raw)
+    assert migrated["migration"]["actor"] == "test"
+    assert migrated["migration"]["provenance"] == "reviewed test fixture"
+    assert migrated["latest"]["status"] == "aborted"
+    assert migrated["latest"]["usable"] is False
+    assert len(migrated["events"]) == 6
+    for old, new in zip(original["events"], migrated["events"]):
+        assert all(new[key] == value for key, value in old.items())
+    with pytest.raises(dq.DeploymentBlocked):
+        dq.finalize({"event": original["events"][3]}, success=True, journal=path)
+    pair = (path.read_bytes(), dq._anchor_path(path).read_bytes())
+    for _ in range(3):
+        assert dq._load_journal(path) == migrated
+        assert dq.migrate_legacy_journal(
+            journal=path, expected_sha256=hashlib.sha256(raw).hexdigest(), actor="retry",
+            provenance="retry", legacy_format="deployed-v1") == migrated
+        assert pair == (path.read_bytes(), dq._anchor_path(path).read_bytes())
+    clearance = dq.authorize("restart", quiet(), journal=path)
+    assert dq.finalize(clearance, success=True, journal=path)["event"]["usable"] is True
+
+
+@pytest.mark.parametrize("damage", ["missing-terminal", "wrong-link", "wrong-action", "wrong-usable",
+                                    "unexpected-field", "bad-id", "backwards-time", "latest",
+                                    "contradictory-pending", "wrong-digest", "unknown-root-link"])
+def test_ambiguous_or_corrupt_deployed_legacy_is_never_migrated(tmp_path, damage):
+    path = tmp_path / "journal.json"
+    value = deployed_legacy()
+    if damage == "missing-terminal":
+        value["events"].pop()
+    elif damage == "wrong-link":
+        value["events"][4]["prior_event_id"] = "1" * 32
+    elif damage == "wrong-action":
+        value["events"][4]["action"] = "redeploy"
+    elif damage == "wrong-usable":
+        value["events"][4]["usable"] = False
+    elif damage == "unexpected-field":
+        value["events"][4]["mystery"] = True
+    elif damage == "bad-id":
+        value["events"][0]["event_id"] = "not-an-id"
+    elif damage == "backwards-time":
+        value["events"][4]["at"] = "2025-01-01T00:00:00+00:00"
+    elif damage == "contradictory-pending":
+        value["events"][4]["pending"] = True
+    elif damage == "wrong-digest":
+        value["events"][0]["inventory_digest"] = "bad"
+    elif damage == "unknown-root-link":
+        value["events"][3]["prior_event_id"] = "f" * 32
+    value["latest"] = copy.deepcopy(value["events"][-1])
+    if damage == "latest":
+        value["latest"]["at"] = "different"
+    write(path, value)
+    before = path.read_bytes()
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+    assert path.read_bytes() == before
+    assert not dq._anchor_path(path).exists()
+    assert not path.with_name(path.name + ".legacy-v1.backup").exists()
+
+
+def test_strict_linked_migration_refuses_missing_links_and_pending_roots(tmp_path):
+    path = tmp_path / "journal.json"
+    history(path)
+    value = json.loads(path.read_bytes())
+    legacy = {"version": 1, "events": value["events"], "latest": value["latest"]}
+    dq._anchor_path(path).unlink()
+    write(path, legacy)
+    migrated = migrate(path, "linked-v1")
+    assert migrated["latest"]["usable"] is False
+    for events in [[copy.deepcopy(legacy["events"][2])], copy.deepcopy(legacy["events"])]:
+        events[0].pop("prior_event_id", None)
+        if len(events) > 1:
+            events[2].pop("prior_event_id")
+        other = tmp_path / f"legacy-{len(events)}.json"
+        write(other, {"version": 1, "events": events, "latest": events[-1]})
+        with pytest.raises(dq.DeploymentBlocked):
+            migrate(other, "linked-v1")
+
+
+@pytest.mark.parametrize("step", ["before-backup", "after-backup", "after-anchor", "after-journal"])
+def test_migration_crash_never_loses_legacy_or_manufactures_completion(tmp_path, monkeypatch, step):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    real = dq._atomic_write_bytes
+
+    def interrupted(target, payload):
+        which = "backup" if target == backup else "anchor" if target == dq._anchor_path(path) else "journal"
+        if step == "before-" + which:
+            raise OSError("migration crash")
+        real(target, payload)
+        if step == "after-" + which:
+            raise OSError("migration crash")
+
+    monkeypatch.setattr(dq, "_atomic_write_bytes", interrupted)
+    with pytest.raises(OSError, match="migration crash"):
+        migrate(path)
+    monkeypatch.setattr(dq, "_atomic_write_bytes", real)
+    if step != "before-backup":
+        assert backup.read_bytes() == raw
+    if step == "after-journal":
+        assert dq._load_journal(path)["latest"]["usable"] is False
+    else:
+        assert path.read_bytes() == raw
+        with pytest.raises(dq.DeploymentBlocked):
+            dq.authorize("restart", quiet(), journal=path)
+        if step == "after-anchor":
+            with pytest.raises(dq.DeploymentBlocked, match="anchor"):
+                migrate(path)
+        else:
+            assert migrate(path)["latest"]["usable"] is False
+
+
+def test_migration_pin_and_backup_collisions_refuse_without_changes(tmp_path):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    before = path.read_bytes()
+    with pytest.raises(dq.DeploymentBlocked, match="SHA-256"):
+        dq.migrate_legacy_journal(journal=path, expected_sha256="0" * 64, actor="test",
+                                  provenance="test", legacy_format="deployed-v1")
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    backup.write_bytes(b"older evidence")
+    with pytest.raises(dq.DeploymentBlocked, match="different bytes"):
+        migrate(path)
+    assert path.read_bytes() == before
+    assert backup.read_bytes() == b"older evidence"
+    assert not dq._anchor_path(path).exists()
+
+
+def test_content_chain_guard_is_independent_of_checkpoint(tmp_path):
+    path = tmp_path / "journal.json"
+    dq.authorize("restart", quiet(), journal=path)
+    value = json.loads(path.read_bytes())
+    value["events"][0]["reason"] = "changed content retaining stale content chain"
+    value["latest"] = copy.deepcopy(value["events"][0])
+    write(path, value)
+    # A matching envelope checksum is insufficient: the event chain must also verify.
+    anchor = json.loads(dq._anchor_path(path).read_bytes())
+    anchor["journal_hash"] = canonical_hash(value)
+    write(dq._anchor_path(path), anchor)
+    with pytest.raises(dq.DeploymentBlocked, match="content-hash chain"):
+        dq._load_journal(path)
+
+
+@pytest.mark.parametrize("fail_call", [1, 2, 3, 4])
+def test_file_and_directory_fsync_failures_are_fail_closed(tmp_path, monkeypatch, fail_call):
+    path = tmp_path / "journal.json"
+    clearance = dq.authorize("restart", quiet(), journal=path)
+    real = dq.os.fsync
+    calls = 0
+
+    def fail(fd):
+        nonlocal calls
+        calls += 1
+        if calls == fail_call:
+            raise OSError("fsync failed")
+        return real(fd)
+
+    monkeypatch.setattr(dq.os, "fsync", fail)
+    with pytest.raises(OSError, match="fsync failed"):
+        dq.finalize(clearance, success=True, journal=path)
+    if fail_call == 1:
+        assert dq._load_journal(path)["latest"]["pending"] is True
+    elif fail_call in {2, 3}:
+        with pytest.raises(dq.DeploymentBlocked, match="anchor mismatch"):
+            dq._load_journal(path)
+    else:
+        # Both renames are visible, although a real power loss could lose the last
+        # rename whose directory fsync failed. Either old journal then mismatches
+        # the durable new anchor, or the committed new pair is readable.
+        assert dq._load_journal(path)["latest"]["status"] == "completed"

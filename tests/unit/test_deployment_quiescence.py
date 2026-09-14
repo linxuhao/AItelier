@@ -122,8 +122,8 @@ def _journal_event(event_id, **changes):
 
 def _write_journal(path, events):
     latest = dict(events[-1]) if events else None
-    path.write_text(json.dumps({"version": 1, "events": events, "latest": latest},
-                               sort_keys=True))
+    state = {"version": 2, "journal_id": "0" * 32, "events": events, "latest": latest}
+    dq._persist_journal(path, state)
     return path.read_bytes()
 
 
@@ -1091,6 +1091,9 @@ def test_mutation_paths_reject_missing_latest_without_overwriting_evidence(
 def test_compatible_empty_and_minimal_legacy_journals_remain_usable(tmp_path):
     empty = tmp_path / "empty.json"
     empty.write_text(json.dumps({"version": 1, "events": []}))
+    dq.migrate_legacy_journal(
+        journal=empty, expected_sha256=dq.hashlib.sha256(empty.read_bytes()).hexdigest(),
+        actor="test", provenance="empty v1 fixture", legacy_format="linked-v1")
     empty_clearance = dq.authorize(
         "restart", _producer_shaped_observation(), journal=empty)
     assert empty_clearance["event"]["status"] == "authorized"
@@ -1104,6 +1107,9 @@ def test_compatible_empty_and_minimal_legacy_journals_remain_usable(tmp_path):
     legacy.write_text(json.dumps({
         "version": 1, "events": [legacy_event], "latest": legacy_event,
     }))
+    dq.migrate_legacy_journal(
+        journal=legacy, expected_sha256=dq.hashlib.sha256(legacy.read_bytes()).hexdigest(),
+        actor="test", provenance="minimal aborted fixture", legacy_format="linked-v1")
     legacy_bytes = legacy.read_bytes()
     legacy_reconcile = dq.reconcile(
         observation=_producer_shaped_observation(), journal=legacy)

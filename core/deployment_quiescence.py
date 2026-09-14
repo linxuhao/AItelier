@@ -404,7 +404,7 @@ def _install_backup_bytes(path: Path, payload: bytes) -> None:
                 os.close(dir_fd)
 
 
-def _read_journal_json(path: Path) -> dict:
+def _decode_journal_json(payload: bytes, path: Path) -> dict:
     def unique_keys(pairs):
         result = {}
         for key, value in pairs:
@@ -417,10 +417,18 @@ def _read_journal_json(path: Path) -> dict:
         raise ValueError(f"non-finite JSON: {value}")
 
     try:
-        return json.loads(path.read_bytes(), object_pairs_hook=unique_keys,
+        return json.loads(payload, object_pairs_hook=unique_keys,
                           parse_constant=reject_constant)
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         raise DeploymentBlocked(f"deployment journal is unreadable at {path}: {exc}") from exc
+
+
+def _read_journal_json(path: Path) -> dict:
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise DeploymentBlocked(f"deployment journal is unreadable at {path}: {exc}") from exc
+    return _decode_journal_json(payload, path)
 
 
 def _validate_journal(value: dict, path: Path) -> None:
@@ -541,6 +549,14 @@ def _anchor_path(path: Path) -> Path:
     return path.with_name(path.name + ".anchor.json")
 
 
+def _migration_source_path(path: Path) -> Path:
+    return path.with_name(path.name + ".legacy-v1.source")
+
+
+def _migration_transaction_path(path: Path) -> Path:
+    return path.with_name(path.name + ".migration-v1.json")
+
+
 def _chain(journal: dict) -> list[str]:
     previous = None
     hashes = []
@@ -560,10 +576,92 @@ def _checkpoint(journal: dict) -> dict:
             "journal_hash": _digest(journal)}
 
 
+def _migration_transaction(*, journal: dict, source_sha256: str,
+                           source_bytes: int, legacy_format: str,
+                           backup: Path, source: Path) -> dict:
+    return {
+        "version": 1,
+        "kind": "deployment-journal-v1-migration",
+        "source_sha256": source_sha256,
+        "source_bytes": source_bytes,
+        "legacy_format": legacy_format,
+        "backup": backup.name,
+        "source": source.name,
+        "journal": journal,
+    }
+
+
+def _validate_migration_transaction(transaction: dict, journal: dict,
+                                    path: Path) -> None:
+    migration = journal.get("migration")
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    source = _migration_source_path(path)
+    expected_keys = {"source_sha256", "source_bytes", "legacy_format", "actor",
+                     "provenance", "at", "backup", "source", "transaction"}
+    if (type(migration) is not dict or set(migration) != expected_keys
+            or migration.get("backup") != backup.name
+            or migration.get("source") != source.name
+            or migration.get("transaction") != _migration_transaction_path(path).name
+            or type(migration.get("source_bytes")) is not int
+            or migration["source_bytes"] < 0
+            or type(migration.get("source_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", migration["source_sha256"]) is None
+            or migration.get("legacy_format") not in {"linked-v1", "deployed-v1"}
+            or not _nonempty_string(migration.get("actor"))
+            or not _nonempty_string(migration.get("provenance"))
+            or not _nonempty_string(migration.get("at"))):
+        raise DeploymentBlocked("deployment journal migration evidence is malformed")
+    target = transaction.get("journal") if type(transaction) is dict else None
+    if (type(transaction) is not dict
+            or set(transaction) != {"version", "kind", "source_sha256", "source_bytes",
+                                    "legacy_format", "backup", "source", "journal"}
+            or transaction.get("version") != 1
+            or transaction.get("kind") != "deployment-journal-v1-migration"
+            or transaction.get("source_sha256") != migration["source_sha256"]
+            or transaction.get("source_bytes") != migration["source_bytes"]
+            or transaction.get("legacy_format") != migration["legacy_format"]
+            or transaction.get("backup") != backup.name
+            or transaction.get("source") != source.name
+            or type(target) is not dict):
+        raise DeploymentBlocked("deployment journal migration evidence does not match")
+    _validate_journal(target, path)
+    if (target.get("version") != 2
+            or target.get("journal_id") != journal.get("journal_id")
+            or target.get("migration") != migration
+            or target.get("chain") != _chain(target)
+            or len(target.get("events", [])) > len(journal["events"])
+            or journal["events"][:len(target["events"])] != target["events"]
+            or journal["chain"][:len(target["chain"])] != target["chain"]):
+        raise DeploymentBlocked("deployment journal migration evidence does not match")
+
+
+def _validate_migration_evidence(journal: dict, path: Path) -> None:
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    source = _migration_source_path(path)
+    transaction_path = _migration_transaction_path(path)
+    migration = journal.get("migration", {})
+    with _open_existing_backup(backup) as backup_file:
+        with _open_existing_backup(source) as source_file:
+            with _open_existing_backup(transaction_path) as transaction_file:
+                if backup_file is None or source_file is None or transaction_file is None:
+                    raise DeploymentBlocked("deployment journal migration evidence is missing")
+                expected_hash = migration.get("source_sha256")
+                expected_bytes = migration.get("source_bytes")
+                if (backup_file[2] != source_file[2]
+                        or len(source_file[2]) != expected_bytes
+                        or hashlib.sha256(source_file[2]).hexdigest() != expected_hash):
+                    raise DeploymentBlocked("deployment journal migration evidence does not match")
+                transaction = _decode_journal_json(transaction_file[2], transaction_path)
+                _validate_migration_transaction(transaction, journal, path)
+
+
 def _load_journal(path: Path) -> dict:
     anchor_path = _anchor_path(path)
     if not path.exists():
-        if anchor_path.exists() or path.with_name(path.name + ".legacy-v1.backup").exists():
+        if (anchor_path.exists()
+                or path.with_name(path.name + ".legacy-v1.backup").exists()
+                or _migration_source_path(path).exists()
+                or _migration_transaction_path(path).exists()):
             raise DeploymentBlocked("deployment journal missing with durable anchor/backup")
         return {"version": 2, "journal_id": uuid.uuid4().hex, "events": [], "chain": []}
     value = _read_journal_json(path)
@@ -578,6 +676,8 @@ def _load_journal(path: Path) -> dict:
     anchor = _read_journal_json(anchor_path)
     if _digest(anchor) != _digest(_checkpoint(value)):
         raise DeploymentBlocked("deployment journal durable anchor mismatch; refusing recovery/replay")
+    if "migration" in value:
+        _validate_migration_evidence(value, path)
     return value
 
 
@@ -671,20 +771,17 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
         raise ValueError("migration requires SHA-256, actor, provenance and a known legacy format")
     path = Path(journal) if journal is not None else evidence_path()
     backup = path.with_name(path.name + ".legacy-v1.backup")
+    source = _migration_source_path(path)
+    transaction_path = _migration_transaction_path(path)
     with _journal_lock(path):
         value = _read_journal_json(path)
         if type(value) is dict and value.get("version") == 2:
             current = _load_journal(path)
             migration = current.get("migration", {})
-            with _open_existing_backup(backup) as existing:
-                if (migration.get("source_sha256") != expected_sha256
-                        or migration.get("legacy_format") != legacy_format
-                        or existing is None
-                        or hashlib.sha256(existing[2]).hexdigest() != expected_sha256):
-                    raise DeploymentBlocked("migration provenance/backup does not match")
-                return current
-        if _anchor_path(path).exists():
-            raise DeploymentBlocked("legacy journal has an anchor; interrupted migration or rollback")
+            if (migration.get("source_sha256") != expected_sha256
+                    or migration.get("legacy_format") != legacy_format):
+                raise DeploymentBlocked("migration provenance/backup does not match")
+            return current
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() != expected_sha256:
             raise DeploymentBlocked("legacy journal does not match the reviewed SHA-256")
@@ -699,38 +796,89 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
         _validate_journal(value, path)
         if (value.get("latest") or {}).get("pending") is True:
             raise DeploymentBlocked("unsettled legacy authorization is ambiguous; migration refused")
-        migration = {"source_sha256": expected_sha256, "source_bytes": len(raw),
-                     "legacy_format": legacy_format, "actor": actor,
-                     "provenance": provenance, "at": _now(),
-                     "backup": backup.name}
-        value.update(version=2, journal_id=uuid.uuid4().hex, migration=migration)
-        latest = value.get("latest") or {}
-        if latest.get("action") in DEPLOY_ACTIONS:
-            _append_to(value, {"action": latest["action"], "status": "aborted",
-                               "pending": False, "usable": False, "replayed": False,
-                               "inventory_digest": latest.get("inventory_digest"),
-                               "reason": "legacy migration barrier; fresh authorization required"})
-        _validate_journal(value, path)
 
-        def commit(accepted) -> None:
-            if accepted[2] != raw:
-                raise DeploymentBlocked("legacy backup already exists with different bytes")
-            # Recheck both names immediately before publishing the checkpoint.
-            if (_read_open_backup(backup, accepted[0], accepted[1]) != raw
-                    or path.read_bytes() != raw):
-                raise DeploymentBlocked("legacy evidence changed before migration commit")
-            _persist_journal(path, value)
+        transaction = None
+        with _open_existing_backup(transaction_path) as existing_transaction:
+            if existing_transaction is not None:
+                transaction = _decode_journal_json(existing_transaction[2], transaction_path)
+        if transaction is None:
+            if _anchor_path(path).exists():
+                raise DeploymentBlocked(
+                    "legacy journal has an anchor without a migration transaction")
+            migration = {"source_sha256": expected_sha256, "source_bytes": len(raw),
+                         "legacy_format": legacy_format, "actor": actor,
+                         "provenance": provenance, "at": _now(),
+                         "backup": backup.name, "source": source.name,
+                         "transaction": transaction_path.name}
+            target = _plain_json_snapshot(value)
+            target.update(version=2, journal_id=uuid.uuid4().hex, migration=migration)
+            latest = target.get("latest") or {}
+            if latest.get("action") in DEPLOY_ACTIONS:
+                _append_to(target, {
+                    "action": latest["action"], "status": "aborted",
+                    "pending": False, "usable": False, "replayed": False,
+                    "inventory_digest": latest.get("inventory_digest"),
+                    "reason": "legacy migration barrier; fresh authorization required",
+                })
+            target["chain"] = _chain(target)
+            _validate_journal(target, path)
+            transaction = _migration_transaction(
+                journal=target, source_sha256=expected_sha256,
+                source_bytes=len(raw), legacy_format=legacy_format,
+                backup=backup, source=source)
+        else:
+            target = transaction.get("journal") if type(transaction) is dict else None
+            if type(target) is not dict:
+                raise DeploymentBlocked("migration transaction is malformed")
+            _validate_migration_transaction(transaction, target, path)
+            if (target["migration"].get("source_sha256") != expected_sha256
+                    or target["migration"].get("legacy_format") != legacy_format
+                    or target["migration"].get("actor") != actor
+                    or target["migration"].get("provenance") != provenance
+                    or target["events"][:len(value["events"])] != value["events"]):
+                raise DeploymentBlocked("migration transaction does not match request/source")
 
-        with _open_existing_backup(backup) as existing:
-            if existing is not None:
-                commit(existing)
-                return value
-        _install_backup_bytes(backup, raw)
-        with _open_existing_backup(backup) as accepted:
-            if accepted is None:
-                raise DeploymentBlocked("legacy backup does not match reviewed bytes")
-            commit(accepted)
-        return value
+        def ensure_exact_evidence(target_path: Path, payload: bytes, mismatch: str) -> None:
+            with _open_existing_backup(target_path) as existing:
+                if existing is not None:
+                    if existing[2] != payload:
+                        raise DeploymentBlocked(mismatch)
+                    return
+            _install_backup_bytes(target_path, payload)
+            with _open_existing_backup(target_path) as installed:
+                if installed is None or installed[2] != payload:
+                    raise DeploymentBlocked(mismatch)
+
+        ensure_exact_evidence(
+            backup, raw, "legacy backup already exists with different bytes")
+        ensure_exact_evidence(
+            source, raw, "legacy migration source already exists with different bytes")
+        transaction_bytes = (json.dumps(transaction, sort_keys=True, indent=2,
+                                        ensure_ascii=True) + "\n").encode("utf-8")
+        ensure_exact_evidence(
+            transaction_path, transaction_bytes,
+            "legacy migration transaction already exists with different bytes")
+
+        with _open_existing_backup(backup) as accepted_backup:
+            with _open_existing_backup(source) as accepted_source:
+                with _open_existing_backup(transaction_path) as accepted_transaction:
+                    if (accepted_backup is None or accepted_source is None
+                            or accepted_transaction is None
+                            or accepted_backup[2] != raw or accepted_source[2] != raw
+                            or accepted_transaction[2] != transaction_bytes
+                            or path.read_bytes() != raw):
+                        raise DeploymentBlocked(
+                            "legacy evidence changed before migration commit")
+                    anchor_path = _anchor_path(path)
+                    if anchor_path.exists():
+                        if _read_journal_json(anchor_path) != _checkpoint(target):
+                            raise DeploymentBlocked(
+                                "migration transaction does not match durable anchor")
+                        _atomic_write(path, target)
+                    else:
+                        _persist_journal(path, target)
+                    current = _load_journal(path)
+        return current
 
 
 def _ensure_journal(path: Path) -> None:

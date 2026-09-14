@@ -82,20 +82,35 @@ sequence cannot prove that its original prefix was preserved: v1 has no durable
 root. The explicit hash/provenance review is the one-time trust boundary, not a
 claim of retroactive authentication. Ambiguous histories require investigation.
 
-Before publishing v2, the migrator writes a byte-for-byte
-`journal.json.legacy-v1.backup`, fsyncs it, and records its SHA-256, byte length,
-filename, selected grammar, actor, provenance and migration time in the anchored
-journal. An existing different backup is never overwritten. Existing historical
-completion claims are preserved; no new completion is generated. A new aborted,
-unusable migration barrier requires fresh authorization wherever the legacy
-history has an action binding. Empty/minimal aborted histories remain unusable.
-An existing backup is opened without following links, must be a regular file,
-and remains open while its bytes and filesystem identity are rechecked through
-the migration commit. A backup that appears during creation is never replaced.
+Before publishing v2, the migrator writes and fsyncs two byte-for-byte copies:
+`journal.json.legacy-v1.backup` and the independently named
+`journal.json.legacy-v1.source`. It then writes and fsyncs
+`journal.json.migration-v1.json`, an immutable transaction record containing the
+exact proposed v2 journal. Only after all three safe regular files are durable
+does it publish the checkpoint and journal. The anchored journal records both
+source filenames, the transaction filename, SHA-256, byte length, selected
+grammar, actor, provenance and migration time. Existing different files are
+never overwritten. Existing historical completion claims are preserved; no new
+completion is generated. A new aborted, unusable migration barrier requires
+fresh authorization wherever the legacy history has an action binding.
+Empty/minimal aborted histories remain unusable.
 
-An identical completed migration request reloads without rewriting either file or
-its provenance and verifies the pinned backup. A crash before the checkpoint is
-published may be retried with the same exact bytes and pin. A crash after the
-checkpoint but before the journal is published is refused on retry, preserving the
-legacy bytes, backup and checkpoint for explicit recovery. No migration fallback
-can turn a lost v2 anchor or a stale pending event into usable completion evidence.
+The backup, independent source and transaction are opened without following
+links and remain open while their bytes and filesystem identities are rechecked
+through publication. Every later journal load also requires all three files,
+requires both legacy copies to match the recorded bytes and hash, and requires
+the transaction's exact v2 journal to be the current history prefix. Thus a
+backup pathname replacement detected after either v2 rename cannot leave a
+loadable pair with false migration provenance, while the independent source
+still retains the reviewed bytes. A file that appears during creation is never
+replaced.
+
+An identical completed migration request reloads without rewriting the pair or
+its provenance and verifies all migration evidence. Any crash before checkpoint
+publication can be retried from the pinned legacy journal and durable transaction.
+If the exact transaction checkpoint was already published, retry verifies it and
+publishes only that transaction's journal, making recovery idempotent without
+inventing a new journal ID, time or provenance. A conflicting transaction,
+checkpoint, backup or independent source is refused and preserved. No migration
+fallback can turn a lost v2 anchor, damaged migration evidence or stale pending
+event into usable completion evidence.

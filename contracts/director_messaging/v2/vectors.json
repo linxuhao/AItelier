@@ -1,0 +1,1011 @@
+{
+  "schema": "aitelier.director-messaging.conformance.v2",
+  "project_ids": [
+    "alpha",
+    "beta",
+    "gamma"
+  ],
+  "scenarios": [
+    {
+      "id": "target-list-lifecycle-and-replay",
+      "actor": "transport-a",
+      "steps": [
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "send-1",
+            "subject": "Café",
+            "body": "first body",
+            "target_project_id": "beta"
+          },
+          "schema": "sendSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "message": {
+                "sender_project_id": "alpha",
+                "director_identity": "director-a",
+                "actor": "transport-a",
+                "subject": "Café",
+                "body": "first body",
+                "reply_to_delivery_id": null
+              },
+              "deliveries": [
+                {
+                  "target_project_id": "beta",
+                  "delivery_seq": 1,
+                  "status": "unread",
+                  "version": 1
+                }
+              ],
+              "replayed": false
+            }
+          },
+          "capture": {
+            "d1": "/result/deliveries/0/delivery_id",
+            "m1": "/result/message/message_id",
+            "t1": "/result/message/thread_id"
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "beta"
+          },
+          "schema": "listSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "project_id": "beta",
+              "items": [
+                {
+                  "message": {
+                    "message_id": "@capture:m1",
+                    "thread_id": "@capture:t1",
+                    "subject": "Café",
+                    "body": "first body"
+                  },
+                  "delivery": {
+                    "delivery_id": "@capture:d1",
+                    "delivery_seq": 1,
+                    "status": "unread",
+                    "version": 1
+                  }
+                }
+              ],
+              "next_after": 1
+            }
+          }
+        },
+        {
+          "action": "acknowledge_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "@capture:d1",
+            "expected_version": 1,
+            "request_key": "ack-1"
+          },
+          "schema": "transitionSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "delivery": {
+                "delivery_id": "@capture:d1",
+                "status": "acknowledged",
+                "version": 2
+              },
+              "replayed": false
+            }
+          }
+        },
+        {
+          "action": "acknowledge_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "@capture:d1",
+            "expected_version": 1,
+            "request_key": "ack-1"
+          },
+          "schema": "transitionSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "delivery": {
+                "delivery_id": "@capture:d1",
+                "status": "acknowledged",
+                "version": 2
+              },
+              "replayed": true
+            }
+          }
+        },
+        {
+          "action": "resolve_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "@capture:d1",
+            "expected_version": 2,
+            "request_key": "resolve-1"
+          },
+          "schema": "transitionSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "delivery": {
+                "delivery_id": "@capture:d1",
+                "status": "resolved",
+                "version": 3
+              },
+              "replayed": false
+            }
+          }
+        },
+        {
+          "action": "resolve_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "@capture:d1",
+            "expected_version": 1,
+            "request_key": "resolve-already"
+          },
+          "schema": "transitionSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "delivery": {
+                "delivery_id": "@capture:d1",
+                "status": "resolved",
+                "version": 3
+              },
+              "replayed": false
+            }
+          }
+        },
+        {
+          "action": "acknowledge_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "@capture:d1",
+            "expected_version": 3,
+            "request_key": "ack-regress"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_transition",
+            "detail": {
+              "message": "invalid_transition"
+            }
+          }
+        },
+        {
+          "action": "acknowledge_director_message",
+          "arguments": {
+            "project_id": "gamma",
+            "delivery_id": "@capture:d1",
+            "expected_version": 1,
+            "request_key": "ack-wrong-box"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "unknown_delivery",
+            "detail": {
+              "message": "unknown_delivery"
+            }
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "send-1",
+            "subject": "Hello",
+            "body": "changed",
+            "target_project_id": "beta"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "idempotency_conflict",
+            "detail": {
+              "message": "idempotency_conflict"
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "beta",
+            "after": 1,
+            "limit": 1
+          },
+          "schema": "listSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "project_id": "beta",
+              "items": [],
+              "next_after": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "broadcast-and-direct-reply",
+      "actor": "transport-a",
+      "steps": [
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "broadcast-1",
+            "subject": "News",
+            "body": "all recipients",
+            "broadcast": true
+          },
+          "schema": "sendSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "message": {
+                "sender_project_id": "alpha",
+                "reply_to_delivery_id": null
+              },
+              "deliveries": [
+                {
+                  "target_project_id": "beta",
+                  "delivery_seq": 1,
+                  "status": "unread",
+                  "version": 1
+                },
+                {
+                  "target_project_id": "gamma",
+                  "delivery_seq": 1,
+                  "status": "unread",
+                  "version": 1
+                }
+              ],
+              "replayed": false
+            }
+          },
+          "capture": {
+            "bt": "/result/message/thread_id",
+            "bd_beta": "/result/deliveries/0/delivery_id"
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "beta",
+            "director_identity": "director-b",
+            "request_key": "reply-1",
+            "subject": "Re",
+            "body": "private reply",
+            "reply_to_delivery_id": "@capture:bd_beta"
+          },
+          "schema": "sendSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "message": {
+                "sender_project_id": "beta",
+                "actor": "transport-b",
+                "thread_id": "@capture:bt",
+                "reply_to_delivery_id": "@capture:bd_beta"
+              },
+              "deliveries": [
+                {
+                  "target_project_id": "alpha",
+                  "delivery_seq": 1
+                }
+              ],
+              "replayed": false
+            }
+          },
+          "capture": {
+            "reply_delivery": "/result/deliveries/0/delivery_id"
+          },
+          "actor": "transport-b"
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "alpha"
+          },
+          "schema": "listSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "project_id": "alpha",
+              "items": [
+                {
+                  "message": {
+                    "sender_project_id": "beta",
+                    "thread_id": "@capture:bt",
+                    "reply_to_delivery_id": "@capture:bd_beta"
+                  },
+                  "delivery": {
+                    "delivery_id": "@capture:reply_delivery",
+                    "target_project_id": "alpha",
+                    "delivery_seq": 1
+                  }
+                }
+              ],
+              "next_after": 1
+            }
+          },
+          "actor": "transport-c"
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "gamma",
+            "director_identity": "director-c",
+            "request_key": "bad-reply",
+            "subject": "No",
+            "body": "",
+            "reply_to_delivery_id": "@capture:bd_beta"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "unknown_delivery",
+            "detail": {
+              "message": "unknown_delivery"
+            }
+          },
+          "actor": "transport-c"
+        }
+      ]
+    },
+    {
+      "id": "validation-project-and-transition-errors",
+      "actor": "transport-a",
+      "steps": [
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "bad-bool",
+            "subject": "Hello",
+            "body": "Body",
+            "target_project_id": "beta",
+            "broadcast": 1
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_request",
+            "detail": {
+              "message": "invalid_request"
+            }
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "bad-mode",
+            "subject": "Hello",
+            "body": "Body",
+            "target_project_id": null
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_request",
+            "detail": {
+              "message": "invalid_request"
+            }
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "self",
+            "subject": "Hello",
+            "body": "Body",
+            "target_project_id": "alpha"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_request",
+            "detail": {
+              "message": "invalid_request"
+            }
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "unknown-target",
+            "subject": "Hello",
+            "body": "Body",
+            "target_project_id": "missing"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "unknown_project",
+            "detail": {
+              "message": "unknown_project"
+            }
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "missing",
+            "director_identity": "director-a",
+            "request_key": "bad-first",
+            "subject": "",
+            "body": "",
+            "target_project_id": "beta"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_request",
+            "detail": {
+              "message": "invalid_request"
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "beta",
+            "after": false
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_request",
+            "detail": {
+              "message": "invalid_request"
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "missing"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "unknown_project",
+            "detail": {
+              "message": "unknown_project"
+            }
+          }
+        },
+        {
+          "action": "acknowledge_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "none",
+            "expected_version": true,
+            "request_key": "bad-version"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_request",
+            "detail": {
+              "message": "invalid_request"
+            }
+          }
+        },
+        {
+          "action": "resolve_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "none",
+            "expected_version": 1,
+            "request_key": "unknown"
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "unknown_delivery",
+            "detail": {
+              "message": "unknown_delivery"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "no-recipient-does-not-write",
+      "actor": "transport-a",
+      "project_ids": [
+        "solo"
+      ],
+      "steps": [
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "solo",
+            "director_identity": "director",
+            "request_key": "empty-broadcast",
+            "subject": "News",
+            "body": "",
+            "broadcast": true
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "no_recipients",
+            "detail": {
+              "message": "no_recipients"
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "solo"
+          },
+          "schema": "listSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "project_id": "solo",
+              "items": [],
+              "next_after": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "recipient-limit-is-atomic",
+      "actor": "transport-a",
+      "project_ids": [
+        "sender",
+        "recipient-000",
+        "recipient-001",
+        "recipient-002",
+        "recipient-003",
+        "recipient-004",
+        "recipient-005",
+        "recipient-006",
+        "recipient-007",
+        "recipient-008",
+        "recipient-009",
+        "recipient-010",
+        "recipient-011",
+        "recipient-012",
+        "recipient-013",
+        "recipient-014",
+        "recipient-015",
+        "recipient-016",
+        "recipient-017",
+        "recipient-018",
+        "recipient-019",
+        "recipient-020",
+        "recipient-021",
+        "recipient-022",
+        "recipient-023",
+        "recipient-024",
+        "recipient-025",
+        "recipient-026",
+        "recipient-027",
+        "recipient-028",
+        "recipient-029",
+        "recipient-030",
+        "recipient-031",
+        "recipient-032",
+        "recipient-033",
+        "recipient-034",
+        "recipient-035",
+        "recipient-036",
+        "recipient-037",
+        "recipient-038",
+        "recipient-039",
+        "recipient-040",
+        "recipient-041",
+        "recipient-042",
+        "recipient-043",
+        "recipient-044",
+        "recipient-045",
+        "recipient-046",
+        "recipient-047",
+        "recipient-048",
+        "recipient-049",
+        "recipient-050",
+        "recipient-051",
+        "recipient-052",
+        "recipient-053",
+        "recipient-054",
+        "recipient-055",
+        "recipient-056",
+        "recipient-057",
+        "recipient-058",
+        "recipient-059",
+        "recipient-060",
+        "recipient-061",
+        "recipient-062",
+        "recipient-063",
+        "recipient-064",
+        "recipient-065",
+        "recipient-066",
+        "recipient-067",
+        "recipient-068",
+        "recipient-069",
+        "recipient-070",
+        "recipient-071",
+        "recipient-072",
+        "recipient-073",
+        "recipient-074",
+        "recipient-075",
+        "recipient-076",
+        "recipient-077",
+        "recipient-078",
+        "recipient-079",
+        "recipient-080",
+        "recipient-081",
+        "recipient-082",
+        "recipient-083",
+        "recipient-084",
+        "recipient-085",
+        "recipient-086",
+        "recipient-087",
+        "recipient-088",
+        "recipient-089",
+        "recipient-090",
+        "recipient-091",
+        "recipient-092",
+        "recipient-093",
+        "recipient-094",
+        "recipient-095",
+        "recipient-096",
+        "recipient-097",
+        "recipient-098",
+        "recipient-099",
+        "recipient-100",
+        "recipient-101",
+        "recipient-102",
+        "recipient-103",
+        "recipient-104",
+        "recipient-105",
+        "recipient-106",
+        "recipient-107",
+        "recipient-108",
+        "recipient-109",
+        "recipient-110",
+        "recipient-111",
+        "recipient-112",
+        "recipient-113",
+        "recipient-114",
+        "recipient-115",
+        "recipient-116",
+        "recipient-117",
+        "recipient-118",
+        "recipient-119",
+        "recipient-120",
+        "recipient-121",
+        "recipient-122",
+        "recipient-123",
+        "recipient-124",
+        "recipient-125",
+        "recipient-126",
+        "recipient-127",
+        "recipient-128",
+        "recipient-129",
+        "recipient-130",
+        "recipient-131",
+        "recipient-132",
+        "recipient-133",
+        "recipient-134",
+        "recipient-135",
+        "recipient-136",
+        "recipient-137",
+        "recipient-138",
+        "recipient-139",
+        "recipient-140",
+        "recipient-141",
+        "recipient-142",
+        "recipient-143",
+        "recipient-144",
+        "recipient-145",
+        "recipient-146",
+        "recipient-147",
+        "recipient-148",
+        "recipient-149",
+        "recipient-150",
+        "recipient-151",
+        "recipient-152",
+        "recipient-153",
+        "recipient-154",
+        "recipient-155",
+        "recipient-156",
+        "recipient-157",
+        "recipient-158",
+        "recipient-159",
+        "recipient-160",
+        "recipient-161",
+        "recipient-162",
+        "recipient-163",
+        "recipient-164",
+        "recipient-165",
+        "recipient-166",
+        "recipient-167",
+        "recipient-168",
+        "recipient-169",
+        "recipient-170",
+        "recipient-171",
+        "recipient-172",
+        "recipient-173",
+        "recipient-174",
+        "recipient-175",
+        "recipient-176",
+        "recipient-177",
+        "recipient-178",
+        "recipient-179",
+        "recipient-180",
+        "recipient-181",
+        "recipient-182",
+        "recipient-183",
+        "recipient-184",
+        "recipient-185",
+        "recipient-186",
+        "recipient-187",
+        "recipient-188",
+        "recipient-189",
+        "recipient-190",
+        "recipient-191",
+        "recipient-192",
+        "recipient-193",
+        "recipient-194",
+        "recipient-195",
+        "recipient-196",
+        "recipient-197",
+        "recipient-198",
+        "recipient-199",
+        "recipient-200"
+      ],
+      "steps": [
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "sender",
+            "director_identity": "director",
+            "request_key": "too-many",
+            "subject": "News",
+            "body": "",
+            "broadcast": true
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "recipient_limit",
+            "detail": {
+              "message": "recipient_limit"
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "recipient-000"
+          },
+          "schema": "listSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "project_id": "recipient-000",
+              "items": [],
+              "next_after": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "v2-delivery-modes-and-filtered-pages",
+      "actor": "transport-a",
+      "steps": [
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "v2-default",
+            "subject": "default",
+            "body": "",
+            "target_project_id": "beta"
+          },
+          "schema": "sendSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "message": {
+                "delivery_mode": "transient"
+              },
+              "deliveries": [
+                {
+                  "delivery_seq": 1,
+                  "status": "unread",
+                  "version": 1
+                }
+              ],
+              "replayed": false
+            }
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "v2-standing",
+            "subject": "standing",
+            "body": "",
+            "target_project_id": "beta",
+            "delivery_mode": "standing"
+          },
+          "schema": "sendSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "message": {
+                "delivery_mode": "standing"
+              },
+              "deliveries": [
+                {
+                  "delivery_seq": 2,
+                  "status": "unread",
+                  "version": 1
+                }
+              ],
+              "replayed": false
+            }
+          },
+          "capture": {
+            "standing_delivery": "/result/deliveries/0/delivery_id"
+          }
+        },
+        {
+          "action": "send_director_message",
+          "arguments": {
+            "sender_project_id": "alpha",
+            "director_identity": "director-a",
+            "request_key": "v2-standing-two",
+            "subject": "standing two",
+            "body": "",
+            "target_project_id": "beta",
+            "delivery_mode": "standing"
+          },
+          "schema": "sendSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "message": {
+                "delivery_mode": "standing"
+              },
+              "deliveries": [
+                {
+                  "delivery_seq": 3,
+                  "status": "unread",
+                  "version": 1
+                }
+              ],
+              "replayed": false
+            }
+          }
+        },
+        {
+          "action": "acknowledge_director_message",
+          "arguments": {
+            "project_id": "beta",
+            "delivery_id": "@capture:standing_delivery",
+            "expected_version": 1,
+            "request_key": "v2-ack"
+          },
+          "schema": "transitionSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "delivery": {
+                "status": "acknowledged",
+                "version": 2
+              },
+              "replayed": false
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "beta",
+            "after": 0,
+            "limit": 1,
+            "delivery_mode": "standing",
+            "statuses": [
+              "unread",
+              "acknowledged"
+            ]
+          },
+          "schema": "listSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "project_id": "beta",
+              "items": [
+                {
+                  "message": {
+                    "delivery_mode": "standing"
+                  },
+                  "delivery": {
+                    "delivery_seq": 2,
+                    "status": "acknowledged",
+                    "version": 2
+                  }
+                }
+              ],
+              "matched_total": 2,
+              "has_more": true,
+              "next_after": 2
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "beta",
+            "after": 3,
+            "limit": 100,
+            "delivery_mode": "transient",
+            "statuses": [
+              "resolved"
+            ]
+          },
+          "schema": "listSuccess",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "result": {
+              "project_id": "beta",
+              "items": [],
+              "matched_total": 0,
+              "has_more": false,
+              "next_after": 3
+            }
+          }
+        },
+        {
+          "action": "list_director_messages",
+          "arguments": {
+            "project_id": "beta",
+            "statuses": [
+              "unread",
+              "unread"
+            ]
+          },
+          "schema": "error",
+          "expect": {
+            "schema": "aitelier.director-messaging.v2",
+            "code": "invalid_request",
+            "detail": {
+              "message": "invalid_request"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

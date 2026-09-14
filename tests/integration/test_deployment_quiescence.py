@@ -17,6 +17,9 @@ def test_real_skillflow_cross_project_measurement_then_quiescence(tmp_path):
     sf.start_run(run_b)
 
     active = dq.measure(skillflow=sf, external_probe=list)
+    assert active["digest"] == dq._digest(
+        {key: value for key, value in active.items() if key != "digest"})
+    assert dq._validate_observation(active) is None
     assert active["projects"] == ["project-a", "project-b"]
     assert {row["run_id"] for row in active["blockers"]["active_runs"]} == {run_a, run_b}
     assert active["quiescent"] is False
@@ -27,4 +30,9 @@ def test_real_skillflow_cross_project_measurement_then_quiescence(tmp_path):
     assert quiet["projects"] == ["project-a", "project-b"]
     assert quiet["blockers"]["active_runs"] == []
     assert quiet["quiescent"] is True
+    assert dq._validate_observation(quiet) is None
+    clearance = dq.authorize(
+        "restart", quiet, journal=tmp_path / "deployment-journal.json")
+    dq.finalize(clearance, success=True,
+                journal=tmp_path / "deployment-journal.json")
     sf._conn.close()

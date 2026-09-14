@@ -73,6 +73,25 @@ def _quiet_probe():
     return [{"kind": "docker", "name": "zvec-grep", "active": False}]
 
 
+def _producer_shaped_observation(**changes):
+    observation = {
+        "observed_at": "2026-09-14T00:00:00+00:00",
+        "projects": [],
+        "runs": [],
+        "sidecar_owners": [],
+        "godot_render_owners": [],
+        "external_owners": [],
+        "registered_external_owners": [],
+        "blockers": {},
+        "errors": [],
+        "quiescent": True,
+        **changes,
+    }
+    observation.pop("digest", None)
+    observation["digest"] = dq._digest(observation)
+    return observation
+
+
 def test_measurement_is_cross_project_and_includes_external_sidecar_owners(tmp_path):
     db = _db(tmp_path / "app.sqlite", lease=True, admission=True)
     sidecar_path = tmp_path / "control.sqlite3"
@@ -122,26 +141,27 @@ def test_quiet_measurement_requires_all_boundaries_to_settle(tmp_path):
 
 def test_non_quiet_gate_persists_aborted_unusable_evidence(tmp_path):
     journal = tmp_path / "journal.json"
-    observation = {
-        "quiescent": False,
-        "digest": "a" * 64,
-        "blockers": {"active_runs": [{"run_id": "run-a"}]},
-        "errors": [],
-    }
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    observation = _producer_shaped_observation(
+        quiescent=False,
+        runs=[run],
+        blockers={"active_runs": [run]},
+    )
     with pytest.raises(dq.DeploymentBlocked, match="aborted/unusable"):
         dq.authorize("restart", observation, journal=journal)
     data = json.loads(journal.read_text())
     assert data["latest"]["status"] == "aborted"
     assert data["latest"]["usable"] is False
-    assert data["latest"]["inventory_digest"] == "a" * 64
+    assert data["latest"]["inventory_digest"] == observation["digest"]
 
 
 def test_override_is_audited_and_bound_to_fresh_inventory(tmp_path):
     journal = tmp_path / "journal.json"
-    observation = {"quiescent": False, "digest": "b" * 64,
-                   "blockers": {"active_runs": [{"run_id": "run-a"}]}, "errors": []}
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    observation = _producer_shaped_observation(
+        quiescent=False, runs=[run], blockers={"active_runs": [run]})
     base = {"action": "restart", "actor": "operator@example", "reason": "urgent fix",
-            "ticket": "INC-42", "inventory_digest": "b" * 64,
+            "ticket": "INC-42", "inventory_digest": observation["digest"],
             "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat()}
     result = dq.authorize("restart", observation, journal=journal, override=base)
     assert result["allowed"] is True and result["replayed"] is False
@@ -179,31 +199,33 @@ def _unknown_process(index):
 
 def test_incident_unknown_ack_cannot_cross_real_owner_amid_147_noise(tmp_path):
     noise = [_unknown_process(index) for index in range(147)]
-    observation = {
-        "quiescent": False,
-        "digest": "7" * 64,
-        "blockers": {
+    godot_owner = {
+        "generation": 35,
+        "owner_id": "owner-35",
+        "project_id": "two-step-r1b",
+        "run_id": "unknown-run",
+        "operation_id": "operation-35",
+        "resource": "render",
+        "status": "active",
+    }
+    observation = _producer_shaped_observation(
+        quiescent=False,
+        external_owners=noise,
+        godot_render_owners=[godot_owner],
+        blockers={
             "active_runs": [],
             "active_operations": [],
             "checkout_leases": [],
             "sidecar_owners": [],
             "external_active": noise,
             "registered_external_owners": [],
-            "godot_render_owners": [{
-                "generation": 35,
-                "owner_id": "owner-35",
-                "project_id": "two-step-r1b",
-                "run_id": "unknown-run",
-                "operation_id": "operation-35",
-                "resource": "render",
-                "status": "active",
-            }],
+            "godot_render_owners": [godot_owner],
         },
-        "errors": [
+        errors=[
             "unregistered external measurement process has unknown ownership: "
             + row["command"] for row in noise
         ],
-    }
+    )
 
     with pytest.raises(dq.DeploymentBlocked, match="authoritative"):
         dq.authorize(
@@ -217,19 +239,17 @@ def test_incident_unknown_ack_cannot_cross_real_owner_amid_147_noise(tmp_path):
 
 
 def test_unknown_ack_cannot_cross_known_owner_without_noise(tmp_path):
-    observation = {
-        "quiescent": False,
-        "digest": "8" * 64,
-        "blockers": {
-            "registered_external_owners": [{
-                "attempt_id": "attempt-real",
-                "project_id": "wuxia-myth",
-                "external_id": "real-worker",
-                "status": "active",
-            }],
-        },
-        "errors": [],
+    owner = {
+        "attempt_id": "attempt-real",
+        "project_id": "wuxia-myth",
+        "external_id": "real-worker",
+        "status": "active",
     }
+    observation = _producer_shaped_observation(
+        quiescent=False,
+        registered_external_owners=[owner],
+        blockers={"registered_external_owners": [owner]},
+    )
 
     with pytest.raises(dq.DeploymentBlocked, match="authoritative"):
         dq.authorize(
@@ -241,15 +261,15 @@ def test_unknown_ack_cannot_cross_known_owner_without_noise(tmp_path):
 
 def test_noise_only_unknown_ack_remains_explicit_and_audited(tmp_path):
     noise = [_unknown_process(index) for index in range(3)]
-    observation = {
-        "quiescent": False,
-        "digest": "9" * 64,
-        "blockers": {"external_active": noise},
-        "errors": [
+    observation = _producer_shaped_observation(
+        quiescent=False,
+        external_owners=noise,
+        blockers={"external_active": noise},
+        errors=[
             "unregistered external measurement process has unknown ownership: "
             + row["command"] for row in noise
         ],
-    }
+    )
     result = dq.authorize(
         "restart", observation, journal=tmp_path / "journal.json",
         override=_deployment_override(
@@ -263,10 +283,8 @@ def test_noise_only_unknown_ack_remains_explicit_and_audited(tmp_path):
 
 
 def test_clean_no_owner_path_does_not_need_an_override(tmp_path):
-    observation = {
-        "quiescent": True,
-        "digest": "0" * 64,
-        "blockers": {
+    observation = _producer_shaped_observation(
+        blockers={
             "active_runs": [],
             "active_operations": [],
             "checkout_leases": [],
@@ -275,13 +293,112 @@ def test_clean_no_owner_path_does_not_need_an_override(tmp_path):
             "registered_external_owners": [],
             "godot_render_owners": [],
         },
-        "errors": [],
-    }
+    )
     result = dq.authorize(
         "restart", observation, journal=tmp_path / "journal.json")
 
     assert result["allowed"] is True
     assert result["event"]["status"] == "authorized"
+
+
+def test_top_level_active_run_cannot_be_omitted_from_quiescent_blockers(tmp_path):
+    observation = _producer_shaped_observation(
+        projects=["project-a"],
+        runs=[{"run_id": "run-a", "project_id": "project-a",
+               "status": "running", "active_operations": 0}],
+    )
+
+    with pytest.raises(dq.DeploymentBlocked, match="normalized runs inventory"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+
+
+def test_clean_observation_without_inventory_digest_is_unusable(tmp_path):
+    observation = _producer_shaped_observation()
+    del observation["digest"]
+
+    with pytest.raises(dq.DeploymentBlocked, match="digest must be"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+
+
+def test_mutated_blockers_cannot_reuse_pre_mutation_inventory_digest(tmp_path):
+    observation = _producer_shaped_observation()
+    observation["blockers"] = {
+        "active_runs": [{"run_id": "run-a", "project_id": "project-a",
+                         "status": "running"}],
+    }
+    observation["quiescent"] = False
+
+    with pytest.raises(dq.DeploymentBlocked, match="digest does not match"):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / "journal.json",
+            override=_deployment_override(observation["digest"]),
+        )
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+    assert "audit" not in event
+
+
+@pytest.mark.parametrize("digest", [None, "A" * 64, "a" * 63, "g" * 64, 123])
+def test_malformed_inventory_digest_is_unusable(tmp_path, digest):
+    observation = _producer_shaped_observation()
+    observation["digest"] = digest
+
+    with pytest.raises(dq.DeploymentBlocked, match="digest must be"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+
+
+@pytest.mark.parametrize("inventory_name", [
+    "runs", "sidecar_owners", "external_owners",
+    "registered_external_owners", "godot_render_owners",
+])
+def test_required_top_level_owner_inventory_cannot_be_omitted(
+        tmp_path, inventory_name):
+    observation = _producer_shaped_observation()
+    del observation[inventory_name]
+    observation["digest"] = dq._digest(
+        {key: value for key, value in observation.items() if key != "digest"})
+
+    with pytest.raises(dq.DeploymentBlocked, match=f"{inventory_name} must be a list"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+
+
+@pytest.mark.parametrize(("inventory_name", "blocker_name", "owner"), [
+    ("runs", "active_operations",
+     {"run_id": "run-a", "project_id": "project-a", "status": "completed",
+      "active_operations": 1}),
+    ("sidecar_owners", "sidecar_owners",
+     {"run_id": "run-a", "desired": "ready", "outcome": "pending",
+      "revision": 2, "done_revision": 1}),
+    ("external_owners", "external_active",
+     {"kind": "docker", "id": "container-a", "active": True}),
+    ("registered_external_owners", "registered_external_owners",
+     {"attempt_id": "attempt-a", "status": "active"}),
+    ("godot_render_owners", "godot_render_owners",
+     {"owner_id": "owner-a", "status": "owner_lost"}),
+])
+def test_top_level_owner_cannot_be_omitted_from_normalized_blockers(
+        tmp_path, inventory_name, blocker_name, owner):
+    observation = _producer_shaped_observation(
+        **{inventory_name: [owner]}, blockers={}, quiescent=True)
+
+    with pytest.raises(dq.DeploymentBlocked, match=f"blockers.{blocker_name}"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
 
 
 @pytest.mark.parametrize(("field", "value"), [
@@ -328,15 +445,15 @@ def test_noise_shaped_row_with_authoritative_identity_is_malformed(
     ({"quiescent": None}, "quiescent must be a boolean"),
 ])
 def test_malformed_observation_cannot_be_overridden(tmp_path, patch, reason):
-    observation = {
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    values = {
         "quiescent": False,
-        "digest": "3" * 64,
-        "blockers": {
-            "active_runs": [{"run_id": "run-a", "project_id": "project-a"}],
-        },
+        "runs": [run],
+        "blockers": {"active_runs": [run]},
         "errors": [],
         **patch,
     }
+    observation = _producer_shaped_observation(**values)
 
     with pytest.raises(dq.DeploymentBlocked, match=reason):
         dq.authorize(
@@ -353,12 +470,12 @@ def test_malformed_observation_cannot_be_overridden(tmp_path, patch, reason):
 
 def test_noise_row_requires_non_empty_command(tmp_path):
     row = {**_unknown_process(0), "command": "  "}
-    observation = {
-        "quiescent": False,
-        "digest": "5" * 64,
-        "blockers": {"external_active": [row]},
-        "errors": [dq.UNKNOWN_PROCESS_ERROR_PREFIX + row["command"]],
-    }
+    observation = _producer_shaped_observation(
+        quiescent=False,
+        external_owners=[row],
+        blockers={"external_active": [row]},
+        errors=[dq.UNKNOWN_PROCESS_ERROR_PREFIX + row["command"]],
+    )
 
     with pytest.raises(dq.DeploymentBlocked, match="non-empty command"):
         dq.authorize(
@@ -376,17 +493,16 @@ def test_noise_row_requires_non_empty_command(tmp_path):
 def test_declared_quiescence_must_match_validated_blockers_and_errors(
         tmp_path, quiescent):
     if quiescent:
-        blockers = {"active_runs": [{"run_id": "run-a", "project_id": "project-a"}]}
+        run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+        runs = [run]
+        blockers = {"active_runs": [run]}
         errors = []
     else:
+        runs = []
         blockers = {}
         errors = []
-    observation = {
-        "quiescent": quiescent,
-        "digest": "4" * 64,
-        "blockers": blockers,
-        "errors": errors,
-    }
+    observation = _producer_shaped_observation(
+        quiescent=quiescent, runs=runs, blockers=blockers, errors=errors)
 
     with pytest.raises(dq.DeploymentBlocked, match="quiescent contradicts"):
         dq.authorize(
@@ -415,12 +531,19 @@ def test_declared_quiescence_must_match_validated_blockers_and_errors(
 ])
 def test_unknown_ack_cannot_cross_each_authoritative_owner_variant(
         tmp_path, blocker_key, owner):
-    observation = {
-        "quiescent": False,
-        "digest": "a" * 64,
-        "blockers": {blocker_key: [owner]},
-        "errors": [],
+    inventory_by_blocker = {
+        "active_runs": "runs",
+        "active_operations": "runs",
+        "registered_external_owners": "registered_external_owners",
+        "godot_render_owners": "godot_render_owners",
+        "external_active": "external_owners",
+        "sidecar_owners": "sidecar_owners",
     }
+    observation = _producer_shaped_observation(
+        quiescent=False,
+        blockers={blocker_key: [owner]},
+        **{inventory_by_blocker[blocker_key]: [owner]},
+    )
 
     with pytest.raises(dq.DeploymentBlocked, match="authoritative"):
         dq.authorize(
@@ -432,14 +555,15 @@ def test_unknown_ack_cannot_cross_each_authoritative_owner_variant(
 
 def test_reconciliation_never_replays_before_or_after_quiescence(tmp_path):
     journal = tmp_path / "journal.json"
-    blocked = {"quiescent": False, "digest": "d" * 64,
-               "blockers": {"active_runs": [{"run_id": "run-a"}]}, "errors": []}
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    blocked = _producer_shaped_observation(
+        quiescent=False, runs=[run], blockers={"active_runs": [run]})
     with pytest.raises(dq.DeploymentBlocked):
         dq.authorize("redeploy", blocked, journal=journal)
     still_blocked = dq.reconcile(observation=blocked, journal=journal)
     assert still_blocked["reconciled"] is False
     assert still_blocked["replayed"] is False
-    quiet = {"quiescent": True, "digest": "e" * 64, "blockers": {}, "errors": []}
+    quiet = _producer_shaped_observation()
     settled = dq.reconcile(observation=quiet, journal=journal)
     assert settled == {"reconciled": True, "replayed": False,
                        "event": settled["event"]}
@@ -467,8 +591,9 @@ def test_malformed_override_is_aborted_and_unusable(tmp_path):
     override.write_text("not json")
     assert dq.load_override(override)["_invalid_override"]
     journal = tmp_path / "journal.json"
-    observation = {"quiescent": False, "digest": "1" * 64,
-                   "blockers": {"active_runs": [{"run_id": "run-a"}]}, "errors": []}
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    observation = _producer_shaped_observation(
+        quiescent=False, runs=[run], blockers={"active_runs": [run]})
     with pytest.raises(dq.DeploymentBlocked):
         dq.authorize("restart", observation, journal=journal,
                      override=dq.load_override(override))
@@ -530,8 +655,8 @@ def test_active_godot_process_blocks_without_semantic_index_ledger(tmp_path):
 
 def test_authorized_action_is_aborted_when_compose_fails(tmp_path):
     journal = tmp_path / "journal.json"
-    clearance = dq.authorize("restart", {"quiescent": True, "digest": "a" * 64,
-                                           "blockers": {}, "errors": []}, journal=journal)
+    clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=journal)
     assert clearance["event"]["pending"] is True
     result = dq.finalize(clearance, success=False, error="compose failed", journal=journal)
     assert result["event"]["status"] == "aborted"
@@ -542,18 +667,16 @@ def test_authorized_action_is_aborted_when_compose_fails(tmp_path):
 
 def test_pending_authorization_is_not_replayed_by_reconcile(tmp_path):
     journal = tmp_path / "journal.json"
-    dq.authorize("restart", {"quiescent": True, "digest": "a" * 64,
-                              "blockers": {}, "errors": []}, journal=journal)
-    result = dq.reconcile(observation={"quiescent": True, "digest": "b" * 64,
-                                       "blockers": {}, "errors": []}, journal=journal)
+    dq.authorize("restart", _producer_shaped_observation(), journal=journal)
+    result = dq.reconcile(
+        observation=_producer_shaped_observation(), journal=journal)
     assert result["replayed"] is False and result["reconciled"] is False
     assert json.loads(journal.read_text())["latest"]["status"] == "aborted"
 
 
 def test_new_authorization_explicitly_aborts_prior_pending_event(tmp_path):
     journal = tmp_path / "journal.json"
-    observation = {"quiescent": True, "digest": "a" * 64,
-                   "blockers": {}, "errors": []}
+    observation = _producer_shaped_observation()
     first = dq.authorize("restart", observation, journal=journal)
     second = dq.authorize("restart", observation, journal=journal)
     events = json.loads(journal.read_text())["events"]

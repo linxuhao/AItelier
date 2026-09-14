@@ -50,6 +50,13 @@ AUTHORITATIVE_IDENTITY_FIELDS = frozenset({
     "attempt_id", "run_id", "operation_id", "owner_id", "project_id",
     "external_id", "id", "owner", "node_key", "harness",
 })
+OWNER_INVENTORY_BLOCKERS = {
+    "runs": ("active_runs", "active_operations"),
+    "sidecar_owners": ("sidecar_owners",),
+    "external_owners": ("external_active",),
+    "registered_external_owners": ("registered_external_owners",),
+    "godot_render_owners": ("godot_render_owners",),
+}
 
 
 class DeploymentBlocked(RuntimeError):
@@ -64,6 +71,35 @@ def _digest(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
                          ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _observation_digest(observation: dict) -> str:
+    """Use the producer's canonical JSON encoding over the frozen inventory."""
+    return _digest({key: value for key, value in observation.items()
+                    if key != "digest"})
+
+
+def _normalized_owner_blockers(*, runs: list[dict], sidecar_owners: list[dict],
+                               external_owners: list[dict],
+                               registered_external_owners: list[dict],
+                               godot_render_owners: list[dict]) -> dict[str, list[dict]]:
+    """Project measured owner inventories through the producer's blocker rules."""
+    return {
+        "active_runs": [row for row in runs
+                        if row.get("status") in BLOCKING_STATUSES],
+        "active_operations": [row for row in runs
+                              if isinstance(row.get("active_operations"), int)
+                              and row["active_operations"] > 0],
+        "sidecar_owners": [row for row in sidecar_owners
+                           if row.get("desired") != "released"
+                           or row.get("outcome") != "released"
+                           or row.get("done_revision") != row.get("revision")],
+        "external_active": [row for row in external_owners
+                            if row.get("active") is True],
+        "registered_external_owners": list(registered_external_owners),
+        "godot_render_owners": [row for row in godot_render_owners
+                                if row.get("status") in {"active", "owner_lost"}],
+    }
 
 
 def evidence_path() -> Path:
@@ -531,27 +567,17 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
         if shared:
             errors.append(f"shared sidecar ledger is missing: {sidecar_db}")
 
-    active_runs = [r for r in runs if r.get("status") in BLOCKING_STATUSES]
-    active_ops = [r for r in runs if isinstance(r.get("active_operations"), int)
-                  and r["active_operations"] > 0]
-    sidecar_blockers = [r for r in sidecar_rows
-                        if r.get("desired") != "released"
-                        or r.get("outcome") != "released"
-                        or r.get("done_revision") != r.get("revision")]
     write_blockers = leases + admissions
-    external_blockers = [r for r in external if r.get("active") is True]
-    godot_blockers = [r for r in godot_rows
-                      if r.get("status") in {"active", "owner_lost"}]
-    blockers = {
-        "active_runs": active_runs,
-        "active_operations": active_ops,
-        "checkout_leases": write_blockers,
-        "sidecar_owners": sidecar_blockers,
-        "external_active": external_blockers,
-        "registered_external_owners": registered_external,
-    }
-    if godot_rows or godot_errors:
-        blockers["godot_render_owners"] = godot_blockers
+    blockers = _normalized_owner_blockers(
+        runs=runs,
+        sidecar_owners=sidecar_rows,
+        external_owners=external,
+        registered_external_owners=registered_external,
+        godot_render_owners=godot_rows,
+    )
+    blockers["checkout_leases"] = write_blockers
+    if not godot_rows and not godot_errors:
+        blockers.pop("godot_render_owners")
     observation = {
         "observed_at": _now(),
         "projects": sorted(
@@ -567,7 +593,7 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
         "errors": errors,
     }
     observation["quiescent"] = not errors and not any(blockers.values())
-    observation["digest"] = _digest(observation)
+    observation["digest"] = _observation_digest(observation)
     return observation
 
 
@@ -575,11 +601,12 @@ def failed_observation(reason: str) -> dict:
     """Represent an unavailable runtime measurement as unusable evidence."""
     observation = {
         "observed_at": _now(), "projects": [], "runs": [],
-        "sidecar_owners": [], "external_owners": [],
+        "sidecar_owners": [], "godot_render_owners": [],
+        "external_owners": [], "registered_external_owners": [],
         "blockers": {"measurement_failure": [{"reason": str(reason)[:500]}]},
         "errors": [str(reason)[:500]], "quiescent": False,
     }
-    observation["digest"] = _digest(observation)
+    observation["digest"] = _observation_digest(observation)
     return observation
 
 
@@ -631,6 +658,35 @@ def _validate_observation(observation: Any) -> str | None:
     errors = observation.get("errors")
     if not isinstance(errors, list) or any(not isinstance(error, str) for error in errors):
         return "errors must be a list of strings"
+    digest = observation.get("digest")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return "digest must be a lowercase hexadecimal SHA-256"
+    try:
+        expected_digest = _observation_digest(observation)
+    except (TypeError, ValueError) as exc:
+        return f"observation cannot be canonically digested: {exc}"
+    if digest != expected_digest:
+        return "digest does not match the canonical frozen inventory"
+    inventories = {}
+    for name in OWNER_INVENTORY_BLOCKERS:
+        rows = observation.get(name)
+        if not isinstance(rows, list):
+            return f"{name} must be a list"
+        if any(not isinstance(row, dict) for row in rows):
+            return f"{name} rows must be objects"
+        inventories[name] = rows
+    normalized = _normalized_owner_blockers(
+        runs=inventories["runs"],
+        sidecar_owners=inventories["sidecar_owners"],
+        external_owners=inventories["external_owners"],
+        registered_external_owners=inventories["registered_external_owners"],
+        godot_render_owners=inventories["godot_render_owners"],
+    )
+    for inventory_name, blocker_names in OWNER_INVENTORY_BLOCKERS.items():
+        for blocker_name in blocker_names:
+            if blockers.get(blocker_name, []) != normalized[blocker_name]:
+                return (f"blockers.{blocker_name} does not match normalized "
+                        f"{inventory_name} inventory")
     declared_quiescent = observation.get("quiescent")
     if not isinstance(declared_quiescent, bool):
         return "quiescent must be a boolean"

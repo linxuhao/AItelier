@@ -2,6 +2,8 @@
 import copy
 import hashlib
 import json
+import stat
+from pathlib import Path
 
 import pytest
 
@@ -333,19 +335,29 @@ def test_migration_crash_never_loses_legacy_or_manufactures_completion(tmp_path,
     raw = path.read_bytes()
     backup = path.with_name(path.name + ".legacy-v1.backup")
     real = dq._atomic_write_bytes
+    real_install = dq._install_backup_bytes
 
     def interrupted(target, payload):
-        which = "backup" if target == backup else "anchor" if target == dq._anchor_path(path) else "journal"
+        which = "anchor" if target == dq._anchor_path(path) else "journal"
         if step == "before-" + which:
             raise OSError("migration crash")
         real(target, payload)
         if step == "after-" + which:
             raise OSError("migration crash")
 
+    def interrupted_backup(target, payload):
+        if step == "before-backup":
+            raise OSError("migration crash")
+        real_install(target, payload)
+        if step == "after-backup":
+            raise OSError("migration crash")
+
     monkeypatch.setattr(dq, "_atomic_write_bytes", interrupted)
+    monkeypatch.setattr(dq, "_install_backup_bytes", interrupted_backup)
     with pytest.raises(OSError, match="migration crash"):
         migrate(path)
     monkeypatch.setattr(dq, "_atomic_write_bytes", real)
+    monkeypatch.setattr(dq, "_install_backup_bytes", real_install)
     if step != "before-backup":
         assert backup.read_bytes() == raw
     if step == "after-journal":
@@ -375,6 +387,167 @@ def test_migration_pin_and_backup_collisions_refuse_without_changes(tmp_path):
     assert path.read_bytes() == before
     assert backup.read_bytes() == b"older evidence"
     assert not dq._anchor_path(path).exists()
+
+
+@pytest.mark.parametrize("target", ["journal", "matching-file"])
+def test_migration_refuses_symlink_backup_without_changes(tmp_path, target):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    matching = tmp_path / "matching-v1.json"
+    matching.write_bytes(raw)
+    backup.symlink_to(path.name if target == "journal" else matching.name)
+    link_target = backup.readlink()
+
+    with pytest.raises(dq.DeploymentBlocked, match="regular file"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert backup.is_symlink()
+    assert backup.readlink() == link_target
+    assert matching.read_bytes() == raw
+    assert not dq._anchor_path(path).exists()
+
+
+def test_existing_backup_open_uses_no_follow(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    backup.write_bytes(path.read_bytes())
+    real_open = dq.os.open
+    backup_flags = []
+
+    def capture_flags(target, flags, *args, **kwargs):
+        if Path(target) == backup:
+            backup_flags.append(flags)
+        return real_open(target, flags, *args, **kwargs)
+
+    monkeypatch.setattr(dq.os, "open", capture_flags)
+    migrate(path)
+    assert backup_flags
+    assert all(flags & dq.os.O_NOFOLLOW for flags in backup_flags)
+
+
+def test_migration_refuses_backup_replaced_during_descriptor_open(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    backup.write_bytes(raw)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(raw)
+    original_identity = backup.stat().st_ino
+    real_open = dq.os.open
+    replaced = False
+
+    def replace_after_open(target, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = real_open(target, flags, *args, **kwargs)
+        if Path(target) == backup and not replaced:
+            replacement.replace(backup)
+            replaced = True
+        return fd
+
+    monkeypatch.setattr(dq.os, "open", replace_after_open)
+    with pytest.raises(dq.DeploymentBlocked, match="changed identity"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.stat().st_ino != original_identity
+    assert backup.read_bytes() == raw
+    assert not dq._anchor_path(path).exists()
+
+
+def test_migration_refuses_backup_replaced_after_validation(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    backup.write_bytes(raw)
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(raw)
+    real_read = dq._read_open_backup
+    reads = 0
+
+    def replace_before_precommit_read(target, fd, signature):
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            replacement.replace(backup)
+        return real_read(target, fd, signature)
+
+    monkeypatch.setattr(dq, "_read_open_backup", replace_before_precommit_read)
+    with pytest.raises(dq.DeploymentBlocked, match="changed identity"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert backup.is_file() and not backup.is_symlink()
+    assert backup.read_bytes() == raw
+    assert not dq._anchor_path(path).exists()
+
+
+def test_migration_never_replaces_backup_appearing_during_creation(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    raced_bytes = b"concurrent backup evidence"
+    real_link = dq.os.link
+
+    def create_before_link(source, destination, **kwargs):
+        backup.write_bytes(raced_bytes)
+        return real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(dq.os, "link", create_before_link)
+    with pytest.raises(dq.DeploymentBlocked, match="appeared during migration"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert backup.read_bytes() == raced_bytes
+    assert not dq._anchor_path(path).exists()
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_migration_refuses_non_regular_backup_without_changes(tmp_path, kind):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    if kind == "directory":
+        backup.mkdir()
+    else:
+        dq.os.mkfifo(backup)
+
+    with pytest.raises(dq.DeploymentBlocked, match="regular file"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert backup.is_dir() if kind == "directory" else stat.S_ISFIFO(backup.stat().st_mode)
+    assert not dq._anchor_path(path).exists()
+
+
+def test_matching_existing_regular_backup_is_stable_and_idempotent(tmp_path):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    source_sha256 = hashlib.sha256(raw).hexdigest()
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    backup.write_bytes(raw)
+    identity = (backup.stat().st_dev, backup.stat().st_ino)
+
+    migrated = migrate(path)
+    pair = (path.read_bytes(), dq._anchor_path(path).read_bytes())
+    assert backup.read_bytes() == raw
+    assert (backup.stat().st_dev, backup.stat().st_ino) == identity
+
+    assert dq.migrate_legacy_journal(
+        journal=path, expected_sha256=source_sha256, actor="retry",
+        provenance="retry", legacy_format="deployed-v1") == migrated
+    assert (path.read_bytes(), dq._anchor_path(path).read_bytes()) == pair
+    assert backup.read_bytes() == raw
+    assert (backup.stat().st_dev, backup.stat().st_ino) == identity
 
 
 def test_content_chain_guard_is_independent_of_checkpoint(tmp_path):

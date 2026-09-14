@@ -89,6 +89,9 @@ journal. An existing different backup is never overwritten. Existing historical
 completion claims are preserved; no new completion is generated. A new aborted,
 unusable migration barrier requires fresh authorization wherever the legacy
 history has an action binding. Empty/minimal aborted histories remain unusable.
+An existing backup is opened without following links, must be a regular file,
+and remains open while its bytes and filesystem identity are rechecked through
+the migration commit. A backup that appears during creation is never replaced.
 
 An identical completed migration request reloads without rewriting either file or
 its provenance and verifies the pinned backup. A crash before the checkpoint is

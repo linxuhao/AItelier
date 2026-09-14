@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -296,6 +297,113 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
         raise
 
 
+def _backup_signature(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode), value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _read_open_backup(path: Path, fd: int,
+                      signature: tuple[int, int, int, int, int, int]) -> bytes:
+    try:
+        before = os.fstat(fd)
+        named = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise DeploymentBlocked(
+            f"legacy backup changed identity during migration: {path}") from exc
+    if (not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(named.st_mode)
+            or _backup_signature(before) != signature
+            or _backup_signature(named) != signature):
+        raise DeploymentBlocked(
+            f"legacy backup changed identity during migration: {path}")
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks = []
+    while chunk := os.read(fd, 1024 * 1024):
+        chunks.append(chunk)
+    payload = b"".join(chunks)
+    try:
+        after = os.fstat(fd)
+        named_after = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise DeploymentBlocked(
+            f"legacy backup changed identity during migration: {path}") from exc
+    if (_backup_signature(after) != signature
+            or _backup_signature(named_after) != signature):
+        raise DeploymentBlocked(
+            f"legacy backup changed identity during migration: {path}")
+    return payload
+
+
+@contextmanager
+def _open_existing_backup(path: Path):
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise DeploymentBlocked("safe no-follow backup access is unavailable")
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0) \
+        | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        yield None
+        return
+    except OSError as exc:
+        raise DeploymentBlocked(
+            f"legacy backup must be a safe regular file: {path}") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise DeploymentBlocked(
+                f"legacy backup must be a safe regular file: {path}")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise DeploymentBlocked(
+                f"legacy backup is not identity-stable for migration: {path}") from exc
+        signature = _backup_signature(opened)
+        payload = _read_open_backup(path, fd, signature)
+        yield (fd, signature, payload)
+        if _read_open_backup(path, fd, signature) != payload:
+            raise DeploymentBlocked(
+                f"legacy backup changed bytes during migration: {path}")
+    finally:
+        os.close(fd)
+
+
+def _install_backup_bytes(path: Path, payload: bytes) -> None:
+    """Publish a complete backup without replacing an entry that raced us."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp = Path(raw)
+    linked = False
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(tmp, path, follow_symlinks=False)
+            linked = True
+        except FileExistsError as exc:
+            raise DeploymentBlocked(
+                "legacy backup appeared during migration; refusing to replace it") from exc
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        if linked:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+
 def _read_journal_json(path: Path) -> dict:
     def unique_keys(pairs):
         result = {}
@@ -568,12 +676,13 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
         if type(value) is dict and value.get("version") == 2:
             current = _load_journal(path)
             migration = current.get("migration", {})
-            if (migration.get("source_sha256") != expected_sha256
-                    or migration.get("legacy_format") != legacy_format
-                    or not backup.exists()
-                    or hashlib.sha256(backup.read_bytes()).hexdigest() != expected_sha256):
-                raise DeploymentBlocked("migration provenance/backup does not match")
-            return current
+            with _open_existing_backup(backup) as existing:
+                if (migration.get("source_sha256") != expected_sha256
+                        or migration.get("legacy_format") != legacy_format
+                        or existing is None
+                        or hashlib.sha256(existing[2]).hexdigest() != expected_sha256):
+                    raise DeploymentBlocked("migration provenance/backup does not match")
+                return current
         if _anchor_path(path).exists():
             raise DeploymentBlocked("legacy journal has an anchor; interrupted migration or rollback")
         raw = path.read_bytes()
@@ -602,14 +711,25 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
                                "inventory_digest": latest.get("inventory_digest"),
                                "reason": "legacy migration barrier; fresh authorization required"})
         _validate_journal(value, path)
-        if backup.exists():
-            if backup.read_bytes() != raw:
+
+        def commit(accepted) -> None:
+            if accepted[2] != raw:
                 raise DeploymentBlocked("legacy backup already exists with different bytes")
-        else:
-            _atomic_write_bytes(backup, raw)
-        if path.read_bytes() != raw:
-            raise DeploymentBlocked("legacy journal changed before migration commit")
-        _persist_journal(path, value)
+            # Recheck both names immediately before publishing the checkpoint.
+            if (_read_open_backup(backup, accepted[0], accepted[1]) != raw
+                    or path.read_bytes() != raw):
+                raise DeploymentBlocked("legacy evidence changed before migration commit")
+            _persist_journal(path, value)
+
+        with _open_existing_backup(backup) as existing:
+            if existing is not None:
+                commit(existing)
+                return value
+        _install_backup_bytes(backup, raw)
+        with _open_existing_backup(backup) as accepted:
+            if accepted is None:
+                raise DeploymentBlocked("legacy backup does not match reviewed bytes")
+            commit(accepted)
         return value
 
 

@@ -87,9 +87,12 @@ Before publishing v2, the migrator writes and fsyncs two byte-for-byte copies:
 `journal.json.legacy-v1.source`. It then writes and fsyncs
 `journal.json.migration-v1.json`, an immutable transaction record containing the
 exact proposed v2 journal. Only after all three safe regular files are durable
-does it publish the checkpoint and journal. The anchored journal records both
-source filenames, the transaction filename, SHA-256, byte length, selected
-grammar, actor, provenance and migration time. Existing different files are
+does it publish the checkpoint and journal. The proposed and published v2
+journal also contains the canonical base64 encoding of the exact v1 bytes; the
+transaction, journal content hash and checkpoint therefore bind that recovery
+image to the migrated history. The anchored journal records both source
+filenames, the transaction filename, SHA-256, byte length, selected grammar,
+actor, provenance and migration time. Existing different files are
 never overwritten. Existing historical completion claims are preserved; no new
 completion is generated. A new aborted, unusable migration barrier requires
 fresh authorization wherever the legacy history has an action binding.
@@ -99,13 +102,24 @@ The journal, backup, independent source and transaction are opened without
 following links. Each must be a regular file with exactly one link, and all four
 must have distinct device/inode identities. Their descriptors remain open while
 bytes, link counts, path identities and timestamps are rechecked after checkpoint
-publication and before the journal becomes v2. Every later journal load repeats
-the four-file independence check, requires both legacy copies to match the
-recorded bytes and hash, and requires the transaction's exact v2 journal to be
-the current history prefix. Hard links through another name are refused even
-when their bytes match. Thus an evidence identity or link-count change cannot
-leave a loadable pair with false migration provenance. A file that appears
+publication and immediately before the single-file v2 journal commit. That
+atomic journal replacement is the migration commit boundary: recovery no longer
+depends only on the identities observed before it because the committed file
+carries the exact v1 recovery image. Every later journal load repeats the
+four-file independence check, requires both legacy copies to match the embedded
+bytes and hash, and requires the transaction's exact v2 journal to be the current
+history prefix. Hard links through another name are refused even when their
+bytes match. A same-byte pathname replacement beginning at the commit boundary
+may be accepted because it cannot remove the embedded recovery image; missing,
+different, linked or non-regular evidence remains blocked. A file that appears
 during creation is never replaced.
+
+On successful return the migrator has reopened and validated the committed
+journal and all evidence. This is the finite operation boundary. Filesystem
+changes after return are evaluated by the next load and can block future use;
+the migration does not claim to prevent later external mutation. Such mutation
+cannot rewrite the embedded recovery image without breaking the transaction and
+checkpoint bindings.
 
 An identical completed migration request reloads without rewriting the pair or
 its provenance and verifies all migration evidence. Any crash before checkpoint

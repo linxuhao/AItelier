@@ -12,6 +12,8 @@ is quiet; it never replays the interrupted deployment action.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import fcntl
 import hashlib
 import json
@@ -334,7 +336,7 @@ def _read_open_backup(path: Path, fd: int,
 
 
 @contextmanager
-def _open_existing_backup(path: Path):
+def _open_existing_backup(path: Path, *, validate_on_exit: bool = True):
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise DeploymentBlocked("safe no-follow backup access is unavailable")
@@ -364,7 +366,7 @@ def _open_existing_backup(path: Path):
             raise DeploymentBlocked(
                 f"legacy evidence must have link count one for independent storage: {path}")
         yield (fd, signature, payload)
-        if _read_open_backup(path, fd, signature) != payload:
+        if validate_on_exit and _read_open_backup(path, fd, signature) != payload:
             raise DeploymentBlocked(
                 f"legacy backup changed bytes during migration: {path}")
     finally:
@@ -608,13 +610,29 @@ def _migration_transaction(*, journal: dict, source_sha256: str,
     }
 
 
+def _migration_recovery_bytes(migration: dict) -> bytes:
+    encoded = migration.get("source_base64") if type(migration) is dict else None
+    if type(encoded) is not str:
+        raise DeploymentBlocked("deployment journal exact migration recovery is malformed")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise DeploymentBlocked(
+            "deployment journal exact migration recovery is malformed") from exc
+    if (base64.b64encode(raw).decode("ascii") != encoded
+            or len(raw) != migration.get("source_bytes")
+            or hashlib.sha256(raw).hexdigest() != migration.get("source_sha256")):
+        raise DeploymentBlocked("deployment journal exact migration recovery does not match")
+    return raw
+
+
 def _validate_migration_transaction(transaction: dict, journal: dict,
                                     path: Path) -> None:
     migration = journal.get("migration")
     backup = path.with_name(path.name + ".legacy-v1.backup")
     source = _migration_source_path(path)
-    expected_keys = {"source_sha256", "source_bytes", "legacy_format", "actor",
-                     "provenance", "at", "backup", "source", "transaction"}
+    expected_keys = {"source_sha256", "source_bytes", "source_base64", "legacy_format",
+                     "actor", "provenance", "at", "backup", "source", "transaction"}
     if (type(migration) is not dict or set(migration) != expected_keys
             or migration.get("backup") != backup.name
             or migration.get("source") != source.name
@@ -628,6 +646,7 @@ def _validate_migration_transaction(transaction: dict, journal: dict,
             or not _nonempty_string(migration.get("provenance"))
             or not _nonempty_string(migration.get("at"))):
         raise DeploymentBlocked("deployment journal migration evidence is malformed")
+    _migration_recovery_bytes(migration)
     target = transaction.get("journal") if type(transaction) is dict else None
     if (type(transaction) is not dict
             or set(transaction) != {"version", "kind", "source_sha256", "source_bytes",
@@ -670,11 +689,8 @@ def _validate_migration_evidence(journal: dict, path: Path) -> None:
                     if _decode_journal_json(journal_file[2], path) != journal:
                         raise DeploymentBlocked(
                             "deployment journal changed during migration evidence validation")
-                    expected_hash = migration.get("source_sha256")
-                    expected_bytes = migration.get("source_bytes")
-                    if (backup_file[2] != source_file[2]
-                            or len(source_file[2]) != expected_bytes
-                            or hashlib.sha256(source_file[2]).hexdigest() != expected_hash):
+                    recovery = _migration_recovery_bytes(migration)
+                    if backup_file[2] != recovery or source_file[2] != recovery:
                         raise DeploymentBlocked(
                             "deployment journal migration evidence does not match")
                     transaction = _decode_journal_json(transaction_file[2], transaction_path)
@@ -786,9 +802,10 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
 
     The operator verifies the original bytes/provenance. Legacy files have no
     authenticated root; structural validity cannot establish historical completeness.
-    The original bytes are backed up before a v2 checkpoint is written. A migration
-    barrier requires a fresh authorization afterwards. Unsettled legacy gates
-    are refused rather than interpreted as completed or safe to resume.
+    The original bytes are backed up and embedded in v2 before its checkpoint is
+    written. A migration barrier requires a fresh authorization afterwards.
+    Unsettled legacy gates are refused rather than interpreted as completed or
+    safe to resume.
     """
     if (type(expected_sha256) is not str
             or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
@@ -832,6 +849,7 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
                 raise DeploymentBlocked(
                     "legacy journal has an anchor without a migration transaction")
             migration = {"source_sha256": expected_sha256, "source_bytes": len(raw),
+                         "source_base64": base64.b64encode(raw).decode("ascii"),
                          "legacy_format": legacy_format, "actor": actor,
                          "provenance": provenance, "at": _now(),
                          "backup": backup.name, "source": source.name,
@@ -861,6 +879,7 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
                     or target["migration"].get("legacy_format") != legacy_format
                     or target["migration"].get("actor") != actor
                     or target["migration"].get("provenance") != provenance
+                    or _migration_recovery_bytes(target["migration"]) != raw
                     or target["events"][:len(value["events"])] != value["events"]):
                 raise DeploymentBlocked("migration transaction does not match request/source")
 
@@ -885,10 +904,11 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
             transaction_path, transaction_bytes,
             "legacy migration transaction already exists with different bytes")
 
-        with _open_existing_backup(backup) as accepted_backup:
-            with _open_existing_backup(source) as accepted_source:
-                with _open_existing_backup(transaction_path) as accepted_transaction:
-                    with _open_existing_backup(path) as accepted_journal:
+        with _open_existing_backup(backup, validate_on_exit=False) as accepted_backup:
+            with _open_existing_backup(source, validate_on_exit=False) as accepted_source:
+                with _open_existing_backup(
+                        transaction_path, validate_on_exit=False) as accepted_transaction:
+                    with _open_existing_backup(path, validate_on_exit=False) as accepted_journal:
                         if (accepted_journal is None or accepted_backup is None
                                 or accepted_source is None or accepted_transaction is None
                                 or accepted_journal[2] != raw or accepted_backup[2] != raw
@@ -907,12 +927,13 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
                                     "migration transaction does not match durable anchor")
                         else:
                             _atomic_write(anchor_path, _checkpoint(target))
-                        # Keep every descriptor open and revalidate identity, link count,
-                        # bytes and pathname after the durable anchor but before v2 replaces
-                        # the only journal pathname.
+                        # This is the finite identity boundary: every descriptor is still
+                        # open and checked immediately before the one-file v2 commit. The
+                        # v2 bytes carry their own exact legacy recovery image, so a later
+                        # pathname replacement cannot remove the committed recovery bytes.
                         _validate_open_evidence(entries)
                     _atomic_write(path, target)
-                    current = _load_journal(path)
+        current = _load_journal(path)
         return current
 
 

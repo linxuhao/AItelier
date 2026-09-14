@@ -1,4 +1,5 @@
 """Storage-fault controls, including independently rehashed stale-history attacks."""
+import base64
 import copy
 import hashlib
 import json
@@ -828,6 +829,112 @@ def test_migration_creates_four_independent_single_link_files_and_is_idempotent(
     assert pair == (path.read_bytes(), dq._anchor_path(path).read_bytes())
     assert {(entry.stat().st_dev, entry.stat().st_ino) for entry in paths} == identities
     assert all(entry.stat().st_nlink == 1 for entry in paths)
+
+
+@pytest.mark.parametrize("target_name", ["journal", "backup", "source", "transaction"])
+def test_final_journal_publication_commits_exact_recovery_across_same_byte_path_replacement(
+        tmp_path, monkeypatch, target_name):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    target = {
+        "journal": path,
+        "backup": path.with_name(path.name + ".legacy-v1.backup"),
+        "source": dq._migration_source_path(path),
+        "transaction": dq._migration_transaction_path(path),
+    }[target_name]
+    original_identity = None
+    real_atomic = dq._atomic_write
+
+    def replace_at_final_publication(destination, value):
+        nonlocal original_identity
+        if destination == path and original_identity is None:
+            original_identity = (target.stat().st_dev, target.stat().st_ino)
+            replacement = tmp_path / f"same-byte-{target_name}-replacement"
+            replacement.write_bytes(target.read_bytes())
+            replacement.replace(target)
+        real_atomic(destination, value)
+
+    monkeypatch.setattr(dq, "_atomic_write", replace_at_final_publication)
+    migrated = migrate(path)
+
+    assert original_identity is not None
+    assert (target.stat().st_dev, target.stat().st_ino) != original_identity
+    recovery = base64.b64decode(migrated["migration"]["source_base64"], validate=True)
+    assert recovery == raw
+    assert dq._load_journal(path) == migrated
+
+
+def test_same_byte_source_replacement_after_return_keeps_exact_recovery(tmp_path):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    migrated = migrate(path)
+    source = dq._migration_source_path(path)
+    original_identity = (source.stat().st_dev, source.stat().st_ino)
+    replacement = tmp_path / "post-return-source-replacement"
+    replacement.write_bytes(raw)
+    replacement.replace(source)
+
+    assert (source.stat().st_dev, source.stat().st_ino) != original_identity
+    assert base64.b64decode(
+        migrated["migration"]["source_base64"], validate=True) == raw
+    assert dq._load_journal(path) == migrated
+
+
+@pytest.mark.parametrize("damage", ["remove-source", "add-source-link"])
+def test_final_journal_publication_race_cannot_make_v2_loadable_without_valid_evidence(
+        tmp_path, monkeypatch, damage):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    source = dq._migration_source_path(path)
+    real_atomic = dq._atomic_write
+    injected = False
+
+    def damage_at_final_publication(destination, value):
+        nonlocal injected
+        if destination == path and not injected:
+            injected = True
+            if damage == "remove-source":
+                source.unlink()
+            else:
+                os.link(source, tmp_path / "late-source-alias")
+        real_atomic(destination, value)
+
+    monkeypatch.setattr(dq, "_atomic_write", damage_at_final_publication)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+
+    assert injected
+    published = json.loads(path.read_bytes())
+    assert published["version"] == 2
+    assert base64.b64decode(
+        published["migration"]["source_base64"], validate=True) == raw
+    with pytest.raises(dq.DeploymentBlocked):
+        dq._load_journal(path)
+
+
+def test_migration_rejects_noncanonical_or_mismatched_embedded_recovery(tmp_path):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    migrate(path)
+    source_bytes = path.with_name(path.name + ".legacy-v1.backup").read_bytes()
+
+    for source_base64 in [
+        "not base64!", base64.b64encode(b"x" * len(source_bytes)).decode("ascii")
+    ]:
+        value = json.loads(path.read_bytes())
+        value["migration"]["source_base64"] = source_base64
+        value["chain"] = dq._chain(value)
+        write(path, value)
+        write(dq._anchor_path(path), dq._checkpoint(value))
+        transaction_path = dq._migration_transaction_path(path)
+        transaction = json.loads(transaction_path.read_bytes())
+        transaction["journal"] = copy.deepcopy(value)
+        write(transaction_path, transaction)
+        with pytest.raises(dq.DeploymentBlocked, match="recovery"):
+            dq._load_journal(path)
 
 
 @pytest.mark.parametrize("evidence", ["backup", "source", "transaction"])

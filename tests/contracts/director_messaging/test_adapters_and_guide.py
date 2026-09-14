@@ -217,6 +217,19 @@ def test_mcp_wire_authorized_malformed_nested_body_is_closed_invalid_request(
         "detail": {"message": "invalid_request"}}
 
 
+def test_mcp_tools_list_keeps_generic_state_arguments_required_objects(client):
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    response = client.post("/mcp", json={
+        "jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}},
+        headers=headers)
+    tools = {tool["name"]: tool for tool in response.json()["result"]["tools"]}
+    for name in ("state_graph_read", "state_graph_write"):
+        schema = tools[name]["inputSchema"]
+        assert "arguments" in schema["required"]
+        assert schema["properties"]["arguments"]["type"] == "object"
+
+
 def test_guide_is_agent_neutral_and_documents_messaging():
     assert "send_director_message" in STATE_DRIVER_GUIDE
     assert "director_message_received" in STATE_DRIVER_GUIDE

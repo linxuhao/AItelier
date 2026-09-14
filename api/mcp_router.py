@@ -64,6 +64,10 @@ from core.tool_guards import (bad_config_name, bad_tool_name,
 _TOOL_KIND: dict[str, str] = {}
 # State goals/evidence may contain private product plans: reads require a writer.
 _PRIVATE_READ_TOOLS = frozenset({"state_graph_read"})
+_DIRECTOR_ACTIONS = frozenset({
+    "send_director_message", "list_director_messages",
+    "acknowledge_director_message", "resolve_director_message",
+})
 
 # The event loop the endpoint runs on, captured at lifespan open so a tool
 # body executing in a worker thread can still schedule background work.
@@ -241,6 +245,36 @@ def _wrap(mcp: FastMCP, fn: Callable, name: str) -> Callable:
     return _inner
 
 
+def _install_director_call_guard(mcp: FastMCP) -> None:
+    """Authorize director actions before FastMCP validates nested arguments."""
+    manager = mcp._tool_manager
+    call_tool = manager.call_tool
+
+    async def guarded_call_tool(name, arguments, context=None, convert_result=False):
+        if name in {"state_graph_read", "state_graph_write"} and isinstance(arguments, dict):
+            action = arguments.get("action")
+            if action in _DIRECTOR_ACTIONS:
+                try:
+                    _authorize(name, context)
+                except ToolDenied:
+                    code = "unauthorized"
+                else:
+                    if isinstance(arguments.get("arguments"), dict):
+                        return await call_tool(name, arguments, context=context,
+                                               convert_result=convert_result)
+                    code = "invalid_request"
+                from core.director_messaging_protocol import DirectorMessageError
+                result = {"result": DirectorMessageError(code).as_dict()}
+                if convert_result:
+                    tool = manager.get_tool(name)
+                    return tool.fn_metadata.convert_result(result)
+                return result
+        return await call_tool(name, arguments, context=context,
+                               convert_result=convert_result)
+
+    manager.call_tool = guarded_call_tool
+
+
 # Hosts this endpoint will answer to. The SDK enforces DNS-rebinding protection by
 # rejecting an unexpected `Host` header with 421 — worth keeping, because the port
 # is published on the host's loopback and a browser tricked into posting there
@@ -300,6 +334,7 @@ def build_mcp() -> FastMCP:
     _register_model_tools(tool)
     from api.state_graph_tools import register_state_tools
     register_state_tools(tool, mcp)
+    _install_director_call_guard(mcp)
 
     @mcp.prompt(name="pipeline_workflow",
                 description="How and when to use AItelier's pipeline engine")

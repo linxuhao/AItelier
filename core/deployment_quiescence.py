@@ -40,6 +40,12 @@ OBSERVATION_FIELDS = frozenset({
     "godot_render_owners", "external_owners", "registered_external_owners",
     "blockers", "errors", "quiescent", "digest",
 })
+CLEARANCE_EVENT_BINDING_FIELDS = (
+    "event_id", "action", "status", "pending", "inventory_digest",
+)
+CLEARANCE_EVENT_IDENTITY_FIELDS = (
+    "event_id", "action", "inventory_digest",
+)
 SIDECAR_DESIRED = frozenset({"ready", "released"})
 SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
 EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled"})
@@ -132,6 +138,23 @@ def _plain_json_snapshot(value: Any) -> Any:
         raise ValueError("observation exceeds the supported JSON nesting depth") from exc
     except RuntimeError as exc:
         raise ValueError("observation changed while it was being snapshotted") from exc
+
+
+def _clearance_event_snapshot(clearance: Any) -> dict:
+    """Snapshot durable gate bindings without traversing CLI transport handles."""
+    if type(clearance) is not dict:
+        raise ValueError("clearance must be a plain object")
+    event = clearance.get("event")
+    if type(event) is not dict:
+        raise ValueError("clearance event must be a plain object")
+    snapshot = _plain_json_snapshot(
+        {field: event.get(field) for field in CLEARANCE_EVENT_BINDING_FIELDS})
+    missing = [field for field in CLEARANCE_EVENT_IDENTITY_FIELDS
+               if field not in event]
+    if missing:
+        raise ValueError("clearance event is missing binding fields: "
+                         + ", ".join(missing))
+    return snapshot
 
 
 def _nonnegative_int(value: Any) -> bool:
@@ -1035,15 +1058,16 @@ def finalize(clearance: dict, *, success: bool, error: str | None = None,
              journal: Path | str | None = None) -> dict:
     """Commit or abort the deployment action represented by a pending gate."""
     try:
-        clearance_value = _plain_json_snapshot(clearance)
+        prior = _clearance_event_snapshot(clearance)
     except (TypeError, ValueError) as exc:
         raise DeploymentBlocked(f"deployment clearance is malformed: {exc}") from exc
     if type(success) is not bool:
         raise DeploymentBlocked("deployment result success must be a boolean")
     path = Path(journal) if journal is not None else evidence_path()
-    prior = clearance_value.get("event") if type(clearance_value) is dict else None
-    if type(prior) is not dict:
-        raise DeploymentBlocked("deployment clearance has no pending event")
+    if prior["status"] not in {"authorized", "overridden"} \
+            or prior["pending"] is not True:
+        raise DeploymentBlocked(
+            "deployment clearance is not a pending authorization")
     with _journal_lock(path):
         _ensure_journal(path)
         state = _load_journal(path)
@@ -1054,6 +1078,10 @@ def finalize(clearance: dict, *, success: bool, error: str | None = None,
                 or latest.get("pending") is not True:
             raise DeploymentBlocked(
                 "latest deployment evidence is not a pending authorization")
+        if (prior["status"] != latest.get("status")
+                or prior["pending"] != latest.get("pending")):
+            raise DeploymentBlocked(
+                "deployment clearance state does not match the journal")
         if prior.get("action") != latest.get("action"):
             raise DeploymentBlocked("deployment clearance action does not match the journal")
         if prior.get("inventory_digest") != latest.get("inventory_digest"):

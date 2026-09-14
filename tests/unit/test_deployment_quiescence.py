@@ -771,6 +771,9 @@ def test_reviewer_finalize_cannot_upgrade_aborted_event(tmp_path):
     ("event_id", "different-event", "superseded"),
     ("action", "redeploy", "action does not match"),
     ("inventory_digest", "f" * 64, "digest does not match"),
+    ("status", "aborted", "not a pending authorization"),
+    ("status", "overridden", "state does not match"),
+    ("pending", False, "not a pending authorization"),
 ])
 def test_reviewer_finalize_binds_caller_to_persisted_pending_event(
         tmp_path, field, value, reason):
@@ -779,6 +782,26 @@ def test_reviewer_finalize_binds_caller_to_persisted_pending_event(
         "restart", _producer_shaped_observation(), journal=journal)
     persisted = json.loads(journal.read_text())["latest"]
     clearance["event"][field] = value
+
+    with pytest.raises(dq.DeploymentBlocked, match=reason):
+        dq.finalize(clearance, success=True, journal=journal)
+    assert json.loads(journal.read_text())["latest"] == persisted
+
+
+@pytest.mark.parametrize(("field", "reason"), [
+    ("event_id", "malformed"),
+    ("action", "malformed"),
+    ("inventory_digest", "malformed"),
+    ("status", "not a pending authorization"),
+    ("pending", "not a pending authorization"),
+])
+def test_finalize_rejects_clearance_missing_a_durable_binding_field(
+        tmp_path, field, reason):
+    journal = tmp_path / "journal.json"
+    clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=journal)
+    persisted = json.loads(journal.read_text())["latest"]
+    del clearance["event"][field]
 
     with pytest.raises(dq.DeploymentBlocked, match=reason):
         dq.finalize(clearance, success=True, journal=journal)
@@ -875,6 +898,58 @@ def test_authorized_action_is_aborted_when_compose_fails(tmp_path):
     data = json.loads(journal.read_text())
     assert data["latest"]["usable"] is False
     assert data["latest"]["reason"] == "compose failed"
+
+
+@pytest.mark.parametrize(("success", "status", "usable"), [
+    (True, "completed", True),
+    (False, "aborted", False),
+])
+def test_cli_clearance_with_transport_fence_reaches_terminal_journal_state(
+        tmp_path, monkeypatch, success, status, usable):
+    from cli import server
+
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    clearance = dq.authorize("restart", _producer_shaped_observation())
+    fence = dq.acquire_cutover_fence()
+    clearance["_cutover_fence"] = fence
+
+    result = server._finish_deployment(
+        clearance, success=success,
+        error=None if success else RuntimeError("compose exit 137"))
+
+    latest = json.loads(dq.evidence_path().read_text())["latest"]
+    assert result["event"] == latest
+    assert latest["status"] == status
+    assert latest["pending"] is False
+    assert latest["usable"] is usable
+    if not success:
+        assert latest["reason"] == "compose exit 137"
+    assert fence.closed
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), [
+    ("event_id", "stale-event", "superseded"),
+    ("action", "redeploy", "action does not match"),
+    ("inventory_digest", "f" * 64, "digest does not match"),
+    ("status", "aborted", "not a pending authorization"),
+    ("pending", False, "not a pending authorization"),
+])
+def test_cli_rejects_mutated_clearance_and_releases_transport_fence(
+        tmp_path, monkeypatch, field, value, reason):
+    from cli import server
+
+    monkeypatch.setenv("AITELIER_HOME", str(tmp_path / "home"))
+    clearance = dq.authorize("restart", _producer_shaped_observation())
+    persisted = json.loads(dq.evidence_path().read_text())["latest"]
+    clearance["event"][field] = value
+    fence = dq.acquire_cutover_fence()
+    clearance["_cutover_fence"] = fence
+
+    with pytest.raises(dq.DeploymentBlocked, match=reason):
+        server._finish_deployment(clearance, success=True)
+
+    assert json.loads(dq.evidence_path().read_text())["latest"] == persisted
+    assert fence.closed
 
 
 def test_pending_authorization_is_not_replayed_by_reconcile(tmp_path):

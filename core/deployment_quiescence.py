@@ -15,6 +15,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -33,6 +34,17 @@ from core import datadir
 TERMINAL_STATUSES = frozenset({"completed", "failed"})
 BLOCKING_STATUSES = frozenset({"pending", "running", "paused", "draining"})
 DEPLOY_ACTIONS = frozenset({"rebuild", "redeploy", "restart"})
+OBSERVATION_SCHEMA_VERSION = 1
+OBSERVATION_FIELDS = frozenset({
+    "schema_version", "observed_at", "projects", "runs", "sidecar_owners",
+    "godot_render_owners", "external_owners", "registered_external_owners",
+    "blockers", "errors", "quiescent", "digest",
+})
+SIDECAR_DESIRED = frozenset({"ready", "released"})
+SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
+EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled"})
+EXTERNAL_OWNER_KINDS = frozenset({"docker", "process"})
+GODOT_OWNER_STATUSES = frozenset({"active", "owner_lost", "reconciled", "released"})
 UNKNOWN_PROCESS_ERROR_PREFIX = (
     "unregistered external measurement process has unknown ownership: ")
 BLOCKER_IDENTITY_FIELDS = {
@@ -77,6 +89,63 @@ def _observation_digest(observation: dict) -> str:
     """Use the producer's canonical JSON encoding over the frozen inventory."""
     return _digest({key: value for key, value in observation.items()
                     if key != "digest"})
+
+
+def _plain_json_snapshot(value: Any) -> Any:
+    """Deep-copy plain JSON while rejecting executable/custom containers."""
+    ancestors: set[int] = set()
+
+    def clone(item: Any, path: str) -> Any:
+        if type(item) is dict:
+            identity = id(item)
+            if identity in ancestors:
+                raise ValueError(f"{path} contains a cyclic value")
+            ancestors.add(identity)
+            try:
+                result = {}
+                for key, child in item.items():
+                    if type(key) is not str:
+                        raise ValueError(f"{path} has a non-string object key")
+                    result[key] = clone(child, f"{path}.{key}")
+                return result
+            finally:
+                ancestors.remove(identity)
+        if type(item) is list:
+            identity = id(item)
+            if identity in ancestors:
+                raise ValueError(f"{path} contains a cyclic value")
+            ancestors.add(identity)
+            try:
+                return [clone(child, f"{path}[{index}]")
+                        for index, child in enumerate(item)]
+            finally:
+                ancestors.remove(identity)
+        if type(item) in {str, int, bool, type(None)}:
+            return item
+        if type(item) is float and math.isfinite(item):
+            return item
+        raise ValueError(f"{path} contains a non-JSON or non-finite value")
+
+    try:
+        return clone(value, "observation")
+    except RecursionError as exc:
+        raise ValueError("observation exceeds the supported JSON nesting depth") from exc
+    except RuntimeError as exc:
+        raise ValueError("observation changed while it was being snapshotted") from exc
+
+
+def _nonnegative_int(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _nonnegative_number(value: Any) -> bool:
+    if type(value) is int:
+        return value >= 0
+    return type(value) is float and math.isfinite(value) and value >= 0
+
+
+def _nonempty_string(value: Any) -> bool:
+    return type(value) is str and bool(value.strip())
 
 
 def _normalized_owner_blockers(*, runs: list[dict], sidecar_owners: list[dict],
@@ -513,18 +582,33 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
         elif status not in TERMINAL_STATUSES and status not in BLOCKING_STATUSES:
             errors.append(f"SkillFlow run {run_id} has unknown status {status!r}")
         try:
-            audit = skillflow.audit_operation_owners(run_id) or {}
+            audit = skillflow.audit_operation_owners(run_id)
+            if audit is None:
+                audit = {}
         except Exception as exc:  # noqa: BLE001
             errors.append(f"operation audit failed for {run_id}: {type(exc).__name__}: {exc}")
             audit = {"error": str(exc)}
-        if not isinstance(audit, dict):
+        if type(audit) is not dict:
             errors.append(f"operation audit for {run_id} was malformed")
             audit = {"error": "malformed audit"}
+        lost = audit.get("lost")
+        unknown = audit.get("unknown")
+        alive = audit.get("alive")
+        audit_errors = []
+        if type(lost) is not list or any(type(item) is not str for item in lost):
+            audit_errors.append("lost must be a list of strings")
+        if type(unknown) is not list or any(type(item) is not str for item in unknown):
+            audit_errors.append("unknown must be a list of strings")
+        if not _nonnegative_int(alive):
+            audit_errors.append("alive must be a nonnegative integer")
+        if audit_errors:
+            audit_reason = "; ".join(audit_errors)
+            errors.append(f"operation audit for {run_id} was malformed: {audit_reason}")
+            audit = {"lost": [], "unknown": [], "alive": 0,
+                     "error": audit_reason}
+            lost, unknown, alive = [], [], 0
         row["audit"] = audit
-        row["active_operations"] = (
-            len(audit.get("lost") or []) + len(audit.get("unknown") or [])
-            + int(audit.get("alive") or 0)
-            if isinstance(audit.get("alive", 0), int) else None)
+        row["active_operations"] = len(lost) + len(unknown) + alive
         runs.append(row)
 
     leases, admissions, registered_external, db_errors = _db_rows(db)
@@ -579,6 +663,7 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
     if not godot_rows and not godot_errors:
         blockers.pop("godot_render_owners")
     observation = {
+        "schema_version": OBSERVATION_SCHEMA_VERSION,
         "observed_at": _now(),
         "projects": sorted(
             {r["project_id"] for r in runs if isinstance(r.get("project_id"), str)}
@@ -592,6 +677,9 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
         "blockers": blockers,
         "errors": errors,
     }
+    inventory_error = _validate_owner_inventories(observation)
+    if inventory_error is not None:
+        errors.append(f"owner inventory measurement was malformed: {inventory_error}")
     observation["quiescent"] = not errors and not any(blockers.values())
     observation["digest"] = _observation_digest(observation)
     return observation
@@ -600,6 +688,7 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
 def failed_observation(reason: str) -> dict:
     """Represent an unavailable runtime measurement as unusable evidence."""
     observation = {
+        "schema_version": OBSERVATION_SCHEMA_VERSION,
         "observed_at": _now(), "projects": [], "runs": [],
         "sidecar_owners": [], "godot_render_owners": [],
         "external_owners": [], "registered_external_owners": [],
@@ -630,21 +719,131 @@ def _has_identity(row: dict, fields: tuple[str, ...]) -> bool:
                for field in fields)
 
 
+def _validate_owner_inventories(observation: dict) -> str | None:
+    inventories: dict[str, list[dict]] = {}
+    for name in OWNER_INVENTORY_BLOCKERS:
+        rows = observation.get(name)
+        if type(rows) is not list:
+            return f"{name} must be a list"
+        if any(type(row) is not dict for row in rows):
+            return f"{name} rows must be plain objects"
+        inventories[name] = rows
+
+    for index, row in enumerate(inventories["runs"]):
+        prefix = f"runs row {index}"
+        if not _nonempty_string(row.get("run_id")):
+            return f"{prefix} needs a non-empty run_id"
+        if not _nonempty_string(row.get("project_id")):
+            return f"{prefix} needs a non-empty project_id"
+        if row.get("status") not in TERMINAL_STATUSES | BLOCKING_STATUSES:
+            return f"{prefix} has unknown status {row.get('status')!r}"
+        if not _nonnegative_int(row.get("active_operations")):
+            return f"{prefix} active_operations must be a nonnegative integer"
+        audit = row.get("audit")
+        if type(audit) is not dict:
+            return f"{prefix} audit must be a plain object"
+        lost = audit.get("lost")
+        unknown = audit.get("unknown")
+        alive = audit.get("alive")
+        if type(lost) is not list or any(type(item) is not str for item in lost):
+            return f"{prefix} audit.lost must be a list of strings"
+        if type(unknown) is not list or any(type(item) is not str for item in unknown):
+            return f"{prefix} audit.unknown must be a list of strings"
+        if not _nonnegative_int(alive):
+            return f"{prefix} audit.alive must be a nonnegative integer"
+        if row["active_operations"] != len(lost) + len(unknown) + alive:
+            return f"{prefix} active_operations contradicts its audit"
+
+    for index, row in enumerate(inventories["sidecar_owners"]):
+        prefix = f"sidecar_owners row {index}"
+        for field in ("run_id", "root", "source"):
+            if not _nonempty_string(row.get(field)):
+                return f"{prefix} needs a non-empty {field}"
+        if row.get("desired") not in SIDECAR_DESIRED:
+            return f"{prefix} has unknown desired state {row.get('desired')!r}"
+        if row.get("outcome") not in SIDECAR_OUTCOMES:
+            return f"{prefix} has unknown outcome {row.get('outcome')!r}"
+        for field in ("revision", "done_revision"):
+            if not _nonnegative_int(row.get(field)):
+                return f"{prefix} {field} must be a nonnegative integer"
+        if not _nonnegative_number(row.get("activity_at")):
+            return f"{prefix} activity_at must be a nonnegative finite number"
+        if type(row.get("error")) is not str:
+            return f"{prefix} error must be a string"
+
+    for index, row in enumerate(inventories["external_owners"]):
+        prefix = f"external_owners row {index}"
+        if row.get("kind") not in EXTERNAL_OWNER_KINDS:
+            return f"{prefix} has unknown kind {row.get('kind')!r}"
+        if type(row.get("active")) is not bool:
+            return f"{prefix} active must be a boolean"
+        identity_field = "id" if row["kind"] == "docker" else "command"
+        if not _nonempty_string(row.get(identity_field)):
+            return f"{prefix} needs a non-empty {identity_field}"
+        if "ownership" in row and row["ownership"] not in {"registered", "unregistered"}:
+            return f"{prefix} has unknown ownership {row.get('ownership')!r}"
+
+    for index, row in enumerate(inventories["registered_external_owners"]):
+        prefix = f"registered_external_owners row {index}"
+        if not _nonempty_string(row.get("attempt_id")):
+            return f"{prefix} needs a non-empty attempt_id"
+        if row.get("status") not in EXTERNAL_OWNER_STATUSES:
+            return f"{prefix} has unknown status {row.get('status')!r}"
+
+    for index, row in enumerate(inventories["godot_render_owners"]):
+        prefix = f"godot_render_owners row {index}"
+        if not _nonempty_string(row.get("owner_id")):
+            return f"{prefix} needs a non-empty owner_id"
+        if row.get("status") not in GODOT_OWNER_STATUSES:
+            return f"{prefix} has unknown status {row.get('status')!r}"
+        if "generation" in row and not _nonnegative_int(row["generation"]):
+            return f"{prefix} generation must be a nonnegative integer"
+        for field in ("started_at", "heartbeat_at", "ended_at"):
+            if field in row and row[field] is not None \
+                    and not _nonnegative_number(row[field]):
+                return f"{prefix} {field} must be a nonnegative finite number"
+    return None
+
+
 def _validate_observation(observation: Any) -> str | None:
     """Validate the complete gate observation before any authorization path."""
-    if not isinstance(observation, dict):
-        return "observation must be an object"
+    if type(observation) is not dict:
+        return "observation must be a plain object"
+    if type(observation.get("schema_version")) is not int \
+            or observation["schema_version"] != OBSERVATION_SCHEMA_VERSION:
+        return (f"unsupported observation schema_version "
+                f"{observation.get('schema_version')!r}")
+    unknown_fields = sorted(set(observation) - OBSERVATION_FIELDS)
+    if unknown_fields:
+        return "unknown observation fields: " + ", ".join(unknown_fields)
+    observed_at = observation.get("observed_at")
+    try:
+        observed = datetime.fromisoformat(observed_at)
+    except (TypeError, ValueError):
+        return "observed_at must be an ISO-8601 timestamp"
+    if observed.tzinfo is None:
+        return "observed_at must include a timezone"
+    projects = observation.get("projects")
+    if (type(projects) is not list
+            or any(not _nonempty_string(project) for project in projects)):
+        return "projects must be a list of non-empty strings"
+    if projects != sorted(set(projects)):
+        return "projects must be sorted and unique"
+    inventory_error = _validate_owner_inventories(observation)
+    if inventory_error is not None:
+        return inventory_error
     blockers = observation.get("blockers")
-    if not isinstance(blockers, dict):
-        return "blockers must be an object"
+    if type(blockers) is not dict:
+        return "blockers must be an object (plain dict required)"
     for name, rows in blockers.items():
         if name not in BLOCKER_IDENTITY_FIELDS:
             return f"unknown blocker category {name!r}"
-        if not isinstance(rows, list):
+        if type(rows) is not list:
             return f"blockers.{name} must be a list"
         for index, row in enumerate(rows):
-            if not isinstance(row, dict):
-                return f"blockers.{name} rows must be objects (row {index})"
+            if type(row) is not dict:
+                return (f"blockers.{name} rows must be objects "
+                        f"(plain dict required, row {index})")
             if name == "external_active" and _unknown_process_shape(row):
                 command = row.get("command")
                 if not isinstance(command, str) or not command.strip():
@@ -667,14 +866,7 @@ def _validate_observation(observation: Any) -> str | None:
         return f"observation cannot be canonically digested: {exc}"
     if digest != expected_digest:
         return "digest does not match the canonical frozen inventory"
-    inventories = {}
-    for name in OWNER_INVENTORY_BLOCKERS:
-        rows = observation.get(name)
-        if not isinstance(rows, list):
-            return f"{name} must be a list"
-        if any(not isinstance(row, dict) for row in rows):
-            return f"{name} rows must be objects"
-        inventories[name] = rows
+    inventories = {name: observation[name] for name in OWNER_INVENTORY_BLOCKERS}
     normalized = _normalized_owner_blockers(
         runs=inventories["runs"],
         sidecar_owners=inventories["sidecar_owners"],
@@ -772,6 +964,17 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
     """Authorize a deployment action, persisting every refusal or override."""
     if action not in DEPLOY_ACTIONS:
         raise ValueError(f"unknown deployment action {action!r}")
+    try:
+        observation_value = _plain_json_snapshot(observation)
+        observation_snapshot_error = None
+    except (TypeError, ValueError) as exc:
+        observation_value = {}
+        observation_snapshot_error = str(exc)
+    try:
+        override_value = (_plain_json_snapshot(override)
+                          if override is not None else None)
+    except (TypeError, ValueError) as exc:
+        override_value = {"_invalid_override": str(exc)}
     path = Path(journal) if journal is not None else evidence_path()
     with _journal_lock(path):
         _ensure_journal(path)
@@ -783,38 +986,38 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                "replayed": False,
                                "reason": "deployment authorization was interrupted",
                                "prior_event_id": latest.get("event_id")})
-        observation_value = observation if isinstance(observation, dict) else {}
-        validation_error = _validate_observation(observation)
+        validation_error = (observation_snapshot_error
+                            or _validate_observation(observation_value))
         if validation_error is not None:
             reason = f"observation is malformed: {validation_error}"
             valid = False
-        elif observation["quiescent"] is True:
+        elif observation_value["quiescent"] is True:
             event = _append_to(state, {"action": action, "status": "authorized",
                                        "pending": True, "usable": False,
-                                       "inventory_digest": observation.get("digest"),
-                                       "blockers": observation.get("blockers", {}),
-                                       "errors": observation.get("errors", [])})
+                                       "inventory_digest": observation_value["digest"],
+                                       "blockers": observation_value["blockers"],
+                                       "errors": observation_value["errors"]})
             _atomic_write(path, state)
             return {"allowed": True, "replayed": False, "event": event}
         else:
-            valid, reason = _valid_override(action, observation, override)
+            valid, reason = _valid_override(action, observation_value, override_value)
         if valid:
-            authoritative, unknown_processes = _classify_blockers(observation)
-            unknown_scope = override.get("acknowledge_unknown") is True
+            authoritative, unknown_processes = _classify_blockers(observation_value)
+            unknown_scope = override_value.get("acknowledge_unknown") is True
             event = _append_to(state, {"action": action, "status": "overridden",
                                        "pending": True, "usable": False,
-                                       "audit": {"actor": override["actor"],
-                                                 "reason": override["reason"],
-                                                 "ticket": override["ticket"],
+                                       "audit": {"actor": override_value["actor"],
+                                                 "reason": override_value["reason"],
+                                                 "ticket": override_value["ticket"],
                                                  "override_scope": (
                                                      "unknown_process_noise" if unknown_scope
                                                      else "authoritative_blockers"),
                                                  "affected_ownership": (
                                                      unknown_processes if unknown_scope
                                                      else authoritative)},
-                                       "inventory_digest": observation.get("digest"),
-                                       "blockers": observation.get("blockers", {}),
-                                       "errors": observation.get("errors", [])})
+                                       "inventory_digest": observation_value["digest"],
+                                       "blockers": observation_value["blockers"],
+                                       "errors": observation_value["errors"]})
             _atomic_write(path, state)
             return {"allowed": True, "replayed": False, "event": event}
         event = _append_to(state, {"action": action, "status": "aborted",
@@ -831,20 +1034,44 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
 def finalize(clearance: dict, *, success: bool, error: str | None = None,
              journal: Path | str | None = None) -> dict:
     """Commit or abort the deployment action represented by a pending gate."""
+    try:
+        clearance_value = _plain_json_snapshot(clearance)
+    except (TypeError, ValueError) as exc:
+        raise DeploymentBlocked(f"deployment clearance is malformed: {exc}") from exc
+    if type(success) is not bool:
+        raise DeploymentBlocked("deployment result success must be a boolean")
     path = Path(journal) if journal is not None else evidence_path()
-    prior = (clearance or {}).get("event") or {}
+    prior = clearance_value.get("event") if type(clearance_value) is dict else None
+    if type(prior) is not dict:
+        raise DeploymentBlocked("deployment clearance has no pending event")
     with _journal_lock(path):
         _ensure_journal(path)
         state = _load_journal(path)
         latest = state.get("latest") or {}
         if latest.get("event_id") != prior.get("event_id"):
             raise DeploymentBlocked("deployment clearance was superseded; refusing finalization")
+        if latest.get("status") not in {"authorized", "overridden"} \
+                or latest.get("pending") is not True:
+            raise DeploymentBlocked(
+                "latest deployment evidence is not a pending authorization")
+        if prior.get("action") != latest.get("action"):
+            raise DeploymentBlocked("deployment clearance action does not match the journal")
+        if prior.get("inventory_digest") != latest.get("inventory_digest"):
+            raise DeploymentBlocked(
+                "deployment clearance inventory digest does not match the journal")
+        if latest.get("action") not in DEPLOY_ACTIONS:
+            raise DeploymentBlocked("persisted deployment action is malformed")
+        if (not isinstance(latest.get("inventory_digest"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", latest["inventory_digest"]) is None):
+            raise DeploymentBlocked("persisted deployment inventory digest is malformed")
         event = _append_to(state, {
-            "action": prior.get("action"),
+            "action": latest["action"],
             "status": "completed" if success else "aborted",
-            "usable": bool(success),
+            "pending": False,
+            "usable": success,
             "replayed": False,
-            "prior_event_id": prior.get("event_id"),
+            "prior_event_id": latest["event_id"],
+            "inventory_digest": latest["inventory_digest"],
             **({} if success else {"reason": str(error or "deployment action failed")[:500]}),
         })
         _atomic_write(path, state)
@@ -853,6 +1080,14 @@ def finalize(clearance: dict, *, success: bool, error: str | None = None,
 
 def reconcile(*, observation: dict, journal: Path | str | None = None) -> dict:
     """Reconcile an aborted gate without replaying its deployment action."""
+    try:
+        observation_value = _plain_json_snapshot(observation)
+        observation_snapshot_error = None
+    except (TypeError, ValueError) as exc:
+        observation_value = {}
+        observation_snapshot_error = str(exc)
+    validation_error = (observation_snapshot_error
+                        or _validate_observation(observation_value))
     path = Path(journal) if journal is not None else evidence_path()
     with _journal_lock(path):
         _ensure_journal(path)
@@ -869,19 +1104,26 @@ def reconcile(*, observation: dict, journal: Path | str | None = None) -> dict:
         if not latest or latest.get("status") != "aborted":
             return {"reconciled": False, "replayed": False,
                     "reason": "no aborted deployment evidence"}
-        if observation.get("quiescent") is not True:
+        if validation_error is not None:
+            reason = f"reconciliation observation is malformed: {validation_error}"
+        elif observation_value["quiescent"] is not True:
+            reason = "reconciliation still not quiescent"
+        else:
+            reason = None
+        if reason is not None:
             event = _append_to(state, {"action": latest.get("action"),
                                        "status": "aborted", "usable": False,
-                                       "reason": "reconciliation still not quiescent",
-                                       "inventory_digest": observation.get("digest"),
-                                       "blockers": observation.get("blockers", {}),
-                                       "errors": observation.get("errors", [])})
+                                       "replayed": False,
+                                       "reason": reason,
+                                       "inventory_digest": observation_value.get("digest"),
+                                       "blockers": observation_value.get("blockers"),
+                                       "errors": observation_value.get("errors")})
             _atomic_write(path, state)
             return {"reconciled": False, "replayed": False, "event": event}
         event = _append_to(state, {"action": latest.get("action"),
                                    "status": "reconciled_quiescent", "usable": False,
                                    "replayed": False,
-                                   "inventory_digest": observation.get("digest"),
+                                   "inventory_digest": observation_value["digest"],
                                    "prior_event_id": latest.get("event_id")})
         _atomic_write(path, state)
         return {"reconciled": True, "replayed": False, "event": event}

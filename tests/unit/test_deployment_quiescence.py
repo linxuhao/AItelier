@@ -70,11 +70,13 @@ def _quiet_sf():
 
 
 def _quiet_probe():
-    return [{"kind": "docker", "name": "zvec-grep", "active": False}]
+    return [{"kind": "docker", "id": "quiet-container",
+             "name": "zvec-grep", "active": False}]
 
 
 def _producer_shaped_observation(**changes):
     observation = {
+        "schema_version": dq.OBSERVATION_SCHEMA_VERSION,
         "observed_at": "2026-09-14T00:00:00+00:00",
         "projects": [],
         "runs": [],
@@ -87,6 +89,18 @@ def _producer_shaped_observation(**changes):
         "quiescent": True,
         **changes,
     }
+    for row in observation.get("runs", []):
+        row.setdefault("active_operations", 0)
+        row.setdefault("audit", {
+            "lost": [], "unknown": [], "alive": row["active_operations"],
+        })
+    for row in observation.get("sidecar_owners", []):
+        row.setdefault("root", "/worktrees/" + str(row.get("run_id", "unknown")))
+        row.setdefault("source", "/repositories/source")
+        row.setdefault("revision", 1)
+        row.setdefault("done_revision", 0)
+        row.setdefault("activity_at", 1.0)
+        row.setdefault("error", "")
     observation.pop("digest", None)
     observation["digest"] = dq._digest(observation)
     return observation
@@ -107,7 +121,7 @@ def test_measurement_is_cross_project_and_includes_external_sidecar_owners(tmp_p
     )
 
     def active_probe():
-        return [{"kind": "worker", "active": True}]
+        return [{"kind": "docker", "id": "active-container", "active": True}]
 
     observed = dq.measure(skillflow=sf, db=db, sidecar_db=sidecar_path,
                           external_probe=active_probe)
@@ -117,7 +131,8 @@ def test_measurement_is_cross_project_and_includes_external_sidecar_owners(tmp_p
     assert len(observed["blockers"]["checkout_leases"]) == 2
     assert observed["blockers"]["checkout_leases"][0]["run_id"] == "run-a"
     assert observed["blockers"]["sidecar_owners"][0]["run_id"] == "run-a"
-    assert observed["blockers"]["external_active"] == [{"kind": "worker", "active": True}]
+    assert observed["blockers"]["external_active"] == [
+        {"kind": "docker", "id": "active-container", "active": True}]
     assert observed["quiescent"] is False
 
 
@@ -195,6 +210,155 @@ def _unknown_process(index):
         "resource": "external_measurement",
         "ownership": "unregistered",
     }
+
+
+class DigestThenMutate(dict):
+    """Reviewer reproduction: mutate the caller mapping after digest iteration."""
+    def __init__(self, value):
+        super().__init__(value)
+        self.arm_after_items = False
+        self.armed = False
+
+    def items(self):
+        source = list(super().items())
+        parent = self
+
+        class Items:
+            def __init__(self):
+                self.index = 0
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.index < len(source):
+                    item = source[self.index]
+                    self.index += 1
+                    return item
+                if parent.arm_after_items:
+                    parent.armed = True
+                raise StopIteration
+
+        return Items()
+
+    def get(self, key, default=None):
+        if self.armed and key == "runs":
+            super().get("blockers", {}).clear()
+            super().__setitem__("runs", [])
+            super().__setitem__("quiescent", True)
+            self.armed = False
+        return super().get(key, default)
+
+
+@pytest.mark.parametrize("active_operations", [-1, False, float("nan")])
+def test_reviewer_malformed_operation_counts_fail_closed(tmp_path, active_operations):
+    run = {
+        "run_id": "run-a", "project_id": "project-a", "status": "completed",
+        "active_operations": active_operations,
+        "audit": {"lost": [], "unknown": [], "alive": 0},
+    }
+    observation = _producer_shaped_observation(runs=[run])
+
+    with pytest.raises(dq.DeploymentBlocked, match="malformed"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+    assert json.loads((tmp_path / "journal.json").read_text())["latest"]["usable"] is False
+
+
+@pytest.mark.parametrize("alive", [-1, False, float("nan")])
+def test_measure_records_malformed_audit_as_an_error(alive):
+    sf = FakeSkillFlow(
+        [{"id": "run-a", "project_id": "project-a", "status": "completed"}],
+        {"run-a": {"lost": [], "unknown": [], "alive": alive}},
+    )
+
+    observed = dq.measure(skillflow=sf, external_probe=list)
+
+    assert observed["quiescent"] is False
+    assert any("audit" in error and "malformed" in error
+               for error in observed["errors"])
+
+
+def test_reviewer_non_boolean_external_activity_fails_closed(tmp_path):
+    owner = {"kind": "docker", "id": "container-a", "active": 1}
+    observation = _producer_shaped_observation(external_owners=[owner])
+
+    with pytest.raises(dq.DeploymentBlocked, match="active must be a boolean"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+
+
+def test_reviewer_unknown_run_status_fails_closed(tmp_path):
+    run = {
+        "run_id": "run-a", "project_id": "project-a", "status": "future-running",
+        "active_operations": 0, "audit": {"lost": [], "unknown": [], "alive": 0},
+    }
+    observation = _producer_shaped_observation(runs=[run])
+
+    with pytest.raises(dq.DeploymentBlocked, match="unknown status"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+
+
+@pytest.mark.parametrize(("inventory", "row", "reason"), [
+    ("sidecar_owners", {
+        "run_id": "run-a", "root": "/worktrees/run-a", "source": "/repo",
+        "desired": "future", "revision": 1, "done_revision": 1,
+        "outcome": "ready", "error": "", "activity_at": 1.0,
+    }, "unknown desired state"),
+    ("sidecar_owners", {
+        "run_id": "run-a", "root": "/worktrees/run-a", "source": "/repo",
+        "desired": "ready", "revision": False, "done_revision": 1,
+        "outcome": "ready", "error": "", "activity_at": 1.0,
+    }, "revision must be a nonnegative integer"),
+    ("registered_external_owners", {
+        "attempt_id": "attempt-a", "status": "future-active",
+    }, "unknown status"),
+    ("godot_render_owners", {
+        "owner_id": "owner-a", "status": "future-active",
+    }, "unknown status"),
+    ("godot_render_owners", {
+        "owner_id": "owner-a", "status": "released", "generation": float("inf"),
+    }, "non-JSON"),
+])
+def test_every_owner_inventory_rejects_unknown_statuses_and_bad_counts(
+        tmp_path, inventory, row, reason):
+    observation = _producer_shaped_observation(**{inventory: [row]})
+
+    with pytest.raises(dq.DeploymentBlocked, match=reason):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+
+
+def test_reviewer_future_schema_and_inventory_fail_closed(tmp_path):
+    observation = _producer_shaped_observation()
+    observation["schema_version"] = 2
+    observation["future_owner_inventory"] = [{"owner_id": "future", "active": True}]
+    observation["digest"] = dq._observation_digest(observation)
+
+    with pytest.raises(dq.DeploymentBlocked, match="schema_version"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+
+
+def test_reviewer_digest_to_normalization_mutation_is_rejected(tmp_path):
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    base = _producer_shaped_observation(
+        runs=[run], blockers={"active_runs": [run]}, quiescent=False)
+    mutable = DigestThenMutate(base)
+    mutable.arm_after_items = True
+
+    with pytest.raises(dq.DeploymentBlocked, match="non-JSON"):
+        dq.authorize("restart", mutable, journal=tmp_path / "journal.json")
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted" and event["usable"] is False
+    assert event["inventory_digest"] is None
+
+
+@pytest.mark.parametrize("replacement", [(), {"custom": object()}])
+def test_non_json_observations_are_rejected_before_journaling_fields(tmp_path, replacement):
+    observation = _producer_shaped_observation()
+    observation["runs"] = replacement
+
+    with pytest.raises(dq.DeploymentBlocked, match="non-JSON"):
+        dq.authorize("restart", observation, journal=tmp_path / "journal.json")
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["blockers"] is None and event["errors"] is None
 
 
 def test_incident_unknown_ack_cannot_cross_real_owner_amid_147_noise(tmp_path):
@@ -519,7 +683,7 @@ def test_declared_quiescence_must_match_validated_blockers_and_errors(
     ("active_runs", {"run_id": "run-a", "project_id": "project-a",
                      "status": "running"}),
     ("active_operations", {"run_id": "run-a", "project_id": "project-a",
-                           "active_operations": 1}),
+                           "status": "completed", "active_operations": 1}),
     ("registered_external_owners", {"attempt_id": "attempt-a",
                                     "project_id": "project-a", "status": "active"}),
     ("godot_render_owners", {"owner_id": "render-a", "operation_id": "operation-a",
@@ -571,6 +735,54 @@ def test_reconciliation_never_replays_before_or_after_quiescence(tmp_path):
     assert data["events"][0]["status"] == "aborted"
     assert data["events"][-1]["status"] == "reconciled_quiescent"
     assert not any(e.get("replayed") is True for e in data["events"])
+
+
+def test_reviewer_reconciliation_rejects_malformed_quiet_evidence(tmp_path):
+    journal = tmp_path / "journal.json"
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    blocked = _producer_shaped_observation(
+        runs=[run], blockers={"active_runs": [run]}, quiescent=False)
+    with pytest.raises(dq.DeploymentBlocked):
+        dq.authorize("restart", blocked, journal=journal)
+
+    result = dq.reconcile(observation={"quiescent": True}, journal=journal)
+
+    assert result["reconciled"] is False and result["replayed"] is False
+    event = json.loads(journal.read_text())["latest"]
+    assert event["status"] == "aborted" and event["usable"] is False
+    assert "malformed" in event["reason"]
+
+
+def test_reviewer_finalize_cannot_upgrade_aborted_event(tmp_path):
+    journal = tmp_path / "journal.json"
+    run = {"run_id": "run-a", "project_id": "project-a", "status": "running"}
+    blocked = _producer_shaped_observation(
+        runs=[run], blockers={"active_runs": [run]}, quiescent=False)
+    with pytest.raises(dq.DeploymentBlocked):
+        dq.authorize("restart", blocked, journal=journal)
+    aborted = json.loads(journal.read_text())["latest"]
+
+    with pytest.raises(dq.DeploymentBlocked, match="pending authorization"):
+        dq.finalize({"event": aborted}, success=True, journal=journal)
+    assert json.loads(journal.read_text())["latest"] == aborted
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), [
+    ("event_id", "different-event", "superseded"),
+    ("action", "redeploy", "action does not match"),
+    ("inventory_digest", "f" * 64, "digest does not match"),
+])
+def test_reviewer_finalize_binds_caller_to_persisted_pending_event(
+        tmp_path, field, value, reason):
+    journal = tmp_path / "journal.json"
+    clearance = dq.authorize(
+        "restart", _producer_shaped_observation(), journal=journal)
+    persisted = json.loads(journal.read_text())["latest"]
+    clearance["event"][field] = value
+
+    with pytest.raises(dq.DeploymentBlocked, match=reason):
+        dq.finalize(clearance, success=True, journal=journal)
+    assert json.loads(journal.read_text())["latest"] == persisted
 
 
 def test_corrupt_journal_fails_closed(tmp_path):

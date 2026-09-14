@@ -106,6 +106,42 @@ def _producer_shaped_observation(**changes):
     return observation
 
 
+def _journal_event(event_id, **changes):
+    event = {
+        "event_id": event_id,
+        "action": "restart",
+        "inventory_digest": "f" * 64,
+        "status": "authorized",
+        "pending": True,
+        "usable": False,
+        "replayed": False,
+    }
+    event.update(changes)
+    return event
+
+
+def _write_journal(path, events):
+    latest = dict(events[-1]) if events else None
+    path.write_text(json.dumps({"version": 1, "events": events, "latest": latest},
+                               sort_keys=True))
+    return path.read_bytes()
+
+
+def _invoke_journal_operation(operation, journal):
+    if operation == "load":
+        return dq._load_journal(journal)
+    if operation == "authorize":
+        return dq.authorize(
+            "restart", _producer_shaped_observation(), journal=journal)
+    if operation == "reconcile":
+        return dq.reconcile(
+            observation=_producer_shaped_observation(), journal=journal)
+    if operation == "finalize":
+        latest = json.loads(journal.read_text())["latest"]
+        return dq.finalize({"event": latest}, success=True, journal=journal)
+    raise AssertionError(operation)
+
+
 def test_measurement_is_cross_project_and_includes_external_sidecar_owners(tmp_path):
     db = _db(tmp_path / "app.sqlite", lease=True, admission=True)
     sidecar_path = tmp_path / "control.sqlite3"
@@ -895,6 +931,142 @@ def test_finalize_rejects_truncated_transition_history_without_rewrite(tmp_path)
     assert journal.read_bytes() == corrupt_bytes
 
 
+@pytest.mark.parametrize("operation", ["load", "authorize", "reconcile", "finalize"])
+@pytest.mark.parametrize("events", [
+    [
+        _journal_event("a" * 32),
+        _journal_event("a" * 32, prior_event_id="a" * 32,
+                       status="completed", pending=False, usable=True),
+    ],
+    [
+        _journal_event("a" * 32),
+        _journal_event("b" * 32),
+    ],
+    [
+        _journal_event("a" * 32, prior_event_id="a" * 32),
+    ],
+])
+def test_complete_unique_predecessor_chain_is_required_without_rewrite(
+        tmp_path, operation, events):
+    journal = tmp_path / "journal.json"
+    corrupt_bytes = _write_journal(journal, events)
+
+    with pytest.raises(dq.DeploymentBlocked):
+        _invoke_journal_operation(operation, journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+@pytest.mark.parametrize(("status", "pending", "usable"), [
+    ("mystery", False, False),
+    ("authorized", False, False),
+    ("authorized", True, True),
+    ("overridden", False, False),
+    ("completed", True, True),
+    ("completed", False, False),
+    ("aborted", True, False),
+    ("aborted", False, True),
+    ("reconciled_quiescent", True, False),
+    ("reconciled_quiescent", False, True),
+])
+@pytest.mark.parametrize("operation", ["load", "authorize", "reconcile", "finalize"])
+def test_status_pending_and_usable_invariants_fail_closed_without_rewrite(
+        tmp_path, operation, status, pending, usable):
+    journal = tmp_path / "journal.json"
+    corrupt_bytes = _write_journal(journal, [
+        _journal_event("a" * 32, status=status, pending=pending, usable=usable),
+    ])
+
+    with pytest.raises(dq.DeploymentBlocked):
+        _invoke_journal_operation(operation, journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+@pytest.mark.parametrize(("predecessor", "successor"), [
+    (
+        _journal_event("a" * 32, status="aborted", pending=False, usable=False),
+        _journal_event("b" * 32, status="completed", pending=False, usable=True,
+                       prior_event_id="a" * 32),
+    ),
+    (
+        _journal_event("a" * 32, status="completed", pending=False, usable=True),
+        _journal_event("b" * 32, status="completed", pending=False, usable=True,
+                       prior_event_id="a" * 32),
+    ),
+    (
+        _journal_event("a" * 32),
+        _journal_event("b" * 32, status="reconciled_quiescent", pending=False,
+                       usable=False, prior_event_id="a" * 32),
+    ),
+    (
+        _journal_event("a" * 32),
+        _journal_event("b" * 32, prior_event_id="a" * 32),
+    ),
+    (
+        _journal_event("a" * 32),
+        _journal_event("b" * 32, action="redeploy", status="completed",
+                       pending=False, usable=True, prior_event_id="a" * 32),
+    ),
+    (
+        _journal_event("a" * 32),
+        _journal_event("b" * 32, inventory_digest="e" * 64,
+                       status="completed", pending=False, usable=True,
+                       prior_event_id="a" * 32),
+    ),
+])
+@pytest.mark.parametrize("operation", ["load", "authorize", "reconcile", "finalize"])
+def test_illegal_journal_transitions_fail_closed_without_rewrite(
+        tmp_path, operation, predecessor, successor):
+    journal = tmp_path / "journal.json"
+    corrupt_bytes = _write_journal(journal, [predecessor, successor])
+
+    with pytest.raises(dq.DeploymentBlocked):
+        _invoke_journal_operation(operation, journal)
+
+    assert journal.read_bytes() == corrupt_bytes
+
+
+def test_current_writer_emits_a_linked_legal_state_machine(tmp_path):
+    journal = tmp_path / "journal.json"
+    observation = _producer_shaped_observation()
+    clearance = dq.authorize("restart", observation, journal=journal)
+    completed = dq.finalize(clearance, success=True, journal=journal)
+    next_clearance = dq.authorize("restart", observation, journal=journal)
+    aborted = dq.finalize(next_clearance, success=False, journal=journal)
+    reconciled = dq.reconcile(observation=observation, journal=journal)
+
+    events = json.loads(journal.read_text())["events"]
+    assert [event["status"] for event in events] == [
+        "authorized", "completed", "authorized", "aborted",
+        "reconciled_quiescent",
+    ]
+    assert len({event["event_id"] for event in events}) == len(events)
+    assert "prior_event_id" not in events[0]
+    for index in range(1, len(events)):
+        assert events[index]["prior_event_id"] == events[index - 1]["event_id"]
+    assert completed["event"]["usable"] is True
+    assert aborted["event"]["usable"] is False
+    assert reconciled["event"]["usable"] is False
+    assert all(event["pending"] is (event["status"] in {"authorized", "overridden"})
+               for event in events)
+    assert json.loads(journal.read_text())["latest"] == events[-1]
+
+
+def test_generated_duplicate_event_id_fails_before_rewriting_journal(
+        tmp_path, monkeypatch):
+    journal = tmp_path / "journal.json"
+    dq.authorize("restart", _producer_shaped_observation(), journal=journal)
+    before = journal.read_bytes()
+    event_id = json.loads(before)["latest"]["event_id"]
+    monkeypatch.setattr(dq.uuid, "uuid4", lambda: SimpleNamespace(hex=event_id))
+
+    with pytest.raises(dq.DeploymentBlocked, match="duplicate event_id"):
+        dq.authorize("restart", _producer_shaped_observation(), journal=journal)
+
+    assert journal.read_bytes() == before
+
+
 @pytest.mark.parametrize("operation", ["authorize", "reconcile"])
 def test_mutation_paths_reject_missing_latest_without_overwriting_evidence(
         tmp_path, operation):
@@ -932,6 +1104,12 @@ def test_compatible_empty_and_minimal_legacy_journals_remain_usable(tmp_path):
     legacy.write_text(json.dumps({
         "version": 1, "events": [legacy_event], "latest": legacy_event,
     }))
+    legacy_bytes = legacy.read_bytes()
+    legacy_reconcile = dq.reconcile(
+        observation=_producer_shaped_observation(), journal=legacy)
+    assert legacy_reconcile["reconciled"] is False
+    assert "no deployment action binding" in legacy_reconcile["reason"]
+    assert legacy.read_bytes() == legacy_bytes
     legacy_clearance = dq.authorize(
         "restart", _producer_shaped_observation(), journal=legacy)
     result = dq.finalize(legacy_clearance, success=True, journal=legacy)

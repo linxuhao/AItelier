@@ -47,6 +47,22 @@ CLEARANCE_EVENT_IDENTITY_FIELDS = (
     "event_id", "action", "inventory_digest",
 )
 JOURNAL_EVENT_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+JOURNAL_EVENT_STATES = {
+    "authorized": (True, False),
+    "overridden": (True, False),
+    "completed": (False, True),
+    "aborted": (False, False),
+    "reconciled_quiescent": (False, False),
+}
+JOURNAL_SUCCESSORS = {
+    "authorized": frozenset({"completed", "aborted"}),
+    "overridden": frozenset({"completed", "aborted"}),
+    "completed": frozenset({"authorized", "overridden", "aborted"}),
+    "aborted": frozenset({
+        "authorized", "overridden", "aborted", "reconciled_quiescent",
+    }),
+    "reconciled_quiescent": frozenset({"authorized", "overridden", "aborted"}),
+}
 SIDECAR_DESIRED = frozenset({"ready", "released"})
 SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
 EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled"})
@@ -172,6 +188,13 @@ def _nonempty_string(value: Any) -> bool:
     return type(value) is str and bool(value.strip())
 
 
+def _legacy_journal_genesis(event: Any) -> bool:
+    return (type(event) is dict
+            and set(event) == {"event_id", "status", "usable"}
+            and event["status"] == "aborted"
+            and event["usable"] is False)
+
+
 def _normalized_owner_blockers(*, runs: list[dict], sidecar_owners: list[dict],
                                external_owners: list[dict],
                                registered_external_owners: list[dict],
@@ -285,6 +308,7 @@ def _load_journal(path: Path) -> dict:
             f"deployment quiescence journal at {path} is malformed; "
             "refusing to replay or start a deployment action")
     events = value["events"]
+    seen_event_ids: set[str] = set()
     for index, event in enumerate(events):
         if type(event) is not dict:
             raise DeploymentBlocked(
@@ -298,19 +322,90 @@ def _load_journal(path: Path) -> dict:
                 f"deployment quiescence journal at {path} event_id is "
                 f"malformed at index {index}; refusing to replay or start a "
                 "deployment action")
-        if "prior_event_id" in event:
-            prior_event_id = event["prior_event_id"]
-            if (type(prior_event_id) is not str
-                    or JOURNAL_EVENT_ID_PATTERN.fullmatch(prior_event_id) is None
-                    or index == 0
-                    or prior_event_id != events[index - 1].get("event_id")):
+        if event_id in seen_event_ids:
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has a duplicate "
+                f"event_id at index {index}; refusing to replay or start a "
+                "deployment action")
+        seen_event_ids.add(event_id)
+
+        prior_event_id = event.get("prior_event_id")
+        if ((index == 0 and "prior_event_id" in event)
+                or (index > 0
+                    and (type(prior_event_id) is not str
+                         or JOURNAL_EVENT_ID_PATTERN.fullmatch(prior_event_id) is None
+                         or prior_event_id != events[index - 1].get("event_id")))):
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has a broken "
+                f"event order at index {index}; refusing to replay or "
+                "start a deployment action")
+
+        legacy_genesis = index == 0 and _legacy_journal_genesis(event)
+        if legacy_genesis:
+            continue
+        status = event.get("status")
+        expected_state = JOURNAL_EVENT_STATES.get(status)
+        if expected_state is None:
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has an unknown "
+                f"status at index {index}; refusing to replay or start a "
+                "deployment action")
+        if (event.get("pending") is not expected_state[0]
+                or event.get("usable") is not expected_state[1]):
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has contradictory "
+                f"pending/usable state at index {index}; refusing to replay "
+                "or start a deployment action")
+        if event.get("action") not in DEPLOY_ACTIONS:
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has a malformed "
+                f"action at index {index}; refusing to replay or start a "
+                "deployment action")
+        digest = event.get("inventory_digest")
+        if (status != "aborted" or digest is not None) \
+                and (type(digest) is not str
+                     or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has a malformed "
+                f"inventory digest at index {index}; refusing to replay or "
+                "start a deployment action")
+        if "replayed" in event and event["replayed"] is not False:
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has replayed "
+                f"evidence at index {index}; refusing to replay or start a "
+                "deployment action")
+        if index == 0 and status not in {"authorized", "overridden", "aborted"}:
+            raise DeploymentBlocked(
+                f"deployment quiescence journal at {path} has an invalid "
+                f"genesis event at index {index}; refusing to replay or start "
+                "a deployment action")
+        if index > 0:
+            predecessor = events[index - 1]
+            predecessor_status = predecessor.get("status")
+            if status not in JOURNAL_SUCCESSORS.get(predecessor_status, frozenset()):
                 raise DeploymentBlocked(
-                    f"deployment quiescence journal at {path} has a broken "
-                    f"event order at index {index}; refusing to replay or "
-                    "start a deployment action")
+                    f"deployment quiescence journal at {path} has an illegal "
+                    f"event transition at index {index}; refusing to replay "
+                    "or start a deployment action")
+            if predecessor_status in {"authorized", "overridden"} \
+                    and (event.get("action") != predecessor.get("action")
+                         or event.get("inventory_digest")
+                         != predecessor.get("inventory_digest")):
+                raise DeploymentBlocked(
+                    f"deployment quiescence journal at {path} has a divergent "
+                    f"pending transition at index {index}; refusing to replay "
+                    "or start a deployment action")
+            if status == "reconciled_quiescent" \
+                    and event.get("action") != predecessor.get("action"):
+                raise DeploymentBlocked(
+                    f"deployment quiescence journal at {path} has a divergent "
+                    f"reconciliation transition at index {index}; refusing to "
+                    "replay or start a deployment action")
     if events:
         latest = value.get("latest")
-        if type(latest) is not dict or _digest(latest) != _digest(events[-1]):
+        if (type(latest) is not dict
+                or json.dumps(latest, sort_keys=True, separators=(",", ":"))
+                != json.dumps(events[-1], sort_keys=True, separators=(",", ":"))):
             raise DeploymentBlocked(
                 f"deployment quiescence journal at {path} has missing, orphaned, "
                 "or divergent latest evidence; refusing to replay or start a "
@@ -340,7 +435,16 @@ def _journal_lock(path: Path):
 
 
 def _append_to(journal: dict, event: dict) -> dict:
-    event = {"event_id": uuid.uuid4().hex, "at": _now(), **event}
+    existing_ids = {row.get("event_id") for row in journal["events"]}
+    event_id = uuid.uuid4().hex
+    if event_id in existing_ids:
+        raise DeploymentBlocked(
+            "deployment journal generated a duplicate event_id; refusing to write")
+    event = {**event, "event_id": event_id, "at": _now()}
+    if journal["events"]:
+        event["prior_event_id"] = journal["events"][-1]["event_id"]
+    else:
+        event.pop("prior_event_id", None)
     journal["events"].append(event)
     journal["latest"] = event
     return event
@@ -1008,10 +1112,11 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
         latest = state.get("latest") or {}
         if latest.get("pending") is True:
             _append_to(state, {"action": latest.get("action"),
-                               "status": "aborted", "usable": False,
+                               "status": "aborted", "pending": False,
+                               "usable": False,
                                "replayed": False,
                                "reason": "deployment authorization was interrupted",
-                               "prior_event_id": latest.get("event_id")})
+                               "inventory_digest": latest.get("inventory_digest")})
         validation_error = (observation_snapshot_error
                             or _validate_observation(observation_value))
         if validation_error is not None:
@@ -1020,6 +1125,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
         elif observation_value["quiescent"] is True:
             event = _append_to(state, {"action": action, "status": "authorized",
                                        "pending": True, "usable": False,
+                                       "replayed": False,
                                        "inventory_digest": observation_value["digest"],
                                        "blockers": observation_value["blockers"],
                                        "errors": observation_value["errors"]})
@@ -1032,6 +1138,7 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
             unknown_scope = override_value.get("acknowledge_unknown") is True
             event = _append_to(state, {"action": action, "status": "overridden",
                                        "pending": True, "usable": False,
+                                       "replayed": False,
                                        "audit": {"actor": override_value["actor"],
                                                  "reason": override_value["reason"],
                                                  "ticket": override_value["ticket"],
@@ -1047,7 +1154,8 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
             _atomic_write(path, state)
             return {"allowed": True, "replayed": False, "event": event}
         event = _append_to(state, {"action": action, "status": "aborted",
-                                   "usable": False, "reason": reason,
+                                   "pending": False, "usable": False,
+                                   "replayed": False, "reason": reason,
                                    "inventory_digest": observation_value.get("digest"),
                                    "blockers": observation_value.get("blockers"),
                                    "errors": observation_value.get("errors")})
@@ -1101,7 +1209,6 @@ def finalize(clearance: dict, *, success: bool, error: str | None = None,
             "pending": False,
             "usable": success,
             "replayed": False,
-            "prior_event_id": latest["event_id"],
             "inventory_digest": latest["inventory_digest"],
             **({} if success else {"reason": str(error or "deployment action failed")[:500]}),
         })
@@ -1124,12 +1231,16 @@ def reconcile(*, observation: dict, journal: Path | str | None = None) -> dict:
         _ensure_journal(path)
         state = _load_journal(path)
         latest = state.get("latest")
+        if latest and _legacy_journal_genesis(latest):
+            return {"reconciled": False, "replayed": False,
+                    "reason": "legacy evidence has no deployment action binding"}
         if latest and latest.get("pending") is True:
             event = _append_to(state, {"action": latest.get("action"),
-                                       "status": "aborted", "usable": False,
+                                       "status": "aborted", "pending": False,
+                                       "usable": False,
                                        "replayed": False,
                                        "reason": "deployment authorization was interrupted",
-                                       "prior_event_id": latest.get("event_id")})
+                                       "inventory_digest": latest.get("inventory_digest")})
             _atomic_write(path, state)
             return {"reconciled": False, "replayed": False, "event": event}
         if not latest or latest.get("status") != "aborted":
@@ -1143,7 +1254,8 @@ def reconcile(*, observation: dict, journal: Path | str | None = None) -> dict:
             reason = None
         if reason is not None:
             event = _append_to(state, {"action": latest.get("action"),
-                                       "status": "aborted", "usable": False,
+                                       "status": "aborted", "pending": False,
+                                       "usable": False,
                                        "replayed": False,
                                        "reason": reason,
                                        "inventory_digest": observation_value.get("digest"),
@@ -1152,10 +1264,10 @@ def reconcile(*, observation: dict, journal: Path | str | None = None) -> dict:
             _atomic_write(path, state)
             return {"reconciled": False, "replayed": False, "event": event}
         event = _append_to(state, {"action": latest.get("action"),
-                                   "status": "reconciled_quiescent", "usable": False,
+                                   "status": "reconciled_quiescent",
+                                   "pending": False, "usable": False,
                                    "replayed": False,
-                                   "inventory_digest": observation_value["digest"],
-                                   "prior_event_id": latest.get("event_id")})
+                                   "inventory_digest": observation_value["digest"]})
         _atomic_write(path, state)
         return {"reconciled": True, "replayed": False, "event": event}
 

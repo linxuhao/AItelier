@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import json
 from threading import RLock
 import unicodedata
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from core.state_driver_notes import _redact
 from core.director_messaging_protocol import (
@@ -117,8 +117,13 @@ class InMemoryDirectorMessaging:
 
     def _new_id(self) -> str:
         value = self._id_factory()
-        if not isinstance(value, str) or not value:
-            raise RuntimeError("id_factory must return a nonempty UUIDv4 string")
+        try:
+            parsed = UUID(value)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "id_factory must return a lowercase canonical UUIDv4 string") from exc
+        if parsed.version != 4 or str(parsed) != value:
+            raise RuntimeError("id_factory must return a lowercase canonical UUIDv4 string")
         return value
 
     def _now(self) -> str:

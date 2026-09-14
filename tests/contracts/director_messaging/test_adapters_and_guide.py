@@ -174,6 +174,49 @@ def test_mcp_wire_authorizes_before_parsing_director_action_body(client, monkeyp
         "detail": {"message": "unauthorized"}}
 
 
+@pytest.mark.parametrize("nested", ["DO_NOT_REFLECT", None, pytest.param(..., id="missing")])
+def test_mcp_wire_denies_before_any_nested_body_validation(client, monkeypatch, nested):
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: False)
+    monkeypatch.setattr(mcp_router.authz, "write_denial_reason",
+                        lambda request: authz.WRITE_DENIED_NOT_AUTHENTICATED)
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    outer = {"action": "send_director_message"}
+    if nested is not ...:
+        outer["arguments"] = nested
+    response = client.post("/mcp", json={
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "state_graph_write", "arguments": outer}}, headers=headers)
+    result = response.json()["result"]
+    assert result.get("isError") is not True
+    assert json.loads(result["content"][0]["text"])["result"] == {
+        "schema": "aitelier.director-messaging.v1", "code": "unauthorized",
+        "detail": {"message": "unauthorized"}}
+    assert "DO_NOT_REFLECT" not in response.text
+
+
+@pytest.mark.parametrize("nested", ["not-an-object", None, {"malformed": True},
+                                     pytest.param(..., id="missing")])
+def test_mcp_wire_authorized_malformed_nested_body_is_closed_invalid_request(
+        client, monkeypatch, nested):
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: True)
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    outer = {"action": "send_director_message"}
+    if nested is not ...:
+        outer["arguments"] = nested
+    response = client.post("/mcp", json={
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "state_graph_write", "arguments": outer}}, headers=headers)
+    result = response.json()["result"]
+    assert result.get("isError") is not True
+    assert json.loads(result["content"][0]["text"])["result"] == {
+        "schema": "aitelier.director-messaging.v1", "code": "invalid_request",
+        "detail": {"message": "invalid_request"}}
+
+
 def test_guide_is_agent_neutral_and_documents_messaging():
     assert "send_director_message" in STATE_DRIVER_GUIDE
     assert "director_message_received" in STATE_DRIVER_GUIDE

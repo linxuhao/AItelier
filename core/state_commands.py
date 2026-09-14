@@ -391,11 +391,14 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         raise StateGraphError("unknown state graph action; use state_graph_help")
     if action in WRITE_REQUESTS and not allow_write:
         raise StateGraphError("mutating action is not available on the read surface")
-    if not isinstance(arguments, dict):
-        raise StateGraphError("arguments must be an object")
     director_action = action in {
         "send_director_message", "list_director_messages",
         "acknowledge_director_message", "resolve_director_message"}
+    if not isinstance(arguments, dict):
+        if director_action:
+            from core.director_messaging_protocol import DirectorMessageError
+            return DirectorMessageError("invalid_request").as_dict()
+        raise StateGraphError("arguments must be an object")
     try:
         args = REQUESTS[action].model_validate(arguments).model_dump()
     except ValidationError as exc:

@@ -1,5 +1,7 @@
 """MCP adapters for the same typed State DAG commands used by REST/driver."""
 import inspect
+from typing import Any
+
 import anyio
 
 from core.state_driver_guide import STATE_DRIVER_GUIDE
@@ -37,7 +39,7 @@ def register_state_tools(tool, mcp, service_factory=None):
                 "driver_prompt": "state_graph_driver", "driver_resource": "aitelier://state/driver-guide"}
 
     @tool("state_graph_read", "read", "Private State query. Requires writer authorization even though it does not mutate. Actions include list_director_messages, get_driver_note, driver_note_history, search_driver_note_history, list_projects, get_graph, get_node, facet_lint, frontier, events, get_attempt, list_attempts, evidence, search_design_items, design_impact, wait_for_state_change. Driver-note search returns bounded redacted excerpts in revision order. Design queries return candidates/review hints, not semantic proof. Use cursor-based waits for updates. Exact arguments: state_graph_help.")
-    async def state_graph_read(action: str, arguments: dict) -> dict:
+    async def state_graph_read(action: str, arguments: Any = None) -> dict:
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError
         try:
             result = await anyio.to_thread.run_sync(invoke, action, arguments, False)
@@ -48,7 +50,7 @@ def register_state_tools(tool, mcp, service_factory=None):
             raise MCPToolError(str(exc)) from exc
 
     @tool("state_graph_write", "write", "Manage State facts using typed state_graph_help contracts. Actions include send_director_message, acknowledge_director_message, resolve_director_message, update_driver_note, create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results.")
-    def state_graph_write(action: str, arguments: dict) -> dict:
+    def state_graph_write(action: str, arguments: Any = None) -> dict:
         return {"result": invoke(action, arguments, True)}
 
     @mcp.prompt(name="state_graph_driver", description="State DAG protocol: register, wait by cursor, inspect evidence and accept across authorized transports")

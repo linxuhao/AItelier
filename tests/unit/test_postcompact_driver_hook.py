@@ -131,6 +131,11 @@ def invoke(
         hook_input.update({"turn_id": "turn-compact", "trigger": "auto"})
     elif event == "UserPromptSubmit":
         hook_input.update({"turn_id": "turn-next", "permission_mode": "never", "prompt": "continue"})
+    elif event == "Stop":
+        hook_input.update({
+            "turn_id": "turn-compact", "permission_mode": "never",
+            "stop_hook_active": False, "last_assistant_message": "continuing",
+        })
     result = subprocess.run(
         [str(HOOK)], input=json.dumps(hook_input),
         text=True, capture_output=True, cwd=cwd or tmp_path,
@@ -448,6 +453,60 @@ def test_user_prompt_then_late_compact_session_start_does_not_inject_twice(tmp_p
     assert len(StateStub.requests) == 6
 
 
+def test_actual_postcompact_lifecycle_uses_stop_continuation_without_later_prompt(
+    tmp_path, state_server
+):
+    postcompact = invoke(tmp_path, state_server, event="PostCompact")
+    assert postcompact["continue"] is True
+
+    StateStub.revision = 2
+    stop = invoke(tmp_path, state_server, event="Stop")
+    assert stop["decision"] == "block"
+    assert "driver_note_revision=2" in stop["reason"]
+    assert "# State DAG director protocol" in stop["reason"]
+    assert len(stop["reason"]) <= 12_000
+
+    # The synthetic continuation and any late compatibility event cannot
+    # deliver or dispatch the same compact generation again.
+    assert invoke(tmp_path, state_server, event="Stop") == {"continue": True}
+    assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
+    assert len(StateStub.requests) == 6
+
+
+def test_concurrent_stop_session_and_prompt_fallbacks_deliver_once(tmp_path, state_server):
+    invoke(tmp_path, state_server, event="PostCompact")
+    barrier = threading.Barrier(3)
+
+    def deliver(event):
+        barrier.wait(timeout=5)
+        return invoke(tmp_path, state_server, event=event)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        outputs = list(executor.map(deliver, ("Stop", "SessionStart", "UserPromptSubmit")))
+
+    delivered = [output for output in outputs if output != {"continue": True}]
+    assert len(delivered) == 1
+    if "decision" in delivered[0]:
+        assert delivered[0]["decision"] == "block"
+    else:
+        assert delivered[0]["hookSpecificOutput"]["hookEventName"] in {
+            "SessionStart", "UserPromptSubmit",
+        }
+    assert len(StateStub.requests) == 6
+
+
+def test_compact_session_reordered_before_postcompact_does_not_double_deliver(
+    tmp_path, state_server
+):
+    first = invoke(tmp_path, state_server, event="SessionStart", source="compact")
+    assert first["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    invoke(tmp_path, state_server, event="PostCompact")
+    assert invoke(tmp_path, state_server, event="Stop") == {"continue": True}
+    assert invoke(tmp_path, state_server, event="SessionStart", source="compact") == {
+        "continue": True,
+    }
+
+
 def test_session_and_project_marker_isolation(tmp_path, state_server):
     invoke(tmp_path, state_server, event="PostCompact", session_id="session-a")
     assert invoke(tmp_path, state_server, event="UserPromptSubmit", session_id="session-b") == {"continue": True}
@@ -549,6 +608,21 @@ Use search_driver_note_history for bounded recovery. Do not load driver_note_his
     assert len(context) <= 12_000
 
 
+def test_middle_of_long_note_retains_exact_active_identity_tuple(tmp_path, state_server):
+    identity = (
+        "owner=director-live attempt_id=attempt-live-9 run_id=run-live-9 "
+        "checkpoint=review checkpoint_id=checkpoint-live-9"
+    )
+    StateStub.temporary = "A" * 5_000 + "\n" + identity + "\n" + "B" * 5_000
+
+    context = invoke(
+        tmp_path, state_server, event="SessionStart", source="startup",
+        session_id="long-identity-note",
+    )["hookSpecificOutput"]["additionalContext"]
+    assert identity in context
+    assert len(context) <= 12_000
+
+
 def test_exact_compact_event_pair_retains_middle_of_huge_history_paragraph(tmp_path, state_server):
     StateStub.revision = 91
     StateStub.guide = f"""# State DAG director protocol
@@ -583,7 +657,9 @@ def test_context_retains_active_run_checkpoint_attempt_and_candidate_without_mut
     )
     StateStub.nodes = [
         {"node_key": "running-node", "status": "OPEN", "readiness": "in_progress", "next_action": None,
-         "latest_attempt": {"attempt_id": "attempt-live-7", "run_id": "run-live-7", "status": "running"}},
+         "latest_attempt": {"attempt_id": "attempt-live-7", "run_id": "run-live-7", "status": "running",
+                            "owner": "director-a", "checkpoint": "review",
+                            "checkpoint_id": "checkpoint-pending-7"}},
         {"node_key": "candidate-node", "status": "CANDIDATE", "readiness": "ready",
          "next_action": "candidate_review", "latest_attempt": {
              "attempt_id": "attempt-candidate-8", "artifact_ref": "candidate-sha-8", "status": "candidate"}},
@@ -594,6 +670,7 @@ def test_context_retains_active_run_checkpoint_attempt_and_candidate_without_mut
     context = output["systemMessage"]
     assert "checkpoint-pending-7" in context and "owner remains director-a" in context
     assert "attempt_id=attempt-live-7 run_id=run-live-7 attempt_status=running" in context
+    assert "owner=director-a checkpoint=review checkpoint_id=checkpoint-pending-7" in context
     assert "attempt_id=attempt-candidate-8 artifact_ref=candidate-sha-8" in context
     assert (StateStub.temporary, StateStub.nodes, StateStub.revision) == before
     assert {request["params"]["name"] for request in StateStub.requests} == {
@@ -606,15 +683,16 @@ def test_tracked_hook_config_uses_current_command_shape_and_move_safe_lookup():
     postcompact = config["hooks"]["PostCompact"][0]["hooks"][0]
     handler = config["hooks"]["SessionStart"][0]["hooks"][0]
     prompt_handler = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    stop_handler = config["hooks"]["Stop"][0]["hooks"][0]
     assert config["hooks"]["SessionStart"][0]["matcher"] == "^(startup|resume|compact)$"
-    assert postcompact["type"] == handler["type"] == prompt_handler["type"] == "command"
-    assert postcompact["async"] is handler["async"] is prompt_handler["async"] is False
-    assert postcompact["timeout"] == handler["timeout"] == prompt_handler["timeout"] == 20
+    assert postcompact["type"] == handler["type"] == prompt_handler["type"] == stop_handler["type"] == "command"
+    assert postcompact["async"] is handler["async"] is prompt_handler["async"] is stop_handler["async"] is False
+    assert postcompact["timeout"] == handler["timeout"] == prompt_handler["timeout"] == stop_handler["timeout"] == 20
     assert "additionalContextLimit" not in postcompact
     # Zero disables Codex spilling. The script's own MAX_CONTEXT_CHARS remains
     # the strict safety boundary for complete mixed-language delivery.
     assert handler["additionalContextLimit"] == prompt_handler["additionalContextLimit"] == 0
-    assert handler["command"] == prompt_handler["command"] == postcompact["command"]
+    assert handler["command"] == prompt_handler["command"] == stop_handler["command"] == postcompact["command"]
     assert "git rev-parse --show-toplevel" in handler["command"]
     assert "/Users/" not in handler["command"] and "/home/" not in handler["command"]
     assert HOOK.stat().st_mode & 0o111

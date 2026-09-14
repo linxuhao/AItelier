@@ -191,6 +191,20 @@ def _mark_pending(hook_input: dict[str, Any]) -> bool:
             return False
         if current and current["generation"] == generation and current["status"] == MARKER_ATTEMPTED:
             return True
+        # Some clients can report the compact SessionStart before the matching
+        # PostCompact callback. That activation already delivered the handoff;
+        # bind its provisional marker to the real turn without reopening it.
+        if (
+            current
+            and current["generation"] == "compact-session-start"
+            and current["status"] == MARKER_ATTEMPTED
+        ):
+            return _write_marker(path, {
+                "version": MARKER_VERSION,
+                "generation": generation,
+                "status": MARKER_ATTEMPTED,
+                "acknowledgement": MARKER_NO_ACK,
+            })
         return _write_marker(path, {
             "version": MARKER_VERSION,
             "generation": generation,
@@ -286,6 +300,18 @@ def _guide_sections(guide: str, limit: int = 4_000) -> str:
         excerpts.append(warning_excerpt)
     suffix = "\n\n## Selected live driver-note history search guidance\n" + "\n".join(excerpts)
     return _bounded_section(selected, max(0, limit - len(suffix))) + suffix
+
+
+def _identity_anchors(permanent: str, temporary: str, limit: int = 1_200) -> str:
+    """Retain labeled handoff identities even when note bodies are truncated."""
+    excerpts: list[str] = []
+    for label, text in (("permanent", permanent), ("temporary", temporary)):
+        for key_name in ("owner=", "attempt_id=", "run_id=", "checkpoint=", "checkpoint_id="):
+            excerpt = _centered_excerpt(text, key_name)
+            tagged = f"- {label}: {excerpt}" if excerpt else ""
+            if tagged and tagged not in excerpts:
+                excerpts.append(tagged)
+    return _bounded_section("\n".join(excerpts) or "- none labeled in current note", limit)
 
 
 def _codex_config() -> dict[str, Any]:
@@ -402,11 +428,15 @@ def _frontier_summary(overview: dict[str, Any]) -> str:
         latest = node.get("latest_attempt")
         if readiness == "in_progress" and isinstance(latest, dict):
             run_id = latest.get("run_id") or "none"
+            owner = latest.get("owner") or latest.get("reporting_actor") or "unknown"
+            checkpoint = latest.get("checkpoint") or "none"
+            checkpoint_id = latest.get("checkpoint_id") or "none"
             active.append(
                 f"- {node.get('node_key', node.get('key', '?'))}: "
                 f"attempt_id={latest.get('attempt_id', 'unknown')} "
                 f"run_id={run_id} "
-                f"attempt_status={latest.get('status', 'unknown')}"
+                f"attempt_status={latest.get('status', 'unknown')} "
+                f"owner={owner} checkpoint={checkpoint} checkpoint_id={checkpoint_id}"
             )
         if readiness == "ready" and next_action in {"new_attempt", "candidate_review"}:
             candidate = ""
@@ -470,7 +500,10 @@ state_driver_guide_sha256={_sha256(guide)} chars={len(guide)} source={help_paylo
 ## Stable State driver guidance selected from the live MCP response
 {_guide_sections(guide)}
 
-This is a bounded resume aid, not the full DAG, note history, trace, or evidence. Reconcile exact State records before dispatch, acceptance, push, or deployment."""
+This is a bounded resume aid, not the full DAG, note history, trace, or evidence. Reconcile exact State records before dispatch, acceptance, push, or deployment.
+
+## Exact labeled owner/run/attempt/checkpoint anchors retained from the current note
+{_identity_anchors(permanent, temporary)}"""
     return _bounded_section(context, MAX_CONTEXT_CHARS)
 
 
@@ -479,25 +512,28 @@ def _write_output(output: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -> str:
-    """Persist one no-ACK delivery attempt before emitting context."""
+def _claim_context(
+    hook_input: dict[str, Any], *, standalone: bool,
+    missing_generation: str = "session-start",
+) -> tuple[str, str | None]:
+    """Persist one no-ACK delivery attempt and return its fresh context."""
     path, lock_fd = _acquire_marker(hook_input)
     if path is None:
-        return DELIVERY_FAILED if standalone else DELIVERY_NOOP
+        return (DELIVERY_FAILED if standalone else DELIVERY_NOOP), None
     try:
         state, marker = _read_marker(path)
         if state == "invalid":
-            return DELIVERY_FAILED
+            return DELIVERY_FAILED, None
         if state == "missing":
             if not standalone:
-                return DELIVERY_NOOP
+                return DELIVERY_NOOP, None
             marker = {
                 "version": MARKER_VERSION,
-                "generation": "session-start",
+                "generation": missing_generation,
                 "status": MARKER_PENDING,
             }
         if marker["status"] != MARKER_PENDING:
-            return DELIVERY_NOOP
+            return DELIVERY_NOOP, None
         context = build_context()
         if not _write_marker(path, {
             "version": MARKER_VERSION,
@@ -505,16 +541,38 @@ def _deliver_once(hook_input: dict[str, Any], event: str, *, standalone: bool) -
             "status": MARKER_ATTEMPTED,
             "acknowledgement": MARKER_NO_ACK,
         }):
-            return DELIVERY_FAILED
+            return DELIVERY_FAILED, None
+        return DELIVERY_ATTEMPTED, context
+    finally:
+        _release_marker(lock_fd)
+
+
+def _deliver_once(
+    hook_input: dict[str, Any], event: str, *, standalone: bool,
+    missing_generation: str = "session-start",
+) -> str:
+    """Persist one no-ACK delivery attempt before emitting additional context."""
+    delivery, context = _claim_context(
+        hook_input, standalone=standalone, missing_generation=missing_generation
+    )
+    if delivery == DELIVERY_ATTEMPTED:
+        assert context is not None
         _write_output({
             "hookSpecificOutput": {
                 "hookEventName": event,
                 "additionalContext": context,
             }
         })
-        return DELIVERY_ATTEMPTED
-    finally:
-        _release_marker(lock_fd)
+    return delivery
+
+
+def _continue_once(hook_input: dict[str, Any]) -> str:
+    """Use Stop's supported continuation prompt when compact activation was absent."""
+    delivery, context = _claim_context(hook_input, standalone=False)
+    if delivery == DELIVERY_ATTEMPTED:
+        assert context is not None
+        _write_output({"decision": "block", "reason": context})
+    return delivery
 
 
 def _delivery_recovery_context() -> str:
@@ -532,7 +590,8 @@ def main() -> int:
         hook_input = {}
     event = hook_input.get("hook_event_name")
     # PostCompact has no model-context output. Queue the next supported
-    # SessionStart/UserPromptSubmit delivery. The marker records an at-most-once
+    # SessionStart/UserPromptSubmit delivery, with Stop's supported continuation
+    # prompt as the same-turn fallback. The marker records an at-most-once
     # attempt because Codex provides no acknowledgement that stdout reached the
     # model.
     if event == "PostCompact":
@@ -546,7 +605,16 @@ def main() -> int:
             )
         output = {"continue": True, "systemMessage": context}
     elif event == "SessionStart" and hook_input.get("source") in SESSION_BOOTSTRAP_SOURCES:
-        delivery = _deliver_once(hook_input, "SessionStart", standalone=True)
+        delivery = _deliver_once(
+            hook_input,
+            "SessionStart",
+            standalone=True,
+            missing_generation=(
+                "compact-session-start"
+                if hook_input.get("source") == "compact"
+                else "session-start"
+            ),
+        )
         if delivery == DELIVERY_ATTEMPTED:
             return 0
         output = {"continue": True}
@@ -554,6 +622,13 @@ def main() -> int:
             output["systemMessage"] = _delivery_recovery_context()
     elif event == "UserPromptSubmit":
         delivery = _deliver_once(hook_input, "UserPromptSubmit", standalone=False)
+        if delivery == DELIVERY_ATTEMPTED:
+            return 0
+        output = {"continue": True}
+        if delivery == DELIVERY_FAILED:
+            output["systemMessage"] = _delivery_recovery_context()
+    elif event == "Stop":
+        delivery = _continue_once(hook_input)
         if delivery == DELIVERY_ATTEMPTED:
             return 0
         output = {"continue": True}

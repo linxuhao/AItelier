@@ -297,13 +297,13 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
         raise
 
 
-def _backup_signature(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
-    return (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode), value.st_size,
-            value.st_mtime_ns, value.st_ctime_ns)
+def _backup_signature(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode), value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
 
 def _read_open_backup(path: Path, fd: int,
-                      signature: tuple[int, int, int, int, int, int]) -> bytes:
+                      signature: tuple[int, int, int, int, int, int, int]) -> bytes:
     try:
         before = os.fstat(fd)
         named = os.stat(path, follow_symlinks=False)
@@ -360,12 +360,29 @@ def _open_existing_backup(path: Path):
                 f"legacy backup is not identity-stable for migration: {path}") from exc
         signature = _backup_signature(opened)
         payload = _read_open_backup(path, fd, signature)
+        if signature[3] != 1:
+            raise DeploymentBlocked(
+                f"legacy evidence must have link count one for independent storage: {path}")
         yield (fd, signature, payload)
         if _read_open_backup(path, fd, signature) != payload:
             raise DeploymentBlocked(
                 f"legacy backup changed bytes during migration: {path}")
     finally:
         os.close(fd)
+
+
+def _validate_open_evidence(
+        entries: tuple[tuple[Path, tuple[int, tuple[int, int, int, int, int, int, int], bytes]],
+                       ...]) -> None:
+    identities: dict[tuple[int, int], Path] = {}
+    for path, (fd, signature, payload) in entries:
+        if _read_open_backup(path, fd, signature) != payload:
+            raise DeploymentBlocked(f"legacy evidence changed bytes during migration: {path}")
+        identity = signature[:2]
+        if identity in identities:
+            raise DeploymentBlocked(
+                f"legacy evidence files are not storage-independent: {identities[identity]}, {path}")
+        identities[identity] = path
 
 
 def _install_backup_bytes(path: Path, payload: bytes) -> None:
@@ -640,19 +657,28 @@ def _validate_migration_evidence(journal: dict, path: Path) -> None:
     source = _migration_source_path(path)
     transaction_path = _migration_transaction_path(path)
     migration = journal.get("migration", {})
-    with _open_existing_backup(backup) as backup_file:
-        with _open_existing_backup(source) as source_file:
-            with _open_existing_backup(transaction_path) as transaction_file:
-                if backup_file is None or source_file is None or transaction_file is None:
-                    raise DeploymentBlocked("deployment journal migration evidence is missing")
-                expected_hash = migration.get("source_sha256")
-                expected_bytes = migration.get("source_bytes")
-                if (backup_file[2] != source_file[2]
-                        or len(source_file[2]) != expected_bytes
-                        or hashlib.sha256(source_file[2]).hexdigest() != expected_hash):
-                    raise DeploymentBlocked("deployment journal migration evidence does not match")
-                transaction = _decode_journal_json(transaction_file[2], transaction_path)
-                _validate_migration_transaction(transaction, journal, path)
+    with _open_existing_backup(path) as journal_file:
+        with _open_existing_backup(backup) as backup_file:
+            with _open_existing_backup(source) as source_file:
+                with _open_existing_backup(transaction_path) as transaction_file:
+                    if (journal_file is None or backup_file is None or source_file is None
+                            or transaction_file is None):
+                        raise DeploymentBlocked("deployment journal migration evidence is missing")
+                    entries = ((path, journal_file), (backup, backup_file),
+                               (source, source_file), (transaction_path, transaction_file))
+                    _validate_open_evidence(entries)
+                    if _decode_journal_json(journal_file[2], path) != journal:
+                        raise DeploymentBlocked(
+                            "deployment journal changed during migration evidence validation")
+                    expected_hash = migration.get("source_sha256")
+                    expected_bytes = migration.get("source_bytes")
+                    if (backup_file[2] != source_file[2]
+                            or len(source_file[2]) != expected_bytes
+                            or hashlib.sha256(source_file[2]).hexdigest() != expected_hash):
+                        raise DeploymentBlocked(
+                            "deployment journal migration evidence does not match")
+                    transaction = _decode_journal_json(transaction_file[2], transaction_path)
+                    _validate_migration_transaction(transaction, journal, path)
 
 
 def _load_journal(path: Path) -> dict:
@@ -862,21 +888,30 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
         with _open_existing_backup(backup) as accepted_backup:
             with _open_existing_backup(source) as accepted_source:
                 with _open_existing_backup(transaction_path) as accepted_transaction:
-                    if (accepted_backup is None or accepted_source is None
-                            or accepted_transaction is None
-                            or accepted_backup[2] != raw or accepted_source[2] != raw
-                            or accepted_transaction[2] != transaction_bytes
-                            or path.read_bytes() != raw):
-                        raise DeploymentBlocked(
-                            "legacy evidence changed before migration commit")
-                    anchor_path = _anchor_path(path)
-                    if anchor_path.exists():
-                        if _read_journal_json(anchor_path) != _checkpoint(target):
+                    with _open_existing_backup(path) as accepted_journal:
+                        if (accepted_journal is None or accepted_backup is None
+                                or accepted_source is None or accepted_transaction is None
+                                or accepted_journal[2] != raw or accepted_backup[2] != raw
+                                or accepted_source[2] != raw
+                                or accepted_transaction[2] != transaction_bytes):
                             raise DeploymentBlocked(
-                                "migration transaction does not match durable anchor")
-                        _atomic_write(path, target)
-                    else:
-                        _persist_journal(path, target)
+                                "legacy evidence changed before migration commit")
+                        entries = ((path, accepted_journal), (backup, accepted_backup),
+                                   (source, accepted_source),
+                                   (transaction_path, accepted_transaction))
+                        _validate_open_evidence(entries)
+                        anchor_path = _anchor_path(path)
+                        if anchor_path.exists():
+                            if _read_journal_json(anchor_path) != _checkpoint(target):
+                                raise DeploymentBlocked(
+                                    "migration transaction does not match durable anchor")
+                        else:
+                            _atomic_write(anchor_path, _checkpoint(target))
+                        # Keep every descriptor open and revalidate identity, link count,
+                        # bytes and pathname after the durable anchor but before v2 replaces
+                        # the only journal pathname.
+                        _validate_open_evidence(entries)
+                    _atomic_write(path, target)
                     current = _load_journal(path)
         return current
 

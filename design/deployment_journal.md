@@ -95,15 +95,17 @@ completion is generated. A new aborted, unusable migration barrier requires
 fresh authorization wherever the legacy history has an action binding.
 Empty/minimal aborted histories remain unusable.
 
-The backup, independent source and transaction are opened without following
-links and remain open while their bytes and filesystem identities are rechecked
-through publication. Every later journal load also requires all three files,
-requires both legacy copies to match the recorded bytes and hash, and requires
-the transaction's exact v2 journal to be the current history prefix. Thus a
-backup pathname replacement detected after either v2 rename cannot leave a
-loadable pair with false migration provenance, while the independent source
-still retains the reviewed bytes. A file that appears during creation is never
-replaced.
+The journal, backup, independent source and transaction are opened without
+following links. Each must be a regular file with exactly one link, and all four
+must have distinct device/inode identities. Their descriptors remain open while
+bytes, link counts, path identities and timestamps are rechecked after checkpoint
+publication and before the journal becomes v2. Every later journal load repeats
+the four-file independence check, requires both legacy copies to match the
+recorded bytes and hash, and requires the transaction's exact v2 journal to be
+the current history prefix. Hard links through another name are refused even
+when their bytes match. Thus an evidence identity or link-count change cannot
+leave a loadable pair with false migration provenance. A file that appears
+during creation is never replaced.
 
 An identical completed migration request reloads without rewriting the pair or
 its provenance and verifies all migration evidence. Any crash before checkpoint

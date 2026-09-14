@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -630,6 +631,203 @@ def test_matching_existing_regular_backup_is_stable_and_idempotent(tmp_path):
     assert (path.read_bytes(), dq._anchor_path(path).read_bytes()) == pair
     assert backup.read_bytes() == raw
     assert (backup.stat().st_dev, backup.stat().st_ino) == identity
+
+
+@pytest.mark.parametrize("left,right", [
+    ("journal", "backup"),
+    ("journal", "source"),
+    ("backup", "source"),
+])
+def test_migration_refuses_preexisting_hard_link_aliases_before_publication(
+        tmp_path, left, right):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    entries = {
+        "journal": path,
+        "backup": path.with_name(path.name + ".legacy-v1.backup"),
+        "source": dq._migration_source_path(path),
+    }
+    if left != "journal":
+        entries[left].write_bytes(raw)
+    os.link(entries[left], entries[right])
+
+    with pytest.raises(dq.DeploymentBlocked, match="independent|link count"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert json.loads(path.read_bytes())["version"] == 1
+    assert not dq._anchor_path(path).exists()
+    assert entries[left].stat().st_ino == entries[right].stat().st_ino
+
+
+def test_migration_refuses_unnamed_hard_link_before_publication(tmp_path, monkeypatch):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    source = dq._migration_source_path(path)
+    transaction = dq._migration_transaction_path(path)
+    external = tmp_path / "unreviewed-alias"
+    real_install = dq._install_backup_bytes
+
+    def link_after_transaction(target, payload):
+        real_install(target, payload)
+        if target == transaction:
+            os.link(source, external)
+
+    monkeypatch.setattr(dq, "_install_backup_bytes", link_after_transaction)
+    with pytest.raises(dq.DeploymentBlocked, match="link count"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert not dq._anchor_path(path).exists()
+    assert source.stat().st_nlink == 2
+
+
+@pytest.mark.parametrize("target_name", ["journal", "backup", "source", "transaction"])
+def test_completed_migration_rejects_unnamed_hard_links(tmp_path, target_name):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    migrate(path)
+    target = {
+        "journal": path,
+        "backup": path.with_name(path.name + ".legacy-v1.backup"),
+        "source": dq._migration_source_path(path),
+        "transaction": dq._migration_transaction_path(path),
+    }[target_name]
+    os.link(target, tmp_path / f"{target_name}-external-alias")
+
+    with pytest.raises(dq.DeploymentBlocked, match="link count"):
+        dq._load_journal(path)
+
+
+def test_completed_migration_rejects_backup_source_identity_alias(tmp_path):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    migrate(path)
+    backup = path.with_name(path.name + ".legacy-v1.backup")
+    source = dq._migration_source_path(path)
+    source.unlink()
+    os.link(backup, source)
+
+    with pytest.raises(dq.DeploymentBlocked, match="independent|link count"):
+        dq._load_journal(path)
+
+
+@pytest.mark.parametrize("left,right", [
+    ("journal", "backup"),
+    ("journal", "source"),
+    ("backup", "source"),
+])
+def test_distinct_identity_check_is_independent_of_link_count_observation(
+        tmp_path, monkeypatch, left, right):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    entries = {
+        "journal": path,
+        "backup": path.with_name(path.name + ".legacy-v1.backup"),
+        "source": dq._migration_source_path(path),
+    }
+    if left != "journal":
+        entries[left].write_bytes(raw)
+    os.link(entries[left], entries[right])
+    real_signature = dq._backup_signature
+
+    def signature_with_hidden_link_count(value):
+        signature = list(real_signature(value))
+        signature[3] = 1
+        return tuple(signature)
+
+    monkeypatch.setattr(dq, "_backup_signature", signature_with_hidden_link_count)
+    with pytest.raises(dq.DeploymentBlocked, match="storage-independent"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert not dq._anchor_path(path).exists()
+
+
+@pytest.mark.parametrize("target_name", ["journal", "backup", "source", "transaction"])
+def test_identity_replacement_after_anchor_stops_before_v2_journal(
+        tmp_path, monkeypatch, target_name):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    target = {
+        "journal": path,
+        "backup": path.with_name(path.name + ".legacy-v1.backup"),
+        "source": dq._migration_source_path(path),
+        "transaction": dq._migration_transaction_path(path),
+    }[target_name]
+    real_atomic = dq._atomic_write
+    replaced = False
+
+    def replace_after_anchor(destination, value):
+        nonlocal replaced
+        real_atomic(destination, value)
+        if destination == dq._anchor_path(path) and not replaced:
+            replacement = tmp_path / f"{target_name}-replacement"
+            replacement.write_bytes(target.read_bytes())
+            replacement.replace(target)
+            replaced = True
+
+    monkeypatch.setattr(dq, "_atomic_write", replace_after_anchor)
+    with pytest.raises(dq.DeploymentBlocked, match="identity"):
+        migrate(path)
+
+    assert replaced
+    assert path.read_bytes() == raw
+    assert json.loads(path.read_bytes())["version"] == 1
+
+
+@pytest.mark.parametrize("remove_alias", [False, True])
+def test_link_count_change_after_anchor_stops_before_v2_journal(
+        tmp_path, monkeypatch, remove_alias):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    source = dq._migration_source_path(path)
+    external = tmp_path / "late-source-alias"
+    real_atomic = dq._atomic_write
+
+    def link_after_anchor(destination, value):
+        real_atomic(destination, value)
+        if destination == dq._anchor_path(path):
+            os.link(source, external)
+            if remove_alias:
+                external.unlink()
+
+    monkeypatch.setattr(dq, "_atomic_write", link_after_anchor)
+    with pytest.raises(dq.DeploymentBlocked, match="identity|link count"):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+    assert json.loads(path.read_bytes())["version"] == 1
+    assert source.stat().st_nlink == (1 if remove_alias else 2)
+
+
+def test_migration_creates_four_independent_single_link_files_and_is_idempotent(tmp_path):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    migrated = migrate(path)
+    paths = [
+        path,
+        path.with_name(path.name + ".legacy-v1.backup"),
+        dq._migration_source_path(path),
+        dq._migration_transaction_path(path),
+    ]
+    identities = {(entry.stat().st_dev, entry.stat().st_ino) for entry in paths}
+    assert len(identities) == len(paths)
+    assert all(entry.stat().st_nlink == 1 for entry in paths)
+    pair = (path.read_bytes(), dq._anchor_path(path).read_bytes())
+
+    assert dq.migrate_legacy_journal(
+        journal=path, expected_sha256=hashlib.sha256(raw).hexdigest(), actor="retry",
+        provenance="retry", legacy_format="deployed-v1") == migrated
+    assert pair == (path.read_bytes(), dq._anchor_path(path).read_bytes())
+    assert {(entry.stat().st_dev, entry.stat().st_ino) for entry in paths} == identities
+    assert all(entry.stat().st_nlink == 1 for entry in paths)
 
 
 @pytest.mark.parametrize("evidence", ["backup", "source", "transaction"])

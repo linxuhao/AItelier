@@ -33,6 +33,8 @@ from core import datadir
 TERMINAL_STATUSES = frozenset({"completed", "failed"})
 BLOCKING_STATUSES = frozenset({"pending", "running", "paused", "draining"})
 DEPLOY_ACTIONS = frozenset({"rebuild", "redeploy", "restart"})
+UNKNOWN_PROCESS_ERROR_PREFIX = (
+    "unregistered external measurement process has unknown ownership: ")
 
 
 class DeploymentBlocked(RuntimeError):
@@ -566,6 +568,53 @@ def failed_observation(reason: str) -> dict:
     return observation
 
 
+def _unknown_process_noise(row: Any) -> bool:
+    return (isinstance(row, dict)
+            and row.get("kind") == "process"
+            and row.get("active") is True
+            and row.get("resource") == "external_measurement"
+            and row.get("ownership") == "unregistered")
+
+
+def _classify_blockers(observation: dict) -> tuple[dict, list[dict]]:
+    """Separate authoritative owners from heuristic process-name matches."""
+    blockers = observation.get("blockers")
+    if not isinstance(blockers, dict):
+        return {"measurement_failure": [{"reason": "blocker inventory is malformed"}]}, []
+
+    authoritative: dict[str, Any] = {}
+    unknown_processes: list[dict] = []
+    for name, rows in blockers.items():
+        if not rows:
+            continue
+        if name != "external_active" or not isinstance(rows, list):
+            authoritative[name] = rows
+            continue
+        known_rows = []
+        for row in rows:
+            if _unknown_process_noise(row):
+                unknown_processes.append(row)
+            else:
+                known_rows.append(row)
+        if known_rows:
+            authoritative[name] = known_rows
+
+    expected_unknown_errors = {
+        UNKNOWN_PROCESS_ERROR_PREFIX + str(row.get("command", ""))[:500]
+        for row in unknown_processes
+    }
+    errors = observation.get("errors", [])
+    if not isinstance(errors, list):
+        authoritative["measurement_errors"] = ["measurement errors are malformed"]
+    else:
+        known_errors = [error for error in errors
+                        if not isinstance(error, str)
+                        or error not in expected_unknown_errors]
+        if known_errors:
+            authoritative["measurement_errors"] = known_errors
+    return authoritative, unknown_processes
+
+
 def _valid_override(action: str, observation: dict, override: dict | None) -> tuple[bool, str]:
     if not isinstance(override, dict):
         return False, "no audited override supplied"
@@ -587,7 +636,12 @@ def _valid_override(action: str, observation: dict, override: dict | None) -> tu
         return False, "override expiry must include a timezone"
     if expires <= datetime.now(UTC):
         return False, "override has expired"
-    if observation.get("errors") and override.get("acknowledge_unknown") is not True:
+    authoritative, unknown_processes = _classify_blockers(observation)
+    if override.get("acknowledge_unknown") is True and authoritative:
+        return False, ("unknown-process override cannot bypass authoritative active owners: "
+                       + ", ".join(sorted(authoritative)))
+    if (unknown_processes or observation.get("errors")) \
+            and override.get("acknowledge_unknown") is not True:
         return False, "override must acknowledge unknown measurement errors"
     return True, "audited override accepted"
 
@@ -618,11 +672,19 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
             return {"allowed": True, "replayed": False, "event": event}
         valid, reason = _valid_override(action, observation, override)
         if valid:
+            authoritative, unknown_processes = _classify_blockers(observation)
+            unknown_scope = override.get("acknowledge_unknown") is True
             event = _append_to(state, {"action": action, "status": "overridden",
                                        "pending": True, "usable": False,
                                        "audit": {"actor": override["actor"],
                                                  "reason": override["reason"],
-                                                 "ticket": override["ticket"]},
+                                                 "ticket": override["ticket"],
+                                                 "override_scope": (
+                                                     "unknown_process_noise" if unknown_scope
+                                                     else "authoritative_blockers"),
+                                                 "affected_ownership": (
+                                                     unknown_processes if unknown_scope
+                                                     else authoritative)},
                                        "inventory_digest": observation.get("digest"),
                                        "blockers": observation.get("blockers", {}),
                                        "errors": observation.get("errors", [])})

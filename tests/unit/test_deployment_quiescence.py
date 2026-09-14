@@ -147,10 +147,172 @@ def test_override_is_audited_and_bound_to_fresh_inventory(tmp_path):
     assert result["allowed"] is True and result["replayed"] is False
     assert result["event"]["status"] == "overridden"
     assert result["event"]["usable"] is False
+    assert result["event"]["audit"]["override_scope"] == "authoritative_blockers"
+    assert result["event"]["audit"]["affected_ownership"] == observation["blockers"]
 
     with pytest.raises(dq.DeploymentBlocked, match="aborted/unusable"):
         dq.authorize("restart", observation, journal=tmp_path / "bad.json",
                      override={**base, "inventory_digest": "c" * 64})
+
+
+def _deployment_override(digest, **extra):
+    return {
+        "action": "restart",
+        "actor": "operator@example",
+        "reason": "incident-scoped deployment",
+        "ticket": "INC-20260914",
+        "inventory_digest": digest,
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+        **extra,
+    }
+
+
+def _unknown_process(index):
+    return {
+        "kind": "process",
+        "command": f"{index + 4} 2 [kworker/{index}:0H-events_highpri]",
+        "active": True,
+        "resource": "external_measurement",
+        "ownership": "unregistered",
+    }
+
+
+def test_incident_unknown_ack_cannot_cross_real_owner_amid_147_noise(tmp_path):
+    noise = [_unknown_process(index) for index in range(147)]
+    observation = {
+        "quiescent": False,
+        "digest": "7" * 64,
+        "blockers": {
+            "active_runs": [],
+            "active_operations": [],
+            "checkout_leases": [],
+            "sidecar_owners": [],
+            "external_active": noise,
+            "registered_external_owners": [],
+            "godot_render_owners": [{
+                "generation": 35,
+                "owner_id": "owner-35",
+                "project_id": "two-step-r1b",
+                "run_id": "unknown-run",
+                "operation_id": "operation-35",
+                "resource": "render",
+                "status": "active",
+            }],
+        },
+        "errors": [
+            "unregistered external measurement process has unknown ownership: "
+            + row["command"] for row in noise
+        ],
+    }
+
+    with pytest.raises(dq.DeploymentBlocked, match="authoritative"):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / "journal.json",
+            override=_deployment_override(
+                observation["digest"], acknowledge_unknown=True),
+        )
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["blockers"]["godot_render_owners"][0]["owner_id"] == "owner-35"
+
+
+def test_unknown_ack_cannot_cross_known_owner_without_noise(tmp_path):
+    observation = {
+        "quiescent": False,
+        "digest": "8" * 64,
+        "blockers": {
+            "registered_external_owners": [{
+                "attempt_id": "attempt-real",
+                "project_id": "wuxia-myth",
+                "external_id": "real-worker",
+                "status": "active",
+            }],
+        },
+        "errors": [],
+    }
+
+    with pytest.raises(dq.DeploymentBlocked, match="authoritative"):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / "journal.json",
+            override=_deployment_override(
+                observation["digest"], acknowledge_unknown=True),
+        )
+
+
+def test_noise_only_unknown_ack_remains_explicit_and_audited(tmp_path):
+    noise = [_unknown_process(index) for index in range(3)]
+    observation = {
+        "quiescent": False,
+        "digest": "9" * 64,
+        "blockers": {"external_active": noise},
+        "errors": [
+            "unregistered external measurement process has unknown ownership: "
+            + row["command"] for row in noise
+        ],
+    }
+    result = dq.authorize(
+        "restart", observation, journal=tmp_path / "journal.json",
+        override=_deployment_override(
+            observation["digest"], acknowledge_unknown=True),
+    )
+
+    assert result["allowed"] is True
+    assert result["event"]["status"] == "overridden"
+    assert result["event"]["audit"]["override_scope"] == "unknown_process_noise"
+    assert result["event"]["audit"]["affected_ownership"] == noise
+
+
+def test_clean_no_owner_path_does_not_need_an_override(tmp_path):
+    observation = {
+        "quiescent": True,
+        "digest": "0" * 64,
+        "blockers": {
+            "active_runs": [],
+            "active_operations": [],
+            "checkout_leases": [],
+            "sidecar_owners": [],
+            "external_active": [],
+            "registered_external_owners": [],
+            "godot_render_owners": [],
+        },
+        "errors": [],
+    }
+    result = dq.authorize(
+        "restart", observation, journal=tmp_path / "journal.json")
+
+    assert result["allowed"] is True
+    assert result["event"]["status"] == "authorized"
+
+
+@pytest.mark.parametrize(("blocker_key", "owner"), [
+    ("active_runs", {"run_id": "run-a", "project_id": "project-a",
+                     "status": "running"}),
+    ("active_operations", {"run_id": "run-a", "project_id": "project-a",
+                           "active_operations": 1}),
+    ("registered_external_owners", {"attempt_id": "attempt-a",
+                                    "project_id": "project-a", "status": "active"}),
+    ("godot_render_owners", {"owner_id": "render-a", "operation_id": "operation-a",
+                             "project_id": "project-a", "status": "active"}),
+    ("external_active", {"kind": "process", "command": "godot --headless",
+                         "active": True, "resource": "render"}),
+    ("sidecar_owners", {"run_id": "run-a", "source": "/repo-a",
+                        "desired": "ready", "outcome": "pending"}),
+])
+def test_unknown_ack_cannot_cross_each_authoritative_owner_variant(
+        tmp_path, blocker_key, owner):
+    observation = {
+        "quiescent": False,
+        "digest": "a" * 64,
+        "blockers": {blocker_key: [owner]},
+        "errors": [],
+    }
+
+    with pytest.raises(dq.DeploymentBlocked, match="authoritative"):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / (blocker_key + ".json"),
+            override=_deployment_override(
+                observation["digest"], acknowledge_unknown=True),
+        )
 
 
 def test_reconciliation_never_replays_before_or_after_quiescence(tmp_path):

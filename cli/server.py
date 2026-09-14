@@ -157,6 +157,9 @@ def _ensure_host_dirs() -> None:
         # The state root, owned by US. Must exist before compose runs.
         (Path(os.environ.get("AITELIER_STATE_DIR")
               or (Path.home() / ".AItelier"))).mkdir(parents=True, exist_ok=True)
+        (Path(os.environ.get("AITELIER_STATE_DIR")
+              or (Path.home() / ".AItelier")) / "godot-control").mkdir(
+                  parents=True, exist_ok=True)
     except OSError:
         pass          # let Docker report it in its own terms
     try:
@@ -322,6 +325,50 @@ def _compose_up():
     _warn_if_edge_network_is_alone()
 
 
+def _require_deployment_clearance(action: str) -> dict:
+    """Measure every project and external owner before changing the backend."""
+    from api.dependencies import get_db_manager, get_skillflow
+    from core import datadir
+    from core import deployment_quiescence as dq
+
+    fence = dq.acquire_cutover_fence()
+    try:
+        try:
+            observation = dq.measure(
+                skillflow=get_skillflow(),
+                db=get_db_manager(),
+                sidecar_db=datadir.semantic_index_control_dir() / "control.sqlite3",
+            )
+        except Exception as exc:  # noqa: BLE001 -- unavailable measurement blocks and persists
+            observation = dq.failed_observation(
+                f"deployment quiescence measurement could not start: "
+                f"{type(exc).__name__}: {exc}")
+        override = dq.load_override(os.environ.get("AITELIER_DEPLOY_OVERRIDE_FILE"))
+        clearance = dq.authorize(action, observation, override=override)
+        clearance["_cutover_fence"] = fence
+        return clearance
+    except BaseException as exc:
+        dq.release_cutover_fence(fence)
+        if isinstance(exc, dq.DeploymentBlocked):
+            raise RuntimeError(str(exc)) from exc
+        raise
+
+
+def _finish_deployment(clearance: dict, *, success: bool,
+                       error: BaseException | None = None) -> dict:
+    from core import deployment_quiescence as dq
+
+    # Unit callers may replace the gate with a no-op; a real gate always has
+    # an event and therefore always receives a terminal journal record.
+    try:
+        if not (clearance or {}).get("event"):
+            return clearance
+        return dq.finalize(clearance, success=success,
+                           error=None if error is None else str(error))
+    finally:
+        dq.release_cutover_fence((clearance or {}).get("_cutover_fence"))
+
+
 def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
     client = httpx.Client(base_url=base_url, timeout=2.0)
 
@@ -329,26 +376,22 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
     if _container_running() and _is_healthy(client):
         return True
 
-    # If the container is down, free the port from any stale non-Docker server
-    # squatting on it so the published port can bind.
-    if not _container_running():
-        pid = _find_server_pid(_DEFAULT_PORT)
-        if pid:
-            print("Stopping stale non-Docker server before starting Docker backend...")
-            try:
-                os.kill(pid, 9)
-                time.sleep(0.5)
-            except ProcessLookupError:
-                pass
-
-    _compose_up()
-
-    if _wait_healthy(client, max_wait):
-        return True
-    raise RuntimeError(
-        f"Docker backend did not become healthy within {max_wait}s "
-        f"(check: docker compose -f {_COMPOSE_FILE} logs)"
-    )
+    # A stopped or unhealthy container is a redeploy boundary.  The gate is
+    # deliberately after Docker availability checks and before compose changes
+    # anything, so an unreadable runtime inventory cannot turn into a replay.
+    clearance = _require_deployment_clearance("redeploy")
+    try:
+        _compose_up()
+        if not _wait_healthy(client, max_wait):
+            raise RuntimeError(
+                f"Docker backend did not become healthy within {max_wait}s "
+                f"(check: docker compose -f {_COMPOSE_FILE} logs)"
+            )
+    except BaseException as exc:
+        _finish_deployment(clearance, success=False, error=exc)
+        raise
+    _finish_deployment(clearance, success=True)
+    return True
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -375,8 +418,18 @@ def ensure_server_running(base_url: str, max_wait: int = 120) -> bool:
 def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
     """Restart the Docker backend."""
     _require_docker()
-    _compose("restart", _COMPOSE_SERVICE)
-    client = httpx.Client(base_url=base_url, timeout=2.0)
-    if _wait_healthy(client, max_wait):
-        return True
-    raise RuntimeError(f"Docker backend did not restart within {max_wait}s")
+    clearance = _require_deployment_clearance("restart")
+    try:
+        restarted = _compose("restart", _COMPOSE_SERVICE)
+        if restarted.returncode != 0:
+            raise RuntimeError(
+                f"`docker compose restart {_COMPOSE_SERVICE}` failed with exit "
+                f"{restarted.returncode}")
+        client = httpx.Client(base_url=base_url, timeout=2.0)
+        if not _wait_healthy(client, max_wait):
+            raise RuntimeError(f"Docker backend did not restart within {max_wait}s")
+    except BaseException as exc:
+        _finish_deployment(clearance, success=False, error=exc)
+        raise
+    _finish_deployment(clearance, success=True)
+    return True

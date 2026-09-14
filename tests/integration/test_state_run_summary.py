@@ -1,4 +1,5 @@
 """Real engine/SQLite usage projection; no fake completed goal or dispatch."""
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -154,8 +155,12 @@ def test_active_external_agents_are_listed_from_their_own_last_report(tmp_path):
     service.report_external_attempt(talking['attempt_id'],'progress-1',0,talking['context_hash'],'running',
         'reports/progress-1.json','b'*64,detail='Worker started')
     done=service.start_external_attempt('game','c',1,'own-harness','job-c','req-c')
+    final_report=tmp_path/'final-report.txt'
+    final_body=b'{"status":"candidate","settled":true,"usable":true}'
+    final_report.write_bytes(final_body)
     service.report_external_attempt(done['attempt_id'],'final-1',0,done['context_hash'],'candidate',
-        'reports/final-1.json','c'*64,quiescent=True,artifact='a'*64,artifact_kind='sha256')
+        str(final_report),hashlib.sha256(final_body).hexdigest(),quiescent=True,
+        artifact='a'*64,artifact_kind='sha256')
     out=service.project_run_summary('game')
     assert out['counts']=={'total':0,'running':0,'finished':0,'failed':0,'other':0,'unavailable':0},'counts stays workflow-only'
     # The visible counters count executions, so a listed agent is never under a zero.

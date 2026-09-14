@@ -1,4 +1,5 @@
 """Real MCP prompt/resource discovery and tool fallback share one protocol."""
+import hashlib
 import json
 from fastapi.testclient import TestClient
 from api.state_only import create_app
@@ -94,10 +95,14 @@ def test_mcp_wait_returns_external_completion_and_remains_private(tmp_path):
             future = pool.submit(call, "state_graph_read", "wait_for_state_change", args)
             # Whether the report arrives before or during wait registration,
             # the durable cursor must make this exact completion observable.
+            report=tmp_path/"wait-report.txt"
+            report_body=json.dumps({"status":"candidate","settled":True,
+                                    "usable":True}).encode()
+            report.write_bytes(report_body)
             write("report_external_attempt", {"attempt_id": attempt["attempt_id"],
                 "observation_id": "final", "expected_version": 0,
                 "context_hash": attempt["context_hash"], "status": "candidate",
-                "report_ref": "test/report", "report_sha256": "b" * 64,
+                "report_ref": str(report), "report_sha256": hashlib.sha256(report_body).hexdigest(),
                 "artifact": "a" * 64, "artifact_kind": "sha256", "quiescent": True})
             result = future.result(timeout=5).json()["result"]
         assert not result.get("isError"), result

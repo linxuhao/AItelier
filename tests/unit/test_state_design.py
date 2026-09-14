@@ -1,7 +1,9 @@
 """Design/version contracts against isolated SQLite and authenticated HTTP."""
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -155,8 +157,11 @@ def test_binding_freezes_external_context_and_prevents_cross_version_evidence(se
     # Selecting a baseline does not alter execution scope, status or dependencies.
     assert service.attempts.get(a['attempt_id'])['context'] == frozen
     assert service.design.node_bindings('game', 'work')['baseline_review_required']
+    report=Path(service.db.db_path).parent/'result.txt'
+    report_body=b'{"status":"candidate","settled":true,"usable":true}'
+    report.write_bytes(report_body)
     candidate = service.report_external_attempt(a['attempt_id'], 'done', 0, a['context_hash'], 'candidate',
-        'reports/result.json', 'b' * 64, True, 'a' * 64, 'sha256')
+        str(report), hashlib.sha256(report_body).hexdigest(), True, 'a' * 64, 'sha256')
     assert candidate['status'] == 'candidate'
     bind(service, 'b2', revision=2, design_revision=2)
     assert service.attempts.get(a['attempt_id'])['context'] == frozen
@@ -209,8 +214,11 @@ def test_design_http_authorization_read_surface_and_actor_spoofing(tmp_path):
 def test_old_receipt_remains_historical_after_explicit_rebinding(service):
     revision(service); baseline(service); bind(service)
     a = service.start_external_attempt('game', 'work', 2, 'harness', 'job', 'request')
+    report=Path(service.db.db_path).parent/'result.txt'
+    report_body=b'{"status":"candidate","settled":true,"usable":true}'
+    report.write_bytes(report_body)
     service.report_external_attempt(a['attempt_id'], 'done', 0, a['context_hash'], 'candidate',
-        'reports/result.json', 'b' * 64, True, 'a' * 64, 'sha256')
+        str(report), hashlib.sha256(report_body).hexdigest(), True, 'a' * 64, 'sha256')
     service.attempts.record_evidence(a['attempt_id'], 'e', 'behavior', 'pass', 'a' * 64,
         'reports/test.json', 'c' * 64, 'reviewer')
     receipt = service.attempts.verify('game', 'work', 2, a['attempt_id'], 'reviewer')

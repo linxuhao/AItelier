@@ -1,4 +1,5 @@
 """State DAG invariants against a real, isolated SQLite database."""
+import hashlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
@@ -267,8 +268,12 @@ def test_search_nodes_reaches_recorded_evidence(tmp_path):
     service.store.add_nodes("shrimp", [node("art.audio")])
     a = service.start_external_attempt("shrimp", "art.audio", 1, "harness", "job", "request")
     # evidence only attaches to a reported, quiescent candidate
+    report=tmp_path/"result.txt"
+    report_body=b'{"status":"candidate","settled":true,"usable":true}'
+    report.write_bytes(report_body)
     service.report_external_attempt(a["attempt_id"], "done", 0, a["context_hash"], "candidate",
-                                    "reports/result.json", "b" * 64, True, "a" * 64, "sha256")
+                                    str(report), hashlib.sha256(report_body).hexdigest(), True,
+                                    "a" * 64, "sha256")
     service.attempts.record_evidence(a["attempt_id"], "e1", "behaviour", "fail", "a" * 64, "r.md", "0" * 64,
                                      "me", "placeholder wav still shipped in bus 3")
     ev = service.store.search_nodes("shrimp", "placeholder wav")

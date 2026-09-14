@@ -87,3 +87,13 @@ def orphan_log_path() -> Path:
 def semantic_index_control_dir() -> Path:
     """Small host/sidecar demand ledger, outside all agent worktrees."""
     return aitelier_home() / "semantic-index-control"
+
+
+def godot_control_dir() -> Path:
+    """Shared Godot owner ledger and deployment-admission fence."""
+    return aitelier_home() / "godot-control"
+
+
+def state_report_store_dir() -> Path:
+    """Content-addressed copies of terminal external-attempt reports."""
+    return aitelier_home() / "state-report-evidence"

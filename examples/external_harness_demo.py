@@ -59,12 +59,16 @@ def run_demo():
                 outputs=[]
                 for check,code in checks:
                     proc=subprocess.run([sys.executable,'-B','-c',code],cwd=job,capture_output=True,text=True,timeout=10)
-                    body={'criterion':check,'artifact':artifact,'returncode':proc.returncode,'stdout':proc.stdout,'stderr':proc.stderr,
+                    body={'status':'completed','settled':True,'usable':True,
+                          'verdict':'pass' if proc.returncode==0 else 'fail',
+                          'criterion':check,'artifact':artifact,'returncode':proc.returncode,'stdout':proc.stdout,'stderr':proc.stderr,
                           'context_hash':a['context_hash'],'external_id':a['external_id']}
                     raw=json.dumps(body,sort_keys=True).encode();path=job/(check+'.json');path.write_bytes(raw)
                     outputs.append({'criterion':check,'verdict':'pass' if proc.returncode==0 else 'fail',
                                     'report_ref':str(path),'report_sha256':hashlib.sha256(raw).hexdigest()})
-                final=json.dumps({'checks':outputs,'all_workers_waited':True,'artifact':artifact,'context_hash':a['context_hash']},sort_keys=True).encode()
+                final=json.dumps({'status':'completed','settled':True,'usable':True,
+                                  'checks':outputs,'all_workers_waited':True,
+                                  'artifact':artifact,'context_hash':a['context_hash']},sort_keys=True).encode()
                 final_path=job/'final.json';final_path.write_bytes(final)
                 completed={'attempt_id':a['attempt_id'],'observation_id':'finished','expected_version':0,
                            'context_hash':a['context_hash'],'status':'candidate','artifact':artifact,'artifact_kind':'sha256',

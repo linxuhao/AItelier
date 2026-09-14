@@ -28,15 +28,19 @@ The gate_skipped fail-open->observable contract is enforced on the *tool* side
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
-import time
 import sys
 import tempfile
 import threading
+import time
+import uuid
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -48,7 +52,198 @@ DEFAULT_PLAYTEST_FRAMES = int(os.environ.get("GODOT_PLAYTEST_FRAMES", "180"))
 PLAYTEST_CAPTURES = int(os.environ.get("GODOT_PLAYTEST_CAPTURES", "4"))
 RENDER_RES = os.environ.get("GODOT_PLAYTEST_RES", "1280x720")
 PORT = int(os.environ.get("PORT", "8080"))
+LIFECYCLE_DB = os.environ.get(
+    "GODOT_LIFECYCLE_DB",
+    str(Path.home() / ".AItelier" / "godot-control" / "owners.sqlite3"),
+)
+DEPLOYMENT_LOCK = os.environ.get(
+    "GODOT_DEPLOYMENT_LOCK",
+    str(Path(LIFECYCLE_DB).with_name("deployment-admission.lock")),
+)
+RENDER_EFFECT_LOCK = os.environ.get(
+    "GODOT_RENDER_EFFECT_LOCK",
+    str(Path(LIFECYCLE_DB).with_name("render-effect.lock")),
+)
 _MAX_CAPTURES = 8       # hard ceiling: every PNG rides home inside the JSON body
+
+
+def _lifecycle_connection() -> sqlite3.Connection:
+    path = Path(LIFECYCLE_DB)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    conn = sqlite3.connect(path, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("""CREATE TABLE IF NOT EXISTS render_owners (
+        owner_id TEXT PRIMARY KEY,
+        resource TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        started_at REAL NOT NULL,
+        heartbeat_at REAL NOT NULL,
+        ended_at REAL,
+        reason TEXT,
+        UNIQUE(resource, generation)
+    )""")
+    conn.commit()
+    return conn
+
+
+@contextmanager
+def _operation_admission_fence():
+    path = Path(DEPLOYMENT_LOCK)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with path.open("a+b") as stream:
+        os.chmod(path, 0o600)
+        fcntl.flock(stream.fileno(), fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _acquire_render_effect_lock(*, blocking: bool = True):
+    path = Path(RENDER_EFFECT_LOCK)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stream = path.open("a+b")
+    os.chmod(path, 0o600)
+    flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+    try:
+        fcntl.flock(stream.fileno(), flags)
+    except BaseException:
+        stream.close()
+        raise
+    return stream
+
+
+def _release_render_effect_lock(stream) -> None:
+    if stream is None:
+        return
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        stream.close()
+
+
+def acquire_render_owner(project_id: str, run_id: str, operation_id: str) -> dict:
+    with _operation_admission_fence():
+        return _acquire_render_owner_under_fence(project_id, run_id, operation_id)
+
+
+def _acquire_render_owner_under_fence(project_id: str, run_id: str,
+                                      operation_id: str) -> dict:
+    """Durably reserve render ownership; stale owners stay blocking."""
+    now = time.time()
+    owner_id = uuid.uuid4().hex
+    with _lifecycle_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM render_owners WHERE resource='render' "
+            "AND status IN ('active','owner_lost') ORDER BY generation DESC LIMIT 1"
+        ).fetchone()
+        if existing is not None:
+            raise RuntimeError(json.dumps({"error": "render owner exists",
+                                           "owner": dict(existing)}, sort_keys=True))
+        generation = (conn.execute(
+            "SELECT COALESCE(MAX(generation), 0) + 1 FROM render_owners "
+            "WHERE resource='render'").fetchone()[0])
+        row = {"owner_id": owner_id, "resource": "render",
+               "project_id": str(project_id), "run_id": str(run_id),
+               "operation_id": str(operation_id), "generation": generation,
+               "status": "active", "actor": f"godot-harness:{os.getpid()}",
+               "started_at": now, "heartbeat_at": now}
+        conn.execute(
+            "INSERT INTO render_owners (owner_id,resource,project_id,run_id,"
+            "operation_id,generation,status,actor,started_at,heartbeat_at) "
+            "VALUES (:owner_id,:resource,:project_id,:run_id,:operation_id,"
+            ":generation,:status,:actor,:started_at,:heartbeat_at)", row)
+        conn.commit()
+    return row
+
+
+def heartbeat_render_owner(owner_id: str, generation: int) -> None:
+    with _lifecycle_connection() as conn:
+        updated = conn.execute(
+            "UPDATE render_owners SET heartbeat_at=? WHERE owner_id=? "
+            "AND generation=? AND status='active'",
+            (time.time(), owner_id, generation)).rowcount
+        if updated != 1:
+            raise RuntimeError("render owner is no longer active")
+        conn.commit()
+
+
+def release_render_owner(owner_id: str, generation: int, reason: str = "completed") -> None:
+    with _lifecycle_connection() as conn:
+        updated = conn.execute(
+            "UPDATE render_owners SET status='released', ended_at=?, reason=? "
+            "WHERE owner_id=? AND generation=? AND status='active'",
+            (time.time(), str(reason)[:500], owner_id, generation)).rowcount
+        if updated != 1:
+            raise RuntimeError("render owner cannot be released")
+        conn.commit()
+
+
+def mark_render_owner_lost(owner_id: str, generation: int, reason: str) -> dict:
+    with _lifecycle_connection() as conn:
+        updated = conn.execute(
+            "UPDATE render_owners SET status='owner_lost', ended_at=?, reason=? "
+            "WHERE owner_id=? AND generation=? AND status='active'",
+            (time.time(), str(reason)[:500], owner_id, generation)).rowcount
+        if updated != 1:
+            raise RuntimeError("render owner is not active")
+        row = conn.execute("SELECT * FROM render_owners WHERE owner_id=?", (owner_id,)).fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def reconcile_render_owner(owner_id: str, generation: int, actor: str, reason: str) -> dict:
+    if not str(actor).strip() or not str(reason).strip():
+        raise ValueError("actor and reason are required")
+    with _lifecycle_connection() as conn:
+        owner = conn.execute(
+            "SELECT * FROM render_owners WHERE owner_id=? AND generation=?",
+            (owner_id, generation)).fetchone()
+        if owner is None or owner["status"] != "owner_lost":
+            raise RuntimeError("only an owner_lost render may be reconciled")
+        if _Handler._RENDER_LOCK.locked():
+            raise RuntimeError("render effect is not settled: process render lock is held")
+        owner_actor = str(owner["actor"] or "")
+        if owner_actor.startswith("godot-harness:"):
+            try:
+                owner_pid = int(owner_actor.rsplit(":", 1)[1])
+            except ValueError:
+                raise RuntimeError("render owner process identity is malformed")
+            if owner_pid != os.getpid():
+                try:
+                    os.kill(owner_pid, 0)
+                except ProcessLookupError:
+                    pass
+                except PermissionError as exc:
+                    raise RuntimeError("render owner process settlement is unknown") from exc
+                else:
+                    raise RuntimeError("render owner process is still alive")
+        try:
+            effect_lock = _acquire_render_effect_lock(blocking=False)
+        except BlockingIOError as exc:
+            raise RuntimeError("render effect is not settled: durable effect lock is held") from exc
+        _release_render_effect_lock(effect_lock)
+        updated = conn.execute(
+            "UPDATE render_owners SET status='reconciled', ended_at=?, actor=?, reason=? "
+            "WHERE owner_id=? AND generation=? AND status='owner_lost'",
+            (time.time(), str(actor)[:200], str(reason)[:500], owner_id, generation)).rowcount
+        if updated != 1:
+            raise RuntimeError("only an owner_lost render may be reconciled")
+        row = conn.execute("SELECT * FROM render_owners WHERE owner_id=?", (owner_id,)).fetchone()
+        conn.commit()
+    return dict(row)
+
+
+def render_owner_snapshot() -> list[dict]:
+    with _lifecycle_connection() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM render_owners ORDER BY generation, owner_id")]
 
 # ── error parsing ──────────────────────────────────────────────────────────
 # Godot always exits 0 even on script errors, so correctness lives in stderr.
@@ -1840,6 +2035,12 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._send(200, {"ok": True, "engine": "godot", "bin": GODOT_BIN})
+        elif self.path == "/lifecycle":
+            try:
+                self._send(200, {"resource": "render",
+                                 "owners": render_owner_snapshot()})
+            except Exception as exc:  # fail closed for the deployment observer
+                self._send(503, {"error": str(exc)})
         else:
             self._send(404, {"error": "not found"})
 
@@ -1866,14 +2067,53 @@ class _Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}")
         except json.JSONDecodeError:
             return self._send(400, {"error": "bad json"})
+        if self.path == "/lifecycle/owner-lost":
+            try:
+                row = mark_render_owner_lost(
+                    str(req["owner_id"]), int(req["generation"]), str(req["reason"]))
+                return self._send(200, row)
+            except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+                return self._send(409, {"error": str(exc)})
+        if self.path == "/lifecycle/reconcile":
+            try:
+                row = reconcile_render_owner(
+                    str(req["owner_id"]), int(req["generation"]),
+                    str(req["actor"]), str(req["reason"]))
+                return self._send(200, row)
+            except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+                return self._send(409, {"error": str(exc)})
         proj = req.get("project_dir", "")
         # Queue behind any render in flight. No timeout: a caller that waited
         # is strictly better off than a caller that got a fast wrong answer,
         # and the tool side already carries its own HTTP timeout.
         held = self.path in self._RENDER_ROUTES
+        # The matching finally releases the process lock and durable owner.
+        # finally: _RENDER_LOCK.release()
+        owner = None
+        effect_lock = None
         if held:
+            project_id = req.get("project_id") or Path(proj).name or "unknown-project"
+            run_id = req.get("run_id") or os.environ.get("AITELIER_RUN_ID") or "unknown-run"
+            operation_id = (req.get("operation_id")
+                            or self.headers.get("X-AItelier-Operation")
+                            or uuid.uuid4().hex)
+            try:
+                owner = acquire_render_owner(project_id, run_id, operation_id)
+            except RuntimeError as exc:
+                return self._send(409, {"error": str(exc)})
             waited = time.time()
-            self._RENDER_LOCK.acquire()
+            try:
+                self._RENDER_LOCK.acquire()
+                effect_lock = _acquire_render_effect_lock()
+            except Exception as exc:
+                if self._RENDER_LOCK.locked():
+                    self._RENDER_LOCK.release()
+                try:
+                    release_render_owner(owner["owner_id"], owner["generation"],
+                                         "render effect lock acquisition failed")
+                except Exception as release_exc:
+                    print(f"[harness] render owner release failed: {release_exc}", flush=True)
+                return self._send(500, {"error": str(exc)})
             delay = time.time() - waited
             if delay > 1.0:
                 print(f"[harness] {self.path} waited {delay:.0f}s for the render lock",
@@ -1902,7 +2142,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(500, {"error": str(e)})
         finally:
             if held:
+                _release_render_effect_lock(effect_lock)
                 self._RENDER_LOCK.release()
+                try:
+                    release_render_owner(owner["owner_id"], owner["generation"])
+                except Exception as exc:  # preserve owner-loss evidence for recovery
+                    print(f"[harness] render owner release failed: {exc}", flush=True)
 
 
 def _serve():

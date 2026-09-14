@@ -7,6 +7,7 @@ completeness, not the honesty of the person or test runner that produced it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -234,6 +235,14 @@ class StateAttempts:
                              ",".join("?" for _ in record) + ")", tuple(record.values()))
             except sqlite3.IntegrityError as exc:
                 raise StateConflict("node has an active attempt or this external execution identity was already registered") from exc
+            if external:
+                conn.execute(
+                    "INSERT INTO state_external_owners("
+                    "attempt_id,project_id,node_key,harness,external_id,status,admitted_at,updated_at) "
+                    "VALUES(?,?,?,?,?,'active',?,?)",
+                    (aid, project_id, node_key, external["harness"],
+                     external["external_id"], record["created_at"], record["updated_at"]),
+                )
             conn.execute("UPDATE state_nodes SET status='OPEN',updated_at=? WHERE project_id=? AND node_key=?",
                          (now(), project_id, node_key))
             self.store._event(conn, project_id, node_key,
@@ -508,6 +517,14 @@ class StateAttempts:
             if (not report or report["status"] != "candidate" or not report["quiescent"]
                     or report["artifact_ref"] != attempt["artifact_ref"] or report["artifact_kind"] != attempt["artifact_kind"]):
                 raise StateConflict("external candidate lacks a complete scoped quiescent observation")
+            retained = conn.execute(
+                "SELECT report_bytes,retained_ref FROM state_external_report_blobs "
+                "WHERE report_sha256=?", (report["report_sha256"],)).fetchone()
+            report_bytes = bytes(retained["report_bytes"] if retained else b"")
+            if (not report_bytes
+                    or hashlib.sha256(report_bytes).hexdigest() != report["report_sha256"]
+                    or retained["retained_ref"] != report["report_ref"]):
+                raise StateConflict("external candidate lacks immutable validated report bytes")
         if attempt["status"] != "candidate" or not attempt["artifact_ref"]:
             raise StateConflict("a completed candidate with a pinned artifact is required")
         if not self._pins_current(conn, attempt):
@@ -518,7 +535,8 @@ class StateAttempts:
             raise StateConflict("a newer attempt supersedes this candidate")
 
     def record_evidence(self, attempt_id: str, evidence_id: str, criterion_id: str, verdict: str,
-                        artifact: str, report_ref: str, report_sha256: str, reviewer: str, detail: str = "") -> dict:
+                        artifact: str, report_ref: str, report_sha256: str, reviewer: str,
+                        detail: str = "", *, report_bytes: bytes | None = None) -> dict:
         """Append a scoped verifier attestation, never infer it from agent prose."""
         key(evidence_id, "evidence id")
         key(criterion_id, "criterion id")
@@ -540,6 +558,9 @@ class StateAttempts:
             if prior:
                 if prior["payload_hash"] != payload_hash:
                     raise StateConflict("evidence id already used with different content")
+                if report_bytes is not None:
+                    from core.state_report_integrity import store_report_blob
+                    store_report_blob(conn, report_ref, report_sha256, report_bytes)
                 return dict(prior)
             self._eligible_candidate(conn, attempt)
             if attempt["artifact_ref"] != artifact:
@@ -551,6 +572,9 @@ class StateAttempts:
                 raise StateConflict(
                     "verifier evidence must have a report independent of every external "
                     "candidate observation; produce a fresh review report")
+            if report_bytes is not None:
+                from core.state_report_integrity import store_report_blob
+                store_report_blob(conn, report_ref, report_sha256, report_bytes)
             ctx = json.loads(attempt["context_json"])
             checks = {c["id"]: c for c in ctx["acceptance"]}
             if criterion_id not in checks:
@@ -568,7 +592,7 @@ class StateAttempts:
             return dict(conn.execute("SELECT * FROM state_evidence WHERE evidence_id=?", (evidence_id,)).fetchone())
 
     def verify(self, project_id: str, node_key: str, expected_revision: int,
-               attempt_id: str, reviewer: str) -> dict:
+               attempt_id: str, reviewer: str, *, require_report_bytes: bool = False) -> dict:
         integer(expected_revision, "expected_revision", 1)
         reviewer = text(reviewer, "acceptance reviewer", 300)
         with self.store.transaction(write=True) as conn:
@@ -584,6 +608,17 @@ class StateAttempts:
             failed = [c["id"] for c in required if c["id"] not in latest or latest[c["id"]]["verdict"] != "pass"]
             if failed:
                 raise StateConflict("missing/failed/skipped acceptance evidence: " + ", ".join(failed))
+            if require_report_bytes:
+                for evidence in latest.values():
+                    retained = conn.execute(
+                        "SELECT report_bytes,retained_ref FROM state_external_report_blobs "
+                        "WHERE report_sha256=?", (evidence["report_sha256"],),
+                    ).fetchone()
+                    report_bytes = bytes(retained["report_bytes"] if retained else b"")
+                    if (not report_bytes
+                            or hashlib.sha256(report_bytes).hexdigest() != evidence["report_sha256"]
+                            or retained["retained_ref"] != evidence["report_ref"]):
+                        raise StateConflict("acceptance evidence lacks immutable validated report bytes")
             evidence_ids = canonical([latest[c["id"]]["evidence_id"] for c in required])
             if node["verified_receipt"]:
                 receipt = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (node["verified_receipt"],)).fetchone()

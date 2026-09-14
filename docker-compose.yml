@@ -225,12 +225,19 @@ services:
       # Writable HOME for Godot's import cache when run as an arbitrary host uid
       # (the image's /tmp/godot-home is 0777; keep it off the read-only mount).
       HOME: /tmp/godot-home
+      # Durable render ownership is shared with the deployment observer.
+      GODOT_LIFECYCLE_DB: /var/lib/aitelier-godot/owners.sqlite3
+      GODOT_DEPLOYMENT_LOCK: /var/lib/aitelier-godot/deployment-admission.lock
+      GODOT_RENDER_EFFECT_LOCK: /var/lib/aitelier-godot/render-effect.lock
     volumes:
       # Read-only view of the workspace at the IDENTICAL absolute path the main
       # container uses, so a project_dir passed over HTTP resolves the same here.
       # Both /compile and /playtest copy the project to a container-local tmp dir
       # before importing/running, so the source stays read-only.
+      # The harness writes only its owner ledger under this mounted state root;
+      # its project view remains read-only at the application layer.
       - ${HOME}/.AItelier:${HOME}/.AItelier:ro
+      - ${HOME}/.AItelier/godot-control:/var/lib/aitelier-godot
     networks:
       - default
     restart: unless-stopped

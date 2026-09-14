@@ -1,4 +1,7 @@
 import asyncio
+import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -175,8 +178,12 @@ def register_external(service):
 
 
 def observe_external(service, attempt, status):
+    report = Path(service.db.db_path).parent / "private-report.txt"
+    body = json.dumps({"status": status, "settled": True, "usable": True}).encode()
+    report.write_bytes(body)
     return service.external.observe(attempt["attempt_id"], "report", 0,
-        attempt["context_hash"], status, "private-report", "a" * 64,
+        attempt["context_hash"], status, str(report),
+        hashlib.sha256(body).hexdigest(),
         quiescent=status == "failed")
 
 

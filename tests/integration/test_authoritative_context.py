@@ -40,8 +40,12 @@ def test_ruling_version_propagates_while_old_attempt_stays_frozen(tmp_path):
     old = service.start_external_attempt("fixture", "rule", 2, "fixture-harness", "old-job", "old-request")
     old_seed = state_seed_text(old["context"], {}, relay=False)
     assert json.loads(old_seed[len(SEED_HEADING):].strip())["design_context"]["baseline_id"] == "baseline-old"
+    failure_report=tmp_path/"old-failure.txt"
+    failure_body=b'{"status":"failed","settled":true,"usable":true,"reason":"preserved failure"}'
+    failure_report.write_bytes(failure_body)
     service.report_external_attempt(old["attempt_id"], "old-failure", 0, old["context_hash"], "failed",
-        "reports/old-failure.json", "f" * 64, True, detail="preserved first failure")
+        str(failure_report), hashlib.sha256(failure_body).hexdigest(), True,
+        detail="preserved first failure")
 
     newer = service.design.create_revision("fixture", "rule", 1, "Rule", "Use the new rule.",
         "The owner explicitly revised the decision.", [], {"mode": "all"}, lifecycle_status="approved")

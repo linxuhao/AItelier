@@ -1,5 +1,7 @@
 """Exact relations and review-only impact against real immutable design rows."""
+import hashlib
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
@@ -174,8 +176,16 @@ def test_historical_bindings_remain_but_are_not_misreported_as_current(service):
 def test_removal_preview_does_not_delete_old_rules_bindings_or_receipts(service):
     add(service,'a');add(service,'b');baseline(service,[('a',1),('b',1)]);node(service,'work');bind(service,'work','a')
     a=service.start_external_attempt('game','work',2,'fixture','job','once')
-    service.report_external_attempt(a['attempt_id'],'done',0,a['context_hash'],'candidate','fixture-report','b'*64,True,'a'*64,'sha256')
-    service.record_evidence(a['attempt_id'],'e','test','pass','a'*64,'fixture-check','c'*64)
+    result=Path(service.db.db_path).parent/'result.txt'
+    result_body=b'{"status":"candidate","settled":true,"usable":true}'
+    result.write_bytes(result_body)
+    service.report_external_attempt(a['attempt_id'],'done',0,a['context_hash'],'candidate',str(result),
+        hashlib.sha256(result_body).hexdigest(),True,'a'*64,'sha256')
+    evidence=Path(service.db.db_path).parent/'fixture-check.json'
+    evidence.write_text('{"status":"completed","settled":true,"usable":true,'
+                        '"verdict":"pass","criterion_id":"test"}')
+    service.record_evidence(a['attempt_id'],'e','test','pass','a'*64,str(evidence),
+                            hashlib.sha256(evidence.read_bytes()).hexdigest())
     receipt=service.verify_node('game','work',2,a['attempt_id'])
     report=service.design.impact('game','a',1)
     assert report['affected_nodes']['items'][0]['status']=='VERIFIED'

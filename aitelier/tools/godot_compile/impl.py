@@ -151,7 +151,9 @@ def _write_playtest_summary(target_dir: Path, pt: dict) -> None:
 
 
 def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
-                             workspace_root: str = "", **kwargs) -> dict:
+                             workspace_root: str = "", project_id: str = "",
+                             run_id: str = "", step_id: str = "",
+                             operation_id: str = "", **kwargs) -> dict:
     """Parse-check the repo's GDScript via godot-builder, then (if it passed)
     play-test it. Writes compile_report.json always, and playtest_report.json
     always. Returns {written, passed}."""
@@ -164,7 +166,10 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
     elif not _is_godot(repo):
         report["summary"] = "No project.godot — not a Godot project; compile skipped."
     else:
-        body = json.dumps({"project_dir": str(repo)}).encode("utf-8")
+        from aitelier.tools.godot_playtest.impl import _owner_identity
+        owner = _owner_identity(repo, project_id=project_id, run_id=run_id,
+                                step_id=step_id, operation_id=operation_id)
+        body = json.dumps({"project_dir": str(repo), **owner}).encode("utf-8")
         req = urllib.request.Request(
             _BUILDER_URL.rstrip("/") + "/compile", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
@@ -222,7 +227,9 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
     if report.get("passed") is True and not report.get("gate_skipped") \
             and not report.get("blind_builder") and _is_godot(repo):
         from aitelier.tools.godot_playtest.impl import godot_playtest
-        pt = godot_playtest(project_root=str(repo), out_dir=str(target_dir))
+        pt = godot_playtest(project_root=str(repo), out_dir=str(target_dir),
+                            project_id=project_id, run_id=run_id,
+                            step_id=step_id, operation_id=operation_id)
         pt_passed = pt.get("passed", True)
         try:
             _write_playtest_summary(target_dir, json.loads(
@@ -257,6 +264,8 @@ def _godot_compile_unstamped(*, project_root: str = "", out_dir: str = "",
 
 def godot_compile(*, project_root: str = "", out_dir: str = "",
                   workspace_root: str = "", run_id: str = "",
+                  project_id: str = "", step_id: str = "",
+                  operation_id: str = "",
                   evidence_cycle_from: str = "", fail_fast_gates: str = "",
                   **kwargs) -> dict:
     """Run compile/playtest, then bind both reports to this evidence cycle."""
@@ -293,7 +302,8 @@ def godot_compile(*, project_root: str = "", out_dir: str = "",
                                        or blocker.get("state"))}
     result = _godot_compile_unstamped(
         project_root=project_root, out_dir=out_dir,
-        workspace_root=workspace_root, **kwargs)
+        workspace_root=workspace_root, project_id=project_id, run_id=run_id,
+        step_id=step_id, operation_id=operation_id, **kwargs)
     if run_id and evidence_cycle_from:
         from aitelier.gate_evidence import stamp_file
         for name in ("compile_report.json", "playtest_report.json"):

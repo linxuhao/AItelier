@@ -12,6 +12,7 @@ or an evidence-bearing ``release_operation`` removes the record.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 from typing import Any
@@ -27,6 +28,41 @@ class AItelierSkillFlow(SkillFlow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._operation_recovery_decisions: set[tuple[Any, ...]] = set()
+
+    def _execute_tool_impl(self, name: str, params: dict, *, run_id: str = "",
+                           step_id: str = "", project_root: str = "") -> dict:
+        """Preserve the owning project identity for host-registered tools."""
+        bound = dict(params or {})
+        if run_id and self._tool_accepts_keyword(name, "project_id"):
+            project_id = self._get_project_id(run_id)
+            if project_id:
+                bound.setdefault("project_id", project_id)
+        return super()._execute_tool_impl(
+            name, bound, run_id=run_id, step_id=step_id,
+            project_root=project_root)
+
+    def _tool_accepts_keyword(self, name: str, keyword: str) -> bool:
+        """Return whether a loaded tool can receive a host-owned keyword.
+
+        SkillFlow 1.5.77 reports caller arguments that are absent from a tool
+        signature as an error.  Inspecting the actual callable keeps identity
+        injection available for host tools that opt in, while leaving native
+        tools and their own argument validation untouched.
+        """
+        loader = getattr(self, "_tool_loader", None)
+        if loader is None:
+            return False
+        try:
+            signature = inspect.signature(loader.load_fn(name))
+        except (AttributeError, ImportError, OSError, TypeError, ValueError):
+            return False
+        parameter = signature.parameters.get(keyword)
+        if parameter is not None and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY):
+            return True
+        return any(item.kind is inspect.Parameter.VAR_KEYWORD
+                   for item in signature.parameters.values())
 
     def unsettled_operations(self, run_id: str | None = None) -> list[dict]:
         with self._ro() as conn:
@@ -73,6 +109,15 @@ class AItelierSkillFlow(SkillFlow):
         return int(row["id"]), epoch
 
     def _admit_op(self, kind: str, run_id: str, *,
+                  step_instance_id: int | None = None,
+                  claim_epoch: int = 0, detail: str = "") -> int:
+        from core import deployment_quiescence as dq
+        with dq.operation_admission_fence():
+            return self._admit_op_under_fence(
+                kind, run_id, step_instance_id=step_instance_id,
+                claim_epoch=claim_epoch, detail=detail)
+
+    def _admit_op_under_fence(self, kind: str, run_id: str, *,
                   step_instance_id: int | None = None,
                   claim_epoch: int = 0, detail: str = "") -> int:
         """Atomically exclude an unsettled operation and admit its successor.

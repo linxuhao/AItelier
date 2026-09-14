@@ -56,6 +56,28 @@ CREATE TABLE IF NOT EXISTS state_external_observations (
 );
 CREATE TRIGGER IF NOT EXISTS state_external_observations_no_update BEFORE UPDATE ON state_external_observations
 BEGIN SELECT RAISE(ABORT,'external observations are append-only'); END;
+CREATE TABLE IF NOT EXISTS state_external_report_blobs (
+    report_sha256 TEXT PRIMARY KEY, report_bytes BLOB NOT NULL,
+    retained_ref TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS state_external_report_blobs_no_update
+BEFORE UPDATE ON state_external_report_blobs
+BEGIN SELECT RAISE(ABORT,'external report bytes are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS state_external_report_blobs_no_delete
+BEFORE DELETE ON state_external_report_blobs
+BEGIN SELECT RAISE(ABORT,'external report bytes are immutable'); END;
+CREATE TABLE IF NOT EXISTS state_external_owners (
+    attempt_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, node_key TEXT NOT NULL,
+    harness TEXT NOT NULL, external_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','paused','unknown','settled')),
+    admitted_at TEXT NOT NULL, updated_at TEXT NOT NULL, settled_at TEXT,
+    FOREIGN KEY(attempt_id) REFERENCES state_attempts(attempt_id)
+);
+CREATE INDEX IF NOT EXISTS state_external_owners_status
+ON state_external_owners(status, project_id, node_key);
+CREATE TRIGGER IF NOT EXISTS state_external_owners_no_delete
+BEFORE DELETE ON state_external_owners
+BEGIN SELECT RAISE(ABORT,'external owner lifecycle is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS state_external_observations_no_delete BEFORE DELETE ON state_external_observations
 BEGIN SELECT RAISE(ABORT,'external observations are append-only'); END;
 """
@@ -116,7 +138,16 @@ def initialize(db, existing_schema: str) -> None:
                 conn.execute("ALTER TABLE state_acceptances ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'")
             for statement in _statements(EXTRA_SCHEMA):
                 conn.execute(statement)
-            for table in ('state_attempts','state_evidence','state_acceptances','state_external_observations'):
+            conn.execute(
+                "INSERT OR IGNORE INTO state_external_owners("
+                "attempt_id,project_id,node_key,harness,external_id,status,admitted_at,updated_at,settled_at) "
+                "SELECT attempt_id,project_id,node_key,harness,external_id,"
+                "CASE WHEN status IN ('candidate','failed','superseded') THEN 'settled' "
+                "WHEN status='paused' THEN 'paused' WHEN status='unknown' THEN 'unknown' ELSE 'active' END,"
+                "created_at,updated_at,CASE WHEN status IN ('candidate','failed','superseded') THEN updated_at END "
+                "FROM state_attempts WHERE execution_kind='external'")
+            for table in ('state_attempts','state_evidence','state_acceptances',
+                          'state_external_observations','state_external_owners'):
                 if conn.execute(f'PRAGMA foreign_key_check({table})').fetchone():
                     raise sqlite3.IntegrityError('State migration failed foreign-key validation')
             conn.commit()

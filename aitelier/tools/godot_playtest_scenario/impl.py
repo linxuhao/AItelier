@@ -49,6 +49,7 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
                             project_root: str = "",
                             workspace_root: str = "",
                             step_id: str = "", run_id: str = "",
+                            project_id: str = "", operation_id: str = "",
                             legacy_code_staging: bool = False, **kwargs) -> dict:
     """Play-test one scenario and report every failing assertion's ``observed``.
 
@@ -57,8 +58,12 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
     never touches the repo — that is the way to force values out of a running
     build without writing a throwaway file into the deliverable.
     """
-    from aitelier.tools.godot_playtest.impl import (post_playtest, read_spec,
-                                                    select_scenarios)
+    from aitelier.tools.godot_playtest.impl import (
+        _owner_identity,
+        post_playtest,
+        read_spec,
+        select_scenarios,
+    )
 
     if not project_root or not Path(project_root).is_absolute():
         return {"error": "godot_playtest_scenario requires an injected absolute project_root"}
@@ -135,7 +140,10 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
             return {"error": f"unknown scenario(s) {unknown}. Available: "
                              f"{', '.join(available)}"}
 
-    report = post_playtest({"project_dir": str(target), "spec": picked},
+    report = post_playtest({"project_dir": str(target), "spec": picked,
+                            **_owner_identity(
+                                target, project_id=project_id, run_id=run_id,
+                                step_id=step_id, operation_id=operation_id)},
                            timeout=900)
     if report.get("gate_skipped"):
         return {"error": report.get("summary", "godot-builder unreachable")}

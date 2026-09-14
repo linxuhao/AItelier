@@ -25,6 +25,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 from aitelier.gate_skip_log import log_gate_skip
@@ -296,8 +297,24 @@ def post_playtest(payload: dict, timeout: int = 3600) -> dict:
                     + " Play-test gate skipped — scene NOT smoke-tested.")}
 
 
+def _owner_identity(_repo: Path, *, project_id: str = "", run_id: str = "",
+                    step_id: str = "", operation_id: str = "") -> dict:
+    identity = {}
+    if project_id:
+        identity["project_id"] = project_id
+    if run_id:
+        identity["run_id"] = run_id
+    if operation_id:
+        identity["operation_id"] = operation_id
+    elif run_id:
+        identity["operation_id"] = f"{run_id}:{step_id or 'godot'}:{uuid.uuid4().hex}"
+    return identity
+
+
 def godot_playtest(*, project_root: str = "", out_dir: str = "",
-                   workspace_root: str = "", **kwargs) -> dict:
+                   workspace_root: str = "", project_id: str = "",
+                   run_id: str = "", step_id: str = "",
+                   operation_id: str = "", **kwargs) -> dict:
     """Run the headless play-test via godot-builder; write playtest_report.json.
 
     Reads the authored contract if present — ``playtest/`` (one file per
@@ -330,7 +347,9 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
                          "be read whole — %d problem(s) in the spec: %s"
                          % (len(info["errors"]), " | ".join(info["errors"][:5]))))
         else:
-            payload = {"project_dir": str(repo)}
+            payload = {"project_dir": str(repo), **_owner_identity(
+                repo, project_id=project_id, run_id=run_id, step_id=step_id,
+                operation_id=operation_id)}
             if spec:
                 payload["spec"] = spec
             report = post_playtest(payload)

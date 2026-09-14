@@ -1,4 +1,5 @@
 """Full read/review/adopt chain on actual authenticated State-only transports."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -95,8 +96,15 @@ def test_new_queries_remain_read_only_on_held_project_with_verified_node(tmp_pat
     s.store.add_nodes('p',[{'key':'node','goal':'Node','acceptance':[{'id':'check','kind':'test','description':'Fixture test'}]}])
     s.design.bind_node('p','node',1,'b1',[{'design_id':'rule','revision':1,'purpose':'implements','coverage_scope':{'phase':'overworld'}}],'Explicit fixture bind')
     a=s.start_external_attempt('p','node',2,'fixture','job','once')
-    s.report_external_attempt(a['attempt_id'],'done',0,a['context_hash'],'candidate','fixture-report','a'*64,True,'b'*64,'sha256')
-    s.record_evidence(a['attempt_id'],'e','check','pass','b'*64,'fixture-report','c'*64)
+    report=tmp_path/'fixture-report.txt'
+    report_body=json.dumps({'status':'candidate','settled':True,'usable':True}).encode()
+    report.write_bytes(report_body)
+    s.report_external_attempt(a['attempt_id'],'done',0,a['context_hash'],'candidate',str(report),
+        hashlib.sha256(report_body).hexdigest(),True,'b'*64,'sha256')
+    evidence=tmp_path/'fixture-evidence.json';evidence.write_text(json.dumps(
+        {'status':'completed','settled':True,'usable':True,
+         'verdict':'pass','criterion_id':'check'}))
+    s.record_evidence(a['attempt_id'],'e','check','pass','b'*64,str(evidence),hashlib.sha256(evidence.read_bytes()).hexdigest())
     s.verify_node('p','node',2,a['attempt_id']);s.portfolio.set_dispatch('p','hold',0,'No further work')
     with s.db.get_connection() as c:before=list(c.iterdump())
     with TestClient(app) as client:

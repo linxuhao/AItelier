@@ -561,12 +561,17 @@ class StateService:
 
     def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail=""):
         self.reconcile_attempt(attempt_id)
+        from core.state_report_integrity import retain_report, validate_evidence_semantics
+        report_ref, report_bytes = retain_report(report_ref, report_sha256, completed=True)
+        validate_evidence_semantics(report_bytes, criterion_id, verdict, artifact)
         return self.attempts.record_evidence(attempt_id, evidence_id, criterion_id, verdict, artifact,
-                                             report_ref, report_sha256, self.actor, detail)
+                                             report_ref, report_sha256, self.actor, detail,
+                                             report_bytes=report_bytes)
 
     def verify_node(self, project_id, node_key, expected_revision, attempt_id):
         self.reconcile_attempt(attempt_id)
-        return self.attempts.verify(project_id, node_key, expected_revision, attempt_id, self.actor)
+        return self.attempts.verify(project_id, node_key, expected_revision, attempt_id, self.actor,
+                                    require_report_bytes=True)
 
     def import_tasks(self, project_id, source_project_id):
         """Explicit legacy snapshot; completed tasks never become verified facts."""

@@ -6,11 +6,13 @@ quiescence declarations. It does not pretend to inspect a remote process or
 certify the honesty of a report. Acceptance itself is shared with SkillFlow.
 """
 from __future__ import annotations
+
 import json
 import re
 
 from core.state_graph import StateConflict, StateGraphError, digest, integer, key, now, text
 from core.state_attempts import _public
+from core.state_report_integrity import retain_report, store_report_blob, validate_external_semantics
 
 
 class ExternalAttempts:
@@ -24,8 +26,15 @@ class ExternalAttempts:
         identity = {'harness': key(harness, 'harness'),
                     'external_id': text(external_id, 'external execution identity', 500),
                     'reporting_actor': self.actor}
-        return self.attempts._reserve(project_id, node_key, expected_revision, None, request_key,
-                                      instruction, external=identity)
+        from core import deployment_quiescence as dq
+        with dq.operation_admission_fence():
+            return self.attempts._reserve(
+                project_id, node_key, expected_revision, None, request_key,
+                instruction, external=identity)
+
+    @staticmethod
+    def _terminal_report(report_ref: str, report_sha256: str) -> tuple[str, bytes]:
+        return retain_report(report_ref, report_sha256, completed=True)
 
     def observe(self, attempt_id, observation_id, expected_version, context_hash,
                 status, report_ref, report_sha256, *, quiescent=False,
@@ -52,6 +61,34 @@ class ExternalAttempts:
         terminal = status in {'candidate','failed'}
         if terminal and not quiescent:
             raise StateConflict('terminal result needs the external harness to attest all relevant workers/operations are quiescent')
+        with self.store.transaction() as conn:
+            owner = self.attempts._attempt(conn, attempt_id)
+            if owner['execution_kind'] != 'external':
+                raise StateConflict('external reports cannot complete or override a SkillFlow attempt')
+            if owner['reporting_actor'] != self.actor:
+                raise StateConflict('external observation belongs to a different authenticated reporter')
+            if context_hash != digest(json.loads(owner['context_json'])):
+                raise StateConflict('report describes a different frozen goal/contract/dependency context')
+            prior_observation = conn.execute(
+                'SELECT 1 FROM state_external_observations WHERE attempt_id=? AND observation_id=?',
+                (attempt_id, observation_id)).fetchone()
+            if not prior_observation and owner['observation_version'] != expected_version:
+                raise StateConflict('external observation version changed; reload before appending')
+            if owner['status'] in {'failed','superseded'}:
+                raise StateConflict('this external attempt is terminal; use a new attempt')
+            if status == 'candidate':
+                used = conn.execute(
+                    'SELECT attempt_id,observation_id FROM state_external_observations '
+                    'WHERE report_sha256=? LIMIT 1', (report_sha256,)).fetchone()
+                if used and (used['attempt_id'] != attempt_id
+                             or used['observation_id'] != observation_id):
+                    raise StateConflict(
+                        'candidate report digest was already bound to an earlier observation; '
+                        'produce a fresh report for this candidate')
+        report_bytes = None
+        if terminal:
+            report_ref, report_bytes = self._terminal_report(report_ref, report_sha256)
+            validate_external_semantics(report_bytes, status, artifact)
         if status == 'candidate':
             size = {'git-sha1': 40, 'sha256': 64}.get(artifact_kind) if isinstance(artifact_kind,str) else None
             if size is None or not isinstance(artifact,str) or not re.fullmatch('[0-9a-f]{'+str(size)+'}', artifact):
@@ -97,11 +134,20 @@ class ExternalAttempts:
             current = self.attempts._pins_current(conn, a)
             result_status = 'superseded' if terminal and not current else status
             version = expected_version + 1
+            if report_bytes is not None:
+                store_report_blob(conn, report_ref, report_sha256, report_bytes)
             conn.execute('INSERT INTO state_external_observations(attempt_id,observation_id,version,status,resulting_status,'
                          'quiescent,artifact_ref,artifact_kind,report_ref,report_sha256,actor,detail,payload_hash,context_hash,created_at) '
                          'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                          (attempt_id,observation_id,version,status,result_status,int(quiescent),artifact,artifact_kind,
                           report_ref,report_sha256,self.actor,detail,fingerprint,context_hash,now()))
+            owner_status = {'running':'active','paused':'paused','unknown':'unknown'}.get(
+                result_status, 'settled')
+            updated_owner = conn.execute(
+                'UPDATE state_external_owners SET status=?,updated_at=?,settled_at=? WHERE attempt_id=?',
+                (owner_status, now(), now() if owner_status == 'settled' else None, attempt_id))
+            if updated_owner.rowcount != 1:
+                raise StateConflict('external attempt has no durable owner registration')
             node = self.store._node(conn, a['project_id'], a['node_key'])
             if result_status != 'candidate' and node['verified_receipt']:
                 rec = conn.execute('SELECT attempt_id FROM state_acceptances WHERE receipt_id=?', (node['verified_receipt'],)).fetchone()

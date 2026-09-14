@@ -204,6 +204,13 @@ def _owner_state(owner: str) -> str:
 
 
 def admit_write(db, path, *, kind: str, detail: str = "") -> dict:
+    from core import deployment_quiescence as dq
+    with dq.operation_admission_fence():
+        return _admit_write_under_fence(
+            db, path, kind=kind, detail=detail)
+
+
+def _admit_write_under_fence(db, path, *, kind: str, detail: str = "") -> dict:
     """Admit ONE write to a checkout, or refuse it. Returns the admission.
 
     This is the arbitration half of the exclusion, and it is why the guard it

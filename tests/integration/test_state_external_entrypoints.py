@@ -48,15 +48,26 @@ def register(client, key='a', request='first', eid='director/session-1/subagent-
 
 
 def complete(client,a):
+    report_path = Path(client.app.state.state_service.db.db_path).parent/(a['attempt_id']+'-final.txt')
+    body = json.dumps({'attempt':a['attempt_id'],'observation':'final-1',
+                       'status':'candidate','settled':True,'usable':True},
+                      sort_keys=True).encode()
+    report_path.write_bytes(body)
     return command(client,'report_external_attempt',{'attempt_id':a['attempt_id'],'observation_id':'final-1',
         'expected_version':a['observation_version'],'context_hash':a['context_hash'],'status':'candidate',
-        'artifact':ARTIFACT,'artifact_kind':'sha256','report_ref':'reports/actual-final.json','report_sha256':candidate_report(a),'quiescent':True})
+        'artifact':ARTIFACT,'artifact_kind':'sha256','report_ref':str(report_path),
+        'report_sha256':hashlib.sha256(body).hexdigest(),'quiescent':True})
 
 
 def evidence(client,a,check,verdict='pass',suffix=''):
+    body=json.dumps({'status':'completed','settled':True,'usable':True,
+                     'verdict':verdict,'criterion_id':check,
+                     'artifact':ARTIFACT,'suffix':suffix},sort_keys=True).encode()
+    path=Path(client.app.state.state_service.db.db_path).parent/(a['attempt_id']+'-'+check+suffix+'-evidence.json')
+    path.write_bytes(body)
     return command(client,'record_evidence',{'attempt_id':a['attempt_id'],'evidence_id':a['attempt_id']+'-'+check+suffix,
-        'criterion_id':check,'verdict':verdict,'artifact':ARTIFACT,'report_ref':'reports/subagent-'+check+suffix,
-        'report_sha256':EVIDENCE_REPORT,'detail':'External test/review fixture; not a production game acceptance'})
+        'criterion_id':check,'verdict':verdict,'artifact':ARTIFACT,'report_ref':str(path),
+        'report_sha256':hashlib.sha256(body).hexdigest(),'detail':'External test/review fixture; not a production game acceptance'})
 
 
 def target(a):return {'project_id':'game','node_key':a['node_key'],'expected_revision':a['node_revision'],'attempt_id':a['attempt_id']}
@@ -131,12 +142,19 @@ def test_real_state_only_mcp_can_certify_external_attempt_and_returns_errors(app
         tool('create_project',{'project_id':'game','title':'MCP external'})
         tool('add_nodes',{'project_id':'game','nodes':[spec('a')]})
         a=tool('start_external_attempt',{'project_id':'game','node_key':'a','expected_revision':1,'harness':'ci','external_id':'job/42','request_key':'k'})
+        report_path=Path(app.state.state_service.db.db_path).parent/'mcp-report.txt'
+        report_body=json.dumps({'status':'candidate','settled':True,'usable':True}).encode()
+        report_path.write_bytes(report_body)
         a=tool('report_external_attempt',{'attempt_id':a['attempt_id'],'observation_id':'finish','expected_version':0,
           'context_hash':a['context_hash'],'status':'candidate','artifact':ARTIFACT,'artifact_kind':'sha256',
-          'report_ref':'ci/report.json','report_sha256':REPORT,'quiescent':True})
+          'report_ref':str(report_path),'report_sha256':hashlib.sha256(report_body).hexdigest(),'quiescent':True})
         for check in ['test','review']:
+            evidence_path=Path(app.state.state_service.db.db_path).parent/('mcp-'+check+'.json')
+            evidence_path.write_text(json.dumps({'status':'completed','settled':True,
+                                                  'usable':True,'verdict':'pass',
+                                                  'criterion_id':check}))
             tool('record_evidence',{'attempt_id':a['attempt_id'],'evidence_id':check,'criterion_id':check,'verdict':'pass','artifact':ARTIFACT,
-                 'report_ref':'ci/'+check+'.json','report_sha256':EVIDENCE_REPORT})
+                 'report_ref':str(evidence_path),'report_sha256':hashlib.sha256(evidence_path.read_bytes()).hexdigest()})
         assert tool('verify_node',target(a))['receipt_id']
         bad=rpc(client,'state_graph_write',{'action':'report_external_attempt','arguments':{'attempt_id':a['attempt_id'],'status':'VERIFIED'}}).json()['result']
         assert bad['isError'] is True
@@ -150,9 +168,18 @@ def test_external_lifecycle_never_calls_unavailable_runtime_factory(tmp_path):
     service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=runtime,actor='director')
     service.create_project('game','Game');service.store.add_nodes('game',[spec('a')])
     a=service.start_external_attempt('game','a',1,'subagents','worker-1','request')
-    a=service.report_external_attempt(a['attempt_id'],'end',0,a['context_hash'],'candidate','report.json',REPORT,True,ARTIFACT,'sha256')
+    report_path=tmp_path/'report.txt'
+    report_body=json.dumps({'status':'candidate','settled':True,'usable':True}).encode()
+    report_path.write_bytes(report_body)
+    a=service.report_external_attempt(a['attempt_id'],'end',0,a['context_hash'],'candidate',
+        str(report_path),hashlib.sha256(report_body).hexdigest(),True,ARTIFACT,'sha256')
     for check in ['test','review']:
-        service.record_evidence(a['attempt_id'],check,check,'pass',ARTIFACT,'report-'+check,EVIDENCE_REPORT)
+        evidence_path=tmp_path/('evidence-'+check+'.json')
+        evidence_path.write_text(json.dumps({'status':'completed','settled':True,
+                                              'usable':True,'verdict':'pass',
+                                              'criterion_id':check}))
+        service.record_evidence(a['attempt_id'],check,check,'pass',ARTIFACT,str(evidence_path),
+                                hashlib.sha256(evidence_path.read_bytes()).hexdigest())
     service.verify_node('game','a',1,a['attempt_id'])
     service.recover_attempt(a['attempt_id']);service.reconcile_attempt(a['attempt_id']);service.refresh_project('game')
     assert calls==[]
@@ -161,7 +188,7 @@ def test_external_lifecycle_never_calls_unavailable_runtime_factory(tmp_path):
 def test_pure_state_boot_and_mcp_work_under_workflow_import_firewall(tmp_path):
     source=Path(__file__).resolve().parents[2]
     script=r'''
-import importlib.abc,sys,json
+import importlib.abc,sys,json,hashlib
 class Forbid(importlib.abc.MetaPathFinder):
     def find_spec(self,fullname,path=None,target=None):
         if fullname.startswith('skillflow') or fullname in {'api.dependencies','core.db_manager','core.config_registry','core.run_driver','core.workspace_manager'}:
@@ -177,8 +204,10 @@ with TestClient(app) as c:
     cmd('create_project',{'project_id':'p','title':'P'})
     cmd('add_nodes',{'project_id':'p','nodes':[{'key':'goal','goal':'Goal','acceptance':[{'id':'c','kind':'test','description':'Checker'}]}]})
     a=cmd('start_external_attempt',{'project_id':'p','node_key':'goal','expected_revision':1,'harness':'own-harness','external_id':'job','request_key':'once'})
-    cmd('report_external_attempt',{'attempt_id':a['attempt_id'],'observation_id':'end','expected_version':0,'context_hash':a['context_hash'],'status':'candidate','artifact':'a'*64,'artifact_kind':'sha256','report_ref':'report','report_sha256':'b'*64,'quiescent':True})
-    cmd('record_evidence',{'attempt_id':a['attempt_id'],'evidence_id':'e','criterion_id':'c','verdict':'pass','artifact':'a'*64,'report_ref':'test-report','report_sha256':'c'*64})
+    report=sys.argv[1]+'.report';report_body=json.dumps({'status':'candidate','settled':True,'usable':True}).encode();open(report,'wb').write(report_body)
+    cmd('report_external_attempt',{'attempt_id':a['attempt_id'],'observation_id':'end','expected_version':0,'context_hash':a['context_hash'],'status':'candidate','artifact':'a'*64,'artifact_kind':'sha256','report_ref':report,'report_sha256':hashlib.sha256(report_body).hexdigest(),'quiescent':True})
+    evidence=sys.argv[1]+'.evidence.json';evidence_body=json.dumps({'status':'completed','settled':True,'usable':True,'verdict':'pass','criterion_id':'c'}).encode();open(evidence,'wb').write(evidence_body)
+    cmd('record_evidence',{'attempt_id':a['attempt_id'],'evidence_id':'e','criterion_id':'c','verdict':'pass','artifact':'a'*64,'report_ref':evidence,'report_sha256':hashlib.sha256(evidence_body).hexdigest()})
     cmd('verify_node',{'project_id':'p','node_key':'goal','expected_revision':1,'attempt_id':a['attempt_id']})
     h=c.post('/mcp/',json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'state_graph_read','arguments':{'action':'get_node','arguments':{'project_id':'p','node_key':'goal'}}}},headers={**headers,'Accept':'application/json, text/event-stream'})
     assert h.status_code==200,h.text
@@ -218,7 +247,7 @@ def test_state_only_does_not_boot_unprotected(tmp_path,token):
 
 def test_same_http_factory_in_embedded_mode_shares_commands_and_actor(tmp_path):
     service=StateService(StateDatabase(str(tmp_path/'db.sqlite')),actor='director@local')
-    app=FastAPI();app.include_router(create_state_router(lambda:service,lambda:None))
+    app=FastAPI();app.state.state_service=service;app.include_router(create_state_router(lambda:service,lambda:None))
     with TestClient(app) as client:
         project(client);a=register(client)
         assert a['reporting_actor']=='director@local'
@@ -247,7 +276,12 @@ def test_skillflow_and_external_attempts_can_verify_dependencies_in_one_project(
             a=attempts.reconcile(a['attempt_id'],sf,ARTIFACT)
         else:
             a=external.register('p',nk,1,'own-harness','job-'+str(i),'request')
-            a=external.observe(a['attempt_id'],'done',0,a['context_hash'],'candidate','report',candidate_report(a, 'done'),
+            report_path=tmp_path/(a['attempt_id']+'-done.txt')
+            report_body=json.dumps({'attempt':a['attempt_id'],'observation':'done',
+                                    'status':'candidate','settled':True,
+                                    'usable':True},sort_keys=True).encode()
+            report_path.write_bytes(report_body)
+            a=external.observe(a['attempt_id'],'done',0,a['context_hash'],'candidate',str(report_path),hashlib.sha256(report_body).hexdigest(),
                                quiescent=True,artifact=ARTIFACT,artifact_kind='sha256')
         for criterion in ['test','review']:
             attempts.record_evidence(a['attempt_id'],nk+'-'+criterion,criterion,'pass',ARTIFACT,'report-'+criterion,EVIDENCE_REPORT,'shared-verifier')
@@ -290,7 +324,7 @@ def test_http_rejects_stale_candidate_and_self_evidence_before_acceptance(app):
             "status": "candidate",
             "artifact": ARTIFACT,
             "artifact_kind": "sha256",
-            "report_ref": "reports/copied-old-final.json",
+            "report_ref": first["observation"]["report_ref"],
             "report_sha256": stale_report,
             "quiescent": True,
         }

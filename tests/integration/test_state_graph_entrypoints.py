@@ -100,7 +100,9 @@ def finish(live, attempt, output="candidate output\n"):
 
 
 def evidence(live, attempt, check):
-    body = json.dumps({"check": check, "artifact": attempt["artifact_ref"], "passed": True}).encode()
+    body = json.dumps({"status": "completed", "settled": True, "usable": True,
+                       "check": check, "criterion_id": check,
+                       "artifact": attempt["artifact_ref"], "passed": True}).encode()
     report = live.tmp / (attempt["node_key"] + "-" + check + ".json")
     report.write_bytes(body)
     return live.service.record_evidence(attempt["attempt_id"], attempt["attempt_id"] + "-" + check,
@@ -130,6 +132,51 @@ def test_standard_launcher_persists_seed_attempt_run_and_output_artifact(live):
     assert b["dependencies"]["a"]["verified_receipt"]
     assert b["run_id"] != a["run_id"]
     assert len(live.sf.list_runs()) == 2
+
+
+def test_state_service_refuses_missing_or_incomplete_evidence_and_retains_valid_bytes(live):
+    attempt = finish(live, start(live, request_key="evidence-integrity"))
+    missing = live.tmp / "missing-review.json"
+    with pytest.raises(StateConflict, match="report|unavailable|inspectable"):
+        live.service.record_evidence(
+            attempt["attempt_id"], "missing-review", "review", "pass",
+            attempt["artifact_ref"], str(missing), "1" * 64)
+
+    incomplete = live.tmp / "incomplete-review.json"
+    incomplete.write_text("{}", encoding="utf-8")
+    with pytest.raises(StateConflict, match="complete|terminal|schema"):
+        live.service.record_evidence(
+            attempt["attempt_id"], "incomplete-review", "review", "pass",
+            attempt["artifact_ref"], str(incomplete),
+            hashlib.sha256(incomplete.read_bytes()).hexdigest())
+
+    contradictory = live.tmp / "contradictory-review.json"
+    contradictory.write_text(json.dumps({
+        "status": "completed", "settled": True, "usable": True,
+        "verdict": "fail", "criterion_id": "review",
+    }), encoding="utf-8")
+    with pytest.raises(StateConflict, match="verdict conflicts"):
+        live.service.record_evidence(
+            attempt["attempt_id"], "contradictory-review", "review", "pass",
+            attempt["artifact_ref"], str(contradictory),
+            hashlib.sha256(contradictory.read_bytes()).hexdigest())
+
+    reports = []
+    for criterion in ("behaviour", "review"):
+        report = live.tmp / f"complete-{criterion}.json"
+        report.write_text(json.dumps({
+            "status": "completed", "settled": True, "usable": True,
+            "verdict": "pass", "criterion_id": criterion,
+        }), encoding="utf-8")
+        reports.append(report)
+        live.service.record_evidence(
+            attempt["attempt_id"], f"complete-{criterion}", criterion, "pass",
+            attempt["artifact_ref"], str(report),
+            hashlib.sha256(report.read_bytes()).hexdigest())
+    for report in reports:
+        report.unlink()
+    receipt = live.service.verify_node("game", "a", 1, attempt["attempt_id"])
+    assert receipt["attempt_id"] == attempt["attempt_id"]
 
 
 def test_authoritative_design_revision_is_frozen_through_real_launch_seed_and_claim(live):
@@ -749,9 +796,13 @@ def test_end_to_end_rest_acceptance_and_requirement_revision(live):
         target = {"project_id": "game", "node_key": "a", "expected_revision": 1, "attempt_id": a["attempt_id"]}
         assert command("verify_node", target).status_code == 409
         for check in ["behaviour", "review"]:
+            body = json.dumps({"status": "completed", "settled": True, "usable": True,
+                               "verdict": "pass", "criterion_id": check}).encode()
+            report = live.tmp / ("rest-" + check + ".json")
+            report.write_bytes(body)
             out = command("record_evidence", {"attempt_id": a["attempt_id"], "evidence_id": "rest-" + check,
                 "criterion_id": check, "verdict": "pass", "artifact": a["artifact_ref"],
-                "report_ref": "test-reports/" + check + ".json", "report_sha256": "f" * 64})
+                "report_ref": str(report), "report_sha256": hashlib.sha256(body).hexdigest()})
             assert out.status_code == 200
             assert out.json()["reviewer"] == "test-reviewer"
         assert command("verify_node", target).status_code == 200
@@ -858,7 +909,7 @@ def test_read_only_attempt_without_findings_is_refused_not_pinned_to_the_head(li
     a = live.service.reconcile_attempt(a["attempt_id"])
     assert a["artifact_pending"] is True and a["artifact_ref"] is None
     assert head not in json.dumps(a["note"])
-    body = b"{}"
+    body = b'{"status":"completed","settled":true,"usable":true,"verdict":"pass","criterion_id":"review"}'
     report = live.tmp / "empty-evidence.json"
     report.write_bytes(body)
     with pytest.raises(StateConflict, match="pinned artifact"):

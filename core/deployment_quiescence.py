@@ -35,6 +35,21 @@ BLOCKING_STATUSES = frozenset({"pending", "running", "paused", "draining"})
 DEPLOY_ACTIONS = frozenset({"rebuild", "redeploy", "restart"})
 UNKNOWN_PROCESS_ERROR_PREFIX = (
     "unregistered external measurement process has unknown ownership: ")
+BLOCKER_IDENTITY_FIELDS = {
+    "active_runs": ("run_id",),
+    "active_operations": ("run_id",),
+    "checkout_leases": ("run_id", "owner", "canonical_checkout"),
+    "sidecar_owners": ("run_id",),
+    "external_active": ("attempt_id", "run_id", "operation_id", "owner_id",
+                        "external_id", "id", "command", "name"),
+    "registered_external_owners": ("attempt_id",),
+    "godot_render_owners": ("owner_id", "operation_id", "run_id"),
+    "measurement_failure": ("reason",),
+}
+AUTHORITATIVE_IDENTITY_FIELDS = frozenset({
+    "attempt_id", "run_id", "operation_id", "owner_id", "project_id",
+    "external_id", "id", "owner", "node_key", "harness",
+})
 
 
 class DeploymentBlocked(RuntimeError):
@@ -568,12 +583,62 @@ def failed_observation(reason: str) -> dict:
     return observation
 
 
-def _unknown_process_noise(row: Any) -> bool:
+def _unknown_process_shape(row: Any) -> bool:
     return (isinstance(row, dict)
             and row.get("kind") == "process"
             and row.get("active") is True
             and row.get("resource") == "external_measurement"
             and row.get("ownership") == "unregistered")
+
+
+def _unknown_process_noise(row: Any) -> bool:
+    return (_unknown_process_shape(row)
+            and isinstance(row.get("command"), str)
+            and bool(row["command"].strip())
+            and not any(field in row for field in AUTHORITATIVE_IDENTITY_FIELDS))
+
+
+def _has_identity(row: dict, fields: tuple[str, ...]) -> bool:
+    return any(isinstance(row.get(field), str) and row[field].strip()
+               for field in fields)
+
+
+def _validate_observation(observation: Any) -> str | None:
+    """Validate the complete gate observation before any authorization path."""
+    if not isinstance(observation, dict):
+        return "observation must be an object"
+    blockers = observation.get("blockers")
+    if not isinstance(blockers, dict):
+        return "blockers must be an object"
+    for name, rows in blockers.items():
+        if name not in BLOCKER_IDENTITY_FIELDS:
+            return f"unknown blocker category {name!r}"
+        if not isinstance(rows, list):
+            return f"blockers.{name} must be a list"
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                return f"blockers.{name} rows must be objects (row {index})"
+            if name == "external_active" and _unknown_process_shape(row):
+                command = row.get("command")
+                if not isinstance(command, str) or not command.strip():
+                    return f"blockers.{name} noise row {index} needs a non-empty command"
+                identities = sorted(AUTHORITATIVE_IDENTITY_FIELDS.intersection(row))
+                if identities:
+                    return (f"blockers.{name} noise row {index} carries authoritative "
+                            f"identity fields: {', '.join(identities)}")
+            elif not _has_identity(row, BLOCKER_IDENTITY_FIELDS[name]):
+                return f"blockers.{name} row {index} lacks ownership identity"
+    errors = observation.get("errors")
+    if not isinstance(errors, list) or any(not isinstance(error, str) for error in errors):
+        return "errors must be a list of strings"
+    declared_quiescent = observation.get("quiescent")
+    if not isinstance(declared_quiescent, bool):
+        return "quiescent must be a boolean"
+    computed_quiescent = not errors and not any(blockers.values())
+    if declared_quiescent != computed_quiescent:
+        return ("quiescent contradicts validated blockers/errors: "
+                f"declared={declared_quiescent} computed={computed_quiescent}")
+    return None
 
 
 def _classify_blockers(observation: dict) -> tuple[dict, list[dict]]:
@@ -662,7 +727,12 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                "replayed": False,
                                "reason": "deployment authorization was interrupted",
                                "prior_event_id": latest.get("event_id")})
-        if observation.get("quiescent") is True:
+        observation_value = observation if isinstance(observation, dict) else {}
+        validation_error = _validate_observation(observation)
+        if validation_error is not None:
+            reason = f"observation is malformed: {validation_error}"
+            valid = False
+        elif observation["quiescent"] is True:
             event = _append_to(state, {"action": action, "status": "authorized",
                                        "pending": True, "usable": False,
                                        "inventory_digest": observation.get("digest"),
@@ -670,7 +740,8 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
                                        "errors": observation.get("errors", [])})
             _atomic_write(path, state)
             return {"allowed": True, "replayed": False, "event": event}
-        valid, reason = _valid_override(action, observation, override)
+        else:
+            valid, reason = _valid_override(action, observation, override)
         if valid:
             authoritative, unknown_processes = _classify_blockers(observation)
             unknown_scope = override.get("acknowledge_unknown") is True
@@ -692,9 +763,9 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
             return {"allowed": True, "replayed": False, "event": event}
         event = _append_to(state, {"action": action, "status": "aborted",
                                    "usable": False, "reason": reason,
-                                   "inventory_digest": observation.get("digest"),
-                                   "blockers": observation.get("blockers", {}),
-                                   "errors": observation.get("errors", [])})
+                                   "inventory_digest": observation_value.get("digest"),
+                                   "blockers": observation_value.get("blockers"),
+                                   "errors": observation_value.get("errors")})
         _atomic_write(path, state)
     raise DeploymentBlocked(
         f"refusing {action}: cross-project deployment is not quiescent; "

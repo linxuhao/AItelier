@@ -284,6 +284,121 @@ def test_clean_no_owner_path_does_not_need_an_override(tmp_path):
     assert result["event"]["status"] == "authorized"
 
 
+@pytest.mark.parametrize(("field", "value"), [
+    ("attempt_id", "attempt-real"),
+    ("run_id", "run-real"),
+    ("operation_id", "operation-real"),
+    ("owner_id", "owner-real"),
+])
+def test_noise_shaped_row_with_authoritative_identity_is_malformed(
+        tmp_path, field, value):
+    row = {**_unknown_process(0), field: value}
+    observation = {
+        "quiescent": False,
+        "digest": "2" * 64,
+        "blockers": {"external_active": [row]},
+        "errors": [
+            "unregistered external measurement process has unknown ownership: "
+            + row["command"]
+        ],
+    }
+
+    with pytest.raises(dq.DeploymentBlocked, match="observation is malformed"):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / (field + ".json"),
+            override=_deployment_override(
+                observation["digest"], acknowledge_unknown=True),
+        )
+    event = json.loads((tmp_path / (field + ".json")).read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+    assert event["blockers"] == observation["blockers"]
+    assert event["errors"] == observation["errors"]
+    assert "audit" not in event
+
+
+@pytest.mark.parametrize(("patch", "reason"), [
+    ({"blockers": {"active_runs": {}}}, "must be a list"),
+    ({"blockers": None}, "must be an object"),
+    ({"errors": {}}, "errors must be a list of strings"),
+    ({"blockers": {"active_runs": ["run-a"]}}, "rows must be objects"),
+    ({"blockers": {"active_runs": [{}]}}, "ownership identity"),
+    ({"blockers": {"future_category": []}}, "unknown blocker category"),
+    ({"errors": ["valid", None]}, "errors must be a list of strings"),
+    ({"quiescent": None}, "quiescent must be a boolean"),
+])
+def test_malformed_observation_cannot_be_overridden(tmp_path, patch, reason):
+    observation = {
+        "quiescent": False,
+        "digest": "3" * 64,
+        "blockers": {
+            "active_runs": [{"run_id": "run-a", "project_id": "project-a"}],
+        },
+        "errors": [],
+        **patch,
+    }
+
+    with pytest.raises(dq.DeploymentBlocked, match=reason):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / "journal.json",
+            override=_deployment_override(observation["digest"]),
+        )
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+    assert event["blockers"] == observation.get("blockers")
+    assert event["errors"] == observation.get("errors")
+    assert "audit" not in event
+
+
+def test_noise_row_requires_non_empty_command(tmp_path):
+    row = {**_unknown_process(0), "command": "  "}
+    observation = {
+        "quiescent": False,
+        "digest": "5" * 64,
+        "blockers": {"external_active": [row]},
+        "errors": [dq.UNKNOWN_PROCESS_ERROR_PREFIX + row["command"]],
+    }
+
+    with pytest.raises(dq.DeploymentBlocked, match="non-empty command"):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / "journal.json",
+            override=_deployment_override(
+                observation["digest"], acknowledge_unknown=True),
+        )
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+    assert "audit" not in event
+
+
+@pytest.mark.parametrize("quiescent", [True, False])
+def test_declared_quiescence_must_match_validated_blockers_and_errors(
+        tmp_path, quiescent):
+    if quiescent:
+        blockers = {"active_runs": [{"run_id": "run-a", "project_id": "project-a"}]}
+        errors = []
+    else:
+        blockers = {}
+        errors = []
+    observation = {
+        "quiescent": quiescent,
+        "digest": "4" * 64,
+        "blockers": blockers,
+        "errors": errors,
+    }
+
+    with pytest.raises(dq.DeploymentBlocked, match="quiescent contradicts"):
+        dq.authorize(
+            "restart", observation, journal=tmp_path / "journal.json",
+            override=_deployment_override(observation["digest"]),
+        )
+    event = json.loads((tmp_path / "journal.json").read_text())["latest"]
+    assert event["status"] == "aborted"
+    assert event["usable"] is False
+    assert "audit" not in event
+
+
 @pytest.mark.parametrize(("blocker_key", "owner"), [
     ("active_runs", {"run_id": "run-a", "project_id": "project-a",
                      "status": "running"}),

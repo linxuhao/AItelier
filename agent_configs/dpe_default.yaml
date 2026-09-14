@@ -184,7 +184,7 @@ task_implementer:
   # "兄弟任务还没落地时，照架构契约写" directive in templates/task_implementer.md,
   # which removes the specific thing those 242k reasoning chars were spent on.
   max_output_tokens: 32768
-  # 15 → 24. Now that the implementer can MEASURE (godot_playtest_scenario runs
+  # 100. Now that the implementer can MEASURE (godot_playtest_scenario runs
   # one scenario in ~50s against its own staged edits), a task card is no longer
   # "read the source, write the fix" — it is write → probe → read observed →
   # adjust → probe again. Each probe is a turn, and a play-test probe answers
@@ -200,7 +200,7 @@ task_implementer:
   # write") then made it deliver the scaffolding. Three attempts, the same
   # ending each time, and repo_apply committed the placeholder scenario into
   # the game repo three times.
-  max_tool_turns: 24
+  max_tool_turns: 100
   native_tool_calling: true
   fallback_to_json_mode: true
   # effort "low", 2026-08-25. With no effort set the server defaults to ~high,

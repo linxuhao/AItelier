@@ -29,6 +29,20 @@ proves you saw the recovered work before any new repository operation.
 3. **Write tests** the plan calls for (or that the change obviously needs).
 4. **Stay in scope.** Touch only what the plan lists; no drive-by refactors.
 
+## Verify the first testable slice
+`focused_check` is available from turn 1. After the first testable code slice,
+use `kind="pytest"` with the narrowest plan-named test node. For a Godot change,
+also use `kind="godot_scenario"` with one affected scenario. Run these probes
+before `finish_step`, while you can still repair the code. Each probe is capped
+at five minutes and its command, worktree, timeout, exit status, bounded output,
+run ID, and step ID are retained in this implement step's trace.
+
+These probes do not approve the candidate. They do not skip, xfail, weaken, or
+replace the full `run_tests` step or the later independent review. A narrow
+probe can miss an unrelated regression; `finish_step` still routes through the
+unchanged full gate. If a required runtime probe reports unavailable or times
+out, report that limitation rather than calling it a pass.
+
 ## Writing code with `apply_patch(patch)`
 Use Add/Update/Delete File operations in this run's code worktree. One patch can
 contain multiple files and ordered, non-overlapping hunks. Read affected ranges

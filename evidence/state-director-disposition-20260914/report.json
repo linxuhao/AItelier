@@ -1,0 +1,34 @@
+{
+  "attempt_id": "attempt-5ffb349b27fa4be09f6a13e0b3de65fa",
+  "base_sha": "85f82cbaa79649092a2c460150ed6cb7b50da70c",
+  "branch": "codex/state-director-disposition-r1",
+  "context_hash": "ca288ac5fb9370bcf39700ff15cab16952d4768912fc7bfe032a15bdae713d99",
+  "generated_at": "2026-09-14T12:17:58+02:00",
+  "result": {
+    "automatic_retry": false,
+    "dispositions": [
+      "continue-workflow",
+      "handoff-external",
+      "leave-stopped"
+    ],
+    "source_attempt_mutated": false,
+    "state_production_mutated": false
+  },
+  "scope": [
+    "typed State service and shared REST/MCP disposition command",
+    "existing relay digest reused for workflow continuation and external handoff",
+    "external handoff frozen in the existing attempt context with no new storage table",
+    "service, REST and MCP contract tests"
+  ],
+  "verification": {
+    "command": "uv run --project . --with pytest --with pytest-asyncio python -m pytest tests/unit/test_state_relay.py tests/unit/test_state_attempts.py tests/unit/test_state_external.py tests/integration/test_state_graph_entrypoints.py tests/integration/test_state_external_entrypoints.py -q",
+    "passed": 160,
+    "failed": 0,
+    "warnings": 2
+  },
+  "first_failed_verification": {
+    "command": "/Users/linxuhao/AItelier/.venv/bin/python -m pytest tests/unit/test_state_relay.py -q",
+    "error": "ModuleNotFoundError: No module named 'mcp'",
+    "resolution": "used an isolated worktree virtual environment with the project-declared mcp dependency"
+  }
+}

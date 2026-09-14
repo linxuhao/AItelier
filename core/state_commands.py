@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from core.state_graph import StateGraphError
 
@@ -153,6 +153,10 @@ class Attempt(Request):
     attempt_id: str
 
 
+class RequestAttemptBase(Attempt):
+    base_sha: str
+
+
 class RetireReservation(Attempt):
     reason: str
 
@@ -178,6 +182,7 @@ class StartAttempt(Node):
     workflow: str
     request_key: str
     instruction: str = ""
+    base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     # Continue a FAILED SkillFlow attempt of this node: its branch head becomes
     # the new run's base and its staged draft is seeded into the new staging.
     # Explicit, so a relay is a recorded decision taken after inspecting the
@@ -202,6 +207,29 @@ class StartExternalAttempt(Node):
     instruction: str = ""
 
 
+class DispositionFailedAttempt(Attempt):
+    disposition: Literal["continue-workflow", "handoff-external", "leave-stopped"]
+    request_key: str | None = None
+    relay_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    instruction: str = ""
+    harness: str | None = None
+    external_id: str | None = None
+
+    @model_validator(mode="after")
+    def exact_disposition_shape(self):
+        launch = self.disposition != "leave-stopped"
+        if launch and (self.request_key is None or self.relay_digest is None):
+            raise ValueError("continue-workflow and handoff-external require request_key and relay_digest")
+        if not launch and any(v is not None for v in (
+                self.request_key, self.relay_digest, self.harness, self.external_id)):
+            raise ValueError("leave-stopped takes only attempt_id, disposition and optional instruction")
+        if self.disposition == "continue-workflow" and (self.harness is not None or self.external_id is not None):
+            raise ValueError("continue-workflow does not accept external harness identity")
+        if self.disposition == "handoff-external" and (self.harness is None or self.external_id is None):
+            raise ValueError("handoff-external requires harness and external_id")
+        return self
+
+
 class ExternalObservation(Attempt):
     observation_id: str
     expected_version: int
@@ -218,8 +246,14 @@ class ExternalObservation(Attempt):
 class Evidence(Attempt):
     evidence_id: str
     criterion_id: str
-    verdict: str
-    artifact: str
+    verdict: str = Field(description=(
+        "Evidence verdict. Failed external attempts accept only pass or fail; "
+        "candidate evidence retains the general pass/fail/skip contract."))
+    artifact: str = Field(description=(
+        "Exact artifact reviewed. Candidate evidence must match the attempt artifact. "
+        "A terminal quiescent failed external attempt may retain criterion evidence "
+        "against one shared artifact, exactly once per criterion, but this never promotes "
+        "the attempt or permits verification."))
     report_ref: str
     report_sha256: str
     detail: str = ""
@@ -366,7 +400,10 @@ WRITE_REQUESTS = {
     "bind_node_design": BindDesign,
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
     "split_node": SplitNode, "supersede_node": SupersedeNode, "set_node_facet": SetNodeFacet,
-    "start_attempt": StartAttempt, "recover_attempt": Attempt, "reconcile_attempt": Attempt, "retire_reservation": RetireReservation, "record_evidence": Evidence,
+    "start_attempt": StartAttempt, "request_attempt_base": RequestAttemptBase,
+    "recover_attempt": Attempt, "reconcile_attempt": Attempt,
+    "disposition_failed_attempt": DispositionFailedAttempt,
+    "retire_reservation": RetireReservation, "record_evidence": Evidence,
     "verify_node": Verify, "import_tasks": ImportTasks,
     "bind_source": BindSource, "set_dispatch": DispatchPolicy, "set_node_hold": NodeHold,
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
@@ -426,7 +463,9 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "revise_node": service.store.revise_node, "split_node": service.store.split_node,
         "supersede_node": service.store.supersede_node, "set_node_facet": service.store.set_node_facet,
         "start_attempt": service.start_attempt,
+        "request_attempt_base": service.request_attempt_base,
         "recover_attempt": service.recover_attempt, "reconcile_attempt": service.reconcile_attempt,
+        "disposition_failed_attempt": service.disposition_failed_attempt,
         "retire_reservation": service.attempts.retire_reservation,
         "record_evidence": service.record_evidence, "verify_node": service.verify_node,
         "import_tasks": service.import_tasks,

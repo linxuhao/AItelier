@@ -50,6 +50,7 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
                             workspace_root: str = "",
                             step_id: str = "", run_id: str = "",
                             project_id: str = "", operation_id: str = "",
+                            _timeout_seconds: int | None = None,
                             legacy_code_staging: bool = False, **kwargs) -> dict:
     """Play-test one scenario and report every failing assertion's ``observed``.
 
@@ -140,11 +141,14 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
             return {"error": f"unknown scenario(s) {unknown}. Available: "
                              f"{', '.join(available)}"}
 
+    timeout = 900 if _timeout_seconds is None else int(_timeout_seconds)
+    if not 1 <= timeout <= 900:
+        return {"error": "play-test timeout must be between 1 and 900 seconds"}
     report = post_playtest({"project_dir": str(target), "spec": picked,
                             **_owner_identity(
                                 target, project_id=project_id, run_id=run_id,
                                 step_id=step_id, operation_id=operation_id)},
-                           timeout=900)
+                           timeout=timeout)
     if report.get("gate_skipped"):
         return {"error": report.get("summary", "godot-builder unreachable")}
     if report.get("no_project"):
@@ -165,6 +169,7 @@ def godot_playtest_scenario(*, scenario: str = "", inline_scenario: str = "",
         "scenarios": results,
         "all_passed": bool(results) and all(r["passed"] for r in results),
         "hard_passed": bool(report.get("passed")),
+        "timed_out": bool(report.get("gate_timeout")),
         "code_root": str(target),
         "report": "\n".join(header + _render(scen)),
     }

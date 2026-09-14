@@ -1,0 +1,36 @@
+name: focused_check
+description: >
+  Run one cheap implementation-time probe against the current isolated run
+  worktree. kind=pytest accepts only 1-8 repo-relative pytest file/node targets;
+  kind=godot_scenario accepts one named scenario from the repository play-test
+  contract. There is no shell or arbitrary executable mode. The host injects
+  the worktree root, inherited secret-looking environment variables are
+  removed, the process/request timeout is capped at 300 seconds, and returned
+  output is capped at 12000 bytes. The result records command, cwd, timeout,
+  exit status, truncation, run_id and step_id in the implement trace. This is a
+  focused probe only: finish_step still routes through the unchanged run_tests
+  gate, which remains authoritative for the full candidate.
+parameters:
+  kind:
+    type: string
+    description: "Exactly pytest or godot_scenario."
+    required: true
+  targets:
+    type: array
+    items: {type: string}
+    description: "For pytest: 1-8 repo-relative test paths or node IDs; options and paths outside the worktree are refused."
+    required: false
+  scenario:
+    type: string
+    description: "For godot_scenario: exactly one scenario name from the repo contract."
+    required: false
+  timeout_seconds:
+    type: integer
+    description: "Hard deadline, 1-300 seconds (default 120)."
+    required: false
+  project_root:
+    type: string
+    description: "Attempt worktree root; auto-injected by the host and ignored if supplied by the agent."
+    required: false
+
+x-fallible: true

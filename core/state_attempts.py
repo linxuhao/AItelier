@@ -113,12 +113,13 @@ class StateAttempts:
     def reserve(self, project_id: str, node_key: str, expected_revision: int,
                 workflow: str, request_key: str, instruction: str = "",
                 continue_from: str | None = None, relay_digest: str | None = None,
-                frozen_prerequisites: dict | None = None) -> dict:
+                frozen_prerequisites: dict | None = None,
+                base_sha: str | None = None) -> dict:
         """Idempotent intent, persisted before a workflow can be launched."""
         key(workflow, "workflow")
         return self._reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
                              continue_from=continue_from, relay_digest=relay_digest,
-                             frozen_prerequisites=frozen_prerequisites)
+                             frozen_prerequisites=frozen_prerequisites, base_sha=base_sha)
 
     @staticmethod
     def _relay_source(conn, prior_id, project_id, node_key, workflow, node, deps):
@@ -159,13 +160,15 @@ class StateAttempts:
 
     def _reserve(self, project_id, node_key, expected_revision, workflow, request_key, instruction, *,
                  external=None, continue_from=None, relay_digest=None,
-                 frozen_prerequisites=None):
+                 frozen_prerequisites=None, base_sha=None, relay_handoff=None):
         """Common atomic ownership/pin guard for every execution adapter."""
         key(request_key, "request key")
         integer(expected_revision, "expected_revision", 1)
         if not isinstance(instruction, str) or len(instruction) > 20000:
             raise StateGraphError("instruction must be text of at most 20000 characters")
         request = {"revision": expected_revision, "workflow": workflow, "instruction": instruction}
+        if base_sha is not None:
+            request["base_sha"] = base_sha
         if frozen_prerequisites is not None:
             if external is not None:
                 raise StateGraphError("frozen_prerequisites apply to SkillFlow attempts only")
@@ -177,6 +180,13 @@ class StateAttempts:
             request["frozen_prerequisites"] = frozen_prerequisites
         if external is not None:
             request["external"] = external
+        if relay_handoff is not None:
+            if external is None:
+                raise StateGraphError("relay_handoff applies to external attempts only")
+            if not isinstance(relay_handoff, dict):
+                raise StateGraphError("relay_handoff must be an object")
+            canonical(relay_handoff)
+            request["relay_handoff"] = relay_handoff
         if continue_from is not None:
             if external is not None:
                 raise StateGraphError("continue_from applies to SkillFlow attempts only")
@@ -204,12 +214,16 @@ class StateAttempts:
             ctx = {"state_project_id": project_id, "node_key": node_key, "revision": expected_revision,
                    "goal": node["goal"], "acceptance": json.loads(node["contract_json"]),
                    "contract_hash": node["contract_hash"], "dependencies": deps, "instruction": instruction}
+            if base_sha is not None:
+                ctx["base_sha"] = base_sha
             if frozen_prerequisites is not None:
                 ctx["frozen_prerequisites"] = frozen_prerequisites
             if continue_from is not None:
                 ctx["relay_of"] = self._relay_source(conn, continue_from, project_id, node_key, workflow, node, deps)
                 if relay_digest is not None:
                     ctx["relay_of"]["expected_digest"] = relay_digest
+            if relay_handoff is not None:
+                ctx["relay_handoff"] = relay_handoff
             from core.state_design import binding_snapshot
             design = binding_snapshot(conn, project_id, node_key)
             if design is not None:
@@ -534,6 +548,54 @@ class StateAttempts:
         if not latest or latest[0] != attempt["attempt_id"]:
             raise StateConflict("a newer attempt supersedes this candidate")
 
+    def _eligible_failed_external_evidence(self, conn, attempt, artifact):
+        """Validate evidence scope without turning a failed attempt into a candidate."""
+        if attempt["execution_kind"] != "external" or attempt["status"] != "failed":
+            raise StateConflict("a completed candidate with a pinned artifact is required")
+        report = conn.execute(
+            "SELECT * FROM state_external_observations WHERE attempt_id=? AND observation_id=?",
+            (attempt["attempt_id"], attempt["terminal_observation_id"]),
+        ).fetchone()
+        owner = conn.execute(
+            "SELECT status,settled_at FROM state_external_owners WHERE attempt_id=?",
+            (attempt["attempt_id"],),
+        ).fetchone()
+        if (not report or report["status"] != "failed"
+                or report["resulting_status"] != "failed" or not report["quiescent"]
+                or not owner or owner["status"] != "settled" or not owner["settled_at"]):
+            raise StateConflict(
+                "failed external attempt lacks a complete scoped quiescent observation")
+        retained = conn.execute(
+            "SELECT report_bytes,retained_ref FROM state_external_report_blobs "
+            "WHERE report_sha256=?", (report["report_sha256"],),
+        ).fetchone()
+        report_bytes = bytes(retained["report_bytes"] if retained else b"")
+        if (not report_bytes
+                or hashlib.sha256(report_bytes).hexdigest() != report["report_sha256"]
+                or retained["retained_ref"] != report["report_ref"]):
+            raise StateConflict(
+                "failed external attempt lacks immutable validated report bytes")
+        if not self._pins_current(conn, attempt):
+            raise StateConflict(
+                "failed attempt inputs are stale; evidence must match the current contract")
+        latest = conn.execute(
+            "SELECT attempt_id FROM state_attempts WHERE project_id=? AND node_key=? "
+            "ORDER BY seq DESC LIMIT 1",
+            (attempt["project_id"], attempt["node_key"]),
+        ).fetchone()
+        if not latest or latest[0] != attempt["attempt_id"]:
+            raise StateConflict("a newer attempt supersedes this failed attempt")
+        scoped = attempt["artifact_ref"]
+        if not scoped:
+            row = conn.execute(
+                "SELECT artifact_ref FROM state_evidence WHERE attempt_id=? "
+                "ORDER BY seq LIMIT 1", (attempt["attempt_id"],),
+            ).fetchone()
+            scoped = row["artifact_ref"] if row else None
+        if scoped and scoped != artifact:
+            raise StateConflict(
+                "failed-attempt criterion evidence must describe the same artifact")
+
     def record_evidence(self, attempt_id: str, evidence_id: str, criterion_id: str, verdict: str,
                         artifact: str, report_ref: str, report_sha256: str, reviewer: str,
                         detail: str = "", *, report_bytes: bytes | None = None) -> dict:
@@ -562,9 +624,24 @@ class StateAttempts:
                     from core.state_report_integrity import store_report_blob
                     store_report_blob(conn, report_ref, report_sha256, report_bytes)
                 return dict(prior)
-            self._eligible_candidate(conn, attempt)
-            if attempt["artifact_ref"] != artifact:
-                raise StateConflict("evidence describes a different artifact")
+            failed_external = (attempt["execution_kind"] == "external"
+                               and attempt["status"] == "failed")
+            if failed_external:
+                if verdict not in {"pass", "fail"}:
+                    raise StateGraphError(
+                        "failed-attempt criterion evidence verdict must be pass or fail")
+                self._eligible_failed_external_evidence(conn, attempt, artifact)
+                duplicate = conn.execute(
+                    "SELECT evidence_id FROM state_evidence WHERE attempt_id=? AND criterion_id=? LIMIT 1",
+                    (attempt_id, criterion_id),
+                ).fetchone()
+                if duplicate:
+                    raise StateConflict(
+                        "failed attempt already has evidence for this criterion; exactly one row is permitted")
+            else:
+                self._eligible_candidate(conn, attempt)
+                if attempt["artifact_ref"] != artifact:
+                    raise StateConflict("evidence describes a different artifact")
             candidate_report = conn.execute(
                 "SELECT attempt_id,observation_id FROM state_external_observations "
                 "WHERE report_sha256=? LIMIT 1", (report_sha256,)).fetchone()
@@ -584,7 +661,7 @@ class StateAttempts:
                          (evidence_id, attempt_id, criterion_id, checks[criterion_id]["kind"], verdict, artifact,
                           report_ref, report_sha256, reviewer, detail, payload_hash, now()))
             node = self.store._node(conn, attempt["project_id"], attempt["node_key"])
-            if node["verified_receipt"]:
+            if node["verified_receipt"] and not failed_external:
                 affected = self.store._invalidate(conn, attempt["project_id"], attempt["node_key"])
                 self.store._event(conn, attempt["project_id"], attempt["node_key"], "acceptance_invalidated",
                                   {"reason": "new evidence supersedes an accepted observation", "invalidated": affected})

@@ -32,6 +32,25 @@ class ExternalAttempts:
                 project_id, node_key, expected_revision, None, request_key,
                 instruction, external=identity)
 
+    def register_relay_handoff(self, project_id, node_key, expected_revision,
+                               harness, external_id, request_key, instruction,
+                               relay_handoff):
+        """Register an external owner against one immutable failed-run relay.
+
+        The State service constructs and validates ``relay_handoff`` from the
+        public relay inventory immediately before this call. It lives in the
+        attempt's existing frozen context; no second handoff store can drift
+        away from the context hash that external observations must report.
+        """
+        identity = {'harness': key(harness, 'harness'),
+                    'external_id': text(external_id, 'external execution identity', 500),
+                    'reporting_actor': self.actor}
+        from core import deployment_quiescence as dq
+        with dq.operation_admission_fence():
+            return self.attempts._reserve(
+                project_id, node_key, expected_revision, None, request_key,
+                instruction, external=identity, relay_handoff=relay_handoff)
+
     @staticmethod
     def _terminal_report(report_ref: str, report_sha256: str) -> tuple[str, bytes]:
         return retain_report(report_ref, report_sha256, completed=True)

@@ -51,6 +51,7 @@ GUARDED = {
                                 # root can never become a path it reads.
     "semantic_search",          # refuses a non-absolute project_root (error + hint)
     "emit_project_artifacts",   # refuses a non-absolute workspace_root
+    "focused_check",            # requires an absolute owned Git worktree
     "gen_audio_asset",          # explicit target + absolute output root
     "gen_image_asset",          # same
     "git_history",              # _repo() raises on an empty/blank root, and the

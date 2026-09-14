@@ -16,6 +16,10 @@ dependencies = [
     # import fallback checks only required fields and cannot enforce const.
     # 3.0 adds Draft 6/7; 3.0.2 fixes boolean-versus-number const comparisons.
     "jsonschema>=3.0.2",
+    # The coding_impl focused_check tool invokes pytest before the full gate.
+    # It cannot depend on a developer-only venv: the production image installs
+    # this project with plain `pip install -e .`.
+    "pytest>=8.0",
     "fastapi>=0.136",
     "typer>=0.24",
     "litellm>=1.85",

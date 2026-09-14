@@ -47,7 +47,7 @@ def register_state_tools(tool, mcp, service_factory=None):
         except StateGraphError as exc:
             raise MCPToolError(str(exc)) from exc
 
-    @tool("state_graph_write", "write", "Manage State facts using typed state_graph_help contracts. Actions include send_director_message, acknowledge_director_message, resolve_director_message, update_driver_note, create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results.")
+    @tool("state_graph_write", "write", "Manage State facts using typed state_graph_help contracts. Actions include send_director_message, acknowledge_director_message, resolve_director_message, update_driver_note, create_project, add_nodes, revise_node, split_node, supersede_node, set_node_facet, start_attempt, recover_attempt, reconcile_attempt, disposition_failed_attempt, start_external_attempt, report_external_attempt, record_evidence, verify_node, import_tasks. Checkpoints stay ask; completion never implies verification. Evidence must come from an actual verifier, not invented passing results. Failed external attempts may retain scoped evidence only after a terminal quiescent report; they remain failed and unverifiable.")
     def state_graph_write(action: str, arguments: dict) -> dict:
         return {"result": invoke(action, arguments, True)}
 

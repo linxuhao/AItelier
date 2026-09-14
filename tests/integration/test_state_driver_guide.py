@@ -35,6 +35,15 @@ def test_mcp_driver_onboarding_surfaces_are_discoverable_and_consistent(tmp_path
         assert search_schema["mutates"] is False
         assert search_schema["arguments"]["properties"]["excerpt_chars"]["maximum"] == 1000
         assert "search_driver_note_history" in STATE_DRIVER_GUIDE
+        evidence_schema = help_body["operations"]["record_evidence"]
+        artifact_help = evidence_schema["arguments"]["properties"]["artifact"]["description"]
+        verdict_help = evidence_schema["arguments"]["properties"]["verdict"]["description"]
+        assert "failed external attempt" in artifact_help
+        assert "never promotes" in artifact_help
+        assert "exactly once per criterion" in artifact_help
+        assert "only pass or fail" in verdict_help
+        assert "attempt artifact remains unset" in STATE_DRIVER_GUIDE
+        assert "verify_node refuses" in STATE_DRIVER_GUIDE
         operation = client.get("/openapi.json", headers={
             "Authorization": "Bearer " + "x" * 40}).json()["paths"][
             "/api/state/projects/{project_id}/driver-note/history/search"]["get"]

@@ -1376,6 +1376,16 @@ async def _run_skillflow_tick(project_id: str, loop):
         tick_log(project_id, "claim_failed", run=run_id[:8], error=str(e)[:160])
         return
     if claimed is None:
+        recovery = _record_unclaimable_successor(sf, run_id, project_id)
+        if recovery is not None:
+            tick_log(project_id,
+                     "successor_claim_terminal" if recovery["failed"]
+                     else "successor_recovery_required",
+                     run=run_id[:8], node=recovery["successor"],
+                     predecessor=recovery["predecessor"],
+                     reason=recovery["reason"][:200])
+            _sync_project_status_to_db(project_id)
+            return
         tick_log(project_id, "no_claim", run=run_id[:8],
                  node=next_node if next_node is not None
                  else (sf.get_run(run_id) or {}).get("current_node"))
@@ -1928,6 +1938,118 @@ def _record_and_settle_claim_precondition(sf, run_id: str, project_id: str,
         run_id, project_id, step_id, count,
         _MAX_IDENTICAL_CLAIM_PRECONDITIONS, message)
     return settled, count
+
+
+def _record_unclaimable_successor(sf, run_id: str,
+                                  project_id: str) -> dict | None:
+    """Make an unexplained agent-successor ``None`` durable and bounded.
+
+    SkillFlow owns transition resolution and claim CAS.  AItelier owns the
+    scheduler loop: once ``claim_next_step`` has returned ``None``, repeating
+    ``wedged``/``no_claim`` forever is a host liveness failure.  Inline tools,
+    gates and loops legitimately are not agent-claimable, and an existing
+    claim or admitted operation has a real owner, so none of those enter this
+    recovery path.
+
+    The first identical observation records ``recovery_required``.  A second
+    observation fails the run with the exact predecessor, successor and row
+    state.  No implementation step is re-opened while these observations are
+    made: ``current_node`` remains the unavailable successor throughout.
+    """
+    import hashlib
+
+    try:
+        run = sf.get_run(run_id) or {}
+        successor = run.get("current_node") or ""
+        if run.get("status") != "running" or not successor:
+            return None
+        resolver = sf._get_resolver_for_run(run_id)
+        node = resolver.get_node(successor)
+        if resolver.is_gate(successor) or resolver.is_loop(successor):
+            return None
+        if (node is not None and resolver.is_tool(successor)
+                and not sf._should_delegate_tool(node.tool_name)):
+            return None
+        if _has_active_claim(sf, run_id):
+            return None
+
+        with sf._ro() as conn:
+            latest = conn.execute(
+                "SELECT id, status FROM skillflow_steps "
+                "WHERE run_id = ? AND step_id = ? ORDER BY id DESC LIMIT 1",
+                (run_id, successor),
+            ).fetchone()
+            predecessor = conn.execute(
+                "SELECT step_id, id FROM skillflow_steps "
+                "WHERE run_id = ? AND status = 'completed' "
+                "ORDER BY completion_seq DESC, id DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        predecessor_id = predecessor["step_id"] if predecessor else "<begin>"
+        predecessor_instance = int(predecessor["id"]) if predecessor else 0
+        successor_instance = int(latest["id"]) if latest else 0
+        successor_state = latest["status"] if latest else "missing"
+        fingerprint = hashlib.sha256(
+            (f"{predecessor_id}\0{predecessor_instance}\0{successor}\0"
+             f"{successor_instance}\0{successor_state}").encode("utf-8")
+        ).hexdigest()
+        payload = {
+            "project_id": project_id or run.get("project_id") or "",
+            "run_id": run_id,
+            "predecessor": predecessor_id,
+            "predecessor_instance_id": predecessor_instance,
+            "successor": successor,
+            "successor_instance_id": successor_instance,
+            "successor_state": successor_state,
+            "successor_type": "missing" if node is None else node.step_type,
+            "failure_fingerprint": fingerprint,
+            "recovery_required": True,
+            "reason": (
+                f"confirmed predecessor '{predecessor_id}' (instance "
+                f"{predecessor_instance}) points to agent successor "
+                f"'{successor}' (instance {successor_instance or 'missing'}, "
+                f"state {successor_state}), but claim_next_step returned None "
+                "with no claimed step or admitted operation"
+            ),
+        }
+        sf.trace(run_id, "scheduler", "successor_claim_blocked", payload,
+                 step_id=successor,
+                 step_instance_id=successor_instance or None,
+                 project_id=payload["project_id"])
+        rows = sf.trace_query(
+            run_id,
+            "SELECT payload_json FROM skillflow_trace WHERE run_id = ? "
+            "AND event = 'successor_claim_blocked' ORDER BY seq DESC LIMIT 2",
+            (run_id,),
+        )
+        count = 0
+        for row in rows:
+            raw = row["payload_json"] if hasattr(row, "keys") else row[0]
+            if json.loads(raw).get("failure_fingerprint") == fingerprint:
+                count += 1
+        failed = count >= 2
+        if failed:
+            sf.fail_run(run_id, "Successor claim recovery failed: " + payload["reason"])
+        return {**payload, "failed": failed, "observations": count}
+    except Exception as exc:
+        logging.getLogger("aitelier.scheduler").warning(
+            "successor claim recovery inspection failed", exc_info=True)
+        reason = (
+            "Successor claim recovery inspection failed for run "
+            f"'{run_id}': {type(exc).__name__}: {exc}"
+        )
+        try:
+            sf.fail_run(run_id, reason)
+        except Exception:
+            logging.getLogger("aitelier.scheduler").warning(
+                "could not fail run after successor recovery inspection error",
+                exc_info=True)
+        return {
+            "failed": True,
+            "successor": "unknown",
+            "predecessor": "unknown",
+            "reason": reason,
+        }
 
 
 def _record_tick_error(sf, run_id: str, project_id: str, exc: BaseException,

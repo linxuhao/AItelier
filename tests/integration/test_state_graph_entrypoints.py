@@ -109,6 +109,37 @@ def evidence(live, attempt, check):
         check, "pass", attempt["artifact_ref"], str(report), hashlib.sha256(body).hexdigest(), "Fixture verifier")
 
 
+def failed_code_attempt(live):
+    """One real isolated run with a committed half and an unpromoted draft."""
+    from core import run_isolation
+    repo = live.tmp / "failed-source"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "feature.py").write_text("VALUE = 1\n")
+    subprocess.run(["git", "add", "feature.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=repo, check=True)
+    live.db.ensure_project("failed-source", name="Source", repo_type="existing", repo_path=str(repo))
+    live.service.create_project("codegame", "Code game", source_project_id="failed-source")
+    live.service.store.add_nodes("codegame", [spec("code")])
+    attempt = live.service.start_attempt(
+        "codegame", "code", 1, "state_code_fixture", "initial")
+    rec = run_isolation.record(live.db, attempt["run_id"])
+    tree = Path(rec["worktree_path"])
+    (tree / "feature.py").write_text("VALUE = 2\n")
+    subprocess.run(["git", "add", "feature.py"], cwd=tree, check=True)
+    subprocess.run(["git", "commit", "-qm", "retained implementation"], cwd=tree, check=True)
+    live.ws.write_draft(attempt["execution_project_id"], "work", "partial.txt",
+                        "retained artifact draft\n", graph_name=attempt["workflow"])
+    live.sf.trace(attempt["run_id"], "step", "turn_budget_exhausted", {
+        "step_id": "work", "turns": 32, "max_turns": 32,
+        "remaining_delivery": ["finish the focused test", "submit the immutable report"],
+        "first_failure_run_id": attempt["run_id"],
+    }, step_id="work", project_id=attempt["execution_project_id"])
+    live.sf.fail_run(attempt["run_id"],
+                     "Step work: native turn budget exhausted (32/32); no automatic retry")
+    return live.service.reconcile_attempt(attempt["attempt_id"])
+
+
 def test_standard_launcher_persists_seed_attempt_run_and_output_artifact(live):
     a = start(live)
     assert a["run_id"] and a["status"] == "running"
@@ -304,6 +335,120 @@ def _frozen(*checks):
 def _required(cid, probe, expected, **arguments):
     return {"id": cid, "probe": probe, "arguments": arguments,
             "expected": expected}
+
+
+def test_director_chosen_base_provisions_real_attempt_from_differing_commit(live):
+    from core import run_isolation
+    from core.state_commands import describe, execute
+
+    repo, chosen = _code_state_project(live, "chosen-base")
+    (repo / "later.txt").write_text("source moved\n")
+    subprocess.run(["git", "add", "later.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "later source head"], cwd=repo, check=True)
+    source_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True).stdout.strip()
+    assert source_head != chosen
+
+    operation = describe()["operations"]["request_attempt_base"]
+    assert operation["mutates"] is True
+    assert describe()["operations"]["start_attempt"]["arguments"]["properties"]["base_sha"]
+    arguments = {
+        "project_id": "chosen-base", "node_key": "work", "expected_revision": 1,
+        "workflow": "state_code_fixture", "request_key": "chosen-base",
+        "base_sha": chosen,
+    }
+    launched = execute(live.service, "start_attempt", arguments, allow_write=True)
+    assert launched["status"] == "running" and launched["run_id"]
+    replayed = execute(live.service, "start_attempt", arguments, allow_write=True)
+    assert replayed["attempt_id"] == launched["attempt_id"]
+    assert replayed["run_id"] == launched["run_id"]
+    with pytest.raises(StateConflict, match="request key already used"):
+        execute(live.service, "start_attempt", {
+            **arguments, "base_sha": source_head,
+        }, allow_write=True)
+
+    requested = run_isolation.requested_base(
+        live.db, launched["execution_project_id"])
+    assert requested["base_sha"] == chosen
+    isolation = run_isolation.record(live.db, launched["run_id"])
+    assert isolation["base_sha"] == chosen
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=isolation["worktree_path"], check=True,
+        text=True, capture_output=True).stdout.strip() == chosen
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True).stdout.strip() == source_head
+
+
+def test_director_chosen_unreachable_base_fails_closed_during_real_provision(live):
+    from core import run_isolation
+    from core.state_commands import execute
+
+    repo, source_head = _code_state_project(live, "chosen-missing")
+    missing = "f" * 40
+    refused = execute(live.service, "start_attempt", {
+        "project_id": "chosen-missing", "node_key": "work", "expected_revision": 1,
+        "workflow": "state_code_fixture", "request_key": "chosen-missing",
+        "base_sha": missing,
+    }, allow_write=True)
+    assert refused["status"] == "unknown" and refused["run_id"] is None
+    assert "requested base" in refused["error"]
+    assert "refusing to provision from HEAD instead" in refused["error"]
+    engine_runs = live.sf.list_runs(project_id=refused["execution_project_id"])
+    assert len(engine_runs) == 1
+    assert run_isolation.record(live.db, engine_runs[0]["id"]) is None
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        text=True, capture_output=True).stdout.strip() == source_head
+
+
+def test_director_chosen_base_surfaces_existing_isolation_record(live, monkeypatch):
+    from core import run_isolation
+    from core.run_launcher import start_config_run
+    from core.state_commands import execute
+
+    repo, base = _code_state_project(live, "chosen-already-bound")
+    original = run_isolation.request_base
+
+    def competing_provision(db, project_id, base_sha, note=""):
+        competing = start_config_run(
+            live.db, live.ws, "state_code_fixture", project_id,
+            seed_text="competing launch", repo_type="existing", repo_path=str(repo))
+        assert competing["status"] == "started"
+        return original(db, project_id, base_sha, note=note)
+
+    monkeypatch.setattr(run_isolation, "request_base", competing_provision)
+
+    with pytest.raises(StateConflict, match="already has an isolation record.*would never apply"):
+        execute(live.service, "start_attempt", {
+            "project_id": "chosen-already-bound", "node_key": "work",
+            "expected_revision": 1, "workflow": "state_code_fixture",
+            "request_key": "chosen-already-bound", "base_sha": base,
+        }, allow_write=True)
+    attempt = live.service.attempts.list("chosen-already-bound", "work")[0]
+    assert attempt["status"] == "reserved" and attempt["run_id"] is None
+
+
+def test_director_chosen_base_refuses_external_and_past_dispatch_window(live):
+    from core.state_commands import execute
+
+    external = live.service.start_external_attempt(
+        "game", "a", 1, "codex", "external-1", "external-base")
+    with pytest.raises(StateConflict, match="external attempt.*no execution project"):
+        execute(live.service, "request_attempt_base", {
+            "attempt_id": external["attempt_id"], "base_sha": "a" * 40,
+        }, allow_write=True)
+
+    _code_state_project(live, "chosen-past-window")
+    running = execute(live.service, "start_attempt", {
+        "project_id": "chosen-past-window", "node_key": "work", "expected_revision": 1,
+        "workflow": "state_code_fixture", "request_key": "already-dispatched",
+    }, allow_write=True)
+    with pytest.raises(StateConflict, match="past the dispatch window.*status=running"):
+        execute(live.service, "request_attempt_base", {
+            "attempt_id": running["attempt_id"], "base_sha": "a" * 40,
+        }, allow_write=True)
 
 
 def test_frozen_base_mismatch_refuses_exact_regression_before_launch_claim_or_later_probe(
@@ -564,6 +709,35 @@ def test_rest_uses_typed_commands_and_never_accepts_status_assignment(live):
         assert client.post("/api/state/commands/record_evidence", json={"reviewer": "spoofed"}).status_code == 422
 
 
+def test_rest_exposes_one_exclusive_failed_attempt_disposition(live):
+    from api import state_graph_routers as routes
+    failed = failed_code_attempt(live)
+    app = FastAPI()
+    app.state._test_mode = True
+    app.include_router(routes.router)
+    app.dependency_overrides[routes.get_service] = lambda: live.service
+    with TestClient(app) as client:
+        operation = client.get("/api/state/schema").json()["operations"]["disposition_failed_attempt"]
+        enum = operation["arguments"]["properties"]["disposition"]["enum"]
+        assert enum == ["continue-workflow", "handoff-external", "leave-stopped"]
+        bad = client.post("/api/state/commands/disposition_failed_attempt", json={
+            "attempt_id": failed["attempt_id"], "disposition": "handoff-external",
+            "request_key": "missing-owner", "relay_digest": failed["relay_inventory"]["digest"]})
+        assert bad.status_code == 422
+        response = client.post("/api/state/commands/disposition_failed_attempt", json={
+            "attempt_id": failed["attempt_id"], "disposition": "handoff-external",
+            "request_key": "rest-handoff", "relay_digest": failed["relay_inventory"]["digest"],
+            "instruction": "finish reported remainder", "harness": "rest-subagents",
+            "external_id": "rest/job-1"})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["handoff"]["relay_inventory"] == failed["relay_inventory"]
+        assert result["attempt"]["context_hash"] == live.service.attempts.get(
+            result["attempt"]["attempt_id"])["context_hash"]
+        assert client.get("/api/state/attempts/" + failed["attempt_id"]).json()["status"] == "failed"
+        assert live.service.attempts.evidence(failed["attempt_id"]) == []
+
+
 def rpc(client, method, params):
     return client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
@@ -593,6 +767,36 @@ def test_mcp_real_wire_uses_same_graph_and_marks_domain_errors(live, client, mon
     a = json.loads(good["content"][0]["text"])["result"]
     assert a["run_id"] and a["checkpoints"] == "ask"
     assert live.service.attempts.get(a["attempt_id"])["run_id"] == a["run_id"]
+
+
+def test_mcp_failed_attempt_disposition_uses_same_digest_guard_and_is_idempotent(
+        live, client, monkeypatch):
+    from api import mcp_router
+    failed = failed_code_attempt(live)
+    monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(mcp_router.authz, "request_can_write", lambda request: True)
+    rpc(client, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "state-disposition-test", "version": "1"}})
+    arguments = {
+        "attempt_id": failed["attempt_id"], "disposition": "continue-workflow",
+        "request_key": "mcp-continue", "relay_digest": failed["relay_inventory"]["digest"],
+        "instruction": "finish exact retained remainder",
+    }
+    call = lambda args: rpc(client, "tools/call", {"name": "state_graph_write", "arguments": {
+        "action": "disposition_failed_attempt", "arguments": args}}).json()["result"]
+    first = call(arguments)
+    assert not first.get("isError"), first
+    result = json.loads(first["content"][0]["text"])["result"]
+    assert result["attempt"]["run_id"] != failed["run_id"]
+    assert result["attempt"]["context"]["relay"]["staged_files"] == failed["relay_inventory"]["staged_files"]
+    second = call(arguments)
+    repeated = json.loads(second["content"][0]["text"])["result"]
+    assert repeated["idempotent"] is True
+    assert repeated["attempt"]["attempt_id"] == result["attempt"]["attempt_id"]
+    bad = call({**arguments, "request_key": "mcp-stale", "relay_digest": "0" * 64})
+    assert bad["isError"] is True
+    assert live.service.attempts.get(failed["attempt_id"])["status"] == "failed"
+    assert len(live.sf.list_runs()) == 2
 
 
 def test_mcp_state_read_is_not_an_anonymous_read(live, monkeypatch):
@@ -716,6 +920,100 @@ def test_code_launch_uses_a_run_owned_tree_and_actual_commit(live):
     a = finish(live, a)
     assert a["artifact_ref"] == expected != initial
     assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == initial
+
+
+def test_service_disposition_continues_as_a_distinct_fresh_run_without_rewriting_failure(live):
+    failed = failed_code_attempt(live)
+    before_trace = live.sf.get_trace(failed["run_id"])
+    before_events = live.service.store.events("codegame", after=0, limit=500)
+
+    stopped = live.service.disposition_failed_attempt(
+        failed["attempt_id"], "leave-stopped")
+    assert stopped["attempt"] is None and stopped["dispatchable"] is False
+    assert stopped["automatic_retry"] is False
+    assert len(live.sf.list_runs()) == 1
+    assert live.service.disposition_failed_attempt(
+        failed["attempt_id"], "leave-stopped") == stopped
+    with pytest.raises(StateGraphError, match="cannot carry dispatch"):
+        live.service.disposition_failed_attempt(
+            failed["attempt_id"], "leave-stopped", request_key="must-not-be-ignored")
+    with pytest.raises(StateGraphError, match="external harness"):
+        live.service.disposition_failed_attempt(
+            failed["attempt_id"], "continue-workflow", request_key="bad-shape",
+            relay_digest=failed["relay_inventory"]["digest"], harness="wrong")
+
+    result = live.service.disposition_failed_attempt(
+        failed["attempt_id"], "continue-workflow", request_key="continue-once",
+        relay_digest=failed["relay_inventory"]["digest"],
+        instruction="finish only the reported remaining delivery")
+    successor = result["attempt"]
+    assert result["disposition"] == "continue-workflow" and result["dispatchable"] is True
+    assert successor["attempt_id"] != failed["attempt_id"]
+    assert successor["run_id"] != failed["run_id"]
+    assert successor["context"]["relay"]["digest"] == failed["relay_inventory"]["digest"]
+    assert successor["context"]["relay"]["base_sha"] == failed["relay_inventory"]["head_sha"]
+    assert successor["context"]["relay"]["staged_files"] == failed["relay_inventory"]["staged_files"]
+    assert not any(r["event"] == "turn_budget_exhausted"
+                   for r in live.sf.get_trace(successor["run_id"])), "new run has a fresh role turn"
+
+    duplicate = live.service.disposition_failed_attempt(
+        failed["attempt_id"], "continue-workflow", request_key="continue-once",
+        relay_digest=failed["relay_inventory"]["digest"],
+        instruction="finish only the reported remaining delivery")
+    assert duplicate["idempotent"] is True
+    assert duplicate["attempt"]["attempt_id"] == successor["attempt_id"]
+    assert len(live.sf.list_runs()) == 2
+    source = live.service.attempts.get(failed["attempt_id"])
+    assert source["status"] == "failed" and source["error"] == failed["error"]
+    assert live.sf.get_trace(failed["run_id"]) == before_trace
+    assert live.service.attempts.evidence(failed["attempt_id"]) == []
+    assert before_events == live.service.store.events(
+        "codegame", after=0, limit=500)[:len(before_events)]
+
+
+def test_service_external_handoff_freezes_complete_relay_and_rejects_drift(live):
+    failed = failed_code_attempt(live)
+    inventory = failed["relay_inventory"]
+    result = live.service.disposition_failed_attempt(
+        failed["attempt_id"], "handoff-external", request_key="handoff-once",
+        relay_digest=inventory["digest"], instruction="finish the retained delivery",
+        harness="director-subagents", external_id="subagent/attempt-7")
+    external = result["attempt"]
+    handoff = result["handoff"]
+    assert result["dispatchable"] is True and external["execution_kind"] == "external"
+    assert external["run_id"] is None and external["context"]["relay_handoff"] == handoff
+    assert handoff["source_attempt_id"] == failed["attempt_id"]
+    assert handoff["source_execution_project_id"] == failed["execution_project_id"]
+    assert handoff["source_context_hash"] == failed["context_hash"]
+    assert handoff["relay_inventory"]["base_sha"] == inventory["base_sha"]
+    assert handoff["relay_inventory"]["head_sha"] == inventory["head_sha"]
+    assert handoff["relay_inventory"]["staged_files"] == {
+        "work": {"partial.txt": hashlib.sha256(b"retained artifact draft\n").hexdigest()}}
+    assert handoff["remaining_delivery"] == [
+        "finish the focused test", "submit the immutable report"]
+    assert handoff["original_first_failure"]["attempt_id"] == failed["attempt_id"]
+    assert handoff["original_first_failure"]["run_id"] == failed["run_id"]
+    assert handoff["original_first_failure"]["trace"]["event"] == "turn_budget_exhausted"
+    assert handoff["authority"]["checkpoint_policy"] == "ask"
+    assert live.service.attempts.get(failed["attempt_id"])["status"] == "failed"
+    assert len(live.sf.list_runs()) == 1, "external handoff never starts another workflow"
+
+    duplicate = live.service.disposition_failed_attempt(
+        failed["attempt_id"], "handoff-external", request_key="handoff-once",
+        relay_digest=inventory["digest"], instruction="finish the retained delivery",
+        harness="director-subagents", external_id="subagent/attempt-7")
+    assert duplicate["idempotent"] is True
+    assert duplicate["attempt"]["attempt_id"] == external["attempt_id"]
+    assert len(live.service.attempts.list("codegame", "code")) == 2
+
+    draft = live.ws._draft_dir(failed["execution_project_id"], "work", failed["workflow"])
+    (draft / "partial.txt").write_text("drifted after inspection\n")
+    with pytest.raises(StateConflict, match="changed since it was read"):
+        live.service.disposition_failed_attempt(
+            failed["attempt_id"], "handoff-external", request_key="handoff-after-drift",
+            relay_digest=inventory["digest"], instruction="do not dispatch drift",
+            harness="director-subagents", external_id="subagent/attempt-8")
+    assert len(live.service.attempts.list("codegame", "code")) == 2
 
 
 def test_output_contract_is_pinned_even_if_current_manifest_changes(live):

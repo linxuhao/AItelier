@@ -21,15 +21,14 @@ offload_implementer:
   # the first line of code. Retrieval is what that step was missing; its DPE
   # twin has had it since the zg sidecar landed, and the sidecar already
   # indexes every run worktree.
-  tools: ["semantic_search", "list_tree", "test_write", "read_test_written", "apply_patch"]
+  tools: ["focused_check", "semantic_search", "list_tree", "test_write", "read_test_written", "apply_patch"]
   max_output_tokens: 32768
-  # 32, not 20. The 2026-09-09 parallel contract batch: one implementer had
+  # 100. The 2026-09-09 parallel contract batch: one implementer had
   # every file written at turn 31 of a 32-turn extended budget and died
   # verifying its own work; another spent 16 tool calls grounding before
   # its first write and was still writing at 20. A contract artifact is a
-  # 30-turn shape; 20 was a coding-task budget. Extension to 48 stays
-  # available through ask_more_turns for the outliers.
-  max_tool_turns: 32
+  # 30-turn shape; 20 was a coding-task budget.
+  max_tool_turns: 100
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:

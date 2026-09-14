@@ -285,6 +285,23 @@ def test_exhaustion_retains_conversation_without_automatic_retry(engine):
     assert snapshots[1][1] == snapshots[0][1]
 
 
+def test_hundred_turn_cap_is_exact_and_not_retried(engine):
+    """The configured implementer ceiling permits 100 calls, then stops."""
+    from core.dpe_pipeline import NativeTurnBudgetExhausted
+    tmp = Path(tempfile.mkdtemp()); _setup(tmp); ws = _WS(tmp)
+    engine.factory.get_max_tool_turns.return_value = 100
+    engine.factory.get_max_retries.return_value = 2
+    engine._exec_tool = MagicMock(return_value={"output": "read result"})
+    nat = engine.factory.get_native_agent.return_value
+    nat.turn.return_value = _turn(
+        tool_calls=[_tc("read_file", {"path": "README.md"})])
+
+    with pytest.raises(NativeTurnBudgetExhausted, match=r"\(100/100\)"):
+        _run(engine, ws)
+
+    assert nat.turn.call_count == 100
+
+
 def test_reasoning_starved_turn_is_reported_not_silent(engine):
     """A turn cut off at max_output_tokens with no text and no tool call is the
     silent-review failure: DeepSeek bills reasoning inside that cap, so an

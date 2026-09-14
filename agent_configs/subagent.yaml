@@ -10,7 +10,7 @@ subagent_worker:
   # Generic code editing uses the explicitly granted apply_patch tool.
   tools: ["list_tree", "test_write", "read_test_written", "apply_patch"]
   max_output_tokens: 32768
-  max_tool_turns: 50
+  max_tool_turns: 100
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:

@@ -59,6 +59,18 @@ def complete(client,a):
         'report_sha256':hashlib.sha256(body).hexdigest(),'quiescent':True})
 
 
+def fail(client,a):
+    report_path = Path(client.app.state.state_service.db.db_path).parent/(a['attempt_id']+'-failed.json')
+    body = json.dumps({'attempt':a['attempt_id'],'observation':'failed-1',
+                       'status':'failed','settled':True,'usable':True},
+                      sort_keys=True).encode()
+    report_path.write_bytes(body)
+    return command(client,'report_external_attempt',{'attempt_id':a['attempt_id'],'observation_id':'failed-1',
+        'expected_version':a['observation_version'],'context_hash':a['context_hash'],'status':'failed',
+        'report_ref':str(report_path),'report_sha256':hashlib.sha256(body).hexdigest(),
+        'quiescent':True,'detail':'One criterion failed; scoped evidence follows'})
+
+
 def evidence(client,a,check,verdict='pass',suffix=''):
     body=json.dumps({'status':'completed','settled':True,'usable':True,
                      'verdict':verdict,'criterion_id':check,
@@ -112,6 +124,131 @@ def test_real_state_only_http_flow_persists_and_never_creates_workflow_tables(ap
         assert c.execute('PRAGMA foreign_key_check').fetchall()==[]
 
 
+def test_failed_quiescent_external_attempt_retains_scoped_evidence_without_promotion(app):
+    with TestClient(app) as client:
+        project(client)
+        attempt = fail(client, register(client))
+
+        skip_body = json.dumps({'status':'completed','settled':True,'usable':True,
+                                'verdict':'skip','criterion_id':'test',
+                                'artifact':ARTIFACT}, sort_keys=True).encode()
+        skip_path = Path(client.app.state.state_service.db.db_path).parent/'failed-skip.json'
+        skip_path.write_bytes(skip_body)
+        skipped = client.post('/api/state/commands/record_evidence', json={
+            'attempt_id':attempt['attempt_id'],'evidence_id':'failed-skip',
+            'criterion_id':'test','verdict':'skip','artifact':ARTIFACT,
+            'report_ref':str(skip_path),'report_sha256':hashlib.sha256(skip_body).hexdigest(),
+        }, headers=HEADER)
+        assert skipped.status_code == 422
+        assert 'pass or fail' in skipped.text
+
+        failed = evidence(client, attempt, 'test', verdict='fail')
+        passed = evidence(client, attempt, 'review')
+        assert failed['verdict'] == 'fail'
+        assert passed['verdict'] == 'pass'
+        assert evidence(client, attempt, 'review') == passed
+
+        current = client.get(
+            '/api/state/attempts/' + attempt['attempt_id'], headers=HEADER
+        ).json()
+        assert current['status'] == 'failed'
+        assert current['artifact_ref'] is None
+        graph = client.get('/api/state/projects/game', headers=HEADER).json()
+        assert next(n for n in graph['nodes'] if n['node_key'] == 'a')['status'] == 'OPEN'
+        assert client.post(
+            '/api/state/commands/verify_node', json=target(attempt), headers=HEADER
+        ).status_code == 409
+        duplicate_body = json.dumps({'status':'completed','settled':True,'usable':True,
+                                     'verdict':'pass','criterion_id':'test',
+                                     'artifact':ARTIFACT}, sort_keys=True).encode()
+        duplicate_path = Path(client.app.state.state_service.db.db_path).parent/'failed-duplicate.json'
+        duplicate_path.write_bytes(duplicate_body)
+        duplicate = client.post('/api/state/commands/record_evidence', json={
+            'attempt_id':attempt['attempt_id'],'evidence_id':'failed-test-second',
+            'criterion_id':'test','verdict':'pass','artifact':ARTIFACT,
+            'report_ref':str(duplicate_path),
+            'report_sha256':hashlib.sha256(duplicate_body).hexdigest(),
+        }, headers=HEADER)
+        assert duplicate.status_code == 409
+        assert 'exactly one row' in duplicate.text
+        rejected = client.post(
+            '/api/state/commands/verify_node', json=target(attempt), headers=HEADER
+        )
+        assert rejected.status_code == 409
+        assert 'candidate' in rejected.text
+        assert client.get(
+            '/api/state/attempts/' + attempt['attempt_id'], headers=HEADER
+        ).json()['artifact_ref'] is None
+
+        wrong_artifact = 'd' * 64
+        body = json.dumps({'status':'completed','settled':True,'usable':True,
+                           'verdict':'pass','criterion_id':'review',
+                           'artifact':wrong_artifact}, sort_keys=True).encode()
+        path = Path(client.app.state.state_service.db.db_path).parent/'wrong-artifact.json'
+        path.write_bytes(body)
+        rejected = client.post('/api/state/commands/record_evidence', json={
+            'attempt_id':attempt['attempt_id'],'evidence_id':'wrong-artifact',
+            'criterion_id':'review','verdict':'pass','artifact':wrong_artifact,
+            'report_ref':str(path),'report_sha256':hashlib.sha256(body).hexdigest(),
+        }, headers=HEADER)
+        assert rejected.status_code == 409
+        assert 'same artifact' in rejected.text
+
+        register(client, request='replacement', eid='director/session-2/subagent-8')
+        late = dict(json.loads(body))
+        late['artifact'] = ARTIFACT
+        late_body = json.dumps(late, sort_keys=True).encode()
+        late_path = Path(client.app.state.state_service.db.db_path).parent/'late-evidence.json'
+        late_path.write_bytes(late_body)
+        rejected = client.post('/api/state/commands/record_evidence', json={
+            'attempt_id':attempt['attempt_id'],'evidence_id':'late-old-attempt',
+            'criterion_id':'review','verdict':'pass','artifact':ARTIFACT,
+            'report_ref':str(late_path),
+            'report_sha256':hashlib.sha256(late_body).hexdigest(),
+        }, headers=HEADER)
+        assert rejected.status_code == 409
+        assert 'newer attempt' in rejected.text
+
+
+def test_failed_external_evidence_refuses_a_revised_contract(app):
+    with TestClient(app) as client:
+        project(client)
+        attempt = fail(client, register(client))
+        command(client, 'revise_node', {
+            'project_id':'game','node_key':'a','expected_revision':1,
+            'reason':'Acceptance wording changed after the failed run',
+            'acceptance':[
+                {'id':'test','kind':'test','description':'Run the revised actual behaviour test'},
+                {'id':'review','kind':'review','description':'Review the revised artifact and report'},
+            ],
+        })
+        body = json.dumps({'status':'completed','settled':True,'usable':True,
+                           'verdict':'fail','criterion_id':'test',
+                           'artifact':ARTIFACT}, sort_keys=True).encode()
+        path = Path(client.app.state.state_service.db.db_path).parent/'stale-contract.json'
+        path.write_bytes(body)
+        rejected = client.post('/api/state/commands/record_evidence', json={
+            'attempt_id':attempt['attempt_id'],'evidence_id':'stale-contract',
+            'criterion_id':'test','verdict':'fail','artifact':ARTIFACT,
+            'report_ref':str(path),'report_sha256':hashlib.sha256(body).hexdigest(),
+        }, headers=HEADER)
+        assert rejected.status_code == 409
+        assert 'current contract' in rejected.text
+
+
+def test_failed_external_all_pass_rows_still_cannot_verify(app):
+    with TestClient(app) as client:
+        project(client)
+        attempt = fail(client, register(client))
+        evidence(client, attempt, 'test', verdict='pass')
+        evidence(client, attempt, 'review', verdict='pass')
+        rejected = client.post('/api/state/commands/verify_node', json=target(attempt), headers=HEADER)
+        assert rejected.status_code == 409
+        assert 'candidate' in rejected.text
+        current = client.get('/api/state/attempts/' + attempt['attempt_id'], headers=HEADER).json()
+        assert current['status'] == 'failed' and current['artifact_ref'] is None
+
+
 def test_state_only_authorization_covers_discovery_queries_and_writes(app):
     with TestClient(app) as client:
         for path in ['/openapi.json','/api/state/schema','/api/state/projects','/mcp/']:
@@ -126,6 +263,30 @@ def test_state_only_authorization_covers_discovery_queries_and_writes(app):
 def rpc(client,name,args,headers=None):
     return client.post('/mcp/',json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':args}},
                        headers={**(HEADER if headers is None else headers),'Content-Type':'application/json','Accept':'application/json, text/event-stream'})
+
+
+def test_failed_evidence_duplicate_criterion_and_skip_refuse_over_mcp(app):
+    with TestClient(app) as client:
+        project(client)
+        attempt = fail(client, register(client))
+
+        def refused(verdict, evidence_id, suffix):
+            body = json.dumps({'status':'completed','settled':True,'usable':True,
+                               'verdict':verdict,'criterion_id':'test',
+                               'artifact':ARTIFACT}, sort_keys=True).encode()
+            path = Path(app.state.state_service.db.db_path).parent/('mcp-failed-'+suffix+'.json')
+            path.write_bytes(body)
+            result = rpc(client, 'state_graph_write', {'action':'record_evidence','arguments':{
+                'attempt_id':attempt['attempt_id'],'evidence_id':evidence_id,
+                'criterion_id':'test','verdict':verdict,'artifact':ARTIFACT,
+                'report_ref':str(path),'report_sha256':hashlib.sha256(body).hexdigest(),
+            }}).json()['result']
+            assert result['isError'] is True
+            return result['content'][0]['text']
+
+        assert 'pass or fail' in refused('skip', 'mcp-failed-skip', 'skip')
+        evidence(client, attempt, 'test', verdict='fail')
+        assert 'exactly one row' in refused('pass', 'mcp-failed-duplicate', 'duplicate')
 
 
 def test_real_state_only_mcp_can_certify_external_attempt_and_returns_errors(app):

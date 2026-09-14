@@ -170,6 +170,28 @@ class StateService:
         return self.external.register(project_id, node_key, expected_revision, harness, external_id,
                                       request_key, instruction)
 
+    def request_attempt_base(self, attempt_id, base_sha):
+        """Choose the commit for an unlaunched SkillFlow attempt's worktree."""
+        attempt = self.attempts.get(attempt_id)
+        execution_project_id = attempt["execution_project_id"]
+        if attempt["execution_kind"] == "external" or execution_project_id is None:
+            raise StateConflict(
+                "external attempt has no execution project; a base can be chosen only for a non-external attempt")
+        if attempt["status"] != "reserved" or attempt["run_id"]:
+            raise StateConflict(
+                "attempt is past the dispatch window; a base can be chosen only while status=reserved "
+                f"with no run (status={attempt['status']}, run_id={attempt['run_id']!r})")
+        from core import run_isolation
+        from skillflow.exceptions import IsolationUnavailable
+        try:
+            request = run_isolation.request_base(
+                self.db, execution_project_id, base_sha,
+                note=f"director-chosen base for State attempt {attempt_id}")
+        except IsolationUnavailable as exc:
+            raise StateConflict(str(exc)) from exc
+        return {"attempt_id": attempt_id, "execution_project_id": execution_project_id,
+                "status": attempt["status"], "base_sha": request["base_sha"]}
+
     def report_external_attempt(self, attempt_id, observation_id, expected_version, context_hash,
                                 status, report_ref, report_sha256, quiescent=False,
                                 artifact=None, artifact_kind=None, detail=""):
@@ -178,12 +200,21 @@ class StateService:
                                      artifact=artifact, artifact_kind=artifact_kind, detail=detail)
 
     def start_attempt(self, project_id, node_key, expected_revision, workflow, request_key, instruction="",
-                      continue_from=None, relay_digest=None, frozen_prerequisites=None):
+                      base_sha=None, continue_from=None, relay_digest=None, frozen_prerequisites=None):
         if relay_digest is not None and continue_from is None:
             raise StateGraphError("relay_digest only accompanies continue_from")
         if continue_from is not None and relay_digest is None:
             raise StateGraphError("continue_from requires relay_digest: read the failed attempt's relay_inventory "
                                   "and pass its digest, so the relay is bound to the draft you inspected")
+        if base_sha is not None:
+            if continue_from is not None:
+                raise StateGraphError("base_sha applies to a fresh attempt; continue_from already determines the relay base")
+            from core import run_isolation
+            from skillflow.exceptions import IsolationUnavailable
+            try:
+                run_isolation.validate_base_sha(base_sha)
+            except IsolationUnavailable as exc:
+                raise StateGraphError(str(exc)) from exc
         from core.state_metadata import require_dispatch
         with self.store.transaction() as conn:
             self.store._node(conn, project_id, node_key)
@@ -197,13 +228,15 @@ class StateService:
         source = self._source(project_id)
         if manifest.repo_mode == "code" and not source:
             raise StateGraphError("code-producing attempts require a registered source_project_id")
+        if base_sha is not None and manifest.repo_mode != "code":
+            raise StateGraphError("base_sha requires a code-producing workflow with an isolated worktree")
         # All state writes below use a separate intent identity. No old DPE rows
         # are reused as the long-lived state project.
         if continue_from is not None and manifest.repo_mode != "code":
             raise StateGraphError("continue_from needs a code-producing workflow; only a worktree can carry a draft forward")
         attempt = self.attempts.reserve(project_id, node_key, expected_revision, workflow, request_key, instruction,
                                         continue_from=continue_from, relay_digest=relay_digest,
-                                        frozen_prerequisites=frozen_prerequisites)
+                                        frozen_prerequisites=frozen_prerequisites, base_sha=base_sha)
         return self._launch_or_recover(attempt, manifest, source)
 
     def _launch_or_recover(self, attempt, manifest, source):
@@ -223,6 +256,8 @@ class StateService:
                     "note": "Launch outcome is unknown. No duplicate run was started; retain and inspect the execution project."}
         if attempt["status"] != "reserved":
             return attempt
+        if attempt["context"].get("base_sha"):
+            self.request_attempt_base(aid, attempt["context"]["base_sha"])
         attempt = self.attempts.pin_host_contract(aid, {
             "source_repo": source, "seed_file": manifest.seed_file, "output_step": manifest.output_step,
             "scheduler_owned": bool(manifest.scheduler_owned), "repo_mode": manifest.repo_mode})
@@ -238,7 +273,8 @@ class StateService:
                 # would leave a time-of-check/time-of-use gap.
                 source_checks = [c for c in report["checks"]
                                  if c.get("probe") == "source_head"]
-                if source_checks and manifest.repo_mode == "code":
+                if (source_checks and manifest.repo_mode == "code"
+                        and not attempt["context"].get("base_sha")):
                     if len(source_checks) != 1:
                         raise StateConflict("a code attempt may freeze exactly one source_head")
                     from core import run_isolation
@@ -343,12 +379,205 @@ class StateService:
                 code = code_inventory(tree, config_dir, attempt["run_id"])
             except (ValueError, RuntimeError, OSError) as exc:
                 code_error = str(exc)
-        return {"run_id": attempt["run_id"], "branch": rec["branch"], "base_sha": rec["base_sha"],
+        result = {"run_id": attempt["run_id"], "branch": rec["branch"], "base_sha": rec["base_sha"],
                 "head_sha": head, "commits": [{"sha": c[0], "subject": c[1] if len(c) > 1 else ""} for c in commits],
                 "mainline_ahead_by": behind, "staged_files": staged,
                 "code_changes": code, "code_error": code_error,
                 "digest": digest({"head_sha": head, "staged_files": staged, "code_changes": code}),
                 "error": attempt.get("error")}
+        result.update(self._relay_failure_metadata(attempt))
+        return result
+
+    def _trace_rows(self, run_id):
+        """Read the bounded failure tail through SkillFlow's public trace API."""
+        try:
+            return self.sf.get_trace(run_id, order="desc", limit=500)
+        except TypeError:  # compatible with a host one release behind
+            return list(reversed(self.sf.get_trace(run_id)[-500:]))
+        except Exception:
+            return []
+
+    def _attempt_for_run(self, run_id):
+        with self.store.transaction() as conn:
+            row = conn.execute("SELECT * FROM state_attempts WHERE run_id=?", (run_id,)).fetchone()
+            attempt_id = row["attempt_id"] if row else None
+        return self.attempts.get(attempt_id) if attempt_id else None
+
+    def _relay_failure_metadata(self, attempt):
+        """Keep the exact unfinished-work report and original failure visible.
+
+        A later relay may fail with a smaller remainder than its origin. The
+        handoff needs both facts: the latest run's exact remaining delivery and
+        the first failed run in the relay chain. Trace rows remain owned by
+        SkillFlow; this view only references/copies their bounded failure event
+        into the already-frozen attempt context when a handoff is chosen.
+        """
+        rows = self._trace_rows(attempt["run_id"])
+        latest_budget = next((r for r in rows if r.get("event") == "turn_budget_exhausted"), None)
+        payload = latest_budget.get("payload") if latest_budget else {}
+        remaining = payload.get("remaining_delivery") if isinstance(payload, dict) else None
+        if not isinstance(remaining, list) or any(not isinstance(v, str) for v in remaining):
+            remaining = []
+        relay_of = attempt.get("context", {}).get("relay_of")
+        if not isinstance(relay_of, dict):
+            relay_of = {}
+        first_run_id = (relay_of.get("first_failure_run_id")
+                        or relay_of.get("run_id") or attempt["run_id"])
+        original = self._attempt_for_run(first_run_id)
+        first_rows = rows if first_run_id == attempt["run_id"] else self._trace_rows(first_run_id)
+        first_budget = next((r for r in reversed(first_rows)
+                             if r.get("event") == "turn_budget_exhausted"), None)
+        first_failure = None
+        try:
+            from core.run_driver import summarise_run
+            first_failure = summarise_run(self.sf, self.ws, self.registry, first_run_id).get("first_failure")
+        except Exception:
+            pass
+        return {
+            "remaining_delivery": remaining,
+            "remaining_delivery_trace": self._failure_trace_ref(latest_budget),
+            "original_first_failure": {
+                "attempt_id": original["attempt_id"] if original else None,
+                "run_id": first_run_id,
+                "error": original.get("error") if original else None,
+                "first_failure": first_failure,
+                "trace": self._failure_trace_ref(first_budget, include_payload=True),
+            },
+        }
+
+    @staticmethod
+    def _failure_trace_ref(row, include_payload=False):
+        if not isinstance(row, dict):
+            return None
+        fields = ("seq", "step_id", "step_instance_id", "category", "event", "created_at")
+        result = {name: row.get(name) for name in fields}
+        if include_payload:
+            result["payload"] = row.get("payload")
+        return result
+
+    @staticmethod
+    def _disposition_result(disposition, source, attempt=None, *, idempotent=False,
+                            dispatchable=False, handoff=None):
+        result = {
+            "disposition": disposition,
+            "source_attempt_id": source["attempt_id"],
+            "source_status": source["status"],
+            "automatic_retry": False,
+            "dispatchable": dispatchable,
+            "idempotent": idempotent,
+            "attempt": attempt,
+            "checkpoints": "ask",
+            "later_gates": ["report completion", "record criterion evidence", "verify_node"],
+        }
+        if handoff is not None:
+            result["handoff"] = handoff
+        return result
+
+    def _existing_disposition(self, source, request_key, disposition, relay_digest,
+                              instruction, harness=None, external_id=None):
+        with self.store.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM state_attempts WHERE project_id=? AND node_key=? AND request_key=?",
+                (source["project_id"], source["node_key"], request_key),
+            ).fetchone()
+        if row is None:
+            return None
+        existing = self.attempts.get(row["attempt_id"])
+        context = existing["context"]
+        if disposition == "continue-workflow":
+            relay = context.get("relay_of") or {}
+            matches = (existing["execution_kind"] == "skillflow"
+                       and existing["workflow"] == source["workflow"]
+                       and context.get("instruction") == instruction
+                       and relay.get("attempt_id") == source["attempt_id"]
+                       and relay.get("expected_digest") == relay_digest)
+            if not matches:
+                raise StateConflict("request key already used by a different disposition")
+            return self.reconcile_attempt(existing["attempt_id"]), None
+        handoff = context.get("relay_handoff") or {}
+        matches = (existing["execution_kind"] == "external"
+                   and existing.get("harness") == harness
+                   and existing.get("external_id") == external_id
+                   and context.get("instruction") == instruction
+                   and handoff.get("source_attempt_id") == source["attempt_id"]
+                   and handoff.get("relay_digest") == relay_digest)
+        if not matches:
+            raise StateConflict("request key already used by a different disposition")
+        return self.external.inspect(existing["attempt_id"]), handoff
+
+    def disposition_failed_attempt(self, attempt_id, disposition, request_key=None,
+                                   relay_digest=None, instruction="", harness=None,
+                                   external_id=None):
+        """Make one explicit director choice after a failed workflow attempt."""
+        if disposition not in {"continue-workflow", "handoff-external", "leave-stopped"}:
+            raise StateGraphError("unknown failed-attempt disposition")
+        if disposition == "leave-stopped":
+            if any(value is not None for value in (request_key, relay_digest, harness, external_id)):
+                raise StateGraphError("leave-stopped cannot carry dispatch arguments")
+        elif request_key is None or relay_digest is None:
+            raise StateGraphError("dispatch disposition requires request_key and relay_digest")
+        if disposition == "continue-workflow" and (harness is not None or external_id is not None):
+            raise StateGraphError("continue-workflow cannot carry external harness identity")
+        if disposition == "handoff-external" and (harness is None or external_id is None):
+            raise StateGraphError("handoff-external requires harness and external_id")
+        source = self.attempts.get(attempt_id)
+        if source["execution_kind"] != "skillflow" or source["status"] != "failed":
+            raise StateConflict("director disposition requires a FAILED SkillFlow attempt")
+        if disposition == "leave-stopped":
+            return self._disposition_result(disposition, source)
+
+        self._components()
+        existing = self._existing_disposition(
+            source, request_key, disposition, relay_digest, instruction,
+            harness=harness, external_id=external_id)
+        if existing is not None:
+            attempt, handoff = existing
+            return self._disposition_result(
+                disposition, source, attempt, idempotent=True,
+                dispatchable=True, handoff=handoff)
+
+        source = self.reconcile_attempt(attempt_id)
+        inventory = source.get("relay_inventory")
+        if inventory is None:
+            raise StateConflict("failed attempt has no crash-safe relay inventory; leave it stopped or start fresh")
+        if relay_digest != inventory["digest"]:
+            raise StateConflict("failed attempt relay changed since it was read; reconcile_attempt and choose again")
+
+        if disposition == "continue-workflow":
+            successor = self.start_attempt(
+                source["project_id"], source["node_key"], source["node_revision"],
+                source["workflow"], request_key, instruction,
+                continue_from=attempt_id, relay_digest=relay_digest)
+            return self._disposition_result(
+                disposition, source, successor, dispatchable=True)
+
+        handoff = {
+            "version": 1,
+            "source_attempt_id": source["attempt_id"],
+            "source_run_id": source["run_id"],
+            "source_execution_project_id": source["execution_project_id"],
+            "source_context_hash": source["context_hash"],
+            "workflow": source["workflow"],
+            "relay_digest": inventory["digest"],
+            "relay_inventory": inventory,
+            "remaining_delivery": inventory["remaining_delivery"],
+            "original_first_failure": inventory["original_first_failure"],
+            "authority": {
+                "scope": "execute the frozen node contract and retained delivery only",
+                "state_acceptance": "record_evidence and verify_node remain separate authorized gates",
+                "checkpoint_policy": "ask",
+            },
+        }
+        # Re-read immediately before admitting an external owner. A changed
+        # branch, staged byte or pending code byte never becomes dispatchable.
+        current = self._relay_inventory(source)
+        if current is None or current["digest"] != relay_digest:
+            raise StateConflict("failed attempt relay drifted before external handoff admission")
+        successor = self.external.register_relay_handoff(
+            source["project_id"], source["node_key"], source["node_revision"],
+            harness, external_id, request_key, instruction, handoff)
+        return self._disposition_result(
+            disposition, source, successor, dispatchable=True, handoff=handoff)
 
     def _prepare_relay(self, attempt, source):
         """Make the failed attempt's work physically reachable by the new run:

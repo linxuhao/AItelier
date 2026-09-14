@@ -558,6 +558,12 @@ def _bootstrap_source(db, project_id: str, source: str) -> str:
 _SHA1 = re.compile(r"^[0-9a-f]{40}$")
 
 
+def validate_base_sha(base_sha: str) -> str:
+    if not isinstance(base_sha, str) or not _SHA1.match(base_sha):
+        raise IsolationUnavailable("a requested base must be a 40-hex git commit")
+    return base_sha
+
+
 def request_base(db, project_id: str, base_sha: str, note: str = "") -> dict:
     """Ask that the NEXT worktree provisioned for `project_id` start at `base_sha`.
 
@@ -570,8 +576,7 @@ def request_base(db, project_id: str, base_sha: str, note: str = "") -> dict:
     Refused when the project already has an isolation record: a request that
     can no longer take effect would otherwise sit there looking honoured.
     """
-    if not isinstance(base_sha, str) or not _SHA1.match(base_sha):
-        raise IsolationUnavailable("a requested base must be a 40-hex git commit")
+    base_sha = validate_base_sha(base_sha)
     with db.get_connection() as conn:
         taken = conn.execute(
             "SELECT run_id FROM run_isolation WHERE project_id = ? LIMIT 1",

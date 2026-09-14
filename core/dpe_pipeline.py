@@ -1673,6 +1673,12 @@ class PipelineEngine:
                 f"Tool '{tool_name}' is not granted to this step. "
                 "Available tools: " + (", ".join(sorted(schemas)) or "(none)")
             )}
+        if tool_name == "focused_check":
+            # Its result is evidence about THIS implement attempt. SkillFlow
+            # injects these identities after this boundary; an agent-provided
+            # value must not win through the framework's setdefault behavior.
+            for identity in ("run_id", "step_id", "project_id", "operation_id"):
+                params.pop(identity, None)
         if tool_name == "apply_patch":
             if (getattr(self, "_output_target", "artifact") != "code"
                     or getattr(self, "_output_fixed", {}) or "apply_patch" not in schemas):

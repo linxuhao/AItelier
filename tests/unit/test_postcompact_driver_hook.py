@@ -30,6 +30,7 @@ class StateStub(BaseHTTPRequestHandler):
     temporary = None
     guide = None
     nodes = None
+    standing = None
 
     def log_message(self, *_args):
         pass
@@ -70,7 +71,7 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
                 "temporary": StateStub.temporary or "fresh temporary; Authorization: Bearer forbidden-secret",
                 "updated_at": "2026-09-12T00:00:00Z",
             }
-        else:
+        elif args["action"] == "project_overview":
             assert args == {"action": "project_overview", "arguments": {"project_id": "aitelier"}}
             result = {
                 "event_seq": 57,
@@ -79,6 +80,15 @@ DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION
                     {"node_key": "busy", "status": "OPEN", "readiness": "in_progress", "next_action": None,
                      "latest_attempt": {"attempt_id": "attempt-1", "status": "running"}},
                 ],
+            }
+        else:
+            assert args == {"action": "list_director_messages", "arguments": {
+                "project_id": "aitelier", "after": 0, "limit": 8,
+                "delivery_mode": "standing", "statuses": ["unread", "acknowledged"]}}
+            result = StateStub.standing or {
+                "schema": "aitelier.director-messaging.v2",
+                "result": {"project_id": "aitelier", "items": [], "matched_total": 0,
+                           "has_more": False, "next_after": 0},
             }
         text = json.dumps({"result": result})
         payload = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": text}]}}).encode()
@@ -94,6 +104,7 @@ def state_server():
     StateStub.revision = 1
     StateStub.requests = []
     StateStub.permanent = StateStub.temporary = StateStub.guide = StateStub.nodes = None
+    StateStub.standing = None
     server = ThreadingHTTPServer(("127.0.0.1", 0), StateStub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -161,9 +172,52 @@ def test_hook_emits_legal_bounded_fresh_project_context_from_any_cwd(tmp_path, s
     assert "DO_NOT_INCLUDE_UNSELECTED_GUIDE_SECTION" not in context
     assert "helper-secret" not in context and "forbidden-secret" not in context
     assert "[REDACTED]" in context
-    assert len(StateStub.requests) == 3
+    assert "Active standing director guidance" in context
+    assert len(StateStub.requests) == 4
     wire = json.dumps(StateStub.requests)
     assert "aitelier" in wire and "wuxia-myth" not in wire and "DRIVER_STATE.md" not in wire
+
+
+def test_hook_projects_only_bounded_redacted_active_standing_without_mutation(tmp_path, state_server):
+    items = []
+    for index in range(8):
+        message_id = f"00000000-0000-4000-8000-{index:012d}"
+        delivery_id = f"10000000-0000-4000-8000-{index:012d}"
+        items.append({
+            "message": {
+                "message_id": message_id, "thread_id": message_id,
+                "sender_project_id": "other", "director_identity": "director",
+                "actor": "actor", "subject": "api_key=sk_abcdefghijklmnopqrstuvwxyz",
+                "body": "secret=abcdefghijklmnopqrstuvwxyz " + "界" * 500,
+                "created_at": "2026-09-14T00:00:00.000000Z",
+                "reply_to_delivery_id": None, "delivery_mode": "standing"},
+            "delivery": {
+                "delivery_id": delivery_id, "message_id": message_id,
+                "target_project_id": "aitelier", "delivery_seq": index + 1,
+                "status": "unread" if index % 2 == 0 else "acknowledged", "version": 1},
+        })
+    StateStub.standing = {
+        "schema": "aitelier.director-messaging.v2",
+        "result": {"project_id": "aitelier", "items": items, "matched_total": 11,
+                   "has_more": True, "next_after": 8},
+    }
+    before = deepcopy(StateStub.standing)
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    section = context.split("## Active standing director guidance (bounded, read-only)\n", 1)[1]
+    assert len(section) <= 3000
+    assert section.splitlines()[-1].startswith("[omitted_active_standing=")
+    for line in section.splitlines()[:-1]:
+        json.loads(line)
+    assert "abcdefghijklmnopqrstuvwxyz" not in section
+    assert StateStub.standing == before
+
+
+def test_hook_rejects_malformed_standing_response_into_recovery_context(tmp_path, state_server):
+    StateStub.standing = {"schema": "aitelier.director-messaging.v2", "result": {
+        "project_id": "wrong-project", "items": [], "matched_total": 0,
+        "has_more": False, "next_after": 0}}
+    context = invoke(tmp_path, state_server)["hookSpecificOutput"]["additionalContext"]
+    assert "recovery required" in context
 
 
 def test_next_hook_invocation_reads_new_note_revision_without_cache(tmp_path, state_server):
@@ -174,7 +228,7 @@ def test_next_hook_invocation_reads_new_note_revision_without_cache(tmp_path, st
     assert "driver_note_revision=2" in second
     assert "permanent revision 2" in second
     assert first != second
-    assert len(StateStub.requests) == 6
+    assert len(StateStub.requests) == 8
 
 
 def test_unreachable_state_still_emits_bounded_recovery_context(tmp_path):
@@ -421,7 +475,7 @@ def test_recorded_postcompact_then_user_prompt_order_injects_fresh_context(tmp_p
 
     # The marker is consumed after the supported model-context event.
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
-    assert len(StateStub.requests) == 6
+    assert len(StateStub.requests) == 8
 
 
 def test_concurrent_user_prompt_fallbacks_atomically_inject_once(tmp_path, state_server):
@@ -439,7 +493,7 @@ def test_concurrent_user_prompt_fallbacks_atomically_inject_once(tmp_path, state
     noops = [output for output in outputs if output == {"continue": True}]
     assert len(injected) == len(noops) == 1
     assert injected[0]["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
-    assert len(StateStub.requests) == 6
+    assert len(StateStub.requests) == 8
 
 
 def test_user_prompt_then_late_compact_session_start_does_not_inject_twice(tmp_path, state_server):
@@ -450,7 +504,7 @@ def test_user_prompt_then_late_compact_session_start_does_not_inject_twice(tmp_p
     assert "systemMessage" in postcompact
     assert prompt["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert late_start == {"continue": True}
-    assert len(StateStub.requests) == 6
+    assert len(StateStub.requests) == 8
 
 
 def test_actual_postcompact_lifecycle_uses_stop_continuation_without_later_prompt(
@@ -470,7 +524,7 @@ def test_actual_postcompact_lifecycle_uses_stop_continuation_without_later_promp
     # deliver or dispatch the same compact generation again.
     assert invoke(tmp_path, state_server, event="Stop") == {"continue": True}
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
-    assert len(StateStub.requests) == 6
+    assert len(StateStub.requests) == 8
 
 
 def test_concurrent_stop_session_and_prompt_fallbacks_deliver_once(tmp_path, state_server):
@@ -492,7 +546,7 @@ def test_concurrent_stop_session_and_prompt_fallbacks_deliver_once(tmp_path, sta
         assert delivered[0]["hookSpecificOutput"]["hookEventName"] in {
             "SessionStart", "UserPromptSubmit",
         }
-    assert len(StateStub.requests) == 6
+    assert len(StateStub.requests) == 8
 
 
 def test_compact_session_reordered_before_postcompact_does_not_double_deliver(
@@ -645,8 +699,8 @@ def test_exact_compact_event_pair_retains_middle_of_huge_history_paragraph(tmp_p
     # inject the same bootstrap a second time.
     assert invoke(tmp_path, state_server, event="UserPromptSubmit") == {"continue": True}
     assert [request["params"]["name"] for request in StateStub.requests] == [
-        "state_graph_read", "state_graph_read", "state_graph_help",
-        "state_graph_read", "state_graph_read", "state_graph_help",
+        "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
+        "state_graph_read", "state_graph_read", "state_graph_help", "state_graph_read",
     ]
 
 
@@ -752,7 +806,7 @@ def test_reload_then_midturn_compact_uses_fresh_context_without_duplicate(
         event="UserPromptSubmit",
         session_id="recorded-long-session",
     ) == {"continue": True}
-    assert len(StateStub.requests) == 9
+    assert len(StateStub.requests) == 12
 
 
 @pytest.mark.parametrize("source", ["startup", "resume", "compact"])

@@ -90,11 +90,21 @@ class SendDirectorMessage(Request):
     target_project_id: str | None = None
     broadcast: bool = False
     reply_to_delivery_id: str | None = None
+    delivery_mode: Literal["transient", "standing"] = "transient"
 
 
 class ListDirectorMessages(Project):
     after: int = 0
     limit: int = 100
+    delivery_mode: Literal["transient", "standing"] | None = None
+    statuses: list[Literal["unread", "acknowledged", "resolved"]] | None = Field(
+        default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def statuses_are_unique(self):
+        if self.statuses is not None and len(set(self.statuses)) != len(self.statuses):
+            raise ValueError("statuses must be duplicate-free")
+        return self
 
 
 class TransitionDirectorMessage(Project):

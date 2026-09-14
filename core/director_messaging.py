@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS state_director_messages (
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
     reply_to_delivery_id TEXT,
+    delivery_mode TEXT NOT NULL DEFAULT 'transient'
+        CHECK(delivery_mode IN ('transient','standing')),
     FOREIGN KEY(sender_project_id) REFERENCES state_projects(project_id),
     FOREIGN KEY(reply_to_delivery_id) REFERENCES state_director_deliveries(delivery_id)
 );
@@ -93,7 +95,7 @@ def _success(result):
 def _row_message(row):
     return {key: row[key] for key in (
         "message_id", "thread_id", "sender_project_id", "director_identity", "actor",
-        "subject", "body", "created_at", "reply_to_delivery_id")}
+        "subject", "body", "created_at", "reply_to_delivery_id", "delivery_mode")}
 
 
 def _row_delivery(row):
@@ -115,6 +117,13 @@ class SQLiteDirectorMessaging:
         with self.store.db.get_connection() as conn:
             conn.execute("PRAGMA foreign_keys=ON")
             conn.executescript(SCHEMA)
+            columns = {row["name"] for row in conn.execute(
+                "PRAGMA table_info(state_director_messages)")}
+            if "delivery_mode" not in columns:
+                conn.execute(
+                    "ALTER TABLE state_director_messages ADD COLUMN "
+                    "delivery_mode TEXT NOT NULL DEFAULT 'transient' "
+                    "CHECK(delivery_mode IN ('transient','standing'))")
             conn.commit()
 
     def for_actor(self, actor):
@@ -149,9 +158,21 @@ class SQLiteDirectorMessaging:
             (self.actor, scope, operation, request_key)).fetchone()
         if row is None:
             return None
-        if row["payload_json"] != payload_json:
+        recorded_payload = row["payload_json"]
+        # A v1 send record predates the default-expanded delivery mode.  Treat
+        # that exact legacy payload as the same transient request while leaving
+        # the durable audit row untouched.
+        if recorded_payload != payload_json and operation == "send_director_message":
+            legacy = json.loads(recorded_payload)
+            current = json.loads(payload_json)
+            if "delivery_mode" not in legacy and current.get("delivery_mode") == "transient":
+                legacy["delivery_mode"] = "transient"
+                recorded_payload = _canonical(legacy)
+        if recorded_payload != payload_json:
             raise DirectorMessageError("idempotency_conflict")
         result = json.loads(row["result_json"])
+        if operation == "send_director_message":
+            result.get("message", {}).setdefault("delivery_mode", "transient")
         result["replayed"] = True
         return _success(result)
 
@@ -178,7 +199,7 @@ class SQLiteDirectorMessaging:
 
     def send_director_message(self, sender_project_id, director_identity, request_key,
                               subject, body, target_project_id=None, broadcast=False,
-                              reply_to_delivery_id=None):
+                              reply_to_delivery_id=None, delivery_mode="transient"):
         sender_project_id = _db_id(sender_project_id)
         director_identity = _nfc(director_identity, 1, 320)
         request_key = _nfc(request_key, 1, 320)
@@ -190,6 +211,8 @@ class SQLiteDirectorMessaging:
             target_project_id = _db_id(target_project_id)
         if reply_to_delivery_id is not None:
             reply_to_delivery_id = _db_id(reply_to_delivery_id)
+        if delivery_mode not in ("transient", "standing"):
+            _invalid()
         targeted = not broadcast and target_project_id is not None and reply_to_delivery_id is None
         broadcasting = broadcast and target_project_id is None and reply_to_delivery_id is None
         replying = not broadcast and target_project_id is None and reply_to_delivery_id is not None
@@ -201,7 +224,7 @@ class SQLiteDirectorMessaging:
             "body": body, "broadcast": broadcast, "director_identity": director_identity,
             "reply_to_delivery_id": reply_to_delivery_id, "request_key": request_key,
             "sender_project_id": sender_project_id, "subject": subject,
-            "target_project_id": target_project_id,
+            "target_project_id": target_project_id, "delivery_mode": delivery_mode,
         }
         payload_json = _canonical(payload)
         operation = "send_director_message"
@@ -241,13 +264,16 @@ class SQLiteDirectorMessaging:
                 "sender_project_id": sender_project_id, "director_identity": director_identity,
                 "actor": self.actor, "subject": subject, "body": body,
                 "created_at": created_at, "reply_to_delivery_id": reply_to_delivery_id,
+                "delivery_mode": delivery_mode,
             }
             summary = self._redactor(subject + "\n" + body)[:320]
             conn.execute(
-                "INSERT INTO state_director_messages VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO state_director_messages"
+                "(message_id,thread_id,sender_project_id,director_identity,actor,subject,body,"
+                "created_at,reply_to_delivery_id,delivery_mode) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 tuple(message[key] for key in (
                     "message_id", "thread_id", "sender_project_id", "director_identity", "actor",
-                    "subject", "body", "created_at", "reply_to_delivery_id")))
+                    "subject", "body", "created_at", "reply_to_delivery_id", "delivery_mode")))
             deliveries = []
             for target in targets:
                 delivery = {
@@ -265,20 +291,81 @@ class SQLiteDirectorMessaging:
             result = {"message": message, "deliveries": deliveries, "replayed": False}
             return self._record(conn, sender_project_id, operation, request_key, payload_json, result)
 
-    def list_director_messages(self, project_id, after=0, limit=100):
+    def list_director_messages(self, project_id, after=0, limit=100,
+                               delivery_mode=None, statuses=None):
         project_id = _db_id(project_id)
         after = _integer(after, 0)
         limit = _integer(limit, 1, 100)
+        if delivery_mode is not None and delivery_mode not in ("transient", "standing"):
+            _invalid()
+        if statuses is not None:
+            if (not isinstance(statuses, list) or not statuses
+                    or any(not isinstance(status, str) for status in statuses)
+                    or len(set(statuses)) != len(statuses)
+                    or any(status not in ("unread", "acknowledged", "resolved")
+                           for status in statuses)):
+                _invalid()
         with self.store.transaction() as conn:
             self._project(conn, project_id)
+            high = conn.execute(
+                "SELECT COALESCE(MAX(delivery_seq),0) AS high "
+                "FROM state_director_deliveries WHERE target_project_id=?",
+                (project_id,)).fetchone()["high"]
+            clauses = ["d.target_project_id=?", "d.delivery_seq>?", "d.delivery_seq<=?"]
+            parameters = [project_id, after, high]
+            if delivery_mode is not None:
+                clauses.append("m.delivery_mode=?")
+                parameters.append(delivery_mode)
+            if statuses is not None:
+                clauses.append("d.status IN (" + ",".join("?" for _ in statuses) + ")")
+                parameters.extend(statuses)
+            where = " AND ".join(clauses)
+            matched_total = conn.execute(
+                "SELECT COUNT(*) AS count FROM state_director_deliveries d "
+                "JOIN state_director_messages m ON m.message_id=d.message_id WHERE " + where,
+                tuple(parameters)).fetchone()["count"]
             rows = conn.execute(
                 "SELECT m.*,d.delivery_id,d.target_project_id,d.delivery_seq,d.status,d.version "
                 "FROM state_director_deliveries d JOIN state_director_messages m ON m.message_id=d.message_id "
-                "WHERE d.target_project_id=? AND d.delivery_seq>? ORDER BY d.delivery_seq LIMIT ?",
-                (project_id, after, limit)).fetchall()
+                "WHERE " + where + " ORDER BY d.delivery_seq LIMIT ?",
+                (*parameters, limit)).fetchall()
             items = [{"message": _row_message(row), "delivery": _row_delivery(row)} for row in rows]
+            has_more = matched_total > len(items)
+            next_after = (items[-1]["delivery"]["delivery_seq"] if has_more
+                          else max(after, high))
             return _success({"project_id": project_id, "items": items,
-                             "next_after": items[-1]["delivery"]["delivery_seq"] if items else after})
+                             "matched_total": matched_total, "has_more": has_more,
+                             "next_after": next_after})
+
+    def project_active_standing(self, project_id):
+        """Return bounded, redacted active standing guidance without mutation."""
+        result = self.list_director_messages(
+            project_id, after=0, limit=8, delivery_mode="standing",
+            statuses=["unread", "acknowledged"])["result"]
+        lines = []
+        for item in result["items"]:
+            message, delivery = item["message"], item["delivery"]
+            lines.append(json.dumps({
+                "message_id": message["message_id"],
+                "thread_id": message["thread_id"],
+                "delivery_id": delivery["delivery_id"],
+                "sender_project_id": message["sender_project_id"],
+                "delivery_seq": delivery["delivery_seq"],
+                "status": delivery["status"],
+                "version": delivery["version"],
+                "subject": self._redactor(message["subject"]),
+                "body_excerpt": self._redactor(message["body"])[:320],
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        included = len(lines)
+        while True:
+            omitted = result["matched_total"] - included
+            parts = lines[:included]
+            if omitted:
+                parts.append(f"[omitted_active_standing={omitted}]")
+            projection = "\n".join(parts)
+            if len(projection) <= 3000:
+                return projection
+            included -= 1
 
     def acknowledge_director_message(self, project_id, delivery_id, expected_version, request_key):
         return self._transition("acknowledge_director_message", project_id, delivery_id,

@@ -18,6 +18,7 @@ from typing import Any
 
 PROJECT_ID = "aitelier"
 MAX_CONTEXT_CHARS = 12_000
+MAX_STANDING_CONTEXT_CHARS = 3_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0
 PENDING_DIR_NAME = "project-handoff-pending"
@@ -399,7 +400,7 @@ def _mcp_call(url: str, headers: dict[str, str], name: str, arguments: dict[str,
     return decoded.get("result", decoded)
 
 
-def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     url, headers = _connection()
     note = _mcp_call(url, headers, "state_graph_read", {
         "action": "get_driver_note", "arguments": {"project_id": PROJECT_ID},
@@ -410,7 +411,70 @@ def _read_sources() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         "action": "project_overview", "arguments": {"project_id": PROJECT_ID},
     })
     guide = _mcp_call(url, headers, "state_graph_help", {})
-    return note, overview, guide
+    standing = _mcp_call(url, headers, "state_graph_read", {
+        "action": "list_director_messages",
+        "arguments": {
+            "project_id": PROJECT_ID,
+            "after": 0,
+            "limit": 8,
+            "delivery_mode": "standing",
+            "statuses": ["unread", "acknowledged"],
+        },
+    })
+    return note, overview, guide, standing
+
+
+def _active_standing_projection(envelope: dict[str, Any]) -> str:
+    """Render whole, redacted v2 inbox lines inside the contract's hard cap."""
+    if envelope.get("schema") != "aitelier.director-messaging.v2":
+        raise SourceUnavailable("director inbox schema mismatch")
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        raise SourceUnavailable("director inbox result missing")
+    if result.get("project_id") != PROJECT_ID:
+        raise SourceUnavailable("director inbox project mismatch")
+    items = result.get("items")
+    matched_total = result.get("matched_total")
+    if (not isinstance(items, list) or len(items) > 8
+            or type(matched_total) is not int or matched_total < len(items)):
+        raise SourceUnavailable("director inbox result invalid")
+    lines: list[str] = []
+    previous_seq = 0
+    for item in items:
+        try:
+            message = item["message"]
+            delivery = item["delivery"]
+            if message["delivery_mode"] != "standing" or delivery["status"] not in {
+                    "unread", "acknowledged"}:
+                raise SourceUnavailable("director inbox filter mismatch")
+            if type(delivery["delivery_seq"]) is not int or delivery["delivery_seq"] <= previous_seq:
+                raise SourceUnavailable("director inbox order mismatch")
+            previous_seq = delivery["delivery_seq"]
+            payload = {
+                "message_id": message["message_id"],
+                "thread_id": message["thread_id"],
+                "delivery_id": delivery["delivery_id"],
+                "sender_project_id": message["sender_project_id"],
+                "delivery_seq": delivery["delivery_seq"],
+                "status": delivery["status"],
+                "version": delivery["version"],
+                "subject": _redact(message["subject"]),
+                "body_excerpt": _redact(message["body"])[:320],
+            }
+        except (KeyError, TypeError) as exc:
+            raise SourceUnavailable("director inbox item invalid") from exc
+        lines.append(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                separators=(",", ":")))
+    included = len(lines)
+    while True:
+        omitted = matched_total - included
+        parts = lines[:included]
+        if omitted:
+            parts.append(f"[omitted_active_standing={omitted}]")
+        projection = "\n".join(parts)
+        if len(projection) <= MAX_STANDING_CONTEXT_CHARS:
+            return projection
+        included -= 1
 
 
 def _frontier_summary(overview: dict[str, Any]) -> str:
@@ -474,7 +538,8 @@ Then reconcile referenced nodes/attempts using their exact IDs and current revis
 
 def build_context() -> str:
     try:
-        note, overview, help_payload = _read_sources()
+        note, overview, help_payload, standing_envelope = _read_sources()
+        standing = _active_standing_projection(standing_envelope)
     except Exception:
         return _recovery_context()
     permanent = str(note.get("permanent", ""))
@@ -504,7 +569,10 @@ This is a bounded resume aid, not the full DAG, note history, trace, or evidence
 
 ## Exact labeled owner/run/attempt/checkpoint anchors retained from the current note
 {_identity_anchors(permanent, temporary)}"""
-    return _bounded_section(context, MAX_CONTEXT_CHARS)
+    standing_section = "\n\n## Active standing director guidance (bounded, read-only)\n" + (
+        standing or "- none")
+    return (_bounded_section(context, MAX_CONTEXT_CHARS - len(standing_section))
+            + standing_section)
 
 
 def _write_output(output: dict[str, Any]) -> None:

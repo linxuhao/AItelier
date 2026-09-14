@@ -1,10 +1,10 @@
-"""Transport-neutral constants and error envelope for director messaging v1."""
+"""Transport-neutral constants and error envelope for director messaging v2."""
 from __future__ import annotations
 
 from copy import deepcopy
 
 
-SCHEMA_ID = "aitelier.director-messaging.v1"
+SCHEMA_ID = "aitelier.director-messaging.v2"
 ACTIONS = (
     "send_director_message",
     "list_director_messages",

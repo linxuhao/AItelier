@@ -9,9 +9,31 @@ import unicodedata
 from uuid import UUID, uuid4
 
 from core.state_driver_notes import _redact
-from core.director_messaging_protocol import (
-    ACTIONS, DirectorMessageError, ERROR_CODES, SCHEMA_ID,
+SCHEMA_ID = "aitelier.director-messaging.v1"
+ACTIONS = (
+    "send_director_message", "list_director_messages",
+    "acknowledge_director_message", "resolve_director_message",
 )
+ERROR_CODES = frozenset({
+    "invalid_request", "unauthorized", "unknown_project", "unknown_delivery",
+    "idempotency_conflict", "invalid_transition", "version_conflict",
+    "recipient_limit", "no_recipients",
+})
+
+
+class DirectorMessageError(Exception):
+    """Stable v1 error envelope, independent of the live protocol version."""
+
+    def __init__(self, code: str):
+        if code not in ERROR_CODES:
+            raise ValueError(f"unknown director message error code: {code}")
+        self.code = code
+        self.envelope = {
+            "schema": SCHEMA_ID, "code": code, "detail": {"message": code}}
+        super().__init__(code)
+
+    def as_dict(self):
+        return deepcopy(self.envelope)
 
 __all__ = [
     "ACTIONS", "DirectorMessageError", "ERROR_CODES", "InMemoryDirectorMessaging",

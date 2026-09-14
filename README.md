@@ -27,8 +27,11 @@ verified status. See [architecture, usage, trust boundaries and rollout](docs/st
 and the [offline real-engine demonstration](examples/state_graph_demo.py).
 The authenticated `send_director_message`, `list_director_messages`,
 `acknowledge_director_message`, and `resolve_director_message` State actions provide
-project inboxes with durable delivery events; REST exposes the same closed v1
-contract at `/api/state/director-messages/<action>`.
+project inboxes with durable delivery events; REST exposes the same closed v2
+contract at `/api/state/director-messages/<action>`. The v2 lifecycle distinguishes
+explicit-inbox `transient` deliveries from `standing` guidance that remains in a
+bounded, redacted PostCompact recovery projection until resolved. Existing v1 rows
+migrate as transient without losing their message, delivery, event or idempotency audit.
 The [State Project frontend and migration preparation guide](docs/state-project-ui-migration.md)
 covers project DAG browsing, exact-run graph versions, protected historical references
 and held shadow migration rehearsal.

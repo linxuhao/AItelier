@@ -51,7 +51,8 @@ def _assert_subset(actual, expected, path="$"):
         assert actual == expected, f"{path}: {actual!r} != {expected!r}"
 
 
-def run_vectors(harness, vectors: dict | None = None) -> int:
+def run_vectors(harness, vectors: dict | None = None,
+                error_types: tuple[type[Exception], ...] = (DirectorMessageError,)) -> int:
     """Run the same literal scenarios against any conforming provider harness.
 
     A harness supplies ``reset(project_ids)`` and ``for_actor(actor)``. Each
@@ -71,7 +72,7 @@ def run_vectors(harness, vectors: dict | None = None) -> int:
             expected = _resolve(deepcopy(step["expect"]), captures)
             try:
                 actual = getattr(provider, step["action"])(**arguments)
-            except DirectorMessageError as exc:
+            except error_types as exc:
                 actual = exc.as_dict()
             schema_name = step["schema"]
             resolver.evolve(schema={"$ref": f"#/$defs/{schema_name}",

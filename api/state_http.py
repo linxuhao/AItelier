@@ -29,7 +29,7 @@ def create_state_router(service_dependency, access_dependency):
     @router.post("/director-messages/{action}")
     async def director_message(action: str, request: Request,
                                service=Depends(service_dependency)):
-        """Closed v1 REST adapter; router authorization runs before body parsing."""
+        """Closed v2 REST adapter; router authorization runs before body parsing."""
         from core.director_messaging_protocol import ACTIONS, DirectorMessageError
         if action not in ACTIONS:
             return DirectorMessageError("invalid_request").as_dict()

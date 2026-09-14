@@ -1,11 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import json
 import threading
 
 import pytest
 
-from contracts.director_messaging.v1.conformance import load_vectors, run_vectors
-from contracts.director_messaging.v1.fake import DirectorMessageError
+from contracts.director_messaging.v2.conformance import load_vectors, run_vectors
+from core.director_messaging_protocol import DirectorMessageError
 from core.director_messaging import SQLiteDirectorMessaging
 from core.state_database import StateDatabase
 from core.state_graph import StateGraphStore
@@ -51,10 +52,11 @@ def _send(provider, key="send", target="beta", **overrides):
     return provider.send_director_message(**arguments)
 
 
-def test_literal_vectors_pass_unchanged_against_sqlite(tmp_path):
+def test_literal_v2_vectors_pass_against_sqlite(tmp_path):
     vectors = load_vectors()
     expected = sum(len(scenario["steps"]) for scenario in vectors["scenarios"])
-    assert run_vectors(SQLiteHarness(tmp_path), vectors) == expected
+    assert run_vectors(SQLiteHarness(tmp_path), vectors,
+                       error_types=(DirectorMessageError,)) == expected
 
 
 def test_additive_schema_migrates_existing_state_database_and_survives_restart(tmp_path):
@@ -82,6 +84,119 @@ def test_additive_schema_migrates_existing_state_database_and_survives_restart(t
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'state_director_%'")}
     assert names == {"state_director_messages", "state_director_deliveries",
                      "state_director_inbox_sequences", "state_director_idempotency"}
+
+
+def test_populated_v1_rows_and_dedupe_migrate_without_identity_or_audit_loss(tmp_path):
+    path = tmp_path / "populated-v1.sqlite"
+    database = StateDatabase(str(path))
+    store = StateGraphStore(database)
+    store.create_project("alpha", "alpha")
+    store.create_project("beta", "beta")
+    message_id = "11111111-1111-4111-8111-111111111111"
+    delivery_id = "22222222-2222-4222-8222-222222222222"
+    created_at = "2026-09-14T00:00:00.000000Z"
+    payload = {
+        "body": "legacy body", "broadcast": False, "director_identity": "legacy",
+        "reply_to_delivery_id": None, "request_key": "legacy-send",
+        "sender_project_id": "alpha", "subject": "legacy subject",
+        "target_project_id": "beta",
+    }
+    message = {
+        "message_id": message_id, "thread_id": message_id,
+        "sender_project_id": "alpha", "director_identity": "legacy",
+        "actor": "transport-a", "subject": "legacy subject", "body": "legacy body",
+        "created_at": created_at, "reply_to_delivery_id": None,
+    }
+    delivery = {
+        "delivery_id": delivery_id, "message_id": message_id,
+        "target_project_id": "beta", "delivery_seq": 7,
+        "status": "acknowledged", "version": 2,
+    }
+    canonical = lambda value: json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    with database.get_connection() as conn:
+        conn.executescript("""
+        CREATE TABLE state_director_messages (
+            message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
+            sender_project_id TEXT NOT NULL, director_identity TEXT NOT NULL,
+            actor TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
+            created_at TEXT NOT NULL, reply_to_delivery_id TEXT);
+        CREATE TABLE state_director_deliveries (
+            delivery_id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+            target_project_id TEXT NOT NULL, delivery_seq INTEGER NOT NULL,
+            status TEXT NOT NULL, version INTEGER NOT NULL);
+        CREATE TABLE state_director_inbox_sequences (
+            project_id TEXT PRIMARY KEY, next_seq INTEGER NOT NULL);
+        CREATE TABLE state_director_idempotency (
+            actor TEXT NOT NULL, scope_project_id TEXT NOT NULL,
+            operation TEXT NOT NULL, request_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL, result_json TEXT NOT NULL,
+            PRIMARY KEY(actor,scope_project_id,operation,request_key));
+        """)
+        conn.execute("INSERT INTO state_director_messages VALUES(?,?,?,?,?,?,?,?,?)",
+                     tuple(message.values()))
+        conn.execute("INSERT INTO state_director_deliveries VALUES(?,?,?,?,?,?)",
+                     tuple(delivery.values()))
+        conn.execute("INSERT INTO state_director_inbox_sequences VALUES('beta',8)")
+        stored_result = {"message": message, "deliveries": [delivery], "replayed": False}
+        conn.execute("INSERT INTO state_director_idempotency VALUES(?,?,?,?,?,?)", (
+            "transport-a", "alpha", "send_director_message", "legacy-send",
+            canonical(payload), canonical(stored_result)))
+        store._event(conn, "beta", None, "director_message_received", {
+            "message_id": message_id, "thread_id": message_id,
+            "delivery_id": delivery_id, "summary": "legacy subject\nlegacy body"})
+        conn.commit()
+        before_event = conn.execute(
+            "SELECT seq,project_id,event_type,payload_json,created_at FROM state_events "
+            "WHERE event_type='director_message_received'").fetchone()
+        before_dedupe = conn.execute(
+            "SELECT * FROM state_director_idempotency").fetchone()
+
+    service = _service(path)
+    listed = service.director_messages.list_director_messages("beta")["result"]
+    assert listed["matched_total"] == 1
+    assert listed["items"][0] == {
+        "message": {**message, "delivery_mode": "transient"}, "delivery": delivery}
+    replay = service.director_messages.send_director_message(
+        "alpha", "legacy", "legacy-send", "legacy subject", "legacy body", "beta")
+    assert replay["schema"] == "aitelier.director-messaging.v2"
+    assert replay["result"]["replayed"] is True
+    assert replay["result"]["message"]["delivery_mode"] == "transient"
+    with database.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM state_director_messages").fetchone()[0] == 1
+        assert dict(conn.execute(
+            "SELECT * FROM state_director_idempotency").fetchone()) == dict(before_dedupe)
+        assert dict(conn.execute(
+            "SELECT seq,project_id,event_type,payload_json,created_at FROM state_events "
+            "WHERE event_type='director_message_received'").fetchone()) == dict(before_event)
+        column = next(row for row in conn.execute(
+            "PRAGMA table_info(state_director_messages)") if row["name"] == "delivery_mode")
+        assert column["notnull"] == 1 and column["dflt_value"] == "'transient'"
+
+
+def test_real_standing_projection_survives_restart_then_leaves_recovery_only_on_resolve(tmp_path):
+    path = tmp_path / "standing.sqlite"
+    service = _service(path)
+    _projects(service, "alpha", "beta")
+    sent = _send(service.director_messages, delivery_mode="standing",
+                 subject="api_key=sk_abcdefghijklmnopqrstuvwxyz",
+                 body="secret=abcdefghijklmnopqrstuvwxyz " + "界" * 500)
+    delivery_id = sent["result"]["deliveries"][0]["delivery_id"]
+    reopened = _service(path)
+    before = reopened.director_messages.list_director_messages("beta")["result"]
+    projected = reopened.director_messages.project_active_standing("beta")
+    payload = json.loads(projected)
+    assert payload["delivery_id"] == delivery_id
+    assert "abcdefghijklmnopqrstuvwxyz" not in projected
+    assert len(payload["body_excerpt"]) <= 320
+    assert reopened.director_messages.list_director_messages("beta")["result"] == before
+    reopened.director_messages.acknowledge_director_message("beta", delivery_id, 1, "ack")
+    assert json.loads(reopened.director_messages.project_active_standing("beta"))["status"] == "acknowledged"
+    reopened.director_messages.resolve_director_message("beta", delivery_id, 2, "resolve")
+    assert reopened.director_messages.project_active_standing("beta") == ""
+    assert reopened.director_messages.list_director_messages(
+        "beta", delivery_mode="standing", statuses=["resolved"]
+    )["result"]["matched_total"] == 1
 
 
 def test_duplicate_send_and_version_races_are_atomic(tmp_path):

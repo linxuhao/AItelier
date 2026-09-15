@@ -135,7 +135,7 @@ the `web_search` tool is unavailable: SEARXNG_URL is not set.
 
 the Godot parse gate and head-less play-test (`godot_compile`, `godot_playtest`, `gdscript_check`) is unavailable: GODOT_BUILDER_URL is at its default http://godot-builder:8080 did not answer (Name or service not known).
   Needs: the `godot-builder` sidecar
-  Set it: it SHIPS IN THIS REPO as a compose service, so this usually needs no configuration — `docker compose up -d godot-builder`. Point the variable elsewhere only to use a builder you host yourself
+  Set it: it SHIPS IN THIS REPO as a compose service, so this usually needs no configuration — `aitelier server` starts the guarded deployment. Point the variable elsewhere only to use a builder you host yourself
   Without it: the gate reports `gate_skipped` and the reviewer is told the code shipped UNVERIFIED — it does not silently pass.
 ```
 

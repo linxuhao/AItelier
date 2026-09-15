@@ -7,6 +7,7 @@
 # uvicorn directly on the host would make DPE git commits use the host
 # developer's ~/.gitconfig identity instead of the image's AItelier identity.
 
+import json
 import os
 import re
 import subprocess
@@ -50,6 +51,11 @@ _OPTIONAL_SECRETS = ("GITHUB_TOKEN",)
 
 _COMPOSE_SERVICE = "aitelier"
 _COMPOSE_SERVICES = ("zvec-grep", "godot-builder", _COMPOSE_SERVICE)
+_COMPOSE_CONTAINERS = {
+    "zvec-grep": "aitelier-zg",
+    "godot-builder": "aitelier-godot",
+    _COMPOSE_SERVICE: "aitelier",
+}
 _IMAGE_NAME = "aitelier:latest"
 
 
@@ -124,7 +130,7 @@ def _compose_files() -> list[str]:
     There used to be an opt-in `docker-compose.edge.yml` overlay carrying the
     cloudflared network, added here whenever AITELIER_EDGE_NETWORK was set. That
     made the CLI and a hand-run `docker compose` disagree about which files were
-    in play, and on 2026-08-25 a rebuild run as a plain `docker compose up -d`
+    in play, and on 2026-08-25 an unguarded direct Compose start
     recreated the container without the gateway network: healthy container,
     localhost still 200, public path gone, nothing said so. The network now
     lives in the base file, selected by name — one file, nothing to forget.
@@ -227,6 +233,70 @@ def _container_running() -> bool:
         return False
 
 
+def _compose_ps_rows(text: str) -> list[dict]:
+    """Decode the two JSON shapes emitted by supported Compose releases."""
+    text = text.strip()
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        try:
+            value = [json.loads(line) for line in text.splitlines()]
+        except (TypeError, json.JSONDecodeError):
+            return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list) and all(isinstance(row, dict) for row in value):
+        return value
+    return []
+
+
+def _guarded_service_errors() -> list[str]:
+    """Return exact container identity/state/health failures for all services."""
+    errors = []
+    for service in _COMPOSE_SERVICES:
+        expected_name = _COMPOSE_CONTAINERS[service]
+        try:
+            result = _compose(
+                "ps", "--all", "--format", "json", service,
+                capture_output=True, text=True, timeout=15,
+            )
+        except Exception as exc:
+            errors.append(
+                f"{service} readiness inventory failed: {type(exc).__name__}: {exc}")
+            continue
+        if result.returncode != 0:
+            errors.append(
+                f"{service} readiness inventory exited {result.returncode}")
+            continue
+        rows = _compose_ps_rows(result.stdout)
+        if len(rows) != 1:
+            errors.append(
+                f"{service} expected exactly one {expected_name} container; "
+                f"observed {len(rows)}")
+            continue
+        row = rows[0]
+        if row.get("Service") != service or row.get("Name") != expected_name:
+            errors.append(
+                f"{service} identity mismatch: expected {expected_name}, observed "
+                f"service={row.get('Service')!r} name={row.get('Name')!r}")
+            continue
+        state = str(row.get("State", "")).casefold()
+        health = str(row.get("Health", "")).casefold()
+        if state != "running" or health != "healthy":
+            errors.append(
+                f"{service} is not ready: state={state or 'missing'} "
+                f"health={health or 'missing'}")
+    return errors
+
+
+def _require_guarded_services_ready() -> None:
+    errors = _guarded_service_errors()
+    if errors:
+        raise RuntimeError("guarded deployment is not ready: " + "; ".join(errors))
+
+
 def _image_exists() -> bool:
     try:
         return subprocess.run(
@@ -241,7 +311,7 @@ def _image_deps_are_stale() -> bool:
     """True when the image was built BEFORE the current dependency list.
 
     The repo is bind-mounted at /app, so the container always runs the current
-    SOURCE — but its site-packages come from the image. `docker compose up -d`
+    SOURCE — but its site-packages come from the image. An unguarded Compose start
     happily reuses an existing `aitelier:latest`, so new code meets old
     dependencies and the app dies at import:
 
@@ -307,7 +377,7 @@ def _warn_if_edge_network_is_alone() -> None:
         pass                        # a diagnostic must never break the start
 
 
-def _compose_up():
+def _compose_up(max_wait: int = 120):
     """Start (building on first run) the guarded backend and sidecars."""
     _ensure_host_dirs()
     rebuild = []
@@ -318,7 +388,8 @@ def _compose_up():
               "(the source is mounted, but its packages are not).")
         rebuild = ["--build"]
     # Inherit stdout/stderr so build + startup progress is visible.
-    res = _compose("up", "-d", *rebuild, *_COMPOSE_SERVICES)
+    res = _compose("up", "-d", *rebuild, "--wait", "--wait-timeout",
+                   str(max_wait), *_COMPOSE_SERVICES)
     if res.returncode != 0:
         raise RuntimeError(
             "guarded Compose deployment failed (see output above)"
@@ -375,19 +446,22 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
 
     # Already running and healthy → reuse it.
     if _container_running() and _is_healthy(client):
-        return True
+        # Reuse is read-only. If exact identity or health cannot be proved,
+        # refuse it and let the operator choose the guarded --recreate path.
+        return not _guarded_service_errors()
 
     # A stopped or unhealthy container is a redeploy boundary.  The gate is
     # deliberately after Docker availability checks and before compose changes
     # anything, so an unreadable runtime inventory cannot turn into a replay.
     clearance = _require_deployment_clearance("redeploy")
     try:
-        _compose_up()
+        _compose_up(max_wait)
         if not _wait_healthy(client, max_wait):
             raise RuntimeError(
                 f"Docker backend did not become healthy within {max_wait}s "
                 f"(check: docker compose -f {_COMPOSE_FILE} logs)"
             )
+        _require_guarded_services_ready()
     except BaseException as exc:
         _finish_deployment(clearance, success=False, error=exc)
         raise
@@ -415,7 +489,13 @@ def ensure_server_running(base_url: str, max_wait: int = 120) -> bool:
     Raises if Docker is unavailable
     — there is no host-process fallback."""
     _require_docker()
-    return _ensure_docker_backend(base_url, max_wait)
+    ready = _ensure_docker_backend(base_url, max_wait)
+    if not ready:
+        raise RuntimeError(
+            "refusing to reuse the existing deployment because exact service "
+            "identity and health could not be proved; run "
+            "`aitelier server --recreate` through the deployment gate")
+    return True
 
 
 def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
@@ -423,7 +503,9 @@ def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
     _require_docker()
     clearance = _require_deployment_clearance("restart")
     try:
-        restarted = _compose("up", "-d", "--force-recreate", *_COMPOSE_SERVICES)
+        restarted = _compose(
+            "up", "-d", "--force-recreate", "--wait", "--wait-timeout",
+            str(max_wait), *_COMPOSE_SERVICES)
         if restarted.returncode != 0:
             raise RuntimeError(
                 "guarded Compose recreation failed with exit "
@@ -431,6 +513,7 @@ def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
         client = httpx.Client(base_url=base_url, timeout=2.0)
         if not _wait_healthy(client, max_wait):
             raise RuntimeError(f"Docker backend did not restart within {max_wait}s")
+        _require_guarded_services_ready()
     except BaseException as exc:
         _finish_deployment(clearance, success=False, error=exc)
         raise

@@ -1,9 +1,12 @@
 # docker-compose.yml — AItelier backend + web UI in Docker.
 #
-#   aitelier server             # guarded build/start/recreate of all services
+#   aitelier server             # guarded build/start/reuse of all services
+#   aitelier server --recreate  # guarded recreation of all services
 #   docker compose ps           # status
 #   docker compose logs -f      # tail logs
-#   docker compose down         # stop
+#
+# Direct Compose lifecycle mutation is unsafe and refused: it bypasses the
+# ownership cutover fence. No guarded stop/teardown command is currently exposed.
 #
 # The CLI (`aitelier`) drives this automatically: it starts the backend if the
 # container is down and reuses it if it is already running (see cli/server.py).
@@ -112,7 +115,8 @@ services:
       - ${AITELIER_SECRETS_DIR:-${HOME}/.aitelier-secrets}:/run/aitelier-secrets:ro
       # The SPA bundle is baked into the image at /srv/web_dist (outside /app,
       # so this mount can't shadow it — served via AITELIER_WEB_DIST). A plain
-      # `docker compose up -d --build` deploys frontend changes; no anonymous
+      # A guarded `aitelier server --recreate` deploys frontend changes after a
+      # separate image build; no anonymous
       # volume, no --renew-anon-volumes.
       # Shared state at the identical absolute path the code expects.
       - ${HOME}/.AItelier:${HOME}/.AItelier
@@ -190,7 +194,7 @@ services:
     # http://zvec-grep:7998/mcp (ZVEC_GREP_SERVER_URL; zvec-grep-proxy.js fronts
     # the loopback-only daemon, which refuses to listen anywhere else). It used to share
     # aitelier's namespace (network_mode: service:aitelier) so zg could bind
-    # loopback — but then every `compose restart aitelier` tore the sidecar's
+    # loopback — but then every direct backend-only restart tore the sidecar's
     # namespace away, compose does not restart dependents, and the daemon
     # came back dead (stale instance.lock + index lease). The agent toolset
     # is search-only, so being reachable from the private network is fine.
@@ -275,12 +279,12 @@ networks:
   # into an optional `-f` overlay in the first place.
   #
   # The overlay is gone because it cost an outage on 2026-08-25: a rebuild run
-  # as a plain `docker compose up -d` (no -f) recreated the container without
+  # as an unguarded direct start through Compose (no overlay) recreated the container without
   # the gateway network. The container stayed healthy, 127.0.0.1:4444 kept
   # answering 200, and the public path was simply gone with nothing saying so.
   # One name in .env, one file, no -f to forget.
   #
-  # `compose down` does not remove a network it did not create, so pointing at
+  # Compose teardown does not remove a network it did not create, so pointing at
   # a shared network cannot take it away from whoever else is on it. The cost of
   # dropping `external:` is that a TYPO'd name silently creates a new empty
   # network instead of failing — check `docker inspect aitelier` if the public

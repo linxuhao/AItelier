@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
+import subprocess
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from core import deployment_quiescence as dq
 
@@ -1560,8 +1564,10 @@ def test_server_redeploy_gate_runs_before_compose(monkeypatch):
     monkeypatch.setattr(server, "_find_server_pid", lambda port: None)
     monkeypatch.setattr(server, "_require_deployment_clearance",
                         lambda action: events.append(("gate", action)) or {})
-    monkeypatch.setattr(server, "_compose_up", lambda: events.append(("compose",)))
+    monkeypatch.setattr(
+        server, "_compose_up", lambda _max_wait: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
+    monkeypatch.setattr(server, "_require_guarded_services_ready", lambda: None)
     assert server._ensure_docker_backend("http://localhost:4444", 1) is True
     assert events == [("gate", "redeploy"), ("compose",)]
 
@@ -1577,8 +1583,9 @@ def test_guarded_compose_start_includes_both_sidecars(monkeypatch):
     monkeypatch.setattr(
         server, "_compose",
         lambda *args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0))
-    server._compose_up()
-    assert calls == [("up", "-d", "zvec-grep", "godot-builder", "aitelier")]
+    server._compose_up(17)
+    assert calls == [("up", "-d", "--wait", "--wait-timeout", "17",
+                      "zvec-grep", "godot-builder", "aitelier")]
 
 
 def test_compose_reuse_requires_every_guarded_service(monkeypatch):
@@ -1591,15 +1598,157 @@ def test_compose_reuse_requires_every_guarded_service(monkeypatch):
     assert server._container_running() is False
 
 
-def test_documented_compose_start_is_guarded_and_complete():
-    from pathlib import Path
+def _compose_health_row(service, *, name=None, state="running", health="healthy"):
+    from cli import server
+    return json.dumps([{
+        "ID": service + "-cid",
+        "Name": name or server._COMPOSE_CONTAINERS[service],
+        "Service": service,
+        "State": state,
+        "Health": health,
+    }])
+
+
+def test_guarded_service_readiness_proves_exact_topology(monkeypatch):
+    from cli import server
+
+    calls = []
+    monkeypatch.setattr(
+        server, "_compose",
+        lambda *args, **kwargs: (
+            calls.append(args)
+            or SimpleNamespace(returncode=0, stdout=_compose_health_row(args[-1]))))
+
+    assert server._guarded_service_errors() == []
+    assert calls == [
+        ("ps", "--all", "--format", "json", "zvec-grep"),
+        ("ps", "--all", "--format", "json", "godot-builder"),
+        ("ps", "--all", "--format", "json", "aitelier"),
+    ]
+
+
+def test_guarded_service_identity_matches_shipped_compose_topology():
+    from cli import server
 
     root = Path(__file__).resolve().parents[2]
-    readme = (root / "README.md").read_text()
-    source = (root / "cli/server.py").read_text()
-    assert "docker compose up -d" not in readme
-    assert 'compose("up", "-d"' in source
-    assert "godot-builder" in source and "zvec-grep" in source
+    services = yaml.safe_load((root / "docker-compose.yml").read_text())["services"]
+    assert server._COMPOSE_CONTAINERS == {
+        service: services[service]["container_name"]
+        for service in server._COMPOSE_SERVICES
+    }
+    assert all("healthcheck" in services[service]
+               for service in server._COMPOSE_SERVICES)
+
+
+@pytest.mark.parametrize(
+    ("service", "override", "fragment"),
+    [
+        ("zvec-grep", {"health": "starting"}, "health=starting"),
+        ("godot-builder", {"health": "unhealthy"}, "health=unhealthy"),
+        ("aitelier", {"state": "exited", "health": "healthy"}, "state=exited"),
+        ("zvec-grep", {"name": "aitelier-zg-copy"}, "identity mismatch"),
+        ("godot-builder", {"service_name": "godot-builder-copy"}, "identity mismatch"),
+        ("aitelier", {"missing": True}, "observed 0"),
+    ],
+)
+def test_guarded_service_readiness_fails_closed(
+        monkeypatch, service, override, fragment):
+    from cli import server
+
+    def compose(*args, **kwargs):
+        selected = args[-1]
+        if selected != service:
+            return SimpleNamespace(
+                returncode=0, stdout=_compose_health_row(selected))
+        if override.get("missing"):
+            return SimpleNamespace(returncode=0, stdout="[]")
+        row = json.loads(_compose_health_row(
+            selected,
+            name=override.get("name"),
+            state=override.get("state", "running"),
+            health=override.get("health", "healthy"),
+        ))
+        if "service_name" in override:
+            row[0]["Service"] = override["service_name"]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(row))
+
+    monkeypatch.setattr(server, "_compose", compose)
+    errors = server._guarded_service_errors()
+    assert any(service in error and fragment in error for error in errors)
+
+
+def test_reuse_requires_exact_health_for_all_services(monkeypatch):
+    from cli import server
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(server.httpx, "Client", Client)
+    monkeypatch.setattr(server, "_container_running", lambda: True)
+    monkeypatch.setattr(server, "_is_healthy", lambda _client: True)
+    monkeypatch.setattr(server, "_guarded_service_errors", lambda: [])
+    monkeypatch.setattr(
+        server, "_require_deployment_clearance",
+        lambda _action: (_ for _ in ()).throw(AssertionError("gate invoked")),
+    )
+    assert server._ensure_docker_backend("http://localhost:4444", 1) is True
+
+    monkeypatch.setattr(
+        server, "_guarded_service_errors",
+        lambda: ["zvec-grep is not ready: health=unhealthy"],
+    )
+    assert server._ensure_docker_backend("http://localhost:4444", 1) is False
+
+
+def test_redeploy_health_failure_aborts_pending_journal(monkeypatch):
+    from cli import server
+
+    terminal = []
+    monkeypatch.setattr(server.httpx, "Client", lambda *args, **kwargs: object())
+    monkeypatch.setattr(server, "_container_running", lambda: False)
+    monkeypatch.setattr(server, "_require_deployment_clearance",
+                        lambda _action: {"event": {"event_id": "gate"}})
+    monkeypatch.setattr(server, "_compose_up", lambda _max_wait: None)
+    monkeypatch.setattr(server, "_wait_healthy", lambda *_args: True)
+    monkeypatch.setattr(
+        server, "_require_guarded_services_ready",
+        lambda: (_ for _ in ()).throw(RuntimeError("godot-builder unhealthy")),
+    )
+    monkeypatch.setattr(
+        server, "_finish_deployment",
+        lambda _clearance, *, success, error=None: terminal.append((success, str(error))),
+    )
+
+    with pytest.raises(RuntimeError, match="godot-builder unhealthy"):
+        server._ensure_docker_backend("http://localhost:4444", 1)
+    assert terminal == [(False, "godot-builder unhealthy")]
+
+
+def test_all_tracked_operator_surfaces_avoid_direct_compose_mutations():
+    root = Path(__file__).resolve().parents[2]
+    direct = re.compile(
+        r"(?:docker[ -]compose|\bcompose)\s+"
+        r"(?:(?:-[^\s`]+)\s+)*(?:up|down|restart|recreate|stop|kill|rm)\b",
+        re.IGNORECASE,
+    )
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True,
+    ).stdout.decode().split("\0")
+    hits = []
+    for relative in tracked:
+        if (not relative
+                or relative.startswith(("tests/", "design/evidence/", "evidence/"))
+                or relative.endswith((".lock", ".png", ".pdf", ".sqlite3"))):
+            continue
+        try:
+            lines = (root / relative).read_text().splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for number, line in enumerate(lines, 1):
+            if direct.search(line):
+                hits.append(f"{relative}:{number}:{line.strip()}")
+    assert hits == [], "direct Compose lifecycle bypasses the cutover gate:\n" + "\n".join(hits)
 
 
 def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
@@ -1616,8 +1765,10 @@ def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
                         lambda *args: events.append(("kill", *args)))
     monkeypatch.setattr(server, "_require_deployment_clearance",
                         lambda action: events.append(("gate", action)) or {})
-    monkeypatch.setattr(server, "_compose_up", lambda: events.append(("compose",)))
+    monkeypatch.setattr(
+        server, "_compose_up", lambda _max_wait: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
+    monkeypatch.setattr(server, "_require_guarded_services_ready", lambda: None)
     assert server._ensure_docker_backend("http://localhost:4444", 1) is True
     assert events == [("gate", "redeploy"), ("compose",)]
 
@@ -1640,9 +1791,11 @@ def test_server_restart_gate_runs_before_restart(monkeypatch):
                             events.append(("compose", *args))
                             or SimpleNamespace(returncode=0)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
+    monkeypatch.setattr(server, "_require_guarded_services_ready", lambda: None)
     assert server.restart_server("http://localhost:4444", 1) is True
     assert events[:3] == [("docker",), ("gate", "restart"),
                           ("compose", "up", "-d", "--force-recreate",
+                           "--wait", "--wait-timeout", "1",
                            "zvec-grep", "godot-builder", "aitelier")]
 
 

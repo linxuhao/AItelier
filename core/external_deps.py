@@ -85,8 +85,8 @@ DEPS: tuple[Dep, ...] = (
         resource="the `godot-builder` sidecar",
         default="http://godot-builder:8080",
         how="it SHIPS IN THIS REPO as a compose service, so this usually needs "
-            "no configuration — `docker compose up -d godot-builder`. Point the "
-            "variable elsewhere only to use a builder you host yourself",
+            "no configuration — `aitelier server` starts the guarded deployment. "
+            "Point the variable elsewhere only to use a builder you host yourself",
         without="the gate reports `gate_skipped` and the reviewer is told the "
                 "code shipped UNVERIFIED — it does not silently pass"),
     Dep("model_routes.json: vision",

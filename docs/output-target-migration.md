@@ -97,7 +97,7 @@ engine without the output-target contract. Rebuild the backend image, then recre
 
 ```sh
 docker compose build aitelier
-docker compose up -d aitelier
+aitelier server --recreate
 ```
 
 For an editable host installation use `pip install -e .` from the AItelier

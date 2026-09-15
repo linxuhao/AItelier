@@ -7,7 +7,8 @@ from skillflow.graph import PipelineGraph, StepNode
 from core import deployment_quiescence as dq
 
 
-def test_real_skillflow_cross_project_measurement_then_quiescence(tmp_path):
+def test_real_skillflow_cross_project_measurement_then_quiescence(
+        tmp_path, resource_authority):
     sf = SkillFlow(str(tmp_path / "skillflow.sqlite"))
     sf.register_graph(PipelineGraph(name="fixture", begin="work",
                                     steps=[StepNode(id="work")]))

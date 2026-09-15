@@ -98,7 +98,7 @@ def release_claim_on_cancel(sf, claimed) -> None:
             #
             # This used to call `fail_step(retryable=True)`, and that was the
             # whole bug on the deployed engine: it charges `retry_count`, so
-            # ONE `docker compose restart` — which cancels every gathered tick
+            # ONE unguarded container restart — which cancels every gathered tick
             # at once — cost every in-flight step a retry, and the fourth
             # restart failed the run outright with `last_error` blaming a step
             # that never failed. Adding the scheduler's release widened that

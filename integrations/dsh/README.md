@@ -21,10 +21,11 @@ This plugin is a *client*. It does not install or start AItelier — you need on
 
 ```bash
 git clone https://github.com/linxuhao/AItelier && cd AItelier
+python -m pip install -e .
 mkdir -p ~/.aitelier-secrets && chmod 700 ~/.aitelier-secrets
 printf '%s' "sk-your-deepseek-key" > ~/.aitelier-secrets/DEEPSEEK_API_KEY
 chmod 600 ~/.aitelier-secrets/DEEPSEEK_API_KEY
-docker compose up -d          # serves the API + MCP endpoint on 127.0.0.1:4444
+aitelier server               # guarded API + sidecar start on 127.0.0.1:4444
 ```
 
 The LLM key stays on the AItelier side and never travels through this plugin — see [Which API key goes where](#which-api-key-goes-where).

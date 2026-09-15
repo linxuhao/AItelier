@@ -50,12 +50,16 @@ Test config: `pytest.ini` (testpaths=tests, asyncio_mode=auto, `addopts = -m "no
 
 ### Docker deployment & secrets
 
-The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages it: `cli/server.py:ensure_server_running` reuses the container if it is up, otherwise runs `docker compose up -d aitelier`. Docker is mandatory — there is **no host-process fallback** (running uvicorn on the host would make DPE git commits use the host developer's `~/.gitconfig` identity instead of the image's `AItelier` identity).
+The backend + web UI run in Docker (`Dockerfile`, `docker-compose.yml`). The CLI auto-manages the complete deployment through `cli/server.py:ensure_server_running`. Docker is mandatory — there is **no host-process fallback** (running uvicorn on the host would make DPE git commits use the host developer's `~/.gitconfig` identity instead of the image's `AItelier` identity).
 
 ```bash
-docker compose up -d            # build (first run) + start; the CLI does this for you
+aitelier server                 # guarded build/start/reuse of all three services
+aitelier server --recreate      # guarded recreation of all three services
 docker compose logs -f          # tail
 ```
+
+Direct lifecycle mutations through Compose are unsafe and refused operator
+paths because they bypass the ownership cutover fence.
 
 - **Path-consistency:** host `~/.AItelier` is bind-mounted at the **same absolute path** inside the container, and `HOME` is set to the host home, so `Path.home()/.AItelier` and DB-stored absolute paths resolve identically on host (CLI) and in the container (server). Runs as host uid/gid so files keep host ownership.
 - **External access:** the container binds `0.0.0.0`, published as `127.0.0.1:4444` (loopback-only — the public path is a Cloudflare tunnel reaching `aitelier:4444` over the shared `edge` network). `AITELIER_ALLOW_EXTERNAL=1` disables the app-level localhost guard (requests arrive from the bridge/tunnel, never 127.0.0.1).

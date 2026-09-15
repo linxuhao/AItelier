@@ -2831,7 +2831,7 @@ def server(
     developer's `~/.gitconfig` identity instead of the image's. One entry point
     enforcing an invariant while another bypasses it is the invariant not
     existing. (Found by an agent installing from scratch: `aitelier server` bound
-    :4444 on the host, and the subsequent `docker compose up` died with
+    :4444 on the host, and the subsequent container start died with
     "address already in use".)
 
     `--no-docker` keeps the old behaviour for the cases that genuinely need it —

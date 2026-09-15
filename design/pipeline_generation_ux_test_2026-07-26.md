@@ -2713,7 +2713,7 @@ That is the sentence the maker needed and never received, across two drives and 
 laps. Surfacing a reason is only half the fix; surfacing a *readable* one is the rest.
 
 ### Operational note
-Two verification drives in this session were killed by my own `docker compose restart`
+Two verification drives in this session were killed by my own unguarded container restart
 mid-run — the butler drives these inline, so a restart kills the driver. Restart only
 between drives.
 

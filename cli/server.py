@@ -56,6 +56,7 @@ _COMPOSE_CONTAINERS = {
     "godot-builder": "aitelier-godot",
     _COMPOSE_SERVICE: "aitelier",
 }
+_CONTAINER_ID = re.compile(r"(?:[0-9a-f]{12}|[0-9a-f]{64})")
 _IMAGE_NAME = "aitelier:latest"
 
 
@@ -129,7 +130,7 @@ def _compose_files() -> list[str]:
 
     There used to be an opt-in `docker-compose.edge.yml` overlay carrying the
     cloudflared network, added here whenever AITELIER_EDGE_NETWORK was set. That
-    made the CLI and a hand-run `docker compose` disagree about which files were
+    made the CLI and a manual Compose invocation disagree about which files were
     in play, and on 2026-08-25 an unguarded direct Compose start
     recreated the container without the gateway network: healthy container,
     localhost still 200, public path gone, nothing said so. The network now
@@ -255,6 +256,7 @@ def _compose_ps_rows(text: str) -> list[dict]:
 def _guarded_service_errors() -> list[str]:
     """Return exact container identity/state/health failures for all services."""
     errors = []
+    observed_ids = {}
     for service in _COMPOSE_SERVICES:
         expected_name = _COMPOSE_CONTAINERS[service]
         try:
@@ -282,6 +284,25 @@ def _guarded_service_errors() -> list[str]:
                 f"{service} identity mismatch: expected {expected_name}, observed "
                 f"service={row.get('Service')!r} name={row.get('Name')!r}")
             continue
+        container_id = row.get("ID")
+        if (not isinstance(container_id, str)
+                or _CONTAINER_ID.fullmatch(container_id) is None):
+            errors.append(f"{service} has no concrete Docker container ID")
+            continue
+        reused = next(
+            ((known_id, known_service)
+             for known_id, known_service in observed_ids.items()
+             if (container_id.startswith(known_id)
+                 or known_id.startswith(container_id))),
+            None,
+        )
+        if reused is not None:
+            _known_id, prior_service = reused
+            errors.append(
+                f"{service} reuses container ID {container_id} already observed "
+                f"for {prior_service}")
+            continue
+        observed_ids[container_id] = service
         state = str(row.get("State", "")).casefold()
         health = str(row.get("Health", "")).casefold()
         if state != "running" or health != "healthy":
@@ -318,7 +339,7 @@ def _image_deps_are_stale() -> bool:
         ModuleNotFoundError: No module named 'mcp'
 
     Observed on a machine whose image predated the `mcp` dependency by five
-    days. It is invisible to anyone who habitually runs `up -d --build` — which
+    days. It is invisible to anyone who habitually rebuilds and recreates — which
     is every developer, and no new user.
 
     Compares the image's creation time against `pyproject.toml`'s mtime. A git

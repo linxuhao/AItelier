@@ -72,7 +72,8 @@ paths because they bypass the ownership cutover fence.
   contract before starting. Rebuild the image to change the installed engine;
   restart alone does not replace it. Ship a later engine change by publishing and
   verifying a new SkillFlow release, bumping the exact `skillflow-py==` pin in
-  `pyproject.toml`, then running `docker compose build aitelier && up -d`. A
+  `pyproject.toml`, then running `docker compose build aitelier` followed by
+  `aitelier server --recreate`. A
   `pip install` inside the running container lives in the writable layer and is
   lost on the next recreation.
 

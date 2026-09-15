@@ -1252,8 +1252,8 @@ findings (only the two pre-existing unconditional-edge cases, unchanged).
 
 F1 and F2 live in the host's editable `~/stepflow` checkout. Per `CLAUDE.md` the image
 installs `skillflow-py` from PyPI, so **the container does not have them**. Shipping
-them needs a version bump, a PyPI publish, a pin bump here, and
-`docker compose build aitelier && up -d`. Until then a re-drive exercises only the
+them needs a version bump, a PyPI publish, a pin bump here, an image build, and
+`aitelier server --recreate`. Until then a re-drive exercises only the
 host-side fixes (1.1, 2.1, 2.2, 3.1, 4.1) — which is most of the value, since 1.1
 delivers the gate errors without any framework change.
 

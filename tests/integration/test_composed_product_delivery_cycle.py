@@ -74,7 +74,8 @@ from pathlib import Path
 repo,out,log=map(Path,sys.argv[1:4])
 candidate=subprocess.run(['git','rev-parse','HEAD'],cwd=repo,check=True,
  text=True,capture_output=True).stdout.strip()
-payload={'verdict':'pass','candidate':candidate,'test_report':str(log),
+payload={'settled':True,'usable':True,'status':'completed',
+ 'verdict':'pass','candidate':candidate,'test_report':str(log),
  'test_report_sha256':hashlib.sha256(log.read_bytes()).hexdigest(),
  'reviewer':'independent-subprocess'}
 out.write_text(json.dumps(payload,sort_keys=True,indent=2)+'\\n')
@@ -91,6 +92,7 @@ def adjudicate(state, node, candidate, report, report_sha):
                                 f"worker-{node}", f"request-{node}")
     worker_report = report.with_name(f"{node}-candidate.json")
     worker_report.write_text(json.dumps({
+        "settled": True, "usable": True, "status": "candidate",
         "candidate": candidate, "producer": f"worker-{node}"}) + "\n")
     observed = external.observe(
         attempt["attempt_id"], f"candidate-{node}", 0, attempt["context_hash"],

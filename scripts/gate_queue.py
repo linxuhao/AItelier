@@ -192,7 +192,7 @@ def container_alive(ticket: str) -> bool:
     return bool(out.stdout.strip())
 
 
-def finalize(record: dict) -> dict:
+def finalize(record: dict, runner_rc: int | None = None) -> dict:
     """Read the exit FILE (never a pipe — a pipe eats the exit code) and flatten."""
     parent = report_parent(record["ticket"])
     exitf = parent / ("%s.gate.exit" % SUFFIX)
@@ -208,7 +208,7 @@ def finalize(record: dict) -> dict:
                       verdict={"0": "passed", "1": "failed"}[raw],
                       report_dir=str(parent))
     else:
-        record.update(state="failed", gate_exit_code=raw or None,
+        record.update(state="failed", gate_exit_code=raw or runner_rc,
                       error=record.get("error") or
                       ("no verdict: exit=%r manifest=%s"
                        % (raw, manifest.exists())))
@@ -242,7 +242,7 @@ def run_one(record: dict) -> None:
     if proc.returncode in (64, 65, 66) or proc.stderr.strip():
         record["error"] = "gate_run.sh rc=%d %s" % (proc.returncode,
                                                     proc.stderr.strip()[:400])
-    finalize(record)
+    finalize(record, proc.returncode)
     log("finished %s state=%s exit=%s" % (record["ticket"], record["state"],
                                           record["gate_exit_code"]))
 

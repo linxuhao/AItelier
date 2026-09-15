@@ -1,0 +1,219 @@
+"""Independent-shaped identity and executable-surface regression controls."""
+import json
+import subprocess
+from types import SimpleNamespace
+
+import pytest
+
+from cli import server
+from core import deployment_lifecycle as lifecycle
+
+IDS = {service: str(index) * 64 for index, service in enumerate(server._COMPOSE_SERVICES, 1)}
+
+
+def observation(service):
+    return {"ID": IDS[service], "Name": server._COMPOSE_CONTAINERS[service],
+            "Service": service, "State": "running", "Health": "healthy"}
+
+
+def container(service):
+    return {"Id": IDS[service], "Name": "/" + server._COMPOSE_CONTAINERS[service],
+            "Config": {"Labels": {"com.docker.compose.project": "review-project",
+                                   "com.docker.compose.service": service}},
+            "State": {"Running": True, "Status": "running", "Paused": False,
+                      "Restarting": False, "Dead": False, "Health": {"Status": "healthy"}}}
+
+
+@pytest.fixture
+def inventories(monkeypatch):
+    rows = {service: observation(service) for service in IDS}
+    current = {ident: container(service) for service, ident in IDS.items()}
+    calls = []
+    def compose(*args, **kwargs):
+        calls.append(args)
+        if args == ("config", "--format", "json"):
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"name": "review-project"}))
+        return SimpleNamespace(returncode=0, stdout=json.dumps([rows[args[-1]]]))
+    def run(argv, **kwargs):
+        calls.append(tuple(argv))
+        assert argv[:4] == ["docker", "inspect", "--type", "container"]
+        assert kwargs["env"] == server._compose_env()
+        assert kwargs["timeout"] == 15
+        if argv[-1] not in current:
+            return SimpleNamespace(returncode=1, stdout="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps([current[argv[-1]]]))
+    monkeypatch.setattr(server, "_compose", compose)
+    monkeypatch.setattr(server.subprocess, "run", run)
+    return rows, current, calls
+
+
+def test_full_identity_needs_two_correlated_current_authorities(inventories):
+    rows, current, calls = inventories
+    assert server._guarded_service_errors() == []
+    assert calls[0] == ("config", "--format", "json")
+    assert [call[-1] for call in calls if call[0] == "docker"] == list(IDS.values())
+
+
+@pytest.mark.parametrize("value", [None, "", "a" * 12, "a" * 63, "a" * 65,
+                                   "A" * 64, "g" * 64, "a" * 64 + "\n", 12, True])
+def test_bad_census_id_never_reaches_inspect(inventories, value):
+    rows, current, calls = inventories
+    rows["zvec-grep"]["ID"] = value
+    assert server._guarded_service_errors()
+    assert not any(call[0] == "docker" and call[-1] == value for call in calls)
+
+
+def test_syntactically_valid_fabricated_or_stale_id_is_refused(inventories):
+    rows, current, calls = inventories
+    rows["zvec-grep"]["ID"] = "a" * 64
+    assert any("corroboration" in error for error in server._guarded_service_errors())
+
+
+@pytest.mark.parametrize("path,value", [
+    (("Id",), "a" * 64), (("Name",), "/aitelier-zg-old"),
+    (("Config", "Labels", "com.docker.compose.project"), "other-project"),
+    (("Config", "Labels", "com.docker.compose.service"), "godot-builder"),
+    (("State", "Running"), False), (("State", "Running"), 1),
+    (("State", "Status"), "exited"), (("State", "Paused"), True),
+    (("State", "Restarting"), True), (("State", "Dead"), True),
+    (("State", "Health", "Status"), "starting"),
+    (("State", "Health", "Status"), "unhealthy"),
+    (("Config", "Labels"), None), (("State", "Health"), None),
+])
+def test_inspect_identity_labels_and_live_state_fail_closed(inventories, path, value):
+    rows, current, calls = inventories
+    target = current[IDS["zvec-grep"]]
+    for field in path[:-1]:
+        target = target[field]
+    target[path[-1]] = value
+    assert any("zvec-grep container corroboration" in error for error in server._guarded_service_errors())
+
+
+@pytest.mark.parametrize("payload", ["", "null", "{}", "[]", "[{},{}]", "[true]", "{"])
+def test_malformed_inspect_is_not_identity(inventories, monkeypatch, payload):
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=payload))
+    assert server._guarded_service_errors()
+
+
+@pytest.mark.parametrize("failure", [PermissionError("denied"), subprocess.TimeoutExpired("docker inspect", 15)])
+def test_inspect_unavailable_is_not_identity(inventories, monkeypatch, failure):
+    def fail(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(server.subprocess, "run", fail)
+    assert server._guarded_service_errors()
+
+
+def test_duplicate_and_cross_service_id_refused(inventories):
+    rows, current, calls = inventories
+    rows["godot-builder"]["ID"] = IDS["zvec-grep"]
+    assert any("reuses container ID" in error for error in server._guarded_service_errors())
+    rows["zvec-grep"]["ID"], rows["godot-builder"]["ID"] = IDS["godot-builder"], IDS["zvec-grep"]
+    assert len(server._guarded_service_errors()) == 2
+
+
+@pytest.mark.parametrize("project", [None, "", "UPPER", "../other", 42])
+def test_project_resolution_must_be_authoritative(inventories, monkeypatch, project):
+    monkeypatch.setattr(server, "_compose", lambda *a, **k: SimpleNamespace(returncode=0, stdout=json.dumps({"name": project})))
+    assert any("project identity unavailable" in error for error in server._guarded_service_errors())
+
+
+@pytest.mark.parametrize("verb", sorted(lifecycle.LIFECYCLE_COMMANDS))
+@pytest.mark.parametrize("template", [
+    'docker compose {verb} aitelier',
+    'docker-compose -f config.yml --project-name=review {verb}',
+    'sudo -u root env X=1 bash -lc "docker --context=desktop compose -fconfig.yml {verb}"',
+    'docker compose \\\n --profile production \\\n {verb} aitelier',
+    'command /usr/bin/docker compose {verb}',
+    'exec -a worker docker compose {verb}',
+    'nice -5 bash -o pipefail -ec "docker compose {verb}"',
+])
+def test_all_lifecycle_verbs_and_shell_forms(verb, template):
+    assert lifecycle.shell_actions(template.format(verb=verb)) == [verb]
+
+
+@pytest.mark.parametrize("source", [
+    "echo ';' docker compose up", "printf '%s' '|' docker compose up",
+    "echo 'docker compose up -d'", "printf '%s' 'docker compose restart'",
+    'docker compose --dry-run up -d', 'docker compose --dry-run=true restart',
+    'echo docker compose up', "printf '%s' 'a; docker compose up'",
+    'echo "docker compose stop | docker compose start"',
+    'command -v docker compose up',
+    'docker compose --help', 'docker compose',
+    'docker compose logs --follow', 'docker compose ps --all',
+])
+def test_shell_data_and_readonly_controls(source):
+    assert lifecycle.shell_actions(source) == []
+
+
+@pytest.mark.parametrize("source", [
+    'echo harmless; docker compose up', 'echo harmless\ndocker compose up',
+    'printf "%s" harmless | docker compose up',
+    'docker compose --dry-run=false up',
+    'env -u FOO timeout 5 sh -ec "docker compose up"',
+    'do"cker" compose up', 'docker com\\pose up',
+])
+def test_command_heads_and_controls_are_not_data(source):
+    assert lifecycle.shell_actions(source) == ['up']
+
+
+@pytest.mark.parametrize("source", [
+    '_compose("down")',
+    'server._compose("start", "aitelier")',
+    'subprocess.run(["docker", "compose", "up", "-d"])',
+    'subprocess.run(["docker", "compose",\n "up", "-d"])',
+    'from subprocess import Popen as launch\nlaunch(["docker-compose", "pause"])',
+    'import subprocess as sp\ncmd = ["docker", "compose"] + ["stop"]\nsp.run(cmd)',
+    'cmd = ["docker", "compose"]\nsubprocess.check_call([*cmd, "scale", "aitelier=2"])',
+    'subprocess.run("docker compose kill", shell=True)',
+    'asyncio.create_subprocess_exec("docker", "compose", "watch")',
+])
+def test_python_call_structure_detects_lifecycle(source):
+    assert lifecycle.unguarded_findings("scripts/probe.py", source)
+
+
+@pytest.mark.parametrize("source", [
+    'print("docker compose up")', 'subprocess.run(["echo", "docker compose up"])',
+    'text = ["docker", "compose", "up"]',
+    'subprocess.run("docker compose up", shell=False)',
+    'subprocess.run(["docker", "compose", "--dry-run", "up"])',
+    '"""docker compose up"""',
+])
+def test_python_data_is_not_execution(source):
+    assert lifecycle.python_findings(source) == []
+
+
+@pytest.mark.parametrize("source,expected", [
+    ('Prose says docker compose up is unsafe.', False),
+    ('```text\ndocker compose up\n```', False),
+    ('```sh\ndocker compose \\\n up\n```', True),
+    ('Run `docker compose start aitelier`.', True),
+    ('Print `echo "docker compose up"`.', False),
+    ('```python\nprint("docker compose up")\n```', False),
+    ('```python\nsubprocess.run(["docker", "compose", "up"])\n```', True),
+    ('```\ndocker compose start\n```', True),
+    ('trailing marker\n```', False),
+    ('```sh\ndocker compose start', True),
+    ("```sh\necho 'docker compose up'", False),
+    ('```sh\nprintf "%s" "docker compose up"\n```', False),
+])
+def test_markdown_executable_regions_only(source, expected):
+    assert bool(lifecycle.source_findings('README.md', source)) is expected
+
+
+@pytest.mark.parametrize("verb", sorted(lifecycle.LIFECYCLE_COMMANDS - {"up"}))
+def test_guard_allowlist_is_exact_route_and_verb(verb):
+    assert lifecycle.unguarded_findings('cli/server.py', f'def restart_server():\n _compose("{verb}")')
+    assert lifecycle.unguarded_findings('cli/server.py', f'def unrelated():\n _compose("up")')
+    assert lifecycle.unguarded_findings('other/server.py', f'def restart_server():\n _compose("up")')
+    assert lifecycle.unguarded_findings('cli/server.py', 'def restart_server():\n _compose("up")') == []
+
+
+
+def test_raw_subprocess_cannot_borrow_guarded_helper_allowlist():
+    source = 'def restart_server():\n subprocess.run(["docker", "compose", "up"])'
+    assert lifecycle.unguarded_findings('cli/server.py', source)
+
+
+def test_lifecycle_contract_verbs_are_complete_independent_of_implementation():
+    required = {"create", "start", "run", "up", "down", "restart", "stop", "kill", "rm", "pause", "unpause", "scale", "watch"}
+    assert lifecycle.LIFECYCLE_COMMANDS == required

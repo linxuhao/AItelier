@@ -105,3 +105,32 @@ and flock semantics. It does not claim distributed locking over NFS, immunity to
 privileged deletion/replacement, or independent validation of arbitrary executable
 source. Tests use temporary resources and harmless children; live deployment and
 restart acceptance require separately authorized evidence.
+
+## Current container identity and executable lifecycle audit
+
+Readiness requires three distinct full 64-character lowercase hexadecimal IDs,
+with the exact service and container names. Compose resolves its current project
+name with `config --format json`; each ID is then independently queried using
+`docker inspect --type container ID` under the same Docker environment. The full
+ID, name, Compose project/service labels, running state, and healthy status must
+agree. Missing, abbreviated, stale, malformed or unavailable observations abort
+readiness. This corroborates the current Docker objects; it cannot make sequential
+Docker observations atomic against an uncooperative administrator.
+
+`core/deployment_lifecycle.py` owns the reviewed lifecycle verb contract and the
+static source audit. Shell blocks are lexed as complete POSIX command text with
+shlex (including continuations and command wrappers), Python subprocess argv and
+internal dispatcher calls are read through the AST, and Markdown contributes only
+executable fences or explicit command literals. Echo/printf data and Compose dry
+runs do not mutate lifecycle. Container creation/start/run, up/down, restart,
+stop/kill/rm, pause/unpause, scale and watch are denied outside the two reviewed
+internal `_compose` call sites; gate-order tests exercise those sites separately.
+Unknown Compose verbs are denied pending review. This is a regression audit of
+supported source forms, not permission enforcement for arbitrary generated Python
+or shell code. Generated/dynamic commands require explicit review; they cannot be
+advertised as a supported deployment route based only on this static scan.
+
+The implementation uses maintained Python `ast` and `shlex` APIs and Docker's
+public JSON APIs. No new runtime parser or process-observation dependency is
+introduced. Docker build, live health, controlled replacement and restart evidence
+remain separate acceptance requirements.

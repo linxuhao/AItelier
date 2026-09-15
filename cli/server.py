@@ -56,7 +56,7 @@ _COMPOSE_CONTAINERS = {
     "godot-builder": "aitelier-godot",
     _COMPOSE_SERVICE: "aitelier",
 }
-_CONTAINER_ID = re.compile(r"(?:[0-9a-f]{12}|[0-9a-f]{64})")
+_CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 _IMAGE_NAME = "aitelier:latest"
 
 
@@ -253,10 +253,41 @@ def _compose_ps_rows(text: str) -> list[dict]:
     return []
 
 
+def _inspect_guarded_container(container_id: str) -> dict:
+    # Pin the object type and full ID; never resolve a display-name/prefix here.
+    result = subprocess.run(
+        ["docker", "inspect", "--type", "container", container_id],
+        env=_compose_env(), capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"container inspect exited {result.returncode}")
+    rows = json.loads(result.stdout)
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise ValueError("container inspect did not return one object")
+    return rows[0]
+
+
+def _compose_project() -> str:
+    # Ask Compose to resolve -f, overlays, .env and COMPOSE_PROJECT_NAME using
+    # exactly the same environment as the guarded lifecycle command.
+    result = _compose("config", "--format", "json", capture_output=True,
+                      text=True, timeout=15)
+    if result.returncode != 0:
+        raise RuntimeError("Compose project resolution failed")
+    project = json.loads(result.stdout)["name"]
+    if not isinstance(project, str) or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project) is None:
+        raise ValueError("Compose project identity is unavailable")
+    return project
+
+
 def _guarded_service_errors() -> list[str]:
     """Return exact container identity/state/health failures for all services."""
     errors = []
     observed_ids = {}
+    try:
+        project = _compose_project()
+    except Exception as exc:
+        return [f"Compose project identity unavailable: {type(exc).__name__}: {exc}"]
     for service in _COMPOSE_SERVICES:
         expected_name = _COMPOSE_CONTAINERS[service]
         try:
@@ -289,18 +320,10 @@ def _guarded_service_errors() -> list[str]:
                 or _CONTAINER_ID.fullmatch(container_id) is None):
             errors.append(f"{service} has no concrete Docker container ID")
             continue
-        reused = next(
-            ((known_id, known_service)
-             for known_id, known_service in observed_ids.items()
-             if (container_id.startswith(known_id)
-                 or known_id.startswith(container_id))),
-            None,
-        )
-        if reused is not None:
-            _known_id, prior_service = reused
+        if container_id in observed_ids:
             errors.append(
                 f"{service} reuses container ID {container_id} already observed "
-                f"for {prior_service}")
+                f"for {observed_ids[container_id]}")
             continue
         observed_ids[container_id] = service
         state = str(row.get("State", "")).casefold()
@@ -309,6 +332,21 @@ def _guarded_service_errors() -> list[str]:
             errors.append(
                 f"{service} is not ready: state={state or 'missing'} "
                 f"health={health or 'missing'}")
+        try:
+            current = _inspect_guarded_container(container_id)
+            labels = current["Config"]["Labels"]
+            state = current["State"]
+            if (current["Id"] != container_id
+                    or current["Name"] != "/" + expected_name
+                    or labels["com.docker.compose.project"] != project
+                    or labels["com.docker.compose.service"] != service):
+                raise ValueError("current container identity/Compose labels mismatch")
+            if (state["Running"] is not True or state["Status"] != "running"
+                    or state["Paused"] is not False or state["Restarting"] is not False
+                    or state["Dead"] is not False or state["Health"]["Status"] != "healthy"):
+                raise ValueError("current container is not running and healthy")
+        except Exception as exc:
+            errors.append(f"{service} container corroboration failed: {type(exc).__name__}: {exc}")
     return errors
 
 

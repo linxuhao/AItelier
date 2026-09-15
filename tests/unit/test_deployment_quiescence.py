@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sqlite3
 import subprocess
 import threading
@@ -1623,7 +1622,20 @@ def _compose_health_row(
     return json.dumps([row])
 
 
-def test_guarded_service_readiness_proves_exact_topology(monkeypatch):
+@pytest.fixture
+def corroborated_containers(monkeypatch):
+    from cli import server
+    monkeypatch.setattr(server, "_compose_project", lambda: "aitelier")
+    def inspect(container_id):
+        service = next(key for key, value in _TEST_CONTAINER_IDS.items() if value == container_id)
+        return {"Id": container_id, "Name": "/" + server._COMPOSE_CONTAINERS[service],
+                "Config": {"Labels": {"com.docker.compose.project": "aitelier", "com.docker.compose.service": service}},
+                "State": {"Running": True, "Status": "running", "Paused": False,
+                          "Restarting": False, "Dead": False, "Health": {"Status": "healthy"}}}
+    monkeypatch.setattr(server, "_inspect_guarded_container", inspect)
+
+
+def test_guarded_service_readiness_proves_exact_topology(monkeypatch, corroborated_containers):
     from cli import server
 
     calls = []
@@ -1671,7 +1683,7 @@ def test_guarded_service_identity_matches_shipped_compose_topology():
     ],
 )
 def test_guarded_service_readiness_fails_closed(
-        monkeypatch, service, override, fragment):
+        monkeypatch, service, override, fragment, corroborated_containers):
     from cli import server
 
     def compose(*args, **kwargs):
@@ -1697,7 +1709,7 @@ def test_guarded_service_readiness_fails_closed(
     assert any(service in error and fragment in error for error in errors)
 
 
-def test_guarded_service_readiness_accepts_distinct_short_docker_ids(monkeypatch):
+def test_guarded_service_readiness_rejects_distinct_short_docker_ids(monkeypatch, corroborated_containers):
     from cli import server
 
     short_ids = {"zvec-grep": "1" * 12, "godot-builder": "2" * 12,
@@ -1710,7 +1722,7 @@ def test_guarded_service_readiness_accepts_distinct_short_docker_ids(monkeypatch
                 args[-1], container_id=short_ids[args[-1]]),
         ),
     )
-    assert server._guarded_service_errors() == []
+    assert len(server._guarded_service_errors()) == 3
 
 
 @pytest.mark.parametrize("semantic_id,godot_id", [
@@ -1718,7 +1730,7 @@ def test_guarded_service_readiness_accepts_distinct_short_docker_ids(monkeypatch
     ("a" * 12, "a" * 64),
 ])
 def test_guarded_service_readiness_rejects_reused_container_id(
-        monkeypatch, semantic_id, godot_id):
+        monkeypatch, semantic_id, godot_id, corroborated_containers):
     from cli import server
 
     ids = {"zvec-grep": semantic_id, "godot-builder": godot_id,
@@ -1732,8 +1744,7 @@ def test_guarded_service_readiness_rejects_reused_container_id(
         ),
     )
     errors = server._guarded_service_errors()
-    assert any("godot-builder reuses container ID" in error
-               and "zvec-grep" in error for error in errors)
+    assert any("reuses container ID" in error or "no concrete" in error for error in errors)
 
 
 def test_reuse_requires_exact_health_for_all_services(monkeypatch):
@@ -1784,69 +1795,11 @@ def test_redeploy_health_failure_aborts_pending_journal(monkeypatch):
     assert terminal == [(False, "godot-builder unhealthy")]
 
 
-_LIFECYCLE_COMMANDS = frozenset(
-    {"up", "down", "restart", "recreate", "stop", "kill", "rm"})
-_DOCKER_VALUE_OPTIONS = frozenset(
-    {"--config", "--context", "-c", "--host", "-h", "--log-level", "-l"})
-_DOCKER_FLAG_OPTIONS = frozenset({"--debug", "-d", "--tls", "--tlsverify"})
-_COMPOSE_VALUE_OPTIONS = frozenset({
-    "--ansi", "--env-file", "--file", "-f", "--parallel", "--profile",
-    "--progress", "--project-directory", "--project-name", "-p",
-})
-_COMPOSE_FLAG_OPTIONS = frozenset(
-    {"--all-resources", "--compatibility", "--dry-run", "--verbose"})
+from core.deployment_lifecycle import shell_actions, unguarded_findings
 
 
-def _command_tokens(line):
-    return [token.strip("()[]{}<>,;:'\"").casefold()
-            for token in re.findall(r"[^\s`]+", line)]
-
-
-def _after_global_options(tokens, index, *, values, flags):
-    while index < len(tokens):
-        token = tokens[index]
-        if token in flags:
-            index += 1
-            continue
-        if token in values:
-            if index + 1 >= len(tokens):
-                return len(tokens)
-            index += 2
-            continue
-        if any(token.startswith(option + "=") and token != option + "="
-               for option in values if option.startswith("--")):
-            index += 1
-            continue
-        if any(token.startswith(option) and token != option
-               for option in values if option in {"-c", "-f", "-h", "-l", "-p"}):
-            index += 1
-            continue
-        break
-    return index
-
-
-def _has_compose_lifecycle_mutation(line):
-    tokens = _command_tokens(line)
-    for index, token in enumerate(tokens):
-        command_index = None
-        if token in {"compose", "docker-compose"}:
-            command_index = index + 1
-        elif token == "docker":
-            compose_index = _after_global_options(
-                tokens, index + 1, values=_DOCKER_VALUE_OPTIONS,
-                flags=_DOCKER_FLAG_OPTIONS)
-            if (compose_index < len(tokens)
-                    and tokens[compose_index] == "compose"):
-                command_index = compose_index + 1
-        if command_index is None:
-            continue
-        command_index = _after_global_options(
-            tokens, command_index, values=_COMPOSE_VALUE_OPTIONS,
-            flags=_COMPOSE_FLAG_OPTIONS)
-        if (command_index < len(tokens)
-                and tokens[command_index] in _LIFECYCLE_COMMANDS):
-            return True
-    return False
+def _has_compose_lifecycle_mutation(source):
+    return bool(shell_actions(source))
 
 
 @pytest.mark.parametrize("command", [
@@ -1868,7 +1821,6 @@ def test_operator_inventory_recognizes_compose_global_options(command):
     "docker compose build aitelier",
     "docker compose logs -f",
     "docker compose ps --all",
-    "docker compose run helper --input up",
     "docker composure -f docker-compose.yml up -d",
 ])
 def test_operator_inventory_keeps_non_lifecycle_commands_clean(command):
@@ -1887,12 +1839,11 @@ def test_all_tracked_operator_surfaces_avoid_direct_compose_mutations():
                 or relative.endswith((".lock", ".png", ".pdf", ".sqlite3"))):
             continue
         try:
-            lines = (root / relative).read_text().splitlines()
+            source = (root / relative).read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        for number, line in enumerate(lines, 1):
-            if _has_compose_lifecycle_mutation(line):
-                hits.append(f"{relative}:{number}:{line.strip()}")
+        for finding in unguarded_findings(relative, source):
+            hits.append(f"{relative}:{finding.line}:{finding.function}:{finding.action}")
     assert hits == [], "direct Compose lifecycle bypasses the cutover gate:\n" + "\n".join(hits)
 
 

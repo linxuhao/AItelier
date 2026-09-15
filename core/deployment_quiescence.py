@@ -898,6 +898,9 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
 
         transaction_bytes = (json.dumps(transaction, sort_keys=True, indent=2,
                                         ensure_ascii=True) + "\n").encode("utf-8")
+        anchor_path = _anchor_path(path)
+        anchor_bytes = (json.dumps(_checkpoint(target), sort_keys=True, indent=2,
+                                   ensure_ascii=True) + "\n").encode("utf-8")
         # Refuse every known divergent recovery object before installing a
         # missing one. A forged later object must not leave a new partial proof
         # that could be mistaken for progress on a subsequent recovery.
@@ -905,7 +908,9 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
                 (backup, raw, "legacy backup already exists with different bytes"),
                 (source, raw, "legacy migration source already exists with different bytes"),
                 (transaction_path, transaction_bytes,
-                 "legacy migration transaction already exists with different bytes")):
+                 "legacy migration transaction already exists with different bytes"),
+                (anchor_path, anchor_bytes,
+                 "migration transaction does not match durable anchor")):
             with _open_existing_backup(target_path) as existing:
                 if existing is not None and existing[2] != payload:
                     raise DeploymentBlocked(mismatch)
@@ -933,11 +938,12 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
                                    (source, accepted_source),
                                    (transaction_path, accepted_transaction))
                         _validate_open_evidence(entries)
-                        anchor_path = _anchor_path(path)
                         if anchor_path.exists():
-                            if _read_journal_json(anchor_path) != _checkpoint(target):
-                                raise DeploymentBlocked(
-                                    "migration transaction does not match durable anchor")
+                            with _open_existing_backup(anchor_path) as accepted_anchor:
+                                if (accepted_anchor is None
+                                        or accepted_anchor[2] != anchor_bytes):
+                                    raise DeploymentBlocked(
+                                        "migration transaction does not match durable anchor")
                         else:
                             _atomic_write(anchor_path, _checkpoint(target))
                         # This is the finite identity boundary: every descriptor is still

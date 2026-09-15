@@ -34,6 +34,8 @@ COMPOSE_VALUES = {"--ansi", "--env-file", "--file", "-f", "--parallel", "--profi
                   "--progress", "--project-directory", "--project-name", "-p"}
 COMPOSE_FLAGS = {"--all-resources", "--compatibility", "--dry-run", "--verbose"}
 SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "fish"}
+# Shell argv cannot contain NUL, so literal source cannot spoof this parser marker.
+_DYNAMIC_COMPOSE = "\0dynamic-compose"
 
 
 def _options(argv, index, values, flags):
@@ -107,48 +109,160 @@ def _sed_field(program, start, delimiter):
     return None, len(program)
 
 
+def _sed_address_end(program, start):
+    """Return an address end, start for no address, or None if malformed."""
+    if start >= len(program):
+        return start
+    value = program[start]
+    if value.isdigit():
+        end = start + 1
+        while end < len(program) and program[end].isdigit():
+            end += 1
+        if end < len(program) and program[end] == "~":
+            end += 1
+            number = end
+            while end < len(program) and program[end].isdigit():
+                end += 1
+            if end == number:
+                return None
+        return end
+    if value == "$":
+        return start + 1
+    if value in {"+", "~"}:
+        end = start + 1
+        while end < len(program) and program[end].isdigit():
+            end += 1
+        return end if end > start + 1 else start
+    if value == "/":
+        _, end = _sed_field(program, start + 1, value)
+        return end if end <= len(program) and program[end - 1:end] == value else None
+    if value == "\\" and start + 1 < len(program):
+        delimiter = program[start + 1]
+        _, end = _sed_field(program, start + 2, delimiter)
+        return end if end <= len(program) and program[end - 1:end] == delimiter else None
+    return start
+
+
+def _sed_skip_addresses(program, start):
+    end = _sed_address_end(program, start)
+    if end is None or end == start:
+        return end
+    while end < len(program) and program[end] in " \t":
+        end += 1
+    if end < len(program) and program[end] == ",":
+        end += 1
+        while end < len(program) and program[end] in " \t":
+            end += 1
+        second = _sed_address_end(program, end)
+        if second is None or second == end:
+            return None
+        end = second
+    while end < len(program) and program[end] in " \t":
+        end += 1
+    return end
+
+
+def _sed_boundary(program, start, *, line_only=False):
+    positions = [position for position in (program.find("\n", start),)
+                 if position >= 0]
+    if not line_only:
+        positions.extend(position for position in (program.find(";", start),)
+                         if position >= 0)
+    return min(positions, default=len(program))
+
+
 def _sed_program_actions(program):
-    """Recognize only literal GNU sed commands which invoke a shell."""
+    """Walk literal GNU sed commands without scanning regex/replacement data."""
+    if program == _DYNAMIC_COMPOSE:
+        return ["unknown"]
     if type(program) is not str or program == "<dynamic>":
-        return ["unknown"] if program == "<dynamic>" else []
+        return []
     actions = []
-
-    # GNU sed's `e command` executes command via the shell. Addresses are
-    # deliberately narrow; unfamiliar forms carrying Compose fail closed.
-    execute = re.compile(
-        r"(?:^|[;\n])\s*(?:(?:\d+|\$|/(?:\\.|[^/])*/)(?:\s*,\s*"
-        r"(?:\d+|\$|/(?:\\.|[^/])*/))?\s*)?e(?:[ \t]+([^;\n]+))?"
-    )
-    for match in execute.finditer(program):
-        command = match.group(1)
-        if not command:
-            actions.append("unknown")
-        else:
-            actions.extend(shell_actions(command))
-
-    # In GNU sed, the `e` flag on s/// executes the replacement as a shell
-    # command. Parse only the delimiter structure needed to isolate that exact
-    # replacement; never execute or generally interpret a sed program.
     index = 0
     while index < len(program):
-        match = re.search(r"(?:^|[;\n])\s*(?:\d+|\$)?\s*s([^\\\w\s])",
-                          program[index:])
-        if match is None:
+        while index < len(program) and program[index] in " \t;\n":
+            index += 1
+        if index >= len(program):
             break
-        delimiter = match.group(1)
-        cursor = index + match.end()
-        _, cursor = _sed_field(program, cursor, delimiter)
-        replacement, cursor = _sed_field(program, cursor, delimiter)
-        if replacement is None:
-            break
-        flag_end = min((position for position in (
-            program.find(";", cursor), program.find("\n", cursor))
-            if position >= 0), default=len(program))
-        flags = program[cursor:flag_end].strip()
-        if "e" in flags:
-            actions.extend(shell_actions(replacement))
-        index = max(flag_end + 1, cursor + 1)
+        if program[index] == "#":
+            index = _sed_boundary(program, index, line_only=True) + 1
+            continue
 
+        command_at = _sed_skip_addresses(program, index)
+        if command_at is None:
+            return _unknown_compose_literal([program])
+        index = command_at
+        while index < len(program) and program[index] in " \t":
+            index += 1
+        if index < len(program) and program[index] == "!":
+            index += 1
+            while index < len(program) and program[index] in " \t":
+                index += 1
+        if index >= len(program):
+            return _unknown_compose_literal([program])
+
+        command = program[index]
+        index += 1
+        if command in "{}":
+            continue
+        if command == "e":
+            end = _sed_boundary(program, index, line_only=True)
+            shell = program[index:end].lstrip()
+            actions.extend(shell_actions(shell) if shell else ["unknown"])
+            index = end + 1
+            continue
+        if command == "s":
+            if index >= len(program) or program[index].isalnum() or program[index].isspace():
+                return _unknown_compose_literal([program])
+            delimiter = program[index]
+            pattern, cursor = _sed_field(program, index + 1, delimiter)
+            replacement, cursor = _sed_field(program, cursor, delimiter)
+            if pattern is None or replacement is None:
+                return _unknown_compose_literal([program])
+            end = _sed_boundary(program, cursor)
+            flags = program[cursor:end].lstrip()
+            match = re.match(r"[0-9gIpweMm]*", flags)
+            flag_token = match.group(0)
+            remainder = flags[len(flag_token):]
+            if remainder and not ("w" in flag_token and remainder[:1].isspace()):
+                return _unknown_compose_literal([program])
+            if "e" in flag_token:
+                actions.extend(shell_actions(replacement))
+            index = end + 1
+            continue
+        if command == "y":
+            if index >= len(program) or program[index].isalnum() or program[index].isspace():
+                return _unknown_compose_literal([program])
+            delimiter = program[index]
+            source, cursor = _sed_field(program, index + 1, delimiter)
+            target, cursor = _sed_field(program, cursor, delimiter)
+            if source is None or target is None:
+                return _unknown_compose_literal([program])
+            index = _sed_boundary(program, cursor) + 1
+            continue
+        if command in "aci":
+            # Text commands consume data through the physical line.
+            index = _sed_boundary(program, index, line_only=True) + 1
+            continue
+        if command in "rRwW:btT":
+            # File names and labels are data.
+            index = _sed_boundary(program, index) + 1
+            continue
+        if command == "v":
+            end = _sed_boundary(program, index)
+            version = program[index:end].strip()
+            if version and re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version) is None:
+                return _unknown_compose_literal([program])
+            index = end + 1
+            continue
+        if command in "dDgGhHlnNpPqQxz=":
+            end = _sed_boundary(program, index)
+            argument = program[index:end].strip()
+            if argument and (command not in "lqQ" or not argument.isdigit()):
+                return _unknown_compose_literal([program])
+            index = end + 1
+            continue
+        return _unknown_compose_literal([program])
     return actions
 
 
@@ -160,6 +274,8 @@ def _sed_actions(argv):
         value = argv[index]
         if value == "--":
             index += 1
+            if not explicit and index < len(argv):
+                programs.append(argv[index])
             break
         if value in {"-e", "--expression"}:
             if index + 1 >= len(argv):
@@ -176,20 +292,64 @@ def _sed_actions(argv):
         if value in {"-f", "--file"}:
             if index + 1 >= len(argv):
                 return ["unknown"]
+            if argv[index + 1] == _DYNAMIC_COMPOSE:
+                return ["unknown"]
             explicit = True
             index += 2
             continue
         if value.startswith("--file="):
+            if (_DYNAMIC_COMPOSE in value
+                    or index + 1 < len(argv) and argv[index + 1] == _DYNAMIC_COMPOSE):
+                return ["unknown"]
             explicit = True
+            index += 1
+            continue
+        if value in {"-l", "--line-length"}:
+            if index + 1 >= len(argv):
+                return ["unknown"]
+            index += 2
+            continue
+        if value.startswith("--line-length="):
             index += 1
             continue
         if (value in {"-n", "--quiet", "--silent", "-E", "-r",
                       "--regexp-extended", "-s", "--separate", "-u",
-                      "--unbuffered", "-z", "--null-data", "--sandbox"}
+                      "--unbuffered", "-z", "--null-data", "--sandbox",
+                      "--debug", "--posix", "--binary", "--follow-symlinks",
+                      "--help", "--version"}
                 or value == "-i" or value.startswith("-i")
                 or value.startswith("--in-place")):
             index += 1
             continue
+        if value.startswith("-") and not value.startswith("--"):
+            cluster = value[1:]
+            position = 0
+            valid = True
+            while position < len(cluster):
+                option = cluster[position]
+                if option in "nErsuz":
+                    position += 1
+                    continue
+                if option == "i":
+                    position = len(cluster)  # the remainder is its backup suffix
+                    continue
+                if option in "ef":
+                    argument = cluster[position + 1:]
+                    if not argument:
+                        if index + 1 >= len(argv):
+                            return ["unknown"]
+                        index += 1
+                        argument = argv[index]
+                    if option == "e":
+                        programs.append(argument)
+                    explicit = True
+                    position = len(cluster)
+                    continue
+                valid = False
+                break
+            if valid:
+                index += 1
+                continue
         if value.startswith("-"):
             return _unknown_compose_literal(["sed", *argv])
         if not explicit:
@@ -309,9 +469,13 @@ def shell_actions(source):
     actions = []
 
     def literal(node):
-        if any(child.type in {"command_substitution", "process_substitution", "expansion", "simple_expansion"}
-               for child in descendants(node)):
-            return "<dynamic>"
+        dynamic = {"command_substitution", "process_substitution", "expansion",
+                   "simple_expansion"}
+        if node.type in dynamic or any(child.type in dynamic
+                                       for child in descendants(node)):
+            raw = node.text.decode()
+            return (_DYNAMIC_COMPOSE if _unknown_compose_literal([raw])
+                    else "<dynamic>")
         try:
             words = shlex.split(node.text.decode().replace("\\\n", ""))
             return words[0] if len(words) == 1 else "<dynamic>"
@@ -327,7 +491,13 @@ def shell_actions(source):
         if node.type == "command":
             name = node.child_by_field_name("name")
             if name is not None:
-                argv = [literal(name), *(literal(arg) for arg in node.children_by_field_name("argument"))]
+                arguments = list(node.children_by_field_name("argument"))
+                arguments.extend(
+                    child for child in node.named_children
+                    if child.type in {"command_substitution", "process_substitution"}
+                    and child not in arguments)
+                arguments.sort(key=lambda child: child.start_byte)
+                argv = [literal(name), *(literal(arg) for arg in arguments)]
                 actions.extend(_command_actions(argv))
         elif node.type == "ERROR" and ("docker" in node.text.decode() or "_compose" in node.text.decode()):
             actions.append("unknown")

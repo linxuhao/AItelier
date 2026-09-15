@@ -1206,6 +1206,31 @@ def test_wrong_hash_or_forged_anchor_cannot_recover_deployed_v1(tmp_path):
     assert _evidence_bytes(tmp_path) == before
 
 
+@pytest.mark.parametrize("missing", [
+    ("journal.json.legacy-v1.backup",),
+    ("journal.json.legacy-v1.source",),
+    ("journal.json.legacy-v1.backup", "journal.json.legacy-v1.source"),
+])
+def test_divergent_crash_prefix_anchor_refuses_before_restoring_evidence(
+        tmp_path, missing):
+    journal, raw = _deployed_v1_fixture(tmp_path)
+    expected = hashlib.sha256(raw).hexdigest()
+    request = dict(
+        journal=journal, expected_sha256=expected, actor="fixture-reviewer",
+        provenance="crash prefix fixture", legacy_format="deployed-v1")
+    dq.migrate_legacy_journal(**request)
+    journal.write_bytes(raw)
+    for name in missing:
+        journal.with_name(name).unlink()
+    journal.with_name("journal.json.anchor.json").write_text("{}\n")
+    before = _evidence_bytes(tmp_path)
+
+    with pytest.raises(dq.DeploymentBlocked, match="anchor"):
+        dq.migrate_legacy_journal(**request)
+
+    assert _evidence_bytes(tmp_path) == before
+
+
 def test_corrupt_journal_fails_closed(tmp_path):
     journal = tmp_path / "journal.json"
     journal.write_text("{}")

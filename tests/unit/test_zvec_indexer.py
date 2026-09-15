@@ -44,6 +44,7 @@ def _index(projects: Path, worktrees: Path, bin_dir: Path, **extra: str):
         "AITELIER_PROJECTS_DIR": str(projects),
         "AITELIER_WORKTREES_DIR": str(worktrees),
         "AITELIER_ZG_INDEXER_LIB_ONLY": "1",
+        "AITELIER_ZG_ENTRYPOINT": str(ENTRYPOINT),
         "ZG_TEST_LOG": str(bin_dir / "zg.log"),
         "PATH": f"{bin_dir}:{env['PATH']}",
         **extra,
@@ -130,7 +131,7 @@ def test_backlogs_prioritize_new_worktrees_without_starving_projects(tmp_path):
     )
 
 
-def test_failed_index_is_reported_and_retried_without_success_marker(tmp_path):
+def test_failed_index_requires_explicit_recovery_before_retry(tmp_path, resource_authority):
     projects = tmp_path / "projects"
     worktrees = tmp_path / "worktrees"
     repo = worktrees / "run-fail"
@@ -141,9 +142,15 @@ def test_failed_index_is_reported_and_retried_without_success_marker(tmp_path):
 
     first = _index(projects, worktrees, bin_dir, ZG_TEST_FAIL="1")
     assert "forced failure" in first.stderr
-    assert "index failed; will retry" in first.stderr
+    assert "index failed; explicit ownership recovery required" in first.stderr
     assert not (repo / ".zvec-grep").exists()
 
+    blocked = _index(projects, worktrees, bin_dir, ZG_TEST_FAIL="1")
+    assert "requires recovery" in blocked.stderr
+    assert len(log.read_text().splitlines()) == 1
+    owner = resource_authority.snapshot()[0][0]
+    resource_authority.recover(owner["owner_id"], owner["generation"],
+                               actor="pytest", reason="stub ended, no daemon or descendants")
     second = _index(projects, worktrees, bin_dir, ZG_TEST_FAIL="1")
     assert [line.split()[1] for line in log.read_text().splitlines()] == [str(repo), str(repo)]
-    assert "index failed; will retry" in second.stderr
+    assert "index failed; explicit ownership recovery required" in second.stderr

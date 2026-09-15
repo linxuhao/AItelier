@@ -196,6 +196,11 @@ services:
     # is search-only, so being reachable from the private network is fine.
     networks:
       - default
+    environment:
+      AITELIER_OWNERSHIP_DIR: ${HOME}/.AItelier/godot-control
+      AITELIER_SEMANTIC_CONTROL_DIR: ${HOME}/.AItelier/semantic-index-control
+      AITELIER_PROJECTS_DIR: ${HOME}/.AItelier/projects
+      AITELIER_WORKTREES_DIR: ${HOME}/.AItelier/worktrees
     volumes:
       - ${HOME}/.AItelier:${HOME}/.AItelier
     restart: unless-stopped
@@ -203,10 +208,10 @@ services:
     # the daemon unlinks its lock + leases. Give it time before the KILL.
     stop_grace_period: 20s
     healthcheck:
-      # No curl in the node image; an empty POST through the proxy answers 400
-      # when the daemon is up (anything <500), 502/refused when it is not.
+      # No curl in the node image; the fixed empty protocol health probe never invokes tools
+      # and remains available while deployment fences operation admission.
       test: ["CMD", "node", "-e",
-             "fetch('http://127.0.0.1:7998/mcp',{method:'POST'}).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+             "fetch('http://127.0.0.1:7998/health').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -226,6 +231,7 @@ services:
       # (the image's /tmp/godot-home is 0777; keep it off the read-only mount).
       HOME: /tmp/godot-home
       # Durable render ownership is shared with the deployment observer.
+      AITELIER_OWNERSHIP_DIR: /var/lib/aitelier-godot
       GODOT_LIFECYCLE_DB: /var/lib/aitelier-godot/owners.sqlite3
       GODOT_DEPLOYMENT_LOCK: /var/lib/aitelier-godot/deployment-admission.lock
       GODOT_RENDER_EFFECT_LOCK: /var/lib/aitelier-godot/render-effect.lock

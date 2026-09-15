@@ -33,16 +33,22 @@ prepare_repo() {
 }
 
 index_repo() {
+  python3 -m core.resource_ownership run semantic -- sh "$AITELIER_ZG_ENTRYPOINT" --index-one "$1"
+}
+
+index_one_owned() {
+  python3 -m core.resource_ownership verify semantic || return 1
   repo="$1"
   prepare_repo "$repo" || return 1
-  [ -d "$repo/.zvec-grep" ] && return 1
+  [ -d "$repo/.zvec-grep" ] && return 0
   echo "[zg-indexer] indexing new repo: $repo"
-  if index_output="$(zg index "$repo" --embedding "$EMBED" --mode server \
+  if index_output="$("${AITELIER_ZG_EXECUTABLE:-zg}" index "$repo" --embedding "$EMBED" --mode server \
       --hidden --glob '!**/.zvec-grep/**' 2>&1)"; then
     printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /'
   else
     printf '%s\n' "$index_output" | tail -2 | sed 's/^/[zg-indexer] /' >&2
-    echo "[zg-indexer] index failed; will retry next pass: $repo" >&2
+    echo "[zg-indexer] index failed; explicit ownership recovery required: $repo" >&2
+    return 1
   fi
 }
 
@@ -101,19 +107,20 @@ index_new_repos() {
   rm -f "$attempted"
 }
 
+if [ "${1:-}" = "--index-one" ]; then
+  index_one_owned "$2"
+  exit $?
+fi
+
 # Unit tests source the functions without starting processes or touching the
 # production daemon. This is intentionally not a runtime/agent-facing switch.
 if [ "${AITELIER_ZG_INDEXER_LIB_ONLY:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-# A container restart can leave daemon and per-index leases behind. This
-# sidecar is the sole index writer, so only its known roots are cleared.
-rm -f "$ZVEC_HOME/daemon/instance.lock"
-for parent in "$PROJECTS" "$WORKTREES"; do
-  [ -d "$parent" ] || continue
-  rm -f "$parent"/*/.zvec-grep/locks/daemon.json
-done
+# Stale daemon/index locks are evidence, never auto-deleted at startup.
+# Commission/recover the shared authority explicitly before launching services.
+python3 -c 'from core.semantic_index_control import IndexControl; import os; IndexControl(os.environ["AITELIER_SEMANTIC_CONTROL_DIR"], os.environ["AITELIER_WORKTREES_DIR"])' || exit 1
 
 # zg refuses non-loopback binds. The proxy exposes it only on the compose-private
 # network. TERM is forwarded so daemon-owned locks are normally removed.

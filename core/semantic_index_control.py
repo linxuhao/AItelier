@@ -20,6 +20,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from core import resource_ownership
+
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 
 
@@ -141,7 +143,7 @@ class IndexControl:
         if desired not in ("ready", "released"):
             raise ValueError("invalid index demand")
         rid = rec["run_id"]
-        with self.lock(timeout=2):
+        with resource_ownership.Authority().fence(), self.lock(timeout=2):
             root = str(validate_checkout(rec, self.managed_root))
             source = rec.get("source_repo") or rec.get("source")
             with self.connection() as conn:
@@ -181,6 +183,12 @@ class IndexControl:
                 WHERE done_revision != revision AND retry_after <= ?
                 ORDER BY (desired='released') DESC, activity_at DESC LIMIT 32""",
                 (time.time(),))]
+        if not jobs:
+            return []
+        with resource_ownership.operation("semantic"):
+            return self._process_jobs(jobs, execute, timeout, retry_seconds, embedding)
+
+    def _process_jobs(self, jobs, execute, timeout, retry_seconds, embedding):
         results = []
         for job in jobs:
             rid = job["run_id"]
@@ -224,8 +232,10 @@ class IndexControl:
                 results.append({"run_id": rid, "outcome": "busy", "error": str(exc)})
             except Exception as exc:  # noqa: BLE001 -- retain/degrade on unknown provider or I/O failures
                 error = f"{type(exc).__name__}: {exc}"[:500]
+                resource_ownership.retain()
                 self._finish(job, "error", error, retry_seconds)
                 results.append({"run_id": rid, "outcome": "error", "error": error})
+                break  # Do not issue more daemon work after uncertain settlement.
         return results
 
     def _finish(self, job: dict, outcome: str, error: str, retry_seconds: float):
@@ -254,8 +264,9 @@ class IndexControl:
     def _execute(command: list[str], *, timeout: float):
         # Timeout ends this client, not necessarily the daemon operation. Only
         # a successful subsequent server-mode drop can establish release.
+        command = [os.environ.get("AITELIER_ZG_EXECUTABLE", "zg"), *command[1:]]
         with open(os.devnull, "w") as null:
-            subprocess.run(command, check=True, timeout=timeout, stdout=null,
+            subprocess.run(command, pass_fds=resource_ownership.pass_fds(), check=True, timeout=timeout, stdout=null,
                            stderr=subprocess.STDOUT)
 
 

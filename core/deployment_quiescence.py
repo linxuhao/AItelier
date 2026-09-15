@@ -20,7 +20,6 @@ import json
 import math
 import os
 import re
-import shlex
 import sqlite3
 import stat
 import subprocess
@@ -69,7 +68,7 @@ JOURNAL_SUCCESSORS = {
 SIDECAR_DESIRED = frozenset({"ready", "released"})
 SIDECAR_OUTCOMES = frozenset({"pending", "ready", "released", "error"})
 EXTERNAL_OWNER_STATUSES = frozenset({"active", "paused", "unknown", "settled"})
-EXTERNAL_OWNER_KINDS = frozenset({"docker", "process"})
+EXTERNAL_OWNER_KINDS = frozenset({"docker", "process", "resource"})
 GODOT_OWNER_STATUSES = frozenset({"active", "owner_lost", "reconciled", "released"})
 UNKNOWN_PROCESS_ERROR_PREFIX = (
     "unregistered external measurement process has unknown ownership: ")
@@ -227,15 +226,18 @@ def evidence_path() -> Path:
 
 
 def admission_fence_path() -> Path:
-    return datadir.godot_control_dir() / "deployment-admission.lock"
+    from core.resource_ownership import directory
+    return directory() / "deployment-admission.lock"
 
 
 def _open_fence():
     path = admission_fence_path()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    stream = path.open("a+b")
-    os.chmod(path, 0o600)
-    return stream
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
+        os.close(fd)
+        raise RuntimeError("deployment admission fence is not an independent regular file")
+    return os.fdopen(fd, "r+b")
 
 
 def acquire_cutover_fence():
@@ -983,115 +985,40 @@ def _run_command(command: list[str]) -> subprocess.CompletedProcess:
                           check=False)
 
 
-def _command_has_identity(command: str, external_id: str) -> bool:
-    """Match an owner token without allowing an ID suffix collision."""
-    token = external_id.strip().lower()
-    if not token:
-        return False
-    try:
-        words = [word.lower() for word in shlex.split(command)]
-    except ValueError:
-        words = command.lower().split()
-    if token in words:
-        return True
-    boundary = r"(?<![a-z0-9_.-])" + re.escape(token) + r"(?![a-z0-9_.-])"
-    return re.search(boundary, command.lower()) is not None
-
-
-def _resident_service_identity(command: str) -> bool:
-    """Recognize only the executable identity of a resident service.
-
-    Repository, input, and output arguments are data.  They must not turn a
-    real evaluator into an ignored service merely because their path contains
-    a service name.
-    """
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        words = command.split()
-    if len(words) < 3:
-        return False
-    executable = Path(words[2]).name.lower()
-    if executable.startswith("zvec-grep"):
-        return True
-    if executable == "skillflow" or executable.startswith("skillflow-"):
-        return True
-    for index, word in enumerate(words[2:-1], start=2):
-        if word == "-m" and words[index + 1].lower() in {"skillflow", "skillflow_mcp"}:
-            return True
-    return False
-
-
 def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess]
                     = _run_command,
                     registered_external_owners: list[dict] | None = None
                     ) -> tuple[list[dict], list[str]]:
-    """Measure resident external processes without treating them as work.
+    """Container state is authoritative; process text is diagnostics ONLY.
 
-    Resident services are not blockers by themselves.  A Godot render/compile
-    command is a real owner even when its harness container is merely ``Up``;
-    that distinction keeps a live render from being hidden by a service row.
+    Owned effects must register at their launch boundary. Arbitrary Python,
+    shell, or source text cannot establish either ownership or its absence.
     """
-    owners: list[dict] = []
-    errors: list[str] = []
-    registered_external_owners = registered_external_owners or []
-    docker = runner(["docker", "ps", "--format",
-                     "{{.ID}}\t{{.Names}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Status}}"])
-    if docker.returncode == 0:
+    owners, errors = [], []
+    try:
+        docker = runner(["docker", "ps", "--format",
+                         '{{.ID}}\t{{.Names}}\t{{.Label "com.docker.compose.service"}}\t{{.Status}}'])
+        if docker.returncode:
+            raise RuntimeError((docker.stderr or "docker census failed")[:300])
         for line in (docker.stdout or "").splitlines():
             parts = line.split("\t", 3)
-            if len(parts) >= 2:
-                name = parts[1]
-                service = parts[2] if len(parts) > 2 else ""
-                render_service = ("godot" in name.lower()
-                                  and service not in {"", "godot-builder"})
-                owners.append({"kind": "docker", "id": parts[0],
-                               "name": name, "service": service,
-                               "status": parts[3] if len(parts) > 3 else "",
-                               "active": render_service,
-                               "resource": "render" if render_service else ""})
-    else:
-        errors.append(f"docker inventory failed: {(docker.stderr or '').strip()[:300]}")
-    processes = runner(["ps", "-axo", "pid=,ppid=,command="])
-    if processes.returncode == 0:
-        needles = ("godot-builder", "zvec-grep", "skillflow", "aitelier",
-                   "godot --", "godot --headless", "xvfb-run")
-        for line in (processes.stdout or "").splitlines():
-            lowered = line.lower()
-            measurement_name = bool(re.search(
-                r"(?:^|[^a-z0-9])(measurement|evaluation|evaluator|eval(?:[_-]?job)?|"
-                r"benchmark|playtest|judge|grader|grading|scor(?:e|ing)|"
-                r"assessment|assessor|rater|review|quality[_-]?check|"
-                r"metrics?|"
-                r"[a-z0-9]+[_-](?:worker|job)|[a-z0-9]+(?:worker|job))"
-                r"(?:[^a-z0-9]|$)", lowered)) or "--long-gate" in lowered
-            # These are already enumerated shared services, not an unknown
-            # evaluator worker whose ownership needs State admission.
-            unknown_measurement = measurement_name and not _resident_service_identity(line)
-            if any(needle in lowered for needle in needles) or unknown_measurement:
-                command = line.strip()
-                active = any(token in lowered for token in (
-                    "godot --", "godot --headless", "xvfb-run",
-                    "playtest", "render", "x11_input_smoke", "run_script")) or unknown_measurement
-                matched = next((row for row in registered_external_owners
-                                if row.get("status") in {"active", "paused", "unknown"}
-                                and isinstance(row.get("external_id"), str)
-                                and _command_has_identity(command, row["external_id"])), None)
-                ownership = "registered" if matched else "unregistered"
-                owners.append({"kind": "process", "command": command,
-                               "active": active,
-                               "resource": ("external_measurement" if unknown_measurement
-                                            else "render" if active else ""),
-                               **({"ownership": ownership} if unknown_measurement else {}),
-                               **({"attempt_id": matched["attempt_id"]}
-                                  if matched and matched.get("attempt_id") else {})})
-                if unknown_measurement:
-                    if not matched:
-                        errors.append(
-                            "unregistered external measurement process has unknown ownership: "
-                            + command[:500])
-    else:
-        errors.append(f"process inventory failed: {(processes.stderr or '').strip()[:300]}")
+            if len(parts) != 4 or not parts[0] or not parts[1] or not parts[3]:
+                raise ValueError("incomplete container census row")
+            owners.append({"kind": "docker", "id": parts[0], "name": parts[1],
+                           "service": parts[2], "status": parts[3], "active": False})
+    except Exception as exc:  # unavailable authoritative census fails closed
+        errors.append(f"docker inventory failed: {exc}")
+    try:
+        processes = runner(["ps", "-axo", "pid=,ppid=,command="])
+        if processes.returncode:
+            raise RuntimeError("process diagnostic unavailable")
+        count = len((processes.stdout or "").splitlines())
+        if count:
+            owners.append({"kind": "process", "command": f"process diagnostic: {count} rows (argv not retained)",
+                           "active": False, "diagnostic_only": True})
+    except Exception:
+        owners.append({"kind": "process", "command": "process diagnostic unavailable",
+                       "active": False, "diagnostic_only": True})
     return owners, errors
 
 
@@ -1115,6 +1042,8 @@ def _sidecar_rows(path: Path | None) -> tuple[list[dict], list[str]]:
 
 
 def _godot_rows(path: Path | None) -> tuple[list[dict], list[str]]:
+    if path is not None and path.is_symlink():
+        return [], [f"Godot owner ledger is a symlink: {path}"]
     if path is None or not path.exists():
         return [], []
     try:
@@ -1198,6 +1127,7 @@ def _db_rows(db) -> tuple[list[dict], list[dict], list[dict], list[str]]:
 
 
 def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
+            ownership_dir: Path | str | None = None,
             external_probe: Callable[[], list[dict]] | None = None,
             command_runner: Callable[[list[str]], subprocess.CompletedProcess]
             = _run_command) -> dict:
@@ -1285,21 +1215,28 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
         godot_db = Path(sidecar_db).parent.parent / "godot-control" / "owners.sqlite3"
     godot_rows, godot_errors = _godot_rows(godot_db)
     errors.extend(godot_errors)
-    resident_godot = [r for r in external
-                      if r.get("service") == "godot-builder"
-                      or "aitelier-godot" in str(r.get("name", "")).lower()
-                      or "godot-builder" in str(r.get("command", "")).lower()]
-    if resident_godot and (godot_db is None or not godot_db.is_file()):
-        errors.append(f"Godot owner ledger is missing while its shared sidecar is resident: {godot_db}")
-    if sidecar_db is not None and not Path(sidecar_db).exists():
-        shared = [r for r in external
-                  if r.get("service") in {"zvec-grep", "godot-builder"}
-                  or any(name in str(r.get("name", "")).lower()
-                         for name in ("zvec-grep", "aitelier-godot"))
-                  or any(name in str(r.get("command", "")).lower()
-                         for name in ("zvec-grep", "godot-builder", "godot"))]
-        if shared:
-            errors.append(f"shared sidecar ledger is missing: {sidecar_db}")
+    from core.resource_ownership import Authority
+    resource_rows, resource_errors = Authority(ownership_dir).snapshot()
+    errors.extend(resource_errors)
+    external.extend(resource_rows)
+    # Exact identities come from this repository's Compose definition, never
+    # substrings in unrelated names, argv, or diagnostic process displays.
+    for service, name, resource in (("godot-builder", "aitelier-godot", "godot"),
+                                    ("zvec-grep", "aitelier-zg", "semantic")):
+        resident = [r for r in external if r.get("kind") == "docker"
+                    and (r.get("service") == service or r.get("name") == name)]
+        if any(not str(r.get("status", "")).startswith("Up ") or "(Paused)" in str(r.get("status", "")) for r in resident):
+            errors.append(f"{service} container is not in a stable running state")
+        if resident:
+            if (len(resident) != 1 or not any(
+                    r["resource"] == resource + "-service" and r["lock_held"]
+                    and r.get("runtime_id") == resident[0].get("id")
+                    for r in resource_rows)):
+                errors.append(f"{service} resident without live mandatory service authority")
+            if resource == "godot" and (godot_db is None or not godot_db.is_file()):
+                errors.append(f"Godot owner ledger is missing while its shared sidecar is resident: {godot_db}")
+            if resource == "semantic" and (sidecar_db is None or not Path(sidecar_db).is_file()):
+                errors.append(f"semantic sidecar ledger is missing: {sidecar_db}")
 
     write_blockers = leases + admissions
     blockers = _normalized_owner_blockers(
@@ -1427,9 +1364,21 @@ def _validate_owner_inventories(observation: dict) -> str | None:
             return f"{prefix} has unknown kind {row.get('kind')!r}"
         if type(row.get("active")) is not bool:
             return f"{prefix} active must be a boolean"
-        identity_field = "id" if row["kind"] == "docker" else "command"
+        identity_field = "id" if row["kind"] in {"docker", "resource"} else "command"
         if not _nonempty_string(row.get(identity_field)):
             return f"{prefix} needs a non-empty {identity_field}"
+        if row["kind"] == "resource":
+            from core.resource_ownership import RESOURCES
+            if any(not _nonempty_string(row.get(field)) for field in (
+                    "owner_id", "operation_id", "project_id", "run_id", "runtime_id", "actor")):
+                return f"{prefix} needs a complete durable resource identity"
+            if (row.get("id") != row.get("owner_id") or row.get("resource") not in RESOURCES or row.get("status") != "active"
+                    or type(row.get("lock_held")) is not bool
+                    or not _nonnegative_int(row.get("generation"))
+                    or row.get("active") != (not row["resource"].endswith("-service") or not row["lock_held"])):
+                return f"{prefix} has inconsistent mandatory resource authority"
+        if row["kind"] == "process" and row.get("diagnostic_only") and row["active"]:
+            return f"{prefix} diagnostic process cannot claim ownership"
         if "ownership" in row and row["ownership"] not in {"registered", "unregistered"}:
             return f"{prefix} has unknown ownership {row.get('ownership')!r}"
 

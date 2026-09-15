@@ -85,3 +85,6 @@ COPY docker/godot/godot_harness.py /srv/godot_harness.py
 
 EXPOSE 8080
 CMD ["python3", "/srv/godot_harness.py", "--serve"]
+
+# Mandatory authority at direct, CLI, and HTTP effect boundaries.
+COPY core/resource_ownership.py core/datadir.py /srv/core/

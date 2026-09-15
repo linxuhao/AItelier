@@ -1180,7 +1180,7 @@ def test_external_inventory_uses_real_command_shape():
     assert calls[0][:2] == ["docker", "ps"]
 
 
-def test_active_godot_process_blocks_without_semantic_index_ledger(tmp_path):
+def test_resident_godot_requires_its_own_authority_not_semantic_ledger(tmp_path):
     sf = _quiet_sf()
     calls = []
 
@@ -1197,8 +1197,9 @@ def test_active_godot_process_blocks_without_semantic_index_ledger(tmp_path):
     observed = dq.measure(skillflow=sf, sidecar_db=tmp_path / "missing.sqlite3",
                           command_runner=runner)
     assert observed["quiescent"] is False
-    assert observed["blockers"]["external_active"][0]["resource"] == "render"
-    assert any(row["kind"] == "process" and row["active"] for row in observed["external_owners"])
+    assert any("Godot owner ledger is missing" in error for error in observed["errors"])
+    assert not any("semantic sidecar ledger" in error for error in observed["errors"])
+    assert all(not row["active"] for row in observed["external_owners"] if row["kind"] == "process")
 
 
 def test_authorized_action_is_aborted_when_compose_fails(tmp_path):
@@ -1371,7 +1372,7 @@ def test_missing_external_owner_row_fails_closed_against_active_attempt(tmp_path
                for row in observed["blockers"]["registered_external_owners"])
 
 
-def test_generic_external_measurement_process_fails_closed_when_unregistered():
+def test_generic_external_measurement_process_is_diagnostic():
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1382,9 +1383,8 @@ def test_generic_external_measurement_process_fails_closed_when_unregistered():
         )
 
     owners, errors = dq.external_owners(runner=runner)
-    assert any(owner.get("resource") == "external_measurement" and owner.get("active")
-               for owner in owners)
-    assert any("unregistered external measurement" in error for error in errors)
+    assert all(row["diagnostic_only"] and not row["active"] for row in owners)
+    assert errors == []
 
 
 @pytest.mark.parametrize("command_line", [
@@ -1392,16 +1392,16 @@ def test_generic_external_measurement_process_fails_closed_when_unregistered():
     "4323 1 python3 /tmp/judge_fixture.py --duration 600",
     "4324 1 python3 /tmp/metrics_collection.py --duration 600",
 ])
-def test_unregistered_evaluator_judge_and_metrics_processes_fail_closed(command_line):
+def test_evaluator_judge_and_metrics_names_are_diagnostic(command_line):
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout=command_line + "\n", stderr="")
 
     owners, errors = dq.external_owners(runner=runner)
-    assert owners[0]["active"] is True
-    assert owners[0]["ownership"] == "unregistered"
-    assert any("unknown ownership" in error for error in errors)
+    assert owners[0]["active"] is False
+    assert owners[0]["diagnostic_only"] is True
+    assert errors == []
 
 
 @pytest.mark.parametrize("command_line", [
@@ -1410,16 +1410,16 @@ def test_unregistered_evaluator_judge_and_metrics_processes_fail_closed(command_
     "4328 1 python3 /tmp/assessment_worker.py --duration 600",
     "4329 1 python3 /tmp/quality_check.py --duration 600",
 ])
-def test_grader_scoring_assessment_and_quality_processes_fail_closed(command_line):
+def test_grader_scoring_assessment_and_quality_names_are_diagnostic(command_line):
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout=command_line + "\n", stderr="")
 
     owners, errors = dq.external_owners(runner=runner)
-    assert owners[0]["active"] is True
-    assert owners[0]["ownership"] == "unregistered"
-    assert errors
+    assert owners[0]["active"] is False
+    assert owners[0]["diagnostic_only"] is True
+    assert errors == []
 
 
 @pytest.mark.parametrize("command_line", [
@@ -1428,35 +1428,35 @@ def test_grader_scoring_assessment_and_quality_processes_fail_closed(command_lin
     "4333 1 python3 /tmp/metric_worker.py --duration 600",
     "4334 1 python3 /tmp/evaluationWorker.py --duration 600",
 ])
-def test_nearby_evaluation_worker_names_fail_closed(command_line):
+def test_nearby_evaluation_worker_names_are_diagnostic(command_line):
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout=command_line + "\n", stderr="")
 
     owners, errors = dq.external_owners(runner=runner)
-    assert owners[0]["active"] is True
-    assert errors
+    assert owners[0]["active"] is False
+    assert errors == []
 
 
 @pytest.mark.parametrize("command_line", [
     "4335 1 python3 /tmp/grader_worker.py --repo /tmp/skillflow-candidate",
     "4336 1 python3 /tmp/rater_worker.py --index /tmp/zvec-grep-results",
 ])
-def test_service_names_in_measurement_arguments_do_not_suppress_unknown_work(command_line):
+def test_service_names_in_measurement_arguments_do_not_assert_ownership(command_line):
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout=command_line + "\n", stderr="")
 
     owners, errors = dq.external_owners(runner=runner)
-    assert owners[0]["active"] is True
-    assert owners[0]["resource"] == "external_measurement"
-    assert owners[0]["ownership"] == "unregistered"
-    assert errors
+    assert owners[0]["active"] is False
+    assert "resource" not in owners[0]
+    assert owners[0]["diagnostic_only"] is True
+    assert errors == []
 
 
-def test_registered_external_id_does_not_match_a_longer_token():
+def test_registered_external_id_never_binds_diagnostic_process_tokens():
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1473,11 +1473,11 @@ def test_registered_external_id_does_not_match_a_longer_token():
             "status": "active",
         }],
     )
-    assert owners[0]["ownership"] == "unregistered"
-    assert errors
+    assert owners[0]["diagnostic_only"] is True
+    assert errors == []
 
 
-def test_registered_supported_measurement_is_bound_to_its_state_owner():
+def test_registered_external_owner_is_not_inferred_from_process_text():
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1495,8 +1495,8 @@ def test_registered_supported_measurement_is_bound_to_its_state_owner():
         }],
     )
     assert errors == []
-    assert owners[0]["ownership"] == "registered"
-    assert owners[0]["attempt_id"] == "attempt-1"
+    assert owners[0]["diagnostic_only"] is True
+    assert "attempt_id" not in owners[0]
 
 
 @pytest.mark.parametrize("harness", ["evaluator", "judge", "metrics"])

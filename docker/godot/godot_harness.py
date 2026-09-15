@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -40,6 +41,8 @@ import tempfile
 import threading
 import time
 import uuid
+
+from core import resource_ownership
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -450,7 +453,7 @@ def _run(args: list[str], timeout: int, extra_env: dict | None = None,
     else:
         cmd = [GODOT_BIN, "--headless", *args]
     return subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, env=env,
+        cmd, pass_fds=resource_ownership.pass_fds(), capture_output=True, text=True, timeout=timeout, env=env,
     )
 
 
@@ -544,6 +547,7 @@ def _parse_every_script(dst: Path, timeout: int) -> tuple[str, int]:
     return (cp.stderr or "", n)
 
 
+@resource_ownership.protected("godot")
 def compile_project(project_dir: str, timeout: int = 120) -> dict:
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
@@ -1557,6 +1561,7 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
             "summary": summary}
 
 
+@resource_ownership.protected("godot")
 def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
                      input_action: str = "ui_accept", spec: dict | None = None,
                      timeout: int = 120) -> dict:
@@ -1614,6 +1619,7 @@ def _is_resolution_error(line: str) -> bool:
     return any(frag in line for frag in _RESOLUTION_ERRORS)
 
 
+@resource_ownership.protected("godot")
 def check_gdscript(files: list[str], timeout: int = 120) -> dict:
     """Parse-check GDScript files one at a time — the PER-TASK syntax gate.
 
@@ -1717,6 +1723,7 @@ def _script_log_excerpt(text: str) -> str:
     return text[:head] + marker + text[-(remaining - head):]
 
 
+@resource_ownership.protected("godot")
 def run_script(project_dir: str, scripts: list, timeout: int = 600) -> dict:
     """Run ``godot --headless --path <proj> -s <res://...>`` for each script.
 
@@ -1876,7 +1883,7 @@ def _free_display() -> str:
 
 def _xvfb_up(display: str, size: str = "960x704x24"):
     proc = subprocess.Popen(
-        ["Xvfb", display, "-screen", "0", size],
+        ["Xvfb", display, "-screen", "0", size], pass_fds=resource_ownership.pass_fds(),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
     return proc
@@ -1900,9 +1907,10 @@ def _await_ready(path: Path, deadline: float) -> dict:
 
 def _xdo(display: str, *args) -> None:
     env = dict(os.environ, DISPLAY=display)
-    subprocess.run(["xdotool", *args], env=env, capture_output=True, timeout=20)
+    subprocess.run(["xdotool", *args], pass_fds=resource_ownership.pass_fds(), env=env, capture_output=True, timeout=20)
 
 
+@resource_ownership.protected("godot")
 def x11_input_smoke(project_dir: str, timeout: int = 180) -> dict:
     """Drive the game in a real window with real X11 events.
 
@@ -1932,7 +1940,7 @@ def x11_input_smoke(project_dir: str, timeout: int = 180) -> dict:
     # turns into a parse error, and the autoloads never come up — which reads
     # as "the game is broken" rather than "the project was not imported".
     for _ in range(2):
-        subprocess.run([GODOT_BIN, "--headless", "--path", str(proj), "--import"],
+        subprocess.run([GODOT_BIN, "--headless", "--path", str(proj), "--import"], pass_fds=resource_ownership.pass_fds(),
                        capture_output=True, timeout=180)
 
     display = _free_display()
@@ -1940,7 +1948,7 @@ def x11_input_smoke(project_dir: str, timeout: int = 180) -> dict:
     env = dict(os.environ, DISPLAY=display,
                AITELIER_INPUT_GATE_REPORT=str(report))
     game = subprocess.Popen(
-        [GODOT_BIN, "--path", str(proj), "--resolution", "960x704", "--position", "0,0"],
+        [GODOT_BIN, "--path", str(proj), "--resolution", "960x704", "--position", "0,0"], pass_fds=resource_ownership.pass_fds(),
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     try:
@@ -2120,22 +2128,22 @@ class _Handler(BaseHTTPRequestHandler):
                       flush=True)
         try:
             if self.path == "/compile":
-                self._send(200, compile_project(proj))
+                self._send(200, compile_project(proj, _ownership=req))
             elif self.path == "/checkgd":
                 self._send(200, check_gdscript(
-                    req.get("files") or [], timeout=req.get("timeout", 120)))
+                    req.get("files") or [], timeout=req.get("timeout", 120), _ownership=req))
             elif self.path == "/script":
                 self._send(200, run_script(
                     proj, req.get("scripts") or [],
-                    timeout=req.get("timeout", 600)))
+                    timeout=req.get("timeout", 600), _ownership=req))
             elif self.path == "/x11_input_smoke":
                 self._send(200, x11_input_smoke(
-                    proj, timeout=int(req.get("timeout", 180))))
+                    proj, timeout=int(req.get("timeout", 180)), _ownership=req))
             elif self.path == "/playtest":
                 self._send(200, playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),
                     input_action=req.get("input_action", "ui_accept"),
-                    spec=req.get("spec")))
+                    spec=req.get("spec"), _ownership=req))
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:  # never crash the service on one bad project
@@ -2150,10 +2158,22 @@ class _Handler(BaseHTTPRequestHandler):
                     print(f"[harness] render owner release failed: {exc}", flush=True)
 
 
+@resource_ownership.protected("godot-service")
 def _serve():
+    with _lifecycle_connection():
+        pass
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), _Handler)
     print(f"godot-harness serving on :{PORT} (bin={GODOT_BIN})", flush=True)
-    srv.serve_forever()
+    # Graceful stop drains request threads before releasing resident authority.
+    def stop(_signum, _frame):
+        threading.Thread(target=srv.shutdown, daemon=True).start()
+    previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        srv.serve_forever()
+    finally:
+        srv.server_close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

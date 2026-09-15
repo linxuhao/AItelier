@@ -2817,6 +2817,8 @@ def rollback(
 def server(
     host: str = typer.Option("0.0.0.0", "--host", help="Bind host (--no-docker only)"),
     port: int = typer.Option(_DEFAULT_PORT, "--port", "-p", help="Bind port (--no-docker only)"),
+    recreate: bool = typer.Option(
+        False, "--recreate", help="Recreate the backend and both sidecars through the deployment gate."),
     no_docker: bool = typer.Option(
         False, "--no-docker",
         help="Run uvicorn in THIS process instead of the container. See the warning."),
@@ -2837,8 +2839,11 @@ def server(
     git identity — and says what it costs.
     """
     if not no_docker:
-        from cli.server import ensure_server_running
-        ensure_server_running(_DEFAULT_URL)
+        from cli.server import ensure_server_running, restart_server
+        if recreate is True:
+            restart_server(_DEFAULT_URL)
+        else:
+            ensure_server_running(_DEFAULT_URL)
         console.print(f"[green]Backend running[/green] at {_DEFAULT_URL} "
                       f"(container). Logs: docker compose logs -f")
         return

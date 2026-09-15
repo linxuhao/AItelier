@@ -38,12 +38,18 @@ render-only serialization to compile/checkgd. Semantic writers are likewise
 serial. Busy or stale ownership refuses admission; there is no automatic retry
 of uncertain effects. Idle semantic batches create no owner/history entry.
 
-Launchers pass their effect-lock descriptor to subprocesses. Closing the parent
-reference does not unlock inherited references. Normal completion releases the
-row only after obtaining the effect lock again, proving participating children
-closed theirs. Exceptions, nonzero zg results, unconfirmed child settlement and
-caught semantic provider failures retain the row. A successful resident service
-is not an active operation; a missing service lock makes it unknown and blocking.
+Launchers pass their effect-lock descriptor and an unlinked, per-generation
+capability descriptor to subprocesses. The authority stores only the capability
+digest. An internal entrypoint must present that inherited descriptor and the
+matching live row; reopening the named effect lock cannot borrow another owner's
+admission. Verification never treats lock contention as a capability or turns a
+free lock into authority, so it cannot steal a released generation during a
+race. Closing the parent effect-lock reference does not unlock inherited
+references. Normal completion releases the row only after
+obtaining the effect lock again, proving participating children closed theirs.
+Exceptions, nonzero zg results, unconfirmed child settlement and caught semantic
+provider failures retain the row. A successful resident service is not an active
+operation; a missing service lock makes it unknown and blocking.
 External custom harnesses remain responsible for their own complete worker tree
 and authenticated settlement declaration; this mechanism cannot certify a remote
 report's honesty.

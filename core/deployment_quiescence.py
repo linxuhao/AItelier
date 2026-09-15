@@ -1225,7 +1225,11 @@ def measure(*, skillflow, db=None, sidecar_db: Path | str | None = None,
                                     ("zvec-grep", "aitelier-zg", "semantic")):
         resident = [r for r in external if r.get("kind") == "docker"
                     and (r.get("service") == service or r.get("name") == name)]
-        if any(not str(r.get("status", "")).startswith("Up ") or "(Paused)" in str(r.get("status", "")) for r in resident):
+        if any(not str(r.get("status", "")).startswith("Up ")
+               or any(state in str(r.get("status", "")).casefold()
+                      for state in ("(paused)", "(unhealthy)",
+                                    "(health: starting)"))
+               for r in resident):
             errors.append(f"{service} container is not in a stable running state")
         if resident:
             if (len(resident) != 1 or not any(

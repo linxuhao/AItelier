@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -41,7 +42,7 @@ def test_admission_lifetime_uniqueness_and_completion(resource_authority, resour
         assert rows[0]["owner_id"] == lease.owner_id
         assert rows[0]["lock_held"] is True
         assert rows[0]["active"] is (not resource.endswith("-service"))
-        assert ro.pass_fds() == (lease.fd,)
+        assert ro.pass_fds() == (lease.fd, lease.capability_fd)
         with pytest.raises(RuntimeError, match="unsettled"):
             authority.acquire(resource)
         with pytest.raises(BlockingIOError):
@@ -114,6 +115,37 @@ def test_concurrent_admission_has_exactly_one_winner(resource_authority):
     assert len(leases) == 1
     assert len(history(resource_authority)) == 1
     leases[0].close(settled=True)
+
+
+def test_recovery_and_fresh_admission_race_finishes_without_deadlock(resource_authority):
+    for index in range(30):
+        stale = resource_authority.acquire("godot", operation_id=f"stale-{index}")
+        stale.close(settled=False)
+        barrier = threading.Barrier(2)
+        result = {}
+
+        def recover():
+            barrier.wait()
+            resource_authority.recover(
+                stale.owner_id, stale.generation,
+                actor="pytest", reason="fixture has no child")
+
+        def acquire():
+            barrier.wait()
+            try:
+                result["lease"] = resource_authority.acquire(
+                    "godot", operation_id=f"next-{index}")
+            except RuntimeError:
+                pass
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(recover), pool.submit(acquire)]
+            for future in futures:
+                future.result(timeout=2)
+        lease = result.get("lease") or resource_authority.acquire(
+            "godot", operation_id=f"after-{index}")
+        lease.close(settled=True)
+        assert resource_authority.snapshot() == ([], [])
 
 
 def test_cutover_excludes_sidecar_admission(resource_authority):
@@ -285,6 +317,43 @@ def test_internal_index_entry_refuses_unregistered_invocation(resource_authority
     assert result.returncode != 0
     assert "requires inherited" in result.stderr
     assert not marker.exists() and history(resource_authority) == []
+
+
+@pytest.mark.parametrize("borrowed", ["effect-lock", "anonymous-capability"])
+def test_inherited_verifier_rejects_borrowed_fd(resource_authority, borrowed):
+    lease = resource_authority.acquire("semantic", operation_id="legitimate-owner")
+    code = r'''
+import json, os, sys, tempfile
+from core.resource_ownership import require_inherited
+if sys.argv[4] == "effect-lock":
+    fd = os.open(sys.argv[1], os.O_RDWR)
+else:
+    borrowed = tempfile.TemporaryFile()
+    borrowed.write(b"x" * 32)
+    borrowed.flush()
+    fd = borrowed.fileno()
+os.environ["AITELIER_RESOURCE_LEASE"] = json.dumps({
+    "resource": "semantic", "owner_id": sys.argv[2],
+    "generation": int(sys.argv[3]), "fd": fd,
+})
+try:
+    require_inherited("semantic")
+except Exception as exc:
+    print(type(exc).__name__)
+    raise SystemExit(0)
+raise SystemExit(9)
+'''
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code,
+             str(resource_authority.root / "semantic.effect.lock"),
+             lease.owner_id, str(lease.generation), borrowed],
+            capture_output=True, text=True, env={**os.environ})
+        assert result.returncode == 0
+        assert result.stdout.strip() == "RuntimeError"
+        assert resource_authority.snapshot()[0][0]["lock_held"]
+    finally:
+        lease.close(settled=True)
 
 
 @pytest.mark.parametrize("resource", ["godot", "semantic-service"])
@@ -499,6 +568,30 @@ def test_matching_idle_service_with_own_ledger_is_quiet(resource_authority, tmp_
         assert not semantic_db.exists()
 
 
+@pytest.mark.parametrize("status", [
+    "Up 1 minute (unhealthy)",
+    "Up 1 second (health: starting)",
+])
+def test_exact_semantic_resident_must_be_stably_healthy(
+        resource_authority, tmp_path, monkeypatch, status):
+    monkeypatch.setattr(ro.socket, "gethostname", lambda: "runtime-cid")
+    from core.semantic_index_control import IndexControl
+    semantic_db = tmp_path / "semantic-index-control" / "control.sqlite3"
+    IndexControl(semantic_db.parent, tmp_path / "worktrees")
+
+    def runner(argv):
+        output = (f"runtime-cid\taitelier-zg\tzvec-grep\t{status}\n"
+                  if argv[0] == "docker" else "")
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    with ro.operation("semantic-service", authority=resource_authority):
+        result = dq.measure(
+            skillflow=QuietSkillFlow(), ownership_dir=resource_authority.root,
+            sidecar_db=semantic_db, command_runner=runner)
+    assert not result["quiescent"]
+    assert any("stable running state" in error for error in result["errors"])
+
+
 def test_proxy_refuses_unavailable_authority_before_upstream(resource_authority, tmp_path):
     import http.client
     import shutil
@@ -599,6 +692,7 @@ def test_live_harmless_interpreters_obey_resource_acquisition_not_spelling(resou
 
 
 def test_compose_authority_namespace_and_unique_service_keys():
+    from cli import server
     import yaml
     class UniqueLoader(yaml.SafeLoader):
         pass
@@ -612,6 +706,9 @@ def test_compose_authority_namespace_and_unique_service_keys():
     UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, mapping)
     root = Path(__file__).resolve().parents[2]
     services = yaml.load((root / "docker-compose.yml").read_text(), Loader=UniqueLoader)["services"]
+    assert set(server._COMPOSE_SERVICES) == {
+        "aitelier", "zvec-grep", "godot-builder",
+    }
     semantic = services["zvec-grep"]
     assert semantic["environment"]["AITELIER_OWNERSHIP_DIR"] == "${HOME}/.AItelier/godot-control"
     assert semantic["environment"]["AITELIER_SEMANTIC_CONTROL_DIR"] == "${HOME}/.AItelier/semantic-index-control"

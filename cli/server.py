@@ -2,8 +2,8 @@
 # Detect, start, and reuse the AItelier backend.
 #
 # The backend runs ONLY as a Docker container (docker-compose.yml): the CLI
-# reuses the container if it is already up, otherwise starts it with
-# `docker compose up -d aitelier`. There is no host-process fallback — running
+# reuses the deployment if it is already up, otherwise starts all three
+# Compose services through the deployment gate. There is no host-process fallback — running
 # uvicorn directly on the host would make DPE git commits use the host
 # developer's ~/.gitconfig identity instead of the image's AItelier identity.
 
@@ -49,6 +49,7 @@ _COMPOSE_FILE = _PROJECT_ROOT / "docker-compose.yml"
 _OPTIONAL_SECRETS = ("GITHUB_TOKEN",)
 
 _COMPOSE_SERVICE = "aitelier"
+_COMPOSE_SERVICES = ("zvec-grep", "godot-builder", _COMPOSE_SERVICE)
 _IMAGE_NAME = "aitelier:latest"
 
 
@@ -215,13 +216,13 @@ def _compose(*args: str, **kwargs) -> subprocess.CompletedProcess:
 
 
 def _container_running() -> bool:
-    """True if the compose service container is up."""
+    """True if every service in the guarded deployment is up."""
     try:
         res = _compose(
             "ps", "--status", "running", "--services",
             capture_output=True, text=True, timeout=15,
         )
-        return _COMPOSE_SERVICE in res.stdout.split()
+        return set(_COMPOSE_SERVICES).issubset(res.stdout.split())
     except Exception:
         return False
 
@@ -307,7 +308,7 @@ def _warn_if_edge_network_is_alone() -> None:
 
 
 def _compose_up():
-    """Start (building on first run) the backend container."""
+    """Start (building on first run) the guarded backend and sidecars."""
     _ensure_host_dirs()
     rebuild = []
     if not _image_exists():
@@ -317,10 +318,10 @@ def _compose_up():
               "(the source is mounted, but its packages are not).")
         rebuild = ["--build"]
     # Inherit stdout/stderr so build + startup progress is visible.
-    res = _compose("up", "-d", *rebuild, _COMPOSE_SERVICE)
+    res = _compose("up", "-d", *rebuild, *_COMPOSE_SERVICES)
     if res.returncode != 0:
         raise RuntimeError(
-            f"`docker compose up -d {_COMPOSE_SERVICE}` failed (see output above)"
+            "guarded Compose deployment failed (see output above)"
         )
     _warn_if_edge_network_is_alone()
 
@@ -408,22 +409,24 @@ def _require_docker() -> None:
 
 
 def ensure_server_running(base_url: str, max_wait: int = 120) -> bool:
-    """Ensure the Docker backend is up: reuse the container if it is running,
-    otherwise `docker compose up -d aitelier`. Raises if Docker is unavailable
+    """Ensure the Docker backend and sidecars are up through the cutover gate.
+
+    Reuse the deployment if every service is running and the backend is healthy.
+    Raises if Docker is unavailable
     — there is no host-process fallback."""
     _require_docker()
     return _ensure_docker_backend(base_url, max_wait)
 
 
 def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
-    """Restart the Docker backend."""
+    """Recreate the guarded backend and both sidecars."""
     _require_docker()
     clearance = _require_deployment_clearance("restart")
     try:
-        restarted = _compose("restart", _COMPOSE_SERVICE)
+        restarted = _compose("up", "-d", "--force-recreate", *_COMPOSE_SERVICES)
         if restarted.returncode != 0:
             raise RuntimeError(
-                f"`docker compose restart {_COMPOSE_SERVICE}` failed with exit "
+                "guarded Compose recreation failed with exit "
                 f"{restarted.returncode}")
         client = httpx.Client(base_url=base_url, timeout=2.0)
         if not _wait_healthy(client, max_wait):

@@ -30,6 +30,10 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("resource_authority")
+
 _HARNESS = Path(__file__).resolve().parents[2] / "docker" / "godot" / "godot_harness.py"
 _spec = importlib.util.spec_from_file_location("godot_harness", _HARNESS)
 gh = importlib.util.module_from_spec(_spec)

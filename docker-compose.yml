@@ -1,6 +1,6 @@
 # docker-compose.yml — AItelier backend + web UI in Docker.
 #
-#   docker compose up -d        # build (first run) + start
+#   aitelier server             # guarded build/start/recreate of all services
 #   docker compose ps           # status
 #   docker compose logs -f      # tail logs
 #   docker compose down         # stop

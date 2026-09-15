@@ -11,6 +11,8 @@ import argparse
 import contextvars
 import fcntl
 import functools
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -20,6 +22,7 @@ import sys
 import threading
 import stat
 import subprocess
+import tempfile
 import uuid
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -92,6 +95,19 @@ class Authority:
             os.close(fd)
             raise
 
+    def _capability(self):
+        """Create an inherited capability that cannot be reopened by path."""
+        fd, path = tempfile.mkstemp(prefix=".resource-capability-", dir=self.root)
+        try:
+            os.unlink(path)
+            secret = os.urandom(32)
+            os.write(fd, secret)
+            os.fsync(fd)
+            return fd, hashlib.sha256(secret).hexdigest()
+        except BaseException:
+            os.close(fd)
+            raise
+
     @contextmanager
     def fence(self, *, exclusive=False):
         fd = self._lock("deployment-admission.lock", shared=not exclusive, blocking=True)
@@ -152,7 +168,7 @@ class Authority:
         if not all(isinstance(value, str) and value.strip() for value in
                    (operation_id, project_id, run_id)):
             raise ValueError("operation identity must be nonempty text")
-        fd = None
+        fd = capability_fd = None
         try:
             # Resident registration cannot wait behind cutover: deployment waits
             # for service health while holding that fence. Services may start,
@@ -166,14 +182,19 @@ class Authority:
                         raise RuntimeError("resource has an unsettled owner; explicit recovery required")
                     owner_id = uuid.uuid4().hex
                     fd = self._lock(effect_lock(resource, owner_id), create=resource == "semantic-request")
+                    capability_fd, capability_digest = self._capability()
                     generation = conn.execute(
-                        "INSERT INTO owners(owner_id,resource,operation_id,project_id,run_id,runtime_id,status,actor) VALUES(?,?,?,?,?,?,'active',?)",
-                        (owner_id, resource, operation_id, project_id, run_id, socket.gethostname(), "launcher:" + str(os.getpid()))).lastrowid
+                        "INSERT INTO owners(owner_id,resource,operation_id,project_id,run_id,runtime_id,status,actor,reason) VALUES(?,?,?,?,?,?,'active',?,?)",
+                        (owner_id, resource, operation_id, project_id, run_id,
+                         socket.gethostname(), "launcher:" + str(os.getpid()),
+                         "capability-sha256:" + capability_digest)).lastrowid
         except BaseException:
             if fd is not None:
                 os.close(fd)
+            if capability_fd is not None:
+                os.close(capability_fd)
             raise
-        return Lease(self, resource, owner_id, generation, fd)
+        return Lease(self, resource, owner_id, generation, fd, capability_fd)
 
     def recover(self, owner_id, generation, *, actor, reason):
         if not str(actor).strip() or not str(reason).strip():
@@ -241,15 +262,18 @@ class Authority:
 
 
 class Lease:
-    def __init__(self, authority, resource, owner_id, generation, fd):
+    def __init__(self, authority, resource, owner_id, generation, fd, capability_fd):
         self.authority, self.resource = authority, resource
-        self.owner_id, self.generation, self.fd = owner_id, generation, fd
+        self.owner_id, self.generation = owner_id, generation
+        self.fd, self.capability_fd = fd, capability_fd
         self.uncertain = False
 
     def close(self, *, settled):
         # Do not LOCK_UN: inherited child descriptors must retain the effect lock.
         os.close(self.fd)
         self.fd = None
+        os.close(self.capability_fd)
+        self.capability_fd = None
         if not settled:
             return
         with self.authority.connection(write=True) as conn:
@@ -285,7 +309,7 @@ def retain():
 
 def pass_fds():
     lease = _CURRENT.get()
-    return (lease.fd,) if lease is not None else ()
+    return (lease.fd, lease.capability_fd) if lease is not None else ()
 
 
 def protected(resource):
@@ -306,27 +330,29 @@ def require_inherited(resource):
     if not isinstance(value, dict) or value.get("resource") != resource:
         raise RuntimeError("internal effect requires inherited resource admission")
     authority = Authority()
+    if type(value.get("fd")) is not int:
+        raise RuntimeError("internal effect requires inherited resource capability")
     info = os.fstat(value["fd"])
-    path = authority.root / effect_lock(resource, value["owner_id"])
-    expected = path.stat()
-    if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
-        raise RuntimeError("inherited resource lock identity differs")
-    with authority.connection() as conn:
-        if not conn.execute("SELECT 1 FROM owners WHERE owner_id=? AND generation=? AND resource=? AND status='active'",
-                            (value["owner_id"], value["generation"], resource)).fetchone():
-            raise RuntimeError("inherited resource admission is no longer active")
-    try:
-        fd = authority._lock(effect_lock(resource, value["owner_id"]))
-    except BlockingIOError:
-        return
-    os.close(fd)
-    raise RuntimeError("inherited resource lock is not held")
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 0:
+        raise RuntimeError("inherited resource capability can be reopened")
+    secret = os.pread(value["fd"], 33, 0)
+    if len(secret) != 32:
+        raise RuntimeError("inherited resource capability is malformed")
+    rows, errors = authority.snapshot(family=resource.split("-")[0])
+    row = next((candidate for candidate in rows
+                if candidate.get("owner_id") == value.get("owner_id")
+                and candidate.get("generation") == value.get("generation")
+                and candidate.get("resource") == resource), None)
+    expected = "capability-sha256:" + hashlib.sha256(secret).hexdigest()
+    if (errors or row is None or not row.get("lock_held")
+            or not hmac.compare_digest(str(row.get("reason", "")), expected)):
+        raise RuntimeError("inherited resource admission is no longer active")
 
 
 def run_command(resource, command, *, authority=None):
     with operation(resource, authority=authority) as lease:
         capability = {"resource": resource, "owner_id": lease.owner_id,
-                      "generation": lease.generation, "fd": lease.fd}
+                      "generation": lease.generation, "fd": lease.capability_fd}
         env = {**os.environ, "AITELIER_RESOURCE_LEASE": json.dumps(capability)}
         child = subprocess.Popen(command, pass_fds=pass_fds(), env=env)
         received, previous = [], {}

@@ -13,6 +13,8 @@ import pytest
 
 from core import deployment_quiescence as dq
 
+pytestmark = pytest.mark.usefixtures("resource_authority")
+
 
 class FakeSkillFlow:
     def __init__(self, runs, audits):
@@ -1564,6 +1566,42 @@ def test_server_redeploy_gate_runs_before_compose(monkeypatch):
     assert events == [("gate", "redeploy"), ("compose",)]
 
 
+def test_guarded_compose_start_includes_both_sidecars(monkeypatch):
+    from cli import server
+
+    calls = []
+    monkeypatch.setattr(server, "_ensure_host_dirs", lambda: None)
+    monkeypatch.setattr(server, "_image_exists", lambda: True)
+    monkeypatch.setattr(server, "_image_deps_are_stale", lambda: False)
+    monkeypatch.setattr(server, "_warn_if_edge_network_is_alone", lambda: None)
+    monkeypatch.setattr(
+        server, "_compose",
+        lambda *args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0))
+    server._compose_up()
+    assert calls == [("up", "-d", "zvec-grep", "godot-builder", "aitelier")]
+
+
+def test_compose_reuse_requires_every_guarded_service(monkeypatch):
+    from cli import server
+
+    def compose(*args, **kwargs):
+        return SimpleNamespace(stdout="aitelier\nzvec-grep\n")
+
+    monkeypatch.setattr(server, "_compose", compose)
+    assert server._container_running() is False
+
+
+def test_documented_compose_start_is_guarded_and_complete():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    readme = (root / "README.md").read_text()
+    source = (root / "cli/server.py").read_text()
+    assert "docker compose up -d" not in readme
+    assert 'compose("up", "-d"' in source
+    assert "godot-builder" in source and "zvec-grep" in source
+
+
 def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
     from cli import server
 
@@ -1604,7 +1642,8 @@ def test_server_restart_gate_runs_before_restart(monkeypatch):
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
     assert server.restart_server("http://localhost:4444", 1) is True
     assert events[:3] == [("docker",), ("gate", "restart"),
-                          ("compose", "restart", "aitelier")]
+                          ("compose", "up", "-d", "--force-recreate",
+                           "zvec-grep", "godot-builder", "aitelier")]
 
 
 def test_server_measurement_failure_persists_aborted_evidence(tmp_path, monkeypatch):

@@ -55,7 +55,7 @@ def _index(projects: Path, worktrees: Path, bin_dir: Path, **extra: str):
     )
 
 
-def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
+def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path, resource_authority):
     projects = tmp_path / "projects"
     worktrees = tmp_path / "worktrees"
     source = projects / "source"
@@ -96,7 +96,7 @@ def test_indexes_project_and_linked_worktree_without_dirtying_git(tmp_path):
     assert len(log.read_text().splitlines()) == 2
 
 
-def test_backlogs_prioritize_new_worktrees_without_starving_projects(tmp_path):
+def test_backlogs_prioritize_new_worktrees_without_starving_projects(tmp_path, resource_authority):
     projects = tmp_path / "projects"
     worktrees = tmp_path / "worktrees"
     projects.mkdir()

@@ -138,9 +138,9 @@ def _clear_read_cache():
     _read_cache.clear()
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def resource_authority(tmp_path, monkeypatch):
-    """Every test gets an explicitly commissioned, isolated sidecar authority."""
+    """Commission an isolated sidecar authority for tests that request it."""
     from core.resource_ownership import Authority
     root = tmp_path / "resource-authority"
     monkeypatch.setenv("AITELIER_OWNERSHIP_DIR", str(root))

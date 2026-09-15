@@ -214,10 +214,16 @@ aitelier server                   # Backend container (start/reuse)
 
 ### Run with Docker (+ Cloudflare)
 
-The backend and web UI also ship as a container. The CLI starts it automatically if Docker is running (and reuses it if already up), or you can manage it directly:
+The backend, web UI, and sidecars ship as containers. Commission the shared
+resource authority once, after confirming no legacy Godot or semantic work is
+still running, then use the CLI so every start or recreate crosses the cutover
+fence:
 
 ```bash
-docker compose up -d              # multi-stage build (Node.js → Svelte bundle + Python runtime); serves API + web UI on :4444
+python -m core.resource_ownership --directory "$HOME/.AItelier/godot-control" initialize \
+  --actor "$USER" --reason 'Fresh install; no legacy sidecar effects exist'
+aitelier server                   # guarded full Compose start; serves API + web UI on :4444
+aitelier server --recreate        # guarded recreation of the backend and both sidecars
 docker compose logs -f
 ```
 
@@ -229,7 +235,7 @@ provider" (exception: a self-hosted endpoint with no auth still wants a
 placeholder file with any content — the OpenAI client refuses to start with no
 key at all).
 
-Before the first `docker compose up -d`, create both host dirs **as your
+Before commissioning and the first guarded start, create both host dirs **as your
 user** — if a bind-source dir does not exist, the Docker daemon creates it as
 `root:root`, and the container (which runs as your uid) crash-loops on
 `sqlite3.OperationalError: unable to open database file` without ever
@@ -247,9 +253,9 @@ falls back to the environment) — but then they sit in the container's
 environment where any subprocess that inherits it can see them. Files are the
 recommended path; that is the whole reason they exist.
 
-`docker compose up -d` also starts **aitelier-godot** — the compile/playtest
-sidecar for the game pipeline. Harmless if unused; `docker compose up -d aitelier`
-starts just the main service.
+`aitelier server` starts **aitelier-godot** and **aitelier-zg** with the main
+service. The guarded entrypoint measures ownership and holds the cutover fence
+before Compose may create or replace any of them.
 
 Publishing through an existing **cloudflared** connector is one line. The network
 lives in `docker-compose.yml` itself and is selected BY NAME, with no
@@ -306,7 +312,7 @@ dsh plugin --profile headless add <path-to>/AItelier/integrations/dsh
 echo 'AITELIER_MCP_URL=http://127.0.0.1:4444/mcp' >> ~/.dsh/.env   # where your AItelier runs
 ```
 
-Any other MCP host configures the same endpoint URL directly (streamable HTTP transport). It needs a running backend — [Install](#install) above, or `docker compose up -d`.
+Any other MCP host configures the same endpoint URL directly (streamable HTTP transport). It needs a running backend — use the guarded [Install](#install) flow above.
 
 ## Generate a workflow from a description
 

@@ -57,11 +57,12 @@ def test_transitive_internal_up_refuses_before_preparation(no_docker, monkeypatc
 
 
 def test_live_permit_authorizes_supported_up(permit, no_docker):
-    args = ('up', '-d', *server._COMPOSE_SERVICES)
+    args = ('up',)
     capability = server._mint_deployment_command(permit, args)
     server._compose(*args, capability=capability)
     assert len(no_docker) == 1
-    assert no_docker[0][:3] == ['docker', 'compose', 'up']
+    assert no_docker[0][:2] == ['docker', 'compose']
+    assert no_docker[0][-1] == 'up'
 
 
 @pytest.mark.parametrize('verb', sorted(LIFECYCLE_COMMANDS - {'up'}))
@@ -150,6 +151,29 @@ def test_one_operation_mints_only_one_command(permit, no_docker):
         server._mint_deployment_command(permit, ('up', '-d'))
 
 
+@pytest.mark.parametrize('args', [
+    ('up', '-d'),
+    ('up', 'zvec-grep'),
+    ('up', '-d', '--build', 'zvec-grep'),
+])
+def test_operation_refuses_alternate_partial_and_extra_commands(
+        permit, no_docker, args):
+    with pytest.raises(RuntimeError, match='fixed plan'):
+        server._mint_deployment_command(permit, args)
+    capability = server._mint_deployment_command(permit, 0)
+    server._compose('up', capability=capability)
+    assert len(no_docker) == 1
+
+
+def test_operation_refuses_unplanned_index_without_spending_planned_command(
+        permit, no_docker):
+    with pytest.raises(RuntimeError, match='already minted'):
+        server._mint_deployment_command(permit, 1)
+    capability = server._mint_deployment_command(permit, 0)
+    server._compose('up', capability=capability)
+    assert len(no_docker) == 1
+
+
 def test_explicit_receipt_copy_cannot_mint(permit, no_docker):
     with pytest.raises(RuntimeError, match='explicit deployment authority'):
         server._mint_deployment_command(dict(permit), ('up',))
@@ -196,19 +220,62 @@ def test_failed_dispatch_cannot_replay(permit, no_docker, monkeypatch):
         server._compose('up', capability=capability)
 
 
-def test_capability_freezes_full_argv_and_environment(permit, no_docker, monkeypatch):
+def test_capability_freezes_full_argv_and_environment_before_callbacks(
+        permit, no_docker, monkeypatch):
+    operation = server._OPERATIONS[permit['_operation']]
+    expected_argv = list(operation['command_plan'][0][1])
+    expected_env = dict(operation['command_plan'][0][2])
     monkeypatch.setattr(server, '_compose_files', lambda: ['-f', 'review.yml'])
     monkeypatch.setattr(server, '_compose_env', lambda: {'DOCKER_HOST': 'review'})
     capability = server._mint_deployment_command(permit, ('up',))
     monkeypatch.setattr(server, '_compose_files', lambda: ['-f', 'other.yml'])
     monkeypatch.setattr(server, '_compose_env', lambda: {'DOCKER_HOST': 'other'})
     def dispatch(argv, **kwargs):
-        assert argv == ['docker', 'compose', '-f', 'review.yml', 'up']
-        assert kwargs['env'] == {'DOCKER_HOST': 'review'}
+        assert argv == expected_argv
+        assert kwargs['env'] == expected_env
         no_docker.append(argv)
     monkeypatch.setattr(server.subprocess, 'run', dispatch)
     server._compose('up', capability=capability)
     assert len(no_docker) == 1
+
+
+def test_public_clearance_uses_plan_frozen_before_measurement_callback(
+        resource_authority, monkeypatch, tmp_path):
+    class Quiet:
+        def list_runs(self): return []
+
+    observation = dq.measure(
+        skillflow=Quiet(), ownership_dir=resource_authority.root,
+        command_runner=lambda argv: SimpleNamespace(
+            returncode=0, stdout='', stderr=''))
+    monkeypatch.setattr('api.dependencies.get_db_manager', lambda: None)
+    monkeypatch.setattr('api.dependencies.get_skillflow', Quiet)
+    monkeypatch.setattr(dq, 'evidence_path', lambda: tmp_path / 'journal.json')
+    monkeypatch.setattr(server, '_compose_files', lambda: ['-f', 'planned.yml'])
+    monkeypatch.setattr(server, '_compose_env', lambda: {'DOCKER_HOST': 'planned'})
+    plan = server._deployment_command_plan((('up', '-d', 'aitelier'),))
+
+    def measure(**kwargs):
+        monkeypatch.setattr(server, '_compose_files', lambda: ['-f', 'changed.yml'])
+        monkeypatch.setattr(server, '_compose_env', lambda: {'DOCKER_HOST': 'changed'})
+        return observation
+
+    monkeypatch.setattr(dq, 'measure', measure)
+    clearance = server._require_deployment_clearance('restart', plan)
+    calls = []
+    monkeypatch.setattr(
+        server.subprocess, 'run',
+        lambda argv, **kwargs: calls.append((argv, kwargs))
+        or SimpleNamespace(returncode=0))
+    try:
+        capability = server._mint_deployment_command(clearance, 0)
+        server._compose('up', '-d', 'aitelier', capability=capability)
+    finally:
+        server._finish_deployment(
+            clearance, success=False, error=RuntimeError('fixture settled'))
+    assert calls[0][0] == [
+        'docker', 'compose', '-f', 'planned.yml', 'up', '-d', 'aitelier']
+    assert calls[0][1]['env'] == {'DOCKER_HOST': 'planned'}
 
 
 def test_consumption_is_atomic_between_contenders(permit, no_docker, monkeypatch):
@@ -253,6 +320,31 @@ def test_command_planning_callback_cannot_mint_another_capability(permit, no_doc
     monkeypatch.setattr(server, '_compose_files', files)
     capability = server._mint_deployment_command(permit, ('up',))
     server._compose('up', capability=capability)
+    assert len(no_docker) == 1
+
+
+@pytest.mark.parametrize(('name', 'value'), [
+    ('executable', '/bin/echo'),
+    ('shell', True),
+    ('preexec_fn', lambda: None),
+    ('cwd', '/tmp'),
+    ('env', {'PATH': '/tmp'}),
+    ('start_new_session', True),
+    ('pass_fds', (9,)),
+])
+def test_execution_shape_overrides_refuse_before_consuming_capability(
+        permit, no_docker, name, value):
+    capability = server._mint_deployment_command(permit, 0)
+    with pytest.raises(RuntimeError, match=name):
+        server._compose('up', capability=capability, **{name: value})
+    server._compose('up', capability=capability)
+    assert len(no_docker) == 1
+
+
+def test_safe_subprocess_kwargs_remain_available(permit, no_docker):
+    capability = server._mint_deployment_command(permit, 0)
+    server._compose('up', capability=capability, capture_output=True, text=True,
+                    timeout=5, check=False)
     assert len(no_docker) == 1
 
 

@@ -1565,7 +1565,7 @@ def test_server_redeploy_gate_runs_before_compose(monkeypatch):
     monkeypatch.setattr(server, "_container_running", lambda: False)
     monkeypatch.setattr(server, "_find_server_pid", lambda port: None)
     monkeypatch.setattr(server, "_require_deployment_clearance",
-                        lambda action: events.append(("gate", action)) or {})
+                        lambda action, _plan: events.append(("gate", action)) or {})
     monkeypatch.setattr(
         server, "_compose_up", lambda _args, **_kwargs: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
@@ -1786,7 +1786,7 @@ def test_redeploy_health_failure_aborts_pending_journal(monkeypatch):
     monkeypatch.setattr(server.httpx, "Client", lambda *args, **kwargs: object())
     monkeypatch.setattr(server, "_container_running", lambda: False)
     monkeypatch.setattr(server, "_require_deployment_clearance",
-                        lambda _action: {"event": {"event_id": "gate"}})
+                        lambda _action, _plan: {"event": {"event_id": "gate"}})
     monkeypatch.setattr(server, "_compose_up", lambda _args, **_kwargs: None)
     monkeypatch.setattr(server, "_wait_healthy", lambda *_args: True)
     monkeypatch.setattr(
@@ -1871,7 +1871,7 @@ def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
     monkeypatch.setattr(server.os, "kill",
                         lambda *args: events.append(("kill", *args)))
     monkeypatch.setattr(server, "_require_deployment_clearance",
-                        lambda action: events.append(("gate", action)) or {})
+                        lambda action, _plan: events.append(("gate", action)) or {})
     monkeypatch.setattr(
         server, "_compose_up", lambda _args, **_kwargs: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
@@ -1895,7 +1895,7 @@ def test_server_restart_gate_runs_before_restart(monkeypatch):
     monkeypatch.setattr(server.httpx, "Client", Client)
     monkeypatch.setattr(server, "_require_docker", lambda: events.append(("docker",)))
     monkeypatch.setattr(server, "_require_deployment_clearance",
-                        lambda action: events.append(("gate", action)) or {})
+                        lambda action, _plan: events.append(("gate", action)) or {})
     monkeypatch.setattr(server, "_compose",
                         lambda *args, **kwargs: (
                             events.append(("compose", *args))
@@ -1947,7 +1947,8 @@ def test_restart_exit_137_is_aborted_even_if_old_health_still_answers(tmp_path, 
 
     events = []
     monkeypatch.setattr(server, "_require_docker", lambda: None)
-    monkeypatch.setattr(server, "_require_deployment_clearance", lambda _a: {"event": {"event_id": "gate"}})
+    monkeypatch.setattr(server, "_require_deployment_clearance",
+                        lambda _a, _plan: {"event": {"event_id": "gate"}})
     monkeypatch.setattr(server, "_compose", lambda *_a, **_kw: SimpleNamespace(returncode=137))
     monkeypatch.setattr(server, "_wait_healthy", lambda *_a: True)
     monkeypatch.setattr(server, "_finish_deployment",

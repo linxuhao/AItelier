@@ -354,3 +354,23 @@ def test_r25_markdown_executable_regions(source):
 ])
 def test_known_data_and_dryrun_remain_safe(source):
     assert lifecycle.shell_actions(source) == []
+
+
+@pytest.mark.parametrize('source', [
+    "cat 'docker compose up'",
+    "grep 'docker compose restart' README.md",
+    "sed 's/docker compose up/safe/' README.md",
+    "find . -name docker -a -name compose",
+    "test -f 'docker-compose up'",
+])
+def test_known_nonexecuting_data_consumers_remain_safe(source):
+    assert lifecycle.shell_actions(source) == []
+
+
+@pytest.mark.parametrize('source', [
+    "unknown-launcher 'docker compose up'",
+    "unknown-launcher docker --context review compose restart",
+    "find . -exec unknown-launcher 'docker compose up' ';'",
+])
+def test_unknown_literal_launchers_still_fail_closed(source):
+    assert lifecycle.shell_actions(source) == ['unknown']

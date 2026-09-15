@@ -98,7 +98,8 @@ def _command_actions(argv):
         return []
     head = Path(argv[0]).name
     rest = argv[1:]
-    if head in {"echo", "printf", "true", "false", ":"}:
+    if head in {"echo", "printf", "true", "false", ":", "cat", "grep",
+                "egrep", "fgrep", "sed", "test", "[", "[["}:
         return []
     if head == "eval":
         return ["unknown"] if "<dynamic>" in rest else shell_actions(" ".join(rest))
@@ -158,14 +159,13 @@ def _command_actions(argv):
                 break
         return _command_actions(rest)
     if head == "find":
-        actions, executable = [], False
+        actions = []
         for index, value in enumerate(rest):
             if value in {"-exec", "-execdir", "-ok", "-okdir"}:
-                executable = True
                 command = rest[index + 1:]
                 end = next((i for i, arg in enumerate(command) if arg in {";", "+"}), len(command))
                 actions.extend(_command_actions(command[:end]))
-        return actions if executable else _unknown_compose_literal(argv)
+        return actions
     if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", head):
         for index, option in enumerate(rest):
             if option == "-c" or (option.startswith("-") and not option.startswith("--") and option.endswith("c")):

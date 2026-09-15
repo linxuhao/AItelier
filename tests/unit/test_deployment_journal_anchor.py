@@ -1005,6 +1005,98 @@ def test_final_journal_publication_race_cannot_make_v2_loadable_without_valid_ev
         dq._load_journal(path)
 
 
+def replace_with_same_bytes(path, tmp_path):
+    before = (path.stat().st_dev, path.stat().st_ino)
+    replacement = tmp_path / f"same-byte-replacement-{path.name}"
+    replacement.write_bytes(path.read_bytes())
+    replacement.replace(path)
+    assert (path.stat().st_dev, path.stat().st_ino) != before
+
+
+@pytest.mark.parametrize("target_name", [
+    "journal", "backup", "source", "transaction", "anchor",
+])
+def test_preflight_descriptor_identity_remains_bound_through_publication(
+        tmp_path, monkeypatch, target_name):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    migrate(path)
+    path.write_bytes(raw)
+    targets = {
+        "journal": path,
+        "backup": path.with_name(path.name + ".legacy-v1.backup"),
+        "source": dq._migration_source_path(path),
+        "transaction": dq._migration_transaction_path(path),
+        "anchor": dq._anchor_path(path),
+    }
+    real_validate = dq._validate_open_evidence
+    calls = 0
+
+    def replace_after_preflight(entries):
+        nonlocal calls
+        real_validate(entries)
+        calls += 1
+        if calls == 1:
+            replace_with_same_bytes(targets[target_name], tmp_path)
+
+    monkeypatch.setattr(dq, "_validate_open_evidence", replace_after_preflight)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("target_name", ["journal", "anchor"])
+@pytest.mark.parametrize("boundary", ["before-receipt", "after-receipt"])
+def test_atomic_publication_receipt_is_bound_to_writer_inode(
+        tmp_path, monkeypatch, target_name, boundary):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    target = path if target_name == "journal" else dq._anchor_path(path)
+    hook = "_atomic_write_bytes" if boundary == "before-receipt" else "_atomic_write"
+    real_publish = getattr(dq, hook)
+    injected = False
+
+    def replace_after_publish(destination, value):
+        nonlocal injected
+        receipt = real_publish(destination, value)
+        if destination == target and not injected:
+            injected = True
+            replace_with_same_bytes(target, tmp_path)
+        return receipt
+
+    monkeypatch.setattr(dq, hook, replace_after_publish)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+
+    assert injected
+
+
+@pytest.mark.parametrize("target_name", ["journal", "anchor"])
+def test_atomic_publication_receipt_rejects_new_hardlink(
+        tmp_path, monkeypatch, target_name):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    target = path if target_name == "journal" else dq._anchor_path(path)
+    real_publish = dq._atomic_write_bytes
+    injected = False
+
+    def link_after_publish(destination, value):
+        nonlocal injected
+        receipt = real_publish(destination, value)
+        if destination == target and not injected:
+            injected = True
+            os.link(target, tmp_path / f"{target_name}-publication-alias")
+        return receipt
+
+    monkeypatch.setattr(dq, "_atomic_write_bytes", link_after_publish)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+
+    assert injected
+
+
 def test_migration_rejects_noncanonical_or_mismatched_embedded_recovery(tmp_path):
     path = tmp_path / "journal.json"
     write(path, deployed_legacy())

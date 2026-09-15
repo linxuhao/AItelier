@@ -278,12 +278,13 @@ _LAST_ATOMIC_RECEIPT: ContextVar[tuple[Path, tuple] | None] = ContextVar(
 
 
 def _atomic_write(path: Path, value: dict):
-    _atomic_write_bytes(path, (json.dumps(value, sort_keys=True, indent=2,
-                                         ensure_ascii=True) + "\n").encode("utf-8"))
+    returned = _atomic_write_bytes(
+        path, (json.dumps(value, sort_keys=True, indent=2,
+                          ensure_ascii=True) + "\n").encode("utf-8"))
+    receipt = _wrapped_atomic_signature(path, returned)
     with _open_existing_backup(path) as published:
-        if published is None:
-            raise DeploymentBlocked(f"atomic publication disappeared: {path}")
-        receipt = published[1]
+        if published is None or published[1] != receipt:
+            raise DeploymentBlocked(f"atomic publication changed identity: {path}")
     _LAST_ATOMIC_RECEIPT.set((path, receipt))
     return receipt
 
@@ -307,28 +308,39 @@ def _publish_atomic_proof(path: Path, value: dict):
         _LAST_ATOMIC_RECEIPT.reset(token)
 
 
-def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+def _atomic_write_bytes(path: Path, payload: bytes):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     tmp = Path(raw)
     try:
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as stream:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, path)
+        receipt = _backup_signature(os.fstat(fd))
+        try:
+            named = _backup_signature(os.stat(path, follow_symlinks=False))
+        except OSError as exc:
+            raise DeploymentBlocked(f"atomic publication disappeared: {path}") from exc
+        if receipt[3] != 1 or named != receipt:
+            raise DeploymentBlocked(f"atomic publication changed identity: {path}")
         dir_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(dir_fd)
         finally:
             os.close(dir_fd)
+        _LAST_ATOMIC_RECEIPT.set((path, receipt))
+        return receipt
     except BaseException:
         try:
             tmp.unlink()
         except OSError:
             pass
         raise
+    finally:
+        os.close(fd)
 
 
 def _backup_signature(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
@@ -942,43 +954,45 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
         # Hold every existing proof open together before the first recovery
         # write. This makes byte, inode, link-count and cross-file identity one
         # preflight decision rather than four independent pathname samples.
-        preflight_signatures = {}
-        with ExitStack() as preflight:
-            accepted_journal = preflight.enter_context(
+        with ExitStack() as transaction_stack:
+            accepted_journal = transaction_stack.enter_context(
                 _open_existing_backup(path, validate_on_exit=False))
             if accepted_journal is None or accepted_journal[2] != raw:
                 raise DeploymentBlocked("legacy journal changed before migration preflight")
+            preflight_signatures = {path: accepted_journal[1]}
+            preflight_opened = {path: accepted_journal}
             preflight_entries = [(path, accepted_journal)]
             for target_path, payload, mismatch in expected_proofs:
-                existing = preflight.enter_context(
+                existing = transaction_stack.enter_context(
                     _open_existing_backup(target_path, validate_on_exit=False))
                 if existing is None:
                     continue
                 if existing[2] != payload:
                     raise DeploymentBlocked(mismatch)
                 preflight_signatures[target_path] = existing[1]
+                preflight_opened[target_path] = existing
                 preflight_entries.append((target_path, existing))
             _validate_open_evidence(tuple(preflight_entries))
 
-        ensure_exact_evidence(
-            backup, raw, "legacy backup already exists with different bytes")
-        ensure_exact_evidence(
-            source, raw, "legacy migration source already exists with different bytes")
-        ensure_exact_evidence(
-            transaction_path, transaction_bytes,
-            "legacy migration transaction already exists with different bytes")
+            ensure_exact_evidence(
+                backup, raw, "legacy backup already exists with different bytes")
+            ensure_exact_evidence(
+                source, raw, "legacy migration source already exists with different bytes")
+            ensure_exact_evidence(
+                transaction_path, transaction_bytes,
+                "legacy migration transaction already exists with different bytes")
 
-        with ExitStack() as transaction_stack:
             entries = []
             for target_path, payload in (
                     (path, raw), (backup, raw), (source, raw),
                     (transaction_path, transaction_bytes)):
-                opened = transaction_stack.enter_context(
-                    _open_existing_backup(target_path, validate_on_exit=False))
+                opened = preflight_opened.get(target_path)
+                if opened is None:
+                    opened = transaction_stack.enter_context(
+                        _open_existing_backup(target_path, validate_on_exit=False))
                 if opened is None or opened[2] != payload:
                     raise DeploymentBlocked("legacy evidence changed before migration commit")
-                prior_signature = preflight_signatures.get(target_path)
-                if prior_signature is not None and opened[1] != prior_signature:
+                if opened[1] != preflight_signatures.get(target_path, opened[1]):
                     raise DeploymentBlocked(
                         f"legacy evidence changed identity during migration: {target_path}")
                 entries.append((target_path, opened))

@@ -188,6 +188,19 @@ def test_gnu_sed_structural_execution_forms_are_visible(source, expected):
 
 
 @pytest.mark.parametrize("source", [
+    "sed '{p};e docker compose up' input",
+    "sed '1{p};e docker compose up' input",
+    "sed '{l};e docker compose up' input",
+    "sed '{=};e docker compose up' input",
+    "sed '{p};s/x/docker compose up/e' input",
+    "sed '{l};s/x/docker compose up/e' input",
+    "sed '{=};s/x/docker compose up/e' input",
+])
+def test_gnu_sed_group_terminator_preserves_later_execution(source):
+    assert lifecycle.shell_actions(source) == ["up"]
+
+
+@pytest.mark.parametrize("source", [
     "sed 's/docker compose up/safe/' README.md",
     "sed -n '/docker compose up/p' README.md",
     "sed -e 's/x/docker compose up/' input.txt",
@@ -476,3 +489,19 @@ def test_known_nonexecuting_data_consumers_remain_safe(source):
 ])
 def test_unknown_literal_launchers_still_fail_closed(source):
     assert lifecycle.shell_actions(source) == ['unknown']
+
+
+@pytest.mark.parametrize("source", [
+    "unknown-launcher docker --future compose up",
+    "unknown-launcher docker --future=review compose up",
+])
+def test_unknown_docker_option_under_unknown_launcher_stays_fail_closed(source):
+    assert lifecycle.shell_actions(source) == ["unknown"]
+
+
+@pytest.mark.parametrize("source", [
+    "unknown-launcher not-docker compose up",
+    "unknown-launcher dockerish compose up",
+])
+def test_unknown_launcher_near_identity_data_stays_clean(source):
+    assert lifecycle.shell_actions(source) == []

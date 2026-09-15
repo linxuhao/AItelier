@@ -121,6 +121,12 @@ def _has_compose_route(values):
         command_at, _ = _options(words, index + 1, DOCKER_VALUES, DOCKER_FLAGS)
         if command_at < len(words) and words[command_at] == "compose":
             return True
+        # An unmodelled executor may accept Docker options newer than this
+        # inventory.  Preserve the unresolved exact command identity instead
+        # of declaring it inert merely because our option grammar stopped.
+        if (command_at < len(words) and words[command_at].startswith("-")
+                and "compose" in words[command_at + 1:]):
+            return True
     return False
 
 
@@ -333,10 +339,13 @@ def _sed_program_actions(program):
             continue
         if command in "dDgGhHlnNpPqQxz=":
             end = _sed_boundary(program, index)
+            close = program.find("}", index, end)
+            if close >= 0:
+                end = close
             argument = program[index:end].strip()
             if argument and (command not in "lqQ" or not argument.isdigit()):
-                return ambiguous(program[index:end])
-            index = end + 1
+                return ambiguous(program[index:])
+            index = end if end < len(program) and program[end] == "}" else end + 1
             continue
         return ambiguous(program[index - 1:])
     return actions

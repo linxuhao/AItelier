@@ -170,6 +170,18 @@ def test_gnu_sed_shell_execution_is_inventory_visible(source, expected):
     (r"sed -e 's|x\|y|docker compose up|e' input", ["up"]),
     ("sed -f <(printf 'e docker compose up') input", ["unknown"]),
     ("sed --file=<(printf 'e docker compose restart') input", ["unknown"]),
+    ("sed -nf <(printf 'e docker compose up') input", ["unknown"]),
+    ("sed -Enf <(printf 's/x/docker compose up/e') input", ["unknown"]),
+    ("sed -znf <(printf 'e docker compose restart') input", ["unknown"]),
+    ("sed 's#x#docker compose up#e g' input", ["up"]),
+    ("sed 's#x#docker compose up#ewoutfile' input", ["up"]),
+    ("sed 's#x#docker compose up#e woutfile' input", ["up"]),
+    ("sed 's#x#docker compose up#g e' input", ["up"]),
+    ("sed 'sXxXdocker compose upXe' input", ["up"]),
+    ("sed 's1x1docker compose restart1e' input", ["restart"]),
+    (r"sed 's x docker\ compose\ up e' input", ["up"]),
+    ("sed -l80 'e docker compose up' input", ["up"]),
+    ("sed -bl 80 -e 'e docker compose restart' input", ["restart"]),
 ])
 def test_gnu_sed_structural_execution_forms_are_visible(source, expected):
     assert lifecycle.shell_actions(source) == expected
@@ -187,11 +199,19 @@ def test_gnu_sed_structural_execution_forms_are_visible(source, expected):
     "sed 'y|docker compose up|safe text here|' input.txt",
     "sed 'a docker compose up' input.txt",
     "sed 'r docker compose up' input.txt",
+    "sed 'r absent;e docker compose up' input.txt",
+    "sed 'R absent;e docker compose up' input.txt",
+    "sed 'w output;e docker compose up' input.txt",
+    "sed 'W output;e docker compose up' input.txt",
+    "sed 's/x/data/w output;e docker compose up' input.txt",
+    "sed 's/x/data/woutput;e docker compose up' input.txt",
     "sed -f docker-compose-up.sed input.txt",
     "sed -frules.sed -e 's/x/;e docker compose up/' input.txt",
     "sed 'q 3' input.txt",
     "sed 'v 4.9' input.txt",
     "sed 'e echo docker compose up' input.txt",
+    "sed --help 'e docker compose up'",
+    "sed --version 'e docker compose up'",
 ])
 def test_gnu_sed_compose_data_does_not_claim_execution(source):
     assert lifecycle.shell_actions(source) == []
@@ -203,9 +223,19 @@ def test_gnu_sed_compose_data_does_not_claim_execution(source):
     "sed '? docker compose up' input.txt",
     "sed 'q docker compose up' input.txt",
     "sed 'v docker compose up' input.txt",
+    "sed -l docker compose up",
 ])
 def test_unclassifiable_sed_program_with_compose_fails_closed(source):
     assert lifecycle.shell_actions(source) == ["unknown"]
+
+
+@pytest.mark.parametrize("source", [
+    "sed 's#x#docker compose up#e;? ordinary' input.txt",
+    "sed 's|x|docker compose up' input.txt",
+    "sed 's#x#docker compose up#e\n/unterminated' input.txt",
+])
+def test_partial_sed_program_never_discards_prior_or_ambiguous_execution(source):
+    assert lifecycle.shell_actions(source)
 
 
 @pytest.mark.parametrize("source", [

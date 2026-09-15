@@ -80,15 +80,53 @@ def compose_action(argv):
     return None if verb in READ_ONLY_COMMANDS else "unknown"
 
 
+def _command_words(value):
+    """Tokenize an ambiguous executable fragment without executing or reparsing it."""
+    words = []
+    current = []
+    escaped = False
+    for char in value:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char in {"'", '"'}:
+            # Quoting cannot make a dynamic executable field inert. Ignore the
+            # quote itself while retaining word boundaries inside its content.
+            continue
+        elif char.isspace() or char in ";|&(){}<>?,:#":
+            if current:
+                words.append("".join(current))
+                current = []
+        else:
+            current.append(char)
+    if current:
+        words.append("".join(current))
+    return words
+
+
+def _has_compose_route(values):
+    """Recognize exact Compose command identities in an ambiguous executable field."""
+    words = []
+    for value in values:
+        if type(value) is str:
+            words.extend(_command_words(value))
+    names = [Path(word).name for word in words]
+    if any(name == "docker-compose" for name in names):
+        return True
+    for index, name in enumerate(names):
+        if name != "docker":
+            continue
+        command_at, _ = _options(words, index + 1, DOCKER_VALUES, DOCKER_FLAGS)
+        if command_at < len(words) and words[command_at] == "compose":
+            return True
+    return False
+
+
 def _unknown_compose_literal(argv):
-    """Unmodelled executors carrying a Compose command require review."""
-    if any(re.search(r"(?:^|[\s/])docker(?:-compose|\s+compose)(?:\s|$)", arg)
-           for arg in argv):
-        return ["unknown"]
-    if any(Path(arg).name == "docker" and "compose" in argv[index + 1:]
-           for index, arg in enumerate(argv)):
-        return ["unknown"]
-    return []
+    """Unmodelled executable fields carrying exact Compose identity fail closed."""
+    return ["unknown"] if _has_compose_route(argv) else []
 
 
 def _sed_field(program, start, delimiter):
@@ -171,6 +209,11 @@ def _sed_boundary(program, start, *, line_only=False):
     return min(positions, default=len(program))
 
 
+def _sed_replacement_for_shell(replacement, delimiter):
+    """Undo only escapes required to embed the active delimiter in a field."""
+    return replacement.replace("\\" + delimiter, delimiter)
+
+
 def _sed_program_actions(program):
     """Walk literal GNU sed commands without scanning regex/replacement data."""
     if program == _DYNAMIC_COMPOSE:
@@ -178,6 +221,12 @@ def _sed_program_actions(program):
     if type(program) is not str or program == "<dynamic>":
         return []
     actions = []
+
+    def ambiguous(*fields):
+        if _has_compose_route(fields) and "unknown" not in actions:
+            return [*actions, "unknown"]
+        return list(actions)
+
     index = 0
     while index < len(program):
         while index < len(program) and program[index] in " \t;\n":
@@ -190,7 +239,7 @@ def _sed_program_actions(program):
 
         command_at = _sed_skip_addresses(program, index)
         if command_at is None:
-            return _unknown_compose_literal([program])
+            return ambiguous(program[index:])
         index = command_at
         while index < len(program) and program[index] in " \t":
             index += 1
@@ -199,7 +248,7 @@ def _sed_program_actions(program):
             while index < len(program) and program[index] in " \t":
                 index += 1
         if index >= len(program):
-            return _unknown_compose_literal([program])
+            return ambiguous(program)
 
         command = program[index]
         index += 1
@@ -212,57 +261,84 @@ def _sed_program_actions(program):
             index = end + 1
             continue
         if command == "s":
-            if index >= len(program) or program[index].isalnum() or program[index].isspace():
-                return _unknown_compose_literal([program])
+            if index >= len(program) or program[index] in "\\\n":
+                return ambiguous(program[index:])
             delimiter = program[index]
             pattern, cursor = _sed_field(program, index + 1, delimiter)
             replacement, cursor = _sed_field(program, cursor, delimiter)
             if pattern is None or replacement is None:
-                return _unknown_compose_literal([program])
-            end = _sed_boundary(program, cursor)
-            flags = program[cursor:end].lstrip()
-            match = re.match(r"[0-9gIpweMm]*", flags)
-            flag_token = match.group(0)
-            remainder = flags[len(flag_token):]
-            if remainder and not ("w" in flag_token and remainder[:1].isspace()):
-                return _unknown_compose_literal([program])
-            if "e" in flag_token:
-                actions.extend(shell_actions(replacement))
-            index = end + 1
+                return ambiguous(program[index + 1:])
+            execute = False
+            while cursor < len(program):
+                while cursor < len(program) and program[cursor] in " \t":
+                    cursor += 1
+                if cursor >= len(program) or program[cursor] in ";\n":
+                    break
+                if program[cursor].isdigit():
+                    while cursor < len(program) and program[cursor].isdigit():
+                        cursor += 1
+                    continue
+                flag = program[cursor]
+                cursor += 1
+                if flag in "gIpimM":
+                    continue
+                if flag == "e":
+                    execute = True
+                    continue
+                if flag == "w":
+                    # GNU sed consumes a w filename through physical newline,
+                    # including semicolons and without requiring whitespace.
+                    cursor = _sed_boundary(program, cursor, line_only=True)
+                    break
+                return ambiguous(replacement, program[cursor - 1:])
+            if execute:
+                actions.extend(shell_actions(
+                    _sed_replacement_for_shell(replacement, delimiter)))
+            if cursor < len(program) and program[cursor] == ";":
+                index = cursor + 1
+            elif cursor < len(program) and program[cursor] == "\n":
+                index = cursor + 1
+            else:
+                index = cursor
             continue
         if command == "y":
-            if index >= len(program) or program[index].isalnum() or program[index].isspace():
-                return _unknown_compose_literal([program])
+            if index >= len(program) or program[index] in "\\\n":
+                return ambiguous(program[index:])
             delimiter = program[index]
             source, cursor = _sed_field(program, index + 1, delimiter)
             target, cursor = _sed_field(program, cursor, delimiter)
             if source is None or target is None:
-                return _unknown_compose_literal([program])
+                return ambiguous(program[index + 1:])
             index = _sed_boundary(program, cursor) + 1
             continue
         if command in "aci":
             # Text commands consume data through the physical line.
             index = _sed_boundary(program, index, line_only=True) + 1
             continue
-        if command in "rRwW:btT":
-            # File names and labels are data.
+        if command in "rRwW":
+            # GNU file operands consume through physical newline. A semicolon
+            # is part of the filename, never a new sed command.
+            index = _sed_boundary(program, index, line_only=True) + 1
+            continue
+        if command in ":btT":
+            # Labels end at a sed command separator.
             index = _sed_boundary(program, index) + 1
             continue
         if command == "v":
             end = _sed_boundary(program, index)
             version = program[index:end].strip()
             if version and re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version) is None:
-                return _unknown_compose_literal([program])
+                return ambiguous(program[index:end])
             index = end + 1
             continue
         if command in "dDgGhHlnNpPqQxz=":
             end = _sed_boundary(program, index)
             argument = program[index:end].strip()
             if argument and (command not in "lqQ" or not argument.isdigit()):
-                return _unknown_compose_literal([program])
+                return ambiguous(program[index:end])
             index = end + 1
             continue
-        return _unknown_compose_literal([program])
+        return ambiguous(program[index - 1:])
     return actions
 
 
@@ -272,6 +348,8 @@ def _sed_actions(argv):
     explicit = False
     while index < len(argv):
         value = argv[index]
+        if value in {"--help", "--version"}:
+            return []
         if value == "--":
             index += 1
             if not explicit and index < len(argv):
@@ -305,18 +383,20 @@ def _sed_actions(argv):
             index += 1
             continue
         if value in {"-l", "--line-length"}:
-            if index + 1 >= len(argv):
-                return ["unknown"]
+            if index + 1 >= len(argv) or not argv[index + 1].isdigit():
+                return _unknown_compose_literal(["sed", *argv])
             index += 2
             continue
         if value.startswith("--line-length="):
+            if not value.split("=", 1)[1].isdigit():
+                return _unknown_compose_literal(["sed", *argv])
             index += 1
             continue
         if (value in {"-n", "--quiet", "--silent", "-E", "-r",
                       "--regexp-extended", "-s", "--separate", "-u",
                       "--unbuffered", "-z", "--null-data", "--sandbox",
                       "--debug", "--posix", "--binary", "--follow-symlinks",
-                      "--help", "--version"}
+                      "-b"}
                 or value == "-i" or value.startswith("-i")
                 or value.startswith("--in-place")):
             index += 1
@@ -327,8 +407,19 @@ def _sed_actions(argv):
             valid = True
             while position < len(cluster):
                 option = cluster[position]
-                if option in "nErsuz":
+                if option in "bnErsuz":
                     position += 1
+                    continue
+                if option == "l":
+                    argument = cluster[position + 1:]
+                    if not argument:
+                        if index + 1 >= len(argv):
+                            return _unknown_compose_literal(["sed", *argv])
+                        index += 1
+                        argument = argv[index]
+                    if not argument.isdigit():
+                        return _unknown_compose_literal(["sed", *argv])
+                    position = len(cluster)
                     continue
                 if option == "i":
                     position = len(cluster)  # the remainder is its backup suffix
@@ -342,6 +433,8 @@ def _sed_actions(argv):
                         argument = argv[index]
                     if option == "e":
                         programs.append(argument)
+                    elif argument == _DYNAMIC_COMPOSE:
+                        return ["unknown"]
                     explicit = True
                     position = len(cluster)
                     continue

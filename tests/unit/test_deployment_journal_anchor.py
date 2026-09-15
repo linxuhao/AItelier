@@ -347,9 +347,10 @@ def test_migration_crash_never_loses_legacy_or_manufactures_completion(tmp_path,
         which = "anchor" if target == dq._anchor_path(path) else "journal"
         if step == "before-" + which:
             raise OSError("migration crash")
-        real(target, payload)
+        receipt = real(target, payload)
         if step == "after-" + which:
             raise OSError("migration crash")
+        return receipt
 
     source = dq._migration_source_path(path)
     transaction = dq._migration_transaction_path(path)
@@ -831,17 +832,17 @@ def test_migration_creates_four_independent_single_link_files_and_is_idempotent(
     assert all(entry.stat().st_nlink == 1 for entry in paths)
 
 
-@pytest.mark.parametrize("target_name", ["journal", "backup", "source", "transaction"])
-def test_final_journal_publication_commits_exact_recovery_across_same_byte_path_replacement(
+@pytest.mark.parametrize("target_name", ["backup", "source", "transaction", "anchor"])
+def test_final_journal_publication_refuses_same_byte_path_replacement(
         tmp_path, monkeypatch, target_name):
     path = tmp_path / "journal.json"
     write(path, deployed_legacy())
     raw = path.read_bytes()
     target = {
-        "journal": path,
         "backup": path.with_name(path.name + ".legacy-v1.backup"),
         "source": dq._migration_source_path(path),
         "transaction": dq._migration_transaction_path(path),
+        "anchor": dq._anchor_path(path),
     }[target_name]
     original_identity = None
     real_atomic = dq._atomic_write
@@ -853,16 +854,105 @@ def test_final_journal_publication_commits_exact_recovery_across_same_byte_path_
             replacement = tmp_path / f"same-byte-{target_name}-replacement"
             replacement.write_bytes(target.read_bytes())
             replacement.replace(target)
-        real_atomic(destination, value)
+        return real_atomic(destination, value)
 
     monkeypatch.setattr(dq, "_atomic_write", replace_at_final_publication)
-    migrated = migrate(path)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
 
     assert original_identity is not None
     assert (target.stat().st_dev, target.stat().st_ino) != original_identity
-    recovery = base64.b64decode(migrated["migration"]["source_base64"], validate=True)
-    assert recovery == raw
-    assert dq._load_journal(path) == migrated
+    published = json.loads(path.read_bytes())
+    if published["version"] == 2:
+        assert published["latest"]["usable"] is False
+
+
+@pytest.mark.parametrize("target_name", ["backup", "source", "transaction", "anchor"])
+def test_final_journal_publication_refuses_new_proof_hardlink(
+        tmp_path, monkeypatch, target_name):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    target = {
+        "backup": path.with_name(path.name + ".legacy-v1.backup"),
+        "source": dq._migration_source_path(path),
+        "transaction": dq._migration_transaction_path(path),
+        "anchor": dq._anchor_path(path),
+    }[target_name]
+    real_atomic = dq._atomic_write
+    injected = False
+
+    def link_at_final_publication(destination, value):
+        nonlocal injected
+        if destination == path and not injected:
+            os.link(target, tmp_path / f"late-{target_name}-alias")
+            injected = True
+        return real_atomic(destination, value)
+
+    monkeypatch.setattr(dq, "_atomic_write", link_at_final_publication)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+
+    assert injected
+    assert target.stat().st_nlink == 2
+
+
+@pytest.mark.parametrize("replacement", [
+    "changed-content", "same-bytes-new-inode", "hardlink",
+])
+def test_new_anchor_identity_is_bound_before_v2_commit(
+        tmp_path, monkeypatch, replacement):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    anchor = dq._anchor_path(path)
+    real_atomic = dq._atomic_write
+
+    def replace_after_anchor(destination, value):
+        real_atomic(destination, value)
+        if destination == anchor:
+            if replacement == "hardlink":
+                os.link(anchor, tmp_path / "anchor-alias")
+            else:
+                substitute = tmp_path / "anchor-substitute"
+                substitute.write_bytes(
+                    b"{}\n" if replacement == "changed-content" else anchor.read_bytes())
+                substitute.replace(anchor)
+
+    monkeypatch.setattr(dq, "_atomic_write", replace_after_anchor)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("replacement", ["changed-content", "same-bytes-new-inode"])
+def test_existing_anchor_is_held_through_final_proof_validation(
+        tmp_path, monkeypatch, replacement):
+    path = tmp_path / "journal.json"
+    write(path, deployed_legacy())
+    raw = path.read_bytes()
+    migrate(path)
+    path.write_bytes(raw)
+    anchor = dq._anchor_path(path)
+    real_validate = dq._validate_open_evidence
+    calls = 0
+
+    def replace_before_final(entries):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            substitute = tmp_path / "anchor-substitute"
+            substitute.write_bytes(
+                b"{}\n" if replacement == "changed-content" else anchor.read_bytes())
+            substitute.replace(anchor)
+        return real_validate(entries)
+
+    monkeypatch.setattr(dq, "_validate_open_evidence", replace_before_final)
+    with pytest.raises(dq.DeploymentBlocked):
+        migrate(path)
+
+    assert calls >= 2
+    assert path.read_bytes() == raw
 
 
 def test_same_byte_source_replacement_after_return_keeps_exact_recovery(tmp_path):

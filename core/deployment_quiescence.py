@@ -26,7 +26,8 @@ import subprocess
 import tempfile
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -272,9 +273,38 @@ def operation_admission_fence():
         stream.close()
 
 
-def _atomic_write(path: Path, value: dict) -> None:
+_LAST_ATOMIC_RECEIPT: ContextVar[tuple[Path, tuple] | None] = ContextVar(
+    "deployment_last_atomic_receipt", default=None)
+
+
+def _atomic_write(path: Path, value: dict):
     _atomic_write_bytes(path, (json.dumps(value, sort_keys=True, indent=2,
                                          ensure_ascii=True) + "\n").encode("utf-8"))
+    with _open_existing_backup(path) as published:
+        if published is None:
+            raise DeploymentBlocked(f"atomic publication disappeared: {path}")
+        receipt = published[1]
+    _LAST_ATOMIC_RECEIPT.set((path, receipt))
+    return receipt
+
+
+def _wrapped_atomic_signature(path: Path, returned):
+    """Bind a publication even when an observing test/crash wrapper drops its return."""
+    if returned is not None:
+        return returned
+    receipt = _LAST_ATOMIC_RECEIPT.get()
+    if receipt is None or receipt[0] != path:
+        raise DeploymentBlocked(f"atomic publication identity is unavailable: {path}")
+    return receipt[1]
+
+
+def _publish_atomic_proof(path: Path, value: dict):
+    """Publish one proof and bind the writer receipt across observing wrappers."""
+    token = _LAST_ATOMIC_RECEIPT.set(None)
+    try:
+        return _wrapped_atomic_signature(path, _atomic_write(path, value))
+    finally:
+        _LAST_ATOMIC_RECEIPT.reset(token)
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
@@ -901,19 +931,35 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
         anchor_path = _anchor_path(path)
         anchor_bytes = (json.dumps(_checkpoint(target), sort_keys=True, indent=2,
                                    ensure_ascii=True) + "\n").encode("utf-8")
-        # Refuse every known divergent recovery object before installing a
-        # missing one. A forged later object must not leave a new partial proof
-        # that could be mistaken for progress on a subsequent recovery.
-        for target_path, payload, mismatch in (
+        expected_proofs = (
                 (backup, raw, "legacy backup already exists with different bytes"),
                 (source, raw, "legacy migration source already exists with different bytes"),
                 (transaction_path, transaction_bytes,
                  "legacy migration transaction already exists with different bytes"),
                 (anchor_path, anchor_bytes,
-                 "migration transaction does not match durable anchor")):
-            with _open_existing_backup(target_path) as existing:
-                if existing is not None and existing[2] != payload:
+                 "migration transaction does not match durable anchor"),
+        )
+        # Hold every existing proof open together before the first recovery
+        # write. This makes byte, inode, link-count and cross-file identity one
+        # preflight decision rather than four independent pathname samples.
+        preflight_signatures = {}
+        with ExitStack() as preflight:
+            accepted_journal = preflight.enter_context(
+                _open_existing_backup(path, validate_on_exit=False))
+            if accepted_journal is None or accepted_journal[2] != raw:
+                raise DeploymentBlocked("legacy journal changed before migration preflight")
+            preflight_entries = [(path, accepted_journal)]
+            for target_path, payload, mismatch in expected_proofs:
+                existing = preflight.enter_context(
+                    _open_existing_backup(target_path, validate_on_exit=False))
+                if existing is None:
+                    continue
+                if existing[2] != payload:
                     raise DeploymentBlocked(mismatch)
+                preflight_signatures[target_path] = existing[1]
+                preflight_entries.append((target_path, existing))
+            _validate_open_evidence(tuple(preflight_entries))
+
         ensure_exact_evidence(
             backup, raw, "legacy backup already exists with different bytes")
         ensure_exact_evidence(
@@ -922,36 +968,52 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
             transaction_path, transaction_bytes,
             "legacy migration transaction already exists with different bytes")
 
-        with _open_existing_backup(backup, validate_on_exit=False) as accepted_backup:
-            with _open_existing_backup(source, validate_on_exit=False) as accepted_source:
-                with _open_existing_backup(
-                        transaction_path, validate_on_exit=False) as accepted_transaction:
-                    with _open_existing_backup(path, validate_on_exit=False) as accepted_journal:
-                        if (accepted_journal is None or accepted_backup is None
-                                or accepted_source is None or accepted_transaction is None
-                                or accepted_journal[2] != raw or accepted_backup[2] != raw
-                                or accepted_source[2] != raw
-                                or accepted_transaction[2] != transaction_bytes):
-                            raise DeploymentBlocked(
-                                "legacy evidence changed before migration commit")
-                        entries = ((path, accepted_journal), (backup, accepted_backup),
-                                   (source, accepted_source),
-                                   (transaction_path, accepted_transaction))
-                        _validate_open_evidence(entries)
-                        if anchor_path.exists():
-                            with _open_existing_backup(anchor_path) as accepted_anchor:
-                                if (accepted_anchor is None
-                                        or accepted_anchor[2] != anchor_bytes):
-                                    raise DeploymentBlocked(
-                                        "migration transaction does not match durable anchor")
-                        else:
-                            _atomic_write(anchor_path, _checkpoint(target))
-                        # This is the finite identity boundary: every descriptor is still
-                        # open and checked immediately before the one-file v2 commit. The
-                        # v2 bytes carry their own exact legacy recovery image, so a later
-                        # pathname replacement cannot remove the committed recovery bytes.
-                        _validate_open_evidence(entries)
-                    _atomic_write(path, target)
+        with ExitStack() as transaction_stack:
+            entries = []
+            for target_path, payload in (
+                    (path, raw), (backup, raw), (source, raw),
+                    (transaction_path, transaction_bytes)):
+                opened = transaction_stack.enter_context(
+                    _open_existing_backup(target_path, validate_on_exit=False))
+                if opened is None or opened[2] != payload:
+                    raise DeploymentBlocked("legacy evidence changed before migration commit")
+                prior_signature = preflight_signatures.get(target_path)
+                if prior_signature is not None and opened[1] != prior_signature:
+                    raise DeploymentBlocked(
+                        f"legacy evidence changed identity during migration: {target_path}")
+                entries.append((target_path, opened))
+
+            anchor_signature = preflight_signatures.get(anchor_path)
+            if anchor_signature is None:
+                anchor_signature = _publish_atomic_proof(
+                    anchor_path, _checkpoint(target))
+            accepted_anchor = transaction_stack.enter_context(
+                _open_existing_backup(anchor_path, validate_on_exit=False))
+            if (accepted_anchor is None or accepted_anchor[2] != anchor_bytes
+                    or accepted_anchor[1] != anchor_signature):
+                raise DeploymentBlocked(
+                    "migration transaction does not match durable anchor identity")
+            entries.append((anchor_path, accepted_anchor))
+
+            # The anchor participates in both complete checks and stays open
+            # with every recovery proof across the primary journal commit.
+            _validate_open_evidence(tuple(entries))
+            published = _atomic_write(path, target)
+            if published is None:
+                raise DeploymentBlocked(
+                    "deployment journal atomic publication identity is unavailable")
+            journal_signature = published
+
+            proof_entries = tuple(entries[1:])
+            _validate_open_evidence(proof_entries)
+            with _open_existing_backup(path, validate_on_exit=False) as committed:
+                target_bytes = (json.dumps(target, sort_keys=True, indent=2,
+                                           ensure_ascii=True) + "\n").encode("utf-8")
+                if (committed is None or committed[1] != journal_signature
+                        or committed[2] != target_bytes):
+                    raise DeploymentBlocked(
+                        "deployment journal changed at migration commit")
+                _validate_open_evidence(((path, committed), *proof_entries))
         current = _load_journal(path)
         return current
 

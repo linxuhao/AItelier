@@ -181,7 +181,17 @@ class Authority:
                     if resource != "semantic-request" and conn.execute("SELECT 1 FROM owners WHERE resource=? AND status='active'", (resource,)).fetchone():
                         raise RuntimeError("resource has an unsettled owner; explicit recovery required")
                     owner_id = uuid.uuid4().hex
-                    fd = self._lock(effect_lock(resource, owner_id), create=resource == "semantic-request")
+                    try:
+                        fd = self._lock(
+                            effect_lock(resource, owner_id),
+                            create=resource == "semantic-request")
+                    except BlockingIOError as exc:
+                        # Separate SQLite connections in threads may both reach
+                        # the kernel lock before either can observe the other's
+                        # row. The flock is the final admission arbiter: its
+                        # loser is an ordinary fail-closed ownership refusal.
+                        raise RuntimeError(
+                            "resource has a concurrent unsettled owner") from exc
                     capability_fd, capability_digest = self._capability()
                     generation = conn.execute(
                         "INSERT INTO owners(owner_id,resource,operation_id,project_id,run_id,runtime_id,status,actor,reason) VALUES(?,?,?,?,?,?,'active',?,?)",

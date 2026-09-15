@@ -105,16 +105,38 @@ def test_semantic_client_failure_cannot_recover_while_daemon_lives(resource_auth
 
 
 def test_concurrent_admission_has_exactly_one_winner(resource_authority):
+    barrier = threading.Barrier(8)
+
     def attempt(_):
+        barrier.wait()
         try:
             return resource_authority.acquire("godot")
-        except RuntimeError:
-            return None
+        except RuntimeError as exc:
+            return exc
     with ThreadPoolExecutor(max_workers=8) as pool:
-        leases = [r for r in pool.map(attempt, range(8)) if r is not None]
+        results = list(pool.map(attempt, range(8)))
+    leases = [result for result in results if isinstance(result, ro.Lease)]
+    losers = [result for result in results if isinstance(result, RuntimeError)]
     assert len(leases) == 1
+    assert len(losers) == 7
     assert len(history(resource_authority)) == 1
     leases[0].close(settled=True)
+
+
+def test_effect_lock_contention_is_a_fail_closed_admission_loser(
+        resource_authority, monkeypatch):
+    original_lock = resource_authority._lock
+
+    def contended(name, **kwargs):
+        if name == "godot.effect.lock":
+            raise BlockingIOError("simultaneous owner holds the effect lock")
+        return original_lock(name, **kwargs)
+
+    monkeypatch.setattr(resource_authority, "snapshot", lambda **kwargs: ([], []))
+    monkeypatch.setattr(resource_authority, "_lock", contended)
+    with pytest.raises(RuntimeError, match="concurrent unsettled owner"):
+        resource_authority.acquire("godot")
+    assert history(resource_authority) == []
 
 
 def test_recovery_and_fresh_admission_race_finishes_without_deadlock(resource_authority):

@@ -2185,8 +2185,8 @@ The full detail is in 'test_report.json' — read it before retrying.
 One intermediate run did still show `"Tool failed"` after the wheel was installed and
 after `inspect.getsource` in the running container showed the new call site, which I
 recorded here as unexplained rather than guess at it. The next restart cleared it, so
-the most likely explanation is simply that the `pip install` and the `docker compose
-restart` in that one command raced — the server process came up against the old module
+the most likely explanation is simply that the package installation and the Compose
+restart in that historical command raced — the server process came up against the old module
 while a fresh `docker exec` saw the new one. Worth remembering as a deployment trap:
 **verifying a container fix with `docker exec` proves the FILE is right, not that the
 running server loaded it.** Check a live artifact, not an exec'd import.

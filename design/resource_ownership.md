@@ -37,6 +37,11 @@ serial across HTTP, CLI and direct calls; this extends prior
 render-only serialization to compile/checkgd. Semantic writers are likewise
 serial. Busy or stale ownership refuses admission; there is no automatic retry
 of uncertain effects. Idle semantic batches create no owner/history entry.
+Snapshots also reserve SQLite's writer slot while probing effect locks. Probes
+change no rows, but must serialize with other probes and admission transactions:
+otherwise two observers can briefly lock different free resources and each report
+the other's probe as an unregistered effect. An unavailable writer reservation
+fails closed, like an unavailable authority.
 
 Launchers pass their effect-lock descriptor and an unlinked, per-generation
 capability descriptor to subprocesses. The authority stores only the capability
@@ -112,25 +117,35 @@ Readiness requires three distinct full 64-character lowercase hexadecimal IDs,
 with the exact service and container names. Compose resolves its current project
 name with `config --format json`; each ID is then independently queried using
 `docker inspect --type container ID` under the same Docker environment. The full
-ID, name, Compose project/service labels, running state, and healthy status must
+ID, name, Compose project/service labels, the exact one-off label `False`, running state, and healthy status must
 agree. Missing, abbreviated, stale, malformed or unavailable observations abort
 readiness. This corroborates the current Docker objects; it cannot make sequential
 Docker observations atomic against an uncooperative administrator.
 
 `core/deployment_lifecycle.py` owns the reviewed lifecycle verb contract and the
-static source audit. Shell blocks are lexed as complete POSIX command text with
-shlex (including continuations and command wrappers), Python subprocess argv and
-internal dispatcher calls are read through the AST, and Markdown contributes only
-executable fences or explicit command literals. Echo/printf data and Compose dry
+static source audit. The maintained tree-sitter Bash grammar identifies executable
+commands, groups, redirects and substitutions; shlex only decodes individual
+literal words. Python subprocess argv, shell APIs and internal dispatcher calls
+are read through the AST. The maintained CommonMark parser contributes executable
+fences, indented code blocks and explicit command literals. Echo/printf data and Compose dry
 runs do not mutate lifecycle. Container creation/start/run, up/down, restart,
-stop/kill/rm, pause/unpause, scale and watch are denied outside the two reviewed
-internal `_compose` call sites; gate-order tests exercise those sites separately.
-Unknown Compose verbs are denied pending review. This is a regression audit of
+stop/kill/rm, pause/unpause, scale, watch, exec and cp carry lifecycle capability;
+exec/cp can terminate a service or replace its code. Unknown Compose verbs are
+denied pending review. This is a regression audit of
 supported source forms, not permission enforcement for arbitrary generated Python
 or shell code. Generated/dynamic commands require explicit review; they cannot be
 advertised as a supported deployment route based only on this static scan.
 
-The implementation uses maintained Python `ast` and `shlex` APIs and Docker's
-public JSON APIs. No new runtime parser or process-observation dependency is
-introduced. Docker build, live health, controlled replacement and restart evidence
+Both `_compose_up` and the raw `_compose` dispatcher require the current thread's
+live exclusive cutover fence and an exact still-pending journal receipt before
+effects. Transitive callers cannot bypass this check by using an internal helper.
+Only `up` is currently supported under that authority; other effect capabilities
+are refused even with a permit. Read-only and global dry-run calls require no
+effect permit. Closing/unlocking the fence, settling or changing the receipt,
+or transferring its context to another thread invalidates it. This is cooperative
+application authority, not a sandbox against code that monkeypatches the protocol.
+
+Parser versions are pinned; their wheels support the project's Python 3.12 on
+macOS and Linux. They are used by the static audit, not process observation.
+Docker build, live health, controlled replacement and restart evidence
 remain separate acceptance requirements.

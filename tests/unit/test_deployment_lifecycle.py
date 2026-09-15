@@ -19,7 +19,7 @@ def observation(service):
 def container(service):
     return {"Id": IDS[service], "Name": "/" + server._COMPOSE_CONTAINERS[service],
             "Config": {"Labels": {"com.docker.compose.project": "review-project",
-                                   "com.docker.compose.service": service}},
+                                   "com.docker.compose.service": service, "com.docker.compose.oneoff": "False"}},
             "State": {"Running": True, "Status": "running", "Paused": False,
                       "Restarting": False, "Dead": False, "Health": {"Status": "healthy"}}}
 
@@ -205,7 +205,7 @@ def test_guard_allowlist_is_exact_route_and_verb(verb):
     assert lifecycle.unguarded_findings('cli/server.py', f'def restart_server():\n _compose("{verb}")')
     assert lifecycle.unguarded_findings('cli/server.py', f'def unrelated():\n _compose("up")')
     assert lifecycle.unguarded_findings('other/server.py', f'def restart_server():\n _compose("up")')
-    assert lifecycle.unguarded_findings('cli/server.py', 'def restart_server():\n _compose("up")') == []
+    assert lifecycle.unguarded_findings('cli/server.py', 'def restart_server():\n _require_deployment_authority()\n _compose("up")') == []
 
 
 
@@ -215,5 +215,65 @@ def test_raw_subprocess_cannot_borrow_guarded_helper_allowlist():
 
 
 def test_lifecycle_contract_verbs_are_complete_independent_of_implementation():
-    required = {"create", "start", "run", "up", "down", "restart", "stop", "kill", "rm", "pause", "unpause", "scale", "watch"}
+    required = {"create", "start", "run", "up", "down", "restart", "stop", "kill", "rm", "pause", "unpause", "scale", "watch", "exec", "cp"}
     assert lifecycle.LIFECYCLE_COMMANDS == required
+
+
+@pytest.mark.parametrize('value', [True, False, 'True', 'true', 'false', '1', '', None, 0])
+def test_oneoff_label_must_be_exact_resident_false(inventories, value):
+    inventories[1][IDS['zvec-grep']]['Config']['Labels']['com.docker.compose.oneoff'] = value
+    assert server._guarded_service_errors()
+
+
+def test_missing_oneoff_label_is_unknown(inventories):
+    del inventories[1][IDS['zvec-grep']]['Config']['Labels']['com.docker.compose.oneoff']
+    assert server._guarded_service_errors()
+
+
+@pytest.mark.parametrize('source,expected', [
+    ('eval "docker compose up -d"', ['up']),
+    ('time docker compose restart aitelier', ['restart']),
+    ('{ docker compose stop; }', ['stop']),
+    ('(docker compose pause)', ['pause']),
+    ('busybox sh -ec "docker compose start"', ['start']),
+    ('>deploy.log docker compose down', ['down']),
+    ('docker --unknown compose kill', ['unknown']),
+    ('docker compose --future-option up', ['unknown']),
+    ('echo "$(docker compose stop)"', ['stop']),
+    ('cat <(docker compose restart)', ['restart']),
+    ('if true; then\n docker compose up\nfi', ['up']),
+    ('docker compose exec aitelier kill -TERM 1', ['exec']),
+    ('docker compose cp payload aitelier:/app/core/authority.py', ['cp']),
+    ('eval "$COMMAND"', ['unknown']),
+    ('cat <<\'DATA\'\ndocker compose up\nDATA', []),
+    ('printf "%s" "{ docker compose restart; }"', []),
+    ('echo "$(printf docker) compose up"', []),
+    ('busybox sh -c \'echo "docker compose up"\'', []),
+    ('eval \'printf "%s" "docker compose up"\'', []),
+    ('docker compose --dry-run exec aitelier kill -TERM 1', []),
+])
+def test_bash_syntax_execution_boundaries(source, expected):
+    assert lifecycle.shell_actions(source) == expected
+
+
+@pytest.mark.parametrize('source,expected', [
+    ('subprocess.getoutput("docker compose up")', True),
+    ('subprocess.getstatusoutput("docker compose restart")', True),
+    ('subprocess.run("docker compose stop", shell=1)', True),
+    ('subprocess.run("docker compose stop", shell=0)', False),
+    ('subprocess.getoutput("echo docker compose up")', False),
+    ('from subprocess import getoutput as launch\nlaunch("docker compose up")', True),
+])
+def test_python_shell_api_boundaries(source, expected):
+    assert bool(lifecycle.unguarded_findings('scripts/x.py', source)) is expected
+
+
+@pytest.mark.parametrize('source,expected', [
+    ('    docker compose up -d\n', True),
+    ('>     docker compose restart\n', True),
+    ('    echo "docker compose up"\n', False),
+    ('```text\ndocker compose up\n```', False),
+    ('Prose mentions docker compose restart without a command literal.', False),
+])
+def test_commonmark_execution_boundaries(source, expected):
+    assert bool(lifecycle.source_findings('README.md', source)) is expected

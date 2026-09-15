@@ -1,9 +1,9 @@
 """Static audit of supported deployment entry points; never executes source.
 
-The contract covers literal shell commands and Python argv (including local
-constant bindings), not arbitrary generated programs. Unknown Compose commands
-are refused. Only the two reviewed lifecycle call sites may dispatch mutation;
-behavioral gate tests separately prove their clearance precedes dispatch.
+Maintained Bash/CommonMark parsers and Python AST identify executable source
+forms, including literal wrappers and local constant argv. This regression audit
+does not authorize arbitrary generated programs. Internal Compose primitives
+separately require live journal-backed authority at runtime; only up is supported.
 """
 from __future__ import annotations
 
@@ -16,16 +16,17 @@ import textwrap
 
 LIFECYCLE_COMMANDS = frozenset({
     "create", "start", "run", "up", "down", "restart", "stop", "kill", "rm",
-    "pause", "unpause", "scale", "watch",
+    "pause", "unpause", "scale", "watch", "exec", "cp",
 })
 READ_ONLY_COMMANDS = frozenset({
-    "build", "config", "convert", "cp", "events", "exec", "images", "logs",
+    "build", "config", "convert", "events", "images", "logs",
     "ls", "port", "ps", "pull", "push", "top", "version", "wait", "help",
 })
-# These commands do not mutate container lifecycle (exec/cp still have other
-# effects). This is a deployment audit, not a general Docker permissions policy.
+# exec/cp can replace code or terminate PID 1, so they carry lifecycle capability
+# even when their command spelling does not say restart. Unknown capability is denied.
 GUARDED_CALLS = {("cli/server.py", "_compose_up"): {"up"},
-                 ("cli/server.py", "restart_server"): {"up"}}
+                 ("cli/server.py", "restart_server"): {"up"},
+                 ("cli/server.py", "_ensure_docker_backend"): {"up"}}
 DOCKER_VALUES = {"--config", "--context", "-c", "--host", "-H", "--log-level", "-l",
                  "--tlscacert", "--tlscert", "--tlskey"}
 DOCKER_FLAGS = {"--debug", "-D", "--tls", "--tlsverify"}
@@ -88,6 +89,14 @@ def _command_actions(argv):
     rest = argv[1:]
     if head in {"echo", "printf", "true", "false", ":"}:
         return []
+    if head == "eval":
+        return ["unknown"] if "<dynamic>" in rest else shell_actions(" ".join(rest))
+    if head == "busybox":
+        return _command_actions(rest)
+    if head == "time":
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in {"-f", "--format", "-o", "--output"} else rest[1:]
+        return _command_actions(rest)
     if head in {"command", "exec", "nohup"}:
         if head == "command" and any(value in {"-v", "-V"} for value in rest[:1]):
             return []
@@ -133,7 +142,7 @@ def _command_actions(argv):
     if head == "docker":
         index, _ = _options(rest, 0, DOCKER_VALUES, DOCKER_FLAGS)
         if index >= len(rest) or rest[index] != "compose":
-            return []
+            return ["unknown"] if "compose" in rest[index:] and rest[index].startswith("-") else []
         rest = rest[index + 1:]
     elif head != "docker-compose":
         return []
@@ -142,28 +151,34 @@ def _command_actions(argv):
 
 
 def shell_actions(source):
-    # Whole-block POSIX lexing handles quoted words, escapes and continuations.
-    # Protect literal punctuation before shlex removes quoting; otherwise a
-    # quoted semicolon becomes indistinguishable from a command separator.
-    source = source.replace("\\\n", "")
-    source = re.sub(r"(['\"])([;&|()]+)\1", lambda m: m[1] + "\ue000" + m[2] + m[1], source)
-    source = re.sub(r"\\([;&|()])", lambda m: "\ue000" + m[1], source)
-    lexer = shlex.shlex(source, posix=True, punctuation_chars=";&|()\n")
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
-    actions, command = [], []
-    try:
-        for token in lexer:
-            if token and all(c in ";&|()\n" for c in token):
-                actions.extend(_command_actions(command))
-                command = []
-                continue
-            command.append(token.removeprefix("\ue000"))
-        actions.extend(_command_actions(command))
-    except ValueError:
-        # A malformed executable block mentioning the protected dispatcher is
-        # unauditable, never silently treated as a reviewed lifecycle route.
-        if "docker" in source or "_compose" in source:
+    """Visit executable Bash syntax nodes, never re-lex whole source as words."""
+    from tree_sitter import Language, Parser
+    import tree_sitter_bash
+    root = Parser(Language(tree_sitter_bash.language())).parse(source.encode()).root_node
+    actions = []
+
+    def literal(node):
+        if any(child.type in {"command_substitution", "process_substitution", "expansion", "simple_expansion"}
+               for child in descendants(node)):
+            return "<dynamic>"
+        try:
+            words = shlex.split(node.text.decode().replace("\\\n", ""))
+            return words[0] if len(words) == 1 else "<dynamic>"
+        except ValueError:
+            return "<dynamic>"
+
+    def descendants(node):
+        for child in node.named_children:
+            yield child
+            yield from descendants(child)
+
+    for node in [root, *descendants(root)]:
+        if node.type == "command":
+            name = node.child_by_field_name("name")
+            if name is not None:
+                argv = [literal(name), *(literal(arg) for arg in node.children_by_field_name("argument"))]
+                actions.extend(_command_actions(argv))
+        elif node.type == "ERROR" and ("docker" in node.text.decode() or "_compose" in node.text.decode()):
             actions.append("unknown")
     return actions
 
@@ -174,6 +189,7 @@ class Finding:
     action: str
     function: str = ""
     sink: str = ""
+    guarded: bool = False
 
 
 def _literal(node, bindings):
@@ -218,14 +234,25 @@ def python_findings(source):
 
     class Visitor(ast.NodeVisitor):
         def __init__(self):
-            self.bindings, self.function = {}, ""
+            self.bindings, self.function, self.guard_line = {}, "", None
+
+        def visit_ClassDef(self, node):
+            prior = self.function
+            self.function = prior + "." + node.name if prior else node.name
+            self.generic_visit(node)
+            self.function = prior
 
         def visit_FunctionDef(self, node):
-            old, prior = self.bindings, self.function
-            self.bindings, self.function = dict(old), node.name
+            old, prior, guard = self.bindings, self.function, self.guard_line
+            self.bindings = dict(old)
+            self.function = prior + "." + node.name if prior else node.name
+            self.guard_line = None
             for statement in node.body:
+                candidate = statement.value if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
+                if isinstance(candidate, ast.Call) and name(candidate.func) in {"_require_deployment_authority", "_require_deployment_clearance"}:
+                    self.guard_line = statement.lineno
                 self.visit(statement)
-            self.bindings, self.function = old, prior
+            self.bindings, self.function, self.guard_line = old, prior, guard
 
         visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -239,11 +266,13 @@ def python_findings(source):
         def visit_Call(self, node):
             called = name(node.func)
             actions = []
-            if called.split(".")[-1] == "_compose":
+            if called.split(".")[-1] == "_compose_up":
+                actions = ["up"]
+            elif called.split(".")[-1] == "_compose":
                 argv = _literal(ast.List(elts=node.args), self.bindings)
                 action = compose_action(argv)
                 actions = [action] if action else []
-            elif called in {"subprocess.run", "subprocess.Popen", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "os.system", "os.popen", "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell"}:
+            elif called in {"subprocess.run", "subprocess.Popen", "subprocess.getoutput", "subprocess.getstatusoutput", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "os.system", "os.popen", "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell"}:
                 arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg in {"args", "command", "cmd"}), None)
                 value = _literal(arg, self.bindings)
                 if called == "asyncio.create_subprocess_exec":
@@ -253,11 +282,12 @@ def python_findings(source):
                 elif isinstance(value, str):
                     # Python's shell=False string is an executable filename;
                     # only shell=True/os.system/shell API interprets shell text.
-                    shell = called in {"os.system", "os.popen", "asyncio.create_subprocess_shell"} or any(k.arg == "shell" and isinstance(k.value, ast.Constant) and k.value.value is True for k in node.keywords)
+                    shell = called in {"os.system", "os.popen", "subprocess.getoutput", "subprocess.getstatusoutput", "asyncio.create_subprocess_shell"} or any(k.arg == "shell" and isinstance(k.value, ast.Constant) and bool(k.value.value) for k in node.keywords)
                     if shell:
                         actions = shell_actions(value)
             for action in actions:
-                findings.append(Finding(node.lineno, action, self.function, "_compose" if called.split(".")[-1] == "_compose" else called))
+                findings.append(Finding(node.lineno, action, self.function, called.split(".")[-1] if called.split(".")[-1] in {"_compose", "_compose_up"} else called,
+                                        self.guard_line is not None and self.guard_line < node.lineno))
             self.generic_visit(node)
 
     Visitor().visit(tree)
@@ -279,7 +309,7 @@ def _fenced_findings(language, block, first):
 
 
 def source_findings(path, source):
-    """Audit executable content only; Markdown prose is never shell source."""
+    """Use the language parser for code, fences and CommonMark indented blocks."""
     suffix = Path(path).suffix
     if suffix == ".py":
         return python_findings(source)
@@ -287,30 +317,34 @@ def source_findings(path, source):
         return [Finding(1, action) for action in shell_actions(source)]
     if suffix != ".md":
         return []
-    findings, block, fence, first = [], [], None, 0
-    for number, line in enumerate(source.splitlines(), 1):
-        marker = re.match(r"^\s*(`{3,}|~{3,})(.*)$", line)
-        if marker:
-            if fence is None:
-                fence = (marker[1][0], len(marker[1]), marker[2].strip().split()[0] if marker[2].strip() else "")
-                first = number + 1
-            elif marker[1][0] == fence[0] and len(marker[1]) >= fence[1]:
-                findings.extend(_fenced_findings(fence[2], block, first))
-                block, fence = [], None
-            continue
-        if fence:
-            block.append(line)
-        else:
-            for literal in re.findall(r"`([^`\n]+)`", line):
-                findings.extend(Finding(number, action) for action in shell_actions(literal))
-    # CommonMark allows a fenced block to extend to EOF without a closer.
-    if fence:
-        findings.extend(_fenced_findings(fence[2], block, first))
+    from markdown_it import MarkdownIt
+    findings = []
+    for token in MarkdownIt("commonmark").parse(source):
+        first = (token.map or [0])[0] + 1
+        if token.type in {"fence", "code_block"}:
+            language = token.info.strip().split()[0] if token.info.strip() else ""
+            findings.extend(_fenced_findings(language, token.content.splitlines(), first))
+        elif token.type == "inline":
+            for child in token.children or []:
+                if child.type == "code_inline":
+                    findings.extend(Finding(first, action) for action in shell_actions(child.content))
     return findings
 
 
 def unguarded_findings(path, source):
-    return [finding for finding in source_findings(path, source)
-            if not (finding.sink == "_compose" and finding.action in GUARDED_CALLS.get((str(path), finding.function), set()))
-            and not (str(path) == "cli/server.py" and finding.function == "_compose"
-                     and finding.sink == "subprocess.run" and finding.action == "unknown")]
+    findings = source_findings(path, source)
+    result = []
+    for finding in findings:
+        allowed = (finding.guarded and finding.sink in {"_compose", "_compose_up"}
+                   and finding.action in GUARDED_CALLS.get((str(path), finding.function), set()))
+        # The single raw dispatcher performs the same runtime capability check
+        # before subprocess.run. It is not a wildcard for nested same-name code.
+        dispatcher = (str(path) == "cli/server.py" and finding.function == "_compose"
+                      and finding.sink == "subprocess.run" and finding.action == "unknown"
+                      and any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                              and node.func.id == "_require_deployment_authority"
+                              for node in ast.walk(next(node for node in ast.parse(source).body
+                                  if isinstance(node, ast.FunctionDef) and node.name == "_compose"))))
+        if not allowed and not dispatcher:
+            result.append(finding)
+    return result

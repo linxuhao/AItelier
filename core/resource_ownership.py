@@ -234,7 +234,11 @@ class Authority:
         """Read authority and fixed locks; missing/unknown/inconsistent blocks."""
         rows, errors = [], []
         try:
-            with self.connection() as conn:
+            # Lock probes briefly hold otherwise-free effect locks. Serialize
+            # probes with each other and admission's uncommitted intent so a
+            # probe can never masquerade as an unregistered physical owner.
+            # BEGIN IMMEDIATE reserves the writer slot but changes no rows.
+            with self.connection(write=True) as conn:
                 owners = [dict(r) for r in conn.execute("SELECT * FROM owners ORDER BY generation")]
                 active_by_lock = {}
                 for row in owners:

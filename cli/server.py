@@ -7,7 +7,10 @@
 # uvicorn directly on the host would make DPE git commits use the host
 # developer's ~/.gitconfig identity instead of the image's AItelier identity.
 
+import contextvars
+import fcntl
 import json
+import threading
 import os
 import re
 import subprocess
@@ -58,6 +61,7 @@ _COMPOSE_CONTAINERS = {
 }
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 _IMAGE_NAME = "aitelier:latest"
+_ACTIVE_CLEARANCE = contextvars.ContextVar("deployment_clearance", default=None)
 
 
 # ── Health ────────────────────────────────────────────────────────────────
@@ -215,6 +219,12 @@ def _ensure_host_dirs() -> None:
 
 def _compose(*args: str, **kwargs) -> subprocess.CompletedProcess:
     """Run `docker compose -f <file> [-f <overlay>] <args>`."""
+    from core.deployment_lifecycle import compose_action
+    capability = compose_action(list(args))
+    if capability:
+        _require_deployment_authority()
+        if capability != "up":
+            raise RuntimeError("unsupported guarded Compose capability: " + capability)
     return subprocess.run(
         ["docker", "compose", *_compose_files(), *args],
         env=_compose_env(),
@@ -339,7 +349,8 @@ def _guarded_service_errors() -> list[str]:
             if (current["Id"] != container_id
                     or current["Name"] != "/" + expected_name
                     or labels["com.docker.compose.project"] != project
-                    or labels["com.docker.compose.service"] != service):
+                    or labels["com.docker.compose.service"] != service
+                    or labels.get("com.docker.compose.oneoff") != "False"):
                 raise ValueError("current container identity/Compose labels mismatch")
             if (state["Running"] is not True or state["Status"] != "running"
                     or state["Paused"] is not False or state["Restarting"] is not False
@@ -438,6 +449,7 @@ def _warn_if_edge_network_is_alone() -> None:
 
 def _compose_up(max_wait: int = 120):
     """Start (building on first run) the guarded backend and sidecars."""
+    _require_deployment_authority()
     _ensure_host_dirs()
     rebuild = []
     if not _image_exists():
@@ -477,12 +489,39 @@ def _require_deployment_clearance(action: str) -> dict:
         override = dq.load_override(os.environ.get("AITELIER_DEPLOY_OVERRIDE_FILE"))
         clearance = dq.authorize(action, observation, override=override)
         clearance["_cutover_fence"] = fence
+        _ACTIVE_CLEARANCE.set((clearance, threading.get_ident()))
         return clearance
     except BaseException as exc:
         dq.release_cutover_fence(fence)
         if isinstance(exc, dq.DeploymentBlocked):
             raise RuntimeError(str(exc)) from exc
         raise
+
+
+def _require_deployment_authority() -> None:
+    """Internal primitives require a live, current journal-backed cutover."""
+    from core import deployment_quiescence as dq
+    active = _ACTIVE_CLEARANCE.get()
+    if active is None or active[1] != threading.get_ident():
+        raise RuntimeError("Compose effects require active deployment authority")
+    clearance = active[0]
+    fence = clearance.get("_cutover_fence")
+    if fence is None or fence.closed:
+        raise RuntimeError("deployment authority fence is no longer held")
+    info, current = os.fstat(fence.fileno()), dq.admission_fence_path().stat()
+    if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+        raise RuntimeError("deployment authority fence identity changed")
+    probe = os.open(dq.admission_fence_path(), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
+            raise RuntimeError("deployment authority lost its exclusive fence")
+    finally:
+        os.close(probe)
+    dq.validate_pending_clearance(clearance)
 
 
 def _finish_deployment(clearance: dict, *, success: bool,
@@ -497,6 +536,9 @@ def _finish_deployment(clearance: dict, *, success: bool,
         return dq.finalize(clearance, success=success,
                            error=None if error is None else str(error))
     finally:
+        active = _ACTIVE_CLEARANCE.get()
+        if active is not None and active[0] is clearance:
+            _ACTIVE_CLEARANCE.set(None)
         dq.release_cutover_fence((clearance or {}).get("_cutover_fence"))
 
 

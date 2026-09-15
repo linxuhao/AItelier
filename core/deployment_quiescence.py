@@ -1638,6 +1638,22 @@ def authorize(action: str, observation: dict, *, journal: Path | str | None = No
         f"evidence {event['event_id']} is aborted/unusable ({reason})")
 
 
+def validate_pending_clearance(clearance: dict) -> None:
+    """Read-only revalidation immediately before an internal Compose effect."""
+    try:
+        prior = _clearance_event_snapshot(clearance)
+    except (TypeError, ValueError) as exc:
+        raise DeploymentBlocked(f"deployment clearance is malformed: {exc}") from exc
+    with _journal_lock(evidence_path()):
+        state = _load_journal(evidence_path())
+        latest = state.get("latest") or {}
+        if (latest.get("status") not in {"authorized", "overridden"}
+                or latest.get("pending") is not True
+                or any(prior.get(field) != latest.get(field)
+                       for field in CLEARANCE_EVENT_BINDING_FIELDS)):
+            raise DeploymentBlocked("deployment authority is stale or differs from its pending journal")
+
+
 def finalize(clearance: dict, *, success: bool, error: str | None = None,
              journal: Path | str | None = None) -> dict:
     """Commit or abort the deployment action represented by a pending gate."""

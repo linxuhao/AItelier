@@ -9,6 +9,10 @@ requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
+    # Maintained syntax trees for the executable deployment-route audit.
+    "tree-sitter==0.26.0",
+    "tree-sitter-bash==0.25.1",
+    "markdown-it-py==4.2.0",
     # This storage migration spans host + engine. Exact-pin the reviewed public
     # release so an older engine cannot ignore the explicit output target.
     "skillflow-py==1.5.77",

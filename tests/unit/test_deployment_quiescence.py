@@ -1574,6 +1574,9 @@ def test_server_redeploy_gate_runs_before_compose(monkeypatch):
 def test_guarded_compose_start_includes_both_sidecars(monkeypatch):
     from cli import server
 
+    # Argument construction is isolated here; actual missing/stale authority
+    # refusal is exercised in test_deployment_authority.
+    monkeypatch.setattr(server, "_require_deployment_authority", lambda: None)
     calls = []
     monkeypatch.setattr(server, "_ensure_host_dirs", lambda: None)
     monkeypatch.setattr(server, "_image_exists", lambda: True)
@@ -1629,7 +1632,7 @@ def corroborated_containers(monkeypatch):
     def inspect(container_id):
         service = next(key for key, value in _TEST_CONTAINER_IDS.items() if value == container_id)
         return {"Id": container_id, "Name": "/" + server._COMPOSE_CONTAINERS[service],
-                "Config": {"Labels": {"com.docker.compose.project": "aitelier", "com.docker.compose.service": service}},
+                "Config": {"Labels": {"com.docker.compose.project": "aitelier", "com.docker.compose.service": service, "com.docker.compose.oneoff": "False"}},
                 "State": {"Running": True, "Status": "running", "Paused": False,
                           "Restarting": False, "Dead": False, "Health": {"Status": "healthy"}}}
     monkeypatch.setattr(server, "_inspect_guarded_container", inspect)

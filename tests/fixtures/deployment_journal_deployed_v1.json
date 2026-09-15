@@ -1,0 +1,81 @@
+{
+  "events": [
+    {
+      "action": "redeploy",
+      "at": "2026-09-14T08:10:36+00:00",
+      "audit": {
+        "actor": "fixture-operator",
+        "reason": "reviewed deployment",
+        "ticket": "attempt-fixture-one"
+      },
+      "blockers": {},
+      "errors": [
+        "shared sidecar ledger is missing"
+      ],
+      "event_id": "11111111111111111111111111111111",
+      "inventory_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "pending": true,
+      "status": "overridden",
+      "usable": false
+    },
+    {
+      "action": "redeploy",
+      "at": "2026-09-14T08:11:00+00:00",
+      "event_id": "22222222222222222222222222222222",
+      "prior_event_id": "11111111111111111111111111111111",
+      "replayed": false,
+      "status": "completed",
+      "usable": true
+    },
+    {
+      "action": "restart",
+      "at": "2026-09-14T08:14:16+00:00",
+      "blockers": {},
+      "errors": [
+        "no audited override supplied"
+      ],
+      "event_id": "33333333333333333333333333333333",
+      "inventory_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+      "reason": "no audited override supplied",
+      "status": "aborted",
+      "usable": false
+    },
+    {
+      "action": "restart",
+      "at": "2026-09-14T13:46:46+00:00",
+      "audit": {
+        "actor": "fixture-operator",
+        "reason": "reviewed restart",
+        "ticket": "attempt-fixture-two"
+      },
+      "blockers": {},
+      "errors": [
+        "shared sidecar ledger is missing"
+      ],
+      "event_id": "44444444444444444444444444444444",
+      "inventory_digest": "4444444444444444444444444444444444444444444444444444444444444444",
+      "pending": true,
+      "status": "overridden",
+      "usable": false
+    },
+    {
+      "action": "restart",
+      "at": "2026-09-14T13:47:03+00:00",
+      "event_id": "55555555555555555555555555555555",
+      "prior_event_id": "44444444444444444444444444444444",
+      "replayed": false,
+      "status": "completed",
+      "usable": true
+    }
+  ],
+  "latest": {
+    "action": "restart",
+    "at": "2026-09-14T13:47:03+00:00",
+    "event_id": "55555555555555555555555555555555",
+    "prior_event_id": "44444444444444444444444444444444",
+    "replayed": false,
+    "status": "completed",
+    "usable": true
+  },
+  "version": 1
+}

@@ -89,6 +89,118 @@ def _unknown_compose_literal(argv):
     return []
 
 
+def _sed_field(program, start, delimiter):
+    """Return one sed field and its end without interpreting its contents."""
+    result = []
+    escaped = False
+    for index in range(start, len(program)):
+        value = program[index]
+        if escaped:
+            result.extend(("\\", value))
+            escaped = False
+        elif value == "\\":
+            escaped = True
+        elif value == delimiter:
+            return "".join(result), index + 1
+        else:
+            result.append(value)
+    return None, len(program)
+
+
+def _sed_program_actions(program):
+    """Recognize only literal GNU sed commands which invoke a shell."""
+    if type(program) is not str or program == "<dynamic>":
+        return ["unknown"] if program == "<dynamic>" else []
+    actions = []
+
+    # GNU sed's `e command` executes command via the shell. Addresses are
+    # deliberately narrow; unfamiliar forms carrying Compose fail closed.
+    execute = re.compile(
+        r"(?:^|[;\n])\s*(?:(?:\d+|\$|/(?:\\.|[^/])*/)(?:\s*,\s*"
+        r"(?:\d+|\$|/(?:\\.|[^/])*/))?\s*)?e(?:[ \t]+([^;\n]+))?"
+    )
+    for match in execute.finditer(program):
+        command = match.group(1)
+        if not command:
+            actions.append("unknown")
+        else:
+            actions.extend(shell_actions(command))
+
+    # In GNU sed, the `e` flag on s/// executes the replacement as a shell
+    # command. Parse only the delimiter structure needed to isolate that exact
+    # replacement; never execute or generally interpret a sed program.
+    index = 0
+    while index < len(program):
+        match = re.search(r"(?:^|[;\n])\s*(?:\d+|\$)?\s*s([^\\\w\s])",
+                          program[index:])
+        if match is None:
+            break
+        delimiter = match.group(1)
+        cursor = index + match.end()
+        _, cursor = _sed_field(program, cursor, delimiter)
+        replacement, cursor = _sed_field(program, cursor, delimiter)
+        if replacement is None:
+            break
+        flag_end = min((position for position in (
+            program.find(";", cursor), program.find("\n", cursor))
+            if position >= 0), default=len(program))
+        flags = program[cursor:flag_end].strip()
+        if "e" in flags:
+            actions.extend(shell_actions(replacement))
+        index = max(flag_end + 1, cursor + 1)
+
+    return actions
+
+
+def _sed_actions(argv):
+    programs = []
+    index = 0
+    explicit = False
+    while index < len(argv):
+        value = argv[index]
+        if value == "--":
+            index += 1
+            break
+        if value in {"-e", "--expression"}:
+            if index + 1 >= len(argv):
+                return ["unknown"]
+            programs.append(argv[index + 1])
+            explicit = True
+            index += 2
+            continue
+        if value.startswith("--expression="):
+            programs.append(value.split("=", 1)[1])
+            explicit = True
+            index += 1
+            continue
+        if value in {"-f", "--file"}:
+            if index + 1 >= len(argv):
+                return ["unknown"]
+            explicit = True
+            index += 2
+            continue
+        if value.startswith("--file="):
+            explicit = True
+            index += 1
+            continue
+        if (value in {"-n", "--quiet", "--silent", "-E", "-r",
+                      "--regexp-extended", "-s", "--separate", "-u",
+                      "--unbuffered", "-z", "--null-data", "--sandbox"}
+                or value == "-i" or value.startswith("-i")
+                or value.startswith("--in-place")):
+            index += 1
+            continue
+        if value.startswith("-"):
+            return _unknown_compose_literal(["sed", *argv])
+        if not explicit:
+            programs.append(value)
+        break
+    actions = []
+    for program in programs:
+        actions.extend(_sed_program_actions(program))
+    return actions
+
+
 def _command_actions(argv):
     if not argv:
         return []
@@ -99,8 +211,10 @@ def _command_actions(argv):
     head = Path(argv[0]).name
     rest = argv[1:]
     if head in {"echo", "printf", "true", "false", ":", "cat", "grep",
-                "egrep", "fgrep", "sed", "test", "[", "[["}:
+                "egrep", "fgrep", "test", "[", "[["}:
         return []
+    if head == "sed":
+        return _sed_actions(rest)
     if head == "eval":
         return ["unknown"] if "<dynamic>" in rest else shell_actions(" ".join(rest))
     if head == "busybox":

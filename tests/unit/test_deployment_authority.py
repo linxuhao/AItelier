@@ -1,5 +1,7 @@
 """Internal/transitive Compose execution requires live runtime authority."""
+import copy
 import fcntl
+import pickle
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -262,6 +264,8 @@ def test_public_clearance_uses_plan_frozen_before_measurement_callback(
 
     monkeypatch.setattr(dq, 'measure', measure)
     clearance = server._require_deployment_clearance('restart', plan)
+    with pytest.raises(RuntimeError, match='already consumed'):
+        server._require_deployment_clearance('restart', plan)
     calls = []
     monkeypatch.setattr(
         server.subprocess, 'run',
@@ -276,6 +280,42 @@ def test_public_clearance_uses_plan_frozen_before_measurement_callback(
     assert calls[0][0] == [
         'docker', 'compose', '-f', 'planned.yml', 'up', '-d', 'aitelier']
     assert calls[0][1]['env'] == {'DOCKER_HOST': 'planned'}
+
+
+def test_only_registered_opaque_plan_identity_is_accepted():
+    args = ('up',)
+    env = (('DOCKER_HOST', 'review'),)
+    raw = ((args, ('docker', 'compose', '-f', 'review.yml', *args), env),)
+    with pytest.raises(RuntimeError, match='malformed'):
+        server._require_deployment_clearance('restart', raw)
+
+    plan = server._deployment_command_plan((args,))
+    with pytest.raises(TypeError, match='copied'):
+        copy.copy(plan)
+    with pytest.raises(TypeError, match='copied'):
+        copy.deepcopy(plan)
+    with pytest.raises(TypeError, match='serialized'):
+        pickle.dumps(plan)
+    reconstructed = object.__new__(type(plan))
+    with pytest.raises(RuntimeError, match='unknown'):
+        server._require_deployment_clearance('restart', reconstructed)
+    server._DEPLOYMENT_PLANS.pop(plan)
+
+
+def test_canonical_planner_refuses_duplicate_commands_and_manifests(monkeypatch):
+    with pytest.raises(RuntimeError, match='unsupported'):
+        server._deployment_command_plan((('up',), ('up',)))
+    monkeypatch.setattr(
+        server, '_compose_files',
+        lambda: ['-f', 'review.yml', '-f', 'review.yml'])
+    with pytest.raises(RuntimeError, match='invalid launch data'):
+        server._deployment_command_plan((('up',),))
+
+
+def test_unregistered_sealed_lookalike_cannot_supply_alternate_argv_or_env():
+    lookalike = server._DeploymentPlan(server._DEPLOYMENT_PLAN_SEAL)
+    with pytest.raises(RuntimeError, match='unknown'):
+        server._require_deployment_clearance('restart', lookalike)
 
 
 def test_consumption_is_atomic_between_contenders(permit, no_docker, monkeypatch):

@@ -64,7 +64,32 @@ _IMAGE_NAME = "aitelier:latest"
 _CAPABILITY_LOCK = threading.Lock()
 _OPERATIONS = {}
 _COMMANDS = {}
+_DEPLOYMENT_PLANS = {}
+_DEPLOYMENT_PLAN_SEAL = object()
 _SAFE_COMPOSE_RUN_KWARGS = frozenset({"capture_output", "text", "timeout", "check"})
+
+
+class _DeploymentPlan:
+    """Opaque identity whose command bytes live only in the private registry."""
+
+    __slots__ = ()
+
+    def __new__(cls, seal=None):
+        if cls is not _DeploymentPlan or seal is not _DEPLOYMENT_PLAN_SEAL:
+            raise TypeError("deployment plans are created by the canonical planner")
+        return super().__new__(cls)
+
+    def __copy__(self):
+        raise TypeError("deployment plans cannot be copied")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("deployment plans cannot be copied")
+
+    def __reduce__(self):
+        raise TypeError("deployment plans cannot be serialized")
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("deployment plans cannot be serialized")
 
 
 # ── Health ────────────────────────────────────────────────────────────────
@@ -481,8 +506,8 @@ def _compose_up(args, *, capability=None):
     _warn_if_edge_network_is_alone()
 
 
-def _deployment_command_plan(commands) -> tuple:
-    """Freeze exact Compose argv and environment before authorization callbacks."""
+def _deployment_command_plan(commands) -> _DeploymentPlan:
+    """Seal exact Compose argv and environment before authorization callbacks."""
     try:
         command_args = tuple(tuple(command) for command in commands)
     except TypeError as exc:
@@ -495,12 +520,21 @@ def _deployment_command_plan(commands) -> tuple:
         raise RuntimeError("unsupported deployment authority command plan")
     compose_files = tuple(_compose_files())
     environment = tuple(_compose_env().items())
-    if (not all(type(value) is str for value in compose_files)
+    manifests = compose_files[1::2]
+    if (len(compose_files) % 2
+            or any(compose_files[index] != "-f"
+                   for index in range(0, len(compose_files), 2))
+            or len(set(manifests)) != len(manifests)
+            or not all(type(value) is str and value for value in compose_files)
             or not all(type(key) is str and type(value) is str
                        for key, value in environment)):
-        raise RuntimeError("deployment command plan contains non-string launch data")
-    return tuple((args, ("docker", "compose", *compose_files, *args), environment)
-                 for args in command_args)
+        raise RuntimeError("deployment command plan contains invalid launch data")
+    frozen = tuple((args, ("docker", "compose", *compose_files, *args), environment)
+                   for args in command_args)
+    handle = _DeploymentPlan(_DEPLOYMENT_PLAN_SEAL)
+    with _CAPABILITY_LOCK:
+        _DEPLOYMENT_PLANS[handle] = frozen
+    return handle
 
 
 def _require_deployment_clearance(action: str, command_plan=None) -> dict:
@@ -509,28 +543,17 @@ def _require_deployment_clearance(action: str, command_plan=None) -> dict:
     # routes always supply their already-frozen full plan.
     if command_plan is None:
         command_plan = _deployment_command_plan((("up",),))
-    if (type(command_plan) is not tuple or not command_plan
-            or any(type(item) is not tuple or len(item) != 3
-                   or type(item[0]) is not tuple
-                   or type(item[1]) is not tuple
-                   or type(item[2]) is not tuple
-                   or not item[0]
-                   or item[0][0] != "up"
-                   or not all(type(value) is str for value in item[0])
-                   or len(item[1]) < 2 + len(item[0])
-                   or item[1][:2] != ("docker", "compose")
-                   or item[1][-len(item[0]):] != item[0]
-                   or not all(type(value) is str for value in item[1])
-                   or not all(type(pair) is tuple and len(pair) == 2
-                              and type(pair[0]) is str and type(pair[1]) is str
-                              for pair in item[2])
-                   for item in command_plan)):
-        raise RuntimeError("deployment command plan is malformed")
     from api.dependencies import get_db_manager, get_skillflow
     from core import datadir
     from core import deployment_quiescence as dq
 
     with _CAPABILITY_LOCK:
+        if type(command_plan) is not _DeploymentPlan:
+            raise RuntimeError(
+                "deployment command plan is malformed or not a sealed canonical plan")
+        frozen_plan = _DEPLOYMENT_PLANS.pop(command_plan, None)
+        if frozen_plan is None:
+            raise RuntimeError("deployment command plan is unknown or already consumed")
         if any(operation["owner"] == (os.getpid(), threading.get_ident())
                for operation in _OPERATIONS.values()):
             raise RuntimeError("nested deployment authority is unsupported")
@@ -556,7 +579,7 @@ def _require_deployment_clearance(action: str, command_plan=None) -> dict:
                                       "owner": (os.getpid(), threading.get_ident()),
                                       "fence": fence, "journal": dq.evidence_path(),
                                       "event": copy.deepcopy(clearance["event"]),
-                                      "command_plan": command_plan,
+                                      "command_plan": frozen_plan,
                                       "minted": set()}
         return clearance
     except BaseException as exc:

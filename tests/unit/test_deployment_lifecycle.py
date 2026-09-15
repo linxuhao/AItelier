@@ -145,6 +145,28 @@ def test_shell_data_and_readonly_controls(source):
     assert lifecycle.shell_actions(source) == []
 
 
+@pytest.mark.parametrize(("source", "expected"), [
+    ("printf x | sed 'e docker compose up'", ["up"]),
+    ("sed -e '1e docker compose restart' input.txt", ["restart"]),
+    ("sed 's/x/docker compose up/e' input.txt", ["up"]),
+    ("sed --expression='s|x|docker compose restart|e' input.txt", ["restart"]),
+])
+def test_gnu_sed_shell_execution_is_inventory_visible(source, expected):
+    assert lifecycle.shell_actions(source) == expected
+
+
+@pytest.mark.parametrize("source", [
+    "sed 's/docker compose up/safe/' README.md",
+    "sed -n '/docker compose up/p' README.md",
+    "sed -e 's/x/docker compose up/' input.txt",
+    "sed 's/x/value e docker compose up/' input.txt",
+    "sed 'e echo docker compose up' input.txt",
+    "sed -f docker-compose-up.sed input.txt",
+])
+def test_gnu_sed_compose_data_does_not_claim_execution(source):
+    assert lifecycle.shell_actions(source) == []
+
+
 @pytest.mark.parametrize("source", [
     'echo harmless; docker compose up', 'echo harmless\ndocker compose up',
     'printf "%s" harmless | docker compose up',

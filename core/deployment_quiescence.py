@@ -896,12 +896,23 @@ def migrate_legacy_journal(*, expected_sha256: str, actor: str, provenance: str,
                 if installed is None or installed[2] != payload:
                     raise DeploymentBlocked(mismatch)
 
+        transaction_bytes = (json.dumps(transaction, sort_keys=True, indent=2,
+                                        ensure_ascii=True) + "\n").encode("utf-8")
+        # Refuse every known divergent recovery object before installing a
+        # missing one. A forged later object must not leave a new partial proof
+        # that could be mistaken for progress on a subsequent recovery.
+        for target_path, payload, mismatch in (
+                (backup, raw, "legacy backup already exists with different bytes"),
+                (source, raw, "legacy migration source already exists with different bytes"),
+                (transaction_path, transaction_bytes,
+                 "legacy migration transaction already exists with different bytes")):
+            with _open_existing_backup(target_path) as existing:
+                if existing is not None and existing[2] != payload:
+                    raise DeploymentBlocked(mismatch)
         ensure_exact_evidence(
             backup, raw, "legacy backup already exists with different bytes")
         ensure_exact_evidence(
             source, raw, "legacy migration source already exists with different bytes")
-        transaction_bytes = (json.dumps(transaction, sort_keys=True, indent=2,
-                                        ensure_ascii=True) + "\n").encode("utf-8")
         ensure_exact_evidence(
             transaction_path, transaction_bytes,
             "legacy migration transaction already exists with different bytes")

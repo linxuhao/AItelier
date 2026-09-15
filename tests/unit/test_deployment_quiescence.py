@@ -1,8 +1,10 @@
 """Deployment changes must observe every project and preserve failed evidence."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -1126,6 +1128,82 @@ def test_compatible_empty_and_minimal_legacy_journals_remain_usable(tmp_path):
     result = dq.finalize(legacy_clearance, success=True, journal=legacy)
     assert result["event"]["status"] == "completed"
     assert result["event"]["usable"] is True
+
+
+def _deployed_v1_fixture(tmp_path):
+    source = Path(__file__).parents[1] / "fixtures" / "deployment_journal_deployed_v1.json"
+    journal = tmp_path / "journal.json"
+    shutil.copyfile(source, journal)
+    return journal, journal.read_bytes()
+
+
+def _evidence_bytes(root):
+    return {path.name: path.read_bytes() for path in root.iterdir()
+            if path.is_file() and not path.name.endswith(".lock")}
+
+
+def test_exact_deployed_v1_completion_topology_has_audited_recovery(tmp_path):
+    journal, raw = _deployed_v1_fixture(tmp_path)
+    expected = hashlib.sha256(raw).hexdigest()
+    assert expected == "95597f576fd5f51bc8f9f92759d4d3d1232942b1dd2654cf386205aba4dca096"
+    with pytest.raises(dq.DeploymentBlocked, match="contradictory pending/usable"):
+        dq._load_journal(journal)
+
+    migrated = dq.migrate_legacy_journal(
+        journal=journal, expected_sha256=expected, actor="fixture-reviewer",
+        provenance="immutable production-shape fixture", legacy_format="deployed-v1")
+
+    assert migrated["version"] == 2
+    assert migrated["migration"]["source_sha256"] == expected
+    assert base64.b64decode(migrated["migration"]["source_base64"]) == raw
+    assert migrated["latest"]["status"] == "aborted"
+    assert migrated["latest"]["usable"] is False
+    assert "fresh authorization required" in migrated["latest"]["reason"]
+    assert journal.with_name("journal.json.legacy-v1.backup").read_bytes() == raw
+    assert journal.with_name("journal.json.legacy-v1.source").read_bytes() == raw
+    assert journal.with_name("journal.json.anchor.json").exists()
+    assert journal.with_name("journal.json.migration-v1.json").exists()
+    assert dq._load_journal(journal) == migrated
+
+
+@pytest.mark.parametrize("evidence_name", [
+    "journal.json.legacy-v1.backup",
+    "journal.json.legacy-v1.source",
+    "journal.json.migration-v1.json",
+])
+def test_divergent_deployed_v1_recovery_evidence_refuses_before_installing(
+        tmp_path, evidence_name):
+    journal, raw = _deployed_v1_fixture(tmp_path)
+    divergent = journal.with_name(evidence_name)
+    divergent.write_bytes(b"forged\n")
+    before = _evidence_bytes(tmp_path)
+
+    with pytest.raises(dq.DeploymentBlocked, match="different|malformed|unreadable"):
+        dq.migrate_legacy_journal(
+            journal=journal, expected_sha256=hashlib.sha256(raw).hexdigest(),
+            actor="fixture-reviewer", provenance="forged recovery control",
+            legacy_format="deployed-v1")
+
+    assert _evidence_bytes(tmp_path) == before
+
+
+def test_wrong_hash_or_forged_anchor_cannot_recover_deployed_v1(tmp_path):
+    journal, raw = _deployed_v1_fixture(tmp_path)
+    with pytest.raises(dq.DeploymentBlocked, match="reviewed SHA-256"):
+        dq.migrate_legacy_journal(
+            journal=journal, expected_sha256="0" * 64, actor="fixture-reviewer",
+            provenance="wrong hash control", legacy_format="deployed-v1")
+    assert _evidence_bytes(tmp_path) == {"journal.json": raw}
+
+    anchor = journal.with_name("journal.json.anchor.json")
+    anchor.write_text("{}")
+    before = _evidence_bytes(tmp_path)
+    with pytest.raises(dq.DeploymentBlocked, match="anchor without"):
+        dq.migrate_legacy_journal(
+            journal=journal, expected_sha256=hashlib.sha256(raw).hexdigest(),
+            actor="fixture-reviewer", provenance="forged anchor control",
+            legacy_format="deployed-v1")
+    assert _evidence_bytes(tmp_path) == before
 
 
 def test_corrupt_journal_fails_closed(tmp_path):

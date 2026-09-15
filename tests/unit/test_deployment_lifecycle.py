@@ -205,7 +205,7 @@ def test_guard_allowlist_is_exact_route_and_verb(verb):
     assert lifecycle.unguarded_findings('cli/server.py', f'def restart_server():\n _compose("{verb}")')
     assert lifecycle.unguarded_findings('cli/server.py', f'def unrelated():\n _compose("up")')
     assert lifecycle.unguarded_findings('other/server.py', f'def restart_server():\n _compose("up")')
-    assert lifecycle.unguarded_findings('cli/server.py', 'def restart_server():\n _require_deployment_authority()\n _compose("up")') == []
+    assert lifecycle.unguarded_findings('cli/server.py', 'def restart_server():\n _require_deployment_authority(clearance)\n _compose("up", capability=token)') == []
 
 
 
@@ -277,3 +277,80 @@ def test_python_shell_api_boundaries(source, expected):
 ])
 def test_commonmark_execution_boundaries(source, expected):
     assert bool(lifecycle.source_findings('README.md', source)) is expected
+
+
+@pytest.mark.parametrize('source', [
+    'builtin eval "docker compose up"',
+    'xargs docker compose restart',
+    'xargs -I {} -- docker compose restart {}',
+    'find . -exec docker compose stop ;',
+    'find . -execdir docker compose stop {} +',
+    'python -c "import os; os.system(\'docker compose up\')"',
+    'python3.12 -Ic "import subprocess; subprocess.getoutput(\'docker compose up\')"',
+    'unmodelled-launcher "docker compose up"',
+    'unmodelled-launcher docker --context review compose up',
+    'xargs --unknown-option future docker compose up',
+    'fish -c "docker compose up"',
+])
+def test_r25_literal_executors_and_unknown_routes_are_refused(source):
+    assert lifecycle.shell_actions(source)
+
+
+@pytest.mark.parametrize('source', [
+    'import os\nos.execvp("docker", ["docker","compose","up"])',
+    'import os\nos.spawnvp(os.P_WAIT,"docker",["docker","compose","restart"])',
+    'os.execlp("docker", "docker", "compose", "up")',
+    'os.execlp("docker", "alias", "compose", "up")',
+    'os.spawnlp(os.P_WAIT, "docker", "alias", "compose", "up")',
+    'os.spawnlp(os.P_WAIT, "docker", "docker", "compose", "up")',
+    '@_compose("up")\ndef harmless():\n pass',
+    'def harmless(value=_compose("up")):\n pass',
+    '@subprocess.run(["docker","compose","up"])\ndef harmless():\n pass',
+    'def harmless(value=subprocess.run(["docker","compose","restart"])):\n pass',
+    '@subprocess.getoutput("docker compose stop")\ndef harmless():\n pass',
+    'def harmless(*, value=os.system("docker compose up")):\n pass',
+    'def harmless(value: os.system("docker compose up")):\n pass',
+    'def harmless() -> os.system("docker compose up"):\n pass',
+    'class C(os.system("docker compose up")):\n pass',
+    'launch=subprocess.run\nlaunch(["docker","compose","up"])',
+    'unmodelled_launch("docker compose up")',
+    'unmodelled_launch(command="docker compose up")',
+    'os.execvp(file="docker", args=["alias","compose","up"])',
+    'subprocess.run(["alias","compose","up"], executable="docker")',
+])
+def test_r25_python_definition_and_exec_surfaces(source):
+    assert lifecycle.unguarded_findings('scripts/x.py', source)
+
+
+@pytest.mark.parametrize('body', [
+    'callback=lambda: _compose("up", capability=token)',
+    'callback=lambda arg=_compose("up", capability=token): None',
+    'callback=(_compose("up", capability=token) for _ in [1])',
+    'callback=[_compose("up", capability=token) for _ in [1]]',
+    'def nested(arg=_compose("up", capability=token)):\n  pass',
+])
+def test_nested_expressions_do_not_inherit_dispatch_exception(body):
+    source = 'def restart_server():\n _require_deployment_authority(clearance)\n ' + body + '\n'
+    assert lifecycle.unguarded_findings('cli/server.py', source)
+
+
+@pytest.mark.parametrize('source', [
+    '```fish\ndocker compose up\n```',
+    '\tpython -c "import os; os.system(\'docker compose up\')"\n',
+    '    xargs docker compose stop\n',
+])
+def test_r25_markdown_executable_regions(source):
+    assert lifecycle.source_findings('README.md', source)
+
+
+@pytest.mark.parametrize('source', [
+    'builtin printf "%s" "docker compose up"',
+    'python -c "print(\'docker compose up\')"',
+    'fish -c \'echo "docker compose up"\'',
+    'xargs docker compose --dry-run up',
+    'find . -exec docker compose --dry-run up ;',
+    'echo "docker compose up"',
+    "cat <<'EOF'\ndocker compose up\nEOF",
+])
+def test_known_data_and_dryrun_remain_safe(source):
+    assert lifecycle.shell_actions(source) == []

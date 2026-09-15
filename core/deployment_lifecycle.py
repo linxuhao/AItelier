@@ -33,7 +33,7 @@ DOCKER_FLAGS = {"--debug", "-D", "--tls", "--tlsverify"}
 COMPOSE_VALUES = {"--ansi", "--env-file", "--file", "-f", "--parallel", "--profile",
                   "--progress", "--project-directory", "--project-name", "-p"}
 COMPOSE_FLAGS = {"--all-resources", "--compatibility", "--dry-run", "--verbose"}
-SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
+SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "fish"}
 
 
 def _options(argv, index, values, flags):
@@ -78,6 +78,17 @@ def compose_action(argv):
     return None if verb in READ_ONLY_COMMANDS else "unknown"
 
 
+def _unknown_compose_literal(argv):
+    """Unmodelled executors carrying a Compose command require review."""
+    if any(re.search(r"(?:^|[\s/])docker(?:-compose|\s+compose)(?:\s|$)", arg)
+           for arg in argv):
+        return ["unknown"]
+    if any(Path(arg).name == "docker" and "compose" in argv[index + 1:]
+           for index, arg in enumerate(argv)):
+        return ["unknown"]
+    return []
+
+
 def _command_actions(argv):
     if not argv:
         return []
@@ -97,7 +108,7 @@ def _command_actions(argv):
         while rest and rest[0].startswith("-"):
             rest = rest[2:] if rest[0] in {"-f", "--format", "-o", "--output"} else rest[1:]
         return _command_actions(rest)
-    if head in {"command", "exec", "nohup"}:
+    if head in {"command", "builtin", "exec", "nohup"}:
         if head == "command" and any(value in {"-v", "-V"} for value in rest[:1]):
             return []
         while rest and rest[0].startswith("-"):
@@ -139,13 +150,39 @@ def _command_actions(argv):
                 return shell_actions(rest[index + 1]) if index + 1 < len(rest) else ["unknown"]
             index += 1
         return []
+    if head == "xargs":
+        while rest and rest[0].startswith("-"):
+            option = rest[0]
+            rest = rest[2:] if option in {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter", "--eof", "--replace", "--max-lines", "--max-args", "--max-procs", "--max-chars"} else rest[1:]
+            if option == "--":
+                break
+        return _command_actions(rest)
+    if head == "find":
+        actions, executable = [], False
+        for index, value in enumerate(rest):
+            if value in {"-exec", "-execdir", "-ok", "-okdir"}:
+                executable = True
+                command = rest[index + 1:]
+                end = next((i for i, arg in enumerate(command) if arg in {";", "+"}), len(command))
+                actions.extend(_command_actions(command[:end]))
+        return actions if executable else _unknown_compose_literal(argv)
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", head):
+        for index, option in enumerate(rest):
+            if option == "-c" or (option.startswith("-") and not option.startswith("--") and option.endswith("c")):
+                if index + 1 == len(rest):
+                    return ["unknown"]
+                try:
+                    return [item.action for item in python_findings(rest[index + 1])]
+                except SyntaxError:
+                    return _unknown_compose_literal(argv)
+        return _unknown_compose_literal(argv)
     if head == "docker":
         index, _ = _options(rest, 0, DOCKER_VALUES, DOCKER_FLAGS)
         if index >= len(rest) or rest[index] != "compose":
             return ["unknown"] if "compose" in rest[index:] and rest[index].startswith("-") else []
         rest = rest[index + 1:]
     elif head != "docker-compose":
-        return []
+        return _unknown_compose_literal(argv)
     action = compose_action(rest)
     return [action] if action else []
 
@@ -244,6 +281,13 @@ def python_findings(source):
 
         def visit_FunctionDef(self, node):
             old, prior, guard = self.bindings, self.function, self.guard_line
+            # Decorators/defaults/annotations execute at definition time. Give
+            # them no enclosing function's dispatch exception.
+            self.function = (prior + "." if prior else "") + "<definition:" + node.name + ">"
+            self.guard_line = None
+            for expression in [*node.decorator_list, node.args, node.returns, *node.type_params]:
+                if expression is not None:
+                    self.visit(expression)
             self.bindings = dict(old)
             self.function = prior + "." + node.name if prior else node.name
             self.guard_line = None
@@ -256,11 +300,32 @@ def python_findings(source):
 
         visit_AsyncFunctionDef = visit_FunctionDef
 
+        def visit_Lambda(self, node):
+            prior, guard = self.function, self.guard_line
+            self.function = prior + ".<lambda>"
+            self.guard_line = None
+            self.visit(node.args)
+            self.visit(node.body)
+            self.function, self.guard_line = prior, guard
+
+        def visit_GeneratorExp(self, node):
+            prior, guard = self.function, self.guard_line
+            self.function = prior + ".<comprehension>"
+            self.guard_line = None
+            self.generic_visit(node)
+            self.function, self.guard_line = prior, guard
+
+        visit_ListComp = visit_GeneratorExp
+        visit_SetComp = visit_GeneratorExp
+        visit_DictComp = visit_GeneratorExp
+
         def visit_Assign(self, node):
             value = _literal(node.value, self.bindings)
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     self.bindings[target.id] = value
+                    if isinstance(node.value, (ast.Name, ast.Attribute)):
+                        aliases[target.id] = name(node.value)
             self.generic_visit(node)
 
         def visit_Call(self, node):
@@ -272,12 +337,31 @@ def python_findings(source):
                 argv = _literal(ast.List(elts=node.args), self.bindings)
                 action = compose_action(argv)
                 actions = [action] if action else []
+            elif called in {"os.execv", "os.execve", "os.execvp", "os.execvpe", "os.spawnv", "os.spawnve", "os.spawnvp", "os.spawnvpe"}:
+                index = 2 if called.startswith("os.spawn") else 1
+                argument = node.args[index] if len(node.args) > index else next((k.value for k in node.keywords if k.arg in {"args", "argv"}), None)
+                argv = _literal(argument, self.bindings)
+                executable = node.args[index - 1] if len(node.args) >= index else next((k.value for k in node.keywords if k.arg in {"file", "path"}), None)
+                target = _literal(executable, self.bindings)
+                if isinstance(argv, list) and argv and isinstance(target, str):
+                    argv = [target, *argv[1:]]
+                actions = _command_actions(argv) if isinstance(argv, list) else []
+            elif called in {"os.execl", "os.execle", "os.execlp", "os.execlpe", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe"}:
+                index = 2 if called.startswith("os.spawn") else 1
+                argv = _literal(ast.List(elts=node.args[index:]), self.bindings)
+                target = _literal(node.args[index - 1], self.bindings) if len(node.args) >= index else None
+                if argv and isinstance(target, str):
+                    argv = [target, *argv[1:]]
+                actions = _command_actions(argv)
             elif called in {"subprocess.run", "subprocess.Popen", "subprocess.getoutput", "subprocess.getstatusoutput", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "os.system", "os.popen", "asyncio.create_subprocess_exec", "asyncio.create_subprocess_shell"}:
                 arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg in {"args", "command", "cmd"}), None)
                 value = _literal(arg, self.bindings)
                 if called == "asyncio.create_subprocess_exec":
                     value = _literal(ast.List(elts=node.args), self.bindings)
                 if isinstance(value, list):
+                    executable = next((_literal(k.value, self.bindings) for k in node.keywords if k.arg == "executable"), None)
+                    if value and isinstance(executable, str):
+                        value = [executable, *value[1:]]
                     actions = _command_actions(value)
                 elif isinstance(value, str):
                     # Python's shell=False string is an executable filename;
@@ -285,9 +369,21 @@ def python_findings(source):
                     shell = called in {"os.system", "os.popen", "subprocess.getoutput", "subprocess.getstatusoutput", "asyncio.create_subprocess_shell"} or any(k.arg == "shell" and isinstance(k.value, ast.Constant) and bool(k.value.value) for k in node.keywords)
                     if shell:
                         actions = shell_actions(value)
+            elif called not in {"print", "str", "repr", "bytes"}:
+                # Unknown callees with a literal Compose command are executable
+                # source, not established data sinks. Require explicit review.
+                for argument in [*node.args, *(k.value for k in node.keywords)]:
+                    value = _literal(argument, self.bindings)
+                    if isinstance(value, str):
+                        actions.extend(_unknown_compose_literal([value]))
+                    elif isinstance(value, list):
+                        actions.extend(_unknown_compose_literal(value))
+            if called == "subprocess.run" and self.function == "_compose" and not actions:
+                actions = ["unknown"]
             for action in actions:
                 findings.append(Finding(node.lineno, action, self.function, called.split(".")[-1] if called.split(".")[-1] in {"_compose", "_compose_up"} else called,
-                                        self.guard_line is not None and self.guard_line < node.lineno))
+                                        (self.guard_line is not None and self.guard_line < node.lineno
+                                         and any(k.arg == "capability" for k in node.keywords))))
             self.generic_visit(node)
 
     Visitor().visit(tree)
@@ -296,7 +392,7 @@ def python_findings(source):
 
 def _fenced_findings(language, block, first):
     text = "\n".join(block)
-    if language in {"", "sh", "shell", "bash", "zsh", "console", "shell-session"}:
+    if language in {"", "sh", "shell", "bash", "zsh", "fish", "console", "shell-session"}:
         text = "\n".join(re.sub(r"^\s*\$ ", "", item) for item in block)
         return [Finding(first, action) for action in shell_actions(text)]
     if language in {"python", "py"}:
@@ -337,12 +433,21 @@ def unguarded_findings(path, source):
     for finding in findings:
         allowed = (finding.guarded and finding.sink in {"_compose", "_compose_up"}
                    and finding.action in GUARDED_CALLS.get((str(path), finding.function), set()))
+        # The forwarding helper has no ambient guard; its sole authority is
+        # the explicit keyword-only capability passed into the raw dispatcher.
+        if str(path) == "cli/server.py" and finding.function == "_compose_up" and finding.sink == "_compose":
+            function = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == "_compose_up")
+            allowed = (finding.action in {"up", "unknown"}
+                       and any(arg.arg == "capability" for arg in function.args.kwonlyargs)
+                       and any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_compose"
+                               and any(k.arg == "capability" and isinstance(k.value, ast.Name) and k.value.id == "capability" for k in node.keywords)
+                               for node in ast.walk(function)))
         # The single raw dispatcher performs the same runtime capability check
         # before subprocess.run. It is not a wildcard for nested same-name code.
         dispatcher = (str(path) == "cli/server.py" and finding.function == "_compose"
                       and finding.sink == "subprocess.run" and finding.action == "unknown"
                       and any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                              and node.func.id == "_require_deployment_authority"
+                              and node.func.id == "_consume_deployment_command"
                               for node in ast.walk(next(node for node in ast.parse(source).body
                                   if isinstance(node, ast.FunctionDef) and node.name == "_compose"))))
         if not allowed and not dispatcher:

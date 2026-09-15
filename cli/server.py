@@ -7,7 +7,7 @@
 # uvicorn directly on the host would make DPE git commits use the host
 # developer's ~/.gitconfig identity instead of the image's AItelier identity.
 
-import contextvars
+import copy
 import fcntl
 import json
 import threading
@@ -61,7 +61,9 @@ _COMPOSE_CONTAINERS = {
 }
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 _IMAGE_NAME = "aitelier:latest"
-_ACTIVE_CLEARANCE = contextvars.ContextVar("deployment_clearance", default=None)
+_CAPABILITY_LOCK = threading.Lock()
+_OPERATIONS = {}
+_COMMANDS = {}
 
 
 # ── Health ────────────────────────────────────────────────────────────────
@@ -217,19 +219,25 @@ def _ensure_host_dirs() -> None:
         pass          # let Docker report it in its own terms
 
 
-def _compose(*args: str, **kwargs) -> subprocess.CompletedProcess:
-    """Run `docker compose -f <file> [-f <overlay>] <args>`."""
+def _compose(*args: str, capability=None, _prepare=False, **kwargs) -> subprocess.CompletedProcess:
+    """Dispatch one exact authorized command, or a read-only Compose query."""
     from core.deployment_lifecycle import compose_action
-    capability = compose_action(list(args))
-    if capability:
-        _require_deployment_authority()
-        if capability != "up":
-            raise RuntimeError("unsupported guarded Compose capability: " + capability)
-    return subprocess.run(
-        ["docker", "compose", *_compose_files(), *args],
-        env=_compose_env(),
-        **kwargs,
-    )
+    effect = compose_action(list(args))
+    if capability is not None and effect != "up":
+        _consume_deployment_command(capability, args)
+    if effect and effect != "up":
+        raise RuntimeError("unsupported guarded Compose capability: " + effect)
+    if effect:
+        command = _consume_deployment_command(capability, args)
+        if _prepare:
+            _ensure_host_dirs()
+        _require_deployment_authority(command["clearance"])
+        argv, env = command["argv"], command["env"]
+    else:
+        if capability is not None or _prepare:
+            raise RuntimeError("deployment authority cannot authorize a different command")
+        argv, env = ["docker", "compose", *_compose_files(), *args], _compose_env()
+    return subprocess.run(list(argv), env=dict(env), **kwargs)
 
 
 def _container_running() -> bool:
@@ -447,10 +455,8 @@ def _warn_if_edge_network_is_alone() -> None:
         pass                        # a diagnostic must never break the start
 
 
-def _compose_up(max_wait: int = 120):
-    """Start (building on first run) the guarded backend and sidecars."""
-    _require_deployment_authority()
-    _ensure_host_dirs()
+def _compose_start_args(max_wait: int) -> tuple[str, ...]:
+    """Read-only command planning before the public route requests authority."""
     rebuild = []
     if not _image_exists():
         print("Building AItelier image (first run — this may take a few minutes)...")
@@ -458,13 +464,15 @@ def _compose_up(max_wait: int = 120):
         print("Dependencies changed since the image was built — rebuilding "
               "(the source is mounted, but its packages are not).")
         rebuild = ["--build"]
-    # Inherit stdout/stderr so build + startup progress is visible.
-    res = _compose("up", "-d", *rebuild, "--wait", "--wait-timeout",
-                   str(max_wait), *_COMPOSE_SERVICES)
+    return ("up", "-d", *rebuild, "--wait", "--wait-timeout",
+            str(max_wait), *_COMPOSE_SERVICES)
+
+
+def _compose_up(args, *, capability=None):
+    """Prepare and start using only the explicitly supplied one-shot command."""
+    res = _compose(*args, capability=capability, _prepare=True)
     if res.returncode != 0:
-        raise RuntimeError(
-            "guarded Compose deployment failed (see output above)"
-        )
+        raise RuntimeError("guarded Compose deployment failed (see output above)")
     _warn_if_edge_network_is_alone()
 
 
@@ -474,6 +482,10 @@ def _require_deployment_clearance(action: str) -> dict:
     from core import datadir
     from core import deployment_quiescence as dq
 
+    with _CAPABILITY_LOCK:
+        if any(operation["owner"] == (os.getpid(), threading.get_ident())
+               for operation in _OPERATIONS.values()):
+            raise RuntimeError("nested deployment authority is unsupported")
     fence = dq.acquire_cutover_fence()
     try:
         try:
@@ -489,7 +501,14 @@ def _require_deployment_clearance(action: str) -> dict:
         override = dq.load_override(os.environ.get("AITELIER_DEPLOY_OVERRIDE_FILE"))
         clearance = dq.authorize(action, observation, override=override)
         clearance["_cutover_fence"] = fence
-        _ACTIVE_CLEARANCE.set((clearance, threading.get_ident()))
+        operation = object()
+        clearance["_operation"] = operation
+        with _CAPABILITY_LOCK:
+            _OPERATIONS[operation] = {"clearance": clearance,
+                                      "owner": (os.getpid(), threading.get_ident()),
+                                      "fence": fence, "journal": dq.evidence_path(),
+                                      "event": copy.deepcopy(clearance["event"]),
+                                      "minted": False}
         return clearance
     except BaseException as exc:
         dq.release_cutover_fence(fence)
@@ -498,14 +517,20 @@ def _require_deployment_clearance(action: str) -> dict:
         raise
 
 
-def _require_deployment_authority() -> None:
-    """Internal primitives require a live, current journal-backed cutover."""
+def _require_deployment_authority(clearance=None) -> None:
+    """An explicit live operation is needed; there is no ambient permit."""
     from core import deployment_quiescence as dq
-    active = _ACTIVE_CLEARANCE.get()
-    if active is None or active[1] != threading.get_ident():
-        raise RuntimeError("Compose effects require active deployment authority")
-    clearance = active[0]
+    with _CAPABILITY_LOCK:
+        operation = _OPERATIONS.get((clearance or {}).get("_operation"))
+        if (operation is None or operation["clearance"] is not clearance
+                or operation["owner"] != (os.getpid(), threading.get_ident())):
+            raise RuntimeError("Compose effects require explicit deployment authority")
+    if (operation["event"] != clearance.get("event")
+            or operation["journal"] != dq.evidence_path()):
+        raise dq.DeploymentBlocked("deployment authority is stale or differs from its operation")
     fence = clearance.get("_cutover_fence")
+    if fence is not operation["fence"]:
+        raise RuntimeError("deployment authority fence identity changed")
     if fence is None or fence.closed:
         raise RuntimeError("deployment authority fence is no longer held")
     info, current = os.fstat(fence.fileno()), dq.admission_fence_path().stat()
@@ -524,6 +549,47 @@ def _require_deployment_authority() -> None:
     dq.validate_pending_clearance(clearance)
 
 
+def _mint_deployment_command(clearance, args):
+    """Public routes mint at most one command under their current cutover fence."""
+    _require_deployment_authority(clearance)
+    args = tuple(args)
+    if not args or args[0] != "up" or not all(type(arg) is str for arg in args):
+        raise RuntimeError("unsupported deployment authority command")
+    with _CAPABILITY_LOCK:
+        operation = _OPERATIONS.get(clearance["_operation"])
+        if operation is None or operation["minted"]:
+            raise RuntimeError("deployment authority command already minted or settled")
+        # Reserve before command-planning callbacks can run. Failed planning
+        # also spends the operation's one issuance; there is no hidden retry.
+        operation["minted"] = True
+    argv = ("docker", "compose", *_compose_files(), *args)
+    env = tuple(_compose_env().items())
+    _require_deployment_authority(clearance)
+    with _CAPABILITY_LOCK:
+        if _OPERATIONS.get(clearance["_operation"]) is not operation:
+            raise RuntimeError("deployment authority settled during command planning")
+        capability = object()
+        _COMMANDS[capability] = {"clearance": clearance, "args": args,
+                                 "argv": argv, "env": env}
+    return capability
+
+
+def _consume_deployment_command(capability, args):
+    # Pop atomically before validation or callbacks: mismatches and failed
+    # attempts spend the capability as well. An uncertain dispatch never retries.
+    with _CAPABILITY_LOCK:
+        try:
+            command = _COMMANDS.pop(capability, None)
+        except TypeError:
+            command = None
+    if command is None:
+        raise RuntimeError("Compose effects require unconsumed command authority")
+    if command["args"] != tuple(args):
+        raise RuntimeError("deployment authority is bound to a different command")
+    _require_deployment_authority(command["clearance"])
+    return command
+
+
 def _finish_deployment(clearance: dict, *, success: bool,
                        error: BaseException | None = None) -> dict:
     from core import deployment_quiescence as dq
@@ -536,9 +602,11 @@ def _finish_deployment(clearance: dict, *, success: bool,
         return dq.finalize(clearance, success=success,
                            error=None if error is None else str(error))
     finally:
-        active = _ACTIVE_CLEARANCE.get()
-        if active is not None and active[0] is clearance:
-            _ACTIVE_CLEARANCE.set(None)
+        with _CAPABILITY_LOCK:
+            _OPERATIONS.pop((clearance or {}).get("_operation"), None)
+            for capability, command in list(_COMMANDS.items()):
+                if command["clearance"] is clearance:
+                    del _COMMANDS[capability]
         dq.release_cutover_fence((clearance or {}).get("_cutover_fence"))
 
 
@@ -554,9 +622,11 @@ def _ensure_docker_backend(base_url: str, max_wait: int) -> bool:
     # A stopped or unhealthy container is a redeploy boundary.  The gate is
     # deliberately after Docker availability checks and before compose changes
     # anything, so an unreadable runtime inventory cannot turn into a replay.
+    args = _compose_start_args(max_wait)
     clearance = _require_deployment_clearance("redeploy")
     try:
-        _compose_up(max_wait)
+        capability = _mint_deployment_command(clearance, args)
+        _compose_up(args, capability=capability)
         if not _wait_healthy(client, max_wait):
             raise RuntimeError(
                 f"Docker backend did not become healthy within {max_wait}s "
@@ -604,9 +674,10 @@ def restart_server(base_url: str = _DEFAULT_URL, max_wait: int = 120) -> bool:
     _require_docker()
     clearance = _require_deployment_clearance("restart")
     try:
-        restarted = _compose(
-            "up", "-d", "--force-recreate", "--wait", "--wait-timeout",
-            str(max_wait), *_COMPOSE_SERVICES)
+        args = ("up", "-d", "--force-recreate", "--wait", "--wait-timeout",
+                str(max_wait), *_COMPOSE_SERVICES)
+        capability = _mint_deployment_command(clearance, args)
+        restarted = _compose(*args, capability=capability)
         if restarted.returncode != 0:
             raise RuntimeError(
                 "guarded Compose recreation failed with exit "

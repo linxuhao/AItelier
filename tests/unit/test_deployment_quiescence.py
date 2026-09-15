@@ -1549,6 +1549,9 @@ def test_supported_external_launch_registers_durable_owner_before_work(
 def test_server_redeploy_gate_runs_before_compose(monkeypatch):
     from cli import server
 
+    # This route-order fixture replaces the gate; capability mechanics have real-gate tests.
+    monkeypatch.setattr(server, "_mint_deployment_command", lambda *args: object())
+
     events = []
 
     class Client:
@@ -1564,7 +1567,7 @@ def test_server_redeploy_gate_runs_before_compose(monkeypatch):
     monkeypatch.setattr(server, "_require_deployment_clearance",
                         lambda action: events.append(("gate", action)) or {})
     monkeypatch.setattr(
-        server, "_compose_up", lambda _max_wait: events.append(("compose",)))
+        server, "_compose_up", lambda _args, **_kwargs: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
     monkeypatch.setattr(server, "_require_guarded_services_ready", lambda: None)
     assert server._ensure_docker_backend("http://localhost:4444", 1) is True
@@ -1576,7 +1579,6 @@ def test_guarded_compose_start_includes_both_sidecars(monkeypatch):
 
     # Argument construction is isolated here; actual missing/stale authority
     # refusal is exercised in test_deployment_authority.
-    monkeypatch.setattr(server, "_require_deployment_authority", lambda: None)
     calls = []
     monkeypatch.setattr(server, "_ensure_host_dirs", lambda: None)
     monkeypatch.setattr(server, "_image_exists", lambda: True)
@@ -1585,7 +1587,7 @@ def test_guarded_compose_start_includes_both_sidecars(monkeypatch):
     monkeypatch.setattr(
         server, "_compose",
         lambda *args, **kwargs: calls.append(args) or SimpleNamespace(returncode=0))
-    server._compose_up(17)
+    server._compose_up(server._compose_start_args(17), capability=object())
     assert calls == [("up", "-d", "--wait", "--wait-timeout", "17",
                       "zvec-grep", "godot-builder", "aitelier")]
 
@@ -1777,12 +1779,15 @@ def test_reuse_requires_exact_health_for_all_services(monkeypatch):
 def test_redeploy_health_failure_aborts_pending_journal(monkeypatch):
     from cli import server
 
+    # This route-order fixture replaces the gate; capability mechanics have real-gate tests.
+    monkeypatch.setattr(server, "_mint_deployment_command", lambda *args: object())
+
     terminal = []
     monkeypatch.setattr(server.httpx, "Client", lambda *args, **kwargs: object())
     monkeypatch.setattr(server, "_container_running", lambda: False)
     monkeypatch.setattr(server, "_require_deployment_clearance",
                         lambda _action: {"event": {"event_id": "gate"}})
-    monkeypatch.setattr(server, "_compose_up", lambda _max_wait: None)
+    monkeypatch.setattr(server, "_compose_up", lambda _args, **_kwargs: None)
     monkeypatch.setattr(server, "_wait_healthy", lambda *_args: True)
     monkeypatch.setattr(
         server, "_require_guarded_services_ready",
@@ -1853,6 +1858,9 @@ def test_all_tracked_operator_surfaces_avoid_direct_compose_mutations():
 def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
     from cli import server
 
+    # This route-order fixture replaces the gate; capability mechanics have real-gate tests.
+    monkeypatch.setattr(server, "_mint_deployment_command", lambda *args: object())
+
     events = []
     class Client:
         def __init__(self, *args, **kwargs):
@@ -1865,7 +1873,7 @@ def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
     monkeypatch.setattr(server, "_require_deployment_clearance",
                         lambda action: events.append(("gate", action)) or {})
     monkeypatch.setattr(
-        server, "_compose_up", lambda _max_wait: events.append(("compose",)))
+        server, "_compose_up", lambda _args, **_kwargs: events.append(("compose",)))
     monkeypatch.setattr(server, "_wait_healthy", lambda client, max_wait: True)
     monkeypatch.setattr(server, "_require_guarded_services_ready", lambda: None)
     assert server._ensure_docker_backend("http://localhost:4444", 1) is True
@@ -1874,6 +1882,9 @@ def test_server_redeploy_never_kills_a_listener_before_gate(monkeypatch):
 
 def test_server_restart_gate_runs_before_restart(monkeypatch):
     from cli import server
+
+    # This route-order fixture replaces the gate; capability mechanics have real-gate tests.
+    monkeypatch.setattr(server, "_mint_deployment_command", lambda *args: object())
 
     events = []
 
@@ -1931,10 +1942,13 @@ def test_resident_godot_sidecar_without_owner_ledger_fails_closed(tmp_path):
 def test_restart_exit_137_is_aborted_even_if_old_health_still_answers(tmp_path, monkeypatch):
     from cli import server
 
+    # This route-order fixture replaces the gate; capability mechanics have real-gate tests.
+    monkeypatch.setattr(server, "_mint_deployment_command", lambda *args: object())
+
     events = []
     monkeypatch.setattr(server, "_require_docker", lambda: None)
     monkeypatch.setattr(server, "_require_deployment_clearance", lambda _a: {"event": {"event_id": "gate"}})
-    monkeypatch.setattr(server, "_compose", lambda *_a: SimpleNamespace(returncode=137))
+    monkeypatch.setattr(server, "_compose", lambda *_a, **_kw: SimpleNamespace(returncode=137))
     monkeypatch.setattr(server, "_wait_healthy", lambda *_a: True)
     monkeypatch.setattr(server, "_finish_deployment",
                         lambda _c, *, success, error=None: events.append((success, str(error))))

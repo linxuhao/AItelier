@@ -136,14 +136,26 @@ supported source forms, not permission enforcement for arbitrary generated Pytho
 or shell code. Generated/dynamic commands require explicit review; they cannot be
 advertised as a supported deployment route based only on this static scan.
 
-Both `_compose_up` and the raw `_compose` dispatcher require the current thread's
-live exclusive cutover fence and an exact still-pending journal receipt before
-effects. Transitive callers cannot bypass this check by using an internal helper.
-Only `up` is currently supported under that authority; other effect capabilities
-are refused even with a permit. Read-only and global dry-run calls require no
-effect permit. Closing/unlocking the fence, settling or changing the receipt,
-or transferring its context to another thread invalidates it. This is cooperative
-application authority, not a sandbox against code that monkeypatches the protocol.
+The public start/recreate paths mint an explicit opaque command capability only
+under their live cutover fence. The operation binds the exact pending journal
+receipt and path, fence object, process and thread. There is no ambient permit:
+a nested callback calling an internal helper receives no authority. Each operation
+reserves one issuance before planning callbacks run; the capability freezes the
+exact verb/argv, Compose file arguments and Docker environment. The raw dispatcher
+atomically removes it before validation, preparation or dispatch. A second use,
+wrong command, failed/uncertain dispatch or cross-thread/process use cannot retry;
+settlement revokes any unconsumed capability. Nested public gates refuse instead
+of waiting on their own fence. Only `up` is currently supported. Read-only and
+global dry-run calls require no effect capability.
+
+Python AST traversal includes decorators, defaults, annotations and nested/lambda/
+comprehension scopes; these scopes cannot borrow a reviewed outer callsite.
+Literal eval/xargs/find-exec/Python-c and os exec/spawn routes are inventoried.
+Unmodelled executable callees carrying a literal Compose command require review;
+known echo/printf/heredoc data and dry runs remain non-effects. The audit still
+is not whole-program evaluation. The explicit capability protocol is cooperative
+application authority, not a sandbox against arbitrary code that rewrites private
+registries, calls raw Docker APIs, or tampers with filesystem/journal state.
 
 Parser versions are pinned; their wheels support the project's Python 3.12 on
 macOS and Linux. They are used by the static audit, not process observation.

@@ -177,6 +177,13 @@ class StatePortfolio:
                                     "JOIN state_attempts a ON a.attempt_id=e.attempt_id WHERE a.project_id=? "
                                     "GROUP BY e.attempt_id,e.criterion_id) v ON e.seq=v.last", (project_id,)):
                 evidence.setdefault(row["attempt_id"], Counter())[row["verdict"]] += 1
+            open_issues, issue_counts = Counter(), {}
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_issues'").fetchone():
+                open_issues.update({r["node_key"]: r["n"] for r in conn.execute(
+                    "SELECT l.node_key,COUNT(*) AS n FROM state_issue_nodes l JOIN state_issues i ON i.issue_id=l.issue_id "
+                    "WHERE i.project_id=? AND i.status='open' GROUP BY l.node_key", (project_id,))})
+                issue_counts = {r["status"]: r["n"] for r in conn.execute(
+                    "SELECT status,COUNT(*) AS n FROM state_issues WHERE project_id=? GROUP BY status", (project_id,))}
             nodes = []
             for n in view["nodes"]:
                 a = latest.get(n["node_key"])
@@ -185,7 +192,8 @@ class StatePortfolio:
                 entry.update(title=n["goal"].splitlines()[0][:180], domain=n["node_key"].split(".")[0],
                              criteria_count=len(n["acceptance"]), attempt_count=count.get(n["node_key"], 0),
                              latest_attempt={k: a[k] for k in ATTEMPT_COLUMNS} if a else None,
-                             latest_evidence=dict(evidence.get(a["attempt_id"], {})) if a else {})
+                             latest_evidence=dict(evidence.get(a["attempt_id"], {})) if a else {},
+                             open_issue_count=open_issues[n["node_key"]])
                 nodes.append(entry)
             seq = conn.execute("SELECT COALESCE(MAX(seq),0) FROM state_events WHERE project_id=?", (project_id,)).fetchone()[0]
             return {"project": view["project"], "source": self._source(conn, view["project"]),
@@ -193,6 +201,7 @@ class StatePortfolio:
                     "counts": dict(Counter(n["status"] for n in nodes)),
                     "readiness_counts": dict(Counter(n["readiness"] for n in nodes)),
                     "ready_action_counts": ready_action_counts(nodes),
+                    "issue_counts": issue_counts,
                     "event_seq": seq, "observed_at": now(), "run_state_mode": "persisted; explicit refresh observes workflow outcomes"}
 
     def project_attempts(self, project_id, after=0, limit=30):

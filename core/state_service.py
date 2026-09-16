@@ -54,6 +54,8 @@ class StateService:
         self.store = StateGraphStore(db)
         from core.state_driver_notes import StateDriverNotes
         self.driver_notes = StateDriverNotes(self.store, actor)
+        from core.state_issues import StateIssues
+        self.issues = StateIssues(self.store, actor)
         self.attempts = StateAttempts(self.store)
         from core.state_external import ExternalAttempts
         self.external = ExternalAttempts(self.attempts, actor)
@@ -93,7 +95,8 @@ class StateService:
                 r = conn.execute("SELECT * FROM state_acceptances WHERE receipt_id=?", (d["verified_receipt"],)).fetchone()
                 receipts[dep] = {"goal": d["goal"], "revision": d["revision"], "status": d["status"],
                                  "acceptance": dict(r) if r else None}
-        return {"node": node, "dependency_receipts": receipts,
+            open_issues = self.issues.open_for_node(conn, project_id, node_key)
+        return {"node": node, "dependency_receipts": receipts, "open_issues": open_issues,
                 "attempts": self.attempts.list(project_id, node_key, limit=10),
                 "references": self.portfolio.references(project_id, node_key, limit=100),
                 "design": self.design.node_bindings(project_id, node_key)}

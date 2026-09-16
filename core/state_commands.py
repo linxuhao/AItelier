@@ -159,6 +159,50 @@ class UpdateDriverNote(Project):
     operation: Literal["replace", "append"] = "replace"
 
 
+class ReportIssue(Project):
+    request_key: str = Field(min_length=1, max_length=200)
+    kind: Literal["defect", "gap", "handoff", "question"]
+    title: str = Field(min_length=1, max_length=300)
+    body: str = Field(min_length=1, max_length=20000)
+    director_identity: str = Field(min_length=1, max_length=320)
+    node_keys: list[str] = Field(default_factory=list, max_length=20, description=(
+        "Optional related nodes. Linking never changes a node's status, revision or readiness."))
+    source: str | None = Field(default=None, max_length=400, description=(
+        "Provenance reference, e.g. a director-message delivery_id, attempt_id or report path."))
+
+
+class IssueRef(Project):
+    issue_id: str
+
+
+class ListIssues(Project):
+    statuses: list[Literal["open", "absorbed", "promoted", "duplicate", "rejected"]] | None = Field(
+        default=None, min_length=1)
+    kinds: list[Literal["defect", "gap", "handoff", "question"]] | None = Field(default=None, min_length=1)
+    node_key: str | None = None
+    after: int = Field(default=0, ge=0, le=2**63-1)
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class LinkIssue(IssueRef):
+    expected_version: int = Field(ge=1)
+    node_keys: list[str] = Field(max_length=20)
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class ResolveIssue(IssueRef):
+    expected_version: int = Field(ge=1)
+    resolution: Literal["absorbed", "promoted", "duplicate", "rejected"] = Field(description=(
+        "absorbed: node_key+node_revision of a revision created after the report; "
+        "promoted: node_key of a node created after the report; "
+        "duplicate: exactly one of duplicate_of (issue) or node_key; rejected: reason only."))
+    reason: str = Field(min_length=1, max_length=4000)
+    director_identity: str = Field(min_length=1, max_length=320)
+    node_key: str | None = None
+    node_revision: int | None = Field(default=None, ge=1)
+    duplicate_of: str | None = None
+
+
 class Attempt(Request):
     attempt_id: str
 
@@ -404,6 +448,7 @@ READ_REQUESTS = {
     "project_attempts": ProjectAttempts, "references": References,
     "run_owners": RunOwner, "attempt_detail": Attempt,
     "list_director_messages": ListDirectorMessages,
+    "list_issues": ListIssues, "get_issue": IssueRef,
 }
 WRITE_REQUESTS = {
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
@@ -422,6 +467,7 @@ WRITE_REQUESTS = {
     "send_director_message": SendDirectorMessage,
     "acknowledge_director_message": TransitionDirectorMessage,
     "resolve_director_message": TransitionDirectorMessage,
+    "report_issue": ReportIssue, "link_issue": LinkIssue, "resolve_issue": ResolveIssue,
 }
 REQUESTS = READ_REQUESTS | WRITE_REQUESTS
 
@@ -492,6 +538,9 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "list_director_messages": service.director_messages.list_director_messages,
         "acknowledge_director_message": service.director_messages.acknowledge_director_message,
         "resolve_director_message": service.director_messages.resolve_director_message,
+        "report_issue": service.issues.report, "list_issues": service.issues.list,
+        "get_issue": service.issues.get, "link_issue": service.issues.link,
+        "resolve_issue": service.issues.resolve,
     }
     try:
         return handlers[action](**args)

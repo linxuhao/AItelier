@@ -42,6 +42,23 @@ source repository. Each **workflow-backed** attempt receives a separate
 has neither; it pins its harness/job identity and context instead. No legacy
 project/task is automatically converted.
 
+## Issues: observations beside the DAG
+
+A node is an acceptance-bearing goal. A found defect, coverage gap, cross-project
+hand-off or open question is an **issue** (`report_issue`, kind
+`defect|gap|handoff|question`, optional linked `node_keys`, `source` provenance).
+Reporting and `link_issue` never change a node's status, revision, readiness or
+the frontier, and issues are never dispatched. Investigation narrative lives in
+the issue body, not in a node goal (revising a goal invalidates dependents).
+
+`resolve_issue` is terminal and must name what absorbed the issue:
+`absorbed` (a node revision created after the report), `promoted` (a node created
+after the report), `duplicate` (another issue, or an existing node) or `rejected`.
+`get_node` returns the node's `open_issues`; `project_overview` returns
+`issue_counts` and per-node `open_issue_count`. An open defect linked to a VERIFIED
+or CANDIDATE node is reported in `contradicts_acceptance`. Storage:
+`state_issues` + `state_issue_nodes` (`core/state_issues.py`).
+
 ## Facets
 
 Nodes carry a `facet` (design / contract / test / content / integration) and the

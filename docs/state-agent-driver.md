@@ -34,6 +34,9 @@ For positive director waits, workflow recovery precedes idle/checkpoint decision
 - record_evidence for EACH current criterion and one exact artifact. Candidate evidence must match the candidate artifact. A terminal quiescent failed external attempt may retain evidence rows against one shared evidence artifact while its attempt artifact remains unset; it stays failed and verify_node refuses it even if every row passes. Reports remain hash-bound and criterion/artifact/verdict scoped. Pass/fail/skip must match actual checks. Shared credentials or different agent labels do not establish independent approval. Follow the product's independent-review requirements.
 - verify_node is separate explicit acceptance. Corrected evidence or changed goal/dependencies can invalidate acceptance and downstream nodes. Retain historical reports; never sign a new revision or artifact with old evidence.
 
+## Issues: observations are not nodes
+Report defects, gaps, cross-project hand-offs and questions with report_issue, not add_nodes; issues never change node status/readiness and are never dispatched. resolve_issue names what took the issue: absorbed (node revision after the report), promoted (node created after the report), duplicate (issue or existing node) or rejected. Open defects on VERIFIED/CANDIDATE nodes appear in contradicts_acceptance. Full protocol: state_graph_help driver_guide.
+
 ## Director notebook: context, not a second State database
 Each State project has one built-in driver note. Select it explicitly by project_id:
 get_driver_note reads the permanent/temporary sections and current revision;

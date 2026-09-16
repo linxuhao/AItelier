@@ -128,7 +128,7 @@
   .goal-text { white-space:pre-wrap; }
   .lanes { display:flex; gap:.35rem; margin:.45rem 0; flex-wrap:wrap; }
   .lane-link { width:auto; margin:0; padding:.25rem .5rem; font-size:.7rem; line-height:1.25; background:none;
-    color:var(--pico-color,#334155); border:1px solid var(--pico-muted-border-color,#dce2ea); border-radius:6px; }
+    color:var(--pico-muted-color,#475569); border:1px solid var(--pico-muted-border-color,#dce2ea); border-radius:6px; }
   .lane-link small { display:block; font-size:.6rem; opacity:.7; }
   .lane-link.current { border-color:var(--pico-primary,#0066cc); color:var(--pico-primary,#0066cc); }
   .badges { display:flex; flex-wrap:wrap; gap:.4rem; font-size:.72rem; }

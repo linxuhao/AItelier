@@ -78,7 +78,7 @@
   .note,.muted { font-size:.72rem; color:var(--pico-muted-color,#667085); }
   .filters { display:flex; gap:.4rem; margin:.5rem 0; }
   button { width:auto; margin:0; padding:.3rem .6rem; font-size:.75rem; }
-  .filters button { background:transparent; color:var(--pico-color,#334155); border:1px solid var(--pico-muted-border-color,#ddd); }
+  .filters button { background:transparent; color:var(--pico-muted-color,#475569); border:1px solid var(--pico-muted-border-color,#ddd); }
   .filters .active { border-color:var(--pico-primary,#0066cc); color:var(--pico-primary,#0066cc); }
   .issue { padding:.75rem .9rem; margin:.6rem 0; overflow-wrap:anywhere; }
   .issue.contradicts { border-left:4px solid #bd433c; }

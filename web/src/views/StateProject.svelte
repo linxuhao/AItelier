@@ -152,7 +152,7 @@
   .policy { border-left:4px solid #c48a27; padding:.7rem 1rem; background:color-mix(in srgb,#ecc369 10%,transparent); font-size:.83rem; margin:1rem 0; }
   .policy p { margin:.3rem 0; }
   .tabs { display:flex; gap:.5rem; justify-content:flex-start; border-bottom:1px solid var(--pico-muted-border-color,#ddd); padding-bottom:.5rem; }
-  .tabs button { background:transparent; color:var(--pico-color,#334155); border-color:transparent; }
+  .tabs button { background:transparent; color:var(--pico-muted-color,#475569); border-color:transparent; }
   .tabs .active { border-color:var(--pico-primary,#0066cc); color:var(--pico-primary,#0066cc); }
   .workspace { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(310px,1fr); gap:1rem; align-items:start; }
   .evidence-workspace { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(0,1.8fr); gap:1rem; }
@@ -162,7 +162,7 @@
   .run-card { padding:.9rem; margin:.7rem 0; }
   .run-row { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; font-size:.8rem; }
   .run-row p { margin:.35rem 0; } .run-actions { display:flex; gap:.7rem; align-items:center; flex-wrap:wrap; }
-  .node-index h3 { font-size:1rem; } .node-index button { display:block; width:100%; text-align:left; background:none; color:var(--pico-color,#334155); border:1px solid var(--pico-muted-border-color,#ddd); margin:.4rem 0; }
+  .node-index h3 { font-size:1rem; } .node-index button { display:block; width:100%; text-align:left; background:none; color:var(--pico-muted-color,#475569); border:1px solid var(--pico-muted-border-color,#ddd); margin:.4rem 0; }
   .node-index .chosen { border-color:var(--pico-primary,#0066cc); } .node-index small { display:block; opacity:.65; }
   .source summary{font-size:.75rem;margin-bottom:.25rem;}
   .compact .breadcrumbs,.compact .eyebrow{display:none;}

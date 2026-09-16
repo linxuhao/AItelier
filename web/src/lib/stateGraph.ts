@@ -203,7 +203,11 @@ export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
 }
 
 
-export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', query = '', maximum = 400) {
+/** `perRow` wraps a wide rank onto several rows: dozens of independent root goals
+ *  in one rank otherwise make a strip no zoom level can show. Ranks still stack in
+ *  dependency order, so every edge keeps pointing downward. */
+export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', query = '', maximum = 400,
+                            perRow = Number.POSITIVE_INFINITY) {
   const keys = new Set<string>();
   for (const node of nodes) {
     if (keys.has(node.node_key)) throw new Error('Duplicate state node identity');
@@ -227,10 +231,18 @@ export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', 
   const layout = layoutGraph(visible.map(n => ({ id: n.node_key,
     transitions: outgoing.get(n.node_key)!.filter(to => shown.has(to)).map(to => ({ to })) })), visible[0]?.node_key ?? '');
   const byKey = new Map(visible.map(n => [n.node_key, n]));
-  const boxes = layout.nodes.map(n => ({ ...byKey.get(n.id)!, x: 20 + n.order * (STATE_CARD.width + STATE_CARD.xGap), y: 20 + n.rank * (STATE_CARD.height + STATE_CARD.yGap),
+  const cols = Math.max(1, Math.floor(perRow));
+  const rankSize = new Map<number, number>();
+  for (const n of layout.nodes) rankSize.set(n.rank, Math.max(rankSize.get(n.rank) ?? 0, n.order + 1));
+  const rowStart = new Map<number, number>();
+  let rows = 0;
+  for (let r = 0; r < layout.rankCount; r++) { rowStart.set(r, rows); rows += Math.max(1, Math.ceil((rankSize.get(r) ?? 0) / cols)); }
+  const boxes = layout.nodes.map(n => ({ ...byKey.get(n.id)!,
+    x: 20 + (n.order % cols) * (STATE_CARD.width + STATE_CARD.xGap),
+    y: 20 + (rowStart.get(n.rank)! + Math.floor(n.order / cols)) * (STATE_CARD.height + STATE_CARD.yGap),
     outsideDependencies: byKey.get(n.id)!.dependencies.filter(k => !shown.has(k)).length }));
-  return { nodes: boxes, edges: layout.edges, width: Math.max(304, 40 + layout.widest * (STATE_CARD.width + STATE_CARD.xGap) - STATE_CARD.xGap),
-    height: Math.max(196, 40 + layout.rankCount * (STATE_CARD.height + STATE_CARD.yGap) - STATE_CARD.yGap), tooLarge: false, count: visible.length,
+  return { nodes: boxes, edges: layout.edges, width: Math.max(304, 40 + Math.min(layout.widest, cols) * (STATE_CARD.width + STATE_CARD.xGap) - STATE_CARD.xGap),
+    height: Math.max(196, 40 + rows * (STATE_CARD.height + STATE_CARD.yGap) - STATE_CARD.yGap), tooLarge: false, count: visible.length,
     hiddenEdges: whole.edges.filter(e => shown.has(e.from) !== shown.has(e.to)).length };
 }
 

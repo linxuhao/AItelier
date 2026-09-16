@@ -21,8 +21,12 @@
   const selectedShown = $derived(grouped && groupable && byKey.has(selected)
     ? stemOf(byKey.get(selected)!) : selected);
   const domains = $derived([...new Set(shown.map(n => n.domain))].sort());
+  // Wrap ranks to what stays legible at 50%; auto-fit then shrinks only as far as needed.
+  const perRow = $derived(canvasWidth > 0
+    ? Math.max(3, Math.floor((canvasWidth / .5 - 40 + STATE_CARD.xGap) / (STATE_CARD.width + STATE_CARD.xGap)))
+    : Number.POSITIVE_INFINITY);
   const result = $derived.by(() => {
-    try { return { layout: stateLayout(shown, domain, local ? selectedShown : '', query), error: '' }; }
+    try { return { layout: stateLayout(shown, domain, local ? selectedShown : '', query, undefined, perRow), error: '' }; }
     catch (error) { return { layout: null, error: String(error) }; }
   });
   const fitZoom = $derived(result.layout && canvasWidth > 0 && result.layout.width > 0

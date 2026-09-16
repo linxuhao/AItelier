@@ -29,6 +29,18 @@ describe('State DAG layout semantics', () => {
     expect(stateLayout(nodes,'','area.0').tooLarge).toBe(false);
     expect(stateLayout(nodes.slice(0, 62)).tooLarge).toBe(false);
   });
+  it('wraps a wide rank into rows without breaking dependency order', () => {
+    const roots = Array.from({length: 10}, (_, i) => goal('root.' + i));
+    const child = goal('child.x', ['root.9']);
+    const flat = stateLayout([...roots, child]);
+    const wrapped = stateLayout([...roots, child], '', '', '', 400, 4);
+    expect(wrapped.width).toBeLessThan(flat.width);
+    const at = new Map(wrapped.nodes.map(n => [n.node_key, n]));
+    expect(new Set(roots.map(r => at.get(r.node_key)!.y)).size).toBe(3);   // 10 roots, 4 per row
+    const lowestRoot = Math.max(...roots.map(r => at.get(r.node_key)!.y));
+    expect(at.get('child.x')!.y).toBeGreaterThan(lowestRoot);
+    expect(Math.max(...wrapped.nodes.map(n => n.y))).toBeLessThan(wrapped.height);
+  });
   it('never treats a completed attempt as a verified goal', () => {
     expect(stateTone('completed')).not.toBe('verified');
     expect(stateTone('CANDIDATE')).toBe('candidate');

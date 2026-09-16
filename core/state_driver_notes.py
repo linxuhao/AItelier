@@ -4,7 +4,13 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from core.state_graph import StateConflict, StateGraphError, key, now, text
+from core.state_driver_index import (ENTRY_SCHEMA, index_line, MAX_INDEX_LIMIT, address_of,
+                                     assertion_text, body_text, entry_detail,
+                                     entry_id_value, entry_summary, force_value,
+                                     landed_text, new_entry_id, reason_text,
+                                     referenced_addresses)
+from core.state_graph import (StateConflict, StateGraphError, StateNotFound, key, now,
+                              text)
 
 MAX_SECTION_CHARS = 100000
 MAX_SEARCH_QUERY_CHARS = 500
@@ -123,7 +129,7 @@ class StateDriverNotes:
         self.store = store
         self.actor = text(actor, "authenticated actor", 320)
         with store.db.get_connection() as conn:
-            conn.executescript(SCHEMA)
+            conn.executescript(SCHEMA + ENTRY_SCHEMA)
             conn.commit()
 
     @staticmethod
@@ -147,7 +153,8 @@ class StateDriverNotes:
             self.store._project(conn, project_id)
             row = conn.execute("SELECT * FROM state_driver_notes WHERE project_id=?",
                                (project_id,)).fetchone()
-        return self._result(project_id, row)
+            index = self._index_projection(conn, project_id)
+        return {**self._result(project_id, row), **index}
 
     def history(self, project_id: str, after_revision: int = 0, limit: int = 100) -> dict:
         project_id = key(project_id, "project_id")
@@ -266,6 +273,11 @@ class StateDriverNotes:
             # Validate the resulting section inside the transaction and before
             # any note, revision, or event write.
             changed = note_text(changed)
+            dangling = self._unresolved(conn, project_id, [(f"section:{section}", changed)])
+            if dangling:
+                raise StateGraphError(
+                    "driver note section references addresses that do not resolve: "
+                    + "; ".join(f"{item['address']} ({item['reason']})" for item in dangling))
             if section == "permanent":
                 permanent = changed
             else:
@@ -293,3 +305,226 @@ class StateDriverNotes:
             "updated_at": timestamp,
             "updated_by": {"actor": self.actor, "director_identity": director_identity},
         }
+
+    # ---- index mode: short assertions on the index, bodies fetched by address ----
+
+    @staticmethod
+    def _unresolved(conn, project_id: str, sources) -> list[dict]:
+        """Every note:// address in ``sources`` that does not resolve to a body.
+
+        This is the check that bites. It is not a comment and not a snapshot of
+        today's data: it runs on every section write, on every entry write and
+        on demand, and it reports the exact dangling addresses.
+        """
+        dangling = []
+        for label, value in sources:
+            for ref_project, ref_entry in referenced_addresses(value):
+                address = f"note://{ref_project}/{ref_entry}"
+                if ref_project != project_id:
+                    dangling.append({"source": label, "address": address,
+                                     "reason": "address leaves this project's notebook"})
+                    continue
+                found = conn.execute(
+                    "SELECT 1 FROM state_driver_note_entries WHERE project_id=? AND entry_id=?",
+                    (project_id, ref_entry)).fetchone()
+                if found is None:
+                    dangling.append({"source": label, "address": address,
+                                     "reason": "no entry at this address"})
+        return dangling
+
+    @staticmethod
+    def _entry(conn, project_id: str, entry_id: str):
+        row = conn.execute(
+            "SELECT * FROM state_driver_note_entries WHERE project_id=? AND entry_id=?",
+            (project_id, entry_id)).fetchone()
+        if row is None:
+            raise StateNotFound(f"no driver note entry at {address_of(project_id, entry_id)}")
+        return row
+
+    @staticmethod
+    def _counts(conn, project_id: str) -> dict:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(listing='listed') AS listed, SUM(listing='delisted') AS delisted "
+            "FROM state_driver_note_entries WHERE project_id=?", (project_id,)).fetchone()
+        return {"entry_count": row["total"] or 0, "listed_count": row["listed"] or 0,
+                "delisted_count": row["delisted"] or 0}
+
+    @classmethod
+    def _index_projection(cls, conn, project_id: str) -> dict:
+        """The part of the notebook that is cheap enough to inject everywhere.
+
+        Bodies are NOT here; each line carries the address that fetches its body.
+        delisted_count is here so a short index can never hide how much left it.
+        """
+        rows = conn.execute(
+            "SELECT * FROM state_driver_note_entries WHERE project_id=? AND listing='listed' "
+            "ORDER BY created_at, entry_id", (project_id,)).fetchall()
+        counts = cls._counts(conn, project_id)
+        return {"index": [{"address": address_of(project_id, row["entry_id"]),
+                           "index_line": index_line(row)} for row in rows], **counts}
+
+    def _write_entry(self, conn, project_id, assertion, body, director_identity,
+                     force, landed, timestamp) -> str:
+        entry_id = new_entry_id()
+        dangling = self._unresolved(conn, project_id, [("body", body), ("assertion", assertion)])
+        if dangling:
+            raise StateGraphError(
+                "driver note entry references addresses that do not resolve: "
+                + "; ".join(f"{item['address']} ({item['reason']})" for item in dangling))
+        conn.execute(
+            "INSERT INTO state_driver_note_entries(project_id,entry_id,assertion,body,force,"
+            "landed,listing,superseded_by,supersede_reason,delist_reason,actor,director_identity,"
+            "created_at,updated_at) VALUES(?,?,?,?,?,?,'listed',NULL,'','',?,?,?,?)",
+            (project_id, entry_id, assertion, body, force, landed, self.actor,
+             director_identity, timestamp, timestamp))
+        return entry_id
+
+    def write_entry(self, project_id: str, assertion: str, body: str, director_identity: str,
+                    force: str = "in_force", landed: str = "") -> dict:
+        """Write one assertion plus its body and return the address of both."""
+        project_id = key(project_id, "project_id")
+        assertion = assertion_text(assertion)
+        body = body_text(body)
+        force = force_value(force)
+        landed = landed_text(landed)
+        director_identity = text(director_identity, "director_identity", 320)
+        timestamp = now()
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            entry_id = self._write_entry(conn, project_id, assertion, body,
+                                         director_identity, force, landed, timestamp)
+            row = self._entry(conn, project_id, entry_id)
+            projection = self._index_projection(conn, project_id)
+            self.store._event(conn, project_id, None, "driver_note_updated", {
+                "operation": "write_entry", "entry_id": entry_id,
+                "address": address_of(project_id, entry_id), "actor": self.actor,
+                "director_identity": director_identity})
+            return {**entry_detail(row), **projection}
+
+    def supersede_entry(self, project_id: str, entry_id: str, assertion: str, body: str,
+                        reason: str, director_identity: str, force: str = "in_force",
+                        landed: str = "") -> dict:
+        """Retire an assertion IN PLACE: the old address keeps a tombstone, the old body stays."""
+        project_id = key(project_id, "project_id")
+        entry_id = entry_id_value(entry_id)
+        assertion = assertion_text(assertion)
+        body = body_text(body)
+        reason = reason_text(reason, "reason")
+        force = force_value(force)
+        landed = landed_text(landed)
+        director_identity = text(director_identity, "director_identity", 320)
+        timestamp = now()
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            previous = self._entry(conn, project_id, entry_id)
+            if previous["superseded_by"]:
+                raise StateConflict(
+                    f"{address_of(project_id, entry_id)} is already superseded by "
+                    f"{address_of(project_id, previous['superseded_by'])}; supersede that one")
+            successor_id = self._write_entry(conn, project_id, assertion, body,
+                                             director_identity, force, landed, timestamp)
+            conn.execute(
+                "UPDATE state_driver_note_entries SET superseded_by=?,supersede_reason=?,"
+                "updated_at=? WHERE project_id=? AND entry_id=?",
+                (successor_id, reason, timestamp, project_id, entry_id))
+            retired = self._entry(conn, project_id, entry_id)
+            successor = self._entry(conn, project_id, successor_id)
+            projection = self._index_projection(conn, project_id)
+            self.store._event(conn, project_id, None, "driver_note_updated", {
+                "operation": "supersede_entry", "entry_id": entry_id,
+                "successor_entry_id": successor_id,
+                "address": address_of(project_id, successor_id), "actor": self.actor,
+                "director_identity": director_identity})
+            return {"superseded": entry_detail(retired), "successor": entry_detail(successor),
+                    **projection}
+
+    def delist_entry(self, project_id: str, entry_id: str, reason: str,
+                     director_identity: str) -> dict:
+        """Evict a line from the index without deleting its body.
+
+        Refused while the entry can still change a decision. Both halves of that
+        test are read from the stored row, never from a caller-supplied flag:
+        there is no force override on this call.
+        """
+        project_id = key(project_id, "project_id")
+        entry_id = entry_id_value(entry_id)
+        reason = reason_text(reason, "reason")
+        director_identity = text(director_identity, "director_identity", 320)
+        timestamp = now()
+        with self.store.transaction(write=True) as conn:
+            self.store._project(conn, project_id)
+            row = self._entry(conn, project_id, entry_id)
+            if row["listing"] == "delisted":
+                raise StateConflict(
+                    f"{address_of(project_id, entry_id)} is already delisted; its body stays "
+                    "readable at that address")
+            still_binding = row["force"] == "in_force" and row["superseded_by"] is None
+            if still_binding:
+                raise StateGraphError(
+                    f"{address_of(project_id, entry_id)} is still in force: reading it can still "
+                    "change a decision, so it may not be delisted. Retire it with "
+                    "supersede_driver_note_entry, which names the successor that replaces it.")
+            conn.execute(
+                "UPDATE state_driver_note_entries SET listing='delisted',delist_reason=?,"
+                "updated_at=? WHERE project_id=? AND entry_id=?",
+                (reason, timestamp, project_id, entry_id))
+            delisted = self._entry(conn, project_id, entry_id)
+            projection = self._index_projection(conn, project_id)
+            self.store._event(conn, project_id, None, "driver_note_updated", {
+                "operation": "delist_entry", "entry_id": entry_id,
+                "address": address_of(project_id, entry_id),
+                "delisted_count": projection["delisted_count"], "actor": self.actor,
+                "director_identity": director_identity})
+            return {**entry_detail(delisted), **projection}
+
+    def get_entry(self, project_id: str, entry_id: str) -> dict:
+        """Fetch one body by address. Bodies are never injected; they are fetched."""
+        project_id = key(project_id, "project_id")
+        entry_id = entry_id_value(entry_id)
+        with self.store.transaction() as conn:
+            self.store._project(conn, project_id)
+            return entry_detail(self._entry(conn, project_id, entry_id))
+
+    def entry_index(self, project_id: str, include_delisted: bool = False,
+                    limit: int = 100) -> dict:
+        project_id = key(project_id, "project_id")
+        if type(limit) is not int or not 1 <= limit <= MAX_INDEX_LIMIT:
+            raise StateGraphError(f"limit must be an integer between 1 and {MAX_INDEX_LIMIT}")
+        clause = "" if include_delisted else " AND listing='listed'"
+        with self.store.transaction() as conn:
+            self.store._project(conn, project_id)
+            rows = conn.execute(
+                "SELECT * FROM state_driver_note_entries WHERE project_id=?" + clause +
+                " ORDER BY created_at, entry_id LIMIT ?", (project_id, limit + 1)).fetchall()
+            counts = self._counts(conn, project_id)
+        return {"project_id": project_id,
+                "entries": [entry_summary(row) for row in rows[:limit]],
+                "truncated": len(rows) > limit, **counts}
+
+    def check_index(self, project_id: str) -> dict:
+        """Run the address check over the whole notebook and report what dangles."""
+        project_id = key(project_id, "project_id")
+        with self.store.transaction() as conn:
+            self.store._project(conn, project_id)
+            note = conn.execute("SELECT * FROM state_driver_notes WHERE project_id=?",
+                                (project_id,)).fetchone()
+            sources = []
+            if note is not None:
+                sources.append(("section:permanent", note["permanent_text"]))
+                sources.append(("section:temporary", note["temporary_text"]))
+            rows = conn.execute(
+                "SELECT * FROM state_driver_note_entries WHERE project_id=? "
+                "ORDER BY created_at, entry_id", (project_id,)).fetchall()
+            for row in rows:
+                label = address_of(project_id, row["entry_id"])
+                sources.append((f"{label}#assertion", row["assertion"]))
+                sources.append((f"{label}#body", row["body"]))
+                if row["superseded_by"]:
+                    sources.append((f"{label}#superseded_by",
+                                    address_of(project_id, row["superseded_by"])))
+            dangling = self._unresolved(conn, project_id, sources)
+            counts = self._counts(conn, project_id)
+        checked = sum(len(referenced_addresses(value)) for _, value in sources)
+        return {"project_id": project_id, "ok": not dangling, "addresses_checked": checked,
+                "dangling": dangling, **counts}

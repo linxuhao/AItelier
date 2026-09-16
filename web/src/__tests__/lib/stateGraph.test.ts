@@ -23,10 +23,11 @@ describe('State DAG layout semantics', () => {
     const r = stateLayout([goal('a'),goal('b',['a']),goal('c',['b']),goal('d')], '', 'b');
     expect(r.nodes.map(n => n.node_key).sort()).toEqual(['a','b','c']);
   });
-  it('refuses an unreadable giant overview until the user narrows the view', () => {
-    const nodes = Array.from({length: 61},(_,i) => goal('area.'+i));
+  it('draws a large overview (auto-fitted) and refuses only past the render guard', () => {
+    const nodes = Array.from({length: 401},(_,i) => goal('area.'+i));
     expect(stateLayout(nodes).tooLarge).toBe(true);
     expect(stateLayout(nodes,'','area.0').tooLarge).toBe(false);
+    expect(stateLayout(nodes.slice(0, 62)).tooLarge).toBe(false);
   });
   it('never treats a completed attempt as a verified goal', () => {
     expect(stateTone('completed')).not.toBe('verified');

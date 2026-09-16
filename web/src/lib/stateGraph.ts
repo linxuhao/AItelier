@@ -203,7 +203,7 @@ export function groupFacets(nodes:StateNodeSummary[]):StateGroup[] {
 }
 
 
-export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', query = '', maximum = 60) {
+export function stateLayout(nodes: StateNodeSummary[], domain = '', focus = '', query = '', maximum = 400) {
   const keys = new Set<string>();
   for (const node of nodes) {
     if (keys.has(node.node_key)) throw new Error('Duplicate state node identity');

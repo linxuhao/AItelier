@@ -7,7 +7,11 @@
   let domain = $state('');
   let query = $state('');
   let local = $state(false);
-  let zoom = $state(1);
+  // Auto-fit by default: a shrunken DAG still shows its shape, which a list of
+  // titles cannot. −/+ switch to manual zoom; the percentage button returns to fit.
+  let manualZoom = $state<number | null>(null);
+  let canvasWidth = $state(0);
+  const MIN_ZOOM = .25, MAX_ZOOM = 1.8;
   // Grouped by default: faceting put three nodes where a reader sees one goal.
   let grouped = $state(true);
   const groupable = $derived(nodes.some(n => n.facet === 'contract' || n.facet === 'test'));
@@ -21,6 +25,19 @@
     try { return { layout: stateLayout(shown, domain, local ? selectedShown : '', query), error: '' }; }
     catch (error) { return { layout: null, error: String(error) }; }
   });
+  const fitZoom = $derived(result.layout && canvasWidth > 0 && result.layout.width > 0
+    ? Math.max(MIN_ZOOM, Math.min(1, (canvasWidth - 4) / result.layout.width)) : 1);
+  const zoom = $derived(manualZoom ?? fitZoom);
+  // A different view (filter, search, focus, grouping) is fitted afresh.
+  $effect(() => { void domain; void query; void grouped; void (local ? selectedShown : ''); manualZoom = null; });
+  function measure(node: HTMLElement) {
+    canvasWidth = node.clientWidth;
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => { canvasWidth = node.clientWidth; });
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
+  }
+  function step(delta: number) { manualZoom = Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom + delta)) * 100) / 100; }
   const positions = $derived(new Map(result.layout?.nodes.map(n => [n.node_key, n]) ?? []));
   const shownList = $derived(shown.filter(n => (!domain || n.domain === domain) &&
     (!query.trim() || (n.node_key + ' ' + n.title).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))).slice(0, 60));
@@ -42,9 +59,9 @@
       {#each domains as d (d)}<option value={d}>{d}</option>{/each}</select></label>
     <label class="search">{st('search')}<input type="search" bind:value={query} placeholder={st('search')} /></label>
     <div class="zoom">
-      <button type="button" class="outline" aria-label={st('zoomOut')} disabled={zoom <= .6} onclick={() => zoom = Math.max(.6, zoom - .2)}>−</button>
-      <button type="button" class="outline" onclick={() => zoom = 1}>{Math.round(zoom * 100)}%</button>
-      <button type="button" class="outline" aria-label={st('zoomIn')} disabled={zoom >= 1.8} onclick={() => zoom = Math.min(1.8, zoom + .2)}>+</button>
+      <button type="button" class="outline" aria-label={st('zoomOut')} disabled={zoom <= MIN_ZOOM} onclick={() => step(-.2)}>−</button>
+      <button type="button" class="outline" title={st('zoomFit')} aria-pressed={manualZoom === null} onclick={() => manualZoom = null}>{Math.round(zoom * 100)}%</button>
+      <button type="button" class="outline" aria-label={st('zoomIn')} disabled={zoom >= MAX_ZOOM} onclick={() => step(.2)}>+</button>
     </div>
   </div>
   <div class="toggles">
@@ -66,7 +83,7 @@
     <p>{nodes.length ? st('noMatch') : st('emptyNodes')}</p>
   {:else if result.layout}
     {#if result.layout.hiddenEdges}<p class="boundary">{st('boundary')}: {result.layout.hiddenEdges}</p>{/if}
-    <div class="canvas" role="region" aria-label={st('graph')}>
+    <div class="canvas" role="region" aria-label={st('graph')} use:measure>
       <svg width={result.layout.width * zoom} height={result.layout.height * zoom}
            style:width={`${result.layout.width * zoom}px`} style:height={`${result.layout.height * zoom}px`}
            viewBox={`0 0 ${result.layout.width} ${result.layout.height}`} aria-label={st('graph')} role="group">

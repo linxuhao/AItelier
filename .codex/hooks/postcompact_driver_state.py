@@ -280,7 +280,10 @@ def _guide_sections(guide: str, limit: int = 4_000) -> str:
         if current is not None:
             sections[current].append(line)
     chosen = ["\n".join(sections[h]).strip() for h in GUIDE_HEADINGS if h in sections]
-    selected = "\n\n".join(chosen)
+    # The live guide is served in index mode and no longer carries these exact
+    # headings. An empty selection would silently drop the rules this hook exists
+    # to re-inject, so fall back to the whole (already bounded) guide.
+    selected = "\n\n".join(chosen) if chosen else guide.strip()
     search_excerpt = _centered_excerpt(guide, "search_driver_note_history")
     warning_excerpt = next(
         (

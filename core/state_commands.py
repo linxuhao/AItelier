@@ -9,6 +9,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from core.state_driver_guide import guide_section
+from core.state_driver_index import (MAX_ASSERTION_CHARS, MAX_ENTRY_BODY_CHARS,
+                                     MAX_INDEX_LIMIT, MAX_LANDED_CHARS, MAX_REASON_CHARS)
 from core.state_graph import StateGraphError
 
 
@@ -157,6 +160,57 @@ class UpdateDriverNote(Project):
     expected_revision: int = Field(ge=0, le=2**63-1)
     director_identity: str = Field(min_length=1, max_length=320)
     operation: Literal["replace", "append"] = "replace"
+
+
+class DriverNoteEntry(Project):
+    entry_id: str = Field(min_length=12, max_length=12,
+                          description="The 12-hex address suffix returned by write_driver_note_entry.")
+
+
+class DriverNoteIndex(Project):
+    include_delisted: bool = Field(
+        default=False, description="Include entries evicted from the index; their bodies stay readable.")
+    limit: int = Field(default=100, ge=1, le=MAX_INDEX_LIMIT)
+
+
+class WriteDriverNoteEntry(Project):
+    assertion: str = Field(
+        min_length=1, max_length=MAX_ASSERTION_CHARS, description=(
+            "One line a reader cannot violate, WITH its status, not a topic. Over the cap the "
+            "write is refused; it is never truncated and never silently dropped."))
+    body: str = Field(min_length=1, max_length=MAX_ENTRY_BODY_CHARS, description=(
+        "The narrative, fetched by address with get_driver_note_entry. Never injected."))
+    director_identity: str = Field(min_length=1, max_length=320)
+    force: Literal["in_force", "informational"] = Field(default="in_force", description=(
+        "in_force: reading this line can still change a decision, so it may only leave the "
+        "index through supersede. informational: it cannot, so it may be delisted."))
+    landed: str = Field(default="", max_length=MAX_LANDED_CHARS, description=(
+        "Landed status, e.g. 'three places VERIFIED'. Landed is NOT expired: a landed rule "
+        "stays in force."))
+
+
+class SupersedeDriverNoteEntry(WriteDriverNoteEntry):
+    entry_id: str = Field(min_length=12, max_length=12, description="The address being retired.")
+    reason: str = Field(min_length=1, max_length=MAX_REASON_CHARS)
+
+
+class DelistDriverNoteEntry(Project):
+    entry_id: str = Field(min_length=12, max_length=12)
+    reason: str = Field(min_length=1, max_length=MAX_REASON_CHARS, description=(
+        "Kept with the entry, not a one-shot command-line argument."))
+    director_identity: str = Field(min_length=1, max_length=320)
+
+
+class DriverGuideSection(Request):
+    address: str = Field(min_length=1, max_length=200,
+                         description="guide://<slug> from the injected guide index.")
+
+
+def _driver_guide_section(address: str) -> dict:
+    try:
+        return guide_section(address)
+    except KeyError as exc:
+        raise StateGraphError(str(exc.args[0])) from exc
 
 
 class ReportIssue(Project):
@@ -442,6 +496,8 @@ READ_REQUESTS = {
     "frontier": Frontier, "events": Events, "wait_for_state_change": WaitForStateChange,
     "get_driver_note": DriverNote, "driver_note_history": DriverNoteHistory,
     "search_driver_note_history": SearchDriverNoteHistory, "get_attempt": Attempt,
+    "driver_note_index": DriverNoteIndex, "get_driver_note_entry": DriverNoteEntry,
+    "check_driver_note_index": DriverNote, "get_driver_guide_section": DriverGuideSection,
     "list_attempts": ListAttempts, "evidence": Attempt,
     "project_catalog": ProjectCatalog, "project_overview": Project,
     "project_run_summary": Project,
@@ -464,6 +520,9 @@ WRITE_REQUESTS = {
     "add_reference": HistoricalReference, "refresh_project": RefreshProject,
     "start_external_attempt": StartExternalAttempt, "report_external_attempt": ExternalObservation,
     "update_driver_note": UpdateDriverNote,
+    "write_driver_note_entry": WriteDriverNoteEntry,
+    "supersede_driver_note_entry": SupersedeDriverNoteEntry,
+    "delist_driver_note_entry": DelistDriverNoteEntry,
     "send_director_message": SendDirectorMessage,
     "acknowledge_director_message": TransitionDirectorMessage,
     "resolve_director_message": TransitionDirectorMessage,
@@ -513,6 +572,10 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "wait_for_state_change": service.wait_for_state_change, "events": service.store.events,
         "get_driver_note": service.driver_notes.get, "driver_note_history": service.driver_notes.history,
         "search_driver_note_history": service.driver_notes.search,
+        "driver_note_index": service.driver_notes.entry_index,
+        "get_driver_note_entry": service.driver_notes.get_entry,
+        "check_driver_note_index": service.driver_notes.check_index,
+        "get_driver_guide_section": _driver_guide_section,
         "get_attempt": service.get_attempt,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
@@ -534,6 +597,9 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "refresh_project": service.refresh_project,
         "start_external_attempt": service.start_external_attempt, "report_external_attempt": service.report_external_attempt,
         "update_driver_note": service.driver_notes.update,
+        "write_driver_note_entry": service.driver_notes.write_entry,
+        "supersede_driver_note_entry": service.driver_notes.supersede_entry,
+        "delist_driver_note_entry": service.driver_notes.delist_entry,
         "send_director_message": service.director_messages.send_director_message,
         "list_director_messages": service.director_messages.list_director_messages,
         "acknowledge_director_message": service.director_messages.acknowledge_director_message,

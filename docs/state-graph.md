@@ -194,7 +194,9 @@ Unknown actions, extra fields and incorrect argument types are rejected.
 MCP domain errors use `isError: true`. State-data MCP reads require writer
 authorization even though other legacy metadata reads may be public.
 
-Read actions include `get_driver_note`, `driver_note_history`, `list_projects`,
+Read actions include `get_driver_note`, `driver_note_index`,
+`get_driver_note_entry`, `check_driver_note_index`, `get_driver_guide_section`,
+`driver_note_history`, `list_projects`,
 `get_graph`, `get_node`, `frontier`, `events`, `wait_for_state_change`,
 `get_attempt`, `list_attempts`, and `evidence`.
 
@@ -202,7 +204,8 @@ Write actions: `create_project`, `add_nodes`, `revise_node`, `split_node`,
 `supersede_node`, `start_attempt`, `start_external_attempt`, `report_external_attempt`,
 `recover_attempt`, `reconcile_attempt`,
 `retire_reservation`, `record_evidence`, `verify_node`, `import_tasks`, and
-`update_driver_note`.
+`update_driver_note`, `write_driver_note_entry`,
+`supersede_driver_note_entry`, and `delist_driver_note_entry`.
 
 The MCP prompt `state_graph_driver` describes the intended loop. Workflow
 completion is observed by the driver using `reconcile_attempt`; this version
@@ -218,6 +221,45 @@ context and decision references; `temporary` holds current handoff details.
 actor plus a caller-supplied director identity, and uses `expected_revision` as
 a compare-and-swap guard. Concurrent writes from the same revision cannot silently
 overwrite each other. `driver_note_history` retains every committed revision.
+
+#### Index mode: the notebook lists assertions and stores bodies by address
+
+A notebook that can only grow is a cliff, not a brake. One project's `permanent`
+section reached 99,730 of its 100,000-character limit because the only documented
+way for a ruling to expire was "replaced in place by a newer one" and nothing
+executed that sentence; the next write would simply have failed.
+
+`write_driver_note_entry` therefore takes a SHORT assertion plus a body and
+returns an address (`note://<project_id>/<12 hex>`). The assertion is capped at
+200 characters and over-cap writes are REFUSED - never truncated, never accepted
+and failed later on read. `get_driver_note` returns the index (one line and one
+address per listed entry) plus `delisted_count`; bodies are never part of that
+payload and are fetched with `get_driver_note_entry`.
+
+An index line carries the assertion AND its status, not a topic: `[in force]` or
+`[superseded -> <address>]`, plus an optional `[landed: ...]` marker. Landed and
+in force are separate fields on purpose - a rule that has been implemented in
+three places is still a rule.
+
+Two retirement channels, and neither deletes a body:
+
+* `supersede_driver_note_entry` - a successor exists. The old address keeps a
+  tombstone naming the successor and its body stays readable.
+* `delist_driver_note_entry` - no successor. The entry leaves the index because
+  reading it can no longer change a decision. The reason is stored with the
+  entry, the body still resolves at its address, and `delisted_count` reports how
+  many entries left, so a short index cannot hide how much was evicted. The call
+  is REFUSED while the stored entry is `force=in_force` and unsuperseded; there
+  is no override argument.
+
+Database triggers block deleting an entry and block changing a stored assertion,
+body or creation time, so retiring is provably not rewriting.
+
+Every `note://` address in a section or a body must resolve.
+`check_driver_note_index` reports dangling addresses, section writes citing one
+are refused, and `scripts/check_driver_note_index.py <state.sqlite> [project...]`
+exits 1 when any address dangles, 0 when none do and 2 when the check itself
+could not run.
 
 The note is context, not another source of goal truth. State nodes, attempts,
 evidence and acceptance remain authoritative. Project IDs isolate note contents,

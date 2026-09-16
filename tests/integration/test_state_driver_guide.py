@@ -3,7 +3,8 @@ import hashlib
 import json
 from fastapi.testclient import TestClient
 from api.state_only import create_app
-from core.state_driver_guide import STATE_DRIVER_GUIDE
+from core.state_driver_guide import (GUIDE_SECTIONS, STATE_DRIVER_GUIDE,
+                                     STATE_DRIVER_GUIDE_INDEX)
 
 
 def test_mcp_driver_onboarding_surfaces_are_discoverable_and_consistent(tmp_path):
@@ -29,7 +30,23 @@ def test_mcp_driver_onboarding_surfaces_are_discoverable_and_consistent(tmp_path
         help_result = rpc("tools/call", {"name": "state_graph_help", "arguments": {}}).json()["result"]
         assert not help_result.get("isError")
         help_body = json.loads(help_result["content"][0]["text"])
-        assert help_body["driver_guide"] == STATE_DRIVER_GUIDE
+        # The injected field is the INDEX; the full guide is one fetch away.
+        assert help_body["driver_guide"] == STATE_DRIVER_GUIDE_INDEX
+        assert help_body["driver_guide_full_chars"] == len(STATE_DRIVER_GUIDE)
+        assert len(help_body["driver_guide"]) < len(STATE_DRIVER_GUIDE) / 4
+        addresses = help_body["driver_guide_sections"]
+        assert addresses == [f"guide://{slug}" for slug in GUIDE_SECTIONS]
+        for address in addresses:
+            fetched = rpc("tools/call", {"name": "state_graph_read", "arguments": {
+                "action": "get_driver_guide_section",
+                "arguments": {"address": address}}}).json()["result"]
+            assert not fetched.get("isError"), fetched
+            section = json.loads(fetched["content"][0]["text"])["result"]
+            assert section["text"] in STATE_DRIVER_GUIDE
+        missing = rpc("tools/call", {"name": "state_graph_read", "arguments": {
+            "action": "get_driver_guide_section",
+            "arguments": {"address": "guide://not-a-section"}}}).json()["result"]
+        assert missing["isError"] is True
         assert help_body["driver_resource"] == "aitelier://state/driver-guide"
         search_schema = help_body["operations"]["search_driver_note_history"]
         assert search_schema["mutates"] is False

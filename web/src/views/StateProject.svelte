@@ -9,6 +9,7 @@
   import StateRunSummary from './StateRunSummary.svelte';
   import StateNodePanel from './StateNodePanel.svelte';
   import StateAttemptEvidence from './StateAttemptEvidence.svelte';
+  import StateIssues from './StateIssues.svelte';
   const { params, compact = false }: { params: { id: string; nodeKey?: string }; compact?:boolean } = $props();
   let data = $state<StateOverview | null>(null), error = $state(''), loading = $state(false);
   let selected = $state(''), tab = $state('graph'), retry = $state(0), detailRefresh = $state(0);
@@ -96,12 +97,14 @@
         <div><strong>{readyActions.candidate_review}</strong><span>{st('candidatesAwaitingReview')}</span></div>
         <div><strong>{readyActions.new_attempt}</strong><span>{st('readyForNewAttempt')}</span></div>
         <div><strong>{data.readiness_counts.held ?? 0}</strong><span>{st('held')}</span></div>
+        <div><strong>{data.issue_counts?.open ?? 0}</strong><span>{st('openIssues')}</span></div>
       </div>
       {#if data.policy.dispatch !== 'active'}<details class="policy" open={!compact}><summary><strong>⏸ {st('policy')}: {data.policy.dispatch}</strong></summary><p>{data.policy.reason}</p><small>{st('holdNote')}</small></details>{/if}
       <nav class="tabs" aria-label={st('overview')}>
         <button class:active={tab === 'graph'} aria-pressed={tab === 'graph'} onclick={() => tab = 'graph'}>{st('graph')}</button>
         <button class:active={tab === 'runs'} aria-pressed={tab === 'runs'} onclick={() => tab = 'runs'}>{st('runs')}</button>
         <button class:active={tab === 'evidence'} aria-pressed={tab === 'evidence'} onclick={() => tab = 'evidence'}>{st('evidence')}</button>
+        <button class:active={tab === 'issues'} aria-pressed={tab === 'issues'} onclick={() => tab = 'issues'}>{st('issues')} · {data.issue_counts?.open ?? 0}</button>
       </nav>
       <p class="snapshot">{st('snapshot')}: {data.observed_at} · event {data.event_seq} {loading ? ' · ' + st('loading') : ''}</p>
       {#if tab === 'graph'}
@@ -123,6 +126,8 @@
           </article>
         {/each}
         {#if next}<button class="outline" disabled={runLoading} onclick={moreRuns}>{st('more')}</button>{/if}
+      {:else if tab === 'issues'}
+        <StateIssues projectId={params.id} refresh={detailRefresh} onselect={key => { selected = key; tab = 'graph'; }} />
       {:else}
         <div class="evidence-workspace"><div class="node-index"><h3>{st('total')}</h3>
           {#each data.nodes as node (node.node_key)}<button class:chosen={selected === node.node_key} onclick={() => selected = node.node_key}>{node.title}<small>{node.status}</small></button>{/each}
@@ -141,7 +146,7 @@
   .source { max-width:760px; margin:.4rem 0; font-size:.77rem; overflow-wrap:anywhere; } code { font-size:.72rem; white-space:normal; }
   .toolbar { display:flex; gap:.5rem; flex-wrap:wrap; }
   button { font-size:.8rem; width:auto; padding:.45rem .75rem; margin:0; }
-  .metrics { display:grid; grid-template-columns:repeat(5,1fr); gap:.8rem; margin:1rem 0; }
+  .metrics { display:grid; grid-template-columns:repeat(6,1fr); gap:.8rem; margin:1rem 0; }
   .metrics div { display:flex; gap:.7rem; align-items:baseline; border:1px solid var(--pico-muted-border-color,#dbe3ec); border-radius:9px; padding:.8rem; }
   .metrics strong { font-size:1.6rem; } .metrics span { font-size:.8rem; color:var(--pico-muted-color,#667085); }
   .policy { border-left:4px solid #c48a27; padding:.7rem 1rem; background:color-mix(in srgb,#ecc369 10%,transparent); font-size:.83rem; margin:1rem 0; }

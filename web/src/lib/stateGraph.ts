@@ -21,14 +21,28 @@ export interface StateNodeSummary {
   status: string; readiness: string; next_action?: StateNextAction | null; dependencies: string[]; blocked_by: string[];
   hold: ({ scope: string; reason: string } & Partial<DispatchPolicy>) | null; node_hold: NodeHold;
   criteria_count: number; attempt_count: number; latest_attempt: StateAttempt | null;
-  latest_evidence: Record<string, number>; priority: number;
+  latest_evidence: Record<string, number>; priority: number; open_issue_count?: number;
 }
 export interface StateOverview {
   project: { project_id: string; title: string; source_project_id: string | null };
   source: SourceBinding; policy: DispatchPolicy; nodes: StateNodeSummary[];
   counts: Record<string, number>; readiness_counts: Record<string, number>;
   ready_action_counts?: Partial<Record<StateNextAction, number>>;
+  issue_counts?: Record<string, number>;
   event_seq: number; observed_at: string; run_state_mode: string;
+}
+/** An observation beside the DAG. Linking never changes a node; only a resolution names one. */
+export interface StateIssueSummary {
+  issue_id: string; project_id: string; kind: 'defect' | 'gap' | 'handoff' | 'question'; title: string;
+  status: 'open' | 'absorbed' | 'promoted' | 'duplicate' | 'rejected'; version: number;
+  nodes: { node_key: string; status: string | null }[]; contradicts_acceptance: string[];
+  created_at: string; updated_at: string;
+}
+export interface StateIssue extends StateIssueSummary {
+  body: string; source: string | null;
+  resolution: { resolution: string; reason: string; director_identity: string; node_key?: string;
+                node_revision?: number; duplicate_of?: string } | null;
+  reported_by: { actor: string; director_identity: string };
 }
 export interface HistoryReference {
   reference_id: string; node_key: string; kind: string; ref: string; label: string;
@@ -44,6 +58,7 @@ export interface StateNodeDetail {
   dependency_receipts: Record<string, { goal: string; revision: number; status: string; acceptance: Record<string, unknown> | null }>;
   attempts: StateAttempt[];
   references: { references: HistoryReference[]; next_after: string | null };
+  open_issues?: StateIssueSummary[];
 }
 export interface AttemptDetail {
   attempt: StateAttempt & { context: Record<string, unknown> }; evidence: StateEvidence[];

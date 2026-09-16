@@ -116,6 +116,19 @@ def create_state_router(service_dependency, access_dependency):
             "excerpt_chars": excerpt_chars})
 
 
+    @router.get("/projects/{project_id}/issues")
+    def issues(project_id: str, status: Annotated[list[str] | None, Query()] = None,
+               kind: Annotated[list[str] | None, Query()] = None, node_key: str | None = None,
+               after: int = 0, limit: int = 50, service=Depends(service_dependency)):
+        return _call(service, "list_issues", {"project_id": project_id, "statuses": status, "kinds": kind,
+                                              "node_key": node_key, "after": after, "limit": limit})
+
+
+    @router.get("/projects/{project_id}/issues/{issue_id}")
+    def issue(project_id: str, issue_id: str, service=Depends(service_dependency)):
+        return _call(service, "get_issue", {"project_id": project_id, "issue_id": issue_id})
+
+
     @router.get("/attempts/{attempt_id}")
     def attempt(attempt_id: str, service=Depends(service_dependency)):
         return _call(service, "get_attempt", {"attempt_id": attempt_id})

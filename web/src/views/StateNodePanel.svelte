@@ -70,6 +70,16 @@
     {#if data.node.node_hold?.held && data.node.hold?.scope === 'project'}
       <p class="hold"><strong>{st('protected')}:</strong> {data.node.node_hold.reason}</p>
     {/if}
+    {#if data.open_issues?.length}
+      <h4>{st('openIssues')}</h4>
+      {#each data.open_issues as issue (issue.issue_id)}
+        <div class="issue-row" class:contradicts={issue.contradicts_acceptance.includes(nodeKey)}>
+          <p><small>{st('kind_' + issue.kind)}</small> <strong>{issue.title}</strong></p>
+          {#if issue.contradicts_acceptance.includes(nodeKey)}<p class="contradiction" role="note">⚠ {st('contradicts')}</p>{/if}
+          <code>{issue.issue_id}</code>
+        </div>
+      {/each}
+    {/if}
     <h4>{st('depends')}</h4>
     {#if !data.node.dependencies.length}<p class="muted">—</p>{/if}
     <div class="deps">{#each data.node.dependencies as dep (dep)}
@@ -130,5 +140,8 @@
   button { width:auto; padding:.3rem .55rem; margin:0; font-size:.75rem; }
   .digest { display:block; opacity:.7; }
   .protected { font-size:.72rem; color:#a36d17; }
+  .issue-row { border-top:1px solid var(--pico-muted-border-color,#ddd); padding:.5rem 0; }
+  .issue-row.contradicts { border-left:3px solid #bd433c; padding-left:.5rem; }
+  .contradiction { color:#bd433c; font-size:.72rem; }
   .stale { font-size:.72rem; color:var(--pico-del-color,#ad2828); }
 </style>

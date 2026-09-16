@@ -61,6 +61,12 @@ const en: Record<string, string> = {
   snapshot: 'State snapshot', more: 'Load more', noRun: 'No run is bound yet. Use the driver recovery tools; do not duplicate the launch.',
   related: 'Related state projects', ownership: 'Project / goal', referenceOnly: 'Reference only · not adopted',
   fullRun: 'Open exact run', complete: 'completed ≠ VERIFIED', policy: 'Dispatch policy', criteria: 'Required checks',
+
+  issues: 'Issues', openIssues: 'Open issues', issuesOpenOnly: 'Open only', issuesAll: 'All',
+  issuesNote: 'Observations beside the DAG: reporting or linking an issue never changes a goal. Only a resolution names the goal revision that absorbed it.',
+  noIssues: 'No issues.', contradicts: 'Open defect on an accepted goal', reportedBy: 'Reported by', issueSource: 'Source',
+  resolution: 'Resolution', showIssue: 'Details', hideIssue: 'Hide',
+  kind_defect: 'Defect', kind_gap: 'Gap', kind_handoff: 'Hand-off', kind_question: 'Question',
 };
 const zh: Record<string, string> = {
   summaryWrongProject:"汇总属于其他项目，已拒绝显示",
@@ -114,6 +120,12 @@ const zh: Record<string, string> = {
   historical:'历史关联', noHistory:'尚无历史关联。', protected:'受保护的外部任务', snapshot:'状态快照', more:'加载更多',
   noRun:'尚未绑定 Run。请通过 Driver 恢复工具核对，不要重复启动。', related:'关联的长期项目', ownership:'所属项目 / 目标',
   referenceOnly:'仅历史关联 · 未接管', fullRun:'打开确切 Run', complete:'completed ≠ VERIFIED', policy:'调度策略', criteria:'必需检查',
+
+  issues:'Issues', openIssues:'未关闭 issue', issuesOpenOnly:'仅未关闭', issuesAll:'全部',
+  issuesNote:'Issue 与 DAG 分离：报告或关联 issue 不会改变任何目标；只有分拣结论会指向吸收它的目标修订。',
+  noIssues:'暂无 issue。', contradicts:'已验收目标上存在未关闭缺陷', reportedBy:'报告者', issueSource:'来源',
+  resolution:'分拣结论', showIssue:'详情', hideIssue:'收起',
+  kind_defect:'缺陷', kind_gap:'缺口', kind_handoff:'转交', kind_question:'问题',
 };
 const fr: Record<string, string> = {
   summaryWrongProject:"Le résumé appartient à un autre projet",
@@ -171,6 +183,12 @@ const fr: Record<string, string> = {
   noRun:'Aucune exécution associée. Utilisez la récupération du driver, sans lancer de doublon.', related:'Projets durables associés',
   ownership:'Projet / objectif', referenceOnly:'Référence seule · non adoptée', fullRun:'Ouvrir l’exécution exacte', complete:'completed ≠ VERIFIED',
   policy:'Politique de lancement', criteria:'Contrôles requis',
+
+  issues:'Tickets', openIssues:'Tickets ouverts', issuesOpenOnly:'Ouverts', issuesAll:'Tous',
+  issuesNote:'Observations à côté du DAG : signaler ou lier un ticket ne modifie aucun objectif. Seule une résolution nomme la révision qui l’a absorbé.',
+  noIssues:'Aucun ticket.', contradicts:'Défaut ouvert sur un objectif accepté', reportedBy:'Signalé par', issueSource:'Source',
+  resolution:'Résolution', showIssue:'Détails', hideIssue:'Masquer',
+  kind_defect:'Défaut', kind_gap:'Lacune', kind_handoff:'Transfert', kind_question:'Question',
 };
 export function st(key: string): string {
   const table = lang.startsWith('zh') ? zh : lang === 'fr' ? fr : en;

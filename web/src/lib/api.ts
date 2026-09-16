@@ -688,6 +688,14 @@ export function stateOverview(projectId: string): Promise<import('./stateGraph')
 export function stateNode(projectId: string, node: string): Promise<import('./stateGraph').StateNodeDetail> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/nodes/' + encodeURIComponent(node));
 }
+export function stateIssues(projectId: string, open: boolean, after = 0): Promise<{issues: import('./stateGraph').StateIssueSummary[]; status_counts: Record<string, number>; has_more: boolean; next_after: number}> {
+  const query = new URLSearchParams({after: String(after), limit: '50'});
+  if (open) query.set('status', 'open');
+  return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/issues?' + query.toString());
+}
+export function stateIssue(projectId: string, issueId: string): Promise<import('./stateGraph').StateIssue> {
+  return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/issues/' + encodeURIComponent(issueId));
+}
 export function stateAttempts(projectId: string, after = 0): Promise<{attempts: import('./stateGraph').StateAttempt[]; next_after: number | null}> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/attempts?after=' + after + '&limit=30');
 }

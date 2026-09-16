@@ -140,3 +140,22 @@ def test_list_paginates_in_report_order_and_writes_are_not_on_read_surface(svc):
     assert seen == ids
     with pytest.raises(StateGraphError, match="read surface"):
         execute(svc, "report_issue", {}, allow_write=False)
+
+
+def test_rest_issue_reads_serve_the_ui(tmp_path):
+    from fastapi.testclient import TestClient
+    from api.state_only import create_app
+    app = create_app(str(tmp_path / "state.sqlite"), "x" * 40)
+    auth = {"Authorization": "Bearer " + "x" * 40}
+    with TestClient(app) as client:
+        assert client.post("/api/state/commands/create_project", json={"project_id": "p", "title": "P"},
+                           headers=auth).status_code == 200
+        made = client.post("/api/state/commands/report_issue", headers=auth, json={
+            "project_id": "p", "request_key": "k", "kind": "gap", "title": "t", "body": "b",
+            "director_identity": "d"}).json()
+        listed = client.get("/api/state/projects/p/issues?status=open&limit=5", headers=auth)
+        assert listed.status_code == 200 and [i["issue_id"] for i in listed.json()["issues"]] == [made["issue_id"]]
+        assert client.get("/api/state/projects/p/issues?status=absorbed", headers=auth).json()["issues"] == []
+        assert client.get(f"/api/state/projects/p/issues/{made['issue_id']}", headers=auth).json()["body"] == "b"
+        assert client.get("/api/state/projects/p/issues/iss-missing", headers=auth).status_code == 404
+        assert client.get("/api/state/projects/p/issues", headers={}).status_code == 401

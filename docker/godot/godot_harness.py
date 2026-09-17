@@ -41,6 +41,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -640,6 +641,16 @@ var _results := []       # [{name, node, expr, passed, actual, error, frame}]
 var _capture_dir := ""
 var _capture_at := {}    # frame -> true, consumed as each one is photographed
 var _captures := []      # [{frame, file}]
+# ── WHERE THE TIME WENT ────────────────────────────────────────────────────
+# The engine side of the per-scenario clock. Three of the four classes can only
+# be seen from in here: the python side only ever sees one opaque subprocess.
+#   _t_first_process_usec  engine start -> first _process  == boot/scene load
+#   _t_step_end_usec       first _process -> _finish       == frame stepping
+#   _capture_usec          viewport grab + save_png, charged out of stepping
+#   (serialize)            _walk + JSON.stringify, measured inside _finish
+var _t_first_process_usec := -1
+var _t_step_end_usec := -1
+var _capture_usec := 0
 var _watch := []         # [{node, attr}] whose frame-0 value a delta assert needs
 var _baselines := {}     # "node|attr" -> frame-0 value
 func _ready() -> void:
@@ -673,6 +684,13 @@ func _on_post_draw() -> void:
     if not _capture_at.has(drawn):
         return
     _capture_at.erase(drawn)
+    # Timed around the WHOLE grab, every exit included: an early return here is
+    # still capture work that happened, and letting it fall into stepping is
+    # exactly the mis-attribution this instrument exists to remove.
+    var t0 := Time.get_ticks_usec()
+    _grab(drawn)
+    _capture_usec += Time.get_ticks_usec() - t0
+func _grab(drawn: int) -> void:
     var vp := get_viewport()
     if vp == null:
         return
@@ -714,6 +732,11 @@ func _load_spec(path: String) -> void:
                 if a.has("mode"):
                     _watch.append({"node": str(a.get("node", "")), "attr": str(a.get("attr", ""))})
 func _process(_d: float) -> void:
+    # The first _process is the boundary between "booting" and "stepping": the
+    # main scene is instantiated and in the tree by now, and nothing has been
+    # driven yet.
+    if _t_first_process_usec < 0:
+        _t_first_process_usec = Time.get_ticks_usec()
     # 0-based frames: apply this frame's scheduled releases + timeline entries,
     # THEN advance. Incrementing first would make `at: 0` unreachable.
     if _frame == 0:
@@ -1029,14 +1052,39 @@ func _finish() -> void:
     if _dumped:
         return
     _dumped = true
+    _t_step_end_usec = Time.get_ticks_usec()
     var out := {"frames": _frame, "asserts": _results, "nodes": {}, "captures": _captures}
+    var t_walk := Time.get_ticks_usec()
     _walk(get_tree().get_root(), out["nodes"])
+    var walk_usec := Time.get_ticks_usec() - t_walk
+    # boot: engine start -> first _process. If the game quit before a single
+    # frame ran there is no stepping to separate, and saying so beats inventing
+    # a split: boot swallows the whole run and step reads 0.
+    var boot_usec := _t_first_process_usec
+    var step_usec := 0
+    if _t_first_process_usec < 0:
+        boot_usec = _t_step_end_usec
+    else:
+        step_usec = (_t_step_end_usec - _t_first_process_usec) - _capture_usec
+    # The two zeros below are PLACEHOLDERS patched into the serialized text: a
+    # number can neither contain the cost of writing itself nor the clock read
+    # that follows it. Both are spliced after stringify returns, so the cost
+    # reported is the real one and the document is serialized exactly once.
+    out["timing"] = {"boot_usec": boot_usec, "step_usec": step_usec,
+                     "capture_usec": _capture_usec, "walk_usec": walk_usec,
+                     "serialize_usec": 0, "engine_usec": 0,
+                     "frames_stepped": _frame, "captures_taken": _captures.size()}
     var path := OS.get_environment("AITELIER_PROBE_OUT")
     if path == "":
         path = "user://probe_state.json"
+    var t_str := Time.get_ticks_usec()
+    var text := JSON.stringify(out, "  ")
+    var str_usec := (Time.get_ticks_usec() - t_str) + walk_usec
+    text = text.replace("\"serialize_usec\": 0", "\"serialize_usec\": %d" % str_usec)
+    text = text.replace("\"engine_usec\": 0", "\"engine_usec\": %d" % Time.get_ticks_usec())
     var f := FileAccess.open(path, FileAccess.WRITE)
     if f != null:
-        f.store_string(JSON.stringify(out, "  "))
+        f.store_string(text)
         f.close()
         print("AITELIER_PROBE_WROTE ", path)
 func _walk(node: Node, acc: Dictionary) -> void:
@@ -1132,9 +1180,10 @@ def _capture_frames(total: int, timeline: list | None = None) -> list[int]:
 
 
 def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
-                render: bool) -> tuple[dict, list, bool]:
+                render: bool, timing: dict | None = None) -> tuple[dict, list, bool]:
     if state_path.exists():
         state_path.unlink()
+    t_proc = time.monotonic()
     try:
         cp = _run(args, timeout=timeout, extra_env=env, render=render)
         stderr, timed_out = cp.stderr, False
@@ -1147,6 +1196,7 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
         if not render:
             raise
         stderr, timed_out = str(e), False
+    proc_sec = time.monotonic() - t_proc
     errs = [e for e in _parse_errors(stderr) if e["kind"] in ("runtime", "push_error", "parse", "load")]
     # A deferred call that never ran, or an atlas blit the engine refused, is a
     # runtime error of the game's own making — it just has no res:// frame. It
@@ -1155,30 +1205,49 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
     # cannot take the evidence down with it.
     errs += _native_errors(stderr)
     probe = {}
+    t_parse = time.monotonic()
     if state_path.is_file():
         try:
             probe = json.loads(state_path.read_text())
         except json.JSONDecodeError:
             probe = {}
+    parse_sec = time.monotonic() - t_parse
+    if timing is not None:
+        timing["proc_sec"] = timing.get("proc_sec", 0.0) + proc_sec
+        timing["snapshot_parse_sec"] = timing.get("snapshot_parse_sec", 0.0) + parse_sec
+        timing["passes"] = timing.get("passes", 0) + 1
+        eng = probe.get("timing") if isinstance(probe, dict) else None
+        if isinstance(eng, dict):
+            for key in ("boot_usec", "step_usec", "capture_usec", "serialize_usec",
+                        "engine_usec", "frames_stepped"):
+                timing[key] = timing.get(key, 0) + int(eng.get(key, 0) or 0)
     return probe, errs, timed_out
 
 
-def _attach_pngs(captures: list, cap_dir: Path) -> list:
+def _attach_pngs(captures: list, cap_dir: Path, timing: dict | None = None) -> list:
     """Inline each captured PNG as base64 and keep only its basename: the sidecar
     mounts the workspace read-only, so the bytes have to ride home in the JSON
     body, and the container-local path means nothing to the caller."""
     out = []
+    t0 = time.monotonic()
+    png_bytes = 0
     for c in captures:
         png = cap_dir / Path(str(c.get("file", ""))).name
         if png.is_file():
+            raw = png.read_bytes()
+            png_bytes += len(raw)
             out.append({"frame": c.get("frame"), "file": png.name,
-                        "png_b64": base64.b64encode(png.read_bytes()).decode()})
+                        "png_b64": base64.b64encode(raw).decode()})
+    if timing is not None:
+        timing["png_b64_sec"] = timing.get("png_b64_sec", 0.0) + (time.monotonic() - t0)
+        timing["png_bytes"] = timing.get("png_bytes", 0) + png_bytes
     return out
 
 
 def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
                extra: dict, scene: str = "",
-               capture_at: list[int] | None = None) -> tuple[dict, list, bool]:
+               capture_at: list[int] | None = None,
+               timing: dict | None = None) -> tuple[dict, list, bool]:
     """One probe run. Returns (probe_report, errors, timed_out) — the captures
     ride inside probe_report, because callers (and the unit tests that fake this)
     depend on the 3-tuple."""
@@ -1194,29 +1263,43 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
         cap_dir.mkdir(parents=True, exist_ok=True)
         env["AITELIER_PROBE_CAPTURE"] = str(cap_dir)
         env["AITELIER_PROBE_CAPTURE_AT"] = ",".join(str(f) for f in capture_at)
-    probe, errs, timed_out = _probe_once(args, env, state_path, timeout, render)
+    probe, errs, timed_out = _probe_once(args, env, state_path, timeout, render,
+                                        timing=timing)
     if render and not probe:
         # A broken X/GL setup must degrade to yesterday's behaviour, not take the
         # whole playtest gate down: retry once, headless, with capture off.
         env.pop("AITELIER_PROBE_CAPTURE")
         env.pop("AITELIER_PROBE_CAPTURE_AT")
         render = False
-        probe, errs, timed_out = _probe_once(args, env, state_path, timeout, False)
+        if timing is not None:
+            timing["headless_retry"] = True
+        probe, errs, timed_out = _probe_once(args, env, state_path, timeout, False,
+                                             timing=timing)
     if probe:
         # Report which mode actually produced this, so a silent fallback to the
         # pixel-blind path is visible rather than looking like "no captures".
         probe["render_mode"] = "render" if render else "headless"
-        probe["captures"] = _attach_pngs(probe.get("captures", []), cap_dir) if render else []
+        probe["captures"] = (_attach_pngs(probe.get("captures", []), cap_dir,
+                                          timing=timing) if render else [])
     return probe, errs, timed_out
 
 
-def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int) -> dict:
+def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int,
+                     ledger: dict | None = None) -> dict:
     """The old canned smoke test: run the main scene auto-pressing one action,
     snapshot the end state. HARD-fails only on crash / didn't-run."""
     state_path = dst.parent / "probe_state.json"
+    t_legacy: dict = {}
+    t_legacy_start = time.monotonic()
     probe, errs, timed_out = _run_probe(
         dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action},
-        capture_at=_capture_frames(frames))
+        capture_at=_capture_frames(frames), timing=t_legacy)
+    if ledger is not None:
+        t_legacy["frames_stepped"] = (probe.get("timing") or {}).get(
+            "frames_stepped", probe.get("frames", 0))
+        ledger["scenarios"] = [_scenario_ledger(
+            "(legacy smoke test)", "", time.monotonic() - t_legacy_start, t_legacy)]
+        ledger["controls"] = []
     errs, debt = _split_diagnostics(errs)
     ran = bool(probe) or not timed_out
     passed = not errs and ran
@@ -1371,7 +1454,52 @@ def _digest(nodes: dict) -> dict:
     return {k: v for k, v in (nodes or {}).items() if "_AItelierProbe" not in k}
 
 
-def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
+def _scenario_ledger(name: str, scene: str, wall_sec: float, t: dict) -> dict:
+    """One scenario's line in the ledger.
+
+    Four classes, each measured at its own clock, plus the residue:
+
+      boot       engine start -> first _process (engine init, autoloads, the
+                 main scene instantiated and in the tree)
+      step       first _process -> _finish, MINUS the in-frame capture cost
+      capture    viewport grab + save_png (engine) + base64 (python)
+      serialize  the node-tree walk + JSON.stringify (engine) + the python-side
+                 parse of that snapshot
+
+      process    python's subprocess wall MINUS everything the engine clock saw
+                 == exec of xvfb-run/godot, engine teardown, the store of the
+                 snapshot file. NOT a dumping ground: it is bounded above by
+                 the subprocess wall and reported next to it.
+      other      this scenario's python wall MINUS the subprocess wall == the
+                 temp user:// dir, the spec write, the digest.
+
+    There is no `other` that absorbs an unmeasured class: every field above is
+    a measurement, and the two residues are named for what they are."""
+    usec = lambda k: int(t.get(k, 0) or 0) / 1e6
+    proc_sec = float(t.get("proc_sec", 0.0))
+    boot, step = usec("boot_usec"), usec("step_usec")
+    capture = usec("capture_usec") + float(t.get("png_b64_sec", 0.0))
+    serialize = usec("serialize_usec") + float(t.get("snapshot_parse_sec", 0.0))
+    engine = usec("engine_usec")
+    # The engine clock starts at engine startup, so everything before and after
+    # it belongs to the process, not to any of the four classes.
+    process = max(0.0, proc_sec - engine)
+    return {"name": name, "scene": scene,
+            "wall_sec": round(wall_sec, 4),
+            "boot_sec": round(boot, 4), "step_sec": round(step, 4),
+            "capture_sec": round(capture, 4), "serialize_sec": round(serialize, 4),
+            "process_sec": round(process, 4),
+            "other_sec": round(max(0.0, wall_sec - proc_sec), 4),
+            "subprocess_sec": round(proc_sec, 4),
+            "engine_sec": round(engine, 4),
+            "passes": int(t.get("passes", 0)),
+            "headless_retry": bool(t.get("headless_retry", False)),
+            "frames_stepped": int(t.get("frames_stepped", 0) or 0),
+            "png_bytes": int(t.get("png_bytes", 0) or 0)}
+
+
+def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
+                   ledger: dict | None = None) -> dict:
     """Authored-spec playtest: run ONE isolated headless pass per scenario, driving
     its input timeline and evaluating its Expression assertions against live nodes.
 
@@ -1387,6 +1515,8 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     spec_path = dst.parent / "scenario_spec.json"
 
     scen_results, all_errors, captures, spec_errors = [], [], [], []
+    scen_timing: list[dict] = []
+    ctrl_timing: list[dict] = []
     all_debt: list[dict] = []
     scen_nodes: list[dict] = []
     scen_frames: list[int] = []
@@ -1445,13 +1575,20 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
         # with baseline true / current true — the frame-0 baseline had a save
         # left over from an earlier scenario. Order-dependence, not chance.
         sc_home = tempfile.mkdtemp(prefix="godot_home_")
+        t_scenario: dict = {}
+        t_scen_start = time.monotonic()
         try:
             probe, errs, timed_out = _run_probe(
                 dst, state_path, sframes, timeout,
                 {"AITELIER_PROBE_SPEC": str(spec_path), "HOME": sc_home},
-                scene=sc_scene, capture_at=_capture_frames(sframes, timeline))
+                scene=sc_scene, capture_at=_capture_frames(sframes, timeline),
+                timing=t_scenario)
         finally:
             shutil.rmtree(sc_home, ignore_errors=True)
+        t_scenario["frames_stepped"] = (probe.get("timing") or {}).get(
+            "frames_stepped", probe.get("frames", 0))
+        scen_timing.append(_scenario_ledger(
+            name, sc_scene, time.monotonic() - t_scen_start, t_scenario))
         errs, debt = _split_diagnostics(errs)
         ran = bool(probe) or not timed_out
         ran_any = ran_any or ran
@@ -1513,13 +1650,18 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
                 # A control that boots into a save an earlier control left is
                 # not the no-input baseline this comparison claims to be.
                 ctrl_home = tempfile.mkdtemp(prefix="godot_home_")
+                t_ctrl: dict = {}
+                t_ctrl_start = time.monotonic()
                 try:
                     ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
                                               {"AITELIER_PROBE_SPEC": str(spec_path),
                                                "HOME": ctrl_home},
-                                              scene=scen_scenes[i])
+                                              scene=scen_scenes[i], timing=t_ctrl)
                 finally:
                     shutil.rmtree(ctrl_home, ignore_errors=True)
+                ctrl_timing.append(_scenario_ledger(
+                    "control:%s@%d" % (scen_scenes[i] or "(main)", n),
+                    scen_scenes[i], time.monotonic() - t_ctrl_start, t_ctrl))
                 controls[key] = _digest(ctrl.get("nodes", {}))
             # An empty control means the control pass itself failed to report --
             # stay quiet rather than accuse the game on missing evidence.
@@ -1549,12 +1691,78 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int) -> dict:
     else:
         summary = ("Playtest ran clean but %d/%d scenario(s) failed assertions (advisory)."
                    % (n_fail, len(scen_results)))
+    if ledger is not None:
+        ledger["scenarios"] = scen_timing
+        ledger["controls"] = ctrl_timing
     return {"passed": hard_passed, "frames": default_frames, "errors": all_errors,
             "native_debt": all_debt,
             "state": last_state, "spec_used": True, "spec_errors": spec_errors,
             "captures": captures, "render_mode": render_mode,
             "behavior": {"all_passed": behavior_passed, "scenarios": scen_results},
             "summary": summary}
+
+
+def _assemble_ledger(ledger: dict, started_at: str, t_start: float,
+                     copy_sec: float, import_sec: float) -> dict:
+    """The playtest-level ledger: every part, AND the remainder.
+
+    A report of parts without a remainder is the same unaccountability it is
+    meant to remove, so `unattributed_sec` is not optional and not a bucket
+    anything is poured into — it is what is LEFT once every measured part is
+    subtracted from this call's own wall clock, and it is 0 only if nothing is
+    missing. `harness_finished_at`/`wall_sec` are the outer endpoints: the
+    difference between them and the gate manifest's playtest stage is the HTTP
+    transport plus the caller's own re-serialization of this document, which
+    this process cannot see and does not claim to have measured."""
+    scenarios = ledger.get("scenarios") or []
+    controls = ledger.get("controls") or []
+    scen_sum = sum(float(s.get("wall_sec", 0.0)) for s in scenarios)
+    ctrl_sum = sum(float(s.get("wall_sec", 0.0)) for s in controls)
+    wall = time.monotonic() - t_start
+
+    def klass(key):
+        return round(sum(float(s.get(key, 0.0)) for s in scenarios + controls), 4)
+
+    return {
+        "schema": "playtest-timing/1",
+        "harness_started_at": started_at,
+        "harness_finished_at": datetime.now(timezone.utc).isoformat(),
+        "wall_sec": round(wall, 4),
+        "copy_project_sec": round(copy_sec, 4),
+        "import_resources_sec": round(import_sec, 4),
+        "scenario_count": len(scenarios),
+        "scenario_wall_sum_sec": round(scen_sum, 4),
+        "control_count": len(controls),
+        "control_wall_sum_sec": round(ctrl_sum, 4),
+        "unattributed_sec": round(
+            wall - scen_sum - ctrl_sum - copy_sec - import_sec, 4),
+        "unattributed_means": (
+            "this call's wall clock minus every scenario, every L0 control, the "
+            "project copy and the resource import: inter-scenario scheduling, "
+            "spec assembly, the aggregation below, and this ledger itself. It "
+            "does NOT include the HTTP transport or the caller writing the "
+            "response to disk — those lie between harness_finished_at and the "
+            "gate manifest's playtest finished_at."),
+        "by_class_sec": {"boot": klass("boot_sec"), "step": klass("step_sec"),
+                         "capture": klass("capture_sec"),
+                         "serialize": klass("serialize_sec"),
+                         "process": klass("process_sec"),
+                         "scenario_other": klass("other_sec")},
+        "top10_scenarios": sorted(
+            ({"name": s["name"], "wall_sec": s["wall_sec"]} for s in scenarios),
+            key=lambda s: -s["wall_sec"])[:10],
+        "top10_share": (round(sum(sorted((float(s.get("wall_sec", 0.0))
+                                          for s in scenarios), reverse=True)[:10])
+                              / scen_sum, 4) if scen_sum else 0.0),
+        "report_serialize_sec": 0.0,
+        "report_serialize_means": (
+            "seconds spent turning this whole document into the JSON response "
+            "body, spliced in after the serialization it measures; 0.0 means "
+            "the response was not produced by the HTTP route (CLI, or a unit "
+            "test calling playtest_project directly)."),
+        "scenarios": scenarios,
+        "controls": controls,
+    }
 
 
 def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
@@ -1565,13 +1773,26 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
         return {"passed": True, "frames": 0, "errors": [], "state": {},
                 "behavior": None, "spec_used": False, "no_project": True,
                 "summary": "No Godot project — playtest skipped."}
+    t_start = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat()
+    t_copy = time.monotonic()
     dst = _copy_project(proj)
+    copy_sec = time.monotonic() - t_copy
+    ledger: dict = {}
     try:
         _inject_probe(dst)
+        t_import = time.monotonic()
         _import_resources(dst, timeout)
+        import_sec = time.monotonic() - t_import
         if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
-            return _playtest_spec(dst, spec, frames, timeout)
-        return _playtest_legacy(dst, frames, input_action, timeout)
+            result = _playtest_spec(dst, spec, frames, timeout, ledger=ledger)
+        else:
+            result = _playtest_legacy(dst, frames, input_action, timeout,
+                                      ledger=ledger)
+        if isinstance(result, dict):
+            result["timing"] = _assemble_ledger(ledger, started_at, t_start,
+                                                copy_sec, import_sec)
+        return result
     finally:
         shutil.rmtree(dst.parent, ignore_errors=True)
 
@@ -2029,6 +2250,30 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_timed(self, code: int, payload: dict) -> None:
+        """Send a report whose ledger includes the cost of serializing itself.
+
+        A document cannot contain a number describing the act that produces it,
+        so the placeholder written by `_assemble_ledger` is spliced AFTER
+        json.dumps returns. The payload is serialized exactly once — measuring
+        by serializing twice would both double the cost and report the wrong
+        one. If the placeholder is not there (an older ledger, or a report with
+        no timing at all) the body is sent untouched: a missing number must
+        never cost a caller its 444MB of evidence."""
+        t0 = time.monotonic()
+        text = json.dumps(payload)
+        took = time.monotonic() - t0
+        placeholder = '"report_serialize_sec": 0.0'
+        if text.count(placeholder) == 1:
+            text = text.replace(placeholder,
+                                '"report_serialize_sec": %.4f' % took, 1)
+        body = text.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *a):  # quiet
         pass
 
@@ -2091,6 +2336,7 @@ class _Handler(BaseHTTPRequestHandler):
         # finally: _RENDER_LOCK.release()
         owner = None
         effect_lock = None
+        lock_wait = 0.0
         if held:
             project_id = req.get("project_id") or Path(proj).name or "unknown-project"
             run_id = req.get("run_id") or os.environ.get("AITELIER_RUN_ID") or "unknown-run"
@@ -2115,6 +2361,7 @@ class _Handler(BaseHTTPRequestHandler):
                     print(f"[harness] render owner release failed: {release_exc}", flush=True)
                 return self._send(500, {"error": str(exc)})
             delay = time.time() - waited
+            lock_wait = delay
             if delay > 1.0:
                 print(f"[harness] {self.path} waited {delay:.0f}s for the render lock",
                       flush=True)
@@ -2132,10 +2379,13 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(200, x11_input_smoke(
                     proj, timeout=int(req.get("timeout", 180))))
             elif self.path == "/playtest":
-                self._send(200, playtest_project(
+                report = playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),
                     input_action=req.get("input_action", "ui_accept"),
-                    spec=req.get("spec")))
+                    spec=req.get("spec"))
+                if isinstance(report.get("timing"), dict):
+                    report["timing"]["render_lock_wait_sec"] = round(lock_wait, 4)
+                self._send_timed(200, report)
             else:
                 self._send(404, {"error": "not found"})
         except Exception as e:  # never crash the service on one bad project

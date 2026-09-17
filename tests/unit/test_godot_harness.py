@@ -105,7 +105,7 @@ def test_scenario_may_override_the_boot_scene(monkeypatch, tmp_path):
     """
     seen = []
 
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None):
         seen.append(scene)
         return ({"frames": 5, "asserts": [{"name": "a", "passed": True}], "nodes": {}},
                 [], False)
@@ -798,7 +798,7 @@ def _home_recording_probe(monkeypatch, seen, control_nodes=None, on_control=None
     The sentinel is the point: a control that can see the previous run's file is
     a control that inherited its user://.
     """
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None):
         home = env.get("HOME")
         is_control = "AITELIER_PROBE_SPEC" in env and capture_at is None
         rec = {"home": home, "is_control": is_control, "existed": False, "found": []}
@@ -898,7 +898,7 @@ def _l0_probe_recorder(seen):
     """Fake _run_probe that records (scene, frames, has_timeline) per call and
     returns a state that depends on the scene and on whether input was driven,
     so a control on the wrong scene can never accidentally match."""
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None):
         import json as _json
         spec = _json.loads(open(env["AITELIER_PROBE_SPEC"]).read())
         driven = bool(spec.get("timeline"))
@@ -946,7 +946,7 @@ def test_controls_are_shared_per_scene_and_frame_budget(monkeypatch, tmp_path):
 def test_a_click_only_scenario_enters_l0(monkeypatch, tmp_path):
     """`clicks:` is input the probe delivers; a scenario made only of clicks
     that ends in the no-input state tested nothing, exactly like a press."""
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None):
         return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
                  "nodes": {"Root": {"x": 1}}}, [], False)   # identical every run
     monkeypatch.setattr(gh, "_run_probe", fake)
@@ -970,7 +970,7 @@ def test_every_input_key_the_probe_delivers_counts_as_driving(monkeypatch, tmp_p
     input_keys = sorted(gh._TIMELINE_KEYS - {"at", "assert", "actions", "clicks", "hovers"})
     assert input_keys == ["click", "hover", "press", "release"]
     for k in input_keys:
-        def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+        def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None):
             return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
                      "nodes": {"Root": {"x": 1}}}, [], False)
         monkeypatch.setattr(gh, "_run_probe", fake)
@@ -995,7 +995,7 @@ def test_a_scenario_with_no_input_at_all_is_not_judged_by_l0(monkeypatch, tmp_pa
 def test_input_dead_still_fires_on_a_scene_override_that_ignores_input(monkeypatch, tmp_path):
     """The comparison is not loosened: same scene, same budget, identical end
     state => input_dead, and a scenario whose state DID move stays alive."""
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None):
         import json as _json
         spec = _json.loads(open(env["AITELIER_PROBE_SPEC"]).read())
         driven = bool(spec.get("timeline"))

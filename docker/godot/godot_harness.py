@@ -1466,15 +1466,24 @@ def _scenario_ledger(name: str, scene: str, wall_sec: float, t: dict) -> dict:
       serialize  the node-tree walk + JSON.stringify (engine) + the python-side
                  parse of that snapshot
 
-      process    python's subprocess wall MINUS everything the engine clock saw
-                 == exec of xvfb-run/godot, engine teardown, the store of the
-                 snapshot file. NOT a dumping ground: it is bounded above by
-                 the subprocess wall and reported next to it.
-      other      this scenario's python wall MINUS the subprocess wall == the
-                 temp user:// dir, the spec write, the digest.
+      process    python's subprocess wall MINUS everything the engine clock
+                 saw == exec of xvfb-run/godot, engine teardown, the store of
+                 the snapshot file
+      engine_res what the engine clock saw that none of the four classes
+                 claimed
+      other      python wall outside the subprocess that is not already charged
+                 to capture or serialize == the temp user:// dir, the spec
+                 write, the digest
 
-    There is no `other` that absorbs an unmeasured class: every field above is
-    a measurement, and the two residues are named for what they are."""
+    The three residues are named for what they are, and none of them may absorb
+    a measured class. That is an arithmetic property, not a promise, so the line
+    carries `sum_check_sec` — wall minus all six — and it is ~0 or the ledger is
+    lying. MEASURED, 2026-09-17: an earlier version defined `other` as
+    wall-minus-subprocess, and because the base64 encode runs outside the
+    subprocess, a 0.5s/PNG delay injected into it landed in BOTH capture
+    (+6.030s, correct) and other (+6.008s, a residue eating a measured class).
+    Subtracting the out-of-subprocess charges here is what makes the polarity
+    test mean something."""
     usec = lambda k: int(t.get(k, 0) or 0) / 1e6
     proc_sec = float(t.get("proc_sec", 0.0))
     boot, step = usec("boot_usec"), usec("step_usec")
@@ -1483,13 +1492,23 @@ def _scenario_ledger(name: str, scene: str, wall_sec: float, t: dict) -> dict:
     engine = usec("engine_usec")
     # The engine clock starts at engine startup, so everything before and after
     # it belongs to the process, not to any of the four classes.
-    process = max(0.0, proc_sec - engine)
+    process = proc_sec - engine
+    engine_res = engine - (boot + step + usec("capture_usec")
+                           + usec("serialize_usec"))
+    # Charged to capture and serialize above, and NOT inside the subprocess —
+    # so they must come out of the python-side residue or they are counted
+    # twice. This is the line the variant-B polarity run was added to hold.
+    outside = float(t.get("png_b64_sec", 0.0)) + float(t.get("snapshot_parse_sec", 0.0))
+    other = wall_sec - proc_sec - outside
+    total = boot + step + capture + serialize + process + engine_res + other
     return {"name": name, "scene": scene,
             "wall_sec": round(wall_sec, 4),
             "boot_sec": round(boot, 4), "step_sec": round(step, 4),
             "capture_sec": round(capture, 4), "serialize_sec": round(serialize, 4),
             "process_sec": round(process, 4),
-            "other_sec": round(max(0.0, wall_sec - proc_sec), 4),
+            "engine_residual_sec": round(engine_res, 4),
+            "other_sec": round(other, 4),
+            "sum_check_sec": round(wall_sec - total, 6),
             "subprocess_sec": round(proc_sec, 4),
             "engine_sec": round(engine, 4),
             "passes": int(t.get("passes", 0)),
@@ -1747,7 +1766,11 @@ def _assemble_ledger(ledger: dict, started_at: str, t_start: float,
                          "capture": klass("capture_sec"),
                          "serialize": klass("serialize_sec"),
                          "process": klass("process_sec"),
+                         "engine_residual": klass("engine_residual_sec"),
                          "scenario_other": klass("other_sec")},
+        "worst_sum_check_sec": max(
+            (abs(float(s.get("sum_check_sec", 0.0)))
+             for s in scenarios + controls), default=0.0),
         "top10_scenarios": sorted(
             ({"name": s["name"], "wall_sec": s["wall_sec"]} for s in scenarios),
             key=lambda s: -s["wall_sec"])[:10],

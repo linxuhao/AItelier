@@ -60,34 +60,49 @@ def test_every_scenario_gets_its_own_line_not_a_sample(monkeypatch, tmp_path):
 
 def test_the_four_classes_are_read_from_their_own_clocks():
     """Each class comes from the measurement named for it — no class is derived
-    by subtracting the others, which is how an unmeasured one hides."""
+    by subtracting the others, which is how an unmeasured one hides — and the
+    six parts add up to the wall clock exactly."""
     line = gh._scenario_ledger("s", "res://a.tscn", 7.0, {
         "proc_sec": 6.0, "boot_usec": 1_000_000, "step_usec": 4_000_000,
         "capture_usec": 500_000, "serialize_usec": 100_000,
-        "engine_usec": 5_600_000, "png_b64_sec": 0.25,
+        "engine_usec": 5_700_000, "png_b64_sec": 0.25,
         "snapshot_parse_sec": 0.05, "passes": 1})
     assert line["boot_sec"] == 1.0
     assert line["step_sec"] == 4.0
     assert line["capture_sec"] == 0.75          # engine grab + python base64
     assert line["serialize_sec"] == pytest.approx(0.15)  # stringify + parse
-    assert line["process_sec"] == pytest.approx(0.4)     # proc wall - engine clock
-    assert line["other_sec"] == pytest.approx(1.0)       # wall - proc wall
+    assert line["process_sec"] == pytest.approx(0.3)     # proc wall - engine clock
+    assert line["engine_residual_sec"] == pytest.approx(0.1)
+    assert line["other_sec"] == pytest.approx(0.7)
+    assert line["sum_check_sec"] == pytest.approx(0.0, abs=1e-6)
 
 
-def test_a_slower_capture_does_not_move_the_other_three():
-    """The polarity that makes the split worth having: charge the capture more
-    and only capture grows. If a delay in the encoder showed up as `step`, the
-    breakdown would be decoration."""
+def test_a_slower_capture_does_not_move_the_other_three_OR_any_residue():
+    """The polarity that makes the split worth having, in BOTH places it can
+    fail: a slower capture must not show up as step/boot/serialize, and it must
+    not show up a SECOND time in a residue.
+
+    Measured on the real harness 2026-09-17: with `other` defined as
+    wall-minus-subprocess, a 0.5s/PNG delay in the base64 encoder was counted
+    twice — +6.030s capture and +6.008s other — because the encoder runs
+    outside the subprocess. Both halves of this test exist because of that run;
+    `encode` is the half that would have caught it."""
     base = dict(proc_sec=6.0, boot_usec=1_000_000, step_usec=4_000_000,
                 capture_usec=500_000, serialize_usec=100_000,
                 engine_usec=5_600_000, png_b64_sec=0.0,
-                snapshot_parse_sec=0.05, passes=1)
-    slow = dict(base, capture_usec=2_500_000, engine_usec=7_600_000)
-    a = gh._scenario_ledger("s", "", 7.0, base)
-    b = gh._scenario_ledger("s", "", 9.0, slow)
-    assert b["capture_sec"] - a["capture_sec"] == pytest.approx(2.0)
-    for untouched in ("boot_sec", "step_sec", "serialize_sec"):
-        assert a[untouched] == b[untouched], untouched
+                snapshot_parse_sec=0.0, passes=1)
+    a = gh._scenario_ledger("s", "", 6.5, base)
+    # (1) slower IN the engine: the grab itself
+    grab = gh._scenario_ledger("s", "", 8.5, dict(
+        base, proc_sec=8.0, capture_usec=2_500_000, engine_usec=7_600_000))
+    # (2) slower OUTSIDE it: the python base64 encode
+    encode = gh._scenario_ledger("s", "", 8.5, dict(base, png_b64_sec=2.0))
+    for slow, label in ((grab, "engine grab"), (encode, "python encode")):
+        assert slow["capture_sec"] - a["capture_sec"] == pytest.approx(2.0), label
+        for untouched in ("boot_sec", "step_sec", "serialize_sec",
+                          "process_sec", "engine_residual_sec", "other_sec"):
+            assert a[untouched] == pytest.approx(slow[untouched]), (label, untouched)
+        assert slow["sum_check_sec"] == pytest.approx(0.0, abs=1e-6), label
 
 
 def test_the_playtest_level_reports_its_remainder(monkeypatch, tmp_path):

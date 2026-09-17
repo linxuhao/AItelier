@@ -42,7 +42,7 @@ def _spec_with(n):
 def test_every_scenario_gets_its_own_line_not_a_sample(monkeypatch, tmp_path):
     """Three scenarios, three lines — the thing the 444MB report never had."""
     def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None,
-             timing=None):
+             timing=None, render=True):
         if timing is not None:
             timing.update({"proc_sec": 6.0, "passes": 1},
                           **_probe()["timing"])

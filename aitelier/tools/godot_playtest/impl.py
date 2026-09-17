@@ -35,6 +35,9 @@ _BUILDER_URL = os.environ.get("GODOT_BUILDER_URL", "http://godot-builder:8080")
 
 SPEC_DIR = "playtest"
 SPEC_FILE = "playtest_spec.yaml"
+# Frames per scenario for the pipeline's own play-test tool, whose report IS
+# read by a human/vision reviewer. Matches the sidecar's pre-2026-09-17 default.
+_DPE_CAPTURES = int(os.environ.get("AITELIER_PLAYTEST_CAPTURES", "4"))
 
 
 # ── Reading the authored contract ─────────────────────────────────────────
@@ -352,6 +355,13 @@ def godot_playtest(*, project_root: str = "", out_dir: str = "",
                 operation_id=operation_id)}
             if spec:
                 payload["spec"] = spec
+            # ASK for the frames. The sidecar stopped photographing by default on
+            # 2026-09-17 (owner ruling: the PNGs were 99.7% of a gate report and
+            # the gate never read one), but THIS path does read them —
+            # `_unpack_frames` below writes frames/ and the vision pass judges
+            # those pictures. A default that is right for the gate is wrong here,
+            # so the only consumer states its own need.
+            payload["captures"] = _DPE_CAPTURES
             report = post_playtest(payload)
             # The sidecar says there is no Godot project at a path where THIS
             # process just stat'd project.godot. It is not looking at the same

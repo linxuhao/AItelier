@@ -47,11 +47,38 @@ from pathlib import Path
 
 GODOT_BIN = os.environ.get("GODOT_BIN", "godot")
 DEFAULT_PLAYTEST_FRAMES = int(os.environ.get("GODOT_PLAYTEST_FRAMES", "180"))
-# How many frames to photograph per playtest run. 0 disables rendering entirely
-# and falls back to the pure-headless run — the opt-out for anyone who only wants
-# the state snapshot (or whose host has no working software GL).
-PLAYTEST_CAPTURES = int(os.environ.get("GODOT_PLAYTEST_CAPTURES", "4"))
+# How many frames to photograph per playtest run. It decides PHOTOGRAPHY ONLY.
+# It used to decide RENDERING too (`render = bool(capture_at)`), which meant
+# turning the pictures off silently moved the whole gate onto --headless's dummy
+# driver — measured 2026-09-17, that alone turned 5 of 8 scenarios red because
+# nothing was laid out to click. Whether the engine draws is now each call
+# site's own explicit argument to `_run_probe`.
+#
+# DEFAULT 0 since 2026-09-17 (owner ruling). At 4/scenario the PNGs were 99.7%
+# of a gate's playtest.json — 442,870,140 of 444,172,652 bytes across 656
+# fields — and NOTHING on the gate path read them: the only reader is
+# aitelier/tools/godot_playtest/impl.py:218, reachable only from :408, while
+# tools/godot_gate.py imports read_spec alone and the game repo's
+# `git grep png_b64` exits 1. This is a size-and-reviewability cut, not a speed
+# one: capture + serialize measured 73.4041 s of a 3373.1978 s run (2.18%).
+# A red scenario is re-photographed ON DEMAND: POST /playtest with
+# {"captures": 4} (or set GODOT_PLAYTEST_CAPTURES) re-runs it in render mode and
+# the PNGs come back exactly as before — the capability is intact, only the
+# default is off.
+PLAYTEST_CAPTURES = int(os.environ.get("GODOT_PLAYTEST_CAPTURES", "0"))
 RENDER_RES = os.environ.get("GODOT_PLAYTEST_RES", "1280x720")
+# Frames per second the probe's game clock advances at, as a FIXED DELTA rather
+# than a real-time throttle. `--fixed-fps N` makes the engine hand _process
+# exactly 1/N as delta and "disables real-time synchronization" (godot --help,
+# 4.7.2), so a frame budget still maps to a determined slice of game time — the
+# property the old `Engine.max_fps = 60` bought — without SLEEPING for it.
+# Measured 2026-09-17 in this image, 600 frames of a trivial scene:
+#   Engine.max_fps = 60   game_time 9.9478 s  wall 9.9504 s  mean delta 0.016580
+#   --fixed-fps 60        game_time 10.0000 s wall 0.0017 s  mean delta 0.016667
+#   neither               game_time  4.1241 s wall 4.1201 s  mean delta 0.006874
+# The fixed delta is the one that is EXACTLY 1/60; the cap only approximated it.
+# Set to 0 to fall back to the old real-time cap (for measuring the difference).
+PLAYTEST_FIXED_FPS = int(os.environ.get("GODOT_PLAYTEST_FIXED_FPS", "60"))
 PORT = int(os.environ.get("PORT", "8080"))
 LIFECYCLE_DB = os.environ.get(
     "GODOT_LIFECYCLE_DB",
@@ -658,9 +685,16 @@ func _ready() -> void:
     # the probe freezes with the game and can neither un-pause nor assert, so a
     # pause feature would be untestable.
     process_mode = Node.PROCESS_MODE_ALWAYS
-    # Cap the framerate so a frame budget maps to stable game time — headless
-    # runs uncapped otherwise, making delta tiny so the game barely advances.
-    Engine.max_fps = 60
+    # A frame budget must map to a determined slice of game time — uncapped,
+    # delta goes tiny (0.0069 measured) and the game barely advances. That used
+    # to be bought with `Engine.max_fps = 60`, which SLEEPS: 82,675 frames over
+    # a gate ÷ 60 = 1,378 s of the hour spent waiting for a clock. The engine's
+    # own `--fixed-fps` hands _process exactly 1/N without the sleep, so the
+    # python side passes it and this stays out of the way. AITELIER_PROBE_MAX_FPS
+    # is the fallback for a run that deliberately keeps the old throttle.
+    var cap := OS.get_environment("AITELIER_PROBE_MAX_FPS")
+    if cap != "" and int(cap) > 0:
+        Engine.max_fps = int(cap)
     var envf := OS.get_environment("AITELIER_PROBE_FRAMES")
     _max = int(envf) if envf != "" else 180
     var spec_path := OS.get_environment("AITELIER_PROBE_SPEC")
@@ -1125,7 +1159,8 @@ def _inject_probe(dst: Path) -> None:
     pg.write_text(text)
 
 
-def _capture_frames(total: int, timeline: list | None = None) -> list[int]:
+def _capture_frames(total: int, timeline: list | None = None,
+                    limit: int | None = None) -> list[int]:
     """Which frames to photograph. Assert frames have PRIORITY over the stride
     (a PNG earns its bandwidth by showing the very state an assertion judged),
     and when there are more of them than there is budget they are sampled
@@ -1136,7 +1171,7 @@ def _capture_frames(total: int, timeline: list | None = None) -> list[int]:
     Never schedules the last frame: the probe calls _finish() and quit() from
     _process once _frame >= _max, so that frame's post-draw never fires and the
     JSON would name a PNG that was never written."""
-    limit = min(PLAYTEST_CAPTURES, _MAX_CAPTURES)
+    limit = min(PLAYTEST_CAPTURES if limit is None else limit, _MAX_CAPTURES)
     last = total - 2
     if limit <= 0 or last < 0:
         return []
@@ -1247,18 +1282,25 @@ def _attach_pngs(captures: list, cap_dir: Path, timing: dict | None = None) -> l
 def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
                extra: dict, scene: str = "",
                capture_at: list[int] | None = None,
-               timing: dict | None = None) -> tuple[dict, list, bool]:
+               timing: dict | None = None,
+               render: bool = True) -> tuple[dict, list, bool]:
     """One probe run. Returns (probe_report, errors, timed_out) — the captures
     ride inside probe_report, because callers (and the unit tests that fake this)
     depend on the 3-tuple."""
     args = ["--path", str(dst)]
+    if PLAYTEST_FIXED_FPS > 0:
+        # Ahead of the scene argument: this is an engine flag, not a scene.
+        args += ["--fixed-fps", str(PLAYTEST_FIXED_FPS)]
     if scene:
         args.append(scene)              # run a specific scene instead of main
     env = {"AITELIER_PROBE_OUT": str(state_path), "AITELIER_PROBE_FRAMES": str(frames)}
+    # Exactly one of the two mechanisms is ever live: the flag (fixed delta, no
+    # sleep) or the in-probe cap (real-time throttle, the pre-2026-09-17 path).
+    if PLAYTEST_FIXED_FPS <= 0:
+        env["AITELIER_PROBE_MAX_FPS"] = "60"
     env.update(extra)
-    render = bool(capture_at)
     cap_dir = dst.parent / "captures"
-    if render:
+    if render and capture_at:
         shutil.rmtree(cap_dir, ignore_errors=True)
         cap_dir.mkdir(parents=True, exist_ok=True)
         env["AITELIER_PROBE_CAPTURE"] = str(cap_dir)
@@ -1268,8 +1310,8 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
     if render and not probe:
         # A broken X/GL setup must degrade to yesterday's behaviour, not take the
         # whole playtest gate down: retry once, headless, with capture off.
-        env.pop("AITELIER_PROBE_CAPTURE")
-        env.pop("AITELIER_PROBE_CAPTURE_AT")
+        env.pop("AITELIER_PROBE_CAPTURE", None)
+        env.pop("AITELIER_PROBE_CAPTURE_AT", None)
         render = False
         if timing is not None:
             timing["headless_retry"] = True
@@ -1280,12 +1322,14 @@ def _run_probe(dst: Path, state_path: Path, frames: int, timeout: int,
         # pixel-blind path is visible rather than looking like "no captures".
         probe["render_mode"] = "render" if render else "headless"
         probe["captures"] = (_attach_pngs(probe.get("captures", []), cap_dir,
-                                          timing=timing) if render else [])
+                                          timing=timing)
+                             if render and capture_at else [])
     return probe, errs, timed_out
 
 
 def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int,
-                     ledger: dict | None = None) -> dict:
+                     ledger: dict | None = None,
+                     cap_limit: int | None = None) -> dict:
     """The old canned smoke test: run the main scene auto-pressing one action,
     snapshot the end state. HARD-fails only on crash / didn't-run."""
     state_path = dst.parent / "probe_state.json"
@@ -1293,7 +1337,7 @@ def _playtest_legacy(dst: Path, frames: int, input_action: str, timeout: int,
     t_legacy_start = time.monotonic()
     probe, errs, timed_out = _run_probe(
         dst, state_path, frames, timeout, {"AITELIER_PROBE_INPUT": input_action},
-        capture_at=_capture_frames(frames), timing=t_legacy)
+        capture_at=_capture_frames(frames, limit=cap_limit), timing=t_legacy)
     if ledger is not None:
         t_legacy["frames_stepped"] = (probe.get("timing") or {}).get(
             "frames_stepped", probe.get("frames", 0))
@@ -1518,7 +1562,8 @@ def _scenario_ledger(name: str, scene: str, wall_sec: float, t: dict) -> dict:
 
 
 def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
-                   ledger: dict | None = None) -> dict:
+                   ledger: dict | None = None,
+                   cap_limit: int | None = None) -> dict:
     """Authored-spec playtest: run ONE isolated headless pass per scenario, driving
     its input timeline and evaluating its Expression assertions against live nodes.
 
@@ -1600,7 +1645,8 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
             probe, errs, timed_out = _run_probe(
                 dst, state_path, sframes, timeout,
                 {"AITELIER_PROBE_SPEC": str(spec_path), "HOME": sc_home},
-                scene=sc_scene, capture_at=_capture_frames(sframes, timeline),
+                scene=sc_scene,
+                capture_at=_capture_frames(sframes, timeline, limit=cap_limit),
                 timing=t_scenario)
         finally:
             shutil.rmtree(sc_home, ignore_errors=True)
@@ -1675,7 +1721,8 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
                     ctrl, _e, _t = _run_probe(dst, state_path, n, timeout,
                                               {"AITELIER_PROBE_SPEC": str(spec_path),
                                                "HOME": ctrl_home},
-                                              scene=scen_scenes[i], timing=t_ctrl)
+                                              scene=scen_scenes[i], timing=t_ctrl,
+                                              render=False)
                 finally:
                     shutil.rmtree(ctrl_home, ignore_errors=True)
                 ctrl_timing.append(_scenario_ledger(
@@ -1790,7 +1837,7 @@ def _assemble_ledger(ledger: dict, started_at: str, t_start: float,
 
 def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
                      input_action: str = "ui_accept", spec: dict | None = None,
-                     timeout: int = 120) -> dict:
+                     timeout: int = 120, captures: int | None = None) -> dict:
     proj = Path(project_dir)
     if not (proj / "project.godot").is_file():
         return {"passed": True, "frames": 0, "errors": [], "state": {},
@@ -1808,10 +1855,11 @@ def playtest_project(project_dir: str, frames: int = DEFAULT_PLAYTEST_FRAMES,
         _import_resources(dst, timeout)
         import_sec = time.monotonic() - t_import
         if spec and isinstance(spec.get("scenarios"), list) and spec["scenarios"]:
-            result = _playtest_spec(dst, spec, frames, timeout, ledger=ledger)
+            result = _playtest_spec(dst, spec, frames, timeout, ledger=ledger,
+                                    cap_limit=captures)
         else:
             result = _playtest_legacy(dst, frames, input_action, timeout,
-                                      ledger=ledger)
+                                      ledger=ledger, cap_limit=captures)
         if isinstance(result, dict):
             result["timing"] = _assemble_ledger(ledger, started_at, t_start,
                                                 copy_sec, import_sec)
@@ -2405,7 +2453,11 @@ class _Handler(BaseHTTPRequestHandler):
                 report = playtest_project(
                     proj, frames=req.get("frames", DEFAULT_PLAYTEST_FRAMES),
                     input_action=req.get("input_action", "ui_accept"),
-                    spec=req.get("spec"))
+                    spec=req.get("spec"),
+                    # On-demand re-photography of a red scenario: the gate runs
+                    # with 0 captures, a reviewer re-runs that one scenario with
+                    # {"captures": 4} and gets the PNGs back.
+                    captures=req.get("captures"))
                 if isinstance(report.get("timing"), dict):
                     report["timing"]["render_lock_wait_sec"] = round(lock_wait, 4)
                 self._send_timed(200, report)

@@ -803,6 +803,25 @@ def _apply_baseline(report: dict, state_dir: str) -> None:
         report["baseline_error"] = f"could not write {path}: {e}"
 
 
+# How long the pytest leg may run before it is killed.
+#
+# This was 75 seconds, and the comment at the call site justified it as keeping
+# the scheduler loop-thread free: "a genuinely-passing suite finishes well under
+# this". Measured 2026-09-18 on the wuxia game repo: 2222 passed, 6 skipped,
+# **83 seconds**. Eight seconds over the wall, every single time.
+#
+# What that cost, on run 1a60bf3d: four implement->test laps, ~4h, ending in
+# `Cycle limit exceeded`, on a deliverable whose own 335 lines of new tests all
+# pass. The round was never shown a test result; it was handed `passed: false`
+# with an empty failures list and asked to fix it, four times.
+#
+# The loop-thread argument does not survive contact with this pipeline anyway:
+# the GDScript repo_gate in the SAME step takes about an hour. A wall that is
+# 1.2% of its neighbour is not protecting the scheduler from anything, it is
+# just the smallest number in the file.
+PYTEST_WALL_SECONDS = 1800
+
+
 def run_tests(*, project_root: str = "", out_dir: str = "",
               workspace_root: str = "", repo_gate: bool = True,
               state_dir: str = "", run_id: str = "",
@@ -937,12 +956,12 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     cwd=str(repo), env=env, start_new_session=True,
                 )
-                # Outer wall kept tight: this runs on the scheduler loop-thread
-                # (under the per-project tick lock), so a long hang would stall
-                # the whole run. A genuinely-passing suite finishes well under
-                # this; an import/collection hang (not caught by pytest-timeout)
-                # fails fast instead of blocking for minutes.
-                stdout, stderr = proc.communicate(timeout=75)
+                # Outer wall: this runs on the scheduler loop-thread (under the
+                # per-project tick lock), so a true hang must not block forever.
+                # It is a HANG detector, not a speed limit — see
+                # PYTEST_WALL_SECONDS for what happened when it was both.
+                stdout, stderr = proc.communicate(
+                    timeout=PYTEST_WALL_SECONDS)
                 out = ((stdout or "") + "\n" + (stderr or "")).strip()
                 report["returncode"] = proc.returncode
                 # pytest: 0=all passed, 1=failures, 5=NOTHING COLLECTED.
@@ -997,7 +1016,26 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     py, _lead_with_install_error(report))
             except subprocess.TimeoutExpired:
                 _kill_group(proc)
-                report.update(passed=False, summary="pytest timed out after 75s")
+                # A timeout is ABSENT evidence, not a red suite. `passed=False`
+                # alone is indistinguishable from "ran and failed", and with an
+                # empty failures[] plus a baseline diff of nothing it classified
+                # as `known_failure` / `passed_relative: true` — a verdict about
+                # tests that never ran. `skipped_because` routes it through
+                # gate_evidence.report_state -> "skipped" -> "unresolved", which
+                # is the state that means "go and verify", and the failures entry
+                # keeps the reason readable to the agent that has to act on it.
+                report.update(
+                    passed=False, timed_out=True,
+                    skipped_because="pytest_timeout",
+                    pytest_wall_seconds=PYTEST_WALL_SECONDS,
+                    summary=(
+                        f"pytest did not finish within {PYTEST_WALL_SECONDS}s and was "
+                        "killed, so NOTHING was measured. This is not a test failure: "
+                        "no test result exists either way. Either the suite needs "
+                        "longer than this harness allows, or it hangs."))
+                report["failures"].append(
+                    f"pytest:timed out after {PYTEST_WALL_SECONDS}s — no results "
+                    "collected, the suite was killed mid-run")
             except Exception as e:  # never raise — the step must not fail
                 _kill_group(proc)
                 report.update(passed=False, summary=f"Error running pytest: {e}")

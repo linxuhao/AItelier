@@ -300,11 +300,12 @@ async def drive_run(sf, db, ws, run_id: str, *, scheduler_owned: bool,
     # Protected workflows keep manual acceptance even through the generic auto
     # driver. Waiting for their checkpoint is normal, not a timeout fault.
     from core.config_registry import _read_host_hints
-    run = sf.get_run(run_id) or {}
-    if isinstance(run, dict):
-        hints = _read_host_hints().get(run.get("graph_name"), {})
-        if hints.get("manual_checkpoints_only") is True:
-            auto_approve = False
+    run = sf.get_run(run_id)
+    if not isinstance(run, dict) or not isinstance(run.get("graph_name"), str) or not run["graph_name"]:
+        raise ValueError("Cannot drive a run without its graph identity; no checkpoint was approved")
+    hints = _read_host_hints().get(run["graph_name"], {})
+    if hints.get("manual_checkpoints_only") is True:
+        auto_approve = False
     if scheduler_owned:
         return await _watch(sf, run_id, auto_approve, max_watch_s)
     return await _step(sf, db, ws, run_id, auto_approve, max_steps)

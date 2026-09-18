@@ -237,3 +237,21 @@ def test_backup_recovery_refuses_running_original(tmp_path, monkeypatch, bench):
     with pytest.raises(BenchError, match="settle or stop"):
         session.drive(recovery)
     assert len(session.backup_calls) == 1
+
+
+@pytest.mark.parametrize("metadata", [None, {}, [], {"graph_name": ""}, {"graph_name": None}])
+def test_auto_driver_missing_identity_fails_closed(monkeypatch, metadata):
+    from core import run_driver
+
+    class MissingIdentity:
+        def get_run(self, run_id):
+            return metadata
+
+    async def forbidden(*args):
+        raise AssertionError("unknown workflow reached auto-checkpoint logic")
+
+    monkeypatch.setattr(run_driver, "_watch", forbidden)
+    monkeypatch.setattr(run_driver, "_step", forbidden)
+    with pytest.raises(ValueError, match="graph identity"):
+        asyncio.run(run_driver.drive_run(MissingIdentity(), None, None, "r",
+                                        scheduler_owned=True, auto_approve=True))

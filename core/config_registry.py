@@ -48,6 +48,7 @@ _DEFAULTS: dict = {
     "repo_mode": "code",
     "preamble_steps": [],
     "checkpoint_kind": "file-review",
+    "manual_checkpoints_only": False,
     "checkpoint_kinds": {},
     "labels": {},
 }  # NB: steps/labels/checkpoints/description are NOT here — derived from the graph.
@@ -122,6 +123,7 @@ class ConfigManifest:
     # Declared rendering hints — inputs used to DERIVE labels/checkpoints below.
     label_overrides: dict[str, str] = field(default_factory=dict)   # step_id -> label
     checkpoint_kind: str = "file-review"
+    manual_checkpoints_only: bool = field(default=False, kw_only=True)
     checkpoint_kinds: dict[str, str] = field(default_factory=dict)  # step_id -> kind
 
     def __post_init__(self):
@@ -260,6 +262,7 @@ class ConfigRegistry:
             preamble_steps=list(hints.get("preamble_steps") or []),
             label_overrides=hints.get("labels") or {},
             checkpoint_kind=hints.get("checkpoint_kind") or "file-review",
+            manual_checkpoints_only=bool(hints.get("manual_checkpoints_only")),
             checkpoint_kinds=hints.get("checkpoint_kinds") or {},
         )
 
@@ -342,6 +345,7 @@ class ConfigRegistry:
             entry["input_hint"] = m.input_hint
             entry["takes_seed"] = bool(m.seed_file)
             entry["has_task_loop"] = bool(m.has_task_loop)
+            entry["manual_checkpoints_only"] = m.manual_checkpoints_only
             # What this pipeline OFFERS is part of its contract, the same way
             # its seed shape is: it is the list a task card may declare from,
             # and a palette that disagreed with this would be a discrepancy

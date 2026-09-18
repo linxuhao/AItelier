@@ -1,0 +1,125 @@
+name: novel_writing_bench_v2
+description: "文件交稿写作台：冻结前情与正文，独立文学/账目审查，差异预览，一次手动终审后私有备份"
+x-aitelier:
+  label: "Writing Bench v2"
+  scheduler_owned: true
+  repo_mode: none
+  manual_checkpoints_only: true
+  seed_file: request.json
+  output_step: backup
+  input_hint: >-
+    先在State登记工作。seed_text为version=2 JSON：project_id、submission_id、base_commit、mode(new/revision)、
+    chapters数组[{chapter,title,prose_file,proposed_events_file?}]，路径相对项目运维policy的submission_root；
+    可选brief_file、context_paths。已给分录则不调用提取模型。revision可协调修改多章。
+    checkpoints=ask；stage正常等待手动批准，不超时自动通过。新版本不迁移旧v1运行。
+    只改分录且文学依赖完全相同可提供reuse_literary_from引用原报告，不伪称重新审读。
+    备份恢复：{version:2,operation:backup_only,project_id,source_run_id,expected_commit}，不再次入册。
+begin: prepare
+end_conditions:
+  combinator: or
+  conditions:
+    - {type: node_reached, node: backup, result: completed, require_completed: true}
+    - {type: node_reached, node: rejected, result: completed, require_completed: true}
+steps:
+  - id: prepare
+    step_type: tool
+    tool_name: novel_bench
+    tool_params: {operation: prepare, out_dir: "$STEP_DIR"}
+    transitions:
+      - {to: backup, match: {backup_only: true}}
+      - {to: literary_check, match: {reuse_literary: true}}
+      - {to: literary_review}
+  - id: literary_review
+    step_type: agent
+    agent_config: bench_literary_v2
+    timeout_seconds: 600
+    context:
+      - source: {step: prepare, output: editor_packet.md}
+    output:
+      mode: content
+      fixed:
+        verdict: {file: review.json, format: '{"review_key":str,"passed":bool,"read_complete":bool,"feedback":str,"findings":[object]}'}
+    validation:
+      - files: [review.json]
+        tool: json_schema
+        inline_schema:
+          type: object
+          required: [review_key, passed, read_complete, feedback, findings]
+          properties:
+            passed: {type: boolean}
+            read_complete: {type: boolean}
+    transitions:
+      - {to: literary_check, match: {from_file: review.json, field: passed, value: true}}
+      - {to: rejected}
+  - id: literary_check
+    step_type: tool
+    tool_name: novel_bench
+    tool_params: {operation: literary_check, out_dir: "$STEP_DIR"}
+    transitions:
+      - {to: extract_ledger, match: {needs_extraction: true}}
+      - {to: ledger_ready}
+  - id: extract_ledger
+    step_type: agent
+    agent_config: bench_ledger_extractor_v2
+    timeout_seconds: 600
+    context:
+      - source: {step: prepare, output: editor_packet.md}
+      - source: {step: prepare, output: extraction_request.json}
+    output:
+      mode: content
+      fixed:
+        ledger: {file: ledgers.json, format: '{"1":{"chapter":int,"title":str,"summary":str,"events":[object],"appearances":[object],"locations":[str],"thread_updates":[object],"arc_updates":[object]}}'}
+    validation:
+      - files: [ledgers.json]
+        tool: json_schema
+        inline_schema: {type: object}
+    transitions: [{to: ledger_ready}]
+  - id: ledger_ready
+    step_type: tool
+    tool_name: novel_bench
+    tool_params: {operation: ledger_ready, out_dir: "$STEP_DIR"}
+    transitions: [{to: ledger_audit}]
+  - id: ledger_audit
+    step_type: agent
+    agent_config: bench_ledger_auditor_v2
+    timeout_seconds: 600
+    context:
+      - source: {step: ledger_ready, output: audit_packet.md}
+    output:
+      mode: content
+      fixed:
+        verdict: {file: review.json, format: '{"review_key":str,"passed":bool,"read_complete":bool,"feedback":str,"findings":[object]}'}
+    validation:
+      - files: [review.json]
+        tool: json_schema
+        inline_schema:
+          type: object
+          required: [review_key, passed, read_complete, feedback, findings]
+          properties:
+            passed: {type: boolean}
+            read_complete: {type: boolean}
+    transitions:
+      - {to: stage, match: {from_file: review.json, field: passed, value: true}}
+      - {to: rejected}
+  - id: stage
+    step_type: tool
+    tool_name: novel_bench
+    tool_params: {operation: stage, out_dir: "$STEP_DIR"}
+    checkpoint: true
+    checkpoint_label: "手动终审：完整正文、独立意见、语义差异与重放；批准才接受并私有备份"
+    checkpoint_reject_to: rejected
+    transitions:
+      - {to: promote, match: {from: checkpoint, value: approved}}
+  - id: promote
+    step_type: tool
+    tool_name: novel_bench
+    tool_params: {operation: promote, out_dir: "$STEP_DIR"}
+    transitions: [{to: backup}]
+  - id: backup
+    step_type: tool
+    tool_name: novel_bench
+    tool_params: {operation: backup, out_dir: "$STEP_DIR"}
+  - id: rejected
+    step_type: tool
+    tool_name: novel_bench
+    tool_params: {operation: rejected, out_dir: "$STEP_DIR"}

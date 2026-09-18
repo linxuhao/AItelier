@@ -32,6 +32,22 @@ def _yaml_block(data) -> str:
         data, allow_unicode=True, sort_keys=False).strip() + "\n```"
 
 
+def character_context(base: str | Path) -> list[dict]:
+    """Current balances and initial deltas; shared by both writing workflows."""
+    cards = []
+    for name, value in sorted(ns.load_characters(base).items()):
+        c = dict(value)
+        c.pop("progression", None)
+        initial = c.pop("initial", None)
+        if initial:
+            delta = {k: v for k, v in initial.items()
+                     if k not in ("initial", "progression") and c.get(k) != v}
+            if delta:
+                c["初始状态（登场时；仅列与现状不同的字段）"] = delta
+        cards.append(c)
+    return cards
+
+
 def state_probe(*, project_root: str = "", workspace_root: str = "",
                 out_dir: str = "", recent_summaries: int = 3,
                 thread_horizon: int = 12, **kwargs) -> dict:
@@ -84,18 +100,7 @@ def state_probe(*, project_root: str = "", workspace_root: str = "",
         # (first-appearance state, fields that changed since). Two points draw
         # the growth line without the O(chapters) progression history — that
         # stays in the per-card file for on-demand reads.
-        cards = []
-        for name in sorted(characters):
-            c = dict(characters[name])
-            c.pop("progression", None)
-            init = c.pop("initial", None)
-            if init:
-                delta = {k: v for k, v in init.items()
-                         if k not in ("initial", "progression")
-                         and c.get(k) != v}
-                if delta:
-                    c["初始状态（登场时；仅列与现状不同的字段）"] = delta
-            cards.append(c)
+        cards = character_context(base)
         parts += ["## 角色卡（当前状态 + 登场时初始状态；出场角色仅限于此，新增角色须在"
                   "章纲阶段提案。完整成长履历在 novel/bible/characters/<名>.yaml 的 "
                   "progression，可用 read 按需查）",

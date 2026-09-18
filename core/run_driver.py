@@ -297,6 +297,14 @@ async def drive_run(sf, db, ws, run_id: str, *, scheduler_owned: bool,
     the sole thing it may contribute is answering checkpoints, and it does that
     event-driven rather than by polling.
     """
+    # Protected workflows keep manual acceptance even through the generic auto
+    # driver. Waiting for their checkpoint is normal, not a timeout fault.
+    from core.config_registry import _read_host_hints
+    run = sf.get_run(run_id) or {}
+    if isinstance(run, dict):
+        hints = _read_host_hints().get(run.get("graph_name"), {})
+        if hints.get("manual_checkpoints_only") is True:
+            auto_approve = False
     if scheduler_owned:
         return await _watch(sf, run_id, auto_approve, max_watch_s)
     return await _step(sf, db, ws, run_id, auto_approve, max_steps)

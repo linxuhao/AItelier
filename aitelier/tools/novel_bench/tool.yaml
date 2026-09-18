@@ -1,0 +1,18 @@
+name: novel_bench
+description: >-
+  File-first writing bench. Freezes exact source and author inputs, preserves
+  supplied ledgers, prepares an isolated full-replay preview, and accepts only
+  after the engine's explicit manual checkpoint. Requires operator project
+  policy and an injected novel_writing_bench_v2 run. Waiting is normal, never
+  auto-approved. Backup recovery does not rewrite chapters. Not for reviewers.
+parameters:
+  operation:
+    type: string
+    required: true
+    description: "Framework step: prepare, literary_check, ledger_ready, stage, promote, backup, rejected."
+  out_dir:
+    type: string
+    required: true
+    description: "Framework-resolved $STEP_DIR."
+output:
+  target: artifact

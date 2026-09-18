@@ -1,0 +1,21 @@
+name: novel_bench_read
+description: >-
+  Read an exact frozen baseline novel/ file for the current writing-bench run.
+  Does not read live source, author drafts, secrets, or another project. Returns
+  source hash, explicit range and completeness; use next_start for the rest.
+  Index summaries are previews; summary.md contains the complete recap.
+parameters:
+  path:
+    type: string
+    required: true
+    description: "Relative novel/ path from the baseline context catalog."
+  start:
+    type: integer
+    required: false
+    description: "Character offset, default 0."
+  length:
+    type: integer
+    required: false
+    description: "Characters to read, default 12000, maximum 20000."
+output:
+  target: artifact

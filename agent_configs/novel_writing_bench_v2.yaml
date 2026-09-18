@@ -1,0 +1,26 @@
+bench_literary_v2:
+  model: novel_alt
+  template: bench_literary.md
+  tools: [novel_bench_read]
+  max_tool_turns: 30
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: {enable: true}
+
+bench_ledger_extractor_v2:
+  model: flash
+  template: bench_ledger_extract.md
+  tools: [novel_bench_read]
+  max_tool_turns: 30
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: {enable: true}
+
+bench_ledger_auditor_v2:
+  model: novel_alt
+  template: bench_ledger_audit.md
+  tools: [novel_bench_read]
+  max_tool_turns: 30
+  native_tool_calling: true
+  fallback_to_json_mode: true
+  thinking: {enable: true}

@@ -97,3 +97,8 @@ def godot_control_dir() -> Path:
 def state_report_store_dir() -> Path:
     """Content-addressed copies of terminal external-attempt reports."""
     return aitelier_home() / "state-report-evidence"
+
+
+def writing_bench_dir() -> Path:
+    """Operator policy and immutable writing artifacts, outside source checkouts."""
+    return aitelier_home() / "writing-bench"

@@ -31,6 +31,7 @@ steps:
       - {to: literary_review}
   - id: literary_review
     step_type: agent
+    validation_on_exhaustion: fail
     agent_config: bench_literary_v2
     timeout_seconds: 600
     context:
@@ -38,7 +39,7 @@ steps:
     output:
       mode: content
       fixed:
-        verdict: {file: review.json, format: '{"review_key":str,"passed":bool,"read_complete":bool,"feedback":str,"findings":[object]}'}
+        verdict: {file: review.json, format: '{"review_key":str,"passed":bool,"read_complete":bool,"feedback":str,"findings":[{"severity":str,"location":str,"reason":str}]}'}
     validation:
       - files: [review.json]
         tool: json_schema
@@ -46,8 +47,28 @@ steps:
           type: object
           required: [review_key, passed, read_complete, feedback, findings]
           properties:
+            review_key: {type: string, pattern: "^[0-9a-f]{64}$"}
             passed: {type: boolean}
             read_complete: {type: boolean}
+            feedback: {type: string}
+            findings:
+              type: array
+              items:
+                type: object
+                required: [severity, location, reason]
+                properties:
+                  severity: {type: string, enum: [blocker, advisory]}
+                  location: {type: string}
+                  reason: {type: string}
+          allOf:
+            - if:
+                properties: {passed: {const: true}}
+              then:
+                properties:
+                  read_complete: {const: true}
+                  findings:
+                    items:
+                      properties: {severity: {const: advisory}}
     transitions:
       - {to: literary_check, match: {from_file: review.json, field: passed, value: true}}
       - {to: rejected}
@@ -81,6 +102,7 @@ steps:
     transitions: [{to: ledger_audit}]
   - id: ledger_audit
     step_type: agent
+    validation_on_exhaustion: fail
     agent_config: bench_ledger_auditor_v2
     timeout_seconds: 600
     context:
@@ -88,7 +110,7 @@ steps:
     output:
       mode: content
       fixed:
-        verdict: {file: review.json, format: '{"review_key":str,"passed":bool,"read_complete":bool,"feedback":str,"findings":[object]}'}
+        verdict: {file: review.json, format: '{"review_key":str,"passed":bool,"read_complete":bool,"feedback":str,"findings":[{"severity":str,"location":str,"reason":str}]}'}
     validation:
       - files: [review.json]
         tool: json_schema
@@ -96,8 +118,28 @@ steps:
           type: object
           required: [review_key, passed, read_complete, feedback, findings]
           properties:
+            review_key: {type: string, pattern: "^[0-9a-f]{64}$"}
             passed: {type: boolean}
             read_complete: {type: boolean}
+            feedback: {type: string}
+            findings:
+              type: array
+              items:
+                type: object
+                required: [severity, location, reason]
+                properties:
+                  severity: {type: string, enum: [blocker, advisory]}
+                  location: {type: string}
+                  reason: {type: string}
+          allOf:
+            - if:
+                properties: {passed: {const: true}}
+              then:
+                properties:
+                  read_complete: {const: true}
+                  findings:
+                    items:
+                      properties: {severity: {const: advisory}}
     transitions:
       - {to: stage, match: {from_file: review.json, field: passed, value: true}}
       - {to: rejected}

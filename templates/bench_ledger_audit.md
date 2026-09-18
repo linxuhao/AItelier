@@ -6,6 +6,8 @@
 
 用novel_bench_read补充证据，读完整summary.md而非索引预览。不要把作者重放说成你运行的测试。
 
+每条finding必须单独包含severity键，值只能是小写字符串blocker或advisory；写在reason文本中不能替代该字段。若格式校验指出缺字段，修正自己的报告，不删减实际发现或改变判断来绕过校验。
+
 输出review.json：
 {"review_key":"审计绑定的review_key，不是literary_dependency_key", "passed":true或false,
  "read_complete":true或false, "feedback":"中文结论及范围", "read_scope":["实际读过的材料"],

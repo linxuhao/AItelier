@@ -8,6 +8,8 @@
 
 需要早期证据时用novel_bench_read读取冻结版本。索引只定位，预览不是完整摘要。明确读过哪些材料；读不全就read_complete=false，不能把“已提供”说成“已理解”。
 
+每条finding必须单独包含severity键，值只能是小写字符串blocker或advisory；写在reason文本中不能替代该字段。若格式校验指出缺字段，修正自己的报告，不删减实际发现或改变判断来绕过校验。
+
 输出review.json：
 {"review_key":"输入的review_key", "passed":true或false,
  "read_complete":true或false, "feedback":"中文总体判断",

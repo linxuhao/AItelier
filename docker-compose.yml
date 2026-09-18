@@ -27,6 +27,18 @@ services:
     # run is killed/times out the git children get reparented to PID 1, and a
     # bare uvicorn PID 1 never wait()s on them → zombie pile-up → PID exhaustion.
     init: true
+    # File descriptors. The default soft limit of 1024 is not a budget the app
+    # controls: skillflow keeps ONE cached sqlite connection per project trace
+    # DB (skillflow/core.py:_get_trace_conn) and never evicts it, and each one
+    # holds three descriptors (db + -wal + -shm). Measured 2026-09-18 after 25h
+    # uptime: 335 distinct trace DBs = 1005 of 1021 open descriptors, and every
+    # API route returned 500 because nothing could open a file any more. The
+    # cache leak is a skillflow defect and is being fixed there; this ceiling is
+    # the defence in depth, so the next leak degrades instead of halting.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # Run as the host user → files written into ~/.AItelier keep host ownership.
     user: "${AITELIER_UID:-1000}:${AITELIER_GID:-1000}"
     depends_on:

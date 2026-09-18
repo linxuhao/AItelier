@@ -31,8 +31,6 @@ class Session:
         self.agent_calls = []
         self.conf = {"review_revision": 1}
         loader = ToolLoader(Path(skillflow.__file__).parent / "tools", ROOT / "aitelier/tools")
-        native = loader.is_native
-        loader.is_native = lambda name: name == "novel_bench" or native(name)
         self.sf = SkillFlow(str(tmp_path / "engine.sqlite"), tool_loader=loader,
                             workspace_base=str(tmp_path / "executions"),
                             projects_base=str(tmp_path / "projects"),

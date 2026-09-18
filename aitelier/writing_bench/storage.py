@@ -20,6 +20,7 @@ from typing import Iterator
 
 FILE_LIMIT = 2_000_000
 TREE_LIMIT = 40_000_000
+FILE_COUNT_LIMIT = 10_000
 
 
 class BenchError(ValueError):
@@ -142,10 +143,14 @@ def lock(path: Path) -> Iterator[None]:
 
 def git(repo: Path, *args: str, raw: bool = False):
     # No shell, no hooks from the manuscript checkout, no interactive credential prompts.
+    # Service/parent Git overrides cannot redirect a trusted repository path.
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.upper().startswith("GIT_")}
+    environment["GIT_TERMINAL_PROMPT"] = "0"
     result = subprocess.run(
         ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.quotepath=false", *args],
         cwd=checked_root(repo), capture_output=True, timeout=90,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env=environment,
     )
     require(result.returncode == 0, "local Git operation failed: " + args[0])
     return result.stdout if raw else result.stdout.decode("utf-8").strip()
@@ -162,9 +167,9 @@ def git_files(repo: Path, revision: str) -> dict[str, bytes]:
     revision = commit_id(revision)
     listing = git(repo, "ls-tree", "-rz", "--full-tree", revision, "--", "novel", raw=True)
     result, size = {}, 0
-    for row in listing.split(b"\0"):
-        if not row:
-            continue
+    rows = [row for row in listing.split(b"\0") if row]
+    require(len(rows) <= FILE_COUNT_LIMIT, "novel source file count exceeds limit")
+    for row in rows:
         meta, name = row.split(b"\t", 1)
         mode, kind, oid = meta.decode().split()
         name = relative(name.decode("utf-8"))

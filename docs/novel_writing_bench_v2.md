@@ -54,12 +54,17 @@ in this file. The backup adapter invokes the pinned, already authorized private
 backup engine; it does not obtain tokens, create public repositories, force-push
 or change the destination. A missing or changed engine fails closed.
 
-Repository, author input and artifact storage roots must be distinct. The novel
+Repository, author input and artifact storage roots must be pairwise disjoint:
+none may equal, contain, or sit inside another. The novel
 is UTF-8 text under `novel/`; symlinks, submodules, path traversal and oversized
 files are refused. Author refs are resolved component-by-component with
 `O_NOFOLLOW`. Artifacts live below the injected data directory, never inside the
 accepted source checkout. The default maximum file size is 2 MB and frozen
-novel tree limit is 40 MB. Limits fail explicitly, not by trimming evidence.
+novel tree limit is 40 MB, with at most 10,000 files checked before reading blobs.
+Limits fail explicitly, not by trimming evidence. Local Git commands discard
+inherited `GIT_*` environment overrides so a parent process cannot redirect the
+canonical checkout or index. Private-backup credentials remain owned by its
+separate, pinned adapter.
 
 The version uses `novel_alt` and `flash` model aliases already provided by the
 host. Actual registered role settings, template contents, policy and relevant
@@ -165,6 +170,8 @@ reviewer's `passed=true`, or a caller-supplied commit is not approval. Rejection
 finishes without acceptance and asks the author for a new submission ID. A source
 branch, effective ruling, role, template, policy or reviewed artifact changing
 before acceptance refuses promotion. No force merge resolves such a conflict.
+Decision lookup uses bounded keyset pages until the latest decision is found;
+unrelated retry events cannot age a real decision out of a fixed recent window.
 
 Accepted commits are exact children of their reviewed bases and fast-forwarded
 only. A retry after a crash accepts the same already-merged commit idempotently.
@@ -226,3 +233,11 @@ post-accept backup failure and exact backup-only recovery. Model and network
 boundaries are deliberately test doubles. Production enablement separately
 requires boot discovery of the new tools/roles/graph and the operator policy;
 never turn those tests into a claim that a restart or live backup already ran.
+
+This version deliberately refuses a baseline or candidate whose native replay
+emits warnings, even if its reconstructed bytes match. Resolve or explicitly
+review such legacy journal issues before enabling that project; warnings are not
+silently waived. A failed process can leave an unreferenced `.freeze-*` temporary
+directory in the project's artifact root. Recovery does not use it as a valid
+submission; operator cleanup must wait until no freeze operation owns the lock,
+and must preserve published submissions, retained refs and run evidence.

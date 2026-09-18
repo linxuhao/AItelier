@@ -65,8 +65,20 @@ class Host:
     def approval(self, run_id: str) -> str:
         # Approval comes from the engine's durable event and stage result, never
         # a seed boolean or a passed=true supplied by a reviewer.
-        rows = self.sf.get_trace(run_id, category="step", order="desc", limit=100)
-        decision = next((r for r in rows if r["event"] in ("checkpoint_approved", "checkpoint_rejected")), None)
+        decision, before = None, None
+        while decision is None:
+            rows = self.sf.get_trace(run_id, category="step", order="desc",
+                                     before_seq=before, limit=100)
+            if not rows:
+                break
+            decision = next((r for r in rows if r["event"] in
+                             ("checkpoint_approved", "checkpoint_rejected")), None)
+            if decision is not None or len(rows) < 100:
+                break
+            cursor = rows[-1].get("seq")
+            require(type(cursor) is int and cursor > 0 and (before is None or cursor < before),
+                    "checkpoint trace cursor did not advance")
+            before = cursor
         require(decision is not None and decision["event"] == "checkpoint_approved"
                 and decision["payload"].get("step_id") == "stage", "manual checkpoint approval required")
         stages = [s for s in self.sf.get_steps(run_id, include_payloads=True)

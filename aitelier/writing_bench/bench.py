@@ -90,10 +90,10 @@ class Policy:
                 and ".." not in self.branch and not self.branch.endswith("/"), "invalid branch")
         for root in (self.repo, self.submission_root, self.store):
             checked_root(root)
-        require(not self.store.is_relative_to(self.repo) and not self.submission_root.is_relative_to(self.repo),
-                "submission/artifact storage must be outside the canonical checkout")
-        require(not self.store.is_relative_to(self.submission_root) and not self.submission_root.is_relative_to(self.store),
-                "author inputs must not contain the artifact store")
+        roots = (self.repo, self.submission_root, self.store)
+        require(all(not a.is_relative_to(b) and not b.is_relative_to(a)
+                    for i, a in enumerate(roots) for b in roots[i + 1:]),
+                "canonical, author and artifact roots must not overlap")
         require(type(self.max_context_bytes) is int and 1000 <= self.max_context_bytes <= 1_000_000,
                 "invalid context budget")
 

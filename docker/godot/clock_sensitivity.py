@@ -17,13 +17,22 @@ run by hand, once, and wired into nothing. This is that matrix, wired in.
 THE MEASUREMENT. Each scenario is run four times: under both clocks, each with
 and without an injected per-frame real cost (AITELIER_PROBE_FRAME_LOAD_USEC).
 
-  findings   real_time_cap: load 0 vs load L. An assertion decided differently
-             is a verdict bought by frame cost. THIS IS THE DETECTOR.
-  immunity   fixed_delta: load 0 vs load L. Must be empty — under a fixed delta
-             the game time is the same however expensive the frames are, which
-             is exactly what `--fixed-fps` was adopted for. A non-empty immunity
-             list means that property is gone, and it is reported as loudly as
-             the findings rather than as an aside.
+  findings_clock  fixed delta vs real-time cap, both unloaded. Under the cap a
+                  frame that costs more than 1/N hands the game a bigger delta;
+                  under the flag it never does. An assertion the two decide
+                  differently is a verdict bought by frame cost.
+  findings_load   real-time cap: load 0 vs load L. The same question asked with
+                  more force, for a scenario whose frames are currently cheap
+                  but whose budget is close.
+  immunity        fixed delta: load 0 vs load L. Must be empty — under a fixed
+                  delta the game time is the same however expensive the frames
+                  are, which is what `--fixed-fps` was adopted for. A non-empty
+                  immunity list means that property is gone, and it is reported
+                  as loudly as the findings rather than as an aside.
+
+Both questions are asked because neither alone was enough: measured
+2026-09-19 the load pair found three of the four known scenarios and the clock
+pair found all four.
 
     python3 /srv/clock_sensitivity.py <spec.json> <project_dir> [--json out]
 
@@ -148,19 +157,73 @@ def _game_times(report):
             for s in ((report or {}).get("timing") or {}).get("scenarios") or []}
 
 
+def did_the_load_bite(gt_load0: dict, gt_loaded: dict, tol=0.05) -> dict:
+    """Per scenario: did the injected cost actually change its game time?
+
+    THE DETECTOR HAS TO SAY THIS OUT LOUD. `Engine.max_fps = N` sleeps for the
+    REMAINDER of 1/N, so a load smaller than the slack a frame already has
+    changes nothing at all — and a scenario that came back unflagged because the
+    experiment never reached it looks exactly like a scenario with no
+    dependency. A checker's window is a separate claim from its sensitivity, and
+    reporting only the verdicts would merge the two.
+
+    Measured 2026-09-19 with a 5,300 us load: it moved
+    two_phase_skill_unlock_and_hp_gate by +6.9 s and locked_slot_unlock_reason
+    by +8.5 s (real negatives, verdicts unchanged), and moved
+    occlusion_no_button_over_text by +0.02 s and save_retry_status_en by
+    +0.01 s — those two were never actually asked the question."""
+    out = {}
+    for name, a in gt_load0.items():
+        b = gt_loaded.get(name)
+        if not b:
+            continue
+        g0 = float(a.get("game_time_sec") or 0.0)
+        g1 = float(b.get("game_time_sec") or 0.0)
+        out[name] = {"game_time_load0_sec": round(g0, 4),
+                     "game_time_loaded_sec": round(g1, 4),
+                     "delta_sec": round(g1 - g0, 4),
+                     "frames_load0": a.get("frames_stepped"),
+                     "frames_loaded": b.get("frames_stepped"),
+                     "bit": abs(g1 - g0) > tol}
+    return out
+
+
 def analyse(reports: dict) -> dict:
     rows = {k: assertion_rows(v) for k, v in reports.items()}
-    findings = compare(rows["real_time_cap_load0"], rows["real_time_cap_loaded"],
-                       "real_time_cap_load0", "real_time_cap_loaded")
+    # TWO WAYS TO ASK THE SAME QUESTION, and a scenario needs only one of them
+    # to answer yes. Measured 2026-09-19: the load pair found three of the four
+    # known scenarios and the clock pair found all four, because
+    # enemy_round_wall_clock's frames were ALREADY dear enough to carry it over
+    # its budget without any help — so the load changed nothing for it while the
+    # clock changed everything. Reporting only the load pair would have cleared
+    # a scenario that is exactly as budget-critical as its three neighbours.
+    clock = compare(rows["fixed_delta_load0"], rows["real_time_cap_load0"],
+                    "fixed_delta", "real_time_cap")
+    load = compare(rows["real_time_cap_load0"], rows["real_time_cap_loaded"],
+                   "real_time_cap_load0", "real_time_cap_loaded")
     immunity = compare(rows["fixed_delta_load0"], rows["fixed_delta_loaded"],
                        "fixed_delta_load0", "fixed_delta_loaded")
+    gt = {k: _game_times(v) for k, v in reports.items()}
+    bite = did_the_load_bite(gt.get("real_time_cap_load0", {}),
+                             gt.get("real_time_cap_loaded", {}))
     return {
         "assertions_per_cell": {k: len(v) for k, v in rows.items()},
-        "scenarios_flagged": flagged_scenarios(findings),
-        "findings": findings,
+        "scenarios_flagged": sorted(set(flagged_scenarios(clock))
+                                    | set(flagged_scenarios(load))),
+        "flagged_by_clock": flagged_scenarios(clock),
+        "flagged_by_load": flagged_scenarios(load),
+        "findings_clock": clock,
+        "findings_load": load,
         "fixed_delta_immunity_broken": flagged_scenarios(immunity),
         "immunity_findings": immunity,
-        "game_time_per_cell": {k: _game_times(v) for k, v in reports.items()},
+        # An unflagged scenario is a CLEARED scenario only if the experiment
+        # reached it. These are the ones the injected cost never moved.
+        "load_did_not_bite": sorted(n for n, v in bite.items() if not v["bit"]),
+        "load_bite": bite,
+        "game_time_per_cell": gt,
+        "assertion_rows": {k: [list(key) + list(v) for key, v in sorted(
+            r.items(), key=lambda kv: tuple(str(x) for x in kv[0]))]
+            for k, r in rows.items()},
     }
 
 
@@ -186,12 +249,19 @@ def main(argv=None):
     print("FLAGGED %d scenario(s) whose verdict depends on real frame cost: %s"
           % (len(doc["scenarios_flagged"]),
              ", ".join(doc["scenarios_flagged"]) or "(none)"), file=sys.stderr)
+    print("   by clock: %s" % (", ".join(doc["flagged_by_clock"]) or "(none)"),
+          file=sys.stderr)
+    print("   by load:  %s" % (", ".join(doc["flagged_by_load"]) or "(none)"),
+          file=sys.stderr)
     print("FIXED-DELTA IMMUNITY broken for: %s"
           % (", ".join(doc["fixed_delta_immunity_broken"]) or "(none)"),
           file=sys.stderr)
+    print("NOT MEASURED by the load pair (the injected cost never changed their "
+          "game time, so their silence there means nothing): %s"
+          % (", ".join(doc["load_did_not_bite"]) or "(none)"), file=sys.stderr)
     if doc["fixed_delta_immunity_broken"]:
         return 2
-    return 1 if doc["findings"] else 0
+    return 1 if (doc["findings_clock"] or doc["findings_load"]) else 0
 
 
 if __name__ == "__main__":

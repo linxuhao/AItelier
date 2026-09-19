@@ -1,16 +1,21 @@
 """The detector for "this scenario is green because its frames were expensive".
 
 Four scenarios on the wuxia tree were green under `Engine.max_fps = 60` only
-because photographing four frames per run was worth 1.2 s of extra game time in
+because photographing four frames per run was worth ~0.7 s of extra game time in
 a 230-frame budget. Nothing declared that dependency and nothing could see it:
 the 2x2 matrix that found it was run by hand, once, and wired into nothing.
 
 `docker/godot/clock_sensitivity.py` runs each scenario under both clocks, with
-and without an injected per-frame real cost, and reports every assertion the
-real-time-capped pair disagrees about (the dependency) and every assertion the
-fixed-delta pair disagrees about (the immunity, which must be empty).
+and without an injected per-frame real cost, and reports
 
-These tests pin the comparison and the way the two questions are kept apart.
+  findings_clock  the two clocks decide an assertion differently,
+  findings_load   the two loads decide it differently under the real-time cap,
+  immunity        the two loads decide it differently under the FIXED delta,
+                  which must never happen,
+  load_did_not_bite   the scenarios the injected cost never actually reached,
+                  whose silence therefore means nothing.
+
+These tests pin the comparison and the way those four readings are kept apart.
 The engine half is a measurement, not a unit test: it runs the real scenarios in
 both polarities and lands its output.
 """
@@ -36,26 +41,38 @@ def _scenario(name, asserts):
         for (n, e, f, p, a) in asserts]}
 
 
+def _ledger(report, per_scenario_game_time):
+    """Give a fake report the ledger rows the bite check reads."""
+    r = dict(report)
+    r["timing"] = {"scenarios": [
+        {"name": n, "frames_stepped": 230, "game_time_sec": g, "wall_sec": g}
+        for n, g in per_scenario_game_time.items()]}
+    return r
+
+
+def _cells(cap0, capL, fixed0=None, fixedL=None):
+    """The four reports keyed the way run_cells returns them.
+
+    By default the fixed pair is a copy of the cheap capped pass — i.e. a
+    harness whose frames are cheap enough that the clock makes no difference,
+    so a test can exercise one comparison without tripping the others."""
+    base = fixed0 if fixed0 is not None else cap0
+    return {"fixed_delta_load0": base,
+            "fixed_delta_loaded": fixedL if fixedL is not None else base,
+            "real_time_cap_load0": cap0,
+            "real_time_cap_loaded": capL}
+
+
 PHASE = ("CombatManager.phase", 'phase == "PLAYER_TURN"', 200)
 MARKER = ("CombatManager.acting_marker_visible", "acting_marker_visible == true", 100)
 
 
-def _cells(load0, loaded, fixed0=None, fixedL=None):
-    """Four reports keyed the way run_cells returns them. By default the fixed
-    pair is a copy of the cheap real-time pass, i.e. immune."""
-    base = fixed0 if fixed0 is not None else load0
-    return {"fixed_delta_load0": base,
-            "fixed_delta_loaded": fixedL if fixedL is not None else base,
-            "real_time_cap_load0": load0,
-            "real_time_cap_loaded": loaded}
-
-
 # ── the detector, both polarities ──────────────────────────────────────────
 
-def test_a_scenario_whose_verdict_does_not_move_with_frame_cost_is_not_flagged():
+def test_a_scenario_whose_verdict_does_not_move_is_not_flagged():
     r = _report(_scenario("quiet", [PHASE + (True, True), MARKER + (True, True)]))
     out = cs.analyse(_cells(r, r))
-    assert out["findings"] == []
+    assert out["findings_clock"] == [] and out["findings_load"] == []
     assert out["scenarios_flagged"] == []
     assert out["fixed_delta_immunity_broken"] == []
 
@@ -67,13 +84,29 @@ def test_a_scenario_that_is_green_only_because_the_frames_were_expensive_is_flag
                                            MARKER + (True, True)]))
     dear = _report(_scenario("end_turn", [PHASE + (True, True),
                                           MARKER + (True, True)]))
-    out = cs.analyse(_cells(cheap, dear))
+    out = cs.analyse(_cells(cheap, dear, fixed0=cheap, fixedL=cheap))
     assert out["scenarios_flagged"] == ["end_turn"]
-    f = out["findings"]
+    assert out["flagged_by_load"] == ["end_turn"]
+    f = out["findings_load"]
     assert len(f) == 1 and f[0]["kind"] == "verdict_differs"
     assert f[0]["assertion"] == "CombatManager.phase" and f[0]["frame"] == 200
     assert f[0]["real_time_cap_load0"] is False
     assert f[0]["real_time_cap_loaded"] is True
+
+
+def test_the_clock_pair_catches_a_scenario_the_load_pair_misses():
+    # enemy_round_wall_clock, measured 2026-09-19: its frames were ALREADY dear
+    # enough to carry it over its budget, so adding more cost changed nothing
+    # and only the clock comparison saw it. A detector with just the load pair
+    # would have cleared it.
+    fixed = _report(_scenario("wall_clock", [PHASE + (False, False)]))
+    capped = _report(_scenario("wall_clock", [PHASE + (True, True)]))
+    out = cs.analyse(_cells(capped, capped, fixed0=fixed, fixedL=fixed))
+    assert out["flagged_by_load"] == []
+    assert out["flagged_by_clock"] == ["wall_clock"]
+    assert out["scenarios_flagged"] == ["wall_clock"]
+    assert out["findings_clock"][0]["fixed_delta"] is False
+    assert out["findings_clock"][0]["real_time_cap"] is True
 
 
 def test_an_assertion_reached_under_only_one_cost_is_flagged_too():
@@ -81,9 +114,9 @@ def test_an_assertion_reached_under_only_one_cost_is_flagged_too():
     # judge it. Silence here would read as agreement.
     cheap = _report(_scenario("half", [PHASE + (True, True)]))
     dear = _report(_scenario("half", [PHASE + (True, True), MARKER + (True, True)]))
-    out = cs.analyse(_cells(cheap, dear))
-    assert [x["kind"] for x in out["findings"]] == ["missing"]
-    assert out["findings"][0]["real_time_cap_load0"] is None
+    out = cs.analyse(_cells(cheap, dear, fixed0=cheap, fixedL=cheap))
+    assert [x["kind"] for x in out["findings_load"]] == ["missing"]
+    assert out["findings_load"][0]["real_time_cap_load0"] is None
 
 
 def test_the_identity_is_the_key_and_the_actual_value_is_not():
@@ -96,7 +129,8 @@ def test_the_identity_is_the_key_and_the_actual_value_is_not():
     dear = _report(_scenario("floaty", [
         ("CombatManager.debug_enemy_round_msec",
          "debug_enemy_round_msec <= 10000", 200, True, 1581)]))
-    assert cs.analyse(_cells(cheap, dear))["findings"] == []
+    out = cs.analyse(_cells(cheap, dear, fixed0=cheap, fixedL=cheap))
+    assert out["findings_load"] == [] and out["findings_clock"] == []
 
 
 def test_a_moved_assertion_is_a_different_assertion():
@@ -105,7 +139,7 @@ def test_a_moved_assertion_is_a_different_assertion():
     a = _report(_scenario("moved", [PHASE + (True, True)]))
     b = _report(_scenario("moved", [
         ("CombatManager.phase", 'phase == "PLAYER_TURN"', 270, True, True)]))
-    found = cs.analyse(_cells(a, b))["findings"]
+    found = cs.analyse(_cells(a, b, fixed0=a, fixedL=a))["findings_load"]
     assert {f["frame"] for f in found} == {200, 270}
     assert all(f["kind"] == "missing" for f in found)
 
@@ -114,9 +148,9 @@ def test_an_empty_pass_does_not_read_as_agreement():
     # A crashed pass returns no scenarios. Comparing it against a real one must
     # say so rather than return "no differences".
     real = _report(_scenario("s", [PHASE + (True, True)]))
-    out = cs.analyse(_cells({}, real))
-    assert len(out["findings"]) == 1
-    assert out["findings"][0]["kind"] == "missing"
+    out = cs.analyse(_cells({}, real, fixed0={}, fixedL={}))
+    assert len(out["findings_load"]) == 1
+    assert out["findings_load"][0]["kind"] == "missing"
 
 
 # ── the immunity is a SEPARATE question and is reported separately ─────────
@@ -128,7 +162,7 @@ def test_the_fixed_delta_losing_its_immunity_is_reported_on_its_own_line():
     quiet = _report(_scenario("s", [PHASE + (True, True)]))
     broken = _report(_scenario("s", [PHASE + (False, False)]))
     out = cs.analyse(_cells(quiet, quiet, fixed0=quiet, fixedL=broken))
-    assert out["findings"] == []
+    assert out["findings_load"] == []
     assert out["fixed_delta_immunity_broken"] == ["s"]
     assert out["immunity_findings"][0]["fixed_delta_load0"] is True
     assert out["immunity_findings"][0]["fixed_delta_loaded"] is False
@@ -142,6 +176,29 @@ def test_the_two_questions_do_not_borrow_each_others_evidence():
     out = cs.analyse(_cells(cheap, dear, fixed0=cheap, fixedL=cheap))
     assert out["scenarios_flagged"] == ["end_turn"]
     assert out["fixed_delta_immunity_broken"] == []
+
+
+# ── silence has to be distinguishable from "the experiment never happened" ──
+
+def test_a_scenario_the_injected_cost_never_reached_is_named_as_not_measured():
+    # `Engine.max_fps = N` sleeps for the REMAINDER of 1/N, so a load smaller
+    # than the slack a frame already has changes nothing. Measured 2026-09-19,
+    # two of the four negative controls were in exactly that position.
+    r = _report(_scenario("cheap", [PHASE + (True, True)]))
+    out = cs.analyse(_cells(_ledger(r, {"cheap": 3.8333}),
+                            _ledger(r, {"cheap": 3.8333})))
+    assert out["findings_load"] == []
+    assert out["load_did_not_bite"] == ["cheap"]
+    assert out["load_bite"]["cheap"]["delta_sec"] == 0.0
+
+
+def test_a_scenario_the_cost_did_reach_and_that_did_not_move_is_really_cleared():
+    r = _report(_scenario("solid", [PHASE + (True, True)]))
+    out = cs.analyse(_cells(_ledger(r, {"solid": 3.8333}),
+                            _ledger(r, {"solid": 4.8333})))
+    assert out["findings_load"] == []
+    assert out["load_did_not_bite"] == []
+    assert out["load_bite"]["solid"]["delta_sec"] == 1.0
 
 
 # ── and the knob it leans on has to exist in the probe ─────────────────────

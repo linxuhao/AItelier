@@ -75,8 +75,17 @@ def test_parse_failed_load():
 # The hard/advisory gate split lives in _playtest_spec; test it without Godot by
 # faking each probe run's (probe_report, errors, timed_out).
 def _mock_run_probe(monkeypatch, probe, errs, timed_out):
-    monkeypatch.setattr(gh, "_run_probe",
-                        lambda *a, **k: (probe, errs, timed_out))
+    def fake(dst, state_path, frames, timeout, extra, scene="", capture_at=None,
+             timing=None, render=True):
+        # The real probe reports the game time its frames bought, and the
+        # harness HARD-fails a run that stepped frames and reported none — a
+        # stand-in that leaves it out is standing in for a broken engine, not
+        # for this one. Report what a healthy fixed-delta run would.
+        if timing is not None:
+            timing["game_usec"] = int(probe.get("frames", 0) * 1_000_000 / 60)
+        return probe, errs, timed_out
+
+    monkeypatch.setattr(gh, "_run_probe", fake)
 
 
 def test_playtest_spec_all_assertions_pass(monkeypatch, tmp_path):
@@ -808,6 +817,10 @@ def _home_recording_probe(monkeypatch, seen, control_nodes=None, on_control=None
             rec["found"] = sorted(p.name for p in hp.iterdir()) if hp.is_dir() else []
             (hp / "save_1.json").write_text("{}")
         seen.append(rec)
+        # Same reason as in _mock_run_probe: a probe that steps frames and
+        # reports no game time is a broken engine, and the harness says so.
+        if timing is not None:
+            timing["game_usec"] = int(frames * 1_000_000 / 60)
         if is_control:
             if on_control is not None:
                 return on_control()

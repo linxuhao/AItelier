@@ -678,6 +678,25 @@ var _captures := []      # [{frame, file}]
 var _t_first_process_usec := -1
 var _t_step_end_usec := -1
 var _capture_usec := 0
+# GAME TIME: the sum of the deltas the engine handed _process. This is the
+# quantity the frame budget is supposed to buy -- under --fixed-fps N every
+# delta is 1/N, so this must come out at frames/N, and the python side CHECKS
+# that it does for every scenario (determined_game_time_findings). Before this
+# line the ledger could only report WALL clock, which under a fixed delta is
+# unrelated to what the game experienced: "a frame budget maps to a determined
+# slice of game time" was a claim with no observation point anywhere.
+var _game_usec := 0.0
+# MEASUREMENT ONLY, never set on the gate path: extra real microseconds spent at
+# the end of every frame. It exists so "does this scenario's verdict depend on
+# what a frame costs in real time?" can be ASKED, instead of being discovered by
+# accident. Under `Engine.max_fps = N` the cap only sleeps for the REMAINDER of
+# 1/N, so a frame that costs more than that hands the game a bigger delta and
+# the scenario silently gets more game time; under `--fixed-fps N` the delta is
+# 1/N no matter what this is set to, which is the property worth proving.
+# (Measured 2026-09-17: four captured frames per run were worth 1.2 s of extra
+# game time in a 230-frame scenario, and that was the whole reason four
+# scenarios were green.)
+var _frame_load_usec := 0
 var _watch := []         # [{node, attr}] whose frame-0 value a delta assert needs
 var _baselines := {}     # "node|attr" -> frame-0 value
 func _ready() -> void:
@@ -695,6 +714,9 @@ func _ready() -> void:
     var cap := OS.get_environment("AITELIER_PROBE_MAX_FPS")
     if cap != "" and int(cap) > 0:
         Engine.max_fps = int(cap)
+    var envl := OS.get_environment("AITELIER_PROBE_FRAME_LOAD_USEC")
+    if envl != "":
+        _frame_load_usec = int(envl)
     var envf := OS.get_environment("AITELIER_PROBE_FRAMES")
     _max = int(envf) if envf != "" else 180
     var spec_path := OS.get_environment("AITELIER_PROBE_SPEC")
@@ -771,6 +793,10 @@ func _process(_d: float) -> void:
     # driven yet.
     if _t_first_process_usec < 0:
         _t_first_process_usec = Time.get_ticks_usec()
+    # Whatever the engine hands out IS this frame's game time. Summing the
+    # ARGUMENT is the only reading that cannot disagree with what the game saw:
+    # any independent clock would be measuring something else.
+    _game_usec += _d * 1000000.0
     # 0-based frames: apply this frame's scheduled releases + timeline entries,
     # THEN advance. Incrementing first would make `at: 0` unreachable.
     if _frame == 0:
@@ -789,6 +815,8 @@ func _process(_d: float) -> void:
             _act(_legacy_action, true)
         elif _frame % 20 == 1:
             _act(_legacy_action, false)
+    if _frame_load_usec > 0:
+        OS.delay_usec(_frame_load_usec)
     _frame += 1
     if _frame >= _max:
         _finish()
@@ -1107,6 +1135,7 @@ func _finish() -> void:
     out["timing"] = {"boot_usec": boot_usec, "step_usec": step_usec,
                      "capture_usec": _capture_usec, "walk_usec": walk_usec,
                      "serialize_usec": 0, "engine_usec": 0,
+                     "game_usec": int(_game_usec),
                      "frames_stepped": _frame, "captures_taken": _captures.size()}
     var path := OS.get_environment("AITELIER_PROBE_OUT")
     if path == "":
@@ -1254,7 +1283,7 @@ def _probe_once(args: list[str], env: dict, state_path: Path, timeout: int,
         eng = probe.get("timing") if isinstance(probe, dict) else None
         if isinstance(eng, dict):
             for key in ("boot_usec", "step_usec", "capture_usec", "serialize_usec",
-                        "engine_usec", "frames_stepped"):
+                        "engine_usec", "game_usec", "frames_stepped"):
                 timing[key] = timing.get(key, 0) + int(eng.get(key, 0) or 0)
     return probe, errs, timed_out
 
@@ -1558,7 +1587,72 @@ def _scenario_ledger(name: str, scene: str, wall_sec: float, t: dict) -> dict:
             "passes": int(t.get("passes", 0)),
             "headless_retry": bool(t.get("headless_retry", False)),
             "frames_stepped": int(t.get("frames_stepped", 0) or 0),
+            # The property, and what it is supposed to be, on the same line —
+            # so nobody has to divide by hand to find out whether it held.
+            "game_time_sec": round(usec("game_usec"), 6),
+            "expected_game_time_sec": (
+                round(int(t.get("frames_stepped", 0) or 0) / PLAYTEST_FIXED_FPS, 6)
+                if PLAYTEST_FIXED_FPS > 0 else None),
             "png_bytes": int(t.get("png_bytes", 0) or 0)}
+
+
+# How far a scenario's game time may sit from frames/N before the run is called
+# a lie. ABSOLUTE, and deliberately not scaled by the run length: the only drift
+# this should ever see is the engine's own float accumulation plus the
+# microsecond truncation on the way out, both fixed-size, while a proportional
+# band would grow until a long scenario could lose whole frames inside it.
+# 0.002 s is under an eighth of a frame at 60 fps; the regression it exists to
+# catch — the real-time cap coming back — was measured at +32%, 5.05 s of game
+# time where 3.83 s was due.
+GAME_TIME_TOL = float(os.environ.get("GODOT_PLAYTEST_GAME_TIME_TOL", "0.002"))
+
+
+def determined_game_time_findings(rows: list, fixed_fps: int,
+                                  tol: float = GAME_TIME_TOL) -> list:
+    """THE OBSERVATION POINT for "a frame budget maps to a determined slice of
+    game time". Returns one finding per scenario whose measured game time is not
+    frames/N; an empty list means the property held for every row.
+
+    This exists because the property was bought and then went UNWATCHED. r2
+    replaced the probe's old real-time frame cap (which bought it by sleeping)
+    with `--fixed-fps N` (which buys it by decree), measured it once by hand, wrote
+    the numbers in a report, and shipped tests that mock the engine out — so
+    nothing that runs would have noticed if a later change quietly took the
+    property away again. It is checked here, on the production path, for all 164
+    scenarios of every gate, rather than in a test that is allowed to pretend.
+
+    A finding is HARD (it joins spec_errors): a run whose frames no longer buy a
+    known amount of game time has not measured the game the author wrote, and a
+    green verdict over it would mean nothing. With fixed_fps <= 0 the harness is
+    deliberately back on the real-time cap and there is no expectation to check,
+    so the list is empty and says nothing either way."""
+    if fixed_fps <= 0:
+        return []
+    out = []
+    for r in rows:
+        frames = int(r.get("frames_stepped", 0) or 0)
+        if frames <= 0:
+            continue
+        got = float(r.get("game_time_sec", 0.0) or 0.0)
+        want = frames / fixed_fps
+        if got <= 0.0:
+            # Frames were stepped and no game time came back at all. That is the
+            # property UNOBSERVED rather than violated, and a run nobody can
+            # attest is not a run to pass: this gate exists in a codebase whose
+            # recurring defect is a verdict delivered over missing evidence.
+            out.append(
+                "scenario %r: stepped %d frames and reported NO game time. The "
+                "probe's reading is missing, so nothing can say whether the "
+                "frame budget still buys a determined slice of game time."
+                % (r.get("name", "?"), frames))
+        elif abs(got - want) > tol:
+            out.append(
+                "scenario %r: %d frames at --fixed-fps %d must be %.6f s of game "
+                "time, measured %.6f s (off by %+.6f s). The frame budget no "
+                "longer buys a determined slice of game time, so every `at:` in "
+                "the spec means something different than it did."
+                % (r.get("name", "?"), frames, fixed_fps, want, got, got - want))
+    return out
 
 
 def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
@@ -1735,13 +1829,21 @@ def _playtest_spec(dst: Path, spec: dict, frames: int, timeout: int,
                 scen_results[i]["input_dead"] = True
                 scen_results[i]["passed"] = False
 
+    # The determined-game-time check runs over the scenario rows, not the
+    # controls: a control has no `at:` and nothing rides on its budget.
+    spec_errors.extend(determined_game_time_findings(scen_timing, PLAYTEST_FIXED_FPS))
+
     dead = [r["name"] for r in scen_results if r["input_dead"]]
     behavior_passed = bool(scen_results) and all(s["passed"] for s in scen_results)
     hard_passed = ran_any and not crashed and not spec_errors and not dead
     n_fail = sum(1 for s in scen_results if not s["passed"])
     if spec_errors:
-        summary = ("Playtest HARD-failed: %d malformed timeline entr%s -- %s"
-                   % (len(spec_errors), "y" if len(spec_errors) == 1 else "ies",
+        # `spec_errors` used to hold exactly one kind of thing, so the
+        # summary named it. It now also holds determined-game-time findings,
+        # and a summary that calls those "malformed timeline entries" would
+        # send the next reader to the wrong file.
+        summary = ("Playtest HARD-failed: %d spec violation%s -- %s"
+                   % (len(spec_errors), "" if len(spec_errors) == 1 else "s",
                       spec_errors[0]))
     elif not ran_any or crashed:
         summary = ("Playtest HARD-failed: %s."

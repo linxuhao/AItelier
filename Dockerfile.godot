@@ -82,6 +82,13 @@ ENV GODOT_BIN=/usr/local/bin/godot \
 RUN mkdir -p /tmp/godot-home && chmod 0777 /tmp/godot-home
 
 COPY docker/godot/godot_harness.py /srv/godot_harness.py
+# Two engine-in-the-loop instruments that have to ship WITH the harness,
+# because both of them read the probe the harness injects: the
+# microbenchmark that says what a frame budget buys at each clock
+# setting, and the detector that says whether a scenario's verdict
+# depends on what a frame cost in real time.
+COPY docker/godot/game_time_probe.py /srv/game_time_probe.py
+COPY docker/godot/clock_sensitivity.py /srv/clock_sensitivity.py
 
 EXPOSE 8080
 CMD ["python3", "/srv/godot_harness.py", "--serve"]

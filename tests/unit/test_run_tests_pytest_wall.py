@@ -64,6 +64,12 @@ def test_the_timeout_does_not_classify_as_a_known_failure_via_the_baseline():
     without_marker = dict(report)
     del without_marker["skipped_because"]
     del without_marker["timed_out"]
+    # A measured baseline, because a relative pass over an UNMEASURED one no
+    # longer classifies as `known_failure` at all (it is `unattributed`). The
+    # marker is what this test is about, so the baseline behind it is held
+    # valid — otherwise the control would be passing for the new reason and
+    # stop guarding the old one.
+    without_marker["baseline_state"] = "compared"
     assert report_state(without_marker) == "known_failure", (
         "the regression this guards against is no longer reachable; if the "
         "classifier changed, re-derive what a timeout should mean")

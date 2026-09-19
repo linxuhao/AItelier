@@ -290,7 +290,10 @@ def test_the_implementer_no_longer_carries_the_asset_tools():
 def test_the_game_addon_offers_the_capability_and_ships_its_briefing():
     addon = yaml.safe_load(
         (ROOT / "configs" / "addons" / "game_harness.yaml").read_text())
-    assert addon["capabilities"] == ["game_assets"]
+    # `stateful` joined the list on 2026-09-20 because the addon's own 5_final_test
+    # declares it for the known-red baseline, and a graph with an offer list must
+    # offer what its steps declare or registration refuses the whole pipeline.
+    assert addon["capabilities"] == ["game_assets", "stateful"]
     brief = ROOT / "configs" / "addons" / "game_harness" / "game_assets_briefing.md"
     assert brief.is_file() and "transparent=true" in brief.read_text()
 
@@ -533,7 +536,7 @@ def test_describe_pipeline_reports_the_offer_list():
     from api.dependencies import get_config_registry
     got = {e["config_name"]: e.get("capabilities")
            for e in get_config_registry().describe("dpe_game")}
-    assert got.get("dpe_game") == ["game_assets"]
+    assert got.get("dpe_game") == ["game_assets", "stateful"]
 
 
 def test_a_built_in_pipelines_offer_list_cannot_be_edited_at_runtime():

@@ -84,6 +84,14 @@ steps:
   - id: "test"
     step_type: "tool"
     tool_name: "run_tests"
+    # The known-red baseline is kept in the durable `state_dir` this capability
+    # injects (~/.AItelier/pipeline_state/coding_impl/). WITHOUT this line the
+    # tool is handed no state_dir, the baseline is never taken, and every
+    # pre-existing red in the repo reads as this round's: run 024cfec6 burned
+    # all three implement laps and died on `Cycle limit exceeded` over three
+    # failures it did not introduce. The registration existed from the day the
+    # capability shipped; no config had ever declared it.
+    capability: "stateful"
     # Must exceed run_tests' worst case (venv + deps + pytest wall) so a slow
     # run isn't reclaimed mid-flight.
     #

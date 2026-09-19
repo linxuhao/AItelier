@@ -2074,6 +2074,89 @@ def _record_tick_error(sf, run_id: str, project_id: str, exc: BaseException,
         "%s on run %s (%s): %s", event, run_id, project_id, exc)
 
 
+def _test_gate_attribution(run_id: str) -> str:
+    """Why an implement<->test loop kept going round, for the terminal reason.
+
+    Run 024cfec6 died with a bare `Cycle limit exceeded` after four implement
+    laps. The answer was in `coding_impl/test/test_report.json` the whole time —
+    three failures, none of them the round's, over a baseline that was never
+    taken — and the only way to it was opening the workspace by hand.
+
+    It is not in the trace: skillflow records a tool step's result as
+    `{"source": "tool_step", "written": ..., "passed": false}` and drops the
+    rest of the tool's return dict, so `_last_trace_error` can only say
+    "check failed". What the trace DOES keep is the params of the call,
+    including the `out_dir` the gate wrote to — so the report is reachable by a
+    path the run itself recorded, not one reconstructed here.
+    """
+    from pathlib import Path
+    from api.dependencies import get_skillflow
+    try:
+        rows = get_skillflow().trace_query(
+            run_id,
+            "SELECT step_id, payload_json FROM skillflow_trace "
+            "WHERE run_id = ? AND payload_json LIKE '%run_tests%' "
+            "ORDER BY seq DESC LIMIT 25",
+            (run_id,))
+    except Exception:
+        return ""
+    for row in rows:
+        try:
+            params = (json.loads(row["payload_json"]) or {}).get("params") or {}
+        except (ValueError, TypeError):
+            continue
+        if params.get("step_name") != "run_tests":
+            continue
+        out_dir = params.get("out_dir")
+        if not out_dir:
+            continue
+        try:
+            report = json.loads(
+                (Path(out_dir) / "test_report.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        line = _attribution_line(report)
+        if line:
+            return f"{row['step_id']}: {line}"
+    return ""
+
+
+def _attribution_line(report: dict) -> str:
+    """One line: how many reds, how many are the ROUND's, what the baseline was.
+
+    Front-loaded because the caller's caller truncates the whole reason to 160
+    characters for the DB status column — the counts and the baseline state
+    have to survive that cut, the failure names are a bonus.
+    """
+    if not isinstance(report, dict) or report.get("passed") is not False:
+        return ""
+    failures = [str(f) for f in (report.get("failures") or [])]
+    new = [str(f) for f in (report.get("new_failures") or [])]
+    state = str(report.get("baseline_state") or "absent")
+    known = len(report.get("baseline_failures") or [])
+    if state in ("seeded", "compared"):
+        head = (f"{len(new)} of {len(failures)} failures are NEW this round "
+                f"(baseline {state}, {known} known-red)")
+        named = new or failures
+    else:
+        head = (f"{len(failures)} failures, attribution UNKNOWN — no baseline "
+                f"was taken ({state}); the step declares no "
+                f"`capability: stateful`")
+        named = failures
+    if not named:
+        return head
+    return head + ": " + "; ".join(_failure_key_of(f) for f in named[:3])
+
+
+def _failure_key_of(failure: str) -> str:
+    """The run-to-run-stable identity of a failure line, or a short prefix."""
+    try:
+        from aitelier.tools.run_tests.impl import _failure_key
+        return _failure_key(failure)[:120]
+    except Exception:
+        return " ".join(str(failure).split())[:120]
+
+
 def _last_trace_error(run_id: str) -> str:
     """Newest trace payload for this run that records an error or a failed check."""
     from api.dependencies import get_skillflow
@@ -2117,7 +2200,11 @@ def _failure_reason(run: dict) -> str:
     run_id = run.get("id") or ""
     if run_id in _failure_reason_cache:
         return _failure_reason_cache[run_id]
-    detail = _last_trace_error(run_id)
+    # The test gate first: `_last_trace_error` can only report "check failed"
+    # for it (skillflow keeps three keys of a tool result), and a loop that
+    # exhausted itself on the test gate is exactly the run whose reason is
+    # otherwise a shrug.
+    detail = _test_gate_attribution(run_id) or _last_trace_error(run_id)
     if detail and _already_said(base, detail):
         detail = ""
     reason = (f"{base} — {detail}" if base else detail) if detail else (base or "unknown")

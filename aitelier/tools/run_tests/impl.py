@@ -22,6 +22,7 @@ Three outcomes, not two: pass, fail, and NO EVIDENCE. "pytest collected nothing"
 compile sections are the real gate.
 """
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -654,6 +655,18 @@ def _run_repo_gate(repo: Path) -> dict | None:
 
 BASELINE_FILE = "run_tests_baseline.json"
 
+# What the baseline reading is WORTH on this run.
+#
+# `seeded` / `compared` are measurements: a baseline file was taken or read, so
+# an empty `baseline_failures` means "this repo carried no standing red".
+# `unavailable` / `unreadable` are the ABSENCE of a measurement, and an empty
+# `baseline_failures` beside them means only "nobody looked". The two used to be
+# the same three fields with the same values — which is how `state_dir` being
+# unset deployment-wide (no config declared `capability: stateful` until
+# 2026-09-20) produced reports that read like a clean baseline for months.
+BASELINE_MEASURED = ("seeded", "compared")
+BASELINE_UNMEASURED = ("unavailable", "unreadable")
+
 _FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
 _ERROR_RE = re.compile(r"^ERROR\s+(\S+)")
 _GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
@@ -731,7 +744,104 @@ def _failure_key(line: str) -> str:
     return line[:200]
 
 
-def _apply_baseline(report: dict, state_dir: str) -> None:
+class Executed:
+    """What this run can PROVE it executed — the licence to SHRINK the baseline.
+
+    Pruning a key means "that known-red test is green now, so a future red is
+    the round's fault". The only evidence that licenses it is that the test RAN
+    this time and did not fail. The rule this replaces inferred it from absence:
+    `keep = known & set(keys)` kept a key only while it kept FAILING, so a
+    known-red test that was never collected — a deleted module, a renamed
+    nodeid, a collection error upstream of it, a `-k` narrowed run, a gate that
+    did not run at all — was dropped from the baseline exactly as if it had been
+    fixed. The next run then reported it as a NEW failure of the round.
+
+    `node_ids` comes from pytest's own junit XML (every test it executed,
+    passes included — the `-q` text only names failures). `repo_gate_cases` is
+    None when the repo gate did not run, and the set of case ids it reported
+    when it did. Everything unproven keeps its key: over-keeping costs one
+    forgiven red, under-keeping blames the round for someone else's.
+    """
+
+    def __init__(self, node_ids=(), pytest_complete: bool = False,
+                 repo_gate_cases=None, node_gate_ran: bool = False):
+        self.node_ids = set(node_ids)
+        self.pytest_complete = bool(pytest_complete)
+        self.repo_gate_cases = repo_gate_cases
+        self.node_gate_ran = bool(node_gate_ran)
+
+    def ran(self, key: str) -> bool:
+        """Did the subject named by this baseline key actually run this time?"""
+        if key.startswith("repo_gate:"):
+            return self.repo_gate_cases is not None
+        if key.startswith("node:"):
+            return self.node_gate_ran
+        if "::" in key:
+            return key in self.node_ids
+        # A collection-error key names a MODULE, not a test: it ran when the
+        # module imported and pytest got through the session.
+        return self.pytest_complete and any(
+            n.startswith(key + "::") for n in self.node_ids)
+
+
+def _junit_node_ids(path: Path) -> set:
+    """Node ids pytest reports as EXECUTED, read from its junit XML.
+
+    `-o junit_family=xunit1` is what carries the `file` attribute; without it
+    only the dotted `classname` survives and a module path cannot be
+    reconstructed from it unambiguously. The classname fallback is kept for the
+    day that family is dropped — a wrong reconstruction there costs a missed
+    prune, never a wrong one.
+    """
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(str(path)).getroot()
+    except Exception:
+        return set()
+    out = set()
+    for case in root.iter("testcase"):
+        name = case.get("name") or ""
+        if not name:
+            continue
+        file_attr = case.get("file") or ""
+        classname = case.get("classname") or ""
+        if file_attr:
+            module = file_attr[:-3] if file_attr.endswith(".py") else file_attr
+            dotted = module.replace("/", ".")
+            inner = (classname[len(dotted) + 1:]
+                     if classname.startswith(dotted + ".") else "")
+            parts = [file_attr] + ([inner] if inner else []) + [name]
+        elif classname:
+            parts = ["/".join(classname.split(".")) + ".py", name]
+        else:
+            continue
+        out.add("::".join(parts))
+    return out
+
+
+def _baseline_dir(state_dir: str, repo) -> str:
+    """The per-REPOSITORY corner of the per-CONFIG `state_dir`.
+
+    `stateful` keys its directory by config name, and one config runs against
+    many repositories: `coding_impl` takes an `against_project`, `dpe_default`
+    is every project's pipeline. One baseline file directly under `state_dir`
+    would carry the AItelier checkout's known-red into the wuxia game's run and
+    forgive it there — a shared-state bug of exactly the kind the capability
+    exists to prevent, so the scoping belongs here and not in the graph.
+
+    Still RELATIVE to the injected directory: the tool never computes a home-
+    relative path of its own, which is the rule `stateful` states in its own
+    briefing.
+    """
+    if not state_dir or repo is None:
+        return ""
+    key = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()[:16]
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(repo).name)[:40] or "repo"
+    return str(Path(state_dir) / "repos" / f"{name}-{key}")
+
+
+def _apply_baseline(report: dict, state_dir: str,
+                    executed: "Executed | None" = None) -> None:
     """Add `new_failures[]` + `passed_relative` by diffing against known-red.
 
     `passed` stays absolute (whatever the suite actually reported) — callers and
@@ -742,27 +852,36 @@ def _apply_baseline(report: dict, state_dir: str) -> None:
 
     The baseline is SEEDED on the first run that finds none (so the pre-existing
     red of the repo as it stands becomes the known set) and afterwards only ever
-    SHRINKS: a key that no longer fails is dropped, so a test that was fixed and
-    then broken again is reported as new. Nothing is ever added after the seed —
-    an added key would let this round's own regression enter the baseline and be
-    forgiven by the next lap.
+    SHRINKS: a key proven to have run and not failed is dropped, so a test that
+    was fixed and then broken again is reported as new. Nothing is ever added
+    after the seed — an added key would let this round's own regression enter
+    the baseline and be forgiven by the next lap.
 
-    Without a `state_dir` (the `stateful` capability is what injects one) there
-    is no durable place to keep the baseline, so the fields still appear, over
-    an empty baseline — never silently absent, which a reader routing on
-    `passed_relative` would see as a missing-field pass.
+    `baseline_state` says which of four things happened, because the fields
+    alone cannot: `seeded`, `compared`, `unavailable` (no `state_dir` — the
+    `stateful` capability is what injects one, and the step must declare it) and
+    `unreadable` (a corrupt baseline, or failure identities this run could not
+    key). An UNMEASURED baseline can never produce `passed_relative: True`: that
+    field is a claim that the red was already there, and with nothing to compare
+    against there is no such claim to make. The claim used to be produced
+    anyway — a red run whose failures[] the parser could not key (a pytest
+    usage error, returncode 2) came out as `passed_relative: True` over an empty
+    baseline, which `gate_evidence.report_state` read as `known_failure`, which
+    routes a game run PAST the hold and into `5_vision`.
     """
     failures = [str(f) for f in report.get("failures", [])]
     keys = [_failure_key(f) for f in failures]
 
     path = Path(state_dir) / BASELINE_FILE if state_dir else None
     baseline: list[str] = []
+    state = "unavailable" if path is None else "compared"
     if path is not None and path.is_file():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             baseline = [str(k) for k in (data or {}).get("failures", [])]
         except (ValueError, OSError) as e:
             report["baseline_error"] = f"unreadable baseline {path}: {e}"
+            state = "unreadable"
 
     identity_error = report.get("failure_identity_error")
     if identity_error:
@@ -771,27 +890,49 @@ def _apply_baseline(report: dict, state_dir: str) -> None:
                                     else str(identity_error))
         report["new_failures"] = failures
         report["passed_relative"] = False
-        report["baseline_failures"] = sorted(set(baseline))
+        report["baseline_failures"] = []
+        # Not "compared": this run's own failure identities are unreliable, so
+        # the diff it would produce is not a measurement of anything.
+        report["baseline_state"] = "unreadable"
         return
 
     known = set(baseline)
-    report["new_failures"] = [f for f, k in zip(failures, keys)
-                              if k not in known]
-    if path is not None and not path.is_file() and "baseline_error" not in report:
+    if path is not None and not path.is_file() and state == "compared":
         # Seed: this repo's current red IS the known red. Nothing is new
         # relative to a baseline that was just taken from it.
         known = set(keys)
+        state = "seeded"
         report["new_failures"] = []
         report["baseline_seeded"] = True
-    report["passed_relative"] = not report["new_failures"]
-    report["baseline_failures"] = sorted(known)
+    else:
+        report["new_failures"] = [f for f, k in zip(failures, keys)
+                                  if k not in known]
+    report["baseline_state"] = state
+    report["passed_relative"] = (state in BASELINE_MEASURED
+                                 and not report["new_failures"])
+    # Only a measured baseline may report a known-red SET. `[]` beside
+    # `unavailable` means nobody looked, and saying so in one field that a
+    # reader already routes on beats a sentence in `summary` nobody parses.
+    report["baseline_failures"] = (sorted(known) if state in BASELINE_MEASURED
+                                   else [])
 
-    if path is None:
+    if path is None or state == "unreadable":
         return
-    # Persist: the seed, or the pruned set (keys that stopped failing are
-    # dropped so a re-break is not forgiven).
-    keep = sorted(known & set(keys)) if not report.get("baseline_seeded") \
-        else sorted(known)
+    # Persist: the seed, or the pruned set. A key is dropped only when this run
+    # can prove the thing it names RAN and did not fail — see `Executed`.
+    if report.get("baseline_seeded"):
+        keep = sorted(known)
+        blocked: list[str] = []
+    else:
+        still_failing = set(keys)
+        blocked = sorted(k for k in known
+                         if k not in still_failing
+                         and not (executed is not None and executed.ran(k)))
+        keep = sorted((known & still_failing) | set(blocked))
+    if blocked:
+        # Readable in the report, so "it stayed known-red" is never mistaken
+        # for "it was measured green and kept anyway".
+        report["baseline_kept_unproven"] = blocked[:50]
     if keep == sorted(baseline) and path.is_file():
         return
     try:
@@ -831,15 +972,19 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
               **kwargs) -> dict:
     """Run pytest over the consolidated repo; write test_report.json to out_dir.
 
-    Returns {written, passed, passed_relative, new_failures}. The report holds
-    {passed, returncode, summary, failures[], collection_errors[], skipped?} for
-    the reviewer to read, plus a ``node`` section (npm install/build/test) when
-    the repo contains a node project, and the baseline fields
-    {new_failures[], passed_relative, baseline_failures[]} — see
-    `_apply_baseline`.
+    Returns {written, passed, passed_relative, baseline_state, baseline_known,
+    failure_count, new_failures}. The report holds {passed, returncode, summary,
+    failures[], collection_errors[], skipped?} for the reviewer to read, plus a
+    ``node`` section (npm install/build/test) when the repo contains a node
+    project, and the baseline fields {new_failures[], passed_relative,
+    baseline_failures[], baseline_state} — see `_apply_baseline`. `state_dir`
+    is injected by the `stateful` capability; a step that does not declare it
+    gets `baseline_state: "unavailable"` and no relative pass at all.
     """
     report = {"passed": True, "returncode": 0, "summary": "", "failures": [],
               "collection_errors": []}
+    # Filled in as each leg runs; it is the ONLY licence to shrink the baseline.
+    executed = Executed()
 
     if fail_fast_gates:
         if not out_dir or not Path(out_dir).is_absolute():
@@ -857,8 +1002,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                                          fail_fast_gates)
         if blocker:
             report.update(upstream_failed_report(blocker, "Test gate"))
+            # No baseline was consulted, and `unavailable` is how the report
+            # says that rather than showing an empty known-red set as if it had
+            # been measured.
             report.update(passed_relative=False, new_failures=[],
-                          baseline_failures=[])
+                          baseline_failures=[], baseline_state="unavailable")
             target_dir.mkdir(parents=True, exist_ok=True)
             if run_id and evidence_cycle_from:
                 stamp_report(report, run_id=run_id, out_dir=str(target_dir),
@@ -867,6 +1015,8 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 json.dumps(report, indent=2), encoding="utf-8")
             return {"written": "test_report.json", "passed": False,
                     "passed_relative": False, "new_failures": [],
+                    "baseline_state": "unavailable", "baseline_known": 0,
+                    "failure_count": len(report.get("failures") or []),
                     "release_evidence": release_disposition(report),
                     "skipped_because": report["skipped_because"],
                     "upstream_state": (blocker.get("upstream_state")
@@ -938,6 +1088,13 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
             # can SIGKILL the whole tree (incl. git subprocesses it spawns) on
             # timeout or any error; otherwise those grandchildren leak as zombies.
             proc = None
+            # Junit XML is how this gate learns which tests PASSED: `-q` prints
+            # only failures, and "not in the failure list" is exactly the
+            # not-run/not-collected confusion `Executed` exists to remove. It
+            # is written OUTSIDE the repo so it can never be committed by a
+            # later `repo_apply`.
+            junit_dir = tempfile.mkdtemp(prefix="run_tests_junit_")
+            junit_path = Path(junit_dir) / "junit.xml"
             try:
                 # --rootdir forces pytest root to the project repo so it doesn't
                 # walk up and find AItelier's pytest.ini (whose testpaths=tests
@@ -952,7 +1109,9 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 proc = subprocess.Popen(
                     [py, "-m", "pytest", str(repo), "-q", "--tb=short",
                      "-p", "no:cacheprovider", "--continue-on-collection-errors",
-                     "--rootdir", str(repo), *_pytest_timeout_args(py)],
+                     "--rootdir", str(repo),
+                     f"--junitxml={junit_path}", "-o", "junit_family=xunit1",
+                     *_pytest_timeout_args(py)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     cwd=str(repo), env=env, start_new_session=True,
                 )
@@ -964,6 +1123,13 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                     timeout=PYTEST_WALL_SECONDS)
                 out = ((stdout or "") + "\n" + (stderr or "")).strip()
                 report["returncode"] = proc.returncode
+                # 0 and 1 are the two outcomes in which pytest ran a session to
+                # the end. 2 (usage/internal), 3 (interrupted), 4 (usage) and 5
+                # (nothing collected) all mean the suite was not exercised, and
+                # a baseline key must not be pruned off one of them.
+                executed = Executed(
+                    node_ids=_junit_node_ids(junit_path),
+                    pytest_complete=proc.returncode in (0, 1))
                 # pytest: 0=all passed, 1=failures, 5=NOTHING COLLECTED.
                 # 5 is a third outcome — no evidence — and it used to be routed
                 # forward as a pass: on the `autopep8` benchmark task the
@@ -1044,6 +1210,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                 # stray children — take the group down before cleaning up.
                 if proc is not None:
                     _kill_group(proc)
+                shutil.rmtree(junit_dir, ignore_errors=True)
                 if venv_dir:
                     shutil.rmtree(venv_dir, ignore_errors=True)
 
@@ -1062,6 +1229,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         node = _run_node_checks(repo)
         if node is not None:
             report["node"] = node
+            executed.node_gate_ran = not node.get("skipped")
             if node.get("skipped"):
                 report.update(passed=False, skipped=True,
                               infrastructure_unavailable=True,
@@ -1086,10 +1254,18 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
         gate = _run_repo_gate(repo)
         if gate is not None:
             report["repo_gate"] = gate
+            # The gate ran: every case it did NOT report as failed passed, so a
+            # known-red case of its own may be pruned. A gate that did not run
+            # (no run_tests.sh, `repo_gate: false`) leaves this None and its
+            # keys stay known-red.
+            executed.repo_gate_cases = set()
             if not gate["passed"]:
                 report["passed"] = False
                 cases, identity_error = _repo_gate_failure_cases(gate)
                 if identity_error is not None:
+                    # A gate whose case identities cannot be read has not told
+                    # us which cases ran; nothing of its may be pruned.
+                    executed.repo_gate_cases = None
                     gate["failure_identity_error"] = identity_error
                     report["failure_identity_error"] = identity_error
                     report["failures"].append(
@@ -1098,6 +1274,7 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                         f"{gate['output'][-1500:]}")
                 else:
                     gate["failure_cases"] = cases
+                    executed.repo_gate_cases = {c["case_id"] for c in cases}
                     for case in cases:
                         detail = case["detail"] or "reported failed"
                         report["failures"].append(
@@ -1105,10 +1282,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                             f"failed: {detail}")
 
 
-    # Known-red baseline: `new_failures[]` + `passed_relative` on top of the
+    # Known-red baseline: `new_failures[]` + `passed_relative` + the
+    # `baseline_state` that says whether either is a measurement, on top of the
     # absolute `passed`, so a reader can tell this round's breakage from the
-    # repo's standing red.
-    _apply_baseline(report, state_dir)
+    # repo's standing red — and tell both from "no baseline was taken".
+    _apply_baseline(report, _baseline_dir(state_dir, repo), executed)
 
     # With no repo AND no out_dir there is nowhere to write — say so in the
     # return rather than defaulting to the CWD, which is the whole point above.
@@ -1146,4 +1324,11 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     return {"written": "test_report.json", "passed": report["passed"],
             "release_evidence": release_disposition(report),
             "passed_relative": report["passed_relative"],
+            # Carried in the RETURN, not only the report, because the terminal
+            # failure reason is assembled from what the run left behind: a loop
+            # that dies on `Cycle limit exceeded` has to be able to say which
+            # reds it kept looping on and whether they were its own.
+            "baseline_state": report["baseline_state"],
+            "baseline_known": len(report["baseline_failures"]),
+            "failure_count": len(report["failures"]),
             "new_failures": report["new_failures"]}

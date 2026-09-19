@@ -148,9 +148,13 @@ def test_the_reason_is_computed_once_per_run(monkeypatch):
     monkeypatch.setattr(deps, "get_skillflow", _sf)
     run = {"id": "run-42", "error_reason": "Cycle limit exceeded"}
     first = scheduler._failure_reason(run)
+    after_first = len(calls)
+    assert after_first >= 1
     for _ in range(20):
         assert scheduler._failure_reason(run) == first
-    assert len(calls) == 1
+    # Not a fixed constant: the assembly may consult more than one source. What
+    # the cache promises is that repeats consult NONE of them again.
+    assert len(calls) == after_first
     assert "boom" in first
 
 

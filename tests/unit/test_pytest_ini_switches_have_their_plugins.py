@@ -4,9 +4,10 @@
 pytest itself. An interpreter without the plugin does not fail — pytest emits a
 `PytestConfigWarning`, ignores the switch, and every test the switch was meant
 to enable then fails for a reason that reads like a code defect. Measured
-2026-09-20: the aitelier image (no pytest-asyncio) reported 209 failed on the
-same tree the host gate venv (pytest-asyncio 1.4.0) reported 0 failed on, and
-nothing anywhere raised an alarm.
+2026-09-20 on c51497bb: the aitelier image (no pytest-asyncio) reported 209
+failed where the host gate venv (pytest-asyncio 1.4.0) reported 4 failed, and
+the two sets were disjoint. 206 of the image's reds were `async def` tests the
+missing plugin could not run. Nothing anywhere raised an alarm.
 
 This check is that alarm, and it runs inside whichever interpreter is executing
 the suite — so the instrument that is wrong is the one that goes red.

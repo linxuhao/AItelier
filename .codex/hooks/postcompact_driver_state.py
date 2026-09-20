@@ -24,7 +24,9 @@ PROJECT_ID = "aitelier"
 # state_graph_help serves STATE_DRIVER_GUIDE_INDEX (3.7k), not the 27.8k guide --
 # so the ceiling rises while the payload does not.
 MAX_CONTEXT_CHARS = 20_000
-MAX_ENTRY_INDEX_CHARS = 7_000
+MAX_ENTRY_INDEX_CHARS = 10_000  # 7_000 dropped a line on first run; the budget must
+# not be the reason an assertion goes missing. It reports omissions rather than
+# hiding them, and the outer MAX_CONTEXT_CHARS still bounds the whole payload.
 MAX_STANDING_CONTEXT_CHARS = 3_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0

@@ -998,6 +998,17 @@ def _command_has_identity(command: str, external_id: str) -> bool:
     return re.search(boundary, command.lower()) is not None
 
 
+def _kernel_thread(line: str) -> bool:
+    """Recognize a Linux kernel thread from its ``ps`` inventory line.
+
+    A kernel thread has no user-space argv, so ``ps -axo pid=,ppid=,command=``
+    prints its whole command column wrapped in square brackets.  Such a thread
+    is scheduling machinery, never an evaluator, so a measurement-shaped name
+    inside those brackets must not be read as unowned external work.
+    """
+    return re.match(r"^\s*\d+\s+\d+\s+\[[^\[\]]*\]\s*$", line) is not None
+
+
 def _resident_service_identity(command: str) -> bool:
     """Recognize only the executable identity of a resident service.
 
@@ -1065,9 +1076,12 @@ def external_owners(*, runner: Callable[[list[str]], subprocess.CompletedProcess
                 r"metrics?|"
                 r"[a-z0-9]+[_-](?:worker|job)|[a-z0-9]+(?:worker|job))"
                 r"(?:[^a-z0-9]|$)", lowered)) or "--long-gate" in lowered
-            # These are already enumerated shared services, not an unknown
-            # evaluator worker whose ownership needs State admission.
-            unknown_measurement = measurement_name and not _resident_service_identity(line)
+            # These are already enumerated shared services or kernel
+            # threads, not an unknown evaluator worker whose ownership
+            # needs State admission.
+            unknown_measurement = (measurement_name
+                                   and not _kernel_thread(line)
+                                   and not _resident_service_identity(line))
             if any(needle in lowered for needle in needles) or unknown_measurement:
                 command = line.strip()
                 active = any(token in lowered for token in (

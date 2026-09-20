@@ -1456,6 +1456,91 @@ def test_service_names_in_measurement_arguments_do_not_suppress_unknown_work(com
     assert errors
 
 
+@pytest.mark.parametrize("command_line", [
+    "4       2 [kworker/R-rcu_g]",
+    "10       2 [kworker/0:0H-events_highpri]",
+    "26       2 [kworker/1:0H-events_highpri]",
+    "  132      2 [kworker/u65:3-events_unbound]",
+    "231       2 [jbd2/dm-0-8]",
+    "17       2 [ksoftirqd/0]",
+])
+def test_kernel_threads_are_not_unknown_measurement_workers(command_line):
+    """A bracketed ``ps`` command is a kernel thread, not an unowned evaluator."""
+    def runner(command):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=command_line + "\n", stderr="")
+
+    owners, errors = dq.external_owners(runner=runner)
+    assert owners == []
+    assert errors == []
+
+
+def test_kernel_threads_do_not_hide_a_real_unregistered_evaluator():
+    """The kernel-thread exemption must not cost the guard its one real hit."""
+    inventory = (
+        "4       2 [kworker/R-rcu_g]\n"
+        "10       2 [kworker/0:0H-events_highpri]\n"
+        "4337 1 python3 /tmp/eval_worker.py --duration 600\n"
+        "132      2 [kworker/u65:3-events_unbound]\n"
+    )
+
+    def runner(command):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=inventory, stderr="")
+
+    owners, errors = dq.external_owners(runner=runner)
+    assert [owner["command"] for owner in owners] == [
+        "4337 1 python3 /tmp/eval_worker.py --duration 600"]
+    assert owners[0]["active"] is True
+    assert owners[0]["resource"] == "external_measurement"
+    assert owners[0]["ownership"] == "unregistered"
+    assert errors == [
+        "unregistered external measurement process has unknown ownership: "
+        "4337 1 python3 /tmp/eval_worker.py --duration 600"]
+
+
+@pytest.mark.parametrize("command_line", [
+    "4338 1 python3 /tmp/eval_worker.py --tag [kworker/R-rcu_g]",
+    "4339 1 [kworker/0:0H] /tmp/scoring_job.py --duration 600",
+    "4340 1 python3 /tmp/rater_worker.py --hosts [::]:3003",
+])
+def test_brackets_inside_a_user_space_command_do_not_grant_the_exemption(command_line):
+    """Only a wholly bracketed command is a kernel thread; arguments are data."""
+    def runner(command):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=command_line + "\n", stderr="")
+
+    owners, errors = dq.external_owners(runner=runner)
+    assert owners[0]["active"] is True
+    assert owners[0]["resource"] == "external_measurement"
+    assert owners[0]["ownership"] == "unregistered"
+    assert any("unknown ownership" in error for error in errors)
+
+
+def test_kernel_thread_noise_no_longer_blocks_the_quiescence_override():
+    """132 kernel threads used to make the override path refuse every time."""
+    inventory = "".join(f"{pid}       2 [kworker/{pid}:0H-events_highpri]\n"
+                        for pid in range(10, 142))
+
+    def runner(command):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=inventory, stderr="")
+
+    owners, errors = dq.external_owners(runner=runner)
+    assert errors == []
+    observation = _producer_shaped_observation(external_owners=owners, errors=errors)
+    accepted, reason = dq._valid_override("restart", observation, {
+        "action": "restart", "actor": "director", "reason": "kernel threads only",
+        "ticket": "T-1", "inventory_digest": observation["digest"],
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+    })
+    assert accepted, reason
+
+
 def test_registered_external_id_does_not_match_a_longer_token():
     def runner(command):
         if command[0] == "docker":

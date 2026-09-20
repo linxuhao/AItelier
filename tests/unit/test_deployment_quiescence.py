@@ -1626,22 +1626,43 @@ def test_an_unreadable_proc_entry_leaves_the_bracketed_line_flagged(tmp_path, mo
 
 
 def test_a_real_process_wearing_a_kernel_thread_name_is_still_flagged():
-    """Measured against the real /proc and the real ps, not a fabricated one."""
+    """Measured against a real process and the real /proc, not a fabricated one.
+
+    The PROCESS has to be real -- that is the whole point, because a kernel
+    thread and a masquerade differ only in /proc, never in the brackets.  The
+    inventory LINE is data: ``ps -o pid=,ppid=,command=`` renders the very argv
+    that /proc/<pid>/cmdline holds, with the NULs turned into spaces, so this
+    derives the line from that file instead of shelling out.  ``ps`` is absent
+    from the deployed image, and a test that cannot run where the code is
+    deployed pins nothing there.
+    """
     process = subprocess.Popen(
         [sys.executable, "-c",
          "import os; os.execv('/bin/cat', ['[kworker/9:9-metrics]'])"],
         stdin=subprocess.PIPE)
     try:
         deadline = time.monotonic() + 10
+        argv = b""
         while time.monotonic() < deadline:
-            inventory = subprocess.run(
-                ["ps", "-o", "pid=,ppid=,command=", "-p", str(process.pid)],
-                capture_output=True, text=True, check=False).stdout
-            if "[kworker/9:9-metrics]" in inventory:
+            with open(f"/proc/{process.pid}/cmdline", "rb") as handle:
+                argv = handle.read().rstrip(b"\0")
+            if argv == b"[kworker/9:9-metrics]":
                 break
             time.sleep(0.1)
-        assert inventory.strip().endswith("[kworker/9:9-metrics]"), inventory
-        assert open(f"/proc/{process.pid}/cmdline", "rb").read()
+        # Real user-space argv, wearing the brackets a kernel thread wears.
+        assert argv == b"[kworker/9:9-metrics]", argv
+
+        # The kernel's own verdict, reached without _kernel_thread's regex and
+        # without its cmdline read: PF_KTHREAD (0x00200000) is field 9 of
+        # /proc/<pid>/stat, which starts after the comm parenthesis.
+        with open(f"/proc/{process.pid}/stat") as handle:
+            stat = handle.read()
+        flags = int(stat[stat.rindex(")") + 1:].split()[6])
+        assert flags & 0x00200000 == 0, f"the kernel calls {process.pid} a kernel thread"
+
+        inventory = "{} {} {}\n".format(
+            process.pid, os.getpid(),
+            " ".join(part.decode() for part in argv.split(b"\0")))
 
         def runner(command):
             if command[0] == "docker":

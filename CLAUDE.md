@@ -289,11 +289,23 @@ exactly like "still running".
 
 ### Scheduler tick log (`~/.AItelier/logs/scheduler_ticks.log`)
 
-The poller advances **one project per tick** (`get_next_active_project()`, ordered
-`updated_at ASC`) — by design. The consequence is that a project which cannot
-advance is picked again every tick and blocks the others, so "nothing is moving"
-is a state you need to be able to read. The tick has eight ways to return and
-most used to be silent: a stuck project looked exactly like an idle one.
+The poller advances **up to `AITELIER_MAX_CONCURRENT_PROJECTS` projects per
+tick** (`get_active_projects(limit=…)`, ordered `updated_at ASC`, then
+`asyncio.gather` over the ones whose per-project lock is free). One project per
+tick was the OLD rule and this paragraph used to describe it; the cost was never
+the serialism but that a project whose tick was already in flight still consumed
+the pick, so a 400s step produced 80 consecutive `outcome=locked` ticks with
+everything else frozen. See `poll_and_execute`'s own docstring, which is the
+authority here.
+
+Two consequences worth knowing before you read the log. A project that cannot
+advance (a zombie stuck `awaiting_brief`, say) is still picked every tick and
+still logs — measured 2026-09-20: one such project had burned 13,894 ticks — but
+under `gather` its instant `no_run` does NOT consume anyone else's slot, so it is
+noise, not a blockage. And `outcome=locked` means a step for that project IS
+executing: it is health, not a stall. **Never read tick counts as progress** —
+read `runs.status` / `current_project_step`. The tick has eight ways to return
+and most used to be silent: a stuck project looked exactly like an idle one.
 
 `core/scheduler.py:tick_log(project, outcome, **detail)` writes one line per tick
 to its own rotating file (5MB × 3, on the mounted `~/.AItelier` so it survives

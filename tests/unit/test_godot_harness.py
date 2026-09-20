@@ -75,8 +75,17 @@ def test_parse_failed_load():
 # The hard/advisory gate split lives in _playtest_spec; test it without Godot by
 # faking each probe run's (probe_report, errors, timed_out).
 def _mock_run_probe(monkeypatch, probe, errs, timed_out):
-    monkeypatch.setattr(gh, "_run_probe",
-                        lambda *a, **k: (probe, errs, timed_out))
+    def fake(dst, state_path, frames, timeout, extra, scene="", capture_at=None,
+             timing=None, render=True):
+        # The real probe reports the game time its frames bought, and the
+        # harness HARD-fails a run that stepped frames and reported none — a
+        # stand-in that leaves it out is standing in for a broken engine, not
+        # for this one. Report what a healthy fixed-delta run would.
+        if timing is not None:
+            timing["game_usec"] = int(probe.get("frames", 0) * 1_000_000 / 60)
+        return probe, errs, timed_out
+
+    monkeypatch.setattr(gh, "_run_probe", fake)
 
 
 def test_playtest_spec_all_assertions_pass(monkeypatch, tmp_path):
@@ -105,7 +114,7 @@ def test_scenario_may_override_the_boot_scene(monkeypatch, tmp_path):
     """
     seen = []
 
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None, render=True):
         seen.append(scene)
         return ({"frames": 5, "asserts": [{"name": "a", "passed": True}], "nodes": {}},
                 [], False)
@@ -798,7 +807,7 @@ def _home_recording_probe(monkeypatch, seen, control_nodes=None, on_control=None
     The sentinel is the point: a control that can see the previous run's file is
     a control that inherited its user://.
     """
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None, render=True):
         home = env.get("HOME")
         is_control = "AITELIER_PROBE_SPEC" in env and capture_at is None
         rec = {"home": home, "is_control": is_control, "existed": False, "found": []}
@@ -808,6 +817,10 @@ def _home_recording_probe(monkeypatch, seen, control_nodes=None, on_control=None
             rec["found"] = sorted(p.name for p in hp.iterdir()) if hp.is_dir() else []
             (hp / "save_1.json").write_text("{}")
         seen.append(rec)
+        # Same reason as in _mock_run_probe: a probe that steps frames and
+        # reports no game time is a broken engine, and the harness says so.
+        if timing is not None:
+            timing["game_usec"] = int(frames * 1_000_000 / 60)
         if is_control:
             if on_control is not None:
                 return on_control()
@@ -898,7 +911,7 @@ def _l0_probe_recorder(seen):
     """Fake _run_probe that records (scene, frames, has_timeline) per call and
     returns a state that depends on the scene and on whether input was driven,
     so a control on the wrong scene can never accidentally match."""
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None, render=True):
         import json as _json
         spec = _json.loads(open(env["AITELIER_PROBE_SPEC"]).read())
         driven = bool(spec.get("timeline"))
@@ -946,7 +959,7 @@ def test_controls_are_shared_per_scene_and_frame_budget(monkeypatch, tmp_path):
 def test_a_click_only_scenario_enters_l0(monkeypatch, tmp_path):
     """`clicks:` is input the probe delivers; a scenario made only of clicks
     that ends in the no-input state tested nothing, exactly like a press."""
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None, render=True):
         return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
                  "nodes": {"Root": {"x": 1}}}, [], False)   # identical every run
     monkeypatch.setattr(gh, "_run_probe", fake)
@@ -970,7 +983,7 @@ def test_every_input_key_the_probe_delivers_counts_as_driving(monkeypatch, tmp_p
     input_keys = sorted(gh._TIMELINE_KEYS - {"at", "assert", "actions", "clicks", "hovers"})
     assert input_keys == ["click", "hover", "press", "release"]
     for k in input_keys:
-        def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+        def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None, render=True):
             return ({"frames": frames, "asserts": [{"name": "a", "passed": True}],
                      "nodes": {"Root": {"x": 1}}}, [], False)
         monkeypatch.setattr(gh, "_run_probe", fake)
@@ -995,7 +1008,7 @@ def test_a_scenario_with_no_input_at_all_is_not_judged_by_l0(monkeypatch, tmp_pa
 def test_input_dead_still_fires_on_a_scene_override_that_ignores_input(monkeypatch, tmp_path):
     """The comparison is not loosened: same scene, same budget, identical end
     state => input_dead, and a scenario whose state DID move stays alive."""
-    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None):
+    def fake(dst, state_path, frames, timeout, env, scene="", capture_at=None, timing=None, render=True):
         import json as _json
         spec = _json.loads(open(env["AITELIER_PROBE_SPEC"]).read())
         driven = bool(spec.get("timeline"))

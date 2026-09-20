@@ -17,7 +17,14 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ID = "aitelier"
-MAX_CONTEXT_CHARS = 12_000
+# 20_000, not 12_000, since 2026-09-21: the driver note's [permanent] section stopped
+# being a store and became a one-line pointer, so the durable assertions this hook
+# must re-inject now live in the note's ENTRY INDEX (43 lines / ~6.8k chars for this
+# project). The guide field shrank by far more than that in the same move --
+# state_graph_help serves STATE_DRIVER_GUIDE_INDEX (3.7k), not the 27.8k guide --
+# so the ceiling rises while the payload does not.
+MAX_CONTEXT_CHARS = 20_000
+MAX_ENTRY_INDEX_CHARS = 7_000
 MAX_STANDING_CONTEXT_CHARS = 3_000
 MAX_INPUT_CHARS = 65_536
 REQUEST_TIMEOUT_SECONDS = 4.0
@@ -306,6 +313,39 @@ def _guide_sections(guide: str, limit: int = 4_000) -> str:
     return _bounded_section(selected, max(0, limit - len(suffix))) + suffix
 
 
+def _entry_index(note: dict[str, Any], limit: int = MAX_ENTRY_INDEX_CHARS) -> str:
+    """Render the driver note's ENTRY INDEX: one assertion per line, with its status.
+
+    This is the section that carries durable content now. Before index mode the
+    [permanent] section held it; a hook that re-injects only the sections
+    therefore re-injects a pointer and nothing it points at. Bodies stay behind
+    get_driver_note_entry and are never injected.
+    """
+    index = note.get("index")
+    if not isinstance(index, list) or not index:
+        return "- none listed (driver_note_index returned no entries)"
+    lines: list[str] = []
+    for item in index:
+        if not isinstance(item, dict):
+            continue
+        entry_id = str(item.get("address", "")).rsplit("/", 1)[-1] or "?"
+        line = str(item.get("index_line", "")).replace("\n", " ").strip()
+        if line:
+            lines.append(f"- {entry_id} {line}")
+    if not lines:
+        return "- none listed (entries present but carried no index_line)"
+    omitted = 0
+    while True:
+        parts = list(lines)
+        if omitted:
+            parts.append(f"[omitted_entry_index_lines={omitted}]")
+        rendered = _redact("\n".join(parts))
+        if len(rendered) <= limit or not lines:
+            return rendered
+        lines.pop()
+        omitted += 1
+
+
 def _identity_anchors(permanent: str, temporary: str, limit: int = 1_200) -> str:
     """Retain labeled handoff identities even when note bodies are truncated."""
     excerpts: list[str] = []
@@ -561,6 +601,13 @@ state_driver_guide_sha256={_sha256(guide)} chars={len(guide)} source={help_paylo
 
 ## Current temporary director note (bounded)
 {_bounded_section(temporary, 3_000)}
+
+## Current driver note ENTRY INDEX (durable assertions; bodies fetched by address)
+Each line is an assertion WITH its status. A line that contradicts what you are about
+to do wins until you have re-measured it. Fetch a body with
+state_graph_read(action="get_driver_note_entry", arguments={{"project_id":"{PROJECT_ID}","entry_id":"<12-hex>"}}).
+entry_count={note.get('entry_count', 'unknown')} listed={note.get('listed_count', 'unknown')} delisted={note.get('delisted_count', 'unknown')}
+{_entry_index(note)}
 
 ## Current State snapshot (bounded)
 {_frontier_summary(overview)}

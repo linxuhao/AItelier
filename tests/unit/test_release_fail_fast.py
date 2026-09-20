@@ -44,7 +44,11 @@ def _report(root: Path, step: str, filename: str = "test_report.json",
 
 
 @pytest.mark.parametrize(("values", "state"), [
-    ({"passed": False, "passed_relative": True}, "known_failure"),
+    # `baseline_state` is not decoration here: a relative pass is only readable
+    # beside the record of what it was measured against — see
+    # test_a_relative_pass_with_no_baseline_holds_instead_of_releasing below.
+    ({"passed": False, "passed_relative": True,
+      "baseline_state": "compared"}, "known_failure"),
     ({"passed": False, "pending": True}, "pending"),
     ({"passed": True, "skipped": True}, "skipped"),
     ({"passed": False, "blind": True}, "blind"),
@@ -283,7 +287,8 @@ def test_absent_or_invalid_test_evidence_holds_without_replan(
 def test_known_failure_marker_chain_reaches_replan_and_stays_fresh(
         tmp_path, monkeypatch):
     _cycle(tmp_path)
-    _report(tmp_path, "5_test", passed=False, passed_relative=True)
+    _report(tmp_path, "5_test", passed=False, passed_relative=True,
+            baseline_state="compared")
     monkeypatch.setattr(compile_impl, "_godot_compile_unstamped",
                         lambda **_: pytest.fail("compile must not run"))
     compile_result = compile_impl.godot_compile(
@@ -564,3 +569,54 @@ def test_file_migration_contains_malformed_graph_and_continues(tmp_path):
     assert malformed_grant.read_bytes() == malformed_bytes
     assert [Path(report["path"]).name for report in reports] == ["gen_z_good.yaml"]
     _assert_game_release_contract(yaml.safe_load(good.read_text()))
+
+
+def test_a_relative_pass_with_no_baseline_holds_instead_of_releasing(tmp_path):
+    """The routing consequence of `baseline_state`, in both polarities.
+
+    `passed_relative: true` says "these reds were already here". Believed, it
+    sends 5_compile past the hold and on to 5_vision. It is only believable
+    beside a baseline that was actually taken: with `state_dir` unset (no
+    config declared `capability: stateful` before 2026-09-20) the field was
+    still produced — over nothing — whenever the run's failures could not be
+    keyed, and the run was released on it.
+    """
+    measured = {"passed": False, "passed_relative": True,
+                "baseline_state": "compared", "baseline_failures": ["x"]}
+    unmeasured = {"passed": False, "passed_relative": True,
+                  "baseline_state": "unavailable", "baseline_failures": []}
+    legacy = {"passed": False, "passed_relative": True}   # no field at all
+
+    from aitelier.gate_evidence import report_state
+    assert report_state(measured) == "known_failure"
+    assert report_state(unmeasured) == "unattributed"
+    assert report_state(legacy) == "unattributed"
+    assert release_disposition(measured) == "known_failure"
+    assert release_disposition(unmeasured) == "unresolved"
+
+    resolver = _resolver(_canonical_game())
+    assert resolver.next_node(
+        "5_compile", {"release_evidence": "known_failure"}, {}) == "5_vision"
+    assert resolver.next_node(
+        "5_compile", {"release_evidence": "unresolved"}, {}) == "5_release_wait"
+
+
+def test_run_tests_never_emits_a_relative_pass_it_did_not_measure(tmp_path):
+    """End to end through the tool, not just `_apply_baseline`.
+
+    A repo with no Python sources and no state_dir: pytest collects nothing,
+    the gate is red for another reason, and `failures[]` is empty — the exact
+    shape that used to come out `passed_relative: true`.
+    """
+    repo = tmp_path / "repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "m.py").write_text("x = 1\n")     # python, but no tests
+    out = tmp_path / "out"
+    result = tests_impl.run_tests(project_root=str(repo), out_dir=str(out),
+                                  repo_gate=False, state_dir="")
+    report = json.loads((out / "test_report.json").read_text())
+    assert report["passed"] is False and report["failures"]
+    assert report["baseline_state"] == "unavailable"
+    assert result["passed_relative"] is False
+    assert result["baseline_state"] == "unavailable"
+    assert release_disposition(report) == "unresolved"

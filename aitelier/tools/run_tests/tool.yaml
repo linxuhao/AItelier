@@ -3,14 +3,20 @@ description: >
   Run the project's unit tests (pytest) over the current run worktree and write
   test_report.json {passed, returncode, summary, failures[], collection_errors[],
   skipped?, import_error?, no_tests_collected?, node?, repo_gate?, new_failures[],
-  passed_relative, baseline_failures[]}. `passed` is ABSOLUTE (did the whole
+  passed_relative, baseline_failures[], baseline_state}. `passed` is ABSOLUTE (did the whole
   suite pass). `new_failures[]` holds only the failures that are NOT in the
   known-red baseline and `passed_relative` is true when that list is empty —
   so a round can be graded on what IT broke instead of on a red the repo
   already carried. The baseline is a JSON file in the durable `state_dir` the
-  `stateful` capability injects (declare `capability: stateful` on the step, or
-  no baseline is kept and `passed_relative` degrades to "nothing is known-red");
-  it is seeded on the first run that finds none and afterwards only shrinks. `node` (npm
+  `stateful` capability injects, under a per-repository subdirectory of it (one
+  config runs against many repos). DECLARE `capability: stateful` on the step:
+  without it no baseline is taken, `baseline_state` reports "unavailable" and
+  `passed_relative` can never be true — an unmeasured baseline is not an empty
+  one, and a report that said otherwise released a red run past the hold. It is
+  seeded on the first run that finds none, and afterwards only shrinks, and only
+  for a key this run can PROVE it executed (pytest's junit record of the tests
+  it ran; the repo gate's own case list). A known-red test that was not
+  collected stays known-red. `node` (npm
   install/build/test checks) is present when the repo holds a node project and
   a failing check also flips `passed`. `repo_gate` is present when the repo
   ships an executable `run_tests.sh` at its root — that script IS the repo's

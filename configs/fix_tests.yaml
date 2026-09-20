@@ -57,6 +57,10 @@ steps:
   - id: "test"
     step_type: "tool"
     tool_name: "run_tests"
+    # The known-red baseline lives in the durable `state_dir` this capability injects.
+    # Without it run_tests is handed none, no baseline is ever taken, and every
+    # pre-existing red in the repo is reported as this round's — see configs/coding_impl.yaml.
+    capability: "stateful"
     timeout_seconds: 1200
     tool_params:
       out_dir: "$STEP_DIR"

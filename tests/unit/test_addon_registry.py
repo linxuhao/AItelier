@@ -35,6 +35,11 @@ def sf_with_addons():
     ar.declare_addons(sf)
     sf.register_capability(
         "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
+    # Offered by the addon for its run_tests steps' known-red baseline; every
+    # offer must be registered or the combo is refused (api/dependencies.py
+    # registers this one at boot, with the real state_dir provider).
+    sf.register_capability(
+        "stateful", context_provider=lambda cfg: {"state_dir": "/tmp/state"})
     with patch("api.dependencies.get_skillflow", return_value=sf):
         yield sf
 
@@ -89,6 +94,11 @@ def _release_addon_runtime(tmp_path):
                    projects_base=str(tmp_path / "projects"))
     sf.register_capability(
         "game_assets", tools=["gen_image_asset", "gen_audio_asset"])
+    # Offered by the addon for its run_tests steps' known-red baseline; every
+    # offer must be registered or the combo is refused (api/dependencies.py
+    # registers this one at boot, with the real state_dir provider).
+    sf.register_capability(
+        "stateful", context_provider=lambda cfg: {"state_dir": "/tmp/state"})
     source = (_ROOT / "evidence/output-target-migration-20260911"
               / "generated-configs/gen_dpe_state_game.yaml")
     pr._register_text(

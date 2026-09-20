@@ -16,6 +16,11 @@ _PENDING_STATUSES = {"pending", "queued", "running", "in_progress", "in-progress
 _INFRA_STATUSES = {"infrastructure_unavailable", "infrastructure-unavailable",
                    "infra_unavailable", "runner_unavailable"}
 _KNOWN_FAILURE_STATES = {"failed", "known_failure"}
+# `passed_relative: true` is a CLAIM that the failures were already in the repo.
+# It is only readable beside a `baseline_state` that says a baseline was
+# actually taken or read — see `run_tests.impl.BASELINE_MEASURED`. Any other
+# value, and the absence of the field, mean nothing was compared.
+_BASELINE_MEASURED = {"seeded", "compared"}
 
 
 def _read_json(path: Path) -> dict:
@@ -123,7 +128,15 @@ def report_state(report: dict) -> str:
         return "skipped"
     if raw_passed is False:
         if report.get("passed_relative") is True:
-            return "known_failure"
+            # THIS is the line that reads the distinction. `known_failure`
+            # RELEASES the run past the hold (game_harness: 5_compile ->
+            # 5_vision); `unattributed` collapses to `unresolved` below, which
+            # routes to 5_release_wait instead. A report that never compared
+            # against a baseline has not earned the first one: it is telling us
+            # the failures are old while holding no record of what was old.
+            if str(report.get("baseline_state") or "") in _BASELINE_MEASURED:
+                return "known_failure"
+            return "unattributed"
         return "failed"
     return "passed"
 
@@ -133,7 +146,8 @@ def release_disposition(report: dict) -> str:
 
     A confirmed product failure may suppress expensive downstream work and
     re-enter planning. Evidence that is absent, stale, pending, blind, skipped,
-    unreadable, or blocked by infrastructure needs verification instead.
+    unreadable, UNATTRIBUTED (a relative pass with no baseline behind it), or
+    blocked by infrastructure needs verification instead.
     """
     state = str(report.get("upstream_state") or report_state(report))
     if (not report.get("upstream_state")

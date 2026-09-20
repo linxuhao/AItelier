@@ -844,25 +844,40 @@ def test_final_journal_publication_commits_exact_recovery_across_same_byte_path_
         "transaction": dq._migration_transaction_path(path),
     }[target_name]
     original_identity = None
+    pinned_fd = None
     real_atomic = dq._atomic_write
 
     def replace_at_final_publication(destination, value):
-        nonlocal original_identity
+        nonlocal original_identity, pinned_fd
         if destination == path and original_identity is None:
             original_identity = (target.stat().st_dev, target.stat().st_ino)
+            # Hold the original inode open across the swap. Without this the
+            # kernel frees it on `replace` and hands the SAME number back to the
+            # next file created in the same directory — on the container's
+            # overlayfs it reliably does, and the `[journal]` case then read
+            # (55, 6032643) != (55, 6032643) and failed. The assertion below is
+            # about identity, and an identity that can be recycled underneath it
+            # is not one; an open descriptor makes the comparison sound without
+            # touching st_nlink, which the neighbouring tests assert on.
+            pinned_fd = os.open(target, os.O_RDONLY)
             replacement = tmp_path / f"same-byte-{target_name}-replacement"
             replacement.write_bytes(target.read_bytes())
             replacement.replace(target)
         real_atomic(destination, value)
 
     monkeypatch.setattr(dq, "_atomic_write", replace_at_final_publication)
-    migrated = migrate(path)
+    try:
+        migrated = migrate(path)
 
-    assert original_identity is not None
-    assert (target.stat().st_dev, target.stat().st_ino) != original_identity
-    recovery = base64.b64decode(migrated["migration"]["source_base64"], validate=True)
-    assert recovery == raw
-    assert dq._load_journal(path) == migrated
+        assert original_identity is not None
+        assert (target.stat().st_dev, target.stat().st_ino) != original_identity
+        recovery = base64.b64decode(
+            migrated["migration"]["source_base64"], validate=True)
+        assert recovery == raw
+        assert dq._load_journal(path) == migrated
+    finally:
+        if pinned_fd is not None:
+            os.close(pinned_fd)
 
 
 def test_same_byte_source_replacement_after_return_keeps_exact_recovery(tmp_path):

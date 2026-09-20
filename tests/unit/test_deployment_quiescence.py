@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import signal
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -72,6 +76,24 @@ def _quiet_sf():
 def _quiet_probe():
     return [{"kind": "docker", "id": "quiet-container",
              "name": "zvec-grep", "active": False}]
+
+
+def _fake_proc(tmp_path, monkeypatch, entries):
+    """Stand in for /proc so a test states its own kernel threads.
+
+    ``entries`` maps a pid to the bytes of its ``cmdline``; a pid left out of
+    the mapping has no ``/proc/<pid>`` at all, which is the vanished-process
+    race.  A container has its own pid namespace and no kernel threads in it,
+    so a test that read the real /proc would measure the host it happens to
+    run on.
+    """
+    root = tmp_path / "proc"
+    for pid, cmdline in entries.items():
+        entry = root / str(pid)
+        entry.mkdir(parents=True)
+        (entry / "cmdline").write_bytes(cmdline)
+    monkeypatch.setattr(dq, "PROC_ROOT", root, raising=False)
+    return root
 
 
 def _producer_shaped_observation(**changes):
@@ -1456,16 +1478,19 @@ def test_service_names_in_measurement_arguments_do_not_suppress_unknown_work(com
     assert errors
 
 
-@pytest.mark.parametrize("command_line", [
-    "4       2 [kworker/R-rcu_g]",
-    "10       2 [kworker/0:0H-events_highpri]",
-    "26       2 [kworker/1:0H-events_highpri]",
-    "  132      2 [kworker/u65:3-events_unbound]",
-    "231       2 [jbd2/dm-0-8]",
-    "17       2 [ksoftirqd/0]",
+@pytest.mark.parametrize("command_line,pid", [
+    ("4       2 [kworker/R-rcu_g]", 4),
+    ("10       2 [kworker/0:0H-events_highpri]", 10),
+    ("26       2 [kworker/1:0H-events_highpri]", 26),
+    ("  132      2 [kworker/u65:3-events_unbound]", 132),
+    ("231       2 [jbd2/dm-0-8]", 231),
+    ("17       2 [ksoftirqd/0]", 17),
 ])
-def test_kernel_threads_are_not_unknown_measurement_workers(command_line):
-    """A bracketed ``ps`` command is a kernel thread, not an unowned evaluator."""
+def test_kernel_threads_are_not_unknown_measurement_workers(
+        tmp_path, monkeypatch, command_line, pid):
+    """A bracketed ``ps`` command with an empty cmdline is a kernel thread."""
+    _fake_proc(tmp_path, monkeypatch, {pid: b""})
+
     def runner(command):
         if command[0] == "docker":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1476,8 +1501,10 @@ def test_kernel_threads_are_not_unknown_measurement_workers(command_line):
     assert errors == []
 
 
-def test_kernel_threads_do_not_hide_a_real_unregistered_evaluator():
+def test_kernel_threads_do_not_hide_a_real_unregistered_evaluator(tmp_path, monkeypatch):
     """The kernel-thread exemption must not cost the guard its one real hit."""
+    _fake_proc(tmp_path, monkeypatch, {4: b"", 10: b"", 132: b"",
+                                       4337: b"python3\0/tmp/eval_worker.py\0"})
     inventory = (
         "4       2 [kworker/R-rcu_g]\n"
         "10       2 [kworker/0:0H-events_highpri]\n"
@@ -1520,8 +1547,10 @@ def test_brackets_inside_a_user_space_command_do_not_grant_the_exemption(command
     assert any("unknown ownership" in error for error in errors)
 
 
-def test_kernel_thread_noise_no_longer_blocks_the_quiescence_override():
+def test_kernel_thread_noise_no_longer_blocks_the_quiescence_override(
+        tmp_path, monkeypatch):
     """132 kernel threads used to make the override path refuse every time."""
+    _fake_proc(tmp_path, monkeypatch, {pid: b"" for pid in range(10, 142)})
     inventory = "".join(f"{pid}       2 [kworker/{pid}:0H-events_highpri]\n"
                         for pid in range(10, 142))
 
@@ -1539,6 +1568,95 @@ def test_kernel_thread_noise_no_longer_blocks_the_quiescence_override():
         "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
     })
     assert accepted, reason
+
+
+@pytest.mark.parametrize("command_line,pid,cmdline", [
+    ("791120      1 [eval_worker]", 791120, b"[eval_worker]\0"),
+    ("791121      1 [kworker/9:9-metrics]", 791121, b"[kworker/9:9-metrics]\0"),
+    ("791122      1 [benchmark]", 791122, b"[benchmark]\0/tmp/suite\0"),
+])
+def test_a_bracketed_argv_masquerade_is_still_flagged(
+        tmp_path, monkeypatch, command_line, pid, cmdline):
+    """Square brackets are ``ps`` formatting; a chosen argv[0] can forge them."""
+    _fake_proc(tmp_path, monkeypatch, {pid: cmdline})
+
+    def runner(command):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=command_line + "\n", stderr="")
+
+    owners, errors = dq.external_owners(runner=runner)
+    assert owners[0]["active"] is True
+    assert owners[0]["resource"] == "external_measurement"
+    assert owners[0]["ownership"] == "unregistered"
+    assert errors == ["unregistered external measurement process has unknown ownership: "
+                      + command_line.strip()]
+
+
+def test_a_vanished_proc_entry_leaves_the_bracketed_line_flagged(tmp_path, monkeypatch):
+    """The exit-before-the-read race is the process's to schedule, so fail closed."""
+    _fake_proc(tmp_path, monkeypatch, {})
+
+    def runner(command):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0,
+                               stdout="791123      2 [kworker/R-eval_worker]\n", stderr="")
+
+    owners, errors = dq.external_owners(runner=runner)
+    assert owners[0]["ownership"] == "unregistered"
+    assert errors == ["unregistered external measurement process has unknown ownership: "
+                      "791123      2 [kworker/R-eval_worker]"]
+
+
+def test_an_unreadable_proc_entry_leaves_the_bracketed_line_flagged(tmp_path, monkeypatch):
+    """A /proc that will not answer is not an answer of "kernel thread"."""
+    root = _fake_proc(tmp_path, monkeypatch, {})
+    (root / "791124" / "cmdline").mkdir(parents=True)
+
+    def runner(command):
+        if command[0] == "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0,
+                               stdout="791124      2 [kworker/R-eval_worker]\n", stderr="")
+
+    owners, errors = dq.external_owners(runner=runner)
+    assert owners[0]["ownership"] == "unregistered"
+    assert errors
+
+
+def test_a_real_process_wearing_a_kernel_thread_name_is_still_flagged():
+    """Measured against the real /proc and the real ps, not a fabricated one."""
+    process = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os; os.execv('/bin/cat', ['[kworker/9:9-metrics]'])"],
+        stdin=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            inventory = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,command=", "-p", str(process.pid)],
+                capture_output=True, text=True, check=False).stdout
+            if "[kworker/9:9-metrics]" in inventory:
+                break
+            time.sleep(0.1)
+        assert inventory.strip().endswith("[kworker/9:9-metrics]"), inventory
+        assert open(f"/proc/{process.pid}/cmdline", "rb").read()
+
+        def runner(command):
+            if command[0] == "docker":
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=inventory, stderr="")
+
+        owners, errors = dq.external_owners(runner=runner)
+        assert owners[0]["active"] is True
+        assert owners[0]["resource"] == "external_measurement"
+        assert owners[0]["ownership"] == "unregistered"
+        assert errors == ["unregistered external measurement process has unknown ownership: "
+                          + inventory.strip()]
+    finally:
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
 
 
 def test_registered_external_id_does_not_match_a_longer_token():

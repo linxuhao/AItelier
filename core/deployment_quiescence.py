@@ -38,6 +38,7 @@ TERMINAL_STATUSES = frozenset({"completed", "failed"})
 BLOCKING_STATUSES = frozenset({"pending", "running", "paused", "draining"})
 DEPLOY_ACTIONS = frozenset({"rebuild", "redeploy", "restart"})
 OBSERVATION_SCHEMA_VERSION = 1
+PROC_ROOT = Path("/proc")
 OBSERVATION_FIELDS = frozenset({
     "schema_version", "observed_at", "projects", "runs", "sidecar_owners",
     "godot_render_owners", "external_owners", "registered_external_owners",
@@ -1005,8 +1006,26 @@ def _kernel_thread(line: str) -> bool:
     prints its whole command column wrapped in square brackets.  Such a thread
     is scheduling machinery, never an evaluator, so a measurement-shaped name
     inside those brackets must not be read as unowned external work.
+
+    The brackets are ``ps`` formatting, not proof: a user-space process can put
+    them in its own ``argv[0]``.  ``/proc/<pid>/cmdline`` settles it, because a
+    kernel thread's is empty while the masquerade's carries the argv it chose.
+    The read is only spent on lines that already look bracketed.
+
+    It fails closed.  An unreadable or vanished ``/proc/<pid>`` leaves the line
+    flagged, because that race is the attacker's to schedule: a process that
+    exits between the inventory and the read would otherwise buy an exemption
+    on demand, while a wrongly flagged thread costs one error that the next
+    fresh measurement drops.
     """
-    return re.match(r"^\s*\d+\s+\d+\s+\[[^\[\]]*\]\s*$", line) is not None
+    match = re.match(r"^\s*(\d+)\s+\d+\s+\[[^\[\]]*\]\s*$", line)
+    if match is None:
+        return False
+    try:
+        with open(PROC_ROOT / match.group(1) / "cmdline", "rb") as handle:
+            return handle.read(1) == b""
+    except OSError:
+        return False
 
 
 def _resident_service_identity(command: str) -> bool:

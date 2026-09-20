@@ -20,6 +20,16 @@ dependencies = [
     # It cannot depend on a developer-only venv: the production image installs
     # this project with plain `pip install -e .`.
     "pytest>=8.0",
+    # pytest.ini turns on `asyncio_mode = auto`, which is a PYTEST-ASYNCIO
+    # switch. Undeclared, the image resolved a pytest with no plugin to honour
+    # it and every `async def` test failed with pytest's own "async def
+    # functions are not natively supported", while the host gate venv (which
+    # happened to have the plugin) stayed green on the same tree.
+    # No upper bound on pytest: pytest-asyncio's own metadata already bounds
+    # the pytest it can load, and the divergence itself now has a check that
+    # goes red (tests/unit/test_pytest_ini_switches_have_their_plugins.py), so
+    # freezing the interpreter would buy nothing we have measured a need for.
+    "pytest-asyncio>=1.0",
     "fastapi>=0.136",
     "typer>=0.24",
     "litellm>=1.85",

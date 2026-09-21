@@ -1,89 +1,346 @@
 """State-only HTTP routes reusable without importing the workflow host."""
 import inspect
-from contextlib import AsyncExitStack
+import json
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from typing import Annotated, Literal
 from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.dependencies.utils import get_dependant, solve_dependencies
-from api.state_route_reader import served_actions
+from fastapi.dependencies.models import Dependant
+from fastapi.dependencies.utils import get_parameterless_sub_dependant, solve_dependencies
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import JSONResponse
+from starlette.routing import Match
+from api.state_route_reader import DISPATCH, LITERAL, NO_ACTION, UNREADABLE, read_route
 from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execute,
                                  is_public_read)
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 
+try:  # FastAPI computes this for every real route; reuse it rather than guess.
+    from fastapi.dependencies.utils import _should_embed_body_fields
+except ImportError:  # pragma: no cover - pinned FastAPI ships it
+    _should_embed_body_fields = None
+
+try:  # FastAPI >= 0.141 keeps an included router lazy in `app.routes`.
+    from fastapi.routing import iter_route_contexts
+except ImportError:  # pragma: no cover - pinned FastAPI ships it
+    iter_route_contexts = None
+
+# The exit stacks FastAPI >= 0.141 solves dependencies against. Inside a route
+# its own middleware has already put them in the scope; the prefix middleware
+# runs outside that middleware, so it puts them there itself.
+_EXIT_STACK_SCOPE_KEYS = ("fastapi_inner_astack", "fastapi_function_astack",
+                          "fastapi_astack")
+
+
+@asynccontextmanager
+async def _exit_stacks(scope):
+    async with AsyncExitStack() as stack:
+        installed = []
+        for key in _EXIT_STACK_SCOPE_KEYS:
+            if not isinstance(scope.get(key), AsyncExitStack):
+                scope[key] = await stack.enter_async_context(AsyncExitStack())
+                installed.append(key)
+        try:
+            yield stack
+        finally:
+            for key in installed:
+                scope.pop(key, None)
+
+
+def route_contexts(app):
+    """Every route of `app`, with the dependencies its inclusion added.
+
+    `app.routes` no longer holds one entry per route: FastAPI keeps an included
+    router as a single lazy entry, and the app-wide dependencies live on the
+    INCLUSION rather than on the route. Reading `app.routes` directly therefore
+    reports neither the routes nor the verdict they carry - which is how a
+    coverage claim can be green over an app it never looked inside.
+    """
+    if iter_route_contexts is None:  # pragma: no cover - pinned FastAPI ships it
+        return list(app.routes)
+    return list(iter_route_contexts(app.routes))
+
 
 # Each route declares WHAT it serves, on its own endpoint object: a tuple
-# `(kind, action)` where `kind` is `read`, `write` or `director` and `action` is
-# the read action (or None for the action-dispatch families, whose action lives
-# in the URL). This is the enumerable declaration the router guard reads, and
-# the thing the invariant tests walk instead of a hardcoded door list.
-_DECLARATION = "_state_route"
+# `(kind, action)` where `kind` is `read`, `write`, `director` or `schema` and
+# `action` is the literal read action (or None for the action-dispatch
+# families, whose action lives in the URL). This is the enumerable declaration
+# the router guard reads, and the thing the invariant tests walk instead of a
+# hardcoded door list.
+STATE_ROUTE_DECLARATION = "_state_route"
+_DECLARATION = STATE_ROUTE_DECLARATION  # legacy name used by the invariant tests
+
+# The URL parameter the action-dispatch families take their action from. The
+# guard reads `request.path_params[_DISPATCH_PARAMETER]`, so the independent
+# reader must find the endpoint executing THAT parameter and no other: the two
+# halves of the cross-check name the same thing or the route is refused.
+_DISPATCH_PARAMETER = "action"
 
 # The `/schema` REST route publishes the shape of every operation, closed
 # families included. The owner has not ruled on opening it, so it stays shut -
 # written down as a NAME so it is a decision somebody made, not a route somebody
-# forgot.
+# forgot. It executes no state action, which is why it declares kind `schema`
+# rather than a read of an action nobody could cross-check.
 SCHEMA_DECLARED_ACTION = "get_state_schema"
 
+# Marks set on the verdict dependencies themselves. A route's coverage is read
+# off the dependency graph FastAPI actually built for it, never off an
+# attribute the endpoint's author can set: an endpoint cannot award itself a
+# verdict it does not carry.
+STATE_VERDICT_MARK = "_is_state_verdict"
+STATE_ROUTER_GUARD_MARK = "_is_state_router_guard"
+STATE_PREFIX_VERDICT_MARK = "_is_state_prefix_verdict"
 
-STATE_ROUTE_DECLARATION = "_state_route"
-_DECLARATION = STATE_ROUTE_DECLARATION  # legacy name used by the invariant tests
+STATE_PREFIX = "/api/state"
+
+
+def is_state_prefix(path: str) -> bool:
+    """Whether `path` is under the state prefix.
+
+    `/api/state` and everything below it; `/api/statistics` is a different
+    prefix and is not this module's business.
+    """
+    return path == STATE_PREFIX or path.startswith(STATE_PREFIX + "/")
+
+
+def _dependant_calls(dependant):
+    yield dependant.call
+    for sub in dependant.dependencies:
+        yield from _dependant_calls(sub)
+
+
+def _carries(route, mark: str) -> bool:
+    dependant = getattr(route, "dependant", None)
+    if dependant is None:
+        return False
+    return any(getattr(call, mark, False) for call in _dependant_calls(dependant))
+
+
+def route_carries_state_verdict(route) -> bool:
+    """Whether FastAPI will run a state verdict as part of this route.
+
+    Read off `route.dependant` - the tree FastAPI built and will solve - so a
+    route that merely looks like a state route, or that sets the declaration
+    attribute on its endpoint, is not mistaken for a route that carries a
+    verdict. A `Mount`, a bare Starlette `Route` and anything else with no
+    dependant answer False.
+    """
+    return _carries(route, STATE_VERDICT_MARK)
+
+
+def route_carries_router_guard(route) -> bool:
+    """Whether this route is one the state router's own guard already judges."""
+    return _carries(route, STATE_ROUTER_GUARD_MARK)
+
+
+def route_carries_prefix_verdict(route) -> bool:
+    """Whether the APP-WIDE prefix verdict is part of this route's tree.
+
+    Distinct from `route_carries_state_verdict`, and the distinction is the
+    whole point: the state router's own routes carry that router's guard, so
+    asking only "does this route carry SOME state verdict" answers yes for them
+    whether or not the app installed the prefix verdict at all. The prefix
+    verdict is what covers a route the state router does NOT own, and a route
+    that does not carry it is a route the app is not ready to have one added
+    next to.
+    """
+    return _carries(route, STATE_PREFIX_VERDICT_MARK)
+
+
+def _body_params(dependant) -> list:
+    found = list(dependant.body_params)
+    for sub in dependant.dependencies:
+        found += _body_params(sub)
+    return found
+
+
+async def _body_for(request, body_params):
+    if not body_params:
+        return None
+    raw = await request.body()
+    if not raw:
+        return None
+    content_type = request.headers.get("content-type", "")
+    if "form" in content_type or "multipart" in content_type:
+        return await request.form()
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
 
 
 async def apply_verdict(dependency, request) -> None:
-    """Apply an authorization verdict to a request, whatever shape it has.
+    """Hand `dependency` to FastAPI and let FastAPI run it.
 
-    This used to be twenty lines of hand-written reflection that CALLED the
-    dependency synchronously. An `async def` dependency then produced a
-    coroutine nobody awaited - no error, no 403, an open private read. That
-    shape is gone: the verdict is now resolved through FastAPI's OWN dependency
-    machinery (`get_dependant` + `solve_dependencies`), the same machinery that
-    runs every `Depends(...)` in this app. Sync `def`, `async def`, callable
-    objects, `functools.partial` and dependencies with sub-dependencies of
-    their own are all executed for real.
+    The verdict this guard needs is chosen at REQUEST time (the read table
+    decides which door a route is), and `Depends(...)` is resolved at route
+    build time, so the choice cannot be expressed as a plain route dependency.
+    What CAN be done - and is done here - is to stop executing the dependency
+    in this repository at all: the dependency is wrapped in `Depends(...)`,
+    hung under an empty `Dependant`, and handed to `solve_dependencies`, the
+    same function `fastapi.routing.APIRoute`'s own request handler calls. Sync
+    `def`, `async def`, `yield` and `async yield` generators, callable objects,
+    `functools.partial`, sub-dependencies and `dependency_overrides` are
+    therefore not cases this module knows about: they are cases FastAPI knows
+    about. Nothing here inspects the dependency's shape and nothing here calls
+    it.
 
-    `Depends`-shaped dependencies take the Request; a bare `lambda: None` (an
-    embedder running with the gate off, which tests and `api/state_only` both
-    use) takes nothing. Overrides are honored, so
-    `app.dependency_overrides[require_writer]` keeps working.
-
-    The default is REFUSE: a dependency that cannot be resolved, cannot be
-    called, or raises anything that is not an HTTPException is a 403 - never a
-    silent pass.
+    The default is REFUSE: a dependency FastAPI cannot solve - including one
+    whose parameters do not resolve on this request - is a 403, never a silent
+    pass.
     """
-    overrides = getattr(getattr(request, "app", None), "dependency_overrides", None)
-    if overrides:
-        replacement = overrides.get(dependency)
-        if replacement is not None:
-            dependency = replacement
     route = request.scope.get("route")
+    path = getattr(route, "path", None) or request.url.path
+    root = Dependant(path=path)
     try:
-        dependant = get_dependant(path=getattr(route, "path", "") or "",
-                                  call=dependency)
-        stack = AsyncExitStack()
-        try:
-            try:
-                solved = await solve_dependencies(
-                    request=request, dependant=dependant,
-                    dependency_overrides_provider=getattr(request, "app", None),
-                    async_exit_stack=stack, embed_body_fields={})
-            except TypeError:
-                # Older FastAPI without the exit-stack parameters.
-                solved = await solve_dependencies(
-                    request=request, dependant=dependant,
-                    dependency_overrides_provider=getattr(request, "app", None))
-        finally:
-            await stack.aclose()
-        if solved.errors:
-            raise HTTPException(403, "state verdict could not be applied")
-        verdict = dependency(**solved.values)
+        root.dependencies.append(
+            get_parameterless_sub_dependant(depends=Depends(dependency), path=path))
+    except Exception as exc:  # fail CLOSED: an unmountable verdict denies
+        raise HTTPException(403, "state verdict could not be applied") from exc
+    body_params = _body_params(root)
+    embed = bool(_should_embed_body_fields(body_params)) if _should_embed_body_fields else True
+    try:
+        body = await _body_for(request, body_params)
+        async with _exit_stacks(request.scope) as stack:
+            solved = await solve_dependencies(
+                request=request, dependant=root, body=body,
+                dependency_overrides_provider=request.scope.get("app"),
+                async_exit_stack=stack, embed_body_fields=embed)
     except HTTPException:
         raise
     except Exception as exc:  # fail CLOSED: an unappliable verdict denies
         raise HTTPException(403, "state verdict could not be applied") from exc
-    if inspect.isawaitable(verdict):
-        verdict = await verdict
-    return verdict
+    if solved.errors:
+        raise HTTPException(403, "state verdict could not be applied")
+
+
+def prefix_verdict_dependency(verdict):
+    """Build the app-wide dependency that judges routes under the prefix.
+
+    Attached with `FastAPI(dependencies=[Depends(...)])`, it is part of the
+    dependency tree of every route the app builds, so a route added under the
+    prefix by any router - including one added after startup - is solved with
+    a verdict in front of it. A route the state router owns already carries
+    that router's guard, which judges it against its declaration; this one
+    stands down for those and judges everything else under the prefix as a
+    private read.
+
+    It cannot reach what FastAPI does not build a dependency tree for - a
+    mounted sub-application, a bare Starlette route. `StatePrefixGate` is the
+    layer for those, and the two are not interchangeable.
+    """
+
+    async def state_prefix_verdict(request: Request) -> None:
+        if not is_state_prefix(request.url.path):
+            return
+        route = request.scope.get("route")
+        if route is not None and route_carries_router_guard(route):
+            return
+        await apply_verdict(verdict, request)
+
+    setattr(state_prefix_verdict, STATE_VERDICT_MARK, True)
+    setattr(state_prefix_verdict, STATE_PREFIX_VERDICT_MARK, True)
+    return state_prefix_verdict
+
+
+def _matched_route(routes, scope):
+    """The route Starlette's own matcher would hand this request to."""
+    partial_match = None
+    for route in routes:
+        try:
+            match, _ = route.matches(scope)
+        except Exception:
+            continue
+        if match == Match.FULL:
+            return route
+        if match == Match.PARTIAL and partial_match is None:
+            partial_match = route
+    return partial_match
+
+
+def _replaying(request, receive):
+    cached = getattr(request, "_body", None)
+    if cached is None:
+        return receive
+    sent = False
+
+    async def replay():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": cached, "more_body": False}
+        return await receive()
+
+    return replay
+
+
+class StatePrefixGate:
+    """Refuse a request under the state prefix that carries no verdict.
+
+    An app-wide `Depends(...)` reaches every route FastAPI BUILDS. It does not
+    reach a sub-application installed with `app.mount()`, nor a bare Starlette
+    `Route` appended to the router, because neither has a dependency tree for
+    FastAPI to solve. This middleware resolves the request against the app's
+    own routes with Starlette's matcher, asks the matched route whether it
+    carries a state verdict, and applies one itself when it does not - before
+    the request reaches that route, so a mounted write never runs.
+    """
+
+    def __init__(self, app, verdict, routes):
+        self.app = app
+        self.verdict = verdict
+        self.routes = routes
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not is_state_prefix(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+        route = _matched_route(self.routes(), scope)
+        if route is not None and route_carries_state_verdict(route):
+            await self.app(scope, receive, send)
+            return
+        request = StarletteRequest(scope, receive)
+        try:
+            await apply_verdict(self.verdict, request)
+        except HTTPException as exc:
+            await JSONResponse({"detail": exc.detail}, status_code=exc.status_code)(
+                scope, receive, send)
+            return
+        await self.app(scope, _replaying(request, receive), send)
+
+
+def install_state_prefix_gate(app, verdict) -> None:
+    """Add the MIDDLEWARE layer of the prefix verdict to `app`.
+
+    The other layer is `prefix_verdict_dependency`, which the app has to be
+    constructed with, because it has to be there when the routes are built.
+    This one covers what that one cannot reach.
+    """
+    app.add_middleware(StatePrefixGate, verdict=verdict,
+                       routes=lambda: route_contexts(app))
+
+
+def declaration_agrees_with_source(declaration, endpoint) -> bool:
+    """Whether the route's declaration survives an independent reading.
+
+    The declaration says what the route serves; `api.state_route_reader` says
+    what the endpoint's own source executes. They must agree in the SAME terms:
+    a declared literal action must be among the literals the endpoint executes,
+    a declared dispatch family must be read executing the very URL parameter
+    the guard resolves, and the schema route must be read executing nothing.
+    A reading of UNREADABLE agrees with nothing - a route whose source cannot
+    be read is refused, not waved through.
+    """
+    kind, action = declaration
+    reading = read_route(endpoint)
+    if reading.kind == UNREADABLE:
+        return False
+    if kind == "schema":
+        return reading.kind == NO_ACTION
+    if action is None:
+        return reading.kind == DISPATCH and reading.parameter == _DISPATCH_PARAMETER
+    return reading.kind == LITERAL and action in reading.actions
 
 
 def create_state_router(service_dependency, access_dependency, read_dependency=None):
@@ -97,13 +354,10 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     The shape this replaces answered 13 of its 20 GET routes to an anonymous
     visitor because nobody had attached a dependency to them: public by
     OMISSION. Here every route declares what it serves, ONE guard applies the
-    verdict through `apply_verdict` (which works whatever the dependency's
-    shape), and the guard cross-checks each declaration against
-    `api.state_route_reader.served_actions` - an independent reading of the
-    endpoint's own source - so a declaration naming the wrong action is
-    refused, not obeyed. A route
-    with no declaration, a route reading an action nobody classified, and a read
-    `read_visibility` fails CLOSED and so does the guard.
+    verdict through `apply_verdict`, and the guard cross-checks each
+    declaration against `api.state_route_reader` - an independent reading of
+    the endpoint's own source. A declaration the reading does not support, and
+    a route whose source cannot be read at all, are both refused.
 
     `read_dependency` is the identity verdict for a private read and MUST accept
     the Request - every authorization dependency in this repository does. It
@@ -140,7 +394,7 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         """This path carries both classes. `send_director_message` and the two
         transitions CHANGE state, so they take the WRITE verdict and its wording;
         only `list_director_messages` is a read, and it is private."""
-        if request.path_params.get("action") == "list_director_messages":
+        if request.path_params.get(_DISPATCH_PARAMETER) == "list_director_messages":
             await _guard_read_action("list_director_messages", request)
         else:
             await apply_verdict(access_dependency, request)
@@ -149,9 +403,9 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         """The one guard, on the ROUTER, under which every route it owns stands.
 
         A route mounted under the same prefix but on a DIFFERENT router is not
-        covered here; `api.state_graph_routers.state_prefix_verdict`, attached
-        app-wide, gives every route under `/api/state` a verdict regardless of
-        which router owns it.
+        covered here. `api.state_http.prefix_verdict_dependency`, attached
+        app-wide, judges those; `api.state_http.StatePrefixGate` judges what
+        even an app-wide dependency cannot reach.
 
         The guard reads the declaration off the matched endpoint at REQUEST
         time, which is what makes a reclassified action move every door at
@@ -159,11 +413,11 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         action a route serves. An endpoint that declares nothing is refused -
         the default here is DENY, exactly as it is in the read table.
 
-        The declaration is then cross-checked against an independent reader:
-        `served_actions` reads the endpoint's own source and reports which
-        state actions it actually executes. A declaration naming an action the
-        endpoint does not serve is refused - a wrong declaration opens no door,
-        here or in the tests that walk these declarations.
+        The declaration is then cross-checked against an independent reader
+        (`declaration_agrees_with_source`). A declaration the endpoint's own
+        source does not support is refused, and so is a route whose source the
+        reader cannot read: reading nothing is not permission to serve
+        anything.
         """
         route = request.scope.get("route")
         endpoint = getattr(route, "endpoint", None)
@@ -171,20 +425,26 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         if declaration is None:
             await apply_verdict(read_verdict, request)
             return
-        kind, action = declaration
-        served = served_actions(endpoint)
-        if action is not None and served and action not in served:
+        if not declaration_agrees_with_source(declaration, endpoint):
             raise HTTPException(403, "route declaration does not match the action it serves")
+        kind, action = declaration
         if kind == "write":
             await apply_verdict(access_dependency, request)
         elif kind == "director":
             await _guard_director_action(request)
+        elif kind == "schema":
+            await _guard_read_action(SCHEMA_DECLARED_ACTION, request)
         elif action is None:
-            # Action-dispatch family: the action is in the URL, and a request
-            # that names none is refused like any other unclassified read.
-            await _guard_read_action(request.path_params.get("action"), request)
+            # Action-dispatch family: the action is in the URL, the reader has
+            # confirmed the endpoint executes that very parameter, and a
+            # request that names none is refused like any other unclassified
+            # read.
+            await _guard_read_action(request.path_params.get(_DISPATCH_PARAMETER), request)
         else:
             await _guard_read_action(action, request)
+
+    setattr(_router_guard, STATE_ROUTER_GUARD_MARK, True)
+    setattr(_router_guard, STATE_VERDICT_MARK, True)
 
     def _declare(endpoint, kind: str, action: str | None = None):
         """Record on the endpoint function WHAT it serves.
@@ -201,10 +461,14 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     router.dependencies.append(Depends(_router_guard))
 
+
     def schema():
         return describe()
 
-    _declare(router.get("/schema")(schema), "read", SCHEMA_DECLARED_ACTION)
+    # Kind `schema`, not a read of an action: this endpoint executes NO state
+    # action, and the independent reader must read it that way or the route is
+    # refused. It is judged as a private read of SCHEMA_DECLARED_ACTION.
+    _declare(router.get("/schema")(schema), "schema", SCHEMA_DECLARED_ACTION)
 
     async def director_message(action: str, request: Request,
                                service=Depends(service_dependency)):

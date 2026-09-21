@@ -295,7 +295,12 @@ class TestTheVerdictIsDerivedNotRemembered:
             assert declaration is not None, ("undeclared route", path)
         # An empty or renamed router must fail this test, not pass it vacuously.
         assert len(declared) >= 20, sorted(declared)
-        assert {kind for kind, _ in declared.values()} <= {"read", "write", "director"}
+        # `schema` is the fourth kind: `/schema` executes no state action, so it
+        # declares that rather than a read of an action nothing could
+        # cross-check it against. A kind outside this set has no branch in
+        # the router guard and would fall through to the refusal.
+        assert {kind for kind, _ in declared.values()} <= {"read", "write",
+                                                           "director", "schema"}
 
     def test_a_reclassified_action_moves_EVERY_route_that_reaches_it(
             self, gated, monkeypatch):

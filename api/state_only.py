@@ -13,10 +13,11 @@ import os
 from pathlib import Path
 import secrets
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from starlette.responses import JSONResponse
 
-from api.state_http import create_state_router
+from api.state_http import (create_state_router, install_state_prefix_gate,
+                            prefix_verdict_dependency)
 from core.state_database import StateDatabase
 from core.state_service import StateService
 
@@ -72,10 +73,6 @@ def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
             async with mcp.session_manager.run():
                 yield
 
-    app = FastAPI(title='AItelier State DAG', lifespan=lifespan, docs_url=None, redoc_url=None)
-    app.add_middleware(_BearerAuth,token=token)
-    app.state.state_service = service
-    app.state.mode = 'state-only'
     def access(request=None):
         # The outer middleware also protects discovery and OpenAPI. This is the
         # same route factory as the full host, without its runtime dependencies.
@@ -87,7 +84,23 @@ def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
         # middleware refuses every request that lacks the dedicated token, reads
         # and writes alike, so nothing reaches these routes unauthenticated.
         return None
+
+    # This deployment embeds the SAME state router, so it needs the SAME two
+    # halves of the prefix verdict the full host installs. Without them a route
+    # added here under `/api/state` on any other router, or mounted as a
+    # sub-application, would stand behind the bearer middleware alone — one
+    # layer where the full host has two, in the process that holds nothing but
+    # the State DAG.
+    app = FastAPI(title='AItelier State DAG', lifespan=lifespan, docs_url=None, redoc_url=None,
+                  dependencies=[Depends(prefix_verdict_dependency(access))])
+    app.add_middleware(_BearerAuth,token=token)
+    app.state.state_service = service
+    app.state.mode = 'state-only'
+    # The verdict this deployment applies under the prefix, named on the app so
+    # it can be read back and overridden rather than guessed from a closure.
+    app.state.state_verdict = access
     app.include_router(create_state_router(lambda:service,access,access))
+    install_state_prefix_gate(app, access)
 
     @app.get('/health')
     def health():

@@ -6,8 +6,8 @@ from api.dependencies import get_db_manager, get_workspace_manager, get_skillflo
 from core import cf_access
 from core.state_service import StateService
 
-from api import state_http
-from api.state_http import STATE_ROUTE_DECLARATION, create_state_router
+from api.state_http import (create_state_router, install_state_prefix_gate,
+                            prefix_verdict_dependency)
 
 
 def authenticated_actor(request) -> str:
@@ -34,22 +34,13 @@ def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_wor
 router = create_state_router(get_service, require_writer, require_reader)
 
 
-async def state_prefix_verdict(request: Request) -> None:
-    """A verdict for EVERY route under `/api/state`, whoever owns it.
+# The app-wide half of the prefix verdict. A route the state router owns is left
+# to that router's guard — recognised by the guard's presence in the route's own
+# dependency tree, not by an attribute its endpoint could set. Everything else
+# under the prefix takes the reader verdict.
+state_prefix_verdict = prefix_verdict_dependency(require_reader)
 
-    The state router's guard covers the routes that router owns. A route with
-    the same prefix mounted on the APP itself belongs to a different router
-    and used to be covered by nothing: the write_gate middleware exempts the
-    whole prefix, and the router guard never saw the route. This dependency is
-    attached app-wide, so every request under the prefix reaches it: a route
-    the state router owns carries the declaration and is left to that guard;
-    anything else under the prefix is treated as a private read and takes the
-    reader verdict. The default is a verdict, not an exemption.
-    """
-    path = request.url.path
-    if path != "/api/state" and not path.startswith("/api/state/"):
-        return
-    endpoint = getattr(request.scope.get("route"), "endpoint", None)
-    if getattr(endpoint, STATE_ROUTE_DECLARATION, None) is not None:
-        return
-    await state_http.apply_verdict(require_reader, request)
+
+def install_prefix_gate(app) -> None:
+    """The middleware half, for routes a dependency cannot reach."""
+    install_state_prefix_gate(app, require_reader)

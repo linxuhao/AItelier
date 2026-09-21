@@ -412,12 +412,24 @@ default is DENY: a read action that is not listed is private, INCLUDING one adde
 later. `api/state_http` declares, ON EACH ROUTE, the action that route serves, and
 ONE router-wide guard derives the class from that table (a read of a private
 action is refused with a read-worded 403). The guard also cross-checks each
-declaration against `api.state_route_reader.served_actions`, which reads the
-endpoint's own source — a declaration naming an action the route does not serve
-is refused, and the declaration/reader consistency test goes red. A route that
-declares nothing — including one added later — is REFUSED, and ANY route mounted
-under `/api/state` on a router other than the state router takes the reader
-verdict from the app-wide `state_prefix_verdict` dependency. Writes still
+declaration against `api.state_route_reader`, which parses the endpoint's own
+source and reports whether it executes a literal action, an action taken from
+the URL, or none — a declaration that reading does not support is refused, and
+so is a route whose source the reader cannot read at all. A route that declares
+nothing — including one added later — is REFUSED.
+
+A route under the prefix that the state router does not own is covered in two
+layers, because one layer cannot reach what the other does. The app-wide
+`state_prefix_verdict` dependency is part of the dependency tree of every route
+FastAPI BUILDS, so a route on any other router takes the reader verdict; it
+cannot reach a sub-application installed with `app.mount()` or a bare Starlette
+route, neither of which has a dependency tree. The `StatePrefixGate` middleware
+resolves the request against the app's own routes and applies the verdict itself
+when the matched route carries none, before that route runs. Both layers are
+installed at both places this repository assembles an app carrying these routes
+— `api/main.py` and `api/state_only.py` — and
+`tests/unit/test_state_prefix_on_the_product_app.py` asserts that against those
+app objects, not against an app the test built. Writes still
 require the writer verdict on `/commands/{action}`. MCP's external token is not
 automatically a REST admin token; use the host's supported authenticated channel
 for each transport.

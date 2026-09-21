@@ -38,7 +38,7 @@ from api.admin_routers import router as admin_router
 from api.repo_routers import router as repo_router
 from api.model_routers import router as model_router
 from api.state_graph_routers import router as state_graph_router
-from api.state_graph_routers import state_prefix_verdict
+from api.state_graph_routers import install_prefix_gate, state_prefix_verdict
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
 
@@ -262,9 +262,13 @@ app = FastAPI(
     description="Skillflow config-run orchestration control plane",
     version="1.0.0",
     lifespan=lifespan,
-    # Every route under `/api/state` gets a verdict no matter which router owns
-    # it: the state router's guard covers its own routes, and this app-wide
-    # dependency fails CLOSED for any other route mounted under that prefix.
+    # Half of the prefix verdict. Every route this app BUILDS under
+    # `/api/state` carries this dependency in its own dependency tree: the
+    # state router's routes are left to that router's guard, and any other
+    # route under the prefix takes the reader verdict. The other half —
+    # `install_prefix_gate` below, for a mounted sub-application or a bare
+    # Starlette route, which have no dependency tree — is not a duplicate of
+    # this one and neither covers the other.
     dependencies=[Depends(state_prefix_verdict)],
 )
 
@@ -417,6 +421,12 @@ async def write_gate(request: Request, call_next):
     if not code:
         return await call_next(request)
     return JSONResponse(authz.denial_body(code), status_code=403)
+
+
+# The middleware half of the prefix verdict. Added last, so it is the OUTERMOST
+# middleware: a request under `/api/state` that routing would hand to something
+# carrying no verdict is refused before that thing runs.
+install_prefix_gate(app)
 
 
 @app.get("/health")

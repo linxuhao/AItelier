@@ -17,3 +17,7 @@ parameters:
     type: string
     description: "Step directory holding the _deletions.json manifest (e.g. $STEP_DIR). Empty = no-op."
     required: false
+  project_id:
+    type: string
+    description: "Owning project; auto-injected by the host and overwritten if supplied by the agent. Appears as a [prefix] in the deletion commit message."
+    required: false

@@ -135,17 +135,18 @@ def test_host_injects_real_project_identity_into_agent_tool_call(monkeypatch):
 
     from core.skillflow_host import AItelierSkillFlow
 
+    from api.dependencies import get_tool_loader
+
     observed = {}
     def base(_self, name, params, **kwargs):
         observed.update(params)
         return {"passed": True}
     monkeypatch.setattr(SkillFlow, "_execute_tool_impl", base)
     host = object.__new__(AItelierSkillFlow)
-    class Loader:
-        @staticmethod
-        def load_fn(_name):
-            return lambda project_id="": None
-    host._tool_loader = Loader()
+    # The REAL loader, so this asserts against godot_playtest's own signature and
+    # its own tool.yaml rather than against a stub that can agree with anything.
+    # Both surfaces have to say yes before the host binds the identity.
+    host._tool_loader = get_tool_loader()
     host._get_project_id = lambda _run: "project-from-run"
     host._execute_tool_impl("godot_playtest", {}, run_id="run-real",
                             step_id="test", project_root="/tmp/repo")

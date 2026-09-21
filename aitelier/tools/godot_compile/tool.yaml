@@ -28,6 +28,10 @@ parameters:
     type: string
     description: "Directory to write compile_report.json + playtest_report.json (set to $STEP_DIR)"
     required: false
+  project_id:
+    type: string
+    description: "Owning project; auto-injected by the host and overwritten if supplied by the agent. Used only for the commit owner identity of the reports this gate writes — it reaches no gate threshold."
+    required: false
 
 # Its result carries passed/error, so a graph step running it MUST route the
 # failure branch — read by forge_registry_check (fallible_tools_unrouted).

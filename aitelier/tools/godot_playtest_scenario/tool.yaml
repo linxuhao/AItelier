@@ -38,6 +38,10 @@ parameters:
     type: string
     description: "Path to the project repo (auto-injected by the engine)"
     required: false
+  project_id:
+    type: string
+    description: "Owning project; auto-injected by the host and overwritten if supplied by the agent. Used only for the commit owner identity of the report this run writes."
+    required: false
 
 # Its result carries passed/error, so a graph step running it MUST route the
 # failure branch — read by forge_registry_check (fallible_tools_unrouted).

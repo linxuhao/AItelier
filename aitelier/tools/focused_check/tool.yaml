@@ -32,5 +32,9 @@ parameters:
     type: string
     description: "Attempt worktree root; auto-injected by the host and ignored if supplied by the agent."
     required: false
+  project_id:
+    type: string
+    description: "Owning project; auto-injected by the host and overwritten if supplied by the agent. Forwarded to the Godot probe so its run is attributed to this project."
+    required: false
 
 x-fallible: true

@@ -25,6 +25,13 @@ from skillflow.identity import owner_is_dead, worker_identity
 class AItelierSkillFlow(SkillFlow):
     """SkillFlow with durable tool-operation recovery enforced at host ingress."""
 
+    #: Every keyword this host binds into a tool call's CALLER params.  A
+    #: keyword listed here is subject to ``_tool_accepts_keyword`` on every
+    #: tool, and ``scripts/audit_injected_kwargs.py`` enumerates the live
+    #: registry against this tuple — so a second injected keyword inherits the
+    #: guard and the audit instead of replaying the ``project_id`` outage.
+    HOST_INJECTED_KEYWORDS: tuple[str, ...] = ("project_id",)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._operation_recovery_decisions: set[tuple[Any, ...]] = set()
@@ -33,21 +40,57 @@ class AItelierSkillFlow(SkillFlow):
                            step_id: str = "", project_root: str = "") -> dict:
         """Preserve the owning project identity for host-registered tools."""
         bound = dict(params or {})
-        if run_id and self._tool_accepts_keyword(name, "project_id"):
-            project_id = self._get_project_id(run_id)
-            if project_id:
-                bound.setdefault("project_id", project_id)
+        if run_id:
+            for keyword in self.HOST_INJECTED_KEYWORDS:
+                if not self._tool_accepts_keyword(name, keyword):
+                    continue
+                value = self._get_project_id(run_id)
+                if value:
+                    # Assigned, not setdefault()ed. The tools that take this
+                    # keyword spend it on owner identity and commit
+                    # attribution, and it is declared in their public schema —
+                    # so a caller CAN name it. Whoever owns the run owns the
+                    # identity; a caller-supplied value must not displace it.
+                    bound[keyword] = value
         return super()._execute_tool_impl(
             name, bound, run_id=run_id, step_id=step_id,
             project_root=project_root)
 
     def _tool_accepts_keyword(self, name: str, keyword: str) -> bool:
-        """Return whether a loaded tool can receive a host-owned keyword.
+        """Return whether a host-owned keyword survives to the tool's body.
 
-        SkillFlow 1.5.77 reports caller arguments that are absent from a tool
-        signature as an error.  Inspecting the actual callable keeps identity
-        injection available for host tools that opt in, while leaving native
-        tools and their own argument validation untouched.
+        The host binds the keyword into the CALLER's ``params``.  SkillFlow then
+        computes ``dropped = [k for k in params if k not in sig.parameters]`` and,
+        when anything was dropped, returns ``unrecognised argument(s): ... No
+        tool action was performed`` — the tool never runs and the agent sees a
+        gap rather than a failure.  ``**kwargs`` is not a member of
+        ``sig.parameters`` under that membership test, so a signature ending in
+        ``**kwargs`` is a REFUSAL, not an acceptance.  Counting VAR_KEYWORD as
+        acceptance is what stopped 65 of the 83 live tools from running when the
+        host reached them (measured 2026-09-21 by
+        ``scripts/audit_injected_kwargs.py``); ``semantic_search`` and
+        ``git_history`` are the two confirmed victims in the trace.
+
+        Two surfaces can disagree about one keyword, so the decision is their
+        intersection:
+
+        * the callable's NAMED parameters — the set SkillFlow filters against,
+          i.e. the layer that performs the refusal.  A probe through the real
+          call path (4 tool shapes, 2026-09-21) shows a schema that declares the
+          keyword is STILL refused when the signature only has ``**kwargs``, and
+          a signature that names it runs even when the schema omits it: the
+          signature's named set is what decides whether the call happens.
+        * the tool's declared ``tool.yaml`` schema — the contract an agent and a
+          reviewer read.  A host-owned tool that consumes a field it never
+          declares is undeclared plumbing, which is exactly how five tools came
+          to look refused while they were quietly being served.  AItelier owns
+          those files, so the agreement is enforceable
+          (``tests/unit/test_host_injected_kwargs_are_declared.py``).
+
+        SkillFlow's own tools are held to the signature half only: their
+        ``tool.yaml`` lives in the wheel, where host plumbing
+        (``workspace_root``, ``run_id``, ``project_id``) is deliberately kept out
+        of the agent-facing schema, and this host cannot edit it.
         """
         loader = getattr(self, "_tool_loader", None)
         if loader is None:
@@ -57,12 +100,40 @@ class AItelierSkillFlow(SkillFlow):
         except (AttributeError, ImportError, OSError, TypeError, ValueError):
             return False
         parameter = signature.parameters.get(keyword)
-        if parameter is not None and parameter.kind in (
+        if parameter is None or parameter.kind not in (
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
                 inspect.Parameter.KEYWORD_ONLY):
-            return True
-        return any(item.kind is inspect.Parameter.VAR_KEYWORD
-                   for item in signature.parameters.values())
+            return False
+        try:
+            if loader.is_native(name):
+                return True
+        except Exception:  # noqa: BLE001 — an unclassifiable tool is not native
+            return False
+        return keyword in self._declared_schema_fields(name)
+
+    def _declared_schema_fields(self, name: str) -> set[str]:
+        """Parameter names a tool advertises in its own ``tool.yaml``.
+
+        Accepts both shapes seen in the registry: a bare mapping of
+        ``name -> spec`` and a JSON-Schema ``{type: object, properties: {...}}``.
+        An unreadable or parameter-less schema yields the empty set, which
+        refuses the injection — the tool is then left exactly as the agent
+        called it.
+        """
+        loader = getattr(self, "_tool_loader", None)
+        if loader is None:
+            return set()
+        try:
+            schema = loader.load_schema(name)
+        except Exception:  # noqa: BLE001 — a schema we cannot read declares nothing
+            return set()
+        parameters = schema.get("parameters") if isinstance(schema, dict) else None
+        if isinstance(parameters, dict) and isinstance(
+                parameters.get("properties"), dict):
+            parameters = parameters["properties"]
+        if not isinstance(parameters, dict):
+            return set()
+        return {key for key in parameters if isinstance(key, str)}
 
     def unsettled_operations(self, run_id: str | None = None) -> list[dict]:
         with self._ro() as conn:

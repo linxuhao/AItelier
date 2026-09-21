@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from starlette.exceptions import HTTPException
 
 from core.state_driver_guide import guide_section
 from core.state_driver_index import (MAX_ASSERTION_CHARS, MAX_ENTRY_BODY_CHARS,
@@ -25,13 +26,23 @@ from core.state_graph import StateGraphError
 PROJECT_UNAVAILABLE = "This State DAG record is not available."
 
 
-class ProjectPrivate(Exception):
+class ProjectPrivate(HTTPException):
     """Anonymous read of a project nobody has opened (or of a project that does
-    not exist) — one indistinguishable refusal for both."""
+    not exist) — one indistinguishable refusal for both.
+
+    It IS a Starlette `HTTPException` carrying status 403, not merely an
+    `Exception` that some layer must remember to map: FastAPI's built-in
+    handler turns every `HTTPException` into a JSON 403 on ANY app, including
+    an embedder that mounts the state router with `FastAPI()` +
+    `include_router(...)` and registers nothing. The 403 therefore does not
+    depend on `apply_project_privacy` being called at every assembly point —
+    it is a property of the exception itself."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=403, detail=PROJECT_UNAVAILABLE)
 
     def __str__(self) -> str:
         return PROJECT_UNAVAILABLE
-
 
 class Request(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)

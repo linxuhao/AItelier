@@ -375,3 +375,116 @@ def test_execute_refuses_anonymous_read_of_unopened_project_directly(tmp_path):
     service.project_read_trusted = False
     service.open_project("p")
     assert execute(service, "get_graph", {"project_id": "p"})
+
+
+def _arguments(action, pid="table-pid"):
+    """Fill every field the read model declares, so a door is never refused
+    for a missing argument — a 422 in the table would hide a real verdict."""
+    body = {}
+    for name, field in READ_REQUESTS[action].model_fields.items():
+
+        if name == "project_id":
+            body[name] = pid
+        elif name == "node_key":
+            body[name] = "a"
+        elif name == "after":
+            body[name] = 0
+        elif name in ("limit", "depth"):
+            body[name] = 30
+        elif name in ("issue_id", "attempt_id", "run_id"):
+            body[name] = "x"
+        elif field.is_required():
+            body[name] = "x"
+    return body
+
+
+def _every_public_gate(router, pid):
+    """The FULL set of public gates, DERIVED from the route table: every GET
+    route whose own endpoint declares a public read action, plus every action
+    of the `/query/{action}` dispatch family that `is_public_read` calls
+    public. Not a sample — the whole derivation."""
+    gates = []
+    for route in router.routes:
+        declaration = getattr(route.endpoint, _DECL, None)
+        if not declaration or declaration[0] != "read":
+            continue
+        methods = sorted(route.methods - {"HEAD", "OPTIONS"})
+        if methods == ["GET"]:
+            if declaration[1] is not None and is_public_read(declaration[1]):
+                gates.append(("GET", _fill(route.path, pid), declaration[1]))
+        elif methods == ["POST"] and route.path.endswith("/query/{action}"):
+            for action in sorted(READ_REQUESTS):
+                if is_public_read(action):
+                    gates.append(("POST", f"/api/state/query/{action}", action))
+    return gates
+
+
+def test_public_gate_table_unopened_opened_closed(monkeypatch, tmp_path):
+    """Criterion 1's table: gate -> project state -> bare status code, over the
+    ENTIRE public-gate set derived from the route table. No gate may answer
+    with anything but 403 while the project is unopened or closed back; the
+    same gates must recover (not 403) once it is opened."""
+    app, router, service = _build(tmp_path)
+    _seed(service, "table-pid", "TABLE-TITLE", "TABLE-GOAL", "TABLE-SECRET-9")
+    _arm(monkeypatch)
+    gates = _every_public_gate(router, "table-pid")
+    assert gates, "route table yielded no public gates - derivation is broken"
+
+    def sweep():
+        rows = []
+        with TestClient(app) as client:
+            for method, path, action in gates:
+                if method == "GET":
+                    r = client.get(path)
+                else:
+                    r = client.post(path, json=_arguments(action))
+                rows.append((f"{method} {path}", action, r.status_code))
+        return rows
+
+    def table(rows_unopened, rows_open, rows_closed):
+        head = "gate | action | unopened | opened | closed-back"
+        lines = [head, "-" * len(head)]
+        for (gate, action, u), (_, _, o), (_, _, c) in zip(rows_unopened, rows_open, rows_closed):
+            lines.append(f"{gate} | {action} | {u} | {o} | {c}")
+        return "\n".join(lines)
+
+    rows_unopened = sweep()
+    with TestClient(app) as client:
+        bodies = {"list_projects": client.get("/api/state/projects").text,
+                  "project_catalog": client.post("/api/state/query/project_catalog",
+                                                 json={"limit": 100}).text}
+    service.open_project("table-pid")
+    rows_opened = sweep()
+    with TestClient(app) as client:
+        assert client.get("/api/state/projects/table-pid/overview").status_code == 200
+        assert client.post("/api/state/query/get_graph",
+                           json={"project_id": "table-pid"}).status_code == 200
+        assert client.get("/api/state/projects/table-pid/nodes/a").status_code == 200
+    service.close_project("table-pid")
+    rows_closed = sweep()
+
+
+    # Two public gates are NOT project-scoped and the owner ruled their action
+    # classification unchanged: the catalog/list (which filters, tested
+    # elsewhere) and a 422 for a malformed argument. They stay in the table;
+    # here we pin that neither names the unopened project.
+    CATALOG_GATES = {"list_projects", "project_catalog"}
+
+    def scoped(gate, action):
+        return "table-pid" in gate and action not in CATALOG_GATES
+
+    assert "table-pid" not in bodies["list_projects"] \
+        and "TABLE-TITLE" not in bodies["list_projects"], bodies["list_projects"]
+
+    assert all(code == 403 for (gate, action, code) in rows_unopened
+               if scoped(gate, action)), \
+        "UNOPENED:\n" + table(rows_unopened, rows_opened, rows_closed)
+    assert all(code == 403 for (gate, action, code) in rows_closed
+               if scoped(gate, action)), \
+        "CLOSED BACK:\n" + table(rows_unopened, rows_opened, rows_closed)
+    # Recovery: no project-scoped gate keeps refusing once opened, and the core
+    # corpus doors answer 200 with the project's real content.
+    assert all(code != 403 for (gate, action, code) in rows_opened
+               if scoped(gate, action)), \
+        "OPENED:\n" + table(rows_unopened, rows_opened, rows_closed)
+

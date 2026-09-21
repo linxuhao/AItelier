@@ -19,6 +19,7 @@ from core.agents import AgentFactory
 from core.workspace_manager import WorkspaceManager, DPE_GRAPH_NAME
 from core.prompt_assembler import (PromptAssembler, build_language_instruction,
                                    is_mutation_tool)
+from core.ai_router import OUTPUT_CAP_CEILING
 
 
 def _repair_json_content(raw: str) -> str | None:
@@ -150,14 +151,71 @@ def _relay_progress_context(value: Any) -> dict | None:
     return None
 
 
+_OUTPUT_BUDGET_HALF = 0.5
+
+
+def _output_budget_state(*, completion_tokens: int, reasoning_tokens: int,
+                         peak_turn_completion: int, peak_turn_cap: int,
+                         max_output_tokens: int, cap_at_start: int,
+                         escalations_used: int) -> dict:
+    """The step's OTHER budget, stated in the same shape as the turn budget.
+
+    A step has two ways to run out and only one of them used to be counted.
+    attempt-c5aae131eaa246d0bc6d7c72864aea0f (2026-09-20, coding_impl step
+    "implement") died at turn 20 of a 100-turn budget with `written_files ==
+    []`: 20% of the turn budget, 100% of the output budget. The half-budget
+    guard below reads `turn >= max_turns // 2`, so on that curve it could not
+    fire by construction — 50 turns would never arrive.
+
+    The step dies when ONE turn fills `max_output_tokens` and no escalation is
+    left (`NativeOutputCapExhausted`), so "how much of the output budget is
+    gone" is measured PER TURN: `spent_fraction` is the largest share of the
+    then-current cap that any single turn consumed. On the reference curve that
+    crosses half at turn 15 (19251/32768 = 0.587), four turns before the wall.
+    The cumulative token totals and `escalations_remaining` say how much room
+    is left; the peak says how close the cliff already is.
+
+    Raising a cap is NOT the remedy and nothing here changes one: landing on
+    OUTPUT_CAP_CEILING means the step needs a smaller prompt or less reasoning,
+    not a bigger budget (see the ceiling branch in the native turn loop).
+    """
+    rungs = 0
+    cap = max(1, int(cap_at_start or 0))
+    while cap < OUTPUT_CAP_CEILING:
+        cap *= 2
+        rungs += 1
+    used = max(0, int(escalations_used))
+    spent = (peak_turn_completion / peak_turn_cap) if peak_turn_cap else 0.0
+    return {
+        "completion_tokens": int(completion_tokens),
+        "reasoning_tokens": int(reasoning_tokens),
+        "max_output_tokens": int(max_output_tokens),
+        "cap_at_start": int(cap_at_start),
+        "escalations_used": used,
+        "escalations_remaining": max(0, rungs - used),
+        "peak_turn_completion_tokens": int(peak_turn_completion),
+        "peak_turn_cap": int(peak_turn_cap),
+        "spent_fraction": round(spent, 4),
+        "half_spent": spent >= _OUTPUT_BUDGET_HALF,
+    }
+
+
 def _should_intervene_early(*, turn: int, max_turns: int, writable: bool,
-                            written_files: list[str], already_intervened: bool) -> bool:
-    """True once, at half budget, for a writable step without a first write."""
+                            written_files: list[str], already_intervened: bool,
+                            output_budget_spent: float = 0.0) -> bool:
+    """True once, at half of EITHER budget, for a writable step without a write.
+
+    `output_budget_spent` is `_output_budget_state()["spent_fraction"]`. The
+    turn side is byte-identical to what it was; the output side is the budget
+    nobody was watching. Either half being gone with nothing written is the
+    same fact and gets the same intervention.
+    """
     return (
         writable
         and not written_files
         and not already_intervened
-        and turn >= max(1, max_turns // 2)
+        and (turn >= max(1, max_turns // 2)
+             or output_budget_spent >= _OUTPUT_BUDGET_HALF)
     )
 
 
@@ -248,8 +306,19 @@ def _remaining_delivery(*, written_files: list[str],
 def _budget_failure_report(*, max_turns: int, first_write_turn: int | None,
                            written_files: list[str], reads_searches: int,
                            tool_failures: int, expansion_requests: list[dict],
-                           relay: dict | None) -> dict:
-    """Classify exhausted work without hiding overlapping failure modes."""
+                           relay: dict | None, turns_used: int | None = None,
+                           output_budget: dict | None = None,
+                           budget_exhausted: str = "turn") -> dict:
+    """Classify exhausted work without hiding overlapping failure modes.
+
+    `budget_exhausted` names WHICH budget ran out and the two budgets are
+    reported side by side, never merged into one number: "split the card" and
+    "shrink the prompt" are opposite remedies, and the director picks between
+    them from exactly this pair. Before 2026-09-21 this report was only ever
+    built on the turn-exhaustion path, so an output-cap death
+    (attempt-c5aae131eaa246d0bc6d7c72864aea0f: turn 20 of 100) carried no
+    attribution at all.
+    """
     halfway = max(1, max_turns // 2)
     classes: list[str] = []
     late_write = first_write_turn is None or first_write_turn > halfway
@@ -280,6 +349,12 @@ def _budget_failure_report(*, max_turns: int, first_write_turn: int | None,
                 strategies.append(strategy)
 
     return {
+        "budget_exhausted": budget_exhausted,
+        "turn_budget": {
+            "turns_used": turns_used,
+            "max_turns": max_turns,
+        },
+        "output_budget": dict(output_budget or {}),
         "first_write_turn": first_write_turn,
         "written_files": sorted(set(written_files)),
         "reads_searches": reads_searches,
@@ -3334,6 +3409,16 @@ class PipelineEngine:
             _resumed.get("expansion_requests") or []
         )
         early_progress_intervened = False
+        # The output budget, counted alongside the turn budget for the whole
+        # step (all attempts): the gateway that owns the cap is built once per
+        # step, so its escalation ladder is a step-level resource.
+        output_completion_tokens = 0
+        output_reasoning_tokens = 0
+        output_peak_fill = 0.0
+        output_peak_completion = 0
+        output_peak_cap = 0
+        output_escalations_used = 0
+        output_cap_at_start = 0
         relay_acknowledged = not bool(relay_progress)
         relay_read_limit = (
             max(4, 3 * len(relay_progress["retained_files"]))
@@ -3592,6 +3677,18 @@ class PipelineEngine:
                         tool_failures=tool_failures,
                         expansion_requests=expansion_requests,
                         relay=relay_progress,
+                        turns_used=turn_count,
+                        budget_exhausted="turn",
+                        output_budget=_output_budget_state(
+                            completion_tokens=output_completion_tokens,
+                            reasoning_tokens=output_reasoning_tokens,
+                            peak_turn_completion=output_peak_completion,
+                            peak_turn_cap=output_peak_cap,
+                            max_output_tokens=int(getattr(
+                                agent.gateway, "max_output_tokens", 0) or 0),
+                            cap_at_start=output_cap_at_start,
+                            escalations_used=output_escalations_used,
+                        ),
                     )
                     self._trace("step", "turn_budget_exhausted", {
                         "step_id": step_id, "turns": turn_count,
@@ -3612,17 +3709,41 @@ class PipelineEngine:
                 remaining = current_max_turns - turn_count
                 # Intervene at half of the ORIGINAL writable-step budget. Later
                 # grants must not postpone the signal that no code has landed.
+                output_budget = _output_budget_state(
+                    completion_tokens=output_completion_tokens,
+                    reasoning_tokens=output_reasoning_tokens,
+                    peak_turn_completion=output_peak_completion,
+                    peak_turn_cap=output_peak_cap,
+                    max_output_tokens=int(getattr(
+                        agent.gateway, "max_output_tokens", 0) or 0),
+                    cap_at_start=output_cap_at_start,
+                    escalations_used=output_escalations_used,
+                )
                 if (implementation_progress_enabled and _should_intervene_early(
                         turn=turn_count, max_turns=max_turns,
                         writable=bool(write_tool_names),
                         written_files=(written_files if first_write_turn is None
                                        else ["<repository mutation>"]),
-                        already_intervened=early_progress_intervened)):
+                        already_intervened=early_progress_intervened,
+                        output_budget_spent=output_budget["spent_fraction"])):
                     early_progress_intervened = True
+                    # Which budget got us here changes nothing about what the
+                    # agent must do next, but naming it stops the agent from
+                    # reading "turn 16/100" and concluding it has room.
+                    trigger = ("output_budget"
+                               if turn_count < max(1, max_turns // 2)
+                               else "turn_budget")
+                    spent_pct = int(round(output_budget["spent_fraction"] * 100))
+                    budget_line = (
+                        f"turn {turn_count}/{max_turns}; output budget "
+                        f"{spent_pct}% of one turn's {output_budget['max_output_tokens']}-token "
+                        f"cap already spent by a single turn, "
+                        f"{output_budget['escalations_remaining']} cap escalation(s) left"
+                    )
                     messages.append({
                         "role": "user",
                         "content": (
-                            f"[Early progress intervention at turn {turn_count}/{max_turns}] "
+                            f"[Early progress intervention at {budget_line}] "
                             f"No repository write after {reads_searches} repository "
                             "read/search/list calls. Stop broad exploration. Write the "
                             "smallest compilable, testable slice from the approved plan now. "
@@ -3638,6 +3759,8 @@ class PipelineEngine:
                         "first_write_turn": first_write_turn,
                         "written_files": [],
                         "reads_searches": reads_searches,
+                        "trigger": trigger,
+                        "output_budget": output_budget,
                         "action": "demand_write_or_split_external",
                     })
                 # A LOW BUDGET IS NEWS EVEN WHEN OUTPUT EXISTS.
@@ -3775,7 +3898,21 @@ class PipelineEngine:
                 # usage so a run's cache hit-ratio can be aggregated from traces.
                 usage = getattr(agent.gateway, "last_usage", {}) or {}
                 outbound = getattr(agent.gateway, "last_outbound", {}) or {}
+                # The cap this turn actually ran under: escalation happens
+                # further down, so reading it here attributes the spend to the
+                # budget that was in force when it was spent.
+                cap_this_turn = int(getattr(agent.gateway, "max_output_tokens", 0) or 0)
+                if not output_cap_at_start:
+                    output_cap_at_start = cap_this_turn
                 if usage:
+                    turn_completion = int(usage.get("completion_tokens") or 0)
+                    output_completion_tokens += turn_completion
+                    output_reasoning_tokens += int(usage.get("reasoning_tokens") or 0)
+                    turn_fill = (turn_completion / cap_this_turn) if cap_this_turn else 0.0
+                    if turn_fill > output_peak_fill:
+                        output_peak_fill = turn_fill
+                        output_peak_completion = turn_completion
+                        output_peak_cap = cap_this_turn
                     self._trace("usage", "token_usage", {
                         "step_id": step_id, "attempt": attempt,
                         "turn": turn_count + 1,
@@ -3853,6 +3990,7 @@ class PipelineEngine:
                     detail = {**starved, "previous_cap": previous_cap,
                               "new_cap": escalated}
                     if escalated:
+                        output_escalations_used += 1
                         # Carry it into the next claim of this role, so the
                         # ladder is climbed once per process, not once per card.
                         try:
@@ -3909,7 +4047,33 @@ class PipelineEngine:
                                         f"cannot escalate"),
                         })
                         self._trace("response", "output_cap_ceiling", detail)
-                        incomplete = {**detail, "written_files": sorted(set(written_files))}
+                        # An attempt that ends here ran out of OUTPUT, not
+                        # turns. Say so, next to how much of the turn budget was
+                        # still unspent, so the remedy chosen is the right one.
+                        failure = _budget_failure_report(
+                            max_turns=current_max_turns,
+                            first_write_turn=first_write_turn,
+                            written_files=written_files,
+                            reads_searches=reads_searches,
+                            tool_failures=tool_failures,
+                            expansion_requests=expansion_requests,
+                            relay=relay_progress,
+                            turns_used=turn_count + 1,
+                            budget_exhausted="output",
+                            output_budget=_output_budget_state(
+                                completion_tokens=output_completion_tokens,
+                                reasoning_tokens=output_reasoning_tokens,
+                                peak_turn_completion=output_peak_completion,
+                                peak_turn_cap=output_peak_cap,
+                                max_output_tokens=previous_cap,
+                                cap_at_start=output_cap_at_start,
+                                escalations_used=output_escalations_used,
+                            ),
+                        )
+                        incomplete = {**detail,
+                                      "written_files": sorted(set(written_files)),
+                                      "early_progress_intervened": early_progress_intervened,
+                                      **failure}
                         self._trace("step", "output_cap_exhausted", incomplete)
                         self._emit("output_cap_exhausted", incomplete)
                         raise NativeOutputCapExhausted(
@@ -4254,6 +4418,32 @@ class PipelineEngine:
                     "turn": turn_count + 1, "mode": "native",
                     "preview": f"Executed {len(result.tool_calls)} tool call(s)",
                 })
+
+            # BOTH budgets, on the way out of every step — not only the ones
+            # that died. A step that finished at 95% of its output cap and one
+            # that finished at 5% left identical traces, so the only way to
+            # learn a role was running hot was to wait for it to die
+            # (attempt-c5aae131eaa246d0bc6d7c72864aea0f). Reported side by
+            # side, never merged: the remedies point in opposite directions.
+            self._trace("step", "step_budget", {
+                "step_id": step_id, "attempt": attempt,
+                "budget_exhausted": None,
+                "turn_budget": {"turns_used": turn_count + 1,
+                                "max_turns": current_max_turns},
+                "output_budget": _output_budget_state(
+                    completion_tokens=output_completion_tokens,
+                    reasoning_tokens=output_reasoning_tokens,
+                    peak_turn_completion=output_peak_completion,
+                    peak_turn_cap=output_peak_cap,
+                    max_output_tokens=int(getattr(
+                        agent.gateway, "max_output_tokens", 0) or 0),
+                    cap_at_start=output_cap_at_start,
+                    escalations_used=output_escalations_used,
+                ),
+                "first_write_turn": first_write_turn,
+                "written_files": sorted(set(written_files)),
+                "early_progress_intervened": early_progress_intervened,
+            })
 
             if not written_files and agent_signaled_done:
                 # Agent explicitly called finish_step without writing — a

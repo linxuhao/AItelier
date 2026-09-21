@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
-  import { stateOverview, stateAttempts, stateRefreshProject, stateDriverNote } from '../lib/api';  import { stateOverview, stateAttempts, stateRefreshProject } from '../lib/api';
+  import { stateOverview, stateAttempts, stateRefreshProject, stateDriverNote } from '../lib/api';
   import { attemptLabel, exactRunHref, stateReadyActionCounts, type StateOverview, type StateAttempt } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateGraph from './StateGraph.svelte';
@@ -29,17 +29,17 @@
   const canWrite = $derived($authStore.canWrite);
   let denied = $state(false);
   let note = $state<{ revision: number; updated_at: string; permanent: string; temporary: string } | null>(null);
-  let noteError = $state(''), noteGeneration = 0;  const allowed = $derived($authStore.permissionResolved && $authStore.canWrite);
+  let noteError = $state(''), noteGeneration = 0;
   const readyActions = $derived(data ? stateReadyActionCounts(data.nodes, data.ready_action_counts) : { candidate_review: 0, new_attempt: 0 });
   $effect(() => {
-    const project = params.id, wanted = params.nodeKey, permitted = canRead; void retry;    const project = params.id, wanted = params.nodeKey, canRead = allowed; void retry;
+    const project = params.id, wanted = params.nodeKey, permitted = canRead; void retry;
     const version = ++generation;
     const routeSelectionChanged = project !== priorProject || (wanted ?? '') !== priorWanted;
     priorWanted = wanted ?? '';
-    if (project !== priorProject) { data = null; selected = ''; attempts = []; next = null; tab = 'graph'; notice = ''; syncNext = null; denied = false; }    if (project !== priorProject) { data = null; selected = ''; attempts = []; next = null; tab = 'graph'; notice = ''; syncNext = null; }
+    if (project !== priorProject) { data = null; selected = ''; attempts = []; next = null; tab = 'graph'; notice = ''; syncNext = null; denied = false; }
     priorProject = project;
     error = '';
-    if (!permitted) { data = null; attempts = []; selected = ''; loading = false; return; }    if (!canRead) { data = null; attempts = []; selected = ''; loading = false; return; }
+    if (!permitted) { data = null; attempts = []; selected = ''; loading = false; return; }
     loading = true;
     stateOverview(project).then(result => {
       if (version !== generation) return;
@@ -47,7 +47,7 @@
       if (wanted && (routeSelectionChanged || !selected) && result.nodes.some(n => n.node_key === wanted)) selected = wanted;
       else if (!result.nodes.some(n => n.node_key === selected)) selected = result.nodes[0]?.node_key ?? '';
       detailRefresh++;
-    }).catch(e => { if (version === generation) { error = String(e.message ?? e); if (e.status === 403) { data = null; denied = true; } } })    }).catch(e => { if (version === generation) { error = String(e.message ?? e); if (e.status === 403) data = null; } })
+    }).catch(e => { if (version === generation) { error = String(e.message ?? e); if (e.status === 403) { data = null; denied = true; } } })
       .finally(() => { if (version === generation) loading = false; });
     return () => { generation++; };
   });
@@ -63,9 +63,9 @@
       .catch(e => { if (version === noteGeneration) noteError = String(e.message ?? e); });
     return () => { noteGeneration++; };
   });
-  $effect(() => {  $effect(() => {
+  $effect(() => {
     const project = params.id, activeTab = tab, permitted = canRead; void detailRefresh;
-    if (!permitted || activeTab !== 'runs') return;    if (!canRead || activeTab !== 'runs') return;
+    if (!permitted || activeTab !== 'runs') return;
     let cancelled = false; const version = ++runGeneration;
     runLoading = true; runError = '';
     stateAttempts(project).then(result => { if (!cancelled && version === runGeneration) { attempts = result.attempts; next = result.next_after; } })
@@ -96,7 +96,7 @@
   // The dashboard follows persisted state without executing a reconciliation
   // or approving anything. Hidden tabs do not generate background requests.
   onMount(()=>{
-    const timer=setInterval(()=>{if(canRead && !loading && !syncing && document.visibilityState==='visible')retry++;},15000);    const timer=setInterval(()=>{if(allowed && !loading && !syncing && document.visibilityState==='visible')retry++;},15000);
+    const timer=setInterval(()=>{if(canRead && !loading && !syncing && document.visibilityState==='visible')retry++;},15000);
     return ()=>clearInterval(timer);
   });
   function selectNode(key: string) { selected = key; }
@@ -104,7 +104,7 @@
 
 <section class="state-project" class:compact>
   <nav class="breadcrumbs"><a href="#/state-projects">{st('projects')}</a><span>/</span><span>{params.id}</span></nav>
-  {#if !canRead || denied}<p role="status">{st('private')}</p>  {#if !allowed}<p role="status">{st('private')}</p>
+  {#if !canRead || denied}<p role="status">{st('private')}</p>
   {:else}
     {#if error}<div class="error" role="alert"><p>{data ? st('staleView') : ''} {error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button></div>{/if}
     {#if !data && loading}<p aria-live="polite">{st('loading')}</p>{/if}

@@ -38,6 +38,25 @@ description: >
   at all the gate records a distinct, non-passing infrastructure_unavailable
   outcome. Reports are artifacts, not source files; a code
   agent can read its report with read(source="self", path="test_report.json").
+  A gate that did NOT run opts in separately, with one whole line:
+  `AITELIER_REPO_GATE_UNMEASURED={"state":"unmeasured|not_run|blocked","reason":"..."}`.
+  `state` must be one of those three; `failed` / `red` never qualify, so one
+  line cannot turn a red into an absence. UNMEASURED is DECLARED and never
+  inferred: no exit code produces it (the game repo's own gate uses 2 for
+  `incomplete`, which includes contract files the implementer wrote wrong —
+  "no authored scenarios found ... an empty one is not a pass" — and those are
+  MEASURED failures with a non-empty `failures[]`), and a timeout is the
+  harness's own observation of the absence. The declaration is read from the
+  gate's WHOLE output BEFORE the 2000-byte tail is retained, so it survives a
+  real gate's log; a gate that says it did not run is then RE-ACQUIRED — the
+  tool runs it again (up to `REPO_GATE_UNMEASURED_ATTEMPTS` runs,
+  `REPO_GATE_RETRY_DELAY_SECONDS` apart) and folds in only the verdict it
+  finally gets, so a first contention spends no implement cycle and does not
+  end the run. `repo_gate.measured` is `measured_pass` | `measured_fail` |
+  `unmeasured` and `repo_gate.attempts` says how many runs the reading cost;
+  only a `measured_pass` licenses pruning that gate's known-red cases, and
+  `repo_gate_unmeasured: true` marks a gate that stayed silent through every
+  re-acquisition.
 parameters:
   project_root:
     type: string

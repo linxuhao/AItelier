@@ -542,7 +542,16 @@ def _find_node_project(repo: Path) -> Path | None:
 
 
 def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int) -> dict:
-    """Run one npm command in its own process group; kill the tree on timeout."""
+    """Run one npm command in its own process group; kill the tree on timeout.
+
+    `output` is a bounded TAIL, and `output_truncated` says so. The one thing
+    NOT read from that tail is a gate's own declaration record: the whole text
+    is scanned BEFORE the bound is applied, because a real gate's log (a
+    GDScript compile plus a play-through) runs to tens of kilobytes, and a
+    declaration that is only readable while the run stays short is not
+    readable at all. `timed_out` / `runner_error` are the framework OBSERVING
+    that nothing was measured — never inferred from `returncode`.
+    """
     proc = None
     try:
         proc = subprocess.Popen(
@@ -556,14 +565,15 @@ def _run_node_cmd(pkg_dir: Path, args: list[str], timeout: int) -> dict:
         out = ((stdout or "") + "\n" + (stderr or "")).strip()
         return {"passed": proc.returncode == 0,
                 "returncode": proc.returncode, "output": out[-2000:],
-                "output_truncated": len(out) > 2000}
+                "output_truncated": len(out) > 2000,
+                "unmeasured_declaration": _unmeasured_declaration(out)}
     except subprocess.TimeoutExpired:
         _kill_group(proc)
-        return {"passed": False, "returncode": -1,
+        return {"passed": False, "returncode": -1, "timed_out": True,
                 "output": f"timed out after {timeout}s: {' '.join(args)}"}
     except Exception as e:
         _kill_group(proc)
-        return {"passed": False, "returncode": -1,
+        return {"passed": False, "returncode": -1, "runner_error": True,
                 "output": f"{type(e).__name__}: {e}"}
 
 
@@ -650,6 +660,11 @@ def _run_repo_gate(repo: Path) -> dict | None:
         return None
     result = _run_node_cmd(repo, ["bash", str(script)], REPO_GATE_TIMEOUT)
     result["script"] = REPO_GATE_SCRIPT
+    # ONE word for what this run of the gate is WORTH: `measured_pass`,
+    # `measured_fail` or `unmeasured`. It is read by the fold in `run_tests`,
+    # re-read by `_acquire_repo_gate`, and lands in every report a reviewer
+    # sees. It is never the exit code alone — see `_repo_gate_outcome`.
+    result["measured"] = _repo_gate_outcome(result)
     return result
 
 
@@ -673,6 +688,132 @@ _GATE_RE = re.compile(r"^((?:node|repo_gate):\S+)")
 _REPO_GATE_CASE_PREFIX = "AITELIER_REPO_GATE_CASE="
 _REPO_GATE_CASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,199}$")
 
+# ── UNMEASURED is DECLARED, never inferred ─────────────────────────────────
+#
+# A repository opts in to saying "I did not run" by emitting one whole line:
+#
+#   AITELIER_REPO_GATE_UNMEASURED={"state":"blocked","reason":"..."}
+#
+# `state` must be one of `_REPO_GATE_UNMEASURED_STATES`. Nothing else in a
+# gate's output produces that reading, and in particular an EXIT CODE never
+# can. `2` is NOT "the engine never ran": the game repo's own gate uses it for
+# `incomplete`, which includes contract files the implementer wrote wrong
+# ("no authored scenarios found ... an empty one is not a pass"), and those
+# are MEASURED failures that have to stay visible with a non-empty failures[].
+_REPO_GATE_UNMEASURED_PREFIX = "AITELIER_REPO_GATE_UNMEASURED="
+_REPO_GATE_UNMEASURED_STATES = frozenset({"unmeasured", "not_run", "blocked"})
+
+REPO_GATE_MEASURED_PASS = "measured_pass"
+REPO_GATE_MEASURED_FAIL = "measured_fail"
+REPO_GATE_UNMEASURED = "unmeasured"
+
+# How many runs a gate gets before its declared absence is reported as the end
+# of the story (one initial run plus this many re-acquisitions), and how long
+# to wait between them. This is what keeps the FIRST contention from killing
+# the round: the tool spends no implement cycle and reaches no verdict, it
+# just asks the gate again once the resource is free.
+REPO_GATE_UNMEASURED_ATTEMPTS = 3
+REPO_GATE_RETRY_DELAY_SECONDS = 60
+
+
+def _unmeasured_declaration(text: str) -> dict | None:
+    """The gate's OWN statement that it did not measure, or None.
+
+    A declaration is a whole line that STARTS with the prefix — a log echo of
+    the prefix in the middle of a line is not a record — carrying a JSON
+    object whose `state` is one of `_REPO_GATE_UNMEASURED_STATES`.
+    `state: "failed"` is not one of them: a gate that failed measured
+    something, and one line must never be able to turn that red into an
+    absence.
+    """
+    for line in str(text).splitlines():
+        if not line.startswith(_REPO_GATE_UNMEASURED_PREFIX):
+            continue
+        raw = line[len(_REPO_GATE_UNMEASURED_PREFIX):]
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        state = str(value.get("state") or "").strip().lower()
+        if state not in _REPO_GATE_UNMEASURED_STATES:
+            continue
+        return {"state": state,
+                "reason": str(value.get("reason") or "")[:500]}
+    return None
+
+
+def _repo_gate_declares_unmeasured(gate: dict) -> bool:
+    """Did this run of the repo gate declare that it did not measure?"""
+    if gate.get("unmeasured_declaration") is not None:
+        return True
+    if gate.get("output_truncated"):
+        # Only a fragment was retained and it was not scanned whole, so
+        # nothing in it is a record: the declaration could have been cut out of
+        # the middle, and half a line still looks like a line.
+        return False
+    return _unmeasured_declaration(str(gate.get("output", ""))) is not None
+
+
+def _repo_gate_outcome(gate: dict) -> str:
+    """`measured_pass`, `measured_fail` or `unmeasured`, for ONE gate run.
+
+    UNMEASURED has exactly two sources and both are the framework OBSERVING
+    the absence itself: the gate's own declaration, and a run this harness
+    killed or could not start (`timed_out` / `runner_error`). `returncode` is
+    never one of them — it only ever splits 0 (`measured_pass`) from
+    everything else, including -1, 2, 124, 137 and 255 (`measured_fail`). A
+    timeout is the framework's own observation, exactly like the pytest wall
+    whose `skipped_because="pytest_timeout"` this aligns with.
+    """
+    if _repo_gate_declares_unmeasured(gate):
+        return REPO_GATE_UNMEASURED
+    if gate.get("timed_out") is True or gate.get("runner_error") is True:
+        return REPO_GATE_UNMEASURED
+    return (REPO_GATE_MEASURED_PASS if gate.get("returncode") == 0
+            else REPO_GATE_MEASURED_FAIL)
+
+
+def _retry_delay_seconds() -> float:
+    """Seconds between re-acquisitions of an unmeasured gate.
+
+    The env override exists so a drill can exercise the re-acquisition path
+    without waiting out the production pause; it is read at CALL time, so the
+    value is the one the process holds when the gate is actually re-run.
+    """
+    raw = os.environ.get("AITELIER_REPO_GATE_RETRY_DELAY_SECONDS")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return REPO_GATE_RETRY_DELAY_SECONDS
+
+
+def _acquire_repo_gate(repo: Path, run_gate=None, sleep=None) -> dict | None:
+    """Run the repo gate, RE-ACQUIRING the verdict while it is unmeasured.
+
+    A gate that did not run has decided nothing, so it may not spend the
+    loop's implement cycle and it may not end the run: the tool asks the gate
+    again instead. Only the verdict it finally gets is folded in. `attempts`
+    stays on the returned dict so a reviewer can see that the reading cost two
+    runs rather than one.
+    """
+    run_gate = _run_repo_gate if run_gate is None else run_gate
+    sleep = time.sleep if sleep is None else sleep
+    gate = run_gate(repo)
+    attempts = 1
+    while (gate is not None
+           and gate.get("measured") == REPO_GATE_UNMEASURED
+           and attempts < REPO_GATE_UNMEASURED_ATTEMPTS):
+        sleep(_retry_delay_seconds())
+        attempts += 1
+        gate = run_gate(repo)
+    if gate is not None:
+        gate["attempts"] = attempts
+    return gate
+    return gate
 
 def _repo_gate_failure_cases(gate: dict) -> tuple[list[dict], str | None]:
     """Read trustworthy per-case identities from one failed repository gate.
@@ -1251,15 +1392,31 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
     # gate of its own (dpe_game's 5_compile). Everywhere else the default
     # stands: a green pytest over a product pytest cannot compile is not a pass.
     if repo_gate and repo is not None and repo.exists():
-        gate = _run_repo_gate(repo)
+        gate = _acquire_repo_gate(repo)
         if gate is not None:
             report["repo_gate"] = gate
-            # The gate ran: every case it did NOT report as failed passed, so a
-            # known-red case of its own may be pruned. A gate that did not run
-            # (no run_tests.sh, `repo_gate: false`) leaves this None and its
-            # keys stay known-red.
-            executed.repo_gate_cases = set()
-            if not gate["passed"]:
+            outcome = gate["measured"]
+            if outcome == REPO_GATE_UNMEASURED:
+                # The gate said it did not run and re-acquiring the verdict
+                # did not get one either. Nothing was measured: there is no
+                # case list to prune from and no failure of the implementer's
+                # to read out of it. Say exactly that; never invent a red, and
+                # never let one be forgiven by a gate that stayed silent.
+                executed.repo_gate_cases = None
+                report["passed"] = False
+                report["repo_gate_unmeasured"] = True
+                report["failures"].append(
+                    f"repo_gate:{gate['script']} was NOT measured "
+                    f"({gate.get('attempts', 1)} attempt(s)): "
+                    f"{gate['output'][-1500:]}")
+            elif outcome == REPO_GATE_MEASURED_PASS:
+                # The gate ran and reported nothing failed: every case it
+                # knows about passed, so a known-red case of its own may be
+                # pruned. A gate that did not run at all (no run_tests.sh,
+                # `repo_gate: false`) leaves this None and its keys stay
+                # known-red.
+                executed.repo_gate_cases = set()
+            else:
                 report["passed"] = False
                 cases, identity_error = _repo_gate_failure_cases(gate)
                 if identity_error is not None:

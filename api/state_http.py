@@ -5,7 +5,8 @@ from typing import Annotated, Literal
 from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execute,
-                                 is_public_read)
+                                                                  is_public_read, ProjectPrivate)
+from starlette.responses import JSONResponse
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 
 
@@ -21,6 +22,20 @@ _DECLARATION = "_state_route"
 # written down as a NAME so it is a decision somebody made, not a route somebody
 # forgot.
 SCHEMA_DECLARED_ACTION = "get_state_schema"
+
+
+def apply_project_privacy(app):
+    """Map a project-privacy refusal raised at the `execute` chokepoint to a 403 on
+    EVERY route of `app` — including one a route author forged by reusing the real
+    guard and declaring a public action. The forged handler obtains a private body
+    only by calling `execute`, which raises; this handler turns that raise into a
+    403 whose text is a generic 'not available', never the body. Honest routes get
+    the same 403 from `_call`. Registered on the product app (api/main) and on the
+    second assembly point (api/state_only)."""
+
+    @app.exception_handler(ProjectPrivate)
+    async def _project_private(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=403)
 
 
 def create_state_router(service_dependency, access_dependency, read_dependency=None):
@@ -75,6 +90,12 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     def _call(service, action, arguments, *, write=False):
         try:
             return execute(service, action, arguments, allow_write=write)
+        except ProjectPrivate as exc:
+            # An anonymous caller reached a project nobody opened (or one that
+            # does not exist) via `execute` — the guard, the action table and the
+            # route declaration are all irrelevant to this refusal, which is why
+            # a route author cannot bypass it by forging a declaration.
+            raise HTTPException(403, str(exc)) from exc
         except StateNotFound as exc:
             raise HTTPException(404, str(exc)) from exc
         except StateConflict as exc:
@@ -315,5 +336,15 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         return _call(service, "run_owners", {"run_id": run_id})
 
     _declare(router.get("/runs/{run_id}/owners")(run_owners), "read", "run_owners")
+
+    def open_project(project_id: str, service=Depends(service_dependency)):
+        return _call(service, "open_project", {"project_id": project_id}, write=True)
+
+    _declare(router.post("/projects/{project_id}/open")(open_project), "write")
+
+    def close_project(project_id: str, service=Depends(service_dependency)):
+        return _call(service, "close_project", {"project_id": project_id}, write=True)
+
+    _declare(router.post("/projects/{project_id}/close")(close_project), "write")
 
     return router

@@ -160,3 +160,22 @@ def require_reader(request: Request) -> None:
         raise HTTPException(status_code=403,
                             detail=DENIAL_MESSAGES[read_code],
                             headers={"X-AItelier-Denial": read_code})
+
+
+def may_read_private(request: Request) -> bool:
+    """Whether THIS request's identity may read a project nobody has opened.
+
+    Identical verdict to `require_reader`/`require_writer` — whoever may read the
+    notebooks is whoever may read an unopened project — but returned as a bool so
+    the State transport can record it on the service and `core.state_commands.execute`
+    can consult it WITHOUT going through the route guard. That placement is what
+    makes project privacy survive the guard-shape hole: a forged route that makes
+    the guard stand down cannot make this decision, because it is taken once per
+    request from the raw credential and stored on the shared service. Test mode and
+    an unconfigured gate mean trusted, exactly as every other verdict does.
+    """
+    if getattr(request.app.state, "_test_mode", False):
+        return True
+    if not gate_enabled():
+        return True
+    return write_denial_reason(request) is None

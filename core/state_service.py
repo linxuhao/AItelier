@@ -49,7 +49,13 @@ def state_seed_text(context: dict, dependency_receipts, relay: bool) -> str:
 
 
 class StateService:
-    def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator", runtime_factory=None):
+    def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator", runtime_factory=None, project_read_trusted=True):
+        # Whether the caller behind THIS service may read a project nobody opened.
+        # The State HTTP transport sets it False for an unauthenticated visitor; the
+        # internal driver, MCP and every direct construction default to True, so the
+        # privacy gate in `core.state_commands.execute` only ever NARROWS a surface
+        # a caller already had — it can never widen what is public.
+        self.project_read_trusted = project_read_trusted
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
         self.store = StateGraphStore(db)
         from core.state_driver_notes import StateDriverNotes
@@ -81,6 +87,21 @@ class StateService:
         if source_project_id and not self.db.get_project(source_project_id):
             raise StateGraphError("source_project_id must name an existing AItelier source project")
         return self.store.create_project(project_id, title, source_project_id)
+
+    def open_project(self, project_id):
+        """The recorded, writer-only decision to publish a project to anonymous
+        readers. Opening happens HERE and nowhere else — no other write path
+        reaches it, so creating a project, running a round, verifying a node or
+        importing never opens it. It reads back state/who/when and reverses."""
+        return self.store.set_project_access(project_id, "public", self.actor)
+
+    def close_project(self, project_id):
+        """The recorded decision to withdraw a project from anonymous readers."""
+        return self.store.set_project_access(project_id, "private", self.actor)
+
+    def project_visibility(self, project_id):
+        """Read back the privacy record: current state, who changed it, when."""
+        return self.store.get_project_access(project_id)
 
     def project_run_summary(self, project_id):
         from core.state_run_summary import project_run_summary

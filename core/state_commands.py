@@ -14,6 +14,24 @@ from core.state_driver_index import (MAX_ASSERTION_CHARS, MAX_ENTRY_BODY_CHARS,
                                      MAX_INDEX_LIMIT, MAX_LANDED_CHARS, MAX_REASON_CHARS)
 from core.state_graph import StateGraphError
 
+# A read the caller is not entitled to make about a project, raised from
+# `execute` itself — the one chokepoint every transport (REST, MCP, driver, and a
+# forged route a route author bolts a stolen guard onto) must pass through to
+# obtain any project body. It is deliberately NOT a StateGraphError/NotFound/Conflict
+# so the HTTP layer maps it to its own status rather than the 404/409/422 those
+# carry. Its message is identical whether the project does not exist or exists but
+# was never opened: a refusal that reads differently for the two is itself an
+# existence oracle.
+PROJECT_UNAVAILABLE = "This State DAG record is not available."
+
+
+class ProjectPrivate(Exception):
+    """Anonymous read of a project nobody has opened (or of a project that does
+    not exist) — one indistinguishable refusal for both."""
+
+    def __str__(self) -> str:
+        return PROJECT_UNAVAILABLE
+
 
 class Request(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -30,6 +48,17 @@ class Project(Request):
 class CreateProject(Project):
     title: str
     source_project_id: str | None = None
+
+class OpenProject(Project):
+    pass
+
+
+class CloseProject(Project):
+    pass
+
+
+class ProjectVisibility(Project):
+    pass
 
 
 class Node(Project):
@@ -505,6 +534,7 @@ READ_REQUESTS = {
     "run_owners": RunOwner, "attempt_detail": Attempt,
     "list_director_messages": ListDirectorMessages,
     "list_issues": ListIssues, "get_issue": IssueRef,
+    "project_visibility": ProjectVisibility,
 }
 # ── Read visibility: public or writer-only ─────────────────────────────────
 # ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
@@ -538,6 +568,9 @@ WRITER_ONLY_READS = frozenset({
     # The driver guide and the event/long-poll plumbing are NOT on the opened
     # list, so they stay shut rather than be assumed harmless.
     "get_driver_guide_section", "events", "wait_for_state_change",
+    # The privacy record itself: who opened a project and when. Private by
+    # default like every unclassified read; the writer verdict reads it back.
+    "project_visibility",
 })
 
 
@@ -559,6 +592,7 @@ WRITE_REQUESTS = {
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
     "bind_node_design": BindDesign,
     "create_project": CreateProject, "add_nodes": AddNodes, "revise_node": ReviseNode,
+    "open_project": OpenProject, "close_project": CloseProject,
     "split_node": SplitNode, "supersede_node": SupersedeNode, "set_node_facet": SetNodeFacet,
     "start_attempt": StartAttempt, "request_attempt_base": RequestAttemptBase,
     "recover_attempt": Attempt, "reconcile_attempt": Attempt,
@@ -587,6 +621,58 @@ def describe() -> dict:
                            for name, model in REQUESTS.items()}}
 
 
+# The reads whose ANSWER can name an unopened project even though no single
+# project_id was supplied: the project list and the project catalog. An anonymous
+# caller gets these filtered down to opened projects only — the listing must not
+# name what the doors themselves refuse.
+_CATALOG_READS = frozenset({"list_projects", "project_catalog"})
+
+
+def _anonymous(service) -> bool:
+    """True only for a caller the transport has explicitly tagged as unable to
+    read private records (an unauthenticated HTTP visitor). Every other caller —
+    the internal driver, MCP, a writer, and any embedder that did not opt in —
+    defaults to trusted, so this can only ever NARROW an existing read, never
+    widen the public surface."""
+    return getattr(service, "project_read_trusted", True) is False
+
+
+def _refuse_if_project_not_public(service, action, args) -> None:
+    """Raise `ProjectPrivate` for an anonymous read that touches a project nobody
+    opened. A project that does not exist is refused identically, so a refusal is
+    never an existence oracle."""
+    store = service.store
+    if "project_id" in args:
+        if not store.is_project_public(args["project_id"]):
+            raise ProjectPrivate()
+        return
+    if "attempt_id" in args:
+        pid = store.project_for_attempt(args["attempt_id"])
+        if pid is None or not store.is_project_public(pid):
+            raise ProjectPrivate()
+        return
+    if "run_id" in args:
+        pids = store.projects_for_run(args["run_id"])
+        if not pids or not all(store.is_project_public(p) for p in pids):
+            raise ProjectPrivate()
+        return
+
+
+def _filter_catalog(service, action, result):
+    """Drop every project an anonymous caller has not been allowed to see from a
+    cross-project read, so the aggregate carries no id, title or count for it."""
+    public = service.store.public_project_ids()
+    if action == "list_projects" and isinstance(result, list):
+        return [p for p in result if p.get("project_id") in public]
+    if action == "project_catalog" and isinstance(result, dict) \
+            and isinstance(result.get("projects"), list):
+        kept = [p for p in result["projects"] if p.get("project_id") in public]
+        out = {**result, "projects": kept}
+        out["next_after"] = kept[-1].get("project_id") if kept else None
+        return out
+    return result
+
+
 def execute(service, action: str, arguments: dict, *, allow_write: bool = False):
     if not isinstance(action, str) or action not in REQUESTS:
         raise StateGraphError("unknown state graph action; use state_graph_help")
@@ -600,6 +686,19 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
             from core.director_messaging_protocol import DirectorMessageError
             return DirectorMessageError("invalid_request").as_dict()
         raise StateGraphError("arguments must be an object")
+    # Project privacy is decided HERE, the single chokepoint every transport
+    # shares, and not in the route guard: a route author who forges a declaration
+    # to make the guard stand down still has to call `execute` to obtain any
+    # project body, and that call is refused for an anonymous principal on a
+    # project nobody opened. This does not depend on the action classification
+    # table or on `prefix_verdict_stands_down_for` — those answer "is this ACTION
+    # public", which is ANDed with "is this PROJECT opened" only in this function.
+    # It runs BEFORE argument validation so an anonymous probe of an unopened
+    # project is refused as private, never bounced with a structural error that
+    # itself leaks the project's request shape.
+    anonymous = _anonymous(service)
+    if anonymous and action in READ_REQUESTS:
+        _refuse_if_project_not_public(service, action, arguments)
     try:
         args = REQUESTS[action].model_validate(arguments).model_dump()
     except ValidationError as exc:
@@ -628,6 +727,8 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "get_attempt": service.get_attempt,
         "list_attempts": service.attempts.list, "evidence": service.attempts.evidence,
         "create_project": service.create_project, "add_nodes": service.store.add_nodes,
+        "open_project": service.open_project, "close_project": service.close_project,
+        "project_visibility": service.project_visibility,
         "revise_node": service.store.revise_node, "split_node": service.store.split_node,
         "supersede_node": service.store.supersede_node, "set_node_facet": service.store.set_node_facet,
         "start_attempt": service.start_attempt,
@@ -658,13 +759,17 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
         "resolve_issue": service.issues.resolve,
     }
     try:
-        return handlers[action](**args)
+        result = handlers[action](**args)
     except Exception as exc:
         if director_action:
             from core.director_messaging_protocol import DirectorMessageError
             if isinstance(exc, DirectorMessageError):
                 return exc.as_dict()
         raise
+    if anonymous and action in _CATALOG_READS:
+        result = _filter_catalog(service, action, result)
+    return result
+
 
 
 # Compact entry points for the internal driver. Exact operation schemas are

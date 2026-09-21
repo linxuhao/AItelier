@@ -277,6 +277,12 @@ app.include_router(repo_router)
 app.include_router(model_router)
 app.include_router(state_graph_router)
 
+# A project-privacy refusal raised at the `execute` chokepoint answers 403 on every
+# route of the product app — including one a route author forges by reusing the real
+# guard and declaring a public action, because such a handler still reaches `execute`.
+from api.state_http import apply_project_privacy
+apply_project_privacy(app)
+
 # When running in Docker (and fronted by Cloudflare Access), requests arrive
 # from the Docker bridge gateway / the tunnel — never 127.0.0.1 — so the
 # localhost guard is disabled via AITELIER_ALLOW_EXTERNAL=1. Auth is then

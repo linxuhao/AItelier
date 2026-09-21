@@ -23,12 +23,21 @@ offload_implementer:
   # indexes every run worktree.
   tools: ["focused_check", "semantic_search", "list_tree", "test_write", "read_test_written", "apply_patch"]
   max_output_tokens: 32768
-  # 100. The 2026-09-09 parallel contract batch: one implementer had
-  # every file written at turn 31 of a 32-turn extended budget and died
-  # verifying its own work; another spent 16 tool calls grounding before
-  # its first write and was still writing at 20. A contract artifact is a
-  # 30-turn shape; 20 was a coding-task budget.
-  max_tool_turns: 100
+  # 200. Raised from 100 on 2026-09-21 (owner approved) after SIX rounds died
+  # at this wall in one day: 100/100, 106/106, 108/108, 116/116 -- every number
+  # inside [100, 100 + _MAX_TURN_GRANTS * _GRANT_TURNS_MAX] = [100, 116].
+  # Measured on the round that died at 100/100 (attempt-8c8461af, State DAG
+  # project `aitelier`): its 100 turns were 47 read + 33 apply_patch + 11 search
+  # + 7 focused_check + 2 list_tree, with exactly one tool call per turn and no
+  # idle turn. It had made 25 successful writes across 9 files and stood at 18
+  # of its own 19 tests green. It was not looping; it ran out.
+  # Known and NOT fixed by this number: 35 of those 47 reads re-read a file
+  # already read (12 unique files; core/state_commands.py read 12 times), so a
+  # larger budget may buy the same waste twice. That is a separate card.
+  # The earlier note (2026-09-09 contract batch: written-at-31-of-32, 16 calls
+  # grounding before the first write) is why the base is not small; it described
+  # a 32-turn ceiling that no longer exists.
+  max_tool_turns: 200
   native_tool_calling: true
   fallback_to_json_mode: true
   thinking:

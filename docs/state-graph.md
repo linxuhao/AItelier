@@ -417,13 +417,35 @@ on `/commands/{action}`. MCP's external token is not automatically a REST admin
 token; use the host's supported authenticated channel for each transport.
 
 ```text
-GET  /api/state/schema
-GET  /api/state/projects
-GET  /api/state/projects/{project_id}
-GET  /api/state/projects/{project_id}/frontier?limit=30
-GET  /api/state/attempts/{attempt_id}
+GET  /api/state/schema                                                 writer-only
+GET  /api/state/projects                                               public
+GET  /api/state/projects/{project_id}                                  public
+GET  /api/state/projects/{project_id}/frontier?limit=30                public
+GET  /api/state/projects/{project_id}/overview                         public
+GET  /api/state/projects/{project_id}/run-summary                      public
+GET  /api/state/projects/{project_id}/nodes/{node_key}                 public
+GET  /api/state/projects/{project_id}/attempts                         public
+GET  /api/state/projects/{project_id}/references                       public
+GET  /api/state/projects/{project_id}/issues                           public
+GET  /api/state/projects/{project_id}/issues/{issue_id}                 public
+GET  /api/state/attempts/{attempt_id}                                  public
+GET  /api/state/attempts/{attempt_id}/detail                           public
+GET  /api/state/runs/{run_id}/owners                                   public
+GET  /api/state/projects/{project_id}/driver-note                      writer-only
+GET  /api/state/projects/{project_id}/driver-note/history              writer-only
+GET  /api/state/projects/{project_id}/driver-note/history/search       writer-only
 POST /api/state/query/{read_action}       JSON body = arguments only
 POST /api/state/commands/{write_action}   JSON body = arguments only
+```
+
+Seventeen GET routes and thirty-six POST read actions carry the same secret, so
+the anonymous verdict has to be enumerated over BOTH shapes. The enumeration is
+`tests/unit/test_state_read_visibility.py::TestExhaustiveDoors`, which probes
+every action and every GET route read from the mounted app's own OpenAPI
+document. It judges by 403 / non-403 rather than 200: a 403 is the door
+refusing, and any other code (404, 409, 422) means the request reached the
+handler. A route added later is probed by the same loop, so an unclassified
+private door surfaces as an unexpected 403 rather than passing unnoticed.
 ```
 
 The shared Python implementation is `StateGraphStore`, `StateAttempts`, and

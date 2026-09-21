@@ -257,4 +257,73 @@ class TestEmbedderDefaults:
             assert client.get("/api/state/projects").status_code == 401
             assert client.get("/api/state/projects/p/driver-note").status_code == 401
             headers = {"Authorization": "Bearer " + "y" * 40}
-            assert client.get("/api/state/projects", headers=headers).status_code == 200
+        assert client.get("/api/state/projects", headers=headers).status_code == 200
+
+
+# GET-shaped doors that must refuse an anonymous caller. Taken from the mounted
+# app's own OpenAPI document, not counted from the source: the source says what
+# was written, the schema says what is actually reachable.
+PRIVATE_GET_DOORS = {
+    "/api/state/schema",
+    "/api/state/projects/{project_id}/driver-note",
+    "/api/state/projects/{project_id}/driver-note/history",
+    "/api/state/projects/{project_id}/driver-note/history/search",
+}
+_PATH_VALUES = {"project_id": "p", "node_key": "a", "issue_id": "x",
+                "attempt_id": "x", "run_id": "x"}
+
+
+def _fill(path: str) -> str:
+    for name, value in _PATH_VALUES.items():
+        path = path.replace("{" + name + "}", value)
+    return path
+
+
+class TestExhaustiveDoors:
+    """EVERY door, not a sample. One leaked door is irreversible.
+
+    Two shapes carry the same secret:
+
+      POST ``/api/state/query/{action}`` — one door per ``READ_REQUESTS`` action.
+      GET  the REST routes under ``/api/state``, read from the mounted app's own
+           OpenAPI document rather than counted from the source.
+
+    The judgment is 403 / non-403, never 200: a 403 means the door refused; any
+    other code (404, 409, 422) means the request reached the handler and the
+    door let it through. So the differing argument schemas need no matching
+    fixture, and a 422 from wrong arguments can never be misread as a refusal.
+    """
+
+    def test_every_read_action_is_refused_iff_it_is_private(self, gated):
+        client, _ = gated
+        probed = {}
+        for action in sorted(READ_REQUESTS):
+            response = client.post("/api/state/query/" + action,
+                                   json={"project_id": "p"})
+            probed[action] = response.status_code
+            if is_public_read(action):
+                assert response.status_code != 403, (action, response.text)
+            else:
+                assert response.status_code == 403, (action, response.text)
+        # Coverage is the point: every action was probed, none skipped.
+        assert set(probed) == set(READ_REQUESTS)
+
+    def test_every_state_get_route_is_refused_iff_it_is_private(self, gated):
+        client, _ = gated
+        schema = client.get("/openapi.json").json()["paths"]
+        doors = sorted(path for path, ops in schema.items()
+                       if path.startswith("/api/state") and "get" in ops)
+        assert len(doors) >= len(PRIVATE_GET_DOORS), doors
+        probed = {}
+        for door in doors:
+            response = client.get(_fill(door))
+            probed[door] = response.status_code
+            if door in PRIVATE_GET_DOORS:
+                assert response.status_code == 403, (door, response.text)
+            else:
+                assert response.status_code != 403, (door, response.text)
+        # A route added later is probed by this loop, so an omission cannot hide:
+        # an unlisted private door shows up as an unexpected 403 above.
+        assert set(probed) == set(doors)
+        assert PRIVATE_GET_DOORS <= set(doors)
+

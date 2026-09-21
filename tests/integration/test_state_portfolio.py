@@ -244,13 +244,34 @@ def test_all_new_state_reads_remain_private_and_commands_strict(live, monkeypatc
     app.dependency_overrides[routes.get_service] = lambda: live.service
     monkeypatch.setattr(authz, "gate_enabled", lambda: True)
     monkeypatch.setattr(authz.cf_access, "email_from_request_headers", lambda *_: None)
-    urls = ["/projects", "/projects/game/overview", "/projects/game/nodes/growth.proficiency",
-            "/projects/game/attempts", "/projects/game/references", "/runs/unknown/owners"]
+    # The split this pins: the graph and the progress reads are PUBLIC to a
+    # caller with no credential, the two notebooks and the mailbox are not.
+    # Publishing is irreversible, so what an ANONYMOUS caller gets is the
+    # contract, and an unclassified read action must be refused by default.
+    public = ["/projects", "/projects/game/overview", "/projects/game/nodes/growth.proficiency",
+              "/projects/game/attempts", "/projects/game/references"]
+    private = ["/projects/game/driver-note", "/projects/game/driver-note/history",
+               "/projects/game/driver-note/history/search"]
     with TestClient(app) as client:
-        for url in urls:
+        for url in public:
+            response = client.get("/api/state" + url)
+            assert response.status_code == 200, (url, response.text)
+        # An unknown run reaches the handler: the door let it through, and the
+        # only reason it is not 200 is that no such run exists.
+        assert client.get("/api/state/runs/unknown/owners").status_code in (200, 404)
+        for url in private:
             response = client.get("/api/state" + url)
             assert response.status_code == 403, (url, response.text)
             assert "Full private requirement" not in response.text
+            assert "to make changes" not in response.text
+            assert response.headers["X-AItelier-Denial"] == authz.READ_DENIED_NOT_AUTHENTICATED
+        for action in ("get_driver_note", "driver_note_index", "list_director_messages"):
+            response = client.post("/api/state/query/" + action, json={"project_id": "game"})
+            assert response.status_code == 403, (action, response.text)
+        # Default DENY: a read action nobody classified, including one added
+        # later, is refused to an anonymous caller.
+        assert client.post("/api/state/query/a_read_added_later",
+                           json={"project_id": "game"}).status_code == 403
     app.state._test_mode = True
     with TestClient(app) as client:
         assert client.get("/api/state/projects/game/overview").status_code == 200

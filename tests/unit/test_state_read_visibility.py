@@ -28,6 +28,7 @@ from api import authz, state_graph_routers as routes
 from api.state_http import create_state_router
 from core.state_commands import (PUBLIC_READS, READ_REQUESTS, WRITER_ONLY_READS,
                                  is_public_read, read_visibility)
+import core.state_commands as state_commands
 from core.state_database import StateDatabase
 from core.state_service import StateService
 
@@ -260,15 +261,6 @@ class TestEmbedderDefaults:
         assert client.get("/api/state/projects", headers=headers).status_code == 200
 
 
-# GET-shaped doors that must refuse an anonymous caller. Taken from the mounted
-# app's own OpenAPI document, not counted from the source: the source says what
-# was written, the schema says what is actually reachable.
-PRIVATE_GET_DOORS = {
-    "/api/state/schema",
-    "/api/state/projects/{project_id}/driver-note",
-    "/api/state/projects/{project_id}/driver-note/history",
-    "/api/state/projects/{project_id}/driver-note/history/search",
-}
 _PATH_VALUES = {"project_id": "p", "node_key": "a", "issue_id": "x",
                 "attempt_id": "x", "run_id": "x"}
 
@@ -279,19 +271,88 @@ def _fill(path: str) -> str:
     return path
 
 
+def _declared(route):
+    """The read action a route declares on its own endpoint, or None."""
+    return getattr(route.endpoint, "_state_route", None)
+
+
+class TestTheVerdictIsDerivedNotRemembered:
+    """A route's visibility must come from the read table, not from memory.
+
+    The shape this replaces: 13 of the 20 GET routes answered an anonymous
+    visitor because nobody had ATTACHED a dependency to them — public by
+    omission — and the test meant to catch that asserted "not 403 unless the
+    door is in a hardcoded PRIVATE_GET_DOORS set". Its default was PUBLIC.
+
+    Now every route declares the read action it serves, ONE router-wide guard
+    derives the class from `read_visibility`, and a route that declares nothing
+    is refused. These tests fail if any of those three pieces is removed.
+    """
+
+    def test_every_state_route_declares_what_it_serves(self):
+        declared = {route.path: _declared(route) for route in routes.router.routes}
+        for path, declaration in declared.items():
+            assert declaration is not None, ("undeclared route", path)
+        # An empty or renamed router must fail this test, not pass it vacuously.
+        assert len(declared) >= 20, sorted(declared)
+        assert {kind for kind, _ in declared.values()} <= {"read", "write", "director"}
+
+    def test_a_reclassified_action_moves_EVERY_route_that_reaches_it(
+            self, gated, monkeypatch):
+        """Both poles on one action, including the route that had no guard.
+
+        `frontier` is public today. Its GET route carried NO dependency, so it
+        answered 200 only because nobody had looked; its POST door was already
+        table-driven. Reclassifying the ACTION must move both — that is the
+        difference between deriving the verdict and remembering to arm it.
+        """
+        client, _ = gated
+        assert client.get("/api/state/projects/p/frontier").status_code == 200
+        assert client.post("/api/state/query/frontier",
+                           json={"project_id": "p"}).status_code == 200
+        monkeypatch.setattr(state_commands, "PUBLIC_READS",
+                            PUBLIC_READS - {"frontier"})
+        assert read_visibility("frontier") == "private"
+        assert is_public_read("frontier") is False
+        post = client.post("/api/state/query/frontier", json={"project_id": "p"})
+        get = client.get("/api/state/projects/p/frontier")
+        assert post.status_code == 403, post.text
+        assert get.status_code == 403, get.text
+
+    def test_a_route_added_with_no_declaration_is_refused(self, gated):
+        """THE case the card exists for, built the way a future author would.
+
+        A new GET route on the same factory, reading the private notebook, with
+        NO extra step taken — no dependency attached, no declaration. It must be
+        refused for an anonymous caller, because the default has to be DENY.
+        """
+        _client, service = gated
+        second = create_state_router(lambda: service, authz.require_writer,
+                                     authz.require_reader)
+
+        @second.get("/projects/{project_id}/undeclared-door")
+        def undeclared_door(project_id: str):
+            return {"notebook": "IN-FLIGHT RUN ID 4711 SECRET"}
+
+        app = FastAPI()
+        app.include_router(second)
+        with TestClient(app) as undeclared_client:
+            response = undeclared_client.get(
+                "/api/state/projects/p/undeclared-door")
+        assert response.status_code == 403, response.text
+        assert "IN-FLIGHT RUN ID 4711 SECRET" not in response.text
+
+
 class TestExhaustiveDoors:
     """EVERY door, not a sample. One leaked door is irreversible.
 
-    Two shapes carry the same secret:
-
       POST ``/api/state/query/{action}`` — one door per ``READ_REQUESTS`` action.
-      GET  the REST routes under ``/api/state``, read from the mounted app's own
-           OpenAPI document rather than counted from the source.
+      GET  every route on the state router, with its declared action read back
+           and compared against the SAME table the server consults.
 
     The judgment is 403 / non-403, never 200: a 403 means the door refused; any
     other code (404, 409, 422) means the request reached the handler and the
-    door let it through. So the differing argument schemas need no matching
-    fixture, and a 422 from wrong arguments can never be misread as a refusal.
+    door let it through.
     """
 
     def test_every_read_action_is_refused_iff_it_is_private(self, gated):
@@ -308,22 +369,28 @@ class TestExhaustiveDoors:
         # Coverage is the point: every action was probed, none skipped.
         assert set(probed) == set(READ_REQUESTS)
 
-    def test_every_state_get_route_is_refused_iff_it_is_private(self, gated):
+    def test_every_state_get_route_is_judged_by_its_own_declaration(self, gated):
+        """The expectation is DERIVED, so a new private door cannot hide.
+
+        No hardcoded list of private doors: each route's declared action is run
+        through `is_public_read`, the same call the server's guard makes. An
+        undeclared route expects 403. A future route that reaches a private
+        action and forgets everything therefore fails HERE instead of passing.
+        """
         client, _ = gated
-        schema = client.get("/openapi.json").json()["paths"]
-        doors = sorted(path for path, ops in schema.items()
-                       if path.startswith("/api/state") and "get" in ops)
-        assert len(doors) >= len(PRIVATE_GET_DOORS), doors
+        get_routes = [route for route in routes.router.routes
+                      if "GET" in route.methods]
+        assert len(get_routes) >= 16, [route.path for route in get_routes]
         probed = {}
-        for door in doors:
-            response = client.get(_fill(door))
-            probed[door] = response.status_code
-            if door in PRIVATE_GET_DOORS:
-                assert response.status_code == 403, (door, response.text)
+        for route in get_routes:
+            response = client.get(_fill(route.path))
+            probed[route.path] = response.status_code
+            declaration = _declared(route)
+            assert declaration is not None, ("undeclared route", route.path)
+            kind, action = declaration
+            if kind == "read" and action is not None and is_public_read(action):
+                assert response.status_code != 403, (route.path, response.text)
             else:
-                assert response.status_code != 403, (door, response.text)
-        # A route added later is probed by this loop, so an omission cannot hide:
-        # an unlisted private door shows up as an unexpected 403 above.
-        assert set(probed) == set(doors)
-        assert PRIVATE_GET_DOORS <= set(doors)
+                assert response.status_code == 403, (route.path, response.text)
+        assert set(probed) == {route.path for route in get_routes}
 

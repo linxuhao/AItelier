@@ -388,11 +388,11 @@ async def write_gate(request: Request, call_next):
     # commands open. `GET /api/state/...` never reached this middleware at all
     # (the safe-method return above), so gating it here never even covered the
     # reads this change opens. The verdict therefore moves to the route:
-    # api/state_http decides PER ROUTE and PER ACTION from
-    # core.state_commands.is_public_read, which fails CLOSED, and
-    # api/state_graph_routers arms the matching dependency on every route —
-    # there is no route in that family without one. Those two halves only make
-    # sense together. Do not remove one half.
+    # api/state_http declares, on EACH route, the action it serves, and ONE
+    # router-wide guard derives the class from core.state_commands.read_visibility
+    # (which fails CLOSED). A route that declares nothing is REFUSED — there is
+    # no dependency to remember and none to forget. Those two halves only make
+    # sense together. Do not remove one half.    # sense together. Do not remove one half.
     #
     # The director-messaging path keeps its closed v2 envelope here: that
     # envelope IS this middleware's contract with the adapter, so it is

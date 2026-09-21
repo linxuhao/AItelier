@@ -409,12 +409,13 @@ event/long-poll plumbing.
 
 The classification is ONE table, `core.state_commands.PUBLIC_READS`, and the
 default is DENY: a read action that is not listed is private, INCLUDING one added
-later. `api/state_http` applies the verdict per route and per action (a read of a
-private action is refused with a read-worded 403 before its body is parsed);
-`api/state_graph_routers` arms the matching dependency on every route, so no
-route in this family is left unguarded. Writes still require the writer verdict
+later. `api/state_http` declares, ON EACH ROUTE, the action that route serves, and
+ONE router-wide guard derives the class from that table (a read of a private
+action is refused with a read-worded 403 before its body is parsed). There is no
+per-route dependency to attach and none to forget: a route that declares nothing
+— including one added later — is REFUSED. Writes still require the writer verdict
 on `/commands/{action}`. MCP's external token is not automatically a REST admin
-token; use the host's supported authenticated channel for each transport.
+token; use the host's supported authenticated channel for each transport.token; use the host's supported authenticated channel for each transport.
 
 ```text
 GET  /api/state/schema                                                 writer-only

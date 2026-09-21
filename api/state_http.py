@@ -1,9 +1,12 @@
 """State-only HTTP routes reusable without importing the workflow host."""
 import inspect
+from contextlib import AsyncExitStack
 from functools import partial
 from typing import Annotated, Literal
 from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.dependencies.utils import get_dependant, solve_dependencies
+from api.state_route_reader import served_actions
 from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execute,
                                  is_public_read)
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
@@ -23,6 +26,66 @@ _DECLARATION = "_state_route"
 SCHEMA_DECLARED_ACTION = "get_state_schema"
 
 
+STATE_ROUTE_DECLARATION = "_state_route"
+_DECLARATION = STATE_ROUTE_DECLARATION  # legacy name used by the invariant tests
+
+
+async def apply_verdict(dependency, request) -> None:
+    """Apply an authorization verdict to a request, whatever shape it has.
+
+    This used to be twenty lines of hand-written reflection that CALLED the
+    dependency synchronously. An `async def` dependency then produced a
+    coroutine nobody awaited - no error, no 403, an open private read. That
+    shape is gone: the verdict is now resolved through FastAPI's OWN dependency
+    machinery (`get_dependant` + `solve_dependencies`), the same machinery that
+    runs every `Depends(...)` in this app. Sync `def`, `async def`, callable
+    objects, `functools.partial` and dependencies with sub-dependencies of
+    their own are all executed for real.
+
+    `Depends`-shaped dependencies take the Request; a bare `lambda: None` (an
+    embedder running with the gate off, which tests and `api/state_only` both
+    use) takes nothing. Overrides are honored, so
+    `app.dependency_overrides[require_writer]` keeps working.
+
+    The default is REFUSE: a dependency that cannot be resolved, cannot be
+    called, or raises anything that is not an HTTPException is a 403 - never a
+    silent pass.
+    """
+    overrides = getattr(getattr(request, "app", None), "dependency_overrides", None)
+    if overrides:
+        replacement = overrides.get(dependency)
+        if replacement is not None:
+            dependency = replacement
+    route = request.scope.get("route")
+    try:
+        dependant = get_dependant(path=getattr(route, "path", "") or "",
+                                  call=dependency)
+        stack = AsyncExitStack()
+        try:
+            try:
+                solved = await solve_dependencies(
+                    request=request, dependant=dependant,
+                    dependency_overrides_provider=getattr(request, "app", None),
+                    async_exit_stack=stack, embed_body_fields={})
+            except TypeError:
+                # Older FastAPI without the exit-stack parameters.
+                solved = await solve_dependencies(
+                    request=request, dependant=dependant,
+                    dependency_overrides_provider=getattr(request, "app", None))
+        finally:
+            await stack.aclose()
+        if solved.errors:
+            raise HTTPException(403, "state verdict could not be applied")
+        verdict = dependency(**solved.values)
+    except HTTPException:
+        raise
+    except Exception as exc:  # fail CLOSED: an unappliable verdict denies
+        raise HTTPException(403, "state verdict could not be applied") from exc
+    if inspect.isawaitable(verdict):
+        verdict = await verdict
+    return verdict
+
+
 def create_state_router(service_dependency, access_dependency, read_dependency=None):
     """Build the `/api/state` router.
 
@@ -33,9 +96,13 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     The shape this replaces answered 13 of its 20 GET routes to an anonymous
     visitor because nobody had attached a dependency to them: public by
-    OMISSION. Here there is nothing to attach and nothing to forget. A route
+    OMISSION. Here every route declares what it serves, ONE guard applies the
+    verdict through `apply_verdict` (which works whatever the dependency's
+    shape), and the guard cross-checks each declaration against
+    `api.state_route_reader.served_actions` - an independent reading of the
+    endpoint's own source - so a declaration naming the wrong action is
+    refused, not obeyed. A route
     with no declaration, a route reading an action nobody classified, and a read
-    action added later all fall to the same verdict - private - because
     `read_visibility` fails CLOSED and so does the guard.
 
     `read_dependency` is the identity verdict for a private read and MUST accept
@@ -47,31 +114,6 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     read_verdict = read_dependency or access_dependency
     router = APIRouter(prefix="/api/state", tags=["state-graph"])
 
-    def _verdict(dependency, request):
-        """Apply an authorization dependency to a request.
-
-        `Depends`-shaped dependencies take the Request; a bare `lambda: None`
-        (an embedder running with the gate off, which tests and
-        `api/state_only` both use) takes nothing. Both shapes appear in this
-        repository, so the call is adapted rather than assumed - the verdict is
-        applied either way, and no path is left unchecked by a TypeError.
-
-        An override is honored. The guard stands in for the declared dependency,
-        so `app.dependency_overrides[require_writer]` (which this repository's
-        tests and embeds use to swap a verdict) must keep working; without this
-        a swapped verdict would be silently ignored here and nowhere else.
-        """
-        overrides = getattr(getattr(request, "app", None), "dependency_overrides", None)
-        if overrides:
-            replacement = overrides.get(dependency)
-            if replacement is not None:
-                dependency = replacement
-        try:
-            accepts = bool(inspect.signature(dependency).parameters)
-        except (TypeError, ValueError):
-            accepts = True
-        return dependency(request) if accepts else dependency()
-
     def _call(service, action, arguments, *, write=False):
         try:
             return execute(service, action, arguments, allow_write=write)
@@ -82,49 +124,67 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         except StateGraphError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    def _guard_read_action(action, request: Request) -> None:
-        """Refuse a NON-public read before the request body is parsed.
+    async def _guard_read_action(action, request: Request) -> None:
+        """Refuse a NON-public read.
 
         `None` (the action could not be resolved) and every name the table does
-        not list - including one added later - are private reads.
+        not list - including one added later - are private reads. The refusal
+        happens when this dependency runs; FastAPI may have validated the
+        request body first, so this guard claims nothing about when the body
+        is parsed.
         """
         if action is None or not is_public_read(action):
-            _verdict(read_verdict, request)
+            await apply_verdict(read_verdict, request)
 
-    def _guard_director_action(request: Request) -> None:
+    async def _guard_director_action(request: Request) -> None:
         """This path carries both classes. `send_director_message` and the two
         transitions CHANGE state, so they take the WRITE verdict and its wording;
         only `list_director_messages` is a read, and it is private."""
         if request.path_params.get("action") == "list_director_messages":
-            _guard_read_action("list_director_messages", request)
+            await _guard_read_action("list_director_messages", request)
         else:
-            _verdict(access_dependency, request)
+            await apply_verdict(access_dependency, request)
 
-    def _router_guard(request: Request) -> None:
-        """The one guard, on the ROUTER, so no route can be added without it.
+    async def _router_guard(request: Request) -> None:
+        """The one guard, on the ROUTER, under which every route it owns stands.
 
-        It reads the declaration off the matched endpoint at REQUEST time, which
-        is what makes a reclassified action move every door at once: nothing is
-        frozen at build time except the declaration of which action a route
-        serves. An endpoint that declares nothing is refused - the default here
-        is DENY, exactly as it is in the read table.
+        A route mounted under the same prefix but on a DIFFERENT router is not
+        covered here; `api.state_graph_routers.state_prefix_verdict`, attached
+        app-wide, gives every route under `/api/state` a verdict regardless of
+        which router owns it.
+
+        The guard reads the declaration off the matched endpoint at REQUEST
+        time, which is what makes a reclassified action move every door at
+        once: nothing is frozen at build time except the declaration of which
+        action a route serves. An endpoint that declares nothing is refused -
+        the default here is DENY, exactly as it is in the read table.
+
+        The declaration is then cross-checked against an independent reader:
+        `served_actions` reads the endpoint's own source and reports which
+        state actions it actually executes. A declaration naming an action the
+        endpoint does not serve is refused - a wrong declaration opens no door,
+        here or in the tests that walk these declarations.
         """
         route = request.scope.get("route")
-        declaration = getattr(getattr(route, "endpoint", None), _DECLARATION, None)
+        endpoint = getattr(route, "endpoint", None)
+        declaration = getattr(endpoint, _DECLARATION, None)
         if declaration is None:
-            _verdict(read_verdict, request)
+            await apply_verdict(read_verdict, request)
             return
         kind, action = declaration
+        served = served_actions(endpoint)
+        if action is not None and served and action not in served:
+            raise HTTPException(403, "route declaration does not match the action it serves")
         if kind == "write":
-            _verdict(access_dependency, request)
+            await apply_verdict(access_dependency, request)
         elif kind == "director":
-            _guard_director_action(request)
+            await _guard_director_action(request)
         elif action is None:
             # Action-dispatch family: the action is in the URL, and a request
             # that names none is refused like any other unclassified read.
-            _guard_read_action(request.path_params.get("action"), request)
+            await _guard_read_action(request.path_params.get("action"), request)
         else:
-            _guard_read_action(action, request)
+            await _guard_read_action(action, request)
 
     def _declare(endpoint, kind: str, action: str | None = None):
         """Record on the endpoint function WHAT it serves.
@@ -148,7 +208,7 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     async def director_message(action: str, request: Request,
                                service=Depends(service_dependency)):
-        """Closed v2 REST adapter; router authorization runs before body parsing."""
+        """Closed v2 REST adapter; authorization is the router guard."""
         from core.director_messaging_protocol import ACTIONS, DirectorMessageError
         if action not in ACTIONS:
             return DirectorMessageError("invalid_request").as_dict()
@@ -166,7 +226,11 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     def projects(repo_path: str | None = None, after: str = "", limit: int = 100, service=Depends(service_dependency)):
         return _call(service, "project_catalog", {"repo_path": repo_path, "after": after, "limit": limit})
 
-    _declare(router.get("/projects")(projects), "read", "list_projects")
+    # `project_catalog`, not `list_projects`: the cross-checkable truth. The
+    # handler executes `project_catalog`; declaring `list_projects` here used
+    # to be a wrong declaration nobody could see, because nothing independent
+    # read the declaration back against what the endpoint executes.
+    _declare(router.get("/projects")(projects), "read", "project_catalog")
 
     def graph(project_id: str, service=Depends(service_dependency)):
         return _call(service, "get_graph", {"project_id": project_id})

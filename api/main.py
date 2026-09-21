@@ -18,7 +18,7 @@ if _env_file.exists():
 
 from contextlib import asynccontextmanager
 from pathlib import Path as _Path
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import Depends, FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from core import cf_access
@@ -38,6 +38,7 @@ from api.admin_routers import router as admin_router
 from api.repo_routers import router as repo_router
 from api.model_routers import router as model_router
 from api.state_graph_routers import router as state_graph_router
+from api.state_graph_routers import state_prefix_verdict
 from api.sse_manager import stream_manager
 from core.scheduler import start_scheduler
 
@@ -261,6 +262,10 @@ app = FastAPI(
     description="Skillflow config-run orchestration control plane",
     version="1.0.0",
     lifespan=lifespan,
+    # Every route under `/api/state` gets a verdict no matter which router owns
+    # it: the state router's guard covers its own routes, and this app-wide
+    # dependency fails CLOSED for any other route mounted under that prefix.
+    dependencies=[Depends(state_prefix_verdict)],
 )
 
 # 挂载路由
@@ -390,9 +395,10 @@ async def write_gate(request: Request, call_next):
     # reads this change opens. The verdict therefore moves to the route:
     # api/state_http declares, on EACH route, the action it serves, and ONE
     # router-wide guard derives the class from core.state_commands.read_visibility
-    # (which fails CLOSED). A route that declares nothing is REFUSED — there is
-    # no dependency to remember and none to forget. Those two halves only make
-    # sense together. Do not remove one half.    # sense together. Do not remove one half.
+    # (which fails CLOSED). A route the state router owns that declares nothing
+    # is REFUSED; any OTHER route mounted under `/api/state` is judged by the
+    # app-wide `state_prefix_verdict` dependency above. Those halves only make
+    # sense together. Do not remove one half.
     #
     # The director-messaging path keeps its closed v2 envelope here: that
     # envelope IS this middleware's contract with the adapter, so it is

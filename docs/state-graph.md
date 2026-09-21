@@ -411,11 +411,16 @@ The classification is ONE table, `core.state_commands.PUBLIC_READS`, and the
 default is DENY: a read action that is not listed is private, INCLUDING one added
 later. `api/state_http` declares, ON EACH ROUTE, the action that route serves, and
 ONE router-wide guard derives the class from that table (a read of a private
-action is refused with a read-worded 403 before its body is parsed). There is no
-per-route dependency to attach and none to forget: a route that declares nothing
-— including one added later — is REFUSED. Writes still require the writer verdict
-on `/commands/{action}`. MCP's external token is not automatically a REST admin
-token; use the host's supported authenticated channel for each transport.token; use the host's supported authenticated channel for each transport.
+action is refused with a read-worded 403). The guard also cross-checks each
+declaration against `api.state_route_reader.served_actions`, which reads the
+endpoint's own source — a declaration naming an action the route does not serve
+is refused, and the declaration/reader consistency test goes red. A route that
+declares nothing — including one added later — is REFUSED, and ANY route mounted
+under `/api/state` on a router other than the state router takes the reader
+verdict from the app-wide `state_prefix_verdict` dependency. Writes still
+require the writer verdict on `/commands/{action}`. MCP's external token is not
+automatically a REST admin token; use the host's supported authenticated channel
+for each transport.
 
 ```text
 GET  /api/state/schema                                                 writer-only

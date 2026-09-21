@@ -2,7 +2,7 @@
 
 ## Effective contract
 
-`apply_patch(patch, references)` is a native SkillFlow code mutation tool with two ways to address an edit: a V4A patch envelope, and reference hunks that cite a digest the `read` issued. SkillFlow 1.5.75 owns its grammar, exact matching, repository path checks, preflight, per-file atomic writes, mutation receipts, schema, and user-facing lifecycle wording. AItelier does not carry a second parser or filesystem implementation.
+`apply_patch(patch, references)` is a native SkillFlow code mutation tool with two ways to address an edit: a V4A patch envelope, and reference hunks that cite a digest the `read` issued. SkillFlow 1.5.78 owns its grammar, exact matching, repository path checks, preflight, per-file atomic writes, mutation receipts, schema, and user-facing lifecycle wording. AItelier does not carry a second parser or filesystem implementation.
 
 AItelier explicitly grants the tool to generic code-writing roles. On those steps the host exposes `apply_patch` in place of generic `create`, `edit`, `write`, and `repo_remove_file`; fixed-slot and artifact steps keep their narrower interfaces. AItelier also checks every parsed path against the task card before dispatch, strips caller-supplied roots, accounts all returned paths, and pins the tested SkillFlow version.
 
@@ -94,8 +94,8 @@ AItelier owns:
 - task-card path authorization and complete-batch refusal;
 - host root injection, role grants, tool filtering, loop accounting, and prompt guidance;
 - pipeline-forge guidance for newly generated code roles;
-- its exact `skillflow-py==1.5.75` package pin.
+- its exact `skillflow-py==1.5.78` package pin.
 
 Existing saved generated pipelines are historical inputs and are not silently rewritten. New/reloaded definitions receive only the tools their role configuration explicitly grants.
 
-The migration is deployable only after SkillFlow 1.5.75 is published, the AItelier image resolves that exact pin from PyPI, and the fresh image passes the relevant integration and regression tests. This candidate does not publish, push, deploy, record evidence, or verify State.
+The migration is deployable only after SkillFlow 1.5.78 is published, the AItelier image resolves that exact pin from PyPI, and the fresh image passes the relevant integration and regression tests. This candidate does not publish, push, deploy, record evidence, or verify State.

@@ -101,8 +101,16 @@ def test_every_route_under_the_prefix_carries_a_verdict(name, app):
 def test_the_prefix_gate_middleware_is_installed(name, app):
     """The property `install_state_prefix_gate` buys: the layer that reaches a
     mounted sub-application or a bare Starlette route, neither of which has a
-    dependency tree for the dependency half to be part of."""
-    assert StatePrefixGate in [middleware.cls for middleware in app.user_middleware], name
+    dependency tree for the dependency half to be part of.
+
+    And OUTERMOST, which both assembly points say they install it as. In
+    `api/state_only.py` that ordering is load-bearing in the other direction
+    too: the bearer middleware sits inside it, so an unauthenticated request
+    still reaches 401 rather than being answered by the verdict.
+    """
+    installed = [middleware.cls for middleware in app.user_middleware]
+    assert StatePrefixGate in installed, (name, installed)
+    assert installed[0] is StatePrefixGate, (name, installed)
 
 
 # --- the three shapes that were still 200 and still leaking ------------------

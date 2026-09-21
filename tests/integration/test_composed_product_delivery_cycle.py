@@ -90,8 +90,12 @@ def adjudicate(state, node, candidate, report, report_sha):
     attempt = external.register("delivery", node, 1, "product-cycle",
                                 f"worker-{node}", f"request-{node}")
     worker_report = report.with_name(f"{node}-candidate.json")
+    # The terminal envelope a real external harness writes: an explicit
+    # terminal status, the settled/usable declaration State requires before it
+    # retains the bytes, and the artifact the observation is about.
     worker_report.write_text(json.dumps({
-        "candidate": candidate, "producer": f"worker-{node}"}) + "\n")
+        "status": "candidate", "settled": True, "usable": True,
+        "artifact": candidate, "producer": f"worker-{node}"}) + "\n")
     observed = external.observe(
         attempt["attempt_id"], f"candidate-{node}", 0, attempt["context_hash"],
         "candidate", str(worker_report), sha(worker_report), quiescent=True,

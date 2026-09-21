@@ -35,6 +35,7 @@ second copy, but that edit is deliberately not made here.
 from __future__ import annotations
 
 import asyncio
+import json
 
 # A driven step loop is bounded so a pipeline that cannot terminate (an unbounded
 # cycle, a step failing forever) surfaces as "did-not-terminate" instead of
@@ -244,6 +245,60 @@ def restore_retry_budget(sf, run_id: str) -> dict | None:
             "max_retries": row["max_retries"]}
 
 
+# SkillFlow's wording when it drops a caller argument the tool does not name.
+# The call is rejected BEFORE the function is entered, so nothing the tool would
+# have done happened — no file read, no search, no report written.
+_REFUSED_MARKER = "No tool action was performed"
+
+
+def refused_tool_calls(sf, run_id: str) -> dict:
+    """Tool calls this run REFUSED before execution, counted per tool.
+
+    A refusal and a failure are different dispositions and must never share a
+    counter. "The tool ran and failed" leaves a result to read; "the tool never
+    ran" leaves a hole, and downstream reads that hole as an absence of
+    evidence rather than as a broken call. Run 0cf3c10b lost its entire
+    commit-history evidence chain that way: `git_history` was refused twice, the
+    review shipped without it, and the gap was only found by a reviewer
+    reasoning backwards. Run c71a39ee refused one `semantic_search` call, and
+    the only record of either fact lived in `tool_result` rows inside
+    `trace.db` — a director spent an hour diagnosing without ever seeing it.
+
+    Shape: ``{"total": int, "by_tool": {name: int}, "note": str}``, or
+    ``{"total": None, "unreadable": str}`` when the trace cannot be queried —
+    "I could not count" must not render as zero.
+    """
+    try:
+        rows = sf.trace_query(
+            run_id,
+            "SELECT event, payload_json FROM skillflow_trace "
+            "WHERE run_id = ? AND category = ? ORDER BY id",
+            (run_id, "tool_result"))
+    except Exception as e:  # noqa: BLE001
+        return {"total": None, "unreadable": str(e)[:200]}
+    by_tool: dict[str, int] = {}
+    for row in rows or []:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        if _REFUSED_MARKER not in str(payload.get("error") or ""):
+            continue
+        name = (row["event"] or "?") if not isinstance(row, dict) else (
+            row.get("event") or "?")
+        by_tool[name] = by_tool.get(name, 0) + 1
+    total = sum(by_tool.values())
+    return {
+        "total": total,
+        "by_tool": dict(sorted(by_tool.items())),
+        "note": ("These calls were rejected before the tool body ran, so they "
+                 "produced NO output at all — read them as missing evidence, "
+                 "not as failed work. They are deliberately not part of any "
+                 "failure count." if total else
+                 "No tool call was rejected before execution."),
+    }
+
+
 def _last_trace_at(sf, run_id: str) -> str | None:
     """Newest trace row timestamp for this run, or None if the trace is empty
     or unreadable. None means "no finer signal available", never "idle 0"."""
@@ -404,7 +459,8 @@ async def _step(sf, db, ws, run_id: str, auto_approve: bool, max_steps: int) -> 
 
 def summarise_run(sf, ws, registry, run_id: str) -> dict:
     """What happened, small enough to read: per-step status, the FIRST failure with
-    its error, and the final outputs truncated.
+    its error, the tool calls that were REFUSED BEFORE EXECUTION, and the final
+    outputs truncated.
 
     The fix half of a generate → drive → fix loop needs to know what broke. A bare
     status ("failed") names no step and no reason, and the raw trace is far too
@@ -547,6 +603,9 @@ def summarise_run(sf, ws, registry, run_id: str) -> dict:
         "liveness_from": liveness_from,
         "run_row_updated_at": row_ts,
         "steps": per_step, "first_failure": first_failure,
+        # Kept out of `first_failure` and out of every failure count on purpose:
+        # a refused call is not a failed one. See refused_tool_calls().
+        "refused_tool_calls": refused_tool_calls(sf, run_id),
         "final_outputs": outputs,
         "run_error": run.get("error_reason") or run.get("error"),
     }

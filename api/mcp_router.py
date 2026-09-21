@@ -1384,7 +1384,10 @@ def _register_run_tools(tool):
 
     @tool("get_run_summary", "read",
           "What a run actually did, small enough to read: per-step status, the FIRST "
-          "failure with its error, and the final outputs truncated. This is what to "
+          "failure with its error, `refused_tool_calls` (calls rejected BEFORE the "
+          "tool body ran, counted per tool — they produced no output at all, so read "
+          "them as missing evidence rather than as failed work; they are deliberately "
+          "not in any failure count), and the final outputs truncated. This is what to "
           "read after wait_for_run — `get_run_status` gives only a status and a node "
           "name, which names neither what broke nor why. Use it to decide whether to "
           "fix the pipeline (edit_template / edit_pipeline / edit_tool) and run it "

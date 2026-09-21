@@ -51,8 +51,19 @@ def _named_parameters(loader, name: str) -> set[str] | None:
     }
 
 
-def test_every_tool_the_host_would_feed_actually_receives_it(loader, host):
-    """The set "would be injected AND would be refused" must be empty."""
+def test_the_guard_never_contradicts_the_signature_it_reads(loader, host):
+    """A REVERT DETECTOR, and deliberately not the measurement.
+
+    This asks the guard and then checks the guard's own first clause
+    (``keyword in named``), so it cannot come out any other way while that
+    clause is there: it goes red if someone restores VAR_KEYWORD-as-acceptance,
+    and says nothing at all about whether the engine then runs the tool.
+
+    The evidence that no tool is refused under the new decision is
+    ``scripts/sweep_injected_kwargs_execution.py``, which CALLS every tool in
+    the live registry through the engine and reads what comes back, with a
+    forced-injection control arm so a zero is falsifiable.
+    """
     refused: list[str] = []
     for keyword in AItelierSkillFlow.HOST_INJECTED_KEYWORDS:
         for name in _tool_names(loader):

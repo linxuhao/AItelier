@@ -265,9 +265,35 @@ def refused_tool_calls(sf, run_id: str) -> dict:
     `trace.db` — a director spent an hour diagnosing without ever seeing it.
 
     Shape: ``{"total": int, "by_tool": {name: int}, "note": str}``, or
-    ``{"total": None, "unreadable": str}`` when the trace cannot be queried —
+    ``{"total": None, "unreadable": str}`` when the count could not be taken —
     "I could not count" must not render as zero.
+
+    A silent zero is the same defect one layer down. ``trace_query`` resolves a
+    run it does not know to the SHARED trace database, which is empty by
+    design, and an absent per-run ``trace.db`` resolves there too: both return
+    zero rows without raising, so "no refusal happened" and "no trace exists to
+    look in" were indistinguishable. This counts the run's trace rows FIRST and
+    reports the inability whenever the trace holds nothing for this run —
+    only a trace that demonstrably carries this run's events can support the
+    claim that none of its calls was refused.
     """
+    try:
+        present = sf.trace_query(
+            run_id,
+            "SELECT COUNT(*) AS n FROM skillflow_trace WHERE run_id = ?",
+            (run_id,))
+    except Exception as e:  # noqa: BLE001
+        return {"total": None, "unreadable": str(e)[:200]}
+    try:
+        row = present[0]
+        traced = int(row["n"] if not isinstance(row, dict) else row.get("n"))
+    except (IndexError, KeyError, TypeError, ValueError):
+        traced = 0
+    if traced <= 0:
+        return {"total": None,
+                "unreadable": "the trace holds no rows for this run: its trace "
+                              "database is absent, empty, or not the one this "
+                              "run wrote to, so no refusal count can be taken"}
     try:
         rows = sf.trace_query(
             run_id,

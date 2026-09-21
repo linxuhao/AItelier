@@ -66,10 +66,15 @@ class AItelierSkillFlow(SkillFlow):
         gap rather than a failure.  ``**kwargs`` is not a member of
         ``sig.parameters`` under that membership test, so a signature ending in
         ``**kwargs`` is a REFUSAL, not an acceptance.  Counting VAR_KEYWORD as
-        acceptance is what stopped 65 of the 83 live tools from running when the
+        acceptance is what stopped 58 of the 83 live tools from running when the
         host reached them (measured 2026-09-21 by
-        ``scripts/audit_injected_kwargs.py``); ``semantic_search`` and
-        ``git_history`` are the two confirmed victims in the trace.
+        ``scripts/audit_injected_kwargs.py``, whose loader-only view of the
+        registry is 83; composing the runtime adds ``skillflow_lint`` and makes
+        it 84); ``semantic_search`` and ``git_history`` are the two confirmed
+        victims in the trace.  That audit measures what the guard and the
+        signatures SAY; what the engine DOES under the new decision is measured
+        by ``scripts/sweep_injected_kwargs_execution.py``, which calls every
+        registered tool through this class and reads the result.
 
         Two surfaces can disagree about one keyword, so the decision is their
         intersection:
@@ -87,10 +92,20 @@ class AItelierSkillFlow(SkillFlow):
           those files, so the agreement is enforceable
           (``tests/unit/test_host_injected_kwargs_are_declared.py``).
 
-        SkillFlow's own tools are held to the signature half only: their
-        ``tool.yaml`` lives in the wheel, where host plumbing
-        (``workspace_root``, ``run_id``, ``project_id``) is deliberately kept out
-        of the agent-facing schema, and this host cannot edit it.
+        Tools whose ``tool.yaml`` this host cannot edit are held to the
+        signature half only, and ``ToolLoader.is_native`` is that predicate.
+        It covers more than the phrase "SkillFlow's own" suggests: the tools in
+        the engine's FIRST tools directory (the wheel's, whose schema
+        deliberately keeps host plumbing — ``workspace_root``, ``run_id``,
+        ``project_id`` — out of the agent-facing contract), AND tools
+        registered dynamically (``register_dynamic_tool``) or declared per step
+        (``declare_dynamic``) that resolve to NO tool directory, and so have no
+        ``tool.yaml`` on disk to hold to.  That second branch fires nowhere in
+        this deployment: with the runtime fully composed, all 84 registered
+        names resolve to a directory (22 are also in the dynamic cache), so
+        ``is_native`` is exactly the 18 wheel tools (measured 2026-09-21).  The
+        rule is still written for the predicate rather than for that count: the
+        schema half applies only where AItelier owns the file and can change it.
         """
         loader = getattr(self, "_tool_loader", None)
         if loader is None:

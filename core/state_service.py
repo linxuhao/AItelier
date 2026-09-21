@@ -656,14 +656,47 @@ class StateService:
                 "mainline_ahead_by": inventory["mainline_ahead_by"], "staged_files": parked,
                 "digest": inventory["digest"], "error": inventory["error"]}
 
+    # An attempt in one of these states has stopped producing work, so what it
+    # did and did not do is now the whole record.
+    _TERMINAL = ("candidate", "failed", "superseded")
+
     def get_attempt(self, attempt_id):
         """The read surface's view of one attempt; a failed SkillFlow attempt
         carries its relay_inventory so the director can inspect the retained
         draft without a write call."""
         attempt = self.attempts.get(attempt_id)
         if attempt["status"] == "failed" and attempt["execution_kind"] == "skillflow":
-            return {**attempt, "relay_inventory": self._relay_inventory(attempt)}
-        return attempt
+            return self._with_refusals({**attempt, "relay_inventory": self._relay_inventory(attempt)})
+        return self._with_refusals(attempt)
+
+    def _with_refusals(self, envelope):
+        """Carry the run's refused-call count into a TERMINAL attempt envelope.
+
+        A refused call produced no output at all, so the only place its absence
+        can still be noticed is the report that closes the attempt. Leaving it
+        in ``get_run_summary`` meant the director had to already suspect it to
+        go looking — which is the failure mode: run 0cf3c10b's review shipped
+        without its commit history because two ``git_history`` calls never ran,
+        and nothing in the attempt's terminal report said so.
+
+        It stays its OWN field. Folding it into any failure count would erase
+        the distinction the count exists to carry: a failed call left a result
+        to read, a refused one left a hole. ``None`` for ``total`` means the
+        count could not be taken and must never be read as "nothing was
+        refused".
+        """
+        if (not isinstance(envelope, dict)
+                or envelope.get("execution_kind") != "skillflow"
+                or envelope.get("status") not in self._TERMINAL
+                or not envelope.get("run_id")):
+            return envelope
+        from core.run_driver import refused_tool_calls
+        try:
+            self._components()
+            refused = refused_tool_calls(self.sf, envelope["run_id"])
+        except Exception as exc:  # noqa: BLE001
+            refused = {"total": None, "unreadable": f"{type(exc).__name__}: {str(exc)[:160]}"}
+        return {**envelope, "refused_tool_calls": refused}
 
     def recover_attempt(self, attempt_id):
         attempt = self.attempts.get(attempt_id)
@@ -782,14 +815,14 @@ class StateService:
         if observed["status"] == "failed":
             # What the director needs to choose between continue_from and a
             # fresh attempt: the retained commits and staged files, by step.
-            return {**observed, "relay_inventory": self._relay_inventory(observed)}
+            return self._with_refusals({**observed, "relay_inventory": self._relay_inventory(observed)})
         if observed["status"] == "candidate" and not observed["artifact_ref"]:
             try:
                 artifact = self._artifact(observed)
             except StateConflict as exc:
-                return {**observed, "artifact_pending": True, "note": str(exc)}
+                return self._with_refusals({**observed, "artifact_pending": True, "note": str(exc)})
             observed = self.attempts.reconcile(attempt_id, self.sf, artifact)
-        return observed
+        return self._with_refusals(observed)
 
     def record_evidence(self, attempt_id, evidence_id, criterion_id, verdict, artifact, report_ref, report_sha256, detail=""):
         self.reconcile_attempt(attempt_id)

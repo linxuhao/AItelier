@@ -80,7 +80,7 @@ def test_media_prompt_migration_preserves_scope_outside_output_block():
     new = migrate_role_prompt(old, strict_code=True)
     assert new.startswith("budget and scope\n")
     assert new.endswith("\nmedia provenance and review requirements")
-    assert "apply_patch(patch)" in new and "review" in new
+    assert "apply_patch" in new and "references" in new and "review" in new
     for obsolete in OBSOLETE:
         assert obsolete not in new.lower()
     assert migrate_role_prompt(new) == new
@@ -116,15 +116,24 @@ def test_invalid_sidecar_is_left_for_normal_registration(tmp_path, content):
     "coding_impl", "fix_tests", "subagent_work", "task_implementer",
     "game_designer", "novel_design",
 ])
-def test_code_templates_split_stale_and_ambiguous_patch_recovery(name):
+def test_code_templates_send_a_stuck_patch_to_a_citation_not_to_more_copying(name):
+    """A stale or ambiguous hunk used to be answered with "copy more".
+
+    That answer costs a re-read before it costs anything else: to widen the
+    copied context an agent must first go and read enough of the file to widen
+    it — which is the loop these templates were feeding. Reference mode answers
+    both failures, so the templates have to name it, and must not leave the old
+    instruction standing beside it.
+    """
     text = (ROOT / "templates" / f"{name}.md").read_text().lower()
     assert "raw=true" in text
-    if name in {"task_implementer", "game_designer", "novel_design"}:
-        assert "逐字复制" in text
-        assert "增加前后未改动行" in text
-    else:
-        assert "copy current text exactly" in text or "exact copy of current text" in text
-        assert "add unchanged surrounding lines" in text or "more unchanged surrounding lines" in text
+    assert "references" in text and "sha" in text
+    assert "citation" in text
+    for retired in ("逐字复制", "增加前后未改动行", "缩短歧义上下文",
+                    "copy current text exactly", "exact copy of current text",
+                    "add unchanged surrounding lines",
+                    "more unchanged surrounding lines"):
+        assert retired not in text, retired
 
 
 def test_checked_in_generated_impl_uses_current_code_target_contract():

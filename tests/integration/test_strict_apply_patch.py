@@ -371,3 +371,66 @@ def test_host_never_exposes_patch_to_artifact_or_fixed_slot_steps(
         output_fixed=fixed,
         config_name="g",
     )
+
+
+def _cite(sf, rid, claim, path, **kw):
+    served = sf.execute_tool(
+        "read", {"path": path, **kw}, run_id=rid, step_id=claim.step_id,
+        step_instance_id=claim.token.step_instance_id,
+        claim_epoch=claim.token.claim_epoch)
+    assert "error" not in served, served
+    return served["citation"]
+
+
+def test_reference_mode_is_accepted_and_scope_checked_by_the_host(
+    tmp_path, monkeypatch
+):
+    """The host used to accept exactly one argument and derive the authorised
+    paths from it. A second addressing mode it let through without deriving
+    ITS paths would be a hole in task-card authorisation, not a feature."""
+    sf, rid, claim, root = fixture(tmp_path, monkeypatch)
+    (root / "allowed").mkdir()
+    (root / "allowed" / "mine.py").write_text("value = 1\nother = 2\n")
+    git(root, "add", "--", "allowed/mine.py")
+    git(root, "commit", "-qm", "scoped file")
+    e = scope_host(sf, rid, claim, root, tmp_path)
+
+    cite = _cite(sf, rid, claim, "allowed/mine.py")
+    assert cite["citable"] is True and cite["start_line"] == 1
+
+    ok = e._exec_tool({"tool": "apply_patch", "params": {"references": [
+        {"file": "allowed/mine.py", "sha": cite["sha"], "from_line": 1,
+         "from_col": 8, "to_line": 1, "to_col": 9, "new_text": "41"}]}})
+    assert ok.get("applied") is True, ok
+    assert (root / "allowed" / "mine.py").read_text() == "value = 41\nother = 2\n"
+
+    outside = _cite(sf, rid, claim, "existing.py")
+    refused = e._exec_tool({"tool": "apply_patch", "params": {"references": [
+        {"file": "existing.py", "sha": outside["sha"], "from_line": 1,
+         "from_col": 4, "to_line": 1, "to_col": 5, "new_text": "9"}]}})
+    assert refused.get("scope_violation") is True, refused
+    assert refused["requested_path"] == "existing.py"
+    assert (root / "existing.py").read_text() == "x = 1\n"
+
+
+def test_a_digest_the_read_never_issued_cannot_edit_an_authorised_file(
+    tmp_path, monkeypatch
+):
+    """Scope authorises the PATH. The citation authorises the RANGE — without
+    it, reference mode would be blind coordinate editing inside the scope."""
+    import hashlib
+
+    sf, rid, claim, root = fixture(tmp_path, monkeypatch)
+    (root / "allowed").mkdir()
+    (root / "allowed" / "mine.py").write_text("value = 1\n")
+    git(root, "add", "--", "allowed/mine.py")
+    git(root, "commit", "-qm", "scoped file")
+    e = scope_host(sf, rid, claim, root, tmp_path)
+
+    forged = hashlib.sha256(b"value = 1").hexdigest()[:40]
+    got = e._exec_tool({"tool": "apply_patch", "params": {"references": [
+        {"file": "allowed/mine.py", "sha": forged, "from_line": 1,
+         "from_col": 8, "to_line": 1, "to_col": 9, "new_text": "41"}]}})
+    assert got.get("applied") is False
+    assert "never issued" in got["error"]
+    assert (root / "allowed" / "mine.py").read_text() == "value = 1\n"

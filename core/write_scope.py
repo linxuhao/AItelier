@@ -152,8 +152,28 @@ def mutation_paths(tool: str, params: object, output_fixed: object = None) -> li
     """
     params = params if isinstance(params, dict) else {}
     if tool == "apply_patch":
+        # BOTH addressing modes, or reference hunks would edit files the task
+        # card never authorised. The paths are what the scope check is about;
+        # how the edit was addressed is not.
         from skillflow.strict_patch import parse_patch
-        return [op.path for op in parse_patch(params.get("patch"))]
+        try:
+            from skillflow.strict_patch import parse_references
+        except ImportError:  # skillflow older than reference mode
+            # The CALL will fail on its own there. What must not happen is the
+            # scope check raising (or passing) because it could not parse an
+            # argument it does not understand: this repo and the pinned
+            # skillflow release move separately, and an authorisation gate is
+            # the wrong place to discover that.
+            def parse_references(refs):
+                if refs:
+                    raise ValueError(
+                        "apply_patch references need a newer skillflow than "
+                        "this deployment installs")
+                return ()
+        paths = [op.path for op in parse_references(params.get("references"))]
+        if params.get("patch"):
+            paths = [op.path for op in parse_patch(params["patch"])] + paths
+        return paths or [None]
     if tool in _GENERIC:
         for key in ("file", "file_path", "filename", "path"):
             if params.get(key) not in (None, ""):

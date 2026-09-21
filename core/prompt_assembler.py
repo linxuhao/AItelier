@@ -523,8 +523,10 @@ class PromptAssembler:
                     delivery = (
                         "[Output Delivery — REQUIRED]\n"
                         "Use JSON actions with the granted apply_patch tool. "
-                        "Do not use a whole-file files shortcut. Follow the strict "
-                        "patch format and read unique current context before updates.\n"
+                        "Do not use a whole-file files shortcut. Add/Delete use the "
+                        "strict patch format; to change an existing file, prefer "
+                        "`references` — quote the `sha` from that file's `read` "
+                        "citation and send only the new text.\n"
                         + json.dumps(example, ensure_ascii=False)
                         + "\nAvailable code editing tools:\n" + tool_list_block
                         + "\nOn partial I/O failure, reread reported changed paths "

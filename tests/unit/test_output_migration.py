@@ -123,10 +123,14 @@ keep task-specific output"""
 
     changed = json.loads(role_path.read_text())
     prompt = changed["generated_impl"]["system_prompt"]
-    assert "apply_patch(patch)" in prompt
-    assert "失效或" in prompt and "逐字复制" in prompt
-    assert "命中多处" in prompt and "增加前后未改动行" in prompt
-    assert "缩短歧义上下文" in prompt
+    assert "apply_patch(patch, references)" in prompt
+    # The migrated guidance sends a stuck agent to a citation, not to a wider
+    # copy of the file it is already unsure about.
+    assert "references" in prompt and "citation" in prompt
+    assert "原文一个字都不用抄" in prompt
+    assert "stale 或 ambiguous" in prompt
+    assert "逐字复制当前文本" not in prompt
+    assert "增加前后未改动行" not in prompt
     assert prompt.endswith("## 输出" + chr(10) + "keep task-specific output")
     assert changed["generated_impl"]["tools"] == ["list_tree", "apply_patch"]
     assert changed["generated_impl"]["model"] == "host"
@@ -164,5 +168,6 @@ def test_saved_generated_media_prompt_is_rewritten_without_stale_old_str_contrac
     role = json.loads(path.read_text())["media"]
     assert role["tools"] == ["apply_patch"]
     assert "old_str" not in role["system_prompt"]
-    assert "stale or not found" in role["system_prompt"]
-    assert "add unchanged surrounding lines" in role["system_prompt"]
+    assert "stale or ambiguous" in role["system_prompt"]
+    assert "citation" in role["system_prompt"]
+    assert "add unchanged surrounding lines" not in role["system_prompt"]

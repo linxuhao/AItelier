@@ -43,18 +43,25 @@ probe can miss an unrelated regression; `finish_step` still routes through the
 unchanged full gate. If a required runtime probe reports unavailable or times
 out, report that limitation rather than calling it a pass.
 
-## Writing code with `apply_patch(patch)`
-Use Add/Update/Delete File operations in this run's code worktree. One patch can
-contain multiple files and ordered, non-overlapping hunks. Read affected ranges
-with `raw=true` first so line-number prefixes never enter patch context. Updates
-must match exact unique context in the ORIGINAL file for that call. Later calls
-see prior uncommitted changes. Follow the tool's Begin/End Patch format with bare
-`@@` headers. Do not send whole-file shortcuts. Add refuses existing paths;
-Delete takes no body.
+## Writing code with `apply_patch(patch, references)`
+To edit an existing file, cite it instead of copying it. Every `read` returns a
+`citation` for the window it served; pass its `sha` with the range you are
+replacing and only the new text — `{"file", "sha", "from_line", "from_col",
+"to_line", "to_col", "new_text"}` — in `references`. Lines are 1-based inside
+that window, columns 0-based, `to_col` exclusive; `(L,0)..(M,len(line M))`
+replaces whole lines. Any order: one snapshot, engine-applied, non-overlapping.
+Changing one word cites one line.
 
-All operations are checked before publication. A stale or missing hunk requires a
-new `read(raw=true)` and an exact copy of current text. An ambiguous hunk requires
-more unchanged surrounding lines until it is unique. Either failure leaves the batch unchanged. On an I/O failure with `partial`, inspect `written`/`deleted`
+Use `patch` for Add/Delete File operations and diff-shaped edits: bare `@@`
+headers, exact unique context against the ORIGINAL file for that call, ranges
+read with `raw=true` so line-number prefixes never enter patch context. Add
+refuses existing paths; Delete takes no body. Later calls see prior uncommitted
+changes. Do not send whole-file shortcuts.
+
+All operations are checked before publication. A stale or ambiguous hunk, or a
+cited window whose text has changed, leaves the batch unchanged; the remedy is
+to reread that range and cite its new `sha`, never to retype the original or
+widen the copied context. On an I/O failure with `partial`, inspect `written`/`deleted`
 and reread affected paths before repairing the remainder; never replay the batch.
 An applied patch changes the uncommitted worktree, but is not validation or review.
 At `finish_step` the engine validates the candidate, commits only this step's

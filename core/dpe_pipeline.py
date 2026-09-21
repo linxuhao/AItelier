@@ -1758,8 +1758,9 @@ class PipelineEngine:
             if (getattr(self, "_output_target", "artifact") != "code"
                     or getattr(self, "_output_fixed", {}) or "apply_patch" not in schemas):
                 return {"error": "apply_patch requires a granted generic code-output step"}
-            if set(params) != {"patch"}:
-                return {"error": "apply_patch accepts exactly one argument: patch"}
+            if not set(params) <= {"patch", "references"} or not params:
+                return {"error": ("apply_patch accepts only patch and/or "
+                                  "references")}
         elif "apply_patch" in schemas and tool_name in ("create", "edit", "write", "repo_remove_file"):
             return {"error": "Use the granted apply_patch tool for code Add/Update/Delete operations"}
         refusal = self._write_scope_refusal(tool_name, params)

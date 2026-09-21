@@ -20,21 +20,47 @@ ARTIFACT_SLOTS = {"design", "report"}
 GENERIC_CODE_MUTATORS = {"create", "edit", "write", "repo_remove_file"}
 VERIFIER_READ_TOOLS = {"list_tree", "semantic_search", "git_history",
                        "web_search", "web_fetch"}
-STRICT_PATCH_GUIDANCE_EN = """Use `apply_patch(patch)` for Add/Update/Delete operations in this run's code
-worktree. Read affected ranges with `raw=true`; numbered output is not patch
-text. If context is stale or not found, reread and copy the current text exactly.
-If context matches more than once, add unchanged surrounding lines until it is
-unique; never shrink ambiguous context. Patches use exact matching and complete
-preflight. On a partial I/O failure, inspect `written`/`deleted` and reread
-those paths before repairing the remainder. A successful call changes only the
-uncommitted worktree; validation, review, and delivery remain pending."""
-STRICT_PATCH_GUIDANCE_ZH = """## 写文件的工具：`apply_patch(patch)`
-用严格补丁批量新建、修改或删除本 run worktree 中的代码文件。修改前用
-`read(raw=true)` 读取当前范围；带行号的输出不能复制进补丁。上下文失效或
-未找到时，重新 raw 读取并逐字复制当前文本；命中多处时，增加前后未改动行
-直到唯一，绝不缩短歧义上下文。补丁先完整预检；若 I/O 失败返回 partial，
-检查 written/deleted 并重读这些路径后再修复。成功只代表未提交 worktree
-已改变，验证、审查和交付仍未通过。
+STRICT_PATCH_GUIDANCE_EN = """Use `apply_patch` to change code in this run's worktree. It takes two
+arguments and you may send either or both.
+
+`references` is the one to reach for when editing an existing file. Every
+`read` returns a `citation` — {path, start_line, end_line, start_byte,
+end_byte, sha} — and the `sha` is issued by the engine over exactly the text
+it just sent you. Quote it back with the range and the NEW text only:
+`{"file": …, "sha": …, "from_line": …, "from_col": …, "to_line": …,
+"to_col": …, "new_text": …}`. Lines are 1-based inside the cited window,
+columns 0-based with `to_col` exclusive. The engine copies the original for
+you, applies your ranges against one snapshot in whatever order you list them,
+and refuses a sha it never issued or a window whose text has changed.
+
+`patch` is the Begin/End Patch envelope, for Add and Delete and for edits you
+would rather express as a diff; its updates still need exactly one matching
+context. When a hunk comes back stale or ambiguous, reread that range and cite
+its sha instead of copying more of the file.
+
+Both modes preflight the whole batch. On a partial I/O failure, inspect
+`written`/`deleted` and reread those paths before repairing the remainder. A
+successful call changes only the uncommitted worktree; validation, review, and
+delivery remain pending."""
+STRICT_PATCH_GUIDANCE_ZH = """## 写文件的工具：`apply_patch(patch, references)`
+两个参数，可以只用一个，也可以一起用。
+
+**改已有文件优先用 `references`（引用模式）。** 每次 `read` 都会返回一个
+`citation`：{path, start_line, end_line, start_byte, end_byte, sha}。这个
+`sha` 是引擎对它刚刚发给你的那段原文签发的——你算不出来，也不需要算。把它
+原样贴回来，只提供新文本：
+`{"file": …, "sha": …, "from_line": …, "from_col": …, "to_line": …,
+"to_col": …, "new_text": …}`。行号 1-based，必须落在被引用的窗口内；列
+0-based，`to_col` 不含。**原文一个字都不用抄**——复制由引擎来做。同一次调用
+里的多个区间针对同一份快照解析，顺序随便给，引擎自己排；区间不能重叠。
+引擎没签发过的 sha、或被引用区间已经变过的，一律拒绝。
+
+`patch` 是 Begin/End Patch 信封，用于 Add / Delete，以及你更愿意写成 diff
+的修改；它的 Update 仍然要求上下文精确且唯一命中。hunk 报 stale 或 ambiguous
+时，重读那一段并引用它的 sha，不要去抄更多原文。
+
+两种模式都先整批预检；若 I/O 失败返回 partial，检查 written/deleted 并重读
+这些路径后再修复。成功只代表未提交 worktree 已改变，验证、审查和交付仍未通过。
 
 不要整文件覆盖已有文件。找不到位置时先 semantic_search/search，再只读取
 相关范围。后续调用能读到本轮之前已应用的补丁。"""

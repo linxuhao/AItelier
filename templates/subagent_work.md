@@ -37,14 +37,24 @@ file once before you edit it; **do NOT re-read it afterward to "verify"** —
 not that tests/review/delivery passed. To touch another step's
 output, pass an explicit `source` (the tool description lists what you may use).
 
-## Writing code with `apply_patch(patch)`
-Use Add/Update/Delete File operations, with multiple files and hunks in one call.
-Read current ranges with `raw=true` first; numbered output is not patch text.
-For stale or missing context, reread and copy current text exactly. For ambiguity,
-add unchanged surrounding lines until the match is unique. Updates need disjoint ordered
-hunks against the ORIGINAL file in that call. Later calls see prior edits.
-Follow the tool's strict Begin/End Patch format; do not use whole-file shortcuts.
-On partial I/O failure, reread reported changed paths before repairing the rest.
+## Writing code with `apply_patch(patch, references)`
+To change an existing file, prefer `references`. Every `read` hands back a
+`citation`; quote its `sha` with the range you are replacing and supply only the
+new text — `{"file", "sha", "from_line", "from_col", "to_line", "to_col",
+"new_text"}`. You never retype the original, so you never have to reread a file
+to check that your copy of it is still accurate. Lines are 1-based inside the
+cited window, columns 0-based, `to_col` exclusive. Give the ranges in any order:
+they resolve against one snapshot and the engine applies them. They must not
+overlap, and a window that changed since its digest was issued is refused —
+reread it and cite the new `sha`.
+
+Use `patch` for Add/Delete File operations and for edits you would rather write
+as a diff; those hunks still need exact, unique, ordered context against the
+ORIGINAL file in that call, read with `raw=true` (numbered output is not patch
+text). If such a hunk comes back stale or ambiguous, switch it to a reference
+rather than copying more of the file. Later calls see prior edits. Do not use
+whole-file shortcuts. On partial I/O failure, reread reported changed paths
+before repairing the rest.
 
 Paths are repo-relative. When done, call `finish_step` with a one-line summary
 of what you changed.

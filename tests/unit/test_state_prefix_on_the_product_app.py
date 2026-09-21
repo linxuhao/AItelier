@@ -19,15 +19,19 @@ import tempfile
 from contextlib import contextmanager
 
 import pytest
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from fastapi.routing import APIWebSocketRoute
+
 from api import authz
 from api import main as api_main
+from api import state_graph_routers
 from api import state_only
 from api.state_http import (STATE_ROUTE_DECLARATION, StatePrefixGate, is_state_prefix,
+                            prefix_verdict_stands_down_for,
                             route_carries_prefix_verdict, route_carries_state_verdict,
                             route_contexts)
 
@@ -49,6 +53,18 @@ def _assembly_points() -> set[str]:
             if re.search(r"include_router\(\s*(create_state_router|state_graph_router)", line):
                 found.add(relative)
     return found
+
+
+def _is_websocket(route) -> bool:
+    """Whether this entry is a websocket route.
+
+    `route_contexts` yields a `RouteContext` WRAPPER, not the route: asking it
+    directly answers False for every entry, which would have made the
+    websocket line below assert nothing at all. The polarity test
+    `test_a_websocket_route_under_the_prefix_is_not_counted_as_covered` is what
+    caught that, which is the whole reason it exists.
+    """
+    return isinstance(getattr(route, "route", route), APIWebSocketRoute)
 
 
 def test_the_repository_assembles_exactly_two_apps_under_the_prefix():
@@ -86,6 +102,14 @@ def test_every_route_under_the_prefix_carries_a_verdict(name, app):
     under_the_prefix = [route for route in route_contexts(app)
                         if getattr(route, "path", None) and is_state_prefix(route.path)]
     assert under_the_prefix, (name, "no route under the prefix was found at all")
+    # A websocket route is NOT counted as covered. `state_prefix_verdict` takes
+    # a `Request`, which a websocket connection cannot supply: connecting dies
+    # with `TypeError: state_prefix_verdict() missing 1 required positional
+    # argument: 'request'`. That happens to fail closed, but counting it would
+    # be counting a verdict that cannot run, so a websocket route under the
+    # prefix fails this assertion instead of inflating it.
+    sockets = [route.path for route in under_the_prefix if _is_websocket(route)]
+    assert sockets == [], (name, sockets)
     naked = [route.path for route in under_the_prefix
              if not route_carries_state_verdict(route)]
     assert naked == [], (name, naked)
@@ -195,6 +219,33 @@ def _plain_app_route(app):
         return {"notebook": SECRET}
 
 
+FORGED_PREFIX_PATH = "/api/state/forged-claim"
+
+
+def _a_route_claiming_to_have_been_judged(app):
+    """A route whose dependency carries EVERY attribute the real router guard
+    carries - r4's exemption, forged, and the strongest form of it: not a
+    guessed mark but a copy of the real object's own attributes."""
+    real = state_graph_routers.router.dependencies[0].dependency
+
+    def claim(request: Request) -> None:
+        return None
+
+    for attribute, value in vars(real).items():
+        setattr(claim, attribute, value)
+
+    def forged():
+        return {"notebook": SECRET}
+
+    app.get(FORGED_PREFIX_PATH, dependencies=[Depends(claim)])(forged)
+
+
+def _a_websocket_route_under_the_prefix(app):
+    @app.websocket("/api/state/socket")
+    async def socket(websocket):  # pragma: no cover - never accepted
+        await websocket.accept()
+
+
 ESCAPES = [
     ("mounted_subapplication", _leaking_subapplication, "/api/state/sub/notebook"),
     ("bare_starlette_route", _bare_starlette_route, "/api/state/bare"),
@@ -228,6 +279,46 @@ def test_the_same_route_is_served_once_the_verdict_allows(name, install, path, g
             response = client.get(path)
     assert response.status_code == 200, (name, response.status_code, response.text[:200])
     assert SECRET in response.text, name
+
+
+def test_the_coverage_claim_and_the_request_are_measured_over_the_same_route(gated):
+    """The coverage assertion must not be able to be green over a leaking route.
+
+    D6 of the r4 review: `/api/state/forged2` reported
+    `carries_state_verdict=True carries_prefix_verdict=True` while answering an
+    anonymous caller 200 with the notebook in the body. The coverage assertion
+    was not wrong about the dependency TREE - the verdict really was in it - it
+    was wrong about what being in the tree buys, because the verdict stood
+    itself down for exactly this route. One number cannot catch that, so all
+    three are taken here over ONE route in ONE installation: what coverage
+    says, what the stand-down decides, and what the request actually gets.
+
+    On `34f380aa` this test fails twice over: the stand-down says yes to the
+    forged claim, and the response is 200 with the body.
+    """
+    with _temporarily(api_main.app, _a_route_claiming_to_have_been_judged):
+        route = next(r for r in route_contexts(api_main.app)
+                     if getattr(r, "path", None) == FORGED_PREFIX_PATH)
+        covered = route_carries_state_verdict(route)
+        carries_the_app_wide_half = route_carries_prefix_verdict(route)
+        stands_down = prefix_verdict_stands_down_for(route)
+        with TestClient(api_main.app) as client:
+            response = client.get(FORGED_PREFIX_PATH)
+    assert covered, "a route counted as uncovered would at least be honest"
+    assert carries_the_app_wide_half
+    assert not stands_down, "the prefix verdict stood down for a forged claim"
+    assert response.status_code == 403, (response.status_code, response.text[:200])
+    assert SECRET not in response.text
+
+
+def test_a_websocket_route_under_the_prefix_is_not_counted_as_covered():
+    """Pole two for the websocket line in the coverage assertion: install one
+    and the coverage test refuses to count it, instead of reporting a verdict
+    that dies with a TypeError the moment anything connects."""
+    with _temporarily(api_main.app, _a_websocket_route_under_the_prefix):
+        with pytest.raises(AssertionError):
+            test_every_route_under_the_prefix_carries_a_verdict("api/main.py",
+                                                                api_main.app)
 
 
 @contextmanager

@@ -120,6 +120,12 @@ def test_every_route_on_the_router_is_declared_read_and_cross_checked(capsys):
               f"{sum(1 for r in table if r['agrees'])} cross-checked")
 
     assert len(table) == len(routes.router.routes)
+    # ...which is a tautology on its own: `_table()` is built by iterating the
+    # same list. On an empty or renamed router it would print "0 routes, 0
+    # unreadable, 0 cross-checked" and pass. The floor is what stops that, and
+    # it lives here rather than only in `test_state_read_visibility.py`, where
+    # it was mitigating this file's gap from another file.
+    assert len(table) >= 20, len(table)
     undeclared = [row["path"] for row in table if row["declaration"] is None]
     assert undeclared == [], undeclared
     unreadable = [row["path"] for row in table if row["reading"] == UNREADABLE]
@@ -229,6 +235,123 @@ def test_a_dispatch_declaration_the_reader_cannot_confirm_is_refused(service, ga
     with _client_for(router, service) as client:
         response = client.get("/api/state/crooked/get_graph")
     assert response.status_code == 403, (response.status_code, response.text[:200])
+    assert SECRET not in response.text
+
+
+def test_a_dispatch_route_judged_on_one_url_parameter_and_run_on_another_is_refused(
+        service, gated):
+    """The guard resolves `action` out of the URL; the handler here executes
+    `verb`. Both are the endpoint's own parameters, the declaration is honest
+    about being a dispatch family, and the reader reads it as one - so the ONLY
+    thing that refuses this route is the two halves naming the SAME parameter
+    (`reading.parameter == _DISPATCH_PARAMETER`).
+
+    Delete that comparison and the suite used to stay green while
+    `GET /api/state/split/get_graph?verb=get_driver_note` went from 403 to 200
+    and returned the notebook: the guard judged the public `get_graph` it found
+    in the path while the handler executed the private `get_driver_note` it
+    found in the query. Reading the WRONG thing is worse than reading nothing,
+    and until this test there was no observation point for it.
+    """
+    def split_dispatch(action: str, verb: str = "",
+                       service=Depends(routes.get_service)):
+        return execute(service, verb, {"project_id": "p"})
+
+    setattr(split_dispatch, STATE_ROUTE_DECLARATION, ("read", None))
+    router = _router(service, authz.require_reader)
+    router.get("/split/{action}")(split_dispatch)
+    with _client_for(router, service) as client:
+        response = client.get("/api/state/split/get_graph?verb=get_driver_note")
+    assert response.status_code == 403, (response.status_code, response.text[:200])
+    assert SECRET not in response.text
+
+
+def test_the_same_dispatch_route_serves_when_both_halves_name_one_parameter(
+        service, gated):
+    """Pole two: one word different - the handler executes the parameter the
+    guard resolved - and the same path, the same declaration and the same
+    anonymous caller get a 200. The refusal above is the disagreement, not the
+    route being unreachable."""
+    def split_dispatch(action: str, verb: str = "",
+                       service=Depends(routes.get_service)):
+        return execute(service, action, {"project_id": "p"})
+
+    setattr(split_dispatch, STATE_ROUTE_DECLARATION, ("read", None))
+    router = _router(service, authz.require_reader)
+    router.get("/split/{action}")(split_dispatch)
+    with _client_for(router, service) as client:
+        response = client.get("/api/state/split/get_graph?verb=get_driver_note")
+    assert response.status_code == 200, (response.status_code, response.text[:200])
+    assert SECRET not in response.text
+
+
+def test_a_dispatch_route_whose_action_is_not_in_the_url_is_refused(service, gated):
+    """A dispatch family whose action arrives as a QUERY parameter.
+
+    The reader reads it as a dispatch on `action`, the declaration says so, and
+    the two halves name the same parameter - but `request.path_params` has no
+    `action`, because this route's path has no `{action}` segment. The guard
+    resolves None, and None is a private read: "the action could not be
+    resolved" must never mean "there is nothing to refuse".
+
+    Flip that arm (`action is None or ...` to `action is not None and ...`) and
+    the suite used to stay green while
+    `GET /api/state/qdispatch?action=get_driver_note` went from 403 to 200 with
+    the notebook in it - an empty result read as an approval, in the one family
+    where the action is not where the guard looks.
+    """
+    def query_dispatch(action: str = "", service=Depends(routes.get_service)):
+        return execute(service, action, {"project_id": "p"})
+
+    setattr(query_dispatch, STATE_ROUTE_DECLARATION, ("read", None))
+    router = _router(service, authz.require_reader)
+    router.get("/qdispatch")(query_dispatch)
+    with _client_for(router, service) as client:
+        response = client.get("/api/state/qdispatch?action=get_driver_note")
+    assert response.status_code == 403, (response.status_code, response.text[:200])
+    assert SECRET not in response.text
+
+
+def test_the_same_query_dispatch_route_serves_once_the_verdict_allows(service, gated):
+    """Pole two for the route above: an allowing verdict, and the same request
+    returns the notebook. The 403 is the guard refusing an action it could not
+    resolve, not the route failing to exist."""
+    def query_dispatch(action: str = "", service=Depends(routes.get_service)):
+        return execute(service, action, {"project_id": "p"})
+
+    setattr(query_dispatch, STATE_ROUTE_DECLARATION, ("read", None))
+    router = _router(service, _allows)
+    router.get("/qdispatch")(query_dispatch)
+    with _client_for(router, service) as client:
+        response = client.get("/api/state/qdispatch?action=get_driver_note")
+    assert response.status_code == 200, (response.status_code, response.text[:200])
+    assert SECRET in response.text
+
+
+@pytest.mark.parametrize("kind,expected", [("peek", 403), ("read", 200)],
+                         ids=["a_kind_with_no_branch", "a_kind_with_a_branch"])
+def test_a_declaration_naming_a_kind_the_guard_does_not_judge_is_refused(
+        service, gated, kind, expected):
+    """One word apart: the same endpoint, the same public action it really
+    executes, declared under a kind the guard has a branch for and under one it
+    does not.
+
+    A kind outside `DECLARATION_KINDS` used to fall through to the arm written
+    for a literal read, so it was judged by whatever action it named - and a
+    public one opened it. `tests/unit/test_state_read_visibility.py` claimed this
+    case ended in a refusal. It did not, until the guard was given the line
+    these two poles measure.
+    """
+    def graph(project_id: str, service=Depends(routes.get_service)):
+        return execute(service, "get_graph", {"project_id": project_id})
+
+    setattr(graph, STATE_ROUTE_DECLARATION, (kind, "get_graph"))
+    router = _router(service, authz.require_reader)
+    router.get("/projects/{project_id}/kinded")(graph)
+    with _client_for(router, service) as client:
+        response = client.get("/api/state/projects/p/kinded")
+    assert response.status_code == expected, (kind, response.status_code,
+                                              response.text[:200])
     assert SECRET not in response.text
 
 

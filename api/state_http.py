@@ -1,6 +1,7 @@
 """State-only HTTP routes reusable without importing the workflow host."""
 import inspect
 import json
+import weakref
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from typing import Annotated, Literal
@@ -71,6 +72,13 @@ def route_contexts(app):
 STATE_ROUTE_DECLARATION = "_state_route"
 _DECLARATION = STATE_ROUTE_DECLARATION  # legacy name used by the invariant tests
 
+# The kinds the router guard has a branch for. A declaration naming anything
+# else is REFUSED rather than sent to the branch that happens to be last: an
+# unknown kind used to reach the literal-read arm, where a kind nobody had
+# written a rule for was judged by whatever action it named - a public one
+# opened the door. The default here is DENY, like everywhere else in this file.
+DECLARATION_KINDS = ("read", "write", "director", "schema")
+
 # The URL parameter the action-dispatch families take their action from. The
 # guard reads `request.path_params[_DISPATCH_PARAMETER]`, so the independent
 # reader must find the endpoint executing THAT parameter and no other: the two
@@ -84,13 +92,34 @@ _DISPATCH_PARAMETER = "action"
 # rather than a read of an action nobody could cross-check.
 SCHEMA_DECLARED_ACTION = "get_state_schema"
 
-# Marks set on the verdict dependencies themselves. A route's coverage is read
-# off the dependency graph FastAPI actually built for it, never off an
-# attribute the endpoint's author can set: an endpoint cannot award itself a
-# verdict it does not carry.
+# Names the real verdict objects carry so a dump, a trace or a test can say
+# which object it is looking at. They are DESCRIPTIVE and nothing in this module
+# reads them to decide anything: a route that sets all three - on its endpoint,
+# on a dependency, on a sub-dependency, on another router's dependency or on a
+# callable class - is judged exactly like a route that sets none.
+# `tests/unit/test_no_route_author_can_stand_the_verdict_down.py` derives this
+# list out of this file and attacks every name in it in every one of those
+# positions, so a name added here is attacked without anybody editing the test.
 STATE_VERDICT_MARK = "_is_state_verdict"
 STATE_ROUTER_GUARD_MARK = "_is_state_router_guard"
 STATE_PREFIX_VERDICT_MARK = "_is_state_prefix_verdict"
+
+# The verdict objects THIS PROCESS built. The question the prefix verdict has to
+# answer before it stands down - "is this route already judged by a state
+# router's own guard?" - is answered by looking for one of these objects in the
+# dependency tree FastAPI built for the route, compared with `is`. A route's
+# author can write any attribute they like and copy every attribute the real
+# guard carries, its `__name__` included; the object itself is what is
+# compared. Reaching the real object is no way round either: hanging it on a
+# route of one's own means the real guard judges that route, and it refuses a
+# route that declares nothing.
+#
+# Weak, so a router a test built stops being an answer as soon as the test
+# drops it. A guard that is not in here is not recognised, and an unrecognised
+# route is JUDGED rather than waved through: forgetting to register fails
+# closed, which is the direction this whole module leans.
+_ROUTER_GUARDS: weakref.WeakSet = weakref.WeakSet()
+_PREFIX_VERDICTS: weakref.WeakSet = weakref.WeakSet()
 
 STATE_PREFIX = "/api/state"
 
@@ -110,28 +139,44 @@ def _dependant_calls(dependant):
         yield from _dependant_calls(sub)
 
 
-def _carries(route, mark: str) -> bool:
+def _tree_holds(route, registry) -> bool:
+    """Whether one of `registry`'s objects is in the tree FastAPI built."""
     dependant = getattr(route, "dependant", None)
     if dependant is None:
         return False
-    return any(getattr(call, mark, False) for call in _dependant_calls(dependant))
+    known = list(registry)
+    return any(any(call is one for one in known)
+               for call in _dependant_calls(dependant))
 
 
 def route_carries_state_verdict(route) -> bool:
-    """Whether FastAPI will run a state verdict as part of this route.
+    """Whether FastAPI will run a state verdict this process built for this route.
 
-    Read off `route.dependant` - the tree FastAPI built and will solve - so a
-    route that merely looks like a state route, or that sets the declaration
-    attribute on its endpoint, is not mistaken for a route that carries a
-    verdict. A `Mount`, a bare Starlette `Route` and anything else with no
-    dependant answer False.
+    Read off `route.dependant` - the tree FastAPI built and will solve - and
+    matched against the verdict objects themselves, so a route that merely looks
+    like a state route, that sets the declaration attribute on its endpoint, or
+    that hangs a dependency carrying every attribute a real guard carries, is
+    not mistaken for a route that carries a verdict. A `Mount`, a bare Starlette
+    `Route` and anything else with no dependant answer False.
     """
-    return _carries(route, STATE_VERDICT_MARK)
+    return route_carries_router_guard(route) or route_carries_prefix_verdict(route)
 
 
 def route_carries_router_guard(route) -> bool:
-    """Whether this route is one the state router's own guard already judges."""
-    return _carries(route, STATE_ROUTER_GUARD_MARK)
+    """Whether a guard object a state router BUILT is in this route's tree."""
+    return _tree_holds(route, _ROUTER_GUARDS)
+
+
+def prefix_verdict_stands_down_for(route) -> bool:
+    """The stand-down decision itself, as the request path makes it.
+
+    Exported so a test can ask the question the running request asks and
+    cross-check the answer against what actually happens to a request for that
+    route. From r1 to r4 the two were never compared: coverage reported a
+    verdict present while the verdict stood itself down and the route served
+    the notebook to an anonymous caller.
+    """
+    return route_carries_router_guard(route)
 
 
 def route_carries_prefix_verdict(route) -> bool:
@@ -145,7 +190,7 @@ def route_carries_prefix_verdict(route) -> bool:
     that does not carry it is a route the app is not ready to have one added
     next to.
     """
-    return _carries(route, STATE_PREFIX_VERDICT_MARK)
+    return _tree_holds(route, _PREFIX_VERDICTS)
 
 
 def _body_params(dependant) -> list:
@@ -226,6 +271,14 @@ def prefix_verdict_dependency(verdict):
     stands down for those and judges everything else under the prefix as a
     private read.
 
+    "The state router owns it" means one of the guard objects
+    `create_state_router` built is in this route's tree, compared with `is`.
+    The version this replaces stood the verdict down for anything CLAIMING to
+    have been judged, by carrying an attribute. Measured on `34f380aa`: that
+    attribute on a route's endpoint, on its dependency, on a sub-dependency, on
+    another router's dependency or on a callable class all served the notebook
+    to an anonymous caller, and the coverage test called those routes covered.
+
     It cannot reach what FastAPI does not build a dependency tree for - a
     mounted sub-application, a bare Starlette route. `StatePrefixGate` is the
     layer for those, and the two are not interchangeable.
@@ -235,12 +288,13 @@ def prefix_verdict_dependency(verdict):
         if not is_state_prefix(request.url.path):
             return
         route = request.scope.get("route")
-        if route is not None and route_carries_router_guard(route):
+        if route is not None and prefix_verdict_stands_down_for(route):
             return
         await apply_verdict(verdict, request)
 
     setattr(state_prefix_verdict, STATE_VERDICT_MARK, True)
     setattr(state_prefix_verdict, STATE_PREFIX_VERDICT_MARK, True)
+    _PREFIX_VERDICTS.add(state_prefix_verdict)
     return state_prefix_verdict
 
 
@@ -428,6 +482,8 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         if not declaration_agrees_with_source(declaration, endpoint):
             raise HTTPException(403, "route declaration does not match the action it serves")
         kind, action = declaration
+        if kind not in DECLARATION_KINDS:
+            raise HTTPException(403, "route declares a kind the guard does not judge")
         if kind == "write":
             await apply_verdict(access_dependency, request)
         elif kind == "director":
@@ -445,6 +501,9 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
 
     setattr(_router_guard, STATE_ROUTER_GUARD_MARK, True)
     setattr(_router_guard, STATE_VERDICT_MARK, True)
+    # THIS object is what the prefix verdict stands down for, registered where
+    # it is created.
+    _ROUTER_GUARDS.add(_router_guard)
 
     def _declare(endpoint, kind: str, action: str | None = None):
         """Record on the endpoint function WHAT it serves.

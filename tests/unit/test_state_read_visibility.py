@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api import authz, state_graph_routers as routes
-from api.state_http import create_state_router
+from api.state_http import DECLARATION_KINDS, create_state_router
 from core.state_commands import (PUBLIC_READS, READ_REQUESTS, WRITER_ONLY_READS,
                                  is_public_read, read_visibility)
 import core.state_commands as state_commands
@@ -297,10 +297,14 @@ class TestTheVerdictIsDerivedNotRemembered:
         assert len(declared) >= 20, sorted(declared)
         # `schema` is the fourth kind: `/schema` executes no state action, so it
         # declares that rather than a read of an action nothing could
-        # cross-check it against. A kind outside this set has no branch in
-        # the router guard and would fall through to the refusal.
-        assert {kind for kind, _ in declared.values()} <= {"read", "write",
-                                                           "director", "schema"}
+        # cross-check it against. The set is the guard's own
+        # `DECLARATION_KINDS`, not a copy of it written here, and a kind outside
+        # it is REFUSED by the guard rather than falling through to a branch
+        # written for something else - which is what used to happen, and is
+        # measured by
+        # `test_a_declaration_naming_a_kind_the_guard_does_not_judge_is_refused`
+        # in `tests/unit/test_state_guard_shapes.py`.
+        assert {kind for kind, _ in declared.values()} <= set(DECLARATION_KINDS)
 
     def test_a_reclassified_action_moves_EVERY_route_that_reaches_it(
             self, gated, monkeypatch):

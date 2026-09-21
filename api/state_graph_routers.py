@@ -35,9 +35,12 @@ router = create_state_router(get_service, require_writer, require_reader)
 
 
 # The app-wide half of the prefix verdict. A route the state router owns is left
-# to that router's guard — recognised by the guard's presence in the route's own
-# dependency tree, not by an attribute its endpoint could set. Everything else
-# under the prefix takes the reader verdict.
+# to that router's guard — recognised by finding the guard OBJECT itself in the
+# route's dependency tree. Everything else under the prefix takes the reader
+# verdict, including a route that carries every attribute the real guard
+# carries: `tests/unit/test_no_route_author_can_stand_the_verdict_down.py` puts
+# each of them on a route of its own, in five positions, on this very app, and
+# goes red if any of them gets served.
 state_prefix_verdict = prefix_verdict_dependency(require_reader)
 
 

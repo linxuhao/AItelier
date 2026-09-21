@@ -421,9 +421,13 @@ nothing — including one added later — is REFUSED.
 A route under the prefix that the state router does not own is covered in two
 layers, because one layer cannot reach what the other does. The app-wide
 `state_prefix_verdict` dependency is part of the dependency tree of every route
-FastAPI BUILDS, so a route on any other router takes the reader verdict; it
-cannot reach a sub-application installed with `app.mount()` or a bare Starlette
-route, neither of which has a dependency tree. The `StatePrefixGate` middleware
+FastAPI BUILDS, so a route on any other router takes the reader verdict. It
+stands down only for a route whose dependency tree contains a guard OBJECT
+`create_state_router` built — identity, not an attribute and not a name, so a
+route that stamps itself with everything a real guard carries is judged like
+any other (`tests/unit/test_no_route_author_can_stand_the_verdict_down.py`).
+It cannot reach a sub-application installed with `app.mount()` or a bare
+Starlette route, neither of which has a dependency tree. The `StatePrefixGate` middleware
 resolves the request against the app's own routes and applies the verdict itself
 when the matched route carries none, before that route runs. Both layers are
 installed at both places this repository assembles an app carrying these routes

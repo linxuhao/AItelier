@@ -446,7 +446,7 @@ document. It judges by 403 / non-403 rather than 200: a 403 is the door
 refusing, and any other code (404, 409, 422) means the request reached the
 handler. A route added later is probed by the same loop, so an unclassified
 private door surfaces as an unexpected 403 rather than passing unnoticed.
-```
+
 
 The shared Python implementation is `StateGraphStore`, `StateAttempts`, and
 `StateService` in `core/state_*.py`. Libraries require explicit DB objects;

@@ -1,7 +1,7 @@
-"""Authorized State DAG command/query endpoints; all project facts are private."""
+"""State DAG HTTP endpoints. Reads of the graph are public; the notebooks are not."""
 from fastapi import Depends, Request
 
-from api.authz import require_writer
+from api.authz import require_reader, require_writer
 from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
 from core import cf_access
 from core.state_service import StateService
@@ -24,4 +24,8 @@ def get_service(request: Request, db=Depends(get_db_manager), ws=Depends(get_wor
                         runtime_factory=lambda: (get_skillflow(), get_config_registry()))
 
 
-router = create_state_router(get_service, require_writer)
+# Two verdicts, one identity check: `require_writer` for writes and for any read
+# that stayed private, `require_reader` for a private read so the refusal talks
+# about reading. `core.state_commands.is_public_read` classifies each read and
+# fails CLOSED, so a read added later is private until someone opens it.
+router = create_state_router(get_service, require_writer, require_reader)

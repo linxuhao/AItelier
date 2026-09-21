@@ -4,12 +4,53 @@ from functools import partial
 from typing import Annotated, Literal
 from anyio import to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from core.state_commands import READ_REQUESTS, WRITE_REQUESTS, describe, execute
+from core.state_commands import (READ_REQUESTS, WRITE_REQUESTS, describe, execute,
+                                 is_public_read)
 from core.state_graph import StateConflict, StateGraphError, StateNotFound
 
 
-def create_state_router(service_dependency, access_dependency):
-    router = APIRouter(prefix="/api/state", tags=["state-graph"], dependencies=[Depends(access_dependency)])
+def create_state_router(service_dependency, access_dependency, read_dependency=None):
+    """Build the `/api/state` router.
+
+    Three authorization classes, declared PER ROUTE rather than once for the
+    whole router — a router-level dependency gates every route it contains,
+    public GETs included, which is the defect this split fixes:
+
+      public  — an anonymous internet reader may run it: graph, nodes, criteria,
+                attempts, evidence, issues, design, frontier, overview.
+      private — the driver notebooks and the director mailbox. Refused in READ
+                wording, because answering a read request with "to make
+                changes" told the reader to ask for rights it never wanted.
+      write   — `access_dependency` (the writer verdict) on `/commands/{action}`.
+
+    The public/private decision itself is NOT made here: it is
+    `core.state_commands.is_public_read`, one table that fails CLOSED, so a read
+    action added later is private until someone opens it deliberately.
+
+    `read_dependency` is the identity verdict for a private read and MUST accept
+    the Request — every authorization dependency in this repository does. It
+    defaults to `access_dependency`, so an embedder that passes only the writer
+    verdict gets that verdict on every private read: it can never open one by
+    omission, and which reads are public stays the table's decision alone.
+    """
+    read_verdict = read_dependency or access_dependency
+    router = APIRouter(prefix="/api/state", tags=["state-graph"])
+
+    def _verdict(dependency, request):
+        """Apply an authorization dependency to a request.
+
+        `Depends`-shaped dependencies take the Request; a bare `lambda: None`
+        (an embedder running with the gate off, which tests and
+        `api/state_only` both use) takes nothing. Both shapes appear in this
+        repository, so the call is adapted rather than assumed — the verdict is
+        applied either way, and no path is left unchecked by a TypeError.
+        """
+        try:
+            accepts = bool(inspect.signature(dependency).parameters)
+        except (TypeError, ValueError):
+            accepts = True
+        return dependency(request) if accepts else dependency()
+
     def _call(service, action, arguments, *, write=False):
         try:
             return execute(service, action, arguments, allow_write=write)
@@ -20,13 +61,33 @@ def create_state_router(service_dependency, access_dependency):
         except StateGraphError as exc:
             raise HTTPException(422, str(exc)) from exc
 
+    def _guard_query_action(action: str, request: Request) -> None:
+        """Refuse a NON-public read before the request body is parsed.
 
-    @router.get("/schema")
+        `/query/{action}` carries the read split in the URL, so the verdict can
+        be taken before any argument is looked at — the per-call move
+        `api/mcp_router._authorize` makes, for the same reason: one path serves
+        both classes and the HTTP method cannot tell them apart. A public action
+        falls through; every other action, including one added later and not yet
+        classified, is a private read.
+        """
+        if not is_public_read(action):
+            _verdict(read_verdict, request)
+
+    def _guard_director_action(action: str, request: Request) -> None:
+        """This path carries both classes too. `send_director_message` and the
+        two transitions CHANGE state, so they take the WRITE verdict and its
+        wording; only `list_director_messages` is a read, and it is private."""
+        if action == "list_director_messages":
+            _verdict(read_verdict, request)
+        else:
+            _verdict(access_dependency, request)
+
+    @router.get("/schema", dependencies=[Depends(read_verdict)])
     def schema():
         return describe()
 
-
-    @router.post("/director-messages/{action}")
+    @router.post("/director-messages/{action}", dependencies=[Depends(_guard_director_action)])
     async def director_message(action: str, request: Request,
                                service=Depends(service_dependency)):
         """Closed v2 REST adapter; router authorization runs before body parsing."""
@@ -58,12 +119,13 @@ def create_state_router(service_dependency, access_dependency):
         return _call(service, "frontier", {"project_id": project_id, "limit": limit})
 
 
-    @router.get("/projects/{project_id}/driver-note")
+    @router.get("/projects/{project_id}/driver-note", dependencies=[Depends(read_verdict)])
     def driver_note(project_id: str, service=Depends(service_dependency)):
         return _call(service, "get_driver_note", {"project_id": project_id})
 
 
-    @router.get("/projects/{project_id}/driver-note/history")
+    @router.get("/projects/{project_id}/driver-note/history",
+                dependencies=[Depends(read_verdict)])
     def driver_note_history(project_id: str, after_revision: int = 0, limit: int = 100,
                             service=Depends(service_dependency)):
         return _call(service, "driver_note_history", {
@@ -72,6 +134,7 @@ def create_state_router(service_dependency, access_dependency):
 
     @router.get(
         "/projects/{project_id}/driver-note/history/search",
+        dependencies=[Depends(read_verdict)],
         summary="Search driver note history",
         description=("Returns bounded redacted excerpts from the section changed by each matching "
                      "revision, ordered by revision ascending. Continue stable pagination with "
@@ -134,7 +197,7 @@ def create_state_router(service_dependency, access_dependency):
         return _call(service, "get_attempt", {"attempt_id": attempt_id})
 
 
-    @router.post("/query/{action}")
+    @router.post("/query/{action}", dependencies=[Depends(_guard_query_action)])
     async def query(action: str, arguments: dict, service=Depends(service_dependency)):
         if action not in READ_REQUESTS:
             raise HTTPException(422, "unknown or mutating query")
@@ -149,7 +212,7 @@ def create_state_router(service_dependency, access_dependency):
             raise HTTPException(422, str(exc)) from exc
 
 
-    @router.post("/commands/{action}")
+    @router.post("/commands/{action}", dependencies=[Depends(access_dependency)])
     def command(action: str, arguments: dict, service=Depends(service_dependency)):
         if action not in WRITE_REQUESTS:
             raise HTTPException(422, "unknown state command")

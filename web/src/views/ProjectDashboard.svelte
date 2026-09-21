@@ -5,11 +5,15 @@
   import { st } from '../lib/stateI18n.svelte';
   import { nt, readLastProject, rememberProject } from '../lib/navigation.svelte';
   import StateProject from './StateProject.svelte';
-  const allowed = $derived($authStore.permissionResolved && $authStore.canWrite);
+  // Reading the project list is a public read (`project_catalog`); writing is
+  // not. `canWrite` no longer decides whether the graph may be loaded — that
+  // conflation is what hid the whole dashboard from a reader.
+  const canRead = $derived($authStore.permissionResolved);
+  const canWrite = $derived($authStore.canWrite);
   let projects = $state<StateProjectRow[]>([]), selected=$state(''), error=$state(''), loading=$state(false), retry=$state(0);
   let generation=0;
   $effect(()=>{
-    const permitted=allowed, identity=$authStore.email; void identity; void retry;
+    const permitted=canRead, identity=$authStore.email; void identity; void retry;
     const version=++generation; projects=[]; selected=''; error=''; loading=permitted;
     if(!permitted) return;
     stateProjects().then(result=>{
@@ -26,10 +30,10 @@
 <section class="project-dashboard" aria-label={nt('home')}>
   <div class="project-switcher">
     <div class="switch-title"><strong>{nt('home')}</strong><span>{st('intro')}</span></div>
-    {#if allowed && projects.length}<label>{nt('pick')}<select value={selected} onchange={choose}>{#each projects as p(p.project_id)}<option value={p.project_id}>{p.title} · {p.project_id}</option>{/each}</select></label>{/if}
+    {#if canRead && projects.length}<label>{nt('pick')}<select value={selected} onchange={choose}>{#each projects as p(p.project_id)}<option value={p.project_id}>{p.title} · {p.project_id}</option>{/each}</select></label>{/if}
     <a href="#/state-projects">{nt('allProjects')} ↗</a>
   </div>
-  {#if !allowed}<p role="status">{st('private')}</p>
+  {#if !canRead}<p role="status">{st('private')}</p>
   {:else if error}<div role="alert"><p>{error}</p><button class="outline" onclick={()=>retry++}>{nt('retry')}</button></div>
   {:else if loading}<p role="status">{st('loading')}</p>
   {:else if selected}

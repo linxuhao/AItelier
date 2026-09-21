@@ -254,12 +254,20 @@ def test_invalid_json_trace_does_not_remove_valid_usage(system):
     assert result['usage_turns']==2 and result['partial'] is True
 
 
-def test_full_host_summary_keeps_writer_authorization(system,monkeypatch):
+def test_full_host_summary_is_a_public_read_while_notes_and_writes_stay_closed(system,monkeypatch):
+    """The run summary is project progress, so an anonymous reader may see it.
+
+    It used to be writer-only because the whole router carried `require_writer`.
+    What must NOT move: the notebook reads and every write.
+    """
     from api import authz
     from api.state_graph_routers import router,get_service
     app=FastAPI();app.include_router(router);app.dependency_overrides[get_service]=lambda:system.s
     monkeypatch.setattr(authz,'gate_enabled',lambda:True)
     monkeypatch.setattr(authz.cf_access,'email_from_request_headers',lambda *_:None)
     with TestClient(app) as c:
-        assert c.get('/api/state/projects/game/run-summary').status_code==403
-        assert c.post('/api/state/query/project_run_summary',json={'project_id':'game'}).status_code==403
+        assert c.get('/api/state/projects/game/run-summary').status_code==200
+        assert c.post('/api/state/query/project_run_summary',json={'project_id':'game'}).status_code==200
+        assert c.get('/api/state/projects/game/driver-note').status_code==403
+        assert c.post('/api/state/query/driver_note_index',json={'project_id':'game'}).status_code==403
+        assert c.post('/api/state/commands/refresh_project',json={'project_id':'game'}).status_code==403

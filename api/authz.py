@@ -24,6 +24,13 @@ WRITE_DENIED_NOT_AUTHENTICATED = "write_denied_not_authenticated"
 WRITE_DENIED_NOT_A_WRITER = "write_denied_not_a_writer"
 WRITE_DENIED_BAD_ADMIN_TOKEN = "write_denied_bad_admin_token"
 
+# Read-side siblings. A read that is still writer-only must be refused with a
+# READ message: the write codes above say "to make changes", and answering a
+# read request with them told the caller to ask for rights it never wanted.
+READ_DENIED_NOT_AUTHENTICATED = "read_denied_not_authenticated"
+READ_DENIED_NOT_A_WRITER = "read_denied_not_a_writer"
+READ_DENIED_BAD_ADMIN_TOKEN = "read_denied_bad_admin_token"
+
 # English fallback messages, for clients that don't know the codes. Kept
 # deliberately generic: never echo the admin token, the writer allowlist or
 # any JWT claim back to an unauthorized caller.
@@ -34,6 +41,22 @@ DENIAL_MESSAGES = {
         "Your account has no write permission — this session is read-only.",
     WRITE_DENIED_BAD_ADMIN_TOKEN:
         "The admin token is missing or invalid.",
+    READ_DENIED_NOT_AUTHENTICATED:
+        "Not signed in — this State DAG record is private; sign in with an "
+        "authorized account to read it.",
+    READ_DENIED_NOT_A_WRITER:
+        "Your account may not read this State DAG record — it is not part of "
+        "the published project state.",
+    READ_DENIED_BAD_ADMIN_TOKEN:
+        "The admin token is missing or invalid.",
+}
+
+# The write verdict maps to its read counterpart: WHO may read a private record
+# is exactly WHO may write, so there is one identity check, not two.
+_READ_DENIAL_CODES = {
+    WRITE_DENIED_NOT_AUTHENTICATED: READ_DENIED_NOT_AUTHENTICATED,
+    WRITE_DENIED_NOT_A_WRITER: READ_DENIED_NOT_A_WRITER,
+    WRITE_DENIED_BAD_ADMIN_TOKEN: READ_DENIED_BAD_ADMIN_TOKEN,
 }
 
 
@@ -114,3 +137,26 @@ def require_writer(request: Request) -> None:
     code = write_denial_reason(request)
     if code:
         raise HTTPException(status_code=403, detail=DENIAL_MESSAGES[code])
+
+
+def require_reader(request: Request) -> None:
+    """FastAPI dependency: 403 unless the request may read a PRIVATE record.
+
+    The identity verdict is IDENTICAL to `require_writer` — whoever may read the
+    notebooks is whoever may write — but the wording is about reading.
+    `require_writer`'s copy says "to make changes", and that copy was being sent
+    to read requests; a reader who is refused must be told what was refused.
+
+    The stable code travels in `X-AItelier-Denial` rather than in the body: the
+    body keeps the flat `{"detail": "..."}` shape `require_writer` already had,
+    and the header lets a client tell a read refusal from a write refusal without
+    parsing prose.
+    """
+    if getattr(request.app.state, "_test_mode", False):
+        return
+    code = write_denial_reason(request)
+    if code:
+        read_code = _READ_DENIAL_CODES[code]
+        raise HTTPException(status_code=403,
+                            detail=DENIAL_MESSAGES[read_code],
+                            headers={"X-AItelier-Denial": read_code})

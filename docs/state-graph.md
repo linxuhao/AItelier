@@ -399,9 +399,22 @@ incremental audit view, not a full transcript dump.
 
 ## REST and SDK
 
-All `/api/state` routes use the existing writer authorization dependency,
-including GETs. MCP's external token is not automatically a REST admin token;
-use the host's supported authenticated channel for each transport.
+Reads of the State DAG are PUBLIC: an anonymous visitor may read the graph, the
+nodes, the acceptance criteria, attempts, evidence, issues, design records and
+the frontier. Two read families stay writer-only — the driver notebooks
+(`get_driver_note`, `driver_note_history`, `search_driver_note_history`,
+`get_driver_note_entry`, `check_driver_note_index`, `driver_note_index`) and the
+director mailbox (`list_director_messages`) — plus the driver guide and the
+event/long-poll plumbing.
+
+The classification is ONE table, `core.state_commands.PUBLIC_READS`, and the
+default is DENY: a read action that is not listed is private, INCLUDING one added
+later. `api/state_http` applies the verdict per route and per action (a read of a
+private action is refused with a read-worded 403 before its body is parsed);
+`api/state_graph_routers` arms the matching dependency on every route, so no
+route in this family is left unguarded. Writes still require the writer verdict
+on `/commands/{action}`. MCP's external token is not automatically a REST admin
+token; use the host's supported authenticated channel for each transport.
 
 ```text
 GET  /api/state/schema

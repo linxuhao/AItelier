@@ -7,13 +7,15 @@
   const { projectId, refresh = 0, onselect }: {projectId:string;refresh?:number;onselect?:(nodeKey:string)=>void} = $props();
   let data=$state<ProjectRunSummary|null>(null), error=$state(''), loading=$state(false);
   let generation=0, previousIdentity='';
-  const allowed=$derived($authStore.permissionResolved && $authStore.canWrite);
+  // `project_run_summary` is a public read of the project's progress; a reader
+  // may see how many runs are linked without holding write rights.
+  const canRead=$derived($authStore.permissionResolved);
   $effect(()=>{
-    const id=projectId, actor=$authStore.email, canRead=allowed;void refresh;
+    const id=projectId, actor=$authStore.email, permitted=canRead;void refresh;
     const identity=JSON.stringify([id,actor]), version=++generation;
     if(identity!==previousIdentity){data=null;previousIdentity=identity;}
-    error='';loading=canRead;
-    if(!canRead){data=null;loading=false;return;}
+    error='';loading=permitted;
+    if(!permitted){data=null;loading=false;return;}
     stateRunSummary(id).then(result=>{if(version!==generation)return;if(result.project_id!==id)throw new Error(st('summaryWrongProject'));data=result;})
       .catch(e=>{if(version===generation){data=null;error=String(e.message??e);}})
       .finally(()=>{if(version===generation)loading=false;});
@@ -30,7 +32,7 @@
   const cacheTitle=$derived(data ? `${st('summaryCacheDefinition')} ${data.usage.cache_hit_tokens??'—'} / ${data.usage.cache_covered_tokens}. ${st('summaryCacheTurns')}: ${data.usage.cache_reported_turns}/${data.usage.usage_turns}` : st('summaryCacheDefinition'));
 </script>
 
-{#if allowed}
+{#if canRead}
 <section class="state-run-summary" aria-label={st('summaryHeading')} aria-busy={loading}>
   <div class="summary-top"><h2>{st('summaryHeading')}</h2><small>{st('summaryScope')}</small></div>
   <dl class="run-summary-metrics">

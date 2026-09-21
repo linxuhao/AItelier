@@ -381,15 +381,35 @@ async def write_gate(request: Request, call_next):
     # this check for every tool declared `write`. Do not remove one half.
     if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
         return await call_next(request)
-    code = authz.write_denial_reason(request)
-    if not code:
-        return await call_next(request)
+    # `/api/state` has the same property as `/mcp`: one path family carries BOTH
+    # classes. `POST /api/state/query/{action}` serves the public reads and the
+    # private ones, and the METHOD cannot tell them apart — gate it and the
+    # public graph breaks for every anonymous visitor, exempt it and the
+    # commands open. `GET /api/state/...` never reached this middleware at all
+    # (the safe-method return above), so gating it here never even covered the
+    # reads this change opens. The verdict therefore moves to the route:
+    # api/state_http decides PER ROUTE and PER ACTION from
+    # core.state_commands.is_public_read, which fails CLOSED, and
+    # api/state_graph_routers arms the matching dependency on every route —
+    # there is no route in that family without one. Those two halves only make
+    # sense together. Do not remove one half.
+    #
+    # The director-messaging path keeps its closed v2 envelope here: that
+    # envelope IS this middleware's contract with the adapter, so it is
+    # answered before the exemption, not after it.
     state_action = request.url.path.rsplit("/", 1)[-1]
     if request.url.path.startswith("/api/state/") and state_action in {
             "send_director_message", "list_director_messages",
             "acknowledge_director_message", "resolve_director_message"}:
-        from core.director_messaging_protocol import DirectorMessageError
-        return JSONResponse(DirectorMessageError("unauthorized").as_dict(), status_code=403)
+        if authz.write_denial_reason(request):
+            from core.director_messaging_protocol import DirectorMessageError
+            return JSONResponse(DirectorMessageError("unauthorized").as_dict(), status_code=403)
+        return await call_next(request)
+    if request.url.path == "/api/state" or request.url.path.startswith("/api/state/"):
+        return await call_next(request)
+    code = authz.write_denial_reason(request)
+    if not code:
+        return await call_next(request)
     return JSONResponse(authz.denial_body(code), status_code=403)
 
 

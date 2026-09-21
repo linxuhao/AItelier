@@ -506,6 +506,55 @@ READ_REQUESTS = {
     "list_director_messages": ListDirectorMessages,
     "list_issues": ListIssues, "get_issue": IssueRef,
 }
+# ── Read visibility: public or writer-only ─────────────────────────────────
+# ONE table, one writer. `READ_REQUESTS` answers "can this mutate?" — no. This
+# answers "may an UNSIGNED internet visitor run it?". Publishing is irreversible
+# (it gets cached and indexed), so the default is DENY: an action missing from
+# `PUBLIC_READS` is private, and that includes a read action added LATER, which
+# nobody will remember to classify. The owner's ruling of 2026-09-21 opens the
+# graph — goals, acceptance criteria, nodes, attempts, evidence, issues, design,
+# frontier — and keeps the working notes shut.
+PUBLIC_READS = frozenset({
+    # Projects, graph, node context, frontier.
+    "list_projects", "get_graph", "get_node", "search_nodes", "facet_lint",
+    "frontier", "project_catalog", "project_overview", "project_run_summary",
+    # Attempts and evidence.
+    "get_attempt", "list_attempts", "evidence", "project_attempts",
+    "attempt_detail", "run_owners", "references",
+    # Issues.
+    "list_issues", "get_issue",
+    # Design records.
+    "design_catalog", "get_design_revision", "search_design_items",
+    "design_impact", "get_design_baseline", "get_design_bindings",
+    "export_design_markdown", "check_design_markdown",
+})
+WRITER_ONLY_READS = frozenset({
+    # The two working notebooks and their full revision history. In-flight run
+    # ids, withheld reasons, owner rulings and the director's own error log.
+    "get_driver_note", "driver_note_history", "search_driver_note_history",
+    "get_driver_note_entry", "check_driver_note_index", "driver_note_index",
+    # The director mailbox.
+    "list_director_messages",
+    # The driver guide and the event/long-poll plumbing are NOT on the opened
+    # list, so they stay shut rather than be assumed harmless.
+    "get_driver_guide_section", "events", "wait_for_state_change",
+})
+
+
+def read_visibility(action: str) -> str:
+    """`public` or `private` for a read action. Unknown → private (fail closed)."""
+    if action in WRITER_ONLY_READS:
+        return "private"
+    if action in PUBLIC_READS:
+        return "public"
+    return "private"
+
+
+def is_public_read(action: str) -> bool:
+    """Whether an unauthenticated caller may execute this read action."""
+    return read_visibility(action) == "public"
+
+
 WRITE_REQUESTS = {
     "create_design_revision": CreateDesignRevision, "create_design_baseline": CreateDesignBaseline,
     "bind_node_design": BindDesign,

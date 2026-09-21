@@ -7,13 +7,15 @@
   let rows = $state<StateProjectRow[]>([]), error = $state(''), loading = $state(false);
   let query = $state(''), next = $state<string | null>(null), retry = $state(0);
   let generation = 0;
-  const allowed = $derived($authStore.permissionResolved && $authStore.canWrite);
+  // The project catalog is a public read; only the write affordances need
+  // `canWrite`.
+  const canRead = $derived($authStore.permissionResolved);
   const filtered = $derived(rows.filter(p => (p.title + ' ' + p.project_id).toLocaleLowerCase().includes(query.toLocaleLowerCase())));
   $effect(() => {
-    const canRead = allowed, repo = params.repoPath; void retry;
+    const permitted = canRead, repo = params.repoPath; void retry;
     const version = ++generation;
     rows = []; next = null; error = '';
-    if (!canRead) { loading = false; return; }
+    if (!permitted) { loading = false; return; }
     loading = true;
     stateProjects(repo).then(result => {
       if (version !== generation) return;
@@ -35,7 +37,7 @@
 <section class="state-projects">
   <header><div><p class="eyebrow">AITELIER / PROJECTS</p><h1>{st('projects')}</h1><p>{st('intro')}</p></div>
     <a href="#/repos">{st('dashboard')} ↗</a></header>
-  {#if !allowed}<p role="status">{st('private')}</p>
+  {#if !canRead}<p role="status">{st('private')}</p>
   {:else}
     <label>{st('search')}<input type="search" bind:value={query} placeholder={st('search')} /></label>
     {#if params.repoPath}<p><code>{params.repoPath}</code></p>{/if}

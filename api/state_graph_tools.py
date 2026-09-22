@@ -4,7 +4,6 @@ import anyio
 
 from core.state_driver_guide import (STATE_DRIVER_GUIDE, STATE_DRIVER_GUIDE_INDEX,
                                      guide_index_addresses)
-from api.authz import may_read_private
 from core.state_commands import describe, execute
 from core.state_graph import StateGraphError
 from core.state_service import StateService
@@ -15,19 +14,19 @@ def register_state_tools(tool, mcp, service_factory=None):
         if service_factory is not None:
             return service_factory()
         from api.dependencies import get_db_manager, get_workspace_manager, get_skillflow, get_config_registry
-        from api.mcp_router import _request_from, _start_driver
+        from api.mcp_router import _request_from, _start_driver, _mcp_may_read_private
         from api.state_graph_routers import authenticated_actor
         try:
             request = _request_from(mcp.get_context())
         except Exception:
             request = None
-        # The MCP service declares its trust from the SAME raw credential the HTTP
-        # transport uses — never from a default. No request object (stdio/CLI) is a
-        # local operator; an HTTP request inherits the anonymous/reader verdict.
+        # The MCP service uses the same raw credential as the MCP tool gate,
+        # including the external tunnel token. No request object (stdio/CLI) is
+        # a local operator; an HTTP request gets its own reader verdict.
         return StateService(get_db_manager(), get_workspace_manager(), attach_driver=_start_driver,
                             actor=authenticated_actor(request),
                             runtime_factory=lambda: (get_skillflow(), get_config_registry()),
-                            project_read_trusted=may_read_private(request) if request is not None else True)
+                            project_read_trusted=_mcp_may_read_private(request) if request is not None else True)
 
     def invoke(action, arguments, write):
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError

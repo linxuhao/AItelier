@@ -156,6 +156,13 @@ def _external_token_ok(request) -> bool:
                 and hmac.compare_digest(token, _EXTERNAL_TOKEN))
 
 
+def _mcp_may_read_private(request) -> bool:
+    """Use the same credential for State visibility that authorized this MCP call."""
+    if _EXTERNAL_TOKEN and authz.is_via_tunnel(request):
+        return _external_token_ok(request)
+    return authz.may_read_private(request)
+
+
 def _authorize(name: str, ctx: Context | None) -> None:
     """Apply the same verdict `write_gate` would have, per tool rather than per path."""
     kind = _TOOL_KIND.get(name)

@@ -1155,6 +1155,47 @@ def test_sha256_git_format_is_not_confused_with_output_bundle(live, monkeypatch)
         live.service._artifact(a)
 
 
+def test_mcp_external_token_reads_private_state_it_can_write(live, client, monkeypatch):
+    from api import mcp_router
+    from api import authz
+
+    live.service.driver_notes.update("game", "permanent", "PRIVATE-MCP-NOTE", 0, "test")
+    monkeypatch.setattr(mcp_router, "_EXTERNAL_TOKEN", "external-test-token")
+    monkeypatch.setattr(client.app.state, "_test_mode", False)
+    from api import main as main_module
+    monkeypatch.setattr(main_module, "_ALLOW_EXTERNAL", True)
+    monkeypatch.setattr(authz, "gate_enabled", lambda: True)
+    monkeypatch.setattr(authz, "WRITERS", set())
+    monkeypatch.setattr(authz, "ADMIN_TOKEN", "admin-test-token")
+    monkeypatch.setattr(authz.cf_access, "email_from_request_headers", lambda *a, **k: None)
+
+    def call(action, headers):
+        response = client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "state_graph_read", "arguments": {
+                "action": action, "arguments": (
+                    {} if action == "list_projects" else {"project_id": "game"})}},
+        }, headers={"Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream", **headers})
+        assert response.status_code == 200, response.text
+        return response.json()["result"]
+
+    public = {"Cf-Ray": "edge-test", "X-AItelier-MCP-External-Token": "external-test-token"}
+    listed = call("list_projects", public)
+    assert listed.get("isError") is not True, listed
+    assert [p["project_id"] for p in json.loads(listed["content"][0]["text"])["result"]] == ["game"]
+    note = call("get_driver_note", public)
+    assert note.get("isError") is not True, note
+    assert "PRIVATE-MCP-NOTE" in note["content"][0]["text"]
+
+    for headers in ({"Cf-Ray": "edge-test", "X-AItelier-MCP-External-Token": "wrong"},
+                    {"Cf-Ray": "edge-test"},
+                    {"X-AItelier-MCP-External-Token": "external-test-token"}):
+        refused = call("get_driver_note", headers)
+        assert refused["isError"] is True
+        assert "PRIVATE-MCP-NOTE" not in refused["content"][0]["text"]
+
+
 def test_mcp_private_state_denial_is_an_error_without_goal_disclosure(live, client, monkeypatch):
     from api import mcp_router
     monkeypatch.setattr(mcp_router.authz, "gate_enabled", lambda: True)

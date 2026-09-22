@@ -76,8 +76,8 @@ because the errors are still what you would see if you bypass the CLI.
 | `web_search` unavailable | Refuses naming `SEARXNG_URL`; agents fall back to model knowledge |
 | Godot gates unavailable (game projects) | **Skips loudly**: `gate_skipped: true`, the reviewer is told the code shipped UNVERIFIED, and the skip is recorded in `~/.AItelier/logs/gate_skips.log`. It does not silently pass |
 | Media generation unavailable | Refuses naming `AITELIER_MEDIA_MCP_URL` — and the doc warns that server holds the **cast**, so repointing it mid-project recasts every character |
-| One project starving the others | Fixed: the scheduler now runs different projects in parallel, serial within a project (`AITELIER_MAX_CONCURRENT_PROJECTS`, default 4) |
-| **GAP — a long step makes the tick log go quiet.** A tick that is executing logs nothing until it returns, so "no lines for eight minutes" and "the scheduler is wedged" look identical. The log exists precisely to make stalls readable | not covered |
+| One project starving the others | Fixed: the scheduler runs different projects in parallel, serial within a project, at most `AITELIER_MAX_CONCURRENT_PROJECTS` (default 4) in flight; the poller does not wait for the ticks it starts, so a project dispatched during another's long step is picked up on the next interval |
+| A long step makes the tick log go quiet | Covered: every poll reports an in-flight project as `outcome=locked` (one heartbeat a minute per project), and a free project held back by the cap as `outcome=at_capacity` |
 
 ## 6. Read the result
 

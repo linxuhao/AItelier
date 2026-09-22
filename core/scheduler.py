@@ -1120,11 +1120,6 @@ async def _check_hung_claims():
         pass  # Never let hung detection itself break the scheduler
 
 
-def _tick_lock_held(project_id: str) -> bool:
-    """Is a tick for this project already running? Read-only — never acquires."""
-    return _get_tick_lock(project_id).locked()
-
-
 async def _execute_skillflow_tick(project_id: str, loop):
     """Advance the skillflow pipeline for one project by one step.
 
@@ -1189,8 +1184,9 @@ async def _run_skillflow_tick(project_id: str, loop):
         return
 
     # Don't re-enter a run that's actively executing (in-flight guard).
-    # With max_instances=1 (SF-5 fix), concurrent ticks are prevented at the
-    # APScheduler level. This is a safety net for edge cases.
+    # Concurrent ticks for one project are prevented by the per-project lock
+    # (taken at dispatch in `poll_and_execute`, or by `_execute_skillflow_tick`).
+    # This is a safety net for edge cases.
     if _has_active_claim(sf, run_id):
         tick_log(project_id, "active_claim", run=run_id[:8])
         return
@@ -1466,10 +1462,11 @@ async def _run_skillflow_tick(project_id: str, loop):
         # This handler used to LOG and re-raise, by an explicit "observe, no fix
         # yet" decision while the cancellation trigger was still unknown — its
         # comment said so: "no behavior change: the orphan still happens". The
-        # trigger is known now (an apscheduler shutdown cancels every pending
-        # tick future regardless of `wait`, and `poll_and_execute` gathers all
-        # concurrent ticks, so ONE cancellation strands every in-flight claim),
-        # so the diagnostic stays and the claim goes back.
+        # trigger is known now (a scheduler shutdown cancels every in-flight
+        # tick at once — `_cancel_detached_ticks` for `poll_and_execute`'s
+        # detached ticks, apscheduler's own job cancellation for the demo and
+        # per-owner pollers — so ONE shutdown strands every in-flight claim
+        # without this), so the diagnostic stays and the claim goes back.
         import traceback as _tb
         _odbg(f"{_cid} *** CANCELLED *** step={claimed.step_id} "
               f"execute_returned={_executed} elapsed={_time.time() - _t0:.1f}s — "
@@ -1759,6 +1756,8 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
     unlike `idle`, two projects can wedge at once and the operator needs to see
     which; and `no_claim` only became a tick-cadence repeater when the wedge
     branch below started falling through to Phase B instead of returning.
+    `locked` and `at_capacity` coalesce per project for the same reason: the
+    poller reports every in-flight or over-cap project on every poll.
     """
     global _tick_last_idle, _tick_last_hold, _tick_last_skip, _tick_last_brief
     try:
@@ -1788,7 +1787,11 @@ def tick_log(project_id: str, outcome: str, **detail) -> None:
             if now - _tick_last_skip < _TICK_SKIP_HEARTBEAT_S:
                 return
             _tick_last_skip = now
-        elif outcome in ("wedged", "no_claim"):
+        elif outcome in ("wedged", "no_claim", "locked", "at_capacity"):
+            # `locked` and `at_capacity` joined when ticks stopped holding the
+            # job: every poll now sees an in-flight project and says so, where
+            # before one long tick muted the poller entirely (`tick_skipped`).
+            # A 26-minute gate would otherwise write ~300 identical lines.
             now = _time.time()
             key = (outcome, project_id or "-")
             if now - _tick_last_stuck.get(key, 0.0) < _TICK_STUCK_HEARTBEAT_S:
@@ -2483,11 +2486,18 @@ def _sync_task_statuses(project_id: str, run: dict, sf):
 
 # ── Polling ──────────────────────────────────────────────────────────
 
-# How many DIFFERENT projects one tick may advance concurrently. Same project
-# stays strictly serial — that is the per-project lock's job and it is unchanged.
-# The bound exists because each slot can hold an LLM call: unbounded fan-out would
-# turn a queue of projects into a burst of concurrent model requests.
+# How many DIFFERENT projects may have a tick in flight at once, across every
+# poll — not per poll: ticks outlive the poll that started them (see
+# `poll_and_execute`). Same project stays strictly serial — that is the
+# per-project lock's job. The bound exists because each slot can hold an LLM
+# call: unbounded fan-out would turn a queue of projects into a burst of
+# concurrent model requests.
 MAX_CONCURRENT_PROJECTS = int(_os.getenv("AITELIER_MAX_CONCURRENT_PROJECTS", "4"))
+
+# The ticks `poll_and_execute` started that have not finished, by project. It is
+# what the cap counts and what a scheduler shutdown cancels. Touched only on the
+# event loop (dispatch and the done callback), so no lock of its own.
+_detached_ticks: dict[str, asyncio.Task] = {}
 
 # How often the poller re-asks whether a held checkout lease can be released.
 # A lease is released on the tick where its run goes terminal — but a run that
@@ -2565,36 +2575,118 @@ def _sweep_ended_leases() -> None:
 
 
 async def poll_and_execute():
-    """Advance up to MAX_CONCURRENT_PROJECTS different projects, one step each.
+    """Start a tick for every free project the cap allows, then RETURN.
 
-    One project per tick was the old rule, and its cost was not the serialism —
-    it was that a project whose tick is ALREADY IN FLIGHT still consumed the
-    pick. A 400s step therefore produced 80 consecutive `outcome=locked` ticks
-    with every other project frozen behind it, which is how a freshly generated
-    pipeline sat at its begin node for an hour while a game build ran.
+    It does not wait for those ticks. It used to — `asyncio.gather` over the
+    batch picked at the top of the tick — and apscheduler runs this job with
+    `max_instances=1`, so the job lasted as long as the SLOWEST project in the
+    batch. One ~26-minute repo gate (`_run_repo_gate`, a synchronous tool step
+    inside `advance_run`) therefore made every later tick `tick_skipped`, and a
+    project that became active after the batch was picked was not in it and got
+    no batch of its own until the gate returned: 7 rounds dispatched at 19:10Z
+    on 2026-09-22, 5 with ZERO tick lines at 19:33Z (iss-ce5d36fce9534128).
 
-    So: ask for several candidates in priority order, skip the ones already
-    running, and start the rest concurrently. The per-project lock still makes
-    the SAME project serial; different projects no longer wait on each other.
+    Now each tick is a task of its own, recorded in `_detached_ticks`, and the
+    next poll re-reads the active list and starts whatever is new. What the
+    poller still serializes:
+
+    * the SAME project — its per-project lock is taken HERE, at dispatch, and
+      released only when its task is done (`_on_detached_tick_done`). A project
+      with a tick in flight logs `locked` and is not started again;
+    * the CAP — at most MAX_CONCURRENT_PROJECTS ticks in flight at once, counted
+      over `_detached_ticks`, i.e. across polls. A project that is free but over
+      the cap logs `at_capacity`. A long step costs one slot, not the poller.
+
+    The job no longer owns the work, so apscheduler's shutdown — which cancels
+    only the job's own future, long since done — would not reach it.
+    `_cancel_detached_ticks` is registered for EVENT_SCHEDULER_SHUTDOWN for that
+    reason: every in-flight tick is cancelled, and its
+    `except asyncio.CancelledError` hands its claim back through
+    `release_claim_on_cancel`, exactly as the gathered ticks did.
+
+    Returns the tasks it started; the scheduler ignores that, callers that must
+    wait for the work (tests) await them.
     """
-    import asyncio
     loop = asyncio.get_running_loop()
 
     _sweep_ended_leases()
 
-    projects = db.get_active_projects(limit=MAX_CONCURRENT_PROJECTS)
+    # Every in-flight project may be among the rows, so ask for enough to still
+    # find a full cap's worth of free ones behind them.
+    projects = db.get_active_projects(
+        limit=MAX_CONCURRENT_PROJECTS + len(_detached_ticks))
     if not projects:
         tick_log("", "idle")
+        return []
+    started = []
+    # No await in this loop: the check and the take are atomic with respect to
+    # every other poll (interval job, wake-on-confirm date jobs), all of which
+    # run on this same event loop.
+    for p in projects:
+        pid = p["project_id"]
+        lock = _get_tick_lock(pid)
+        if lock.locked():
+            tick_log(pid, "locked")          # its tick is in flight: health
+            continue
+        if len(_detached_ticks) >= MAX_CONCURRENT_PROJECTS:
+            tick_log(pid, "at_capacity", in_flight=len(_detached_ticks),
+                     cap=MAX_CONCURRENT_PROJECTS)
+            continue
+        if not lock.acquire(blocking=False):
+            tick_log(pid, "locked")
+            continue
+        task = loop.create_task(_run_skillflow_tick(pid, loop),
+                                name=f"tick:{pid}")
+        _detached_ticks[pid] = task
+        # A done callback, not a `finally` inside the coroutine: a task
+        # cancelled before its first step never enters the coroutine's body, so
+        # a `finally` there would leave the lock held forever.
+        task.add_done_callback(
+            lambda t, pid=pid, lock=lock: _on_detached_tick_done(pid, lock, t))
+        started.append(task)
+    return started
+
+
+def _on_detached_tick_done(project_id: str, lock: threading.Lock,
+                           task: asyncio.Task) -> None:
+    """Free the slot and the project; say so if the tick raised.
+
+    A raised tick used to surface through the gathered job as apscheduler's
+    EVENT_JOB_ERROR (`project=(scheduler) outcome=tick_error`). A detached task
+    has no job to raise into, so the error is logged here — with the project it
+    belongs to, which the job-level line never had.
+    """
+    if _detached_ticks.get(project_id) is task:
+        del _detached_ticks[project_id]
+    lock.release()
+    if task.cancelled():
         return
-    # Filter here as well as in _execute_skillflow_tick: a busy project should not
-    # consume one of this tick's slots, and skipping it silently is what made the
-    # old starvation invisible — `locked` is still logged, by the tick itself.
-    free = [p for p in projects if not _tick_lock_held(p["project_id"])]
-    if not free:
-        tick_log(projects[0]["project_id"], "locked")
-        return
-    await asyncio.gather(*(_execute_skillflow_tick(p["project_id"], loop)
-                           for p in free))
+    exc = task.exception()
+    if exc is not None:
+        logging.getLogger("aitelier.scheduler").error(
+            "tick for %s raised", project_id, exc_info=exc)
+        tick_log(project_id, "tick_error",
+                 error=str(exc)[:160].replace("\n", " "))
+
+
+def _cancel_detached_ticks(_event=None) -> int:
+    """Cancel every in-flight tick. Listener for EVENT_SCHEDULER_SHUTDOWN.
+
+    Each tick's own `except asyncio.CancelledError` releases its claim; this
+    only delivers the cancellation. Returns how many ticks it cancelled.
+    """
+    tasks = list(_detached_ticks.values())
+    for t in tasks:
+        loop = t.get_loop()
+        try:
+            on_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            t.cancel()
+        else:                            # shutdown called from another thread
+            loop.call_soon_threadsafe(t.cancel)
+    return len(tasks)
 
 
 async def poll_and_execute_demo():
@@ -2733,9 +2825,11 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
         scheduler.add_job(
             job_func, 'interval', seconds=interval,
             misfire_grace_time=60,  # first tick may run a full LLM call (~30s)
-            max_instances=1,  # SF-5: prevent concurrent ticks racing on same run
-                              # (wake-on-confirm + interval both hitting advance_run
-                              # caused step version conflicts and infinite retry loops)
+            max_instances=1,  # one poll at a time. poll_and_execute returns once
+                              # it has dispatched, so it no longer holds this while
+                              # a step runs; same-run exclusion (SF-5: wake-on-confirm +
+                              # interval both hitting advance_run caused version
+                              # conflicts) is the per-project lock's job
         )
 
     # Hung-step detection: runs on a separate periodic job so it fires even
@@ -2756,6 +2850,11 @@ def _add_scheduler_job(scheduler: AsyncIOScheduler, settings: dict,
         )
     except Exception:
         pass
+    if job_func is poll_and_execute:
+        # Its ticks outlive the job, so the shutdown that used to cancel them by
+        # cancelling the job no longer does. See `poll_and_execute`.
+        from apscheduler.events import EVENT_SCHEDULER_SHUTDOWN
+        scheduler.add_listener(_cancel_detached_ticks, EVENT_SCHEDULER_SHUTDOWN)
 
 
 # ── Wake-on-confirm hook ──────────────────────────────────────────

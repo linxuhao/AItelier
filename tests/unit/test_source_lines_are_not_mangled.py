@@ -145,3 +145,47 @@ def test_the_verbatim_repeat_exemption_is_derived_not_asserted():
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
     assert sites > 0, "the rule found no repeat anywhere — it is not the rule"
+
+
+# ── the checker's own file, under both poles ───────────────────────────────
+
+_YIELD_LINE = ('            yield node.lineno, f"body is only '
+               '`{node.name}()`"\n')
+
+
+def _own_source() -> str:
+    return Path(__file__).resolve().read_text(encoding="utf-8")
+
+
+def test_the_checker_file_is_clean_under_both_of_its_own_rules():
+    """The checker runs on ITSELF. Round 6 delivered two mangled lines inside
+    this very file and all 4045 tests stayed green, because the self-call rule
+    does not catch a duplicated statement. Both rules scan this file."""
+    source = _own_source()
+    assert list(_mangled_shapes(ast.parse(source))) == []
+    assert _verbatim_repeat_sites(source) == 0, (
+        "this file repeats a statement verbatim — the same shape that was "
+        "delivered here unnoticed in round 6")
+
+
+def test_the_duplicated_yield_pole_is_red_on_the_checker_own_file():
+    """Pole A: the round-6 `yield` duplication, seeded into THIS file's own
+    `_mangled_shapes`, must be seen. The self-call rule cannot see it (the
+    body is two statements, not one self-call); the verbatim-repeat rule is
+    the reader that was missing."""
+    source = _own_source()
+    assert source.count(_YIELD_LINE) == 1, "the anchor line moved; reread it"
+    damaged = source.replace(_YIELD_LINE, _YIELD_LINE + _YIELD_LINE, 1)
+    assert damaged != source
+    assert _verbatim_repeat_sites(damaged) > 0, (
+        "a duplicated `yield` in the checker's own file went unseen — every "
+        "finding would be reported twice and nothing would go red")
+
+
+def test_the_self_call_pole_is_red_on_the_checker_own_file():
+    """Pole B: the shape the checker exists for, seeded into its own file."""
+    damaged = _own_source() + (
+        "\n\ndef _seeded_self_call():\n    _seeded_self_call()\n")
+    offenders = [f"{n}:{w}" for n, w in
+                 _mangled_shapes(ast.parse(damaged))]
+    assert any("_seeded_self_call" in o for o in offenders), offenders

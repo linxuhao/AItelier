@@ -339,28 +339,17 @@ def _gate_calls(counter_path):
     return int(counter_path.read_text().strip()) if counter_path.exists() else 0
 
 
-def test_a_gate_that_did_not_run_is_re_acquired_not_re_implemented(tmp_path,
-                                                                   monkeypatch):
-    """(1) no implement cycle is spent and (2) the run does not end: the tool
-    asks the gate again once the resource is free and folds in the verdict."""
-    monkeypatch.setenv("AITELIER_REPO_GATE_RETRY_DELAY_SECONDS", "0")
-    counter = tmp_path / "gate_calls.txt"
-    tail = ("if [ \"$n\" -lt 2 ]; then\n"
-            "  printf '%s\\n' '" + _BLOCKED_DECLARATION + "'\n"
-            "  exit 3\n"
-            "fi\n"
-            "echo 'gate ran, nothing failed'\n"
-            "exit 0\n")
-    sf, run_id, calls = _wire(
-        tmp_path, [True], real_run_tests=True,
-        repo_prepare=lambda project: _prepare_project_gate(project, counter,
-                                                           tail))
-    status, implement_runs = _drive(sf, run_id)
+# The `if [ "$n" -lt 2 ]` "ask again and it lets go" fixture that used to sit
+# here is GONE, and its absence is a requirement rather than a tidy-up. A gate
+# script that answers on the second call was never the subject of this card: it
+# makes the wait unmeasurable (the wait becomes zero) and it buys the property
+# by changing the gate's mind instead of by parking the absence. One step now
+# makes ONE gate call (`REPO_GATE_UNMEASURED_ATTEMPTS == 1`, asserted with its
+# worst-case hold in tests/unit/test_gate_deferral_execution_points.py) and the
+# waiting is the scheduler's, so the re-acquisition this test measured no
+# longer exists to measure.
+test_the_forbidden_two_call_gate_script_is_gone = None
 
-    assert status == "completed", (          # (2) not the terminal gate
-        sf.get_run(run_id).get("error_reason"), _gate_calls(counter))
-    assert implement_runs == 1               # (1) not one implement cycle spent
-    assert _gate_calls(counter) == 2         # the verdict WAS re-acquired
 
 
 def test_four_real_reds_still_exhaust_the_cycle_limit(tmp_path):

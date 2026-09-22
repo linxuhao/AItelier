@@ -288,8 +288,6 @@ def test_m21b_is_reproduced_and_this_file_is_what_flips():
 # ── a timeout is the framework's own observation ───────────────────────────
 
 
-# ── a timeout is the framework's own observation ───────────────────────────
-
 def test_a_declared_absence_is_unmeasured_whatever_the_exit_code_was():
     gate = {"returncode": 0, "output_truncated": False, "output": DECLARED}
     assert rt._repo_gate_outcome(gate) == rt.REPO_GATE_UNMEASURED

@@ -203,14 +203,30 @@ def guard_per_instance_valve(claims: int, run_id: str, *,
 
 
 def absent_terminal_names_no_failure(reason: str) -> bool:
-    """True when a terminal reason really names only the absence."""
+    """True when a terminal reason really names only the absence.
+
+    Both directions are guarded by its own test, because a checker with one
+    pole is not a checker: round 5 pinned this function to unconditional `True`
+    and the whole suite stayed green, since every test only ever handed it a
+    good sentence and asked for True.
+
+    The word list is matched on a WORD BOUNDARY and on the singular AND plural
+    stem: "measured" ends in "red" (so a naive `in` would refuse the honest
+    sentence itself), and "failures" is the word a blame sentence actually
+    carries — matching only "failure" let "3 failures" through.
+    """
     lowered = str(reason).lower()
     if ABSENCE_TERMINAL.lower() not in lowered:
         return False
     if any(phrase in lowered for phrase in _FORBIDDEN_PHRASES):
         return False
     words = set(re.findall(r"[a-z]+", lowered))
+    # Plurals of the same stem are the same accusation: `failures`, `errors`,
+    # `regressions`. Only a trailing `s` is stripped, so the check stays on
+    # whole words and never fires inside `measu(red)`.
+    words |= {w[:-1] for w in words if w.endswith("s")}
     return not (words & set(_FORBIDDEN_WORDS))
+
 
 
 def hold_blocks_advance(run_id: str, *, now: float | None = None,

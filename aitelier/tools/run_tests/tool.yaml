@@ -54,13 +54,20 @@ description: >
   `repo_gate_unmeasured: true` and `repo_gate_absent: true` (plus
   `repo_gate.measured: "unmeasured"` and `repo_gate.attempts`, the number of
   runs the reading cost), and `configs/coding_impl.yaml` routes
-  `repo_gate_absent` to the loop-external `test_gate_absent` gate. Waiting for
-  the gate and bounding how long a run may spend absent is the SCHEDULER's
-  job (`core/gate_deferral.py`), not this step's: while an absence is live the
-  run is not advanced and spends no implement cycle, and past the episode's
-  wall-clock ceiling the run ends with `gate did not run: no verdict was
-  measured` — never with a message that blames the code. only a
+  `repo_gate_absent` to the loop-external `test_gate_absent` gate — from the
+  `test` step, which OWNS `test_report.json`: a `from_file` match is resolved
+  against the evaluating step's own output dir, so on the `test_evidence`
+  validator (which writes nothing) the reader raises `FileNotFoundError` and
+  the edge can never match. Waiting for the gate and bounding how long a run
+  may spend absent is the SCHEDULER's job (`core/gate_deferral.py`), not this
+  step's: while an absence is live the run is not advanced and spends no
+  implement cycle, and past the episode's wall-clock ceiling the run ends with
+  `gate did not run: no verdict was measured` — never with a message that
+  blames the code. ONE step makes ONE gate run (`REPO_GATE_UNMEASURED_ATTEMPTS
+  = 1`): the re-acquisition that used to happen in-step held the scheduler for
+  3 x 5400 s + 2 x 60 s, so the waiting is the poller's instead. Only a
   `measured_pass` licenses pruning that gate's known-red cases.
+nses pruning that gate's known-red cases.
 parameters:
   project_root:
     type: string

@@ -232,10 +232,11 @@ The absence accounting (round 5), in
 | delete the per-instance valve guard | `test_the_per_instance_valve_does_not_fire_while_an_episode_is_live`; `test_the_episode_ceiling_replaces_the_valve_that_it_disarmed` |
 | delete the host `advance_run` hold | `test_the_host_refuses_to_advance_a_run_whose_gate_is_silent` |
 
-A previous revision of this file carried a row claiming M21
-named in it. That row has been **removed**, not reworded. Round 5 MEASURED whymoved**,
-not reworded. Round 5 MEASURED why it could never reproduce, which is more than
-the previous revision did:
+A previous revision of this file carried a row claiming M21 named in it.
+That row has been **removed**, not reworded, and what replaced it is the
+measurement below rather than another sentence: Round 5 MEASURED why the row
+could never have reproduced.
+
 
 `startswith(PREFIX)` → `PREFIX in line` **alone is not observable at all**.
 The slice is still `line[len(PREFIX):]`, so on an echoed line the reader starts

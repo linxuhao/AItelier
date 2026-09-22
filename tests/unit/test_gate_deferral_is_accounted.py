@@ -199,3 +199,37 @@ def test_a_cleared_episode_stops_holding_the_run(ledger):
     ledger.clear("r")
     assert gd.hold_blocks_advance("r", ledger=ledger, now=1000.0) is False
     assert ledger.hold_remaining("r", now=1000.0) == 0.0
+
+
+# ── the terminal-reason CHECKER has both poles (round 5 had one) ───────────
+
+def test_the_absent_terminal_checker_refuses_a_sentence_that_blames_the_code():
+    """Round 5 left this checker with a SINGLE pole: pinning it to
+    unconditional `True` kept the whole suite green, because every test only
+    ever handed it a good sentence and asked for True. A checker with one pole
+    is not a checker. So both directions are measured here, with the forbidden
+    vocabulary the implementation actually names.
+    """
+    good = gd.ABSENCE_TERMINAL + " (run_tests.sh, 3 attempt(s))"
+    assert gd.absent_terminal_names_no_failure(good) is True
+
+    for bad in (
+        good + " — Cycle limit exceeded",
+        good + " — the suite failed",
+        good + " — 3 failures",
+        good + " — a regression in test_ops",
+        good + " — the gate reported red",
+        good + " — error: builder unreachable",
+        "Cycle limit exceeded (test, 4 attempt(s))",
+        "the tests failed",
+        "",
+    ):
+        assert gd.absent_terminal_names_no_failure(bad) is False, bad
+
+    # The word-boundary rule the implementation documents, stated as a pole of
+    # its own: "measured" CONTAINS "red", and the honest absence sentence
+    # contains "measured" — a naive substring check would refuse the very
+    # sentence it exists to accept.
+    assert "measured" in good.lower()
+    assert gd.absent_terminal_names_no_failure(good) is True
+.0

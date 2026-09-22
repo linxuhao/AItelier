@@ -39,13 +39,18 @@ _MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
 # own wall-clock ceiling is the bound that applies then (see
 # `guard_per_instance_valve`, and the test that proves the valve still fires
 # for a genuine runaway: tests/unit/test_gate_deferral_is_accounted.py).
-# Under the production constants the valve is not even reachable during one
-# episode (300 s poll x 20 = 6000 s < 10800 s ceiling), so the safe direction
-# is the one that holds; setting the poll interval below ~540 s is what brings
-# the valve back into range before the ceiling ends the run, which is why both
-# knobs in gate_deferral are clamped rather than free.
+# MEASURED (round 6): the claim that the valve "is not even reachable during
+# one episode" was ARITHMETICALLY WRONG, in the direction that mattered. 300 s
+# poll x 20 = 6000 s of claims arrives 4800 s BEFORE the 10800 s ceiling, so one
+# episode can accumulate ceiling/wait = 36 re-claims of a single instance
+# against a valve set to 20. The guard, not the arithmetic, is what keeps the
+# valve from killing the run mid-episode; both poles of that guard are asserted
+# with these real numbers, so a future edit to either knob turns this red BY
+# NAME instead of into another comment:
+# tests/unit/test_gate_deferral_execution_points.py.
+
 _MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
-_MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
+
 
 # Claim-time failures happen before an executor exists.  In particular, a code
 # output step refuses a dirty run worktree and rolls its claim transaction back;

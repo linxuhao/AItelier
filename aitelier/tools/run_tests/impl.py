@@ -707,13 +707,27 @@ REPO_GATE_MEASURED_PASS = "measured_pass"
 REPO_GATE_MEASURED_FAIL = "measured_fail"
 REPO_GATE_UNMEASURED = "unmeasured"
 
-# How many runs a gate gets before its declared absence is reported as the end
-# of the story (one initial run plus this many re-acquisitions), and how long
-# to wait between them. This is what keeps the FIRST contention from killing
-# the round: the tool spends no implement cycle and reaches no verdict, it
-# just asks the gate again once the resource is free.
-REPO_GATE_UNMEASURED_ATTEMPTS = 3
+# How many times ONE step invocation may run the repository gate.
+#
+# This is 1, and the number is a BUDGET rather than a tuning knob. Round 5
+# bought the first contention's recovery by re-running the gate in-THIS-step
+# (3 runs, REPO_GATE_RETRY_DELAY_SECONDS apart). Measured cost of that trade:
+# the step's worst-case hold went 5400 s -> 3 x 5400 + 2 x 60 = 16320 s, and a
+# single step held the scheduler for all of it. The repair is to stop paying
+# for the wait HERE: an absence is parked by the SCHEDULER instead
+# (`core/gate_deferral.py`), which lets the poller go on serving every other
+# project while this run waits, and the episode's own ceiling is what ends it.
+# So one step makes one gate call, and its worst case is the gate's own
+# timeout (`REPO_GATE_TIMEOUT`), which is what the previous main line paid.
+# Both numbers are asserted in
+# tests/unit/test_gate_deferral_execution_points.py::test_one_step_holds_the_\
+# scheduler_for_at_most_one_gate_run.
+REPO_GATE_UNMEASURED_ATTEMPTS = 1
+# Kept for the re-acquisition path that remains reachable (`attempts` still
+# reports how many runs the reading cost, and the loop honors this constant
+# when a deployment raises it deliberately). Not read on the default path.
 REPO_GATE_RETRY_DELAY_SECONDS = 60
+
 
 
 def _unmeasured_declaration(text: str) -> dict | None:
@@ -1484,9 +1498,20 @@ def run_tests(*, project_root: str = "", out_dir: str = "",
                      cycle_from=evidence_cycle_from)
     (target_dir / "test_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8")
-    from aitelier.gate_evidence import release_disposition
     return {"written": "test_report.json", "passed": report["passed"],
             "release_evidence": release_disposition(report),
+            # The routing flag ITSELF, on the RETURN and not only in the file.
+            # A `from_file` match must be evaluated by a step that owns the file
+            # AND whose content parses to an OBJECT: measured, a report parsing
+            # to a list raises AttributeError inside the engine's `_flags_match`
+            # (`'list' object has no attribute 'get'`), which takes the
+            # transition resolver down instead of routing anywhere. The return
+            # dict is merged into the step's flags, so `{field:
+            # repo_gate_absent, value: true}` matches with NO file reader at all
+            # — no dependence on which step owns the artifact, no crash on a
+            # malformed one. `configs/coding_impl.yaml` routes on this flag;
+            # core/gate_deferral.py reads the FILE for the reason.
+            "repo_gate_absent": bool(report.get("repo_gate_absent")),
             "passed_relative": report["passed_relative"],
             # Carried in the RETURN, not only the report, because the terminal
             # failure reason is assembled from what the run left behind: a loop

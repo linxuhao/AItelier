@@ -200,7 +200,7 @@ task_implementer:
   # write") then made it deliver the scaffolding. Three attempts, the same
   # ending each time, and repo_apply committed the placeholder scenario into
   # the game repo three times.
-  max_tool_turns: 100
+  max_tool_turns: 200
   native_tool_calling: true
   fallback_to_json_mode: true
   # effort "low", 2026-08-25. With no effort set the server defaults to ~high,

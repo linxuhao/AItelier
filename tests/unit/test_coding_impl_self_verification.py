@@ -46,7 +46,8 @@ def test_live_no_runner_shape_is_fixed_by_discoverable_tool_at_reviewed_budget()
     ]
     prompt = (ROOT / "templates/coding_impl.md").read_text(encoding="utf-8")
     assert "focused_check" in agent["tools"]
-    assert agent["max_tool_turns"] == 100
+    # The reviewed budget; pinned in tests/unit/test_implementer_turn_budgets.py
+    assert agent["max_tool_turns"] == 200
     assert "available from turn 1" in prompt
     assert "before `finish_step`" in prompt
 

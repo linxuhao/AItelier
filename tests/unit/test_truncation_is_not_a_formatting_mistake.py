@@ -34,6 +34,8 @@ from core.dpe_pipeline import (
     classify_json_failure,
     oversized_patch_refusal,
 )
+from core.output_migration import (STRICT_PATCH_GUIDANCE_EN,
+                                   STRICT_PATCH_GUIDANCE_ZH)
 
 CORPUS = (Path(__file__).resolve().parents[1] / "fixtures"
           / "jsonmode_truncation_20260921_trace_7132.jsonl")
@@ -60,11 +62,17 @@ def test_corpus_is_the_retained_incident():
         _payload(88)["error"]
     assert "go in one ordered patch" in _payload(90)["text"]
     truncated = _payload(95)["text"]
-    # The trace stores the text inside a JSON string, so what the engine
-    # receives ends in a literal backslash-n and backslash-quote. Built with
-    # chr(92) so this assertion never carries an escape of its own.
-    tail = ("*** End Patch" + chr(92) + "n}}" + chr(92) + chr(34) + "}]")
-
+    # The recorded reply is an apply_patch body cut off mid-file: the top-level
+    # object never closes. Assert that shape from the data itself -- the old
+    # body computed `truncated` and `tail` and asserted NEITHER (the pass-on-
+    # absence the review named). Reading the real ending avoids re-typing an
+    # escape that silently did not match.
+    tail = truncated.rstrip()[-24:]
+    assert "*** End Patch" in tail, "the reply is cut off right after End Patch"
+    assert tail.endswith("}]"), \
+        "the top-level object never closes: the reply ends in the array close"
+    assert classify_json_failure(truncated) == JSON_FAILURE_TRUNCATED, \
+        "an opened-but-unclosed object is the (乙) truncation pole, not (甲)"
 
 
 class TestTheTwoCausesAreToldApart:
@@ -83,14 +91,53 @@ class TestTheTwoCausesAreToldApart:
         assert classify_json_failure(prose) == JSON_FAILURE_NO_JSON
         assert PipelineEngine._detect_truncated_json(prose) is False
 
-    def test_the_corpus_has_both_poles(self):
-        """Both kinds exist in the retained sample, so the split is real."""
-        verdicts = [classify_json_failure(p.get("text") or "")
-                    for p in (json.loads(r["payload_json"]) for r in _rows()
-                              if r["category"] == "response")
-                    if (p.get("text") or "").strip()]
-        assert JSON_FAILURE_TRUNCATED in verdicts
-        assert JSON_FAILURE_NO_JSON in verdicts
+    def test_prose_with_parentheses_is_not_a_truncation(self):
+        """The theme of this card: a `(` used to count as an unclosable bracket.
+
+        Every one of these is the (甲) formatting pole -- ordinary prose with a
+        round bracket, nothing JSON-like to close. A `(` must never raise the
+        depth counter, because a `)` does not lower it in JSON text.
+        """
+        for text in ("I reviewed the plan (no edits needed).", "(a)"):
+            assert classify_json_failure(text) == JSON_FAILURE_NO_JSON, text
+            assert PipelineEngine._detect_truncated_json(text) is False, text
+
+    def test_seq_64_is_a_complete_reply_not_a_truncation(self):
+        """The corpus line the candidate mis-called TRUNCATED.
+
+        seq 64 is prose with a fully-closed JSON object embedded in it; the
+        engine extracted it and its read call ran at seq 66, so the round
+        continued. The prose contains a round bracket -- exactly the character
+        that used to raise a depth `(` never brought back down -- so this line
+        is the canary for the mirror-image bug.
+        """
+        reply = _payload(64)["text"]
+        assert "(" in reply, "seq 64's prose carries a round bracket"
+        assert PipelineEngine._extract_json(reply) is not None, \
+            "seq 64 is a complete reply: its JSON extracts and runs"
+        assert classify_json_failure(reply) == JSON_FAILURE_NO_JSON, \
+            "a round bracket must not make a complete reply read as truncated"
+        assert PipelineEngine._detect_truncated_json(reply) is False
+
+    def test_the_corpus_carries_only_the_truncation_pole(self):
+        """Why the old 'both poles' assertion was vacuous, and what replaces it.
+
+        The retained sample is the (乙) incident: every response line carries
+        JSON structure, so a genuine formatting-mistake line with nothing to
+        close cannot occur here -- the corpus is the authority for truncation
+        and the regression, never for (甲). The (甲) pole is supplied by the
+        external literals above, not by editing the corpus. Asserting the
+        structural fact is a real check: the old test passed even on a (甲)-
+        free corpus because NO_JSON is what a COMPLETE object also returns.
+        """
+        texts = [(json.loads(r["payload_json"]).get("text") or "")
+                 for r in _rows() if r["category"] == "response"]
+        texts = [t for t in texts if t.strip()]
+        assert texts, "the corpus must carry response rows"
+        assert all("{" in t for t in texts), \
+            "the corpus has no `{`-free line, so (甲) cannot live here"
+        assert any(classify_json_failure(t) == JSON_FAILURE_TRUNCATED
+                   for t in texts), "the retained (乙) pole must still be present"
 
     def test_a_complete_object_is_not_truncated(self):
         assert classify_json_failure('{"thoughts": "ok", "actions": []}') == \
@@ -254,17 +301,33 @@ class TestATruncationDoesNotEndTheRound:
         assert _run(e) is True
         assert (tmp_path / "final/d.md").read_text() == "candidate"
 
-    def test_the_agent_gets_another_turn_naming_truncation_and_split(
-            self, tmp_path):
+    def test_the_agent_prompt_names_truncation_and_split(self, tmp_path):
+        """The message must reach the AGENT's own next prompt.
+
+        The previous assertion read `prompts[1] + json.dumps(events)` — a
+        cross-channel OR that stays green even if the agent never sees the
+        message. This check reads the PROMPT channel ALONE, so it goes red if
+        the message reaches SSE but never the agent.
+        """
         e = _engine(tmp_path, [
             self._truncation(),
             _response(_action("create", file="a.md", content="x"))])
         assert _run(e) is True
         assert len(e.prompts) >= 2, "the round was not handed back"
-        # What the agent was actually shown on the turn after the truncation.
-        seen = e.prompts[1] + json.dumps([d for _k, d in e.events])
-        assert "TRUNCATED" in seen.upper()
-        assert "split" in seen.lower()
+        assert "TRUNCATED" in e.prompts[1].upper(), \
+            "the agent's next prompt never named the truncation"
+        assert "split" in e.prompts[1].lower(), \
+            "the agent's next prompt never told it to split"
+
+    def test_the_sse_channel_names_truncation_and_split(self, tmp_path):
+        """The same message must reach the SSE event stream, asserted ALONE."""
+        e = _engine(tmp_path, [
+            self._truncation(),
+            _response(_action("create", file="a.md", content="x"))])
+        assert _run(e) is True
+        sse = json.dumps([d for _k, d in e.events])
+        assert "TRUNCATED" in sse.upper()
+        assert "split" in sse.lower()
 
     def test_the_refusal_is_traced_not_silent(self, tmp_path):
         e = _engine(tmp_path, [
@@ -303,3 +366,53 @@ class TestATruncationDoesNotEndTheRound:
         errors = [d["error"] for k, d in e.events if k == "parse_error"]
         assert errors and "ONLY a JSON object" in errors[-1]
         assert not any(k == "truncation_detected" for k, _ in e.events)
+
+
+def test_paren_prose_behaviour_is_unchanged_end_to_end(tmp_path):
+    """Extreme (2), restored: a paren-bearing reply is (甲), not a cut.
+
+    The candidate told such a reply it had been 'TRUNCATED ... after 67
+    characters' — nothing truncated it; it merely contained a '('. The base
+    behaviour (raise MaxRetriesExceeded with the reformat instruction) must
+    hold even when the prose carries a round bracket. At least one prose
+    test in this file MUST use a parenthesis, or the mirror-image regression
+    is invisible to the suite.
+    """
+    prose = ("I reviewed the plan (no edits needed); nothing further "
+             "is required this turn.")
+    assert "(" in prose and len(prose) < _APPLY_PATCH_MAX_CHARS
+    e = _engine(tmp_path, [prose])
+    with pytest.raises(MaxRetriesExceeded, match="parse JSON"):
+        _run(e)
+    errors = [d["error"] for k, d in e.events if k == "parse_error"]
+    assert errors and "ONLY a JSON object" in errors[-1]
+    assert not any(k == "truncation_detected" for k, _ in e.events)
+    assert not [p for p in e.prompts[1:] if "TRUNCATED" in p.upper()]
+
+
+def test_the_agent_facing_guidance_has_no_corruption():
+    """The prose sent to the agent every round is a deliverable, not a comment.
+
+    Four overlapping-hunk corruptions went out unnoticed because nothing
+    asserted on the guidance text: a severed sentence, a duplicated fragment,
+    a deleted `sha` suggestion, a repeated banner. This catches that class.
+    A guidance block must not repeat an adjacent line verbatim, must not
+    contain the severed 'stale or file.' signature, and must still carry the
+    reread-and-cite-`sha` advice.
+    """
+    fix_md = (Path(__file__).resolve().parents[2]
+              / "templates" / "fix_tests.md").read_text(encoding="utf-8")
+    blocks = {"fix_tests.md": fix_md,
+              "STRICT_PATCH_GUIDANCE_EN": STRICT_PATCH_GUIDANCE_EN,
+              "STRICT_PATCH_GUIDANCE_ZH": STRICT_PATCH_GUIDANCE_ZH}
+    for name, text in blocks.items():
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        for i in range(1, len(lines)):
+            assert lines[i] != lines[i - 1], (
+                f"{name}: duplicated adjacent line reveals a corrupted hunk: "
+                f"{lines[i]!r}")
+        collapsed = " ".join(text.split())
+        assert "stale or file." not in collapsed, (
+            f"{name}: severed 'stale or file.' — a deleted clause")
+    assert "reread that range and cite its" in fix_md, \
+        "the `sha` advice must be present in the patch template"

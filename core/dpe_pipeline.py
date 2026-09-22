@@ -44,7 +44,6 @@ def _repair_json_content(raw: str) -> str | None:
 
 
 # ── Why did a JSON reply fail to parse? ───────────────────────────────────
-# ── Why did a JSON reply fail to parse? ───────────────────────────────────
 # `_extract_json` returning None has two causes that must never share one
 # answer, because only one of them is the agent's mistake:
 #
@@ -81,6 +80,10 @@ def classify_json_failure(text: str) -> str:
     of JSON cannot masquerade as nested structure. A reply that opened a
     structure and never closed it — or that stopped inside an unterminated
     string — was cut off. A reply with nothing to close was merely not JSON.
+
+    Round brackets are deliberately NOT counted: JSON has none, and a `(` in
+    ordinary prose used to raise a depth that no `)` ever brought back down --
+    the very misfire this classifier exists to prevent (see the retained corpus).
     """
     depth = 0
     in_string = False
@@ -97,7 +100,7 @@ def classify_json_failure(text: str) -> str:
             continue
         if ch == '"':
             in_string = True
-        elif ch in "{[(":
+        elif ch in "{[":
             depth += 1
             opened = True
         elif ch in "}]":
@@ -1837,12 +1840,16 @@ class PipelineEngine:
                 f"Tool '{tool_name}' is not granted to this step. "
                 "Available tools: " + (", ".join(sorted(schemas)) or "(none)")
             )}
+        # focused_check is a probe-only tool: a model must not be able to forge
+        # run/step/project/operation attribution into the implement trace, so
+        # those identity params are stripped here before SkillFlow sees them.
         if tool_name == "focused_check":
             for identity in ("run_id", "step_id", "project_id", "operation_id"):
                 params.pop(identity, None)
         elif tool_name == "apply_patch":
             if (getattr(self, "_output_target", "artifact") != "code"
-                    or getattr(self, "_output_fixed", {})):
+                    or getattr(self, "_output_fixed", {})
+                    or "apply_patch" not in schemas):
                 return {"error": "apply_patch requires a granted generic code-output step"}
             if not set(params) <= {"patch", "references"} or not params:
                 return {"error": ("apply_patch accepts only patch and/or "

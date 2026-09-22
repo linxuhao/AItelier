@@ -248,3 +248,8 @@ model_routes.json
 # Historical private engine wheels stay out of new commits.
 !vendor/wheels/
 vendor/wheels/*
+
+# Review and round worktrees are checked out under here. They are real
+# git worktrees, so a `git add -A` in this shared checkout would otherwise
+# sweep whole in-flight trees into a commit.
+.wt/

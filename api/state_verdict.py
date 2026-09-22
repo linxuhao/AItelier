@@ -261,20 +261,39 @@ def binding_for(endpoint, judged_action: str | None, route_path: str = "") -> Bi
         return Binding(False, "handler source is unreadable", delivery.actions)
     if delivery.opaque:
         return Binding(False, "a delivered action is not a literal", delivery.actions)
+    def _private_delivery() -> "Binding | None":
+        """A reachable delivery of an action the visibility table keeps private.
+
+        This runs before ANY early ``ok=True``: a handler that dispatches on the
+        very path parameter the guard judged is still refused when it ALSO returns
+        a private body. Trusting the parameter name alone is a stand-down of the
+        verdict, so no branch below may grant the declaration without first
+        clearing every delivered action against the table.
+        """
+        for action in sorted(delivery.actions):
+            if not is_public_read(action):
+                return Binding(False, f"handler delivers the private action {action}",
+                               delivery.actions)
+        return None
+
     if delivery.params:
         # Dispatch on the path action itself: the handler hands `execute` the
-        # same string the guard just judged, so the binding is that identity.
+        # same string the guard just judged, so the binding is that identity -
+        # but only once the literal actions the handler ALSO returns are cleared
+        # as public. A dispatch that also delivers a private read is refused.
         if not (delivery.params == {"action"} and "{action}" in route_path
                 and judged_action is not None):
             return Binding(False, "handler dispatches on a value the route does not judge",
                            delivery.actions)
+        private = _private_delivery()
+        if private is not None:
+            return private
         return Binding(True, "", delivery.actions)
     if not delivery.actions:
         return Binding(False, "handler delivers no state action", delivery.actions)
-    for action in sorted(delivery.actions):
-        if not is_public_read(action):
-            return Binding(False, f"handler delivers the private action {action}",
-                           delivery.actions)
+    private = _private_delivery()
+    if private is not None:
+        return private
     if judged_action not in delivery.actions:
         return Binding(False,
                        f"declaration names {judged_action}; handler serves "
@@ -294,7 +313,7 @@ class VerdictLedger:
     """
 
     def __init__(self):
-        self._judged: dict[int, set[str]] = {}
+        self._judged: dict[int, dict[str, str]] = {}
 
     def __enter__(self) -> "VerdictLedger":
         _LEDGERS.append(self)
@@ -304,11 +323,19 @@ class VerdictLedger:
         _LEDGERS.remove(self)
         return False
 
-    def _record(self, app, path: str) -> None:
-        self._judged.setdefault(id(app), set()).add(path)
+    def _record(self, app, path: str, ruling: str) -> None:
+        # The key fact is not merely that a path is present but WHICH verdict the
+        # guard applied to it. "Arrived at the guard" and "a ruling was applied"
+        # were the same set while the leak hid here; recording the ruling keeps
+        # them distinct, so a route the guard never ruled on cannot masquerade as
+        # judged.
+        self._judged.setdefault(id(app), {})[path] = ruling
 
     def judged(self, app) -> frozenset:
         return frozenset(self._judged.get(id(app), ()))
+
+    def rulings(self, app) -> dict:
+        return dict(self._judged.get(id(app), {}))
 
     def clear(self) -> None:
         self._judged.clear()
@@ -317,12 +344,19 @@ class VerdictLedger:
 _LEDGERS: list[VerdictLedger] = []
 
 
-def record_judged(app, path: str | None) -> None:
-    """Called by the router guard the moment it judges a request."""
+def record_judged(app, path: str | None, ruling: str = "verdict-applied") -> None:
+    """Called by the router guard AFTER it applies a ruling to a request.
+
+    `ruling` names the verdict the guard actually ran (an authorization decision,
+    a public clearance, or a declaration refusal). The call is made only once a
+    decision exists; it is not made on arrival, so reaching the guard without
+    ruling on the request is recorded as NO judgment and the route is counted
+    uncovered.
+    """
     if path is None or not _LEDGERS:
         return
     for ledger in list(_LEDGERS):
-        ledger._record(app, path)
+        ledger._record(app, path, ruling)
 
 
 def state_route_paths(app) -> dict:
@@ -424,19 +458,26 @@ def exercised_for(template: str, exercised: dict) -> tuple:
 
 
 def coverage_report(app, ledger: VerdictLedger, exercised: dict) -> dict:
-    """Per route: judged / responded / uncovered, plus its derived verdict.
+    """Per route: judged / ruling / responded / uncovered, plus its derived verdict.
 
     `exercised` maps a request URL to the status codes it produced; it is matched
-    against each route template. A route that RESPONDED while the ledger holds no
-    judgment for it is uncovered — that is the number this exists to move.
+    against each route template. `judged` is true only when the guard RECORDED a
+    ruling for the route (an authorization verdict, a public clearance or a
+    refusal) - not merely when a request reached the router. A route that
+    RESPONDED while the ledger holds no ruling for it is uncovered: that is the
+    number this exists to move, and it is what the arrival-count hid while a
+    private body leaked.
     """
     report: dict = {}
+    rulings = ledger.rulings(app)
     for path, row in declaration_table(app).items():
         statuses = exercised_for(path, exercised)
-        judged = path in ledger.judged(app)
+        ruling = rulings.get(path)
+        judged = ruling is not None
         report[path] = {
             **row,
             "judged": judged,
+            "ruling": ruling,
             "responded": bool(statuses),
             "statuses": tuple(sorted(set(statuses))),
             "uncovered": bool(statuses) and not judged,

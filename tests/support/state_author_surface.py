@@ -10,17 +10,27 @@ controls, every route shape they can express, so the invariant "the prefix
 verdict is applied to any author-writable route" is checked against the whole
 surface rather than a hand-written list of cases.
 
+This is TEST SCAFFOLDING and lives under ``tests/`` on purpose: the running
+application imports nothing here, and it must never grow into an API-package
+module a product route could reach for.
+
 `compile_handler` builds each shape as a real Python function whose source
 `inspect.getsource` can read (the lines are registered in `linecache` under a
 virtual file name), so the binding runs on it exactly as it does on a handler
 written into a file. The one shape whose source is deliberately UNREADABLE is
 the refuse pole: an author-writable route this reader cannot classify must be
 refused, never approved.
+
+There is NO hand-written table of "what each body delivers". The expected
+model is DERIVED, per shape, from the generated source text itself by a
+second, independent scan (see `_model_delivery`): the two computations share
+the generated handler, not a hand-kept dictionary keyed by body name.
 """
 from __future__ import annotations
 
 import itertools
 import linecache
+import re
 from typing import NamedTuple
 
 
@@ -148,21 +158,21 @@ def shape_count() -> int:
     return len(shapes())
 
 
-# What each body's SOURCE reaches for, expressed as the reader's OWN model: the
-# literal actions a reachable return can deliver, whether the handler dispatches
-# on its path parameter, and whether any delivery site is unresolvable. This is
-# derived from the shape alone - the reader never calls the guard - so the
-# invariant test compares two independent computations of "may this answer?".
-_BODY_DELIVERS = {
-    Body.PUBLIC_ONLY: frozenset({"get_graph"}),
-    Body.PRIVATE_ONLY: frozenset({"get_driver_note"}),
-    Body.DISPATCH_PARAM: frozenset(),
-    Body.DISPATCH_AND_PRIVATE: frozenset({"get_driver_note"}),
-    Body.MULTI_PUBLIC: frozenset({"get_graph"}),
-    Body.OPAQUE_ACTION: frozenset(),
-    Body.STATIC: frozenset(),
-    Body.UNKNOWN_SOURCE: frozenset(),
-}
+def _model_delivery(shape: Shape) -> tuple:
+    """DERIVE the shape's delivery from its generated source text.
+
+    A second scan over the SAME generated handler - not a hand-kept dictionary
+    keyed by body name - yields (literal actions delivered, whether the source
+    dispatches on the shape's own path parameter, whether any action slot is
+    unresolvable). `expected_can_serve` is computed from THIS, so the model and
+    the reader share an input (the handler) but no hand-written table.
+    """
+    source = _handler_source(shape.param, shape.body, shape.name)
+    literals = frozenset(re.findall(r"execute\(service,\s*'([a-z_]+)'", source))
+    dispatches = bool(re.search(
+        r"execute\(service,\s*" + re.escape(shape.param) + r"\b", source))
+    opaque = "get_' + 'graph'" in source
+    return literals, dispatches, opaque
 
 
 def expected_can_serve(shape: Shape) -> bool:
@@ -180,15 +190,15 @@ def expected_can_serve(shape: Shape) -> bool:
         return False
     if shape.body == Body.UNKNOWN_SOURCE:
         return False
-    if shape.body == Body.OPAQUE_ACTION:
+    literals, dispatches, opaque = _model_delivery(shape)
+    if opaque:
         return False
-    delivered = _BODY_DELIVERS[shape.body]
-    if any(not _is_public(a) for a in delivered):
+    if any(not _is_public(a) for a in literals):
         return False
     action = shape.declaration[1]
     if action is None:
-        return (shape.body == Body.DISPATCH_PARAM and shape.param == Param.ACTION)
-    return action in delivered
+        return dispatches and shape.param == Param.ACTION and not literals
+    return action in literals
 
 
 def _is_public(action: str) -> bool:
@@ -319,3 +329,56 @@ def dependency_shapes():
         "callable": make_callable,
         "class": make_class,
     }
+
+
+def hiding_handlers(namespace: dict) -> dict:
+    """The four delivery-hiding handler shapes the review measured (r8).
+
+    Each one delivers a PRIVATE action through a site the reader must work to
+    see: a module-level helper, a renamed import, an ``async def`` inner
+    function, and the action passed as the KEYWORD ``action=``. Every one must
+    be refused; the reader derives each refusal, no shape list. All four are
+    compiled into namespace copies so their ``__globals__`` are real, and the
+    helper sources are registered in `linecache` exactly the way
+    `compile_handler` does - the reader follows the helper or refuses.
+    """
+    out: dict = {}
+
+    def build(name: str, source: str, extra: dict) -> object:
+        ns = dict(namespace)
+        ns.update(extra)
+        filename = _register_source(name, source)
+        exec(compile(source, filename, "exec"), ns)
+        return ns[name]
+
+    open_pid = repr(GEN_PID)
+    # 1. module-level helper: the delivery lives OUTSIDE the handler source.
+    out["module_level_helper"] = build(
+        "h_module_helper",
+        ("def _helper(service, action):\n"
+         f"    return execute(service, action, {{'project_id': {open_pid}}})\n"
+         "def h_module_helper(action: str = 'get_graph', service=Depends(get_service)):\n"
+         "    return _helper(service, 'get_driver_note')\n"),
+        {})
+    # 2. renamed import: the action-callable reaches the handler under an alias.
+    out["renamed_import"] = build(
+        "h_renamed_import",
+        ("def h_renamed_import(action: str = 'get_graph', service=Depends(get_service)):\n"
+         f"    return _runner(service, 'get_driver_note', {{'project_id': {open_pid}}})\n"),
+        {"_runner": namespace["execute"]})
+    # 3. async inner function: the delivery is inside a coroutine the handler calls.
+    out["async_inner"] = build(
+        "h_async_inner",
+        ("def h_async_inner(action: str = 'get_graph', service=Depends(get_service)):\n"
+         "    async def inner():\n"
+         f"        return execute(service, 'get_driver_note', {{'project_id': {open_pid}}})\n"
+         "    return inner()\n"),
+        {})
+    # 4. keyword action: the private action arrives as action=..., not positionally.
+    out["keyword_action"] = build(
+        "h_keyword",
+        ("def h_keyword(action: str = 'get_graph', service=Depends(get_service)):\n"
+         "    return execute(service, action='get_driver_note',\n"
+         f"                   arguments={{'project_id': {open_pid}}})\n"),
+        {})
+    return out

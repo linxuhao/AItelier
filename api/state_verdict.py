@@ -55,7 +55,7 @@ import textwrap
 from typing import NamedTuple
 
 from core.state_commands import is_public_read
-
+from core.state_commands import execute as _execute
 
 # The attribute a route's endpoint carries its declaration on.
 DECLARATION_ATTR = "_state_route"
@@ -81,6 +81,7 @@ class Delivery(NamedTuple):
     params: frozenset
     opaque: bool
     readable: bool
+    followed: bool = False
 
 
 class Binding(NamedTuple):
@@ -100,24 +101,33 @@ def _callee_name(node: ast.Call) -> str | None:
     return None
 
 
-def _action_slot(node: ast.Call) -> ast.expr | None:
+def _action_slot(node: ast.Call, resolver=None) -> ast.expr | None:
     """The argument holding the action name for a recognized delivery site.
 
     `execute(service, "get_graph", {...})` and `_call(service, "get_graph", ...)`
     hold it second; `partial(_call, service, "get_graph", ...)` third, because
-    the wrapped callee occupies the first slot.
+    the wrapped callee occupies the first slot. The name may also arrive as the
+    KEYWORD `action=...` — passing the private action as a keyword is a hiding
+    shape, not a different call. And the callable may reach this module under an
+    ALIAS (`from core.state_commands import execute as runner`); an alias is
+    resolved by OBJECT IDENTITY against the real `execute`, derived from the
+    action table's own module — never from a hand-written name list.
     """
     name = _callee_name(node)
-    if name in _ACTION_CALLABLES:
+    if name in _ACTION_CALLABLES or (resolver is not None and name is not None
+                                     and resolver(name) is _execute):
         index = 1
     elif name == "partial" and node.args and isinstance(node.args[0], ast.Name) \
             and node.args[0].id in _ACTION_CALLABLES:
         index = 2
     else:
         return None
-    if len(node.args) <= index:
-        return None
-    return node.args[index]
+    if len(node.args) > index:
+        return node.args[index]
+    for keyword in node.keywords:
+        if keyword.arg == "action":
+            return keyword.value
+    return None
 
 
 def _static_truth(test: ast.expr) -> bool | None:
@@ -133,9 +143,15 @@ class _Analysis:
     Straight-line reachability over the handler body: a block stops at the first
     `return`/`raise`, a statically false test takes its `else` branch only, and
     nested `def`s are remembered but not examined until the handler calls them.
+
+    `resolver` maps a callee NAME to the object the handler's own globals bind it
+    to. It is what lets the reader DERIVE past a module-level helper (its source
+    is read and analyzed the same way) and past a renamed import (object identity
+    against the real `execute`) instead of trusting either. A delivered call the
+    resolver cannot explain is OPAQUE — see `_delivery_of`.
     """
 
-    def __init__(self, source: str):
+    def __init__(self, source: str, resolver=None, depth: int = 0):
         tree = ast.parse(textwrap.dedent(source))
         function = next((node for node in tree.body
                          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), None)
@@ -147,6 +163,9 @@ class _Analysis:
         self._locals: dict[str, ast.AST] = {}
         self._called: set[str] = set()
         self._body = function.body
+        self._resolver = resolver
+        self._depth = depth
+        self.followed = False
 
     def run(self) -> "_Analysis":
         self._walk_block(self._body)
@@ -218,7 +237,7 @@ class _Analysis:
         for node in ast.walk(expression):
             if not isinstance(node, ast.Call):
                 continue
-            slot = _action_slot(node)
+            slot = _action_slot(node, self._resolver)
             if slot is not None:
                 if isinstance(slot, ast.Constant) and isinstance(slot.value, str):
                     self.delivered.add(slot.value)
@@ -228,9 +247,62 @@ class _Analysis:
                     self.opaque = True
                 continue
             name = _callee_name(node)
-            if name in self._locals and name not in self._called:
-                self._called.add(name)
-                self._walk_block(self._locals[name].body)
+            if isinstance(node.func, ast.Name) and name in self._locals:
+                if name not in self._called:
+                    self._called.add(name)
+                    self._walk_block(self._locals[name].body)
+                continue
+            if isinstance(node.func, ast.Name) and self._follow_helper(name):
+                continue
+            if not isinstance(node.func, ast.Name):
+                # A method call (`x.f(...)`) resolves on its receiver at
+                # runtime; an action reaching it through an attribute named
+                # `execute`/`_call` was already bound above by its name.
+                continue
+            # FAIL-CLOSED. A bare-name call in a DELIVERED position that this
+            # reader can neither bind to an action site, nor trace into a local
+            # def, nor follow into a readable helper, is a delivery it cannot
+            # see. It may hand `execute` a private action this source never
+            # spells out — the four hiding shapes (module-level helper, renamed
+            # import, async inner, keyword action) each hid exactly here. An
+            # unresolvable delivery is a refusal, not an approval; `opaque` is
+            # the observable, mutable state that records the derivation failure.
+            self.opaque = True
+
+    def _follow_helper(self, name: str) -> bool:
+        """Follow a module-level helper the handler delivers through.
+
+        The helper is resolved through the handler's OWN globals (derivation, not
+        a name list); its source is read and analyzed with the same reader, so
+        whatever it delivers is delivered by the handler too. Returns False when
+        the callee cannot be resolved to a readable function — the caller then
+        refuses (opaque).
+        """
+        if self._depth >= 3 or self._resolver is None:
+            return False
+        try:
+            target = self._resolver(name)
+        except Exception:
+            return False
+        if target is _execute or not inspect.isfunction(target):
+            return False
+        try:
+            source = inspect.getsource(target)
+        except (OSError, TypeError):
+            return False
+        try:
+            sub = _Analysis(source, resolver=self._resolver,
+                            depth=self._depth + 1).run()
+        except (SyntaxError, IndentationError, ValueError, RecursionError):
+            return False
+        # Record that this handler's action sites were reached THROUGH an
+        # intermediate call: the judged parameter is not handed to the action
+        # site directly, so the dispatch identity can no longer be trusted.
+        self.followed = True
+        self.delivered |= sub.delivered
+        self.params |= sub.params
+        self.opaque = self.opaque or sub.opaque
+        return True
 
 
 @functools.lru_cache(maxsize=512)
@@ -239,13 +311,15 @@ def delivered_actions(handler) -> Delivery:
     try:
         source = inspect.getsource(handler)
     except (OSError, TypeError):
-        return Delivery(frozenset(), frozenset(), False, False)
+        return Delivery(frozenset(), frozenset(), False, False, False)
     try:
-        analysis = _Analysis(source).run()
+        globals_map = getattr(handler, "__globals__", None)
+        analysis = _Analysis(source,
+                             resolver=(globals_map.get if globals_map else None)).run()
     except (SyntaxError, IndentationError, ValueError):
-        return Delivery(frozenset(), frozenset(), False, False)
+        return Delivery(frozenset(), frozenset(), False, False, False)
     return Delivery(frozenset(analysis.delivered), frozenset(analysis.params),
-                    analysis.opaque, True)
+                    analysis.opaque, True, analysis.followed)
 
 
 def binding_for(endpoint, judged_action: str | None, route_path: str = "") -> Binding:
@@ -285,6 +359,14 @@ def binding_for(endpoint, judged_action: str | None, route_path: str = "") -> Bi
                 and judged_action is not None):
             return Binding(False, "handler dispatches on a value the route does not judge",
                            delivery.actions)
+        if delivery.followed:
+            # The judged parameter reaches the action site through an
+            # intermediate call, so the reader cannot bind the value the guard
+            # judged to what the handler executes. Fail closed.
+            return Binding(False, "the judged action is dispatched through an "
+                                  "intermediate call the reader had to follow",
+                           delivery.actions)
+        private = _private_delivery()
         private = _private_delivery()
         if private is not None:
             return private
@@ -310,10 +392,17 @@ class VerdictLedger:
     Coverage must answer "did the verdict run for this route", so it is measured
     from runs, not from the shape of a route's dependency list. A route that
     answered while no judgment was recorded is uncovered — and named.
+
+    Each entry records TWO facts: WHICH ruling ran, and whether it was backed by
+    an authorization dependency actually EXECUTING. `judged(app)` is the
+    dependency-backed set — `judged` means "a real ruling was made", not "the
+    guard was entered". A public read cleared by the declaration binding makes a
+    decision without running a dependency; it is recorded as `public-clearance`
+    and reported as `cleared`, never as `judged`.
     """
 
     def __init__(self):
-        self._judged: dict[int, dict[str, str]] = {}
+        self._judged: dict[int, dict[str, tuple]] = {}
 
     def __enter__(self) -> "VerdictLedger":
         _LEDGERS.append(self)
@@ -323,19 +412,29 @@ class VerdictLedger:
         _LEDGERS.remove(self)
         return False
 
-    def _record(self, app, path: str, ruling: str) -> None:
+    def _record(self, app, path: str, ruling: str, dep_backed: bool) -> None:
         # The key fact is not merely that a path is present but WHICH verdict the
-        # guard applied to it. "Arrived at the guard" and "a ruling was applied"
-        # were the same set while the leak hid here; recording the ruling keeps
-        # them distinct, so a route the guard never ruled on cannot masquerade as
-        # judged.
-        self._judged.setdefault(id(app), {})[path] = ruling
+        # guard applied to it, and whether a dependency executed to make it.
+        # "Arrived at the guard" and "a ruling was applied" were the same set
+        # while the leak hid here; recording the ruling AND its backing keeps
+        # them distinct, so a route the guard never ruled on cannot masquerade
+        # as judged.
+        self._judged.setdefault(id(app), {})[path] = (ruling, bool(dep_backed))
+
+    def _entries(self, app) -> dict:
+        return dict(self._judged.get(id(app), {}))
 
     def judged(self, app) -> frozenset:
-        return frozenset(self._judged.get(id(app), ()))
+        """Paths for which an authorization dependency actually executed."""
+        return frozenset(p for p, (_, backed) in self._entries(app).items() if backed)
+
+    def cleared(self, app) -> frozenset:
+        """Paths approved by the declaration binding alone (no dependency ran)."""
+        return frozenset(p for p, (ruling, backed) in self._entries(app).items()
+                         if not backed and ruling == "public-clearance")
 
     def rulings(self, app) -> dict:
-        return dict(self._judged.get(id(app), {}))
+        return {p: ruling for p, (ruling, _) in self._entries(app).items()}
 
     def clear(self) -> None:
         self._judged.clear()
@@ -344,19 +443,22 @@ class VerdictLedger:
 _LEDGERS: list[VerdictLedger] = []
 
 
-def record_judged(app, path: str | None, ruling: str = "verdict-applied") -> None:
+def record_judged(app, path: str | None, ruling: str = "verdict-applied",
+                  dep_backed: bool = True) -> None:
     """Called by the router guard AFTER it applies a ruling to a request.
 
     `ruling` names the verdict the guard actually ran (an authorization decision,
-    a public clearance, or a declaration refusal). The call is made only once a
-    decision exists; it is not made on arrival, so reaching the guard without
-    ruling on the request is recorded as NO judgment and the route is counted
-    uncovered.
+    a public clearance, or a declaration refusal). `dep_backed` says whether an
+    authorization dependency EXECUTED to make it — a public read cleared by its
+    declaration binding records `dep_backed=False`, and coverage reports it as
+    `cleared`, not `judged`. The call is made only once a decision exists; it is
+    not made on arrival, so reaching the guard without ruling on the request is
+    recorded as NO judgment and the route is counted uncovered.
     """
     if path is None or not _LEDGERS:
         return
     for ledger in list(_LEDGERS):
-        ledger._record(app, path, ruling)
+        ledger._record(app, path, ruling, dep_backed)
 
 
 def state_route_paths(app) -> dict:
@@ -461,26 +563,29 @@ def coverage_report(app, ledger: VerdictLedger, exercised: dict) -> dict:
     """Per route: judged / ruling / responded / uncovered, plus its derived verdict.
 
     `exercised` maps a request URL to the status codes it produced; it is matched
-    against each route template. `judged` is true only when the guard RECORDED a
-    ruling for the route (an authorization verdict, a public clearance or a
-    refusal) - not merely when a request reached the router. A route that
-    RESPONDED while the ledger holds no ruling for it is uncovered: that is the
-    number this exists to move, and it is what the arrival-count hid while a
-    private body leaked.
+    against each route template. `judged` means an authorization dependency
+    EXECUTED for the route — not that the guard was entered. A public read whose
+    declaration binding approved it answers without one: it is `cleared` (the
+    ruling reads `public-clearance`), which is honest — the reader made the
+    decision, no dependency ran. A route that RESPONDED with neither a judgment
+    nor a clearance is uncovered: that is the number this exists to move, and it
+    is what the arrival-count hid while a private body leaked.
     """
     report: dict = {}
-    rulings = ledger.rulings(app)
+    entries = ledger._entries(app)
     for path, row in declaration_table(app).items():
         statuses = exercised_for(path, exercised)
-        ruling = rulings.get(path)
-        judged = ruling is not None
+        ruling, dep_backed = entries.get(path, (None, False))
+        cleared = not dep_backed and ruling == "public-clearance"
         report[path] = {
             **row,
-            "judged": judged,
+            "judged": dep_backed,
+            "dep_backed": dep_backed,
+            "cleared": cleared,
             "ruling": ruling,
             "responded": bool(statuses),
             "statuses": tuple(sorted(set(statuses))),
-            "uncovered": bool(statuses) and not judged,
+            "uncovered": bool(statuses) and not (dep_backed or cleared),
         }
     return report
 

@@ -15,7 +15,8 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from api import authz, state_http
-from api.state_author_surface import GEN_PID, LEAK_MARK, carrier_shapes, compile_handler
+from tests.support.state_author_surface import (GEN_PID, LEAK_MARK, carrier_shapes,
+                                                compile_handler)
 from api.state_graph_routers import get_service
 from api.state_graph_routers import router as state_router
 from api.state_verdict import (Binding, binding_for, delivered_actions, route_verdict,
@@ -54,7 +55,7 @@ class TestBothPolesOfTheBinder:
         assert "get_driver_note" in binding.reason, binding.reason
 
     def test_honest_dispatch_on_the_judged_parameter_still_binds(self, tmp_path):
-        from api.state_author_surface import Body, Shape, Param
+        from tests.support.state_author_surface import Body, Shape, Param
         honest = Shape(name="honest", param=Param.ACTION, template="/api/state/gen/{action}",
                        method="GET", body=Body.DISPATCH_PARAM, declaration=("read", None),
                        stand_down_attr=False, label="honest", intent="genuine dispatch")

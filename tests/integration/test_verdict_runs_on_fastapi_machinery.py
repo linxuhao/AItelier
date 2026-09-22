@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from api import authz
-from api.state_author_surface import dependency_shapes
+from tests.support.state_author_surface import dependency_shapes
 from api.state_graph_routers import get_service
 from api.state_http import create_state_router
 from api.state_verdict import VerdictLedger, state_route_paths
@@ -168,3 +168,53 @@ class TestTheGuardMatchesPlainDepends:
         # The private-read route was judged (a ruling applied) on both requests.
         assert route_template in ledger.judged(app)
         assert ledger.rulings(app)[route_template] in {"read-verdict", "private-verdict"}
+
+    def test_a_yield_verdict_dependency_teardown_runs_after_the_handler(self, tmp_path, monkeypatch):
+        """Observation point for criterion 6's reservation: the guard used to
+        close its own AsyncExitStack BEFORE the handler, so a verdict dependency
+        with a post-`yield` half ran its teardown order-reversed relative to a
+        plain `Depends(D)` route. The guard is now a yield dependency and closes
+        the verdict stack after the handler; this pins setup -> handler ->
+        teardown, identical on both trees, and the mutation (closing the stack
+        inside the guard, the old shape) is shown to reverse it."""
+        monkeypatch.setattr(authz, "gate_enabled", lambda: True)
+        events: list = []
+
+        def D(request: Request):
+            events.append("setup")
+            yield None
+            events.append("teardown")
+
+        def handler_recorder(project_id: str, svc=Depends(get_service)):
+            events.append("handler")
+            from core.state_commands import execute
+            return execute(svc, "get_driver_note", {"project_id": project_id})
+
+        # control tree: the SAME D in an ordinary Depends(D) route.
+        control = FastAPI()
+        control.add_api_route("/note/{project_id}", handler_recorder, methods=["GET"],
+                              dependencies=[Depends(D)])
+        control.dependency_overrides[get_service] = lambda: _service(tmp_path, "td-ctrl")
+        events.clear()
+        with TestClient(control) as client:
+            client.get(f"/note/{OPEN_PID}")
+        control_order = list(events)
+
+        # guard tree: the product guard armed with the SAME D as its verdict.
+        service = _service(tmp_path, "td-guard")
+        router = create_state_router(get_service, D, D)
+        guard_app = FastAPI()
+        guard_app.include_router(router)
+        guard_app.dependency_overrides[get_service] = lambda: service
+        # The same recorder handler, judged by the REAL router guard.
+        guard_app.router.add_api_route(
+            "/g/{project_id}", handler_recorder, methods=["GET"],
+            dependencies=[Depends(router.dependencies[0].dependency)])
+        events.clear()
+        with TestClient(guard_app) as client:
+            client.get(f"/g/{OPEN_PID}")
+        guard_order = list(events)
+
+        print("CONTROL_ORDER =", control_order, "GUARD_ORDER =", guard_order)
+        assert control_order == ["setup", "handler", "teardown"], control_order
+        assert guard_order == control_order, (guard_order, control_order)

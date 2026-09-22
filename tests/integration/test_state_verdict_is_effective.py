@@ -150,7 +150,10 @@ class TestTheProductAppObjectIsWhatIsMeasured:
             # NAMED rather than quietly averaged away.
             assert uncovered_routes(app, ledger, exercised) == []
             for path in responded:
-                assert report[path]["judged"] is True, path
+                # `judged` means an authorization dependency EXECUTED; a public
+                # read approved by its declaration binding answers without one
+                # and is honest `cleared` - never a disguised judgment.
+                assert report[path]["judged"] or report[path]["cleared"], path
         finally:
             app.dependency_overrides.clear()
 

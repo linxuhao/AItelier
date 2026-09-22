@@ -22,11 +22,15 @@ REPO = Path(__file__).resolve().parents[2]
 ROUND_FILES = [
     "api/state_verdict.py",
     "api/state_http.py",
-    "api/state_author_surface.py",
+    "tests/support/state_author_surface.py",
     "tests/integration/test_author_surface_generator.py",
     "tests/integration/test_coverage_measures_judged_not_reached.py",
     "tests/integration/test_verdict_runs_on_fastapi_machinery.py",
     "tests/integration/test_private_delivery_before_early_ok.py",
+    # The file that EXECUTES this ban is not exempt from it: it judges itself
+    # too. Excluding itself would be the exact carrier this card has killed
+    # five rounds running, inside the file written to end it.
+    "tests/integration/test_no_unfalsifiable_guarantees.py",
 ]
 
 BANNED = ["not a defect", "documented", "intentionally", "by design", "known limitation"]
@@ -35,6 +39,14 @@ BANNED = ["not a defect", "documented", "intentionally", "by design", "known lim
 @pytest.mark.parametrize("rel", ROUND_FILES)
 def test_a_round_file_carries_no_lie_keeping_phrase(rel):
     text = (REPO / rel).read_text(encoding="utf-8")
+    if rel == "tests/integration/test_no_unfalsifiable_guarantees.py":
+        # THE DISCOVERY the card asked for: including this file in its own ban
+        # breaks the ban as written, because the phrases appear here as DATA -
+        # the literal list this test enforces. The ban still holds for PROSE:
+        # the declaration lines are excluded exactly, and any other occurrence
+        # (a docstring, a comment, a message) fails like everywhere else.
+        text = "\n".join(line for line in text.splitlines()
+                         if not line.startswith("BANNED = "))
     hits = [phrase for phrase in BANNED if phrase in text]
     assert hits == [], f"{rel} uses a banned phrase: {hits}"
 
@@ -50,7 +62,11 @@ def test_the_guard_is_still_the_one_router_wide_dependency():
     guard = deps[0].dependency
     assert guard.__name__ == "_router_guard"
     import inspect
-    assert inspect.iscoroutinefunction(guard), "the verdict must run as an async dependency"
+    # The guard is an async YIELD dependency: its second half (closing the
+    # verdict stack) runs after the handler, the way a plain `Depends(D)`
+    # route closes D's teardown.
+    assert inspect.isasyncgenfunction(guard) or inspect.iscoroutinefunction(guard), \
+        "the verdict must run as an async dependency"
 
 
 def test_record_judged_requires_a_ruling_string():
@@ -67,7 +83,7 @@ def test_binding_for_orders_the_private_check_before_the_dispatch_approval():
     Falsified by re-reading the function source and checking a `get_driver_note`
     carrier is refused - the assertion a mutation cannot pass silently."""
     from fastapi import Depends
-    from api.state_author_surface import carrier_shapes, compile_handler
+    from tests.support.state_author_surface import carrier_shapes, compile_handler
     from api.state_graph_routers import get_service
     from api.state_verdict import binding_for
     from core.state_commands import execute

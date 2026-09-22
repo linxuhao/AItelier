@@ -65,7 +65,7 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
     read_verdict = read_dependency or access_dependency
     router = APIRouter(prefix="/api/state", tags=["state-graph"])
 
-    async def _apply_verdict(request, dependency) -> None:
+    async def _apply_verdict(request, dependency, ran: list) -> AsyncExitStack:
         """Apply an authorization dependency to a request BY RUNNING IT THROUGH
         FASTAPI'S OWN DEPENDENCY MACHINERY, not by calling it here.
 
@@ -85,6 +85,12 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         so `dependency_overrides[require_writer]` (used by this repository's tests
         and embeds to swap a verdict) keeps working - a swapped verdict would
         otherwise be silently ignored here and nowhere else.
+
+        `ran` is the guard's ledger of "a dependency actually EXECUTED": it is
+        appended the moment `solve_dependencies` is entered, so a refusal raised
+        inside the dependency still counts as a ruling, while a branch that never
+        reaches this function (a declaration the reader refuses on its own)
+        records NO judgment and the route reports uncovered.
         """
         overrides = getattr(getattr(request, "app", None), "dependency_overrides", None) or {}
         dependency = overrides.get(dependency, dependency)
@@ -96,14 +102,17 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         # way FastAPI executes it (solve_dependencies runs a dependant's
         # sub-dependencies, not its own `call`).
         dependant = get_dependant(path=request.url.path, call=_parent, scope="function")
-        async with AsyncExitStack() as stack:
-            solved = await solve_dependencies(
+        ran.append(True)
+        # The stack is created here and returned OPEN: the guard is a yield
+        # dependency, so it closes this AFTER the handler has run — the same
+        # order in which a plain `Depends(D)` route closes D's teardown.
+        stack = AsyncExitStack()
+        solved = await solve_dependencies(
                 request=request, dependant=dependant, body=None,
                 background_tasks=None, response=None,
                 dependency_overrides_provider=request.app,
                 dependency_cache={}, async_exit_stack=stack,
-                embed_body_fields=False)
-        # A released verdict leaves no refusal. A refused one either propagated as
+                embed_body_fields=False)        # A released verdict leaves no refusal. A refused one either propagated as
         # an exception above (handled exactly like a route dependency) or is
         # recorded on the solved result; reproduce it so the guard denies exactly
         # as a real `Depends(D)` route would.
@@ -120,6 +129,7 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
                 headers = getattr(response, "headers", None)
             raise HTTPException(status_code=int(status),
                                 headers=dict(headers) if headers else None)
+        return stack
 
     def _call(service, action, arguments, *, write=False):
         try:
@@ -137,7 +147,7 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         except StateGraphError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    async def _guard_read_action(action, route, request: Request) -> None:
+    async def _guard_read_action(action, route, request: Request, ran: list, add_stack):
         """Refuse a NON-public read before the request body is parsed, and refuse -
         unconditionally - a PUBLIC declaration its own handler source contradicts.
 
@@ -153,24 +163,29 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         no-op would let a forged declaration answer 200 there. A declaration that
         contradicts its handler is not a visibility question, so it is answered by
         the guard itself, on every app that builds this router.
+
+        Returns `public-clearance` when the reader approved a public declaration -
+        a decision made WITHOUT running any authorization dependency, which the
+        coverage metric therefore reports as cleared, not judged.
         """
         if action is None or not is_public_read(action):
-            await _apply_verdict(request, read_verdict)
-            return
+            add_stack(await _apply_verdict(request, read_verdict, ran))
+            return None
         binding = binding_for(route.endpoint, action, route.path)
         if not binding.ok:
             raise HTTPException(403, "state route declaration does not match its handler")
+        return "public-clearance"
 
-    async def _guard_director_action(route, request: Request) -> None:
+    async def _guard_director_action(route, request: Request, ran: list, add_stack) -> None:
         """This path carries both classes. `send_director_message` and the two
         transitions CHANGE state, so they take the WRITE verdict and its wording;
         only `list_director_messages` is a read, and it is private."""
         if request.path_params.get("action") == "list_director_messages":
-            await _guard_read_action("list_director_messages", route, request)
+            await _guard_read_action("list_director_messages", route, request, ran, add_stack)
         else:
-            await _apply_verdict(request, access_dependency)
+            add_stack(await _apply_verdict(request, access_dependency, ran))
 
-    async def _router_guard(request: Request) -> None:
+    async def _router_guard(request: Request):
         """The one guard, on the ROUTER, so no route can be added without it.
 
         It reads the declaration off the matched endpoint at REQUEST time, which
@@ -185,38 +200,71 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
         measures the ruling, not the arrival. The verdict is idempotent - a pure
         function of the request's credential - so judging a request twice yields
         the status and body of judging it once.
+
+        The guard is a YIELD dependency on purpose. FastAPI runs the second half
+        of a yield dependency AFTER the handler, exactly as it closes the
+        teardown of a plain `Depends(D)` route, so the verdict stack opened here
+        closes at the same point a real route's would - a verdict dependency
+        with a post-`yield` half observes setup -> handler -> teardown, the same
+        order `Depends(D)` gives it. Closing the stack inside the guard (the
+        earlier shape) ran teardown BEFORE the handler, order-reversed.
         """
         route = request.scope.get("route")
         path = getattr(route, "path", None)
         app = request.app
         declaration = getattr(getattr(route, "endpoint", None), DECLARATION_ATTR, None)
         ruling = "private-verdict"
+        # A ruling is RECORDED only when a decision was actually made: either an
+        # authorization dependency executed (append to `ran`), or the reader
+        # approved a public declaration (public-clearance). Arriving here records
+        # nothing - the arrival-count was the metric that hid the leak.
+        ran: list = []
+        stacks: list = []
+        decision = None
         try:
             if declaration is None:
-                await _apply_verdict(request, read_verdict)
+                stacks.append(await _apply_verdict(request, read_verdict, ran))
             else:
                 kind, action = declaration
                 if kind == "write":
                     ruling = "write-verdict"
-                    await _apply_verdict(request, access_dependency)
+                    stacks.append(await _apply_verdict(request, access_dependency, ran))
                 elif kind == "director":
                     ruling = "director-verdict"
-                    await _guard_director_action(route, request)
+                    await _guard_director_action(route, request, ran, stacks.append)
                 elif action is None:
                     # Action-dispatch family: the action lives in the URL and is
                     # judged here; the declaration binds only because the handler
                     # hands `execute` the very path parameter this guard judged AND
                     # returns no private body (checked inside `binding_for`).
                     ruling = "dispatch-verdict"
-                    await _guard_read_action(request.path_params.get("action"), route, request)
+                    decision = await _guard_read_action(
+                        request.path_params.get("action"), route, request, ran,
+                        stacks.append)
                 else:
                     ruling = "read-verdict"
-                    await _guard_read_action(action, route, request)
-        finally:
-            # Recorded only after a verdict was applied, approval or refusal.
-            # A route that answers without ever reaching this function records
-            # no ruling, so `uncovered_routes` names it.
-            record_judged(app, path, ruling)
+                    decision = await _guard_read_action(action, route, request, ran,
+                                                        stacks.append)
+        except BaseException:
+            for stack in stacks:
+                await stack.aclose()
+            if ran:
+                record_judged(app, path, ruling, dep_backed=True)
+            else:
+                record_judged(app, path, "declaration-refused", dep_backed=False)
+            raise
+        if ran:
+            # A dependency executed: the branch ruling is backed by a real
+            # authorization decision, approval or refusal.
+            record_judged(app, path, ruling, dep_backed=True)
+        elif decision:
+            # The reader approved a public declaration: a decision, but one no
+            # dependency made. Recorded as public-clearance, dep_backed False -
+            # coverage reports it as cleared, never as judged.
+            record_judged(app, path, decision, dep_backed=False)
+        yield
+        for stack in stacks:
+            await stack.aclose()
 
     def _declare(endpoint, kind: str, action: str | None = None):
         """Record on the endpoint function WHAT it serves.

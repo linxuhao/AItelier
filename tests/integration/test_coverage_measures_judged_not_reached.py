@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
 from api import authz
-from api.state_author_surface import GEN_PID, LEAK_MARK
+from tests.support.state_author_surface import GEN_PID, LEAK_MARK
 from api.state_graph_routers import get_service
 from api.state_graph_routers import router as state_router
 from api.state_verdict import (VerdictLedger, coverage_report, declaration_table,
@@ -34,8 +34,8 @@ def _arm(monkeypatch):
     monkeypatch.setattr(authz.cf_access, "email_from_request_headers", lambda *a, **k: None)
 
 
-def _app(tmp_path):
-    service = StateService(StateDatabase(str(tmp_path / "cov.sqlite")),
+def _app(tmp_path, name="cov.sqlite"):
+    service = StateService(StateDatabase(str(tmp_path / name)),
                            actor="cov-seeder", project_read_trusted=True)
     service.create_project(GEN_PID, GEN_PID)
     service.driver_notes.update(GEN_PID, "permanent", LEAK_MARK, 0, "director")
@@ -104,12 +104,19 @@ class TestTheLeakHandlerIsNamedUncovered:
                 with TestClient(app) as client:
                     resp = client.get("/api/state/leaky/get_graph")
             exercised = {"/api/state/leaky/get_graph": [resp.status_code]}
-            row = coverage_report(app, ledger, exercised)[LEAKY]
             assert resp.status_code == 403, (resp.status_code, resp.text[:200])
             assert LEAK_MARK not in resp.text
-            assert row["judged"] is True, "a refusal is still a ruling"
-            assert row["uncovered"] is False
-            assert uncovered_routes(app, ledger, exercised) == []
+            row = coverage_report(app, ledger, exercised)[LEAKY]
+            # The refusal here is made by the declaration reader: the judged
+            # action (`get_graph`, from the URL) is public, so its binding is
+            # checked and refuses - NO authorization dependency executed. The
+            # metric says so honestly: judged is False (no dependency ran), the
+            # ruling names the declaration refusal, and the route is named
+            # uncovered because it answered on a decision no dependency made.
+            assert row["judged"] is False, row
+            assert row["ruling"] == "declaration-refused", row
+            assert row["uncovered"] is True, row
+            assert uncovered_routes(app, ledger, exercised) == [LEAKY]
         finally:
             _drop(app)
 
@@ -149,7 +156,8 @@ class TestTheFullTableIsDerivedAndPrinted:
         for row in report.values():
             assert row["verdict"]
             if row["responded"]:
-                assert row["judged"] is True, "answered without a ruling"
+                assert row["judged"] or row["cleared"], (
+                    row, "answered with neither a judgment nor a clearance")
 
 
 class TestTheMetricHasTeethUnderMutation:
@@ -169,14 +177,73 @@ class TestTheMetricHasTeethUnderMutation:
             assert LEAK_MARK in resp.text  # the leak really happened
             new_metric = uncovered_routes(app, ledger, exercised)
             # The old metric: a route counted covered merely because a request
-            # "reached" it - it would call this leak covered and return [].
+            # "reached" it. Reproduced honestly: the set of responded routes IS
+            # the old "covered" set, so the old metric counts the leak as
+            # covered - the exact opposite of what the new metric says.
             old_metric = []
             for path, row in coverage_report(app, ledger, exercised).items():
-                if row["responded"] and False:  # arrival == covered ⇒ never uncovered
+                if row["responded"]:   # arrival == covered: the old definition
                     old_metric.append(path)
             print("NEW_METRIC_UNCOVERED =", new_metric)
             print("OLD_METRIC_UNCOVERED =", old_metric)
             assert new_metric == [LEAKY], new_metric
-            assert old_metric == [], "the comparison is not showing the hollow old metric"
+            assert old_metric == [LEAKY], old_metric
         finally:
             _drop(app)
+
+
+class TestJudgedMeansADependencyExecuted:
+    def test_an_anonymous_public_dispatch_read_is_cleared_not_judged(self, tmp_path, monkeypatch):
+        """`judged` means an authorization dependency EXECUTED. An anonymous read
+        of the product dispatch route with a public action is approved by the
+        declaration binding alone: zero dependencies run, so the row must read
+        judged=False, dep_backed=False, cleared=True, ruling=public-clearance -
+        never the old lie judged=True ruling=dispatch-verdict."""
+        _arm(monkeypatch)
+        app, _ = _app(tmp_path)
+        ledger = VerdictLedger()
+        template = "/api/state/query/{action}"
+        with ledger:
+            with TestClient(app) as client:
+                resp = client.post("/api/state/query/get_graph", json={"project_id": GEN_PID})
+        assert resp.status_code == 200, resp.status_code
+        row = coverage_report(app, ledger, {template: [resp.status_code]})[template]
+        print("DISPATCH_ROW =", row)
+        assert row["responded"] is True
+        assert row["judged"] is False, "no dependency ran - judged must stay False"
+        assert row["dep_backed"] is False
+        assert row["cleared"] is True
+        assert row["ruling"] == "public-clearance", row
+
+    def test_restoring_arrival_counting_re_lies_and_is_caught(self, tmp_path, monkeypatch):
+        """The mutation: record on ARRIVAL with dep_backed forced True, the way
+        the old metric did. The same probe then reads judged=True with zero
+        dependencies executed - the lie, observed - which is the ignition."""
+        _arm(monkeypatch)
+        import api.state_http as state_http
+        real_record = state_http.record_judged
+        template = "/api/state/query/{action}"
+
+        def arrival_record(app_, path_, ruling_="verdict-applied", dep_backed=True):
+            # the old bug: recorded regardless of whether anything ruled
+            real_record(app_, path_, ruling_, dep_backed=True)
+
+        app, _ = _app(tmp_path)
+        ledger = VerdictLedger()
+        with ledger:
+            with TestClient(app) as client:
+                resp = client.post("/api/state/query/get_graph", json={"project_id": GEN_PID})
+        honest = coverage_report(app, ledger, {template: [resp.status_code]})[template]
+
+        monkeypatch.setattr(state_http, "record_judged", arrival_record)
+        app2, _ = _app(tmp_path, "cov-mutation.sqlite")
+        ledger2 = VerdictLedger()
+        with ledger2:
+            with TestClient(app2) as client:
+                resp2 = client.post("/api/state/query/get_graph", json={"project_id": GEN_PID})
+        mutated = coverage_report(app2, ledger2, {template: [resp2.status_code]})[template]
+        fired = 1 if (mutated["judged"] and not honest["judged"]) else 0
+        print("IGNITION_COUNT =", fired, "MUTATED_ROW =", mutated)
+        assert honest["judged"] is False
+        assert mutated["judged"] is True and mutated["dep_backed"] is True
+        assert fired > 0, "the mutation did not change what the metric says"

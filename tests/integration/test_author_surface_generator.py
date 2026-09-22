@@ -4,7 +4,7 @@ Four rounds removed one exemption carrier and grew the next one - endpoint
 attribute, dependency attribute, object identity, then a parameter-name-plus-
 path-template branch - because nothing in the repository READ the shape "is a
 route-author-written datum deciding whether to judge?" This is that reader.
-`api.state_author_surface` generates the WHOLE author-writable surface (not a
+`tests.support.state_author_surface` generates the WHOLE author-writable surface (not a
 hand-written list) and drives every generated route through the product's own
 router guard. The invariant: a route answers with a private body for NO
 generated shape, and it answers at all only when an INDEPENDENT reader agrees
@@ -270,3 +270,33 @@ class TestTheFourCarriersAreCaught:
         # Under the reverted order the carrier answers 200 and leaks the note.
         assert response.status_code == 200, (response.status_code, "mutation did not fire")
         assert LEAK_MARK in response.text, "mutation fired but did not leak - the test is hollow"
+
+
+def test_the_expected_model_follows_the_generated_source(monkeypatch):
+    """The model reads the SOURCE, not the body's name.
+
+    The `_BODY_DELIVERS` dictionary this round deleted was keyed by the very
+    body names the generator uses, so the "independent" model and the guard
+    shared one author-written input. Here the SHAPE is untouched - body name,
+    declaration, parameter all as the generator builds them - and only the
+    SOURCE a body generates is tampered with: the model must FOLLOW the source.
+    A model keyed by body name ignores the tampering and keeps refusing, so this
+    test fires on it.
+    """
+    from tests.support import state_author_surface as surface
+
+    shape = next(s for s in surface.shapes() if s.body == surface.Body.PRIVATE_ONLY)
+    honest = surface._model_delivery(shape)
+    assert honest[0] == frozenset({"get_driver_note"}), honest
+    assert surface.expected_can_serve(shape) is False
+
+    real_source = surface._handler_source
+
+    def tampered_source(param, body, name):
+        return real_source(param, body, name).replace("'get_driver_note'", "'get_graph'")
+
+    monkeypatch.setattr(surface, "_handler_source", tampered_source)
+    mutated = surface._model_delivery(shape)
+    assert mutated != honest, "the model ignored the source change - it is name-driven"
+    assert mutated[0] == frozenset({"get_graph"}), mutated
+    assert surface.expected_can_serve(shape) is True

@@ -112,7 +112,8 @@ def create_state_router(service_dependency, access_dependency, read_dependency=N
                 background_tasks=None, response=None,
                 dependency_overrides_provider=request.app,
                 dependency_cache={}, async_exit_stack=stack,
-                embed_body_fields=False)        # A released verdict leaves no refusal. A refused one either propagated as
+                embed_body_fields=False)
+        # A released verdict leaves no refusal. A refused one either propagated as
         # an exception above (handled exactly like a route dependency) or is
         # recorded on the solved result; reproduce it so the guard denies exactly
         # as a real `Depends(D)` route would.

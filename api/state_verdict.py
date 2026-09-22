@@ -367,7 +367,6 @@ def binding_for(endpoint, judged_action: str | None, route_path: str = "") -> Bi
                                   "intermediate call the reader had to follow",
                            delivery.actions)
         private = _private_delivery()
-        private = _private_delivery()
         if private is not None:
             return private
         return Binding(True, "", delivery.actions)

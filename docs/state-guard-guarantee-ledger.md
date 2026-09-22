@@ -15,7 +15,7 @@ the test has teeth, and where the ignition count and bare exit codes live
 | 5 | "The private-delivery check runs before any early `ok=True`; the honest dispatch family still serves." | `tests/integration/test_private_delivery_before_early_ok.py` both poles + product `/api/state/query/{action}` positive case | Reverting the order (patched `old_binding_for`) leaks: 200 + private body, ignition asserted in-file | bare RC=0 |
 | 6 | "The guard runs the verdict on FastAPI's own machinery for six dependency shapes, AND teardown order matches `Depends(D)`." | `tests/integration/test_verdict_runs_on_fastapi_machinery.py` — six shapes both poles; new observation point: a `yield` verdict dependency records setup/handler/teardown identically on a plain route and through the guard | Closing the verdict stack inside the guard (the old shape) runs teardown BEFORE the handler: `GUARD_ORDER == ['setup', 'teardown']` vs control `['setup', 'handler', 'teardown']` — the order assertion goes red | printed `CONTROL_ORDER` / `GUARD_ORDER`, bare RC=0 |
 | 7 | "The ban on lie-keeping phrases applies to the file that executes the ban." | `tests/integration/test_no_unfalsifiable_guarantees.py` — `ROUND_FILES` now contains itself. THE DISCOVERY: included, the ban breaks on the file's own phrase DATA; the test excludes exactly the `BANNED = [...]` declaration lines and still fires on any prose use | Removing that exclusion makes the file condemn itself — a red named failure, recorded here rather than hidden | bare RC=0 |
-| 8 | "The expected surface model is DERIVED from the generated source, not a hand-kept dictionary keyed by body name." | `tests/integration/test_author_surface_generator.py` — `expected_can_serve` now reads `_model_delivery(shape)`, a second scan of the generated handler text (`_BODY_DELIVERS` is deleted) | Hand-writing the dictionary back breaks nothing today (both sides would still agree) — which is why the derivation is in the SCAFFOLD, under `tests/`, not in the API package, and the universal leak invariant is checked against the guard, not the model | bare RC=0 |
+| 8 | "The expected surface model is DERIVED from the generated source, not a hand-kept dictionary keyed by body name." | `tests/integration/test_author_surface_generator.py` — `expected_can_serve` reads `_model_delivery(shape)`, a second scan of the generated handler text (`_BODY_DELIVERS` is deleted); `test_the_expected_model_follows_the_generated_source` tampers ONLY the source the `private_only` body generates (its body name, declaration and parameter are untouched) and the model must FOLLOW it | Hand-writing the dictionary back is now caught: a name-keyed model ignores the tampered source and keeps refusing `private_only`, so that test goes red while the tree is green | bare RC=0 |
 | 9 | "Test scaffolding is not an API module: nothing in `api/` imports `state_author_surface`." | structural: the module lives at `tests/support/state_author_surface.py`; `grep -r "state_author_surface" api/` is empty | A re-import from `api/` would be caught by review and by the import graph, not by a test — stated plainly rather than claimed | bare RC=0 |
 
 ## Deleted falsified prose
@@ -27,3 +27,11 @@ test and mutation that keep them true. The two r6 paste accidents
 demonstration) are repaired: the old metric is now COMPUTED, so the comparison
 is real, and the no-guard demonstration asserts against the same metric the
 guard uses.
+
+One stale assertion was brought in line with row 3 rather than left failing:
+`tests/unit/test_state_declaration_binding.py::TestTheVerdictRanNotJustTheTree`
+asserted `judged is True` for two PUBLIC routes, which is the arrival-count
+reading row 3 replaced; it now asserts the honest row (`ruling ==
+"public-clearance"`, `cleared is True`, `judged is False`, `uncovered is False`).
+A duplicated paste block in that same test - the old assertions repeated with a
+dangling comment - was deleted with it.

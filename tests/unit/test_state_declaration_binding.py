@@ -276,18 +276,20 @@ class TestTheVerdictRanNotJustTheTree:
         assert report["/api/state/ungated"]["uncovered"] is True
         assert report["/api/state/ungated"]["responded"] is True
         assert uncovered_routes(app, ledger, exercised) == ["/api/state/ungated"]
-        # The gated routes WERE judged (their templates are in the ledger), so a
-        report = coverage_report(app, ledger, exercised)
-        assert report["/api/state/ungated"]["uncovered"] is True
-        assert report["/api/state/ungated"]["responded"] is True
-        assert uncovered_routes(app, ledger, exercised) == ["/api/state/ungated"]
-        # The gated routes WERE judged (their templates are in the ledger), so a
-        # concrete URL is matched to its template and reported as covered.
+        # The gated routes WERE ruled on - their templates are in the ledger - so a
+        # concrete URL is matched to its template and reported as covered. Both are
+        # PUBLIC reads their own declaration binding approved, so NO authorization
+        # dependency ran: the honest row is `cleared`, and `judged` (a ruling an
+        # authorization dependency actually executed) is False. Asserting `judged`
+        # here was the arrival-count lie this round replaced.
         for template in ("/api/state/projects/{project_id}",
                          "/api/state/projects/{project_id}/frontier"):
-            assert report[template]["judged"] is True, template
-            assert report[template]["responded"] is True, template
-            assert report[template]["uncovered"] is False, template
+            row = report[template]
+            assert row["ruling"] == "public-clearance", template
+            assert row["cleared"] is True, template
+            assert row["judged"] is False, template
+            assert row["responded"] is True, template
+            assert row["uncovered"] is False, template
 
 
     def test_a_mounted_sub_app_and_a_bare_starlette_route_are_both_enumerated(self, tmp_path, monkeypatch):

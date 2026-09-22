@@ -18,12 +18,14 @@ them: (乙) a structure that opened and never closed is TRUNCATED and is refused
 with instruction to split; (甲) a reply with no structure at all is a format
 mistake and keeps the old instruction.
 """
+
+
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from core.dpe_pipeline import (
     JSON_FAILURE_NO_JSON,
     JSON_FAILURE_TRUNCATED,
@@ -171,8 +173,9 @@ class TestTruncationIsRefusedNotRepaired:
         assert PipelineEngine._extract_json(truncated) is None
 
 
+
 class TestTheMessageTellsTheAgentToSplit:
-    """Not to reformat — it was already sending JSON."""
+    """Not to reformat: it was already sending JSON."""
 
     def test_the_message_says_truncated_and_to_split(self):
         msg = _truncation_feedback("x" * 20061)
@@ -213,6 +216,27 @@ class TestOversizedPatchIsRefusedBeforeSubmission:
     def test_a_non_dict_params_is_not_a_crash(self):
         assert oversized_patch_refusal(None) is None
         assert oversized_patch_refusal([1, 2, 3]) is None
+
+    def test_the_real_seq_85_payload_would_be_refused(self):
+        """A length taken from the corpus, not from the constant.
+
+        The other ceiling tests write `_APPLY_PATCH_MAX_CHARS + 1`, so raising
+        the constant to 30,000 leaves every one of them green. seq 85's own
+        patch body is 16,047 characters: whatever the ceiling is set to, a
+        payload of that real size must not be admitted, so this assertion goes
+        red the moment the ceiling is raised above 16,047.
+        """
+        reply = _payload(85)["text"]
+        assert len(reply) == 17070, len(reply)
+        body = re.search(r'"patch": "(.*?)\*\*\* End Patch"', reply, re.S)
+        assert body, "seq 85 carries the patch body"
+        patch = json.loads('"%s*** End Patch"' % body.group(1))
+        assert len(patch) == 16047, len(patch)
+        refusal = oversized_patch_refusal({"patch": patch})
+        assert refusal is not None, (
+            "a 16,047-character patch was admitted: the ceiling is above the "
+            "payload that was actually cut off")
+
 
 
 # ── The turn loops, end to end ────────────────────────────────────────────
@@ -390,29 +414,205 @@ def test_paren_prose_behaviour_is_unchanged_end_to_end(tmp_path):
     assert not [p for p in e.prompts[1:] if "TRUNCATED" in p.upper()]
 
 
-def test_the_agent_facing_guidance_has_no_corruption():
-    """The prose sent to the agent every round is a deliverable, not a comment.
+# ── The prose sent to the agent is a deliverable ──────────────────────────
+# The corpus below is every surface that carries agent-facing prose in a code
+# step. The checker is not asserted to cover "this class"; it is measured
+# against the five corruptions already in git, one at a time. Each listed rule
+# has been observed to fire on those exact bytes and to name its own file:
+#
+#   fixture (git bytes)                        rule that fires
+#   duplicate banner, core/dpe_pipeline.py     adjacent_duplicate_line
+#   r2 EN duplicated two-line run, 3b3d6560    repeated_run (GUIDANCE_EN)
+#   r2 ZH corruption, 3b3d6560                 repeated_run (GUIDANCE_ZH)
+#   r3 ZH trailing backtick, fad833b0          odd_backtick_count
+#   fix_tests.md clipped block, 3b3d6560       severed_clause
+#
+# test below is what keeps it honest.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_LONG_LINE = 25
+STRICT_GUIDANCE_BLOCKS = ("GUIDANCE_EN", "GUIDANCE_ZH",
+                          "templates/fix_tests.md")
 
-    Four overlapping-hunk corruptions went out unnoticed because nothing
-    asserted on the guidance text: a severed sentence, a duplicated fragment,
-    a deleted `sha` suggestion, a repeated banner. This catches that class.
-    A guidance block must not repeat an adjacent line verbatim, must not
-    contain the severed 'stale or file.' signature, and must still carry the
-    reread-and-cite-`sha` advice.
+
+def _read(rel):
+    return (REPO_ROOT / rel).read_text(encoding="utf-8")
+
+
+def _prose_corpus():
+    """Every agent-facing prose surface, keyed by the path that carries it."""
+    corpus = {
+        "GUIDANCE_EN": STRICT_PATCH_GUIDANCE_EN,
+        "GUIDANCE_ZH": STRICT_PATCH_GUIDANCE_ZH,
+    }
+    for rel in ("templates/fix_tests.md", "templates/coding_impl.md",
+                "core/dpe_pipeline.py", "core/prompt_assembler.py",
+                "core/output_migration.py"):
+        corpus[rel] = _read(rel)
+    return corpus
+
+
+def _prose_violations(name, text):
+    """Rule violations in one prose surface; empty means intact."""
+    violations = []
+    lines = [line.strip() for line in text.splitlines()]
+    long_at = {i for i, line in enumerate(lines) if len(line) >= _LONG_LINE}
+
+    for i in range(1, len(lines)):
+        if i in long_at and i - 1 in long_at and lines[i] == lines[i - 1]:
+            violations.append(
+                f"adjacent_duplicate_line: {name}:{i + 1}: {lines[i]!r}")
+
+    if name in STRICT_GUIDANCE_BLOCKS:
+        runs = {}
+        for i in range(len(lines) - 1):
+            if i in long_at and i + 1 in long_at:
+                runs.setdefault((lines[i], lines[i + 1]), []).append(i + 1)
+        for run, at in runs.items():
+            if len(at) > 1:
+                violations.append(
+                    f"repeated_run: {name}: lines {at} carry the same two "
+                    f"lines: {run[0]!r}")
+
+    if text.count("`") % 2:
+        violations.append(
+            f"odd_backtick_count: {name}: {text.count('`')} backticks, so a "
+            f"code span closes early")
+
+    if "stale or file." in " ".join(text.split()):
+        violations.append(
+            f"severed_clause: {name}: 'stale or file.' is a deleted clause")
+    return violations
+
+
+def test_the_agent_facing_prose_is_intact():
+    corpus = _prose_corpus()
+    assert corpus, "the corpus must not be empty"
+    survivors = {name: _prose_violations(name, text)
+                 for name, text in corpus.items()}
+    assert not {k: v for k, v in survivors.items() if v}, survivors
+
+
+def test_the_checker_reads_every_file_that_carries_agent_prose():
+    """A scope narrower than the prose is a checker that cannot see a defect."""
+    corpus = _prose_corpus()
+    assert "core/dpe_pipeline.py" in corpus, \
+        "the truncation classifier's own prose lives in dpe_pipeline.py"
+    assert "core/prompt_assembler.py" in corpus
+    assert "core/output_migration.py" in corpus
+    assert "templates/fix_tests.md" in corpus
+    assert set(STRICT_GUIDANCE_BLOCKS) <= set(corpus)
+    for name in corpus:
+        assert name == "GUIDANCE_EN" or name == "GUIDANCE_ZH" \
+            or (REPO_ROOT / name).is_file(), name
+    assert "STRICT_PATCH_GUIDANCE_ZH" not in corpus
+
+
+def _git_file(rev, rel):
+    import subprocess
+    out = subprocess.run(["git", "show", f"{rev}:{rel}"],
+                         cwd=REPO_ROOT, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def _git_guidance(rev, block):
+    text = _git_file(rev, "core/output_migration.py")
+    match = re.search(
+        rf'STRICT_PATCH_GUIDANCE_{block} = """(.*?)"""', text, re.S)
+    assert match, f"{rev} carries no STRICT_PATCH_GUIDANCE_{block}"
+    return match.group(1)
+
+
+R2 = "3b3d6560"          # r2 candidate: EN pair-repeat, ZH corruption, banner
+R3 = "fad833b016a5c54d1a5f6253f4fcdfc0fbeb9722"   # r3 candidate: ZH backtick
+
+GIT_CORRUPTIONS = {
+    "r2 EN duplicated two-line run": (
+        "GUIDANCE_EN", lambda: _git_guidance(R2, "EN")),
+    "r2 ZH corruption": (
+        "GUIDANCE_ZH", lambda: _git_guidance(R2, "ZH")),
+    "duplicate banner in core/dpe_pipeline.py": (
+        "core/dpe_pipeline.py",
+        lambda: _git_file(R2, "core/dpe_pipeline.py")),
+    "r3 ZH trailing backtick": (
+        "GUIDANCE_ZH", lambda: _git_guidance(R3, "ZH")),
+    "fix_tests.md clipped block": (
+        "templates/fix_tests.md",
+        lambda: _git_file(R2, "templates/fix_tests.md")),
+}
+@pytest.mark.parametrize("label", sorted(GIT_CORRUPTIONS))
+def test_each_known_corruption_is_caught_by_name(label):
+    name, load = GIT_CORRUPTIONS[label]
+    corrupted = load()
+    clean = _prose_corpus()[name]
+    assert corrupted != clean, f"{label}: the fixture is not actually corrupt"
+    violations = _prose_violations(name, corrupted)
+    assert violations, f"{label}: the checker stayed silent on {name}"
+    assert any(name in v for v in violations), violations
+    assert not _prose_violations(name, clean), (name, "clean copy is red")
+
+
+# ── The apply_patch grant boundary ───────────────────────────────────────
+# `_exec_tool` refuses apply_patch unless the step's OWN schema carries it.
+# Without a reader, deleting that clause changes no test result, so a step
+# whose schema never granted apply_patch would reach the globally registered
+# tool. The two tests below are that reader.
+
+
+def _tool_engine(monkeypatch, schemas):
+    import api.dependencies as dependencies
+    from unittest.mock import patch as _patch
+
+    seen = {}
+
+    class FakeSkillFlow:
+        def execute_tool(self, name, params, **host):
+            seen["name"] = name
+            seen["params"] = params
+            return {"ok": True}
+
+    monkeypatch.setattr(dependencies, "get_skillflow",
+                        lambda: FakeSkillFlow())
+    with _patch("core.agents.AgentFactory.__init__", return_value=None):
+        engine = PipelineEngine()
+    if schemas is not None:
+        engine._tool_schemas = schemas
+    engine._output_target = "code"
+    engine._output_fixed = {}
+    engine._write_scope = None
+    engine._run_id = "run"
+    engine._current_step = "implement"
+    engine._step_instance_id = 1
+    engine._trace = lambda *a, **k: None
+    engine._emit = lambda *a, **k: None
+    return engine, seen
+
+
+def test_apply_patch_needs_a_schema_boundary_that_carries_it(monkeypatch):
+    """The `or "apply_patch" not in schemas` half of the refusal.
+
+    With no `_tool_schemas` attribute at all, the earlier `tool_name not in
+    schemas` guard has no boundary to enforce, so THIS clause is the only
+    thing between such an engine and the globally registered apply_patch tool.
+    Delete the clause and the call below reaches SkillFlow.
     """
-    fix_md = (Path(__file__).resolve().parents[2]
-              / "templates" / "fix_tests.md").read_text(encoding="utf-8")
-    blocks = {"fix_tests.md": fix_md,
-              "STRICT_PATCH_GUIDANCE_EN": STRICT_PATCH_GUIDANCE_EN,
-              "STRICT_PATCH_GUIDANCE_ZH": STRICT_PATCH_GUIDANCE_ZH}
-    for name, text in blocks.items():
-        lines = [ln for ln in text.splitlines() if ln.strip()]
-        for i in range(1, len(lines)):
-            assert lines[i] != lines[i - 1], (
-                f"{name}: duplicated adjacent line reveals a corrupted hunk: "
-                f"{lines[i]!r}")
-        collapsed = " ".join(text.split())
-        assert "stale or file." not in collapsed, (
-            f"{name}: severed 'stale or file.' — a deleted clause")
-    assert "reread that range and cite its" in fix_md, \
-        "the `sha` advice must be present in the patch template"
+    engine, seen = _tool_engine(monkeypatch, None)
+    result = engine._exec_tool({
+        "tool": "apply_patch",
+        "params": {"patch": "*** Begin Patch\n*** End Patch\n"},
+    })
+    assert "apply_patch requires a granted generic code-output step" in \
+        result["error"], result
+    assert seen == {}, "the un-granted call reached SkillFlow"
+    assert seen == {}, "the un-granted call reached SkillFlow"
+
+
+def test_apply_patch_with_its_own_grant_reaches_skillflow(monkeypatch):
+    engine, seen = _tool_engine(monkeypatch, {"apply_patch": {}, "read": {}})
+    result = engine._exec_tool({
+        "tool": "apply_patch",
+        "params": {"patch": "*** Begin Patch\n*** End Patch\n"},
+    })
+    assert result == {"ok": True}
+    assert seen["name"] == "apply_patch"
+

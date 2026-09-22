@@ -38,6 +38,7 @@ would rather express as a diff; its updates still need exactly one matching
 context. When a hunk comes back stale or ambiguous, reread that range and cite
 its sha instead of copying more of the file.
 
+
 Hunks within ONE call must be ordered and non-overlapping. That is a rule about
 their order inside a call — it is NOT a reason to put a whole file, or a whole
 refactor, in one call. A call too large to fit the output ceiling is cut off
@@ -56,18 +57,12 @@ STRICT_PATCH_GUIDANCE_ZH = """## 写文件的工具：`apply_patch(patch, refere
 **改已有文件优先用 `references`（引用模式）。** 每次 `read` 都会返回一个
 `citation`：{path, start_line, end_line, start_byte, end_byte, sha}。这个
 `sha` 是引擎对它刚刚发给你的那段原文签发的——你算不出来，也不需要算。把它
-连同被引用的范围和**新文字**一起引用回来即可：
-`{"file": …, "sha": …, "from_line": …, "from_col": …, "to_line": …,`
+原样贴回来，只提供新文本：
+`{"file": …, "sha": …, "from_line": …, "from_col": …, "to_line": …,
 "to_col": …, "new_text": …}`。行号 1-based，必须落在被引用的窗口内；列
 0-based，`to_col` 不含。**原文一个字都不用抄**——复制由引擎来做。同一次调用
 里的多个区间针对同一份快照解析，顺序随便给，引擎自己排；区间不能重叠。
 引擎没签发过的 sha、或被引用区间已经变过的，一律拒绝。
-
-同一次调用里的 hunk 必须有序且不重叠——这是关于它们在**这一次调用内**顺序的
-规则，**不等于**要把整个文件或整个重构塞进一次调用。一次调用大到撑不住输出上限，
-就会被从 JSON 中间截断，里面什么都不执行。改动大就拆成多次 apply_patch、分几回合
-发：一次一个文件，或一个文件的几个 hunk，都留足余量。被判为 oversized 或被截断的
-补丁**不会**被“能应用多少算多少”地应用——重新发一次，发小一点。
 
 `patch` 是 Begin/End Patch 信封，用于 Add / Delete，以及你更愿意写成 diff
 的修改；它的 Update 仍然要求上下文精确且唯一命中。hunk 报 stale 或 ambiguous

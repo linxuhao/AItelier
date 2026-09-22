@@ -1840,9 +1840,12 @@ class PipelineEngine:
                 f"Tool '{tool_name}' is not granted to this step. "
                 "Available tools: " + (", ".join(sorted(schemas)) or "(none)")
             )}
-        # focused_check is a probe-only tool: a model must not be able to forge
-        # run/step/project/operation attribution into the implement trace, so
-        # those identity params are stripped here before SkillFlow sees them.
+        # focused_check is a probe-only tool, and its result is evidence about
+        # THIS implement attempt. SkillFlow injects the run/step/project/
+        # operation identities on its own side of this boundary, through
+        # `kwargs.setdefault`, so an agent-supplied value would win over the
+        # host's and forge the attribution the implement trace records.
+
         if tool_name == "focused_check":
             for identity in ("run_id", "step_id", "project_id", "operation_id"):
                 params.pop(identity, None)

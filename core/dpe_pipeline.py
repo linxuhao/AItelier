@@ -308,7 +308,8 @@ def _budget_failure_report(*, max_turns: int, first_write_turn: int | None,
                            tool_failures: int, expansion_requests: list[dict],
                            relay: dict | None, turns_used: int | None = None,
                            output_budget: dict | None = None,
-                           budget_exhausted: str = "turn") -> dict:
+                           budget_exhausted: str = "turn",
+                           read_accounting: dict | None = None) -> dict:
     """Classify exhausted work without hiding overlapping failure modes.
 
     `budget_exhausted` names WHICH budget ran out and the two budgets are
@@ -358,6 +359,13 @@ def _budget_failure_report(*, max_turns: int, first_write_turn: int | None,
         "first_write_turn": first_write_turn,
         "written_files": sorted(set(written_files)),
         "reads_searches": reads_searches,
+        # HOW MUCH of that re-served bytes this step already had. Without it
+        # "reads_searches: 47" reads as diligence; with it, privacy r1 reads as
+        # 47 reads over 12 files of which 30 re-served lines already in the
+        # context and 35 touched a file already opened. The two are opposite
+        # diagnoses and pick opposite remedies, and until now the second was
+        # only obtainable by writing SQL against the run's own trace.db.
+        "read_accounting": dict(read_accounting or {}),
         "tool_failures": tool_failures,
         "expansion_requested": bool(expansion_requests),
         "expansion_requests": expansion_requests,
@@ -3182,6 +3190,43 @@ class PipelineEngine:
                 return f"{k}: {v}" if not isinstance(v, bool) else k
         return ""
 
+    def _read_accounting(self) -> dict:
+        """What this step paid twice for, as the engine counted it live.
+
+        getattr-guarded the whole way down: the container tracks the PyPI
+        wheel while the host runs an editable checkout, so the engine can be
+        older than this caller, and a missing counter must cost a key in a
+        report rather than a step.
+        """
+        try:
+            from skillflow import read_accounting
+        except Exception:
+            return {}
+        summary = getattr(read_accounting, "summary", None)
+        if summary is None:
+            return {}
+        try:
+            got = summary(getattr(self, "_run_id", "") or "")
+        except Exception:
+            return {}
+        # The per-file table is the useful half, but it is unbounded; the
+        # report carries the files that were actually paid for twice.
+        by_file = [entry for entry in got.get("by_file", [])
+                   if entry.get("repaid_reads")][:10]
+        return {**got, "by_file": by_file}
+
+    def _report_read_accounting(self, step_id: str) -> None:
+        """Put this step's re-read cost in the trace, on every exit.
+
+        At the CALL site rather than around the loop body, because two tests
+        read 's source to pin what the loop does with tool
+        messages and observations; a wrapper would have left them reading a
+        try/finally and asserting nothing about the loop at all.
+        """
+        paid = self._read_accounting()
+        if paid.get("reads"):
+            self._trace("step", "read_accounting", {"step_id": step_id, **paid})
+
     def _run_native_step(self, task_id: int, step_id: str, workspace: Any,
                          project_id: str, agent_config_name: str = "",
                          subtask_id: str | None = None) -> bool:
@@ -3680,6 +3725,7 @@ class PipelineEngine:
                         relay=relay_progress,
                         turns_used=turn_count,
                         budget_exhausted="turn",
+                        read_accounting=self._read_accounting(),
                         output_budget=_output_budget_state(
                             completion_tokens=output_completion_tokens,
                             reasoning_tokens=output_reasoning_tokens,
@@ -4061,6 +4107,7 @@ class PipelineEngine:
                             relay=relay_progress,
                             turns_used=turn_count + 1,
                             budget_exhausted="output",
+                            read_accounting=self._read_accounting(),
                             output_budget=_output_budget_state(
                                 completion_tokens=output_completion_tokens,
                                 reasoning_tokens=output_reasoning_tokens,
@@ -4691,10 +4738,17 @@ class PipelineEngine:
         if self.factory.is_native(agent_config_name):
             self._native_side_effects_committed = False
             try:
-                return self._run_native_step(
-                    task_id, step_id, workspace, project_id,
-                    agent_config_name, subtask_id,
-                )
+                try:
+                    return self._run_native_step(
+                        task_id, step_id, workspace, project_id,
+                        agent_config_name, subtask_id,
+                    )
+                finally:
+                    # EVERY exit, not only the exhausted ones. A number that
+                    # appears only when a round dies says nothing about the
+                    # round that nearly died, and nearly is the only warning
+                    # there is.
+                    self._report_read_accounting(step_id)
             except Exception as e:
                 import logging
                 logging.getLogger("aitelier.dpe").warning(

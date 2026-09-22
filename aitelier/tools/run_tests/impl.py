@@ -688,7 +688,8 @@ BASELINE_FILE = "run_tests_baseline.json"
 # unset deployment-wide (no config declared `capability: stateful` until
 # 2026-09-20) produced reports that read like a clean baseline for months.
 BASELINE_MEASURED = ("seeded", "compared")
-BASELINE_UNMEASURED = ("unavailable", "unreadable", "unmeasured")
+
+_FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
 
 _FAILED_RE = re.compile(r"^(?:.*\s)?FAILED\s+(\S+)")
 _ERROR_RE = re.compile(r"^ERROR\s+(\S+)")

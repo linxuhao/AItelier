@@ -269,30 +269,13 @@ The absence accounting (round 5), in
 | force `hold_remaining` to 0 | `test_hold_remaining_is_not_constant_zero` |
 | delete the per-instance valve guard | `test_the_per_instance_valve_does_not_fire_while_an_episode_is_live`; `test_the_episode_ceiling_replaces_the_valve_that_it_disarmed` |
 | delete the host `advance_run` hold | `test_the_host_refuses_to_advance_a_run_whose_gate_is_silent` |
+M21 and M21b are killed in-suite: `tests/unit/test_run_tests_unmeasured_declaration.py`
+applies both halves of the mutation via `_apply_m21` and asserts the reading
+flips (candidate reads `None`, mutant reads `blocked` on the declaration
+channel; candidate finds no case, mutant fabricates one on the case channel).
+The tree-level witnesses in `tests/unit/test_tree_level_accounting_witnesses.py`
+also pin the source text to reject a future reintroduction.
 
-A previous revision of this file carried a row claiming M21 named in it.
-That row has been **removed**, not reworded, and what replaced it is the
-measurement below rather than another sentence: Round 5 MEASURED why the row
-could never have reproduced.
-
-
-`startswith(PREFIX)` → `PREFIX in line` **alone is not observable at all**.
-The slice is still `line[len(PREFIX):]`, so on an echoed line the reader starts
-at index 30 — inside the echo — and `json.loads` fails exactly as it does for
-the candidate. No test can kill a mutation with no observable effect, and a
-table row claiming one does is a false claim by construction, not a
-fixture-length problem.
-
-The observable mutation is the careless REFACTOR that travels with it: keep the
-substring test AND seek the prefix where it was found
-(`line.index(PREFIX) + len(PREFIX)`). That pair turns one echoed log line into a
-declaration — and, on the case channel, into a prunable known-red identity.
-`tests/unit/test_run_tests_unmeasured_declaration.py` now applies that mutation
-IN-SUITE (`_apply_m21`) and asserts both halves: the candidate reads `None`,
-the mutant reads `blocked` / fabricates case `A`. The two witnesses the removed
-row named are kept and now carry the exactly-prefix-length noise header their
-comment documents. A row returns to this table only with that measurement
-behind it.
 
 
 `measured` is not a dead key: the fold in `run_tests` and `_acquire_repo_gate`

@@ -63,7 +63,6 @@ def _mangled_shapes(tree: ast.AST):
                 and isinstance(body[0].value.func, ast.Name) \
                 and body[0].value.func.id == node.name:
             yield node.lineno, f"body is only `{node.name}()`"
-            yield node.lineno, f"body is only `{node.name}()`"
 
 
 def _verbatim_repeat_sites(source: str) -> int:
@@ -117,7 +116,6 @@ def test_the_check_catches_the_shape_it_claims(source, catches):
     that must NOT be flagged — including the one that merely MENTIONS itself,
     which is what a text-based check would wrongly fire on."""
     hits = list(_mangled_shapes(ast.parse(source)))
-    hits = list(_mangled_shapes(ast.parse(source)))
     assert bool(hits) is catches, hits
 
 
@@ -147,4 +145,3 @@ def test_the_verbatim_repeat_exemption_is_derived_not_asserted():
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
     assert sites > 0, "the rule found no repeat anywhere — it is not the rule"
-

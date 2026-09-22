@@ -45,6 +45,7 @@ _SCHEDULER = _ROOT / "core" / "scheduler.py"
 _HOST = _ROOT / "core" / "skillflow_host.py"
 _CONFIG = _ROOT / "configs" / "coding_impl.yaml"
 _PROTOCOL = _ROOT / "docs" / "repo-gate-unmeasured-protocol.md"
+_TOOL_YAML = _ROOT / "aitelier" / "tools" / "run_tests" / "tool.yaml"
 
 _DECL_PREFIX = "_REPO_GATE_UNMEASURED_PREFIX"
 _CASE_PREFIX = "_REPO_GATE_CASE_PREFIX"
@@ -153,9 +154,8 @@ def test_M21_the_tree_witnesses_go_red_on_the_actual_mutation(mutation,
     the REAL source text and require the named offence to appear."""
     source = _source(_IMPL)
     mutated = source.replace(mutation, replacement)
-    assert mutated != source, f"the mutation did not apply: {mutation}"
-    offenders = _unmeasured_witnesses(mutated)
-    assert offenders, "the mutation left the witness silent"
+    assert mutated != source, "the mutation did not apply"
+    assert _unmeasured_witnesses(mutated), "the mutation left the witness silent"
 
 
 def test_M21b_the_tree_witness_goes_red_on_the_actual_mutation():
@@ -168,29 +168,37 @@ def test_M21b_the_tree_witness_goes_red_on_the_actual_mutation():
 
 
 def test_N9_the_protocol_text_has_a_reader():
-    """N9 deleted five lines of contract text and the whole suite stayed green,
-    which means nothing read them. This is the reader for the two things the
-    text has to keep saying: an absence is DECLARED and never inferred, and a
-    gate that produced no verdict may not be charged to the implementer."""
-    text = _source(_PROTOCOL)
+    """N9 deleted five lines of contract text from tool.yaml and the whole
+    suite stayed green, which means nothing read them. This is the reader for
+    the two things the text has to keep saying: an absence is DECLARED and
+    never inferred, and a gate that produced no verdict may not be charged to
+    the implementer.
+
+    The witness reads the file N9 ACTUALLY deletes: tool.yaml, not docs/.
+    """
+    text = _source(_TOOL_YAML)
     assert "AITELIER_REPO_GATE_UNMEASURED=" in text, (
-        "N9: the declaration line the protocol is built on is gone")
+        "N9: the declaration line the protocol is built on is gone from tool.yaml")
     assert "no exit code" in text.lower(), (
-        "N9: the protocol no longer says UNMEASURED is never an exit code")
-    assert "gate did not run: no verdict was measured" in text, (
+        "N9: tool.yaml no longer says UNMEASURED is never an exit code")
+    assert "DECLARED and never" in text, (
+        "N9: tool.yaml no longer declares unmeasured is never inferred")
+    # Also pin the protocol doc so a deletion from either file fires.
+    doc = _source(_PROTOCOL)
+    assert "gate did not run: no verdict was measured" in doc, (
         "N9: the sentence an expired absence ends with is gone")
-    assert "never be charged to the implementer" in text, (
+    assert "never be charged to the implementer" in doc, (
         "N9: the accounting rule the card exists for is gone")
-    assert "Cycle limit exceeded" in text, (
+    assert "Cycle limit exceeded" in doc, (
         "N9: the failure the accounting rule exists to replace is gone")
 
 
 
 def test_the_protocol_table_makes_no_unreproducible_m21_claim():
-    """The false table row review vetoed twice. It must stay DELETED, and the
-    replacement must not be the same claim in different words: no row may name
-    M21/M21b as killed, because the one-token mutation has no observable
-    effect at the noise length the row implied."""
+    """The M21 row was removed from the protocol table by a prior revision
+    because its measurement was not in-suite. M21 is now killed by
+    `test_run_tests_unmeasured_declaration.py`; no table row is needed — and
+    a false one must never return."""
     for line in _source(_PROTOCOL).splitlines():
         if not line.startswith("|"):
             continue
@@ -259,4 +267,3 @@ def test_EDGE_the_absence_edge_is_a_flag_on_the_step_that_owns_the_report():
     assert steps["test"]["transitions"][0]["to"] == "test_evidence_missing", (
         "the `_error` edge must come first: a failed invocation may not "
         "consume a prior attempt's report")
-

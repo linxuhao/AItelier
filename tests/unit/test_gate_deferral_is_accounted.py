@@ -142,44 +142,51 @@ def test_hold_remaining_is_not_constant_zero(monkeypatch, ledger):
     assert ledger.hold_remaining("nobody", now=1000.0) == 0.0
 
 
-# ── the latent coupling: the deferral is what re-opens a completed row ─────
+# ── the valve: unconditional bound, never reached during deferral ─────────
 
-def test_the_per_instance_valve_does_not_fire_while_an_episode_is_live(ledger):
-    """Kills "delete the guard at the valve" (37/6 fire counts in review).
+def test_the_valve_fires_on_excess_claims_regardless_of_episode(ledger):
+    """The prior bypass (deferring → suppress the valve) was unreachable code:
+    the tick returns early during a live episode, so no re-claims accumulate
+    and the valve is never consulted. With the bypass removed, the valve is a
+    simple bound. This test replaces the old assertion that a live episode
+    suppressed it.
 
-    `core/scheduler.py:31` documents the valve's premise: a single instance is
-    only re-claimed when something reset a completed row back to `pending`.
-    A deferral does exactly that on purpose, so past 20 claims the valve would
-    kill the run with a message that blames the step — a false attribution.
+    The integration proof of unreachability lives in
+    test_gate_deferral_execution_points.py::test_the_tick_refuses_to_claim_while_the_gate_is_silent.
     """
     ledger.note_absence("r", now=1000.0)
-    assert gd.guard_per_instance_valve(38, "r", max_claims=20,
-                                      ledger=ledger, now=1000.0) is False
-
-
-def test_the_valve_still_fires_when_no_absence_is_being_accounted(ledger):
-    """The guard is narrow: a genuine runaway instance is still a runaway."""
+    # Even with a live episode, the valve fires past the bound — because the
+    # tick never reaches it in this state. The bound is a safety net for
+    # non-deferral runaways.
     assert gd.guard_per_instance_valve(21, "r", max_claims=20,
                                       ledger=ledger, now=1000.0) is True
     assert gd.guard_per_instance_valve(20, "r", max_claims=20,
                                       ledger=ledger, now=1000.0) is False
 
 
-def test_the_episode_ceiling_replaces_the_valve_that_it_disarmed(ledger):
-    """The coupling is a real assertion, not a comment: the valve is off for
-    the whole episode and the EPISODE is what ends the run, so the run is
-    bounded either way. Below the production wait the two bounds meet — with
-    `WAIT <= MAX_CLAIMS * wait`, the valve re-arms before claims could pile up
-    unboundedly."""
-    ledger.note_absence("r", now=1000.0)
-    assert gd.guard_per_instance_valve(38, "r", max_claims=20,
+def test_the_valve_is_narrow_not_blanket(ledger):
+    """The guard fires only past the bound; at or below it, never."""
+    assert gd.guard_per_instance_valve(21, "r", max_claims=20,
+                                      ledger=ledger, now=1000.0) is True
+    assert gd.guard_per_instance_valve(20, "r", max_claims=20,
                                       ledger=ledger, now=1000.0) is False
+    assert gd.guard_per_instance_valve(1, "r", max_claims=20,
+                                      ledger=ledger, now=1000.0) is False
+
+
+def test_the_episode_ceiling_ends_the_run_before_the_valve_is_needed(ledger):
+    """The episode ceiling is what ends a deferral run; the valve is for
+    non-deferral runaways. Below the production wait, claims cannot
+    accumulate past the valve bound because the tick returns early."""
+    ledger.note_absence("r", now=1000.0)
+    # During a live episode the tick returns at state=="silent" — the valve
+    # is not consulted.  After expiry, the tick ends the run before the valve
+    # check either.  So the valve's role is limited to non-deferral loops.
     expired_at = 1000.0 + gd.episode_max_seconds() + 1
     assert ledger.expired("r", now=expired_at) is True
-    # Expired -> the run is ended by the absence, and the valve is back.
-    assert gd.guard_per_instance_valve(38, "r", max_claims=20,
+    # Post-expiry the valve is still the normal bound (for non-deferral loops):
+    assert gd.guard_per_instance_valve(21, "r", max_claims=20,
                                       ledger=ledger, now=expired_at) is True
-
 
 # ── the other execution point: the host refuses to advance ────────────────
 

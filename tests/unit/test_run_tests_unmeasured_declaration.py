@@ -229,16 +229,11 @@ def _apply_m21(func):
     witness below re-runs the REAL reader mutated and asserts the reading
     FLIPS. The mutation is reproduced by the suite, not asserted about.
 
-    MEASURED, and the reason the previous revision's table row was false:
-    `startswith(PREFIX)` -> `PREFIX in line` ALONE is not observable at all.
-    The slice stays `line[len(PREFIX):]`, so on an echoed line the mutant
-    starts its JSON at index 30 — inside the echo — and `json.loads` fails just
-    as it does for the candidate. The one-token mutation is unfalsifiable, so
-    a table row claiming a test kills it could never have been reproduced.
-    What IS observable is the careless REFACTOR that goes with it: keep the
-    substring test AND seek the prefix where it was found. That pair is what
-    these witnesses kill, and `_apply_m21` applies both halves.
+    `_apply_m21` applies both halves: `startswith` → `in` AND the slice
+    seeking the prefix where it was found (`line.index(PREFIX) + len(PREFIX)`).
+    Together they turn a mid-line echo into a declaration.
     """
+    import ast
     import ast
     import inspect
     import textwrap

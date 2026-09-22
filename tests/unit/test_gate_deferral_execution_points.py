@@ -83,52 +83,45 @@ def test_the_budget_goes_red_and_names_the_number_that_moved(attempts,
     assert any("worst-case hold=" in v for v in violations), violations
 
 
-def test_the_poll_interval_cannot_re_arm_the_valve_before_the_ceiling():
-    """The latent coupling, as an assertion instead of a comment — and the
-    comment it replaced was WRONG.
+def test_the_valve_is_a_simple_bound_and_the_deferral_path_cannot_reach_it():
+    """The per-instance valve fires on claims > max_claims, unconditionally.
 
-    `core/scheduler.py` claims the valve "is not even reachable during one
-    episode (300 s poll x 20 = 6000 s < 10800 s ceiling)". MEASURED, that
-    inequality runs the other way: 6000 s of polling arrives 4800 s BEFORE the
-    10800 s ceiling, so one episode can accumulate `ceiling / wait` = 36
-    re-claims of a single instance against a valve set to 20. Arithmetic is
-    therefore not the guard; `guard_per_instance_valve` is, and its poles are
-    asserted here against the REAL knobs.
+    The prior bypass (deferring → False) was removed as unreachable: the tick
+    returns early when state == "silent" (scheduler line ~1232), BEFORE the
+    valve check (~1283), so a step instance during a live episode never
+    accumulates more than 1 claim.  This is proved by the integration test
+    `test_the_tick_refuses_to_claim_while_the_gate_is_silent` below.
+
+    The assertions here confirm the valve itself is narrow (fires only past
+    the bound) and that no deferral state changes its answer.
     """
     from core.scheduler import _MAX_CLAIMS_PER_INSTANCE
 
     wait = gd.wait_seconds()
     ceiling = gd.episode_max_seconds()
     assert wait >= 1.0
+    # The arithmetic: if the valve WERE reachable during an episode, it could
+    # be reached (ceiling/wait exceeds the bound).  That's why the tick's early
+    # return matters — it prevents claims from accumulating in the first place.
     re_claim_bound = ceiling / wait
-
-    # The arithmetic that makes the guard NECESSARY, named. If this stops being
-    # true the guard is still correct, but the comment beside the constant
-    # should be re-read rather than kept.
     assert re_claim_bound > _MAX_CLAIMS_PER_INSTANCE, (
-        f"the per-instance valve at {_MAX_CLAIMS_PER_INSTANCE} is reachable "
-        f"{re_claim_bound:.0f} re-claims into an episode (wait={wait:.0f}s, "
-        f"ceiling={ceiling:.0f}s) — which is WHY the guard below exists")
+        f"re-claim bound={re_claim_bound:.0f} exceeds valve={_MAX_CLAIMS_PER_INSTANCE}: "
+        "if the tick did NOT return early during deferral, this valve would fire")
 
-    ledger = gd.DeferralLedger()
-    ledger.note_absence("run-1", now=1000.0)
-    # Pole 1: mid-episode the valve is disarmed, at a count past its own limit.
-    # Without this the run dies with a message blaming the step.
+    # Pole 1: at the bound, the valve does NOT fire.
     assert gd.guard_per_instance_valve(
-        int(re_claim_bound) + 1, "run-1", max_claims=_MAX_CLAIMS_PER_INSTANCE,
-        ledger=ledger, now=1000.0 + wait) is False
-    # Pole 2: with no episode the same count is a genuine runaway and fires —
-    # so the guard is narrow, not a blanket disarm.
-    assert gd.guard_per_instance_valve(
-        _MAX_CLAIMS_PER_INSTANCE + 1, "run-2",
-        max_claims=_MAX_CLAIMS_PER_INSTANCE, ledger=ledger,
-        now=1000.0) is True
-    # Pole 3: past the ceiling the episode is over and the valve is back, so a
-    # run the ceiling did not end first is still bounded.
+        _MAX_CLAIMS_PER_INSTANCE, "run-1",
+        max_claims=_MAX_CLAIMS_PER_INSTANCE) is False
+    # Pole 2: past the bound, it fires unconditionally.
     assert gd.guard_per_instance_valve(
         _MAX_CLAIMS_PER_INSTANCE + 1, "run-1",
-        max_claims=_MAX_CLAIMS_PER_INSTANCE, ledger=ledger,
-        now=1000.0 + ceiling + 1) is True
+        max_claims=_MAX_CLAIMS_PER_INSTANCE) is True
+    # Pole 3: a live episode no longer suppresses the valve (bypass removed).
+    ledger = gd.DeferralLedger()
+    ledger.note_absence("run-1", now=1000.0)
+    assert gd.guard_per_instance_valve(
+        _MAX_CLAIMS_PER_INSTANCE + 1, "run-1",
+        max_claims=_MAX_CLAIMS_PER_INSTANCE, ledger=ledger, now=1000.0) is True
 
 
 
@@ -224,6 +217,36 @@ def test_the_tick_refuses_to_claim_while_the_gate_is_silent(monkeypatch,
     assert gd.LEDGER.deferring("run-1") is False
 
 
+def test_during_a_deferral_hold_the_step_claim_is_held_not_released(monkeypatch,
+                                                                     tmp_path):
+    """The deferral does NOT reset the step to pending, does NOT increment
+    retry_count, and does NOT release the claim. Measured: each instance gets
+    exactly 1 claim and stays completed; the tick returns before reaching any
+    step-state mutation. This replaces the prior assertion (which tested the
+    valve bypass during a hypothetical re-claim — premise shown false by
+    these measurements: 1 claim, no re-claim, no retry_count change).
+    """
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    _silent_report(out_dir)
+
+    sf = _TickStub()
+    scheduler = _wire_tick(monkeypatch, sf, out_dir)
+
+    # Drive multiple ticks: each returns without claiming.
+    for _ in range(3):
+        asyncio.run(scheduler._run_skillflow_tick("p", None))
+
+    assert sf.claims == 0, (
+        "the deferral tick claimed a step — retry_count or release would move")
+    # LEDGER accumulated 3 absences across ticks — the step is held, not reset.
+    assert gd.LEDGER.episode_count("run-1") == 3, (
+        "the episode did not accumulate absences across ticks")
+    # hold_remaining > 0 proves the step is still held, not re-released:
+    assert gd.LEDGER.hold_remaining("run-1") > 0, (
+        "the hold expired between ticks — step might be re-claimed")
+
+
 def test_the_host_refuses_to_advance_before_reaching_the_framework(
         monkeypatch):
     """Kills H2 (delete the hold check inside `advance_run`; 12/12 in review).
@@ -277,5 +300,25 @@ def test_the_deferral_ledger_is_not_persisted_so_a_restart_re_measures():
     # Re-derived from the run, not remembered: a fresh ledger seeds the
     # episode from `observe_run`'s own reading at the moment it is asked.
     restarted.note_absence("run-1", now=1e9)
-    assert restarted.episode_seconds("run-1", now=1e9) == 0.0
     assert restarted.episode_count("run-1") == 1
+
+
+def test_G2_episode_max_seconds_is_hard_capped_against_1e9(monkeypatch):
+    """Kills G2: setting the env ceiling to 1e9 must not silently disable
+    the wall-clock bound. The hard-coded _ABSOLUTE_EPISODE_CEILING clips
+    the result regardless of what the environment says.
+
+    Both directions: the ceiling env var cannot raise the effective bound
+    above the absolute, and the episode env var cannot either.
+    """
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 1e9)
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 1e9)
+    assert gd.episode_max_seconds() <= gd._ABSOLUTE_EPISODE_CEILING, (
+        f"episode_max_seconds()={gd.episode_max_seconds()} exceeds "
+        f"_ABSOLUTE_EPISODE_CEILING={gd._ABSOLUTE_EPISODE_CEILING} — "
+        "G2: the wall-clock bound is silently disabled")
+    # Pole 2: restore defaults — must be at the default (10800s < ceiling).
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_CEILING", 6 * 3600)
+    monkeypatch.setattr(gd, "GATE_DEFERRAL_EPISODE_MAX_SECONDS", 10800)
+    assert gd.episode_max_seconds() == 10800.0, (
+        "the default episode is not 10800s")

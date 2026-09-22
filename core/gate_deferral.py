@@ -12,16 +12,13 @@ Both can hold at once: the episode below lets the run STOP, and when it stops
 it names the absence.  It never says ``Cycle limit exceeded`` and it never
 says the tests failed, because neither of those is what happened.
 
-Two execution points read this module (``core/scheduler.py``):
+One execution point reads this module (``core/scheduler.py``):
 
 * the tick skips a run whose deferral is still inside its wait, so no
-  implement cycle is spent while the gate is silent;
-* the per-instance re-claim valve (``_MAX_CLAIMS_PER_INSTANCE``) is bypassed
-  while a deferral is live, because a deferral resets a completed row back to
-  ``pending`` on purpose — counting that as a runaway resume would kill the
-  run with a message that blames the step ("a terminal state is being resumed
-  instead of ending"), which is exactly the false attribution this card
-  exists to remove.  The episode's own clock is the bound that applies then.
+  implement cycle is spent while the gate is silent.  Because the tick
+  returns early, the per-instance re-claim valve downstream is never
+  reached during a live episode — each step instance receives exactly one
+  claim and the valve's own bound is irrelevant while parked.
 
 Everything here is pure and clock-injected: no sleeping, no globals beyond
 the module ledger, no dependency on skillflow.
@@ -58,6 +55,10 @@ GATE_DEFERRAL_WAIT_MAX = float(
     os.getenv("AITELIER_GATE_DEFERRAL_WAIT_MAX", "900"))
 GATE_DEFERRAL_EPISODE_MAX_CEILING = float(
     os.getenv("AITELIER_GATE_DEFERRAL_EPISODE_MAX_CEILING", str(6 * 3600)))
+#: Hard-coded absolute ceiling on episode_max_seconds. No env var may lift
+#: the returned value past this. Guards against G2: setting the ceiling env
+#: to 1e9 would silently disable the wall-clock bound without this.
+_ABSOLUTE_EPISODE_CEILING = 6 * 3600.0
 
 # The sentence an expired absence is allowed to end with.  It names the
 # absence and nothing else.  In particular it carries no word that could be
@@ -88,8 +89,9 @@ def wait_seconds() -> float:
 
 
 def episode_max_seconds() -> float:
-    ceiling = max(1.0, _positive_seconds(GATE_DEFERRAL_EPISODE_MAX_CEILING,
-                                         6 * 3600.0))
+    ceiling = max(1.0, min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_CEILING,
+                                             6 * 3600.0),
+                           _ABSOLUTE_EPISODE_CEILING))
     return min(_positive_seconds(GATE_DEFERRAL_EPISODE_MAX_SECONDS, 10800.0),
                ceiling)
 
@@ -188,17 +190,12 @@ def guard_per_instance_valve(claims: int, run_id: str, *,
                              now: float | None = None) -> bool:
     """May the per-instance re-claim valve fire for this run?
 
-    ``core/scheduler.py`` counts ``claimed`` trace events per step instance and
-    fails the run past ``_MAX_CLAIMS_PER_INSTANCE``.  The comment beside that
-    constant states its premise: a single instance is only re-claimed when
-    something reset a completed row back to ``pending``.  A deferral does
-    exactly that, on purpose — so while an episode is live the valve is not a
-    runaway signal and must not fire.  The episode ceiling ends the run
-    instead, naming the absence.
+    Returns True when claims exceed the bound — a genuine runaway.  The
+    deferral path never reaches this function: the tick returns early at
+    state == "silent" before the valve check (see the integration test
+    test_gate_deferral_execution_points.py which proves claims == 0 during
+    an episode). The prior bypass on ``book.deferring`` was unreachable.
     """
-    book = LEDGER if ledger is None else ledger
-    if book.deferring(run_id, now=now):
-        return False
     return claims > max_claims
 
 
@@ -226,7 +223,6 @@ def absent_terminal_names_no_failure(reason: str) -> bool:
     # whole words and never fires inside `measu(red)`.
     words |= {w[:-1] for w in words if w.endswith("s")}
     return not (words & set(_FORBIDDEN_WORDS))
-
 
 
 def hold_blocks_advance(run_id: str, *, now: float | None = None,
@@ -342,4 +338,3 @@ def observe_run(sf, run_id: str, *, now: float | None = None,
     return {"state": "silent",
             "remaining": book.hold_remaining(run_id, now=moment),
             "gate": episode.gate, "reason": ""}
-

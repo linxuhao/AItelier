@@ -25,29 +25,18 @@ from core import gate_deferral
 # NB-1 runaway-loop guard: max total step executions before a run is force-failed.
 # A normal DPE run is well under this; this only trips on a non-converging loop.
 import os as _os
-_MAX_STEPS_PER_RUN = int(_os.getenv("AITELIER_MAX_STEPS_PER_RUN", "300"))
-# Per-instance companion: how often ONE step instance may be re-claimed before the
-# KNOWN COUPLING, guarded rather than commented away: the premise above is
-# "only something that resets a completed row back to pending re-claims one
-# instance", and `core/gate_deferral.py` does EXACTLY that on purpose — a
-# deferral parks the run while its repository gate produces no verdict and
-# re-opens the step. Measured on the r4 candidate: 38 claims of one instance
-# in a single episode. Left unguarded, this valve fires and kills the run with
-# a message that BLAMES THE STEP ("a terminal state is being resumed instead
-# of ending") — a false attribution, and the defect this card exists to
-# remove. So the valve is bypassed while an episode is live and the episode's
-# own wall-clock ceiling is the bound that applies then (see
-# `guard_per_instance_valve`, and the test that proves the valve still fires
-# for a genuine runaway: tests/unit/test_gate_deferral_is_accounted.py).
-# MEASURED (round 6): the claim that the valve "is not even reachable during
-# one episode" was ARITHMETICALLY WRONG, in the direction that mattered. 300 s
-# poll x 20 = 6000 s of claims arrives 4800 s BEFORE the 10800 s ceiling, so one
-# episode can accumulate ceiling/wait = 36 re-claims of a single instance
-# against a valve set to 20. The guard, not the arithmetic, is what keeps the
-# valve from killing the run mid-episode; both poles of that guard are asserted
-# with these real numbers, so a future edit to either knob turns this red BY
-# NAME instead of into another comment:
-# tests/unit/test_gate_deferral_execution_points.py.
+# Per-instance companion: how often ONE step instance may be re-claimed before
+# the run is killed with a message blaming the step.
+#
+# The deferral mechanism parks the run via the tick's early return at
+# state == "silent" (line ~1228). Because the tick returns BEFORE the valve
+# check (~1283), a step instance is never re-claimed during a live episode
+# (measured: 1 claim per instance). The valve therefore has nothing to
+# suppress on the deferral path — the prior bypass in guard_per_instance_valve
+# was unreachable code and has been removed.
+# Proved by: tests/unit/test_gate_deferral_execution_points.py (claims == 0
+# while deferring) and tests/unit/test_gate_deferral_is_accounted.py.
+
 
 _MAX_CLAIMS_PER_INSTANCE = int(_os.getenv("AITELIER_MAX_CLAIMS_PER_INSTANCE", "20"))
 

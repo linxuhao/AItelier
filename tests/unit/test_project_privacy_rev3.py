@@ -179,9 +179,11 @@ class TestSecondCarrierS7:
     def test_self_constructed_service_route_is_refused_private_and_serves_open(
             self, monkeypatch, tmp_path):
         """A route author who builds their OWN service (no Depends(get_service),
-        no forged declaration) still cannot read an unopened project — and the
-        same route on an OPENED project returns 200 with the full text, proving
-        the attack really landed and was really blocked (no three-pole-same-403)."""
+        no forged declaration) cannot read a writer-only action at all: the
+        verdict follows the ACTION, so the OPENED project is refused too. The
+        liveness control is the SAME route executing a PUBLIC read, which answers
+        200 on the opened project with the real body - so the refusals are
+        refusals and not a route that never landed."""
         _arm(monkeypatch)
         app, service = _app(tmp_path, "s7-route")
         _seed(service, "priv", "Private", "S7-PRIVATE-BODY-XYZZY")
@@ -196,14 +198,24 @@ class TestSecondCarrierS7:
             from core.state_commands import execute
             return execute(rogue, "get_driver_note", {"project_id": request.query_params["pid"]})
 
+        def self_built_public(request: Request):
+            # the liveness control: the same construction, a PUBLIC read
+            rogue = StateService(db, project_read_trusted=authz.may_read_private(request))
+            from core.state_commands import execute
+            return execute(rogue, "get_graph", {"project_id": request.query_params["pid"]})
+
         app.get("/api/state/self-built")(self_built)
+        app.get("/api/state/self-built-public")(self_built_public)
         with TestClient(app) as client:
             private = client.get("/api/state/self-built?pid=priv")
             assert private.status_code == 403, (private.status_code, private.text[:200])
             assert "S7-PRIVATE-BODY-XYZZY" not in private.text
-            live = client.get("/api/state/self-built?pid=open-pid")
+            opened = client.get("/api/state/self-built?pid=open-pid")
+            assert opened.status_code == 403, (opened.status_code, opened.text[:200])
+            assert "S7-OPEN-BODY-XYZZY" not in opened.text
+            live = client.get("/api/state/self-built-public?pid=open-pid")
             assert live.status_code == 200, (live.status_code, live.text[:200])
-            assert "S7-OPEN-BODY-XYZZY" in live.text
+            assert "nodes" in live.text
 
     def test_a_portfolio_with_no_declared_trust_fails_closed(self, tmp_path):
         store = StateGraphStore(StateDatabase(str(tmp_path / "pf.sqlite")))

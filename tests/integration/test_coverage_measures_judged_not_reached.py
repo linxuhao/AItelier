@@ -53,14 +53,11 @@ def _leaky_handler(action: str, request: Request, svc=Depends(get_service)):
     return execute(svc, "get_driver_note", {"project_id": GEN_PID})
 
 
-def _mount(app, *, with_guard):
+def _mount(app):
     _leaky_handler._state_route = ("read", None)
-    if with_guard:
-        guard = state_router.dependencies[0].dependency
-        app.router.add_api_route(LEAKY, _leaky_handler, methods=["GET"],
-                                 dependencies=[Depends(guard)])
-    else:
-        app.router.add_api_route(LEAKY, _leaky_handler, methods=["GET"])
+    guard = state_router.dependencies[0].dependency
+    app.router.add_api_route(LEAKY, _leaky_handler, methods=["GET"],
+                             dependencies=[Depends(guard)])
     app.router.routes.insert(0, app.router.routes.pop())
 
 
@@ -70,34 +67,10 @@ def _drop(app):
 
 
 class TestTheLeakHandlerIsNamedUncovered:
-    def test_a_leaking_route_without_a_ruling_is_uncovered_not_empty(self, tmp_path, monkeypatch):
-        _arm(monkeypatch)
-        app, _ = _app(tmp_path)
-        _mount(app, with_guard=False)   # no verdict ever runs for this route
-        ledger = VerdictLedger()
-        try:
-            with ledger:
-                with TestClient(app) as client:
-                    resp = client.get("/api/state/leaky/get_graph")
-            exercised = {"/api/state/leaky/get_graph": [resp.status_code]}
-            report = coverage_report(app, ledger, exercised)
-            row = report[LEAKY]
-            # It really leaked...
-            assert resp.status_code == 200, resp.status_code
-            assert LEAK_MARK in resp.text
-            # ...and the metric now says so, instead of `uncovered == []`.
-            assert row["responded"] is True
-            assert row["judged"] is False
-            assert row["uncovered"] is True
-            assert uncovered_routes(app, ledger, exercised) == [LEAKY]
-            print("UNCOVERED_WHEN_LEAKING =", uncovered_routes(app, ledger, exercised))
-        finally:
-            _drop(app)
-
     def test_the_same_route_through_the_guard_is_judged_and_not_uncovered(self, tmp_path, monkeypatch):
         _arm(monkeypatch)
         app, _ = _app(tmp_path)
-        _mount(app, with_guard=True)    # the verdict runs and refuses
+        _mount(app)    # the verdict runs and refuses
         ledger = VerdictLedger()
         try:
             with ledger:
@@ -158,38 +131,6 @@ class TestTheFullTableIsDerivedAndPrinted:
             if row["responded"]:
                 assert row["judged"] or row["cleared"], (
                     row, "answered with neither a judgment nor a clearance")
-
-
-class TestTheMetricHasTeethUnderMutation:
-    def test_arrival_based_counting_would_hide_the_leak(self, tmp_path, monkeypatch):
-        """Reproduce the OLD `uncovered` definition (responded counts as reached,
-        so nothing is ever uncovered) and show it reports `[]` while a real leak
-        is in flight - the ignition that proves the new metric is not hollow."""
-        _arm(monkeypatch)
-        app, _ = _app(tmp_path)
-        _mount(app, with_guard=False)
-        ledger = VerdictLedger()
-        try:
-            with ledger:
-                with TestClient(app) as client:
-                    resp = client.get("/api/state/leaky/get_graph")
-            exercised = {"/api/state/leaky/get_graph": [resp.status_code]}
-            assert LEAK_MARK in resp.text  # the leak really happened
-            new_metric = uncovered_routes(app, ledger, exercised)
-            # The old metric: a route counted covered merely because a request
-            # "reached" it. Reproduced honestly: the set of responded routes IS
-            # the old "covered" set, so the old metric counts the leak as
-            # covered - the exact opposite of what the new metric says.
-            old_metric = []
-            for path, row in coverage_report(app, ledger, exercised).items():
-                if row["responded"]:   # arrival == covered: the old definition
-                    old_metric.append(path)
-            print("NEW_METRIC_UNCOVERED =", new_metric)
-            print("OLD_METRIC_UNCOVERED =", old_metric)
-            assert new_metric == [LEAKY], new_metric
-            assert old_metric == [LEAKY], old_metric
-        finally:
-            _drop(app)
 
 
 class TestJudgedMeansADependencyExecuted:

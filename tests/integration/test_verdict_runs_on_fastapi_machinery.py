@@ -170,13 +170,11 @@ class TestTheGuardMatchesPlainDepends:
         assert ledger.rulings(app)[route_template] in {"read-verdict", "private-verdict"}
 
     def test_a_yield_verdict_dependency_teardown_runs_after_the_handler(self, tmp_path, monkeypatch):
-        """Observation point for criterion 6's reservation: the guard used to
-        close its own AsyncExitStack BEFORE the handler, so a verdict dependency
-        with a post-`yield` half ran its teardown order-reversed relative to a
-        plain `Depends(D)` route. The guard is now a yield dependency and closes
-        the verdict stack after the handler; this pins setup -> handler ->
-        teardown, identical on both trees, and the mutation (closing the stack
-        inside the guard, the old shape) is shown to reverse it."""
+        """Regression guard, not a fix: on the deployed FastAPI the guard and a
+        plain `Depends(D)` route close a `yield` dependency's teardown at the
+        same point, so this is green on the base tree as well. It pins that
+        equivalence - setup -> handler -> teardown on both - so a later change
+        that closed the verdict stack early would show up here."""
         monkeypatch.setattr(authz, "gate_enabled", lambda: True)
         events: list = []
 

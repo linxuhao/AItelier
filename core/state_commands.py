@@ -756,22 +756,31 @@ def execute(service, action: str, arguments: dict, *, allow_write: bool = False)
             from core.director_messaging_protocol import DirectorMessageError
             return DirectorMessageError("invalid_request").as_dict()
         raise StateGraphError("arguments must be an object")
-    # Project privacy is decided HERE, the single chokepoint every transport
-    # shares, and not in the route guard: a route author who forges a declaration
-    # still has to call `execute` to obtain any project body, and that call is
-    # refused for an anonymous principal on a project nobody opened. This does NOT
-    # depend on the action classification table - that answers "is this ACTION
-    # public", which is ANDed with "is this PROJECT opened" only in this function.
-    # The other half lives in the route guard: a declaration is honoured only when
-    # the handler's own source delivers nothing but public actions
-    # (api/state_verdict), so a forged declaration cannot open the door either.
-    # It runs BEFORE argument validation so an anonymous probe of an unopened
-    # project is refused as private, never bounced with a structural error that
-    # itself leaks the project's request shape.
+    # Confidentiality is decided by the ACTION that is being read, at the
+    # moment the private read EXECUTES, and by the PROJECT's own privacy, from
+    # the trust level the transport derived from the raw credential. Neither
+    # decision is taken from a route's or a handler's shape:
+    #
+    # * the ACTION's privacy (`read_visibility`, the one table, where an action
+    #   nobody classified stays private) is judged HERE and in every leaf
+    #   service method a route could reach without calling `execute`
+    #   (`core.state_privacy.writer_only_read`). A route that bypasses `execute`
+    #   is refused by the very same function.
+    # * the PROJECT's privacy (opened or not) is judged HERE from
+    #   `service.project_read_trusted`, which `api.authz.may_read_private`
+    #   derives from the raw credential once per request; a forged route
+    #   declaration cannot change it.
+    #
+    # Both run BEFORE argument validation so an anonymous probe is refused as
+    # private, never bounced with a structural error that itself leaks the
+    # project's request shape.
 
     anonymous = _anonymous(service)
     if anonymous and action in READ_REQUESTS:
+        from core import state_privacy
+        state_privacy.refuse_private_read(not anonymous, action)
         _refuse_if_project_not_public(service, action, arguments)
+
     try:
         args = REQUESTS[action].model_validate(arguments).model_dump()
     except ValidationError as exc:

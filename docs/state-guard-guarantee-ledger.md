@@ -1,37 +1,40 @@
 # Guarantee ledger — every sentence, its test, its mutation
 
-Date: 2026-09-22 (round 8, `transport.the-guard-must-not-depend-on-the-shape-of-its-dependency`).
+Date: 2026-09-22 (round 9, `transport.the-guard-must-not-depend-on-the-shape-of-its-dependency`).
 Rule: a guarantee sentence that no test can falsify is deleted or made true.
-Each row: the sentence, the test that can fire on it, the mutation that proves
-the test has teeth, and where the ignition count and bare exit codes live
-(every probe in this round was a bare pytest gate, no pipes; exit code 0).
+Each row names the test that can fire on it and the mutation that shows the test
+has teeth. Every number in a row is produced by the test the row names, on this
+tree; the round's raw logs (command, environment, bare exit code) live beside
+this file in the delivery folder.
 
-| # | Sentence (as written) | Falsifying test | Mutation / ignition | Evidence |
-|---|---|---|---|---|
-| 1 | "A delivery the AST reader cannot see is REFUSED, never approved — module-level helper, renamed import, `async def` inner, keyword `action=`." | `tests/integration/test_unreadable_delivery_is_refused.py` — 4 binding poles + 4 guard poles (fresh app, armed) | Restore the old reader: delete the `if delivery.followed` refusal and the bare-name fail-closed `opaque` branch; each shape then binds `ok=True` (fail-open) and the guard pole returns 200 with the private body — 8 named failures | `IGNITION` = the 403 assertions firing on every shape; bare RC=0 on the fixed tree |
-| 2 | "The reader follows a module-level helper through the handler's own globals and an aliased `execute` by object identity — derivation, not a name list." | same file, `module_level_helper` / `renamed_import` poles (a refusal via `opaque` alone would fail these: the helper source is READ and its literal delivery named) | Point the resolver at a static name table instead of `__globals__`: the helper pole still refuses, but for the wrong reason — the test asserting the delivered action is NAMED in `binding.reason` goes red | bare RC=0 |
-| 3 | "`judged` means an authorization dependency actually executed; a public read cleared by its declaration binding is `cleared`, never `judged`." | `tests/integration/test_coverage_measures_judged_not_reached.py::TestJudgedMeansADependencyExecuted` | Restore arrival counting (`record_judged` forced `dep_backed=True`): the same probe reads `judged=True` with zero dependencies executed — `IGNITION_COUNT = 1`, bare RC=1 | printed `DISPATCH_ROW` and `MUTATED_ROW` |
-| 4 | "The old `responded ⇒ covered` metric is hollow: it counts a leaking route as covered." | `test_arrival_based_counting_would_hide_the_leak` — reproduces the old definition HONESTLY (no `and False` constant folding; the old metric is computed, and it names the leak COVERED while the new metric names it UNCOVERED) | The `and False` version is deleted; the comparison now fires by construction (`old == [LEAKY] and new == [LEAKY]`) | bare RC=0 |
-| 5 | "The private-delivery check runs before any early `ok=True`; the honest dispatch family still serves." | `tests/integration/test_private_delivery_before_early_ok.py` both poles + product `/api/state/query/{action}` positive case | Reverting the order (patched `old_binding_for`) leaks: 200 + private body, ignition asserted in-file | bare RC=0 |
-| 6 | "The guard runs the verdict on FastAPI's own machinery for six dependency shapes, AND teardown order matches `Depends(D)`." | `tests/integration/test_verdict_runs_on_fastapi_machinery.py` — six shapes both poles; new observation point: a `yield` verdict dependency records setup/handler/teardown identically on a plain route and through the guard | Closing the verdict stack inside the guard (the old shape) runs teardown BEFORE the handler: `GUARD_ORDER == ['setup', 'teardown']` vs control `['setup', 'handler', 'teardown']` — the order assertion goes red | printed `CONTROL_ORDER` / `GUARD_ORDER`, bare RC=0 |
-| 7 | "The ban on lie-keeping phrases applies to the file that executes the ban." | `tests/integration/test_no_unfalsifiable_guarantees.py` — `ROUND_FILES` now contains itself. THE DISCOVERY: included, the ban breaks on the file's own phrase DATA; the test excludes exactly the `BANNED = [...]` declaration lines and still fires on any prose use | Removing that exclusion makes the file condemn itself — a red named failure, recorded here rather than hidden | bare RC=0 |
-| 8 | "The expected surface model is DERIVED from the generated source, not a hand-kept dictionary keyed by body name." | `tests/integration/test_author_surface_generator.py` — `expected_can_serve` reads `_model_delivery(shape)`, a second scan of the generated handler text (`_BODY_DELIVERS` is deleted); `test_the_expected_model_follows_the_generated_source` tampers ONLY the source the `private_only` body generates (its body name, declaration and parameter are untouched) and the model must FOLLOW it | Hand-writing the dictionary back is now caught: a name-keyed model ignores the tampered source and keeps refusing `private_only`, so that test goes red while the tree is green | bare RC=0 |
-| 9 | "Test scaffolding is not an API module: nothing in `api/` imports `state_author_surface`." | structural: the module lives at `tests/support/state_author_surface.py`; `grep -r "state_author_surface" api/` is empty | A re-import from `api/` would be caught by review and by the import graph, not by a test — stated plainly rather than claimed | bare RC=0 |
+| # | Sentence | Falsifying test | Mutation / ignition |
+|---|---|---|---|
+| 1 | "Confidentiality is decided by the ACTION, at the moment the private read executes." | `tests/unit/test_private_read_verdict_at_execution.py` — every action derived from `WRITER_ONLY_READS` is refused through `execute` and by a direct service call | Neutralize `core.state_privacy.refuse_private_read`: 9 of the 11 paths return a private body, `IGNITION_COUNT = 9` |
+| 2 | "A route that bypasses `execute` is refused by the same function." | same file — a fresh app and `api.main.app`, each with a handler that calls the service method directly | Remove the `@writer_only_read` decorators: the direct calls return bodies |
+| 3 | "`judged` means an authorization dependency executed; a public read cleared by its declaration reads `cleared`, never `judged`." | `tests/integration/test_coverage_measures_judged_not_reached.py::TestJudgedMeansADependencyExecuted::test_restoring_arrival_counting_re_lies_and_is_caught` | Restore arrival counting: `IGNITION_COUNT = 1` (honest `judged=False` against mutated `judged=True`) |
+| 4 | "The ban on lie-keeping phrases covers every file this round touched, scope taken from git, with no line-prefix exclusion." | `tests/integration/test_no_unfalsifiable_guarantees.py` — the scope is `git diff` against the round base; `test_no_line_prefix_can_exclude_a_banned_phrase` plants a phrase and the same predicate catches it | Exclude the declaration line (the old hole): the planted phrase stops being caught |
+| 5 | "The guard runs a verdict dependency on FastAPI's own machinery for six shapes." | `tests/integration/test_verdict_runs_on_fastapi_machinery.py` — six shapes against a plain `Depends(D)`; the hand-call base pole is in-file | Hand-call `dependency(request)`: the async and yield shapes return a coroutine and the refusal inside never runs |
+| 6 | "The private-delivery check runs before any early `ok=True`." | `tests/integration/test_private_delivery_before_early_ok.py` — both poles plus the product `/api/state/query/{action}` positive case | Revert the order (patched `old_binding_for`): 200 with the private body |
+| 7 | "A declaration the reader cannot see, or that delivers a private action, is REFUSED." | `tests/integration/test_unreadable_delivery_is_refused.py` — the hidden-delivery shapes, binding and guard poles | Delete the fail-closed branches: each shape binds `ok=True` and the guard pole returns 200 with the body |
 
-## Deleted falsified prose
+## Changed this round
 
-The six "universally true" sentences carried over from round 7 are gone from
-the round files; this ledger is the only place they survive, as rows with the
-test and mutation that keep them true. The two r6 paste accidents
-(`if row["responded"] and False:` and the `with_guard=False` "uncovered"
-demonstration) are repaired: the old metric is now COMPUTED, so the comparison
-is real, and the no-guard demonstration asserts against the same metric the
-guard uses.
+The two hollow demonstrations in
+`tests/integration/test_coverage_measures_judged_not_reached.py` are DELETED,
+not rewritten: the `if row["responded"]` reproduction of the old metric (which
+counted the leaking route as covered whatever the metric said) and the whole
+`with_guard=False` mount. Every remaining test there must name a mutation that
+turns it red; `test_restoring_arrival_counting_re_lies_and_is_caught` is the one
+whose ignition this round measured (`IGNITION_COUNT = 1`).
 
-One stale assertion was brought in line with row 3 rather than left failing:
-`tests/unit/test_state_declaration_binding.py::TestTheVerdictRanNotJustTheTree`
-asserted `judged is True` for two PUBLIC routes, which is the arrival-count
-reading row 3 replaced; it now asserts the honest row (`ruling ==
-"public-clearance"`, `cleared is True`, `judged is False`, `uncovered is False`).
-A duplicated paste block in that same test - the old assertions repeated with a
-dangling comment - was deleted with it.
+The duplicated `/health` assertion in
+`tests/integration/test_project_gate_assembly_points.py` is deleted.
+
+The r8 teardown explanation in
+`tests/integration/test_verdict_runs_on_fastapi_machinery.py` is deleted: the
+deployed FastAPI already closes a `yield` dependency at the right point, so that
+test is green on the base tree as well and is kept as a regression guard only.
+
+Rows 1 and 2 replace the r8 claim that the route reader settles what a handler
+delivers. `binding_for` and the AST reader remain in the tree as defence in
+depth, but no sentence here rests on them.

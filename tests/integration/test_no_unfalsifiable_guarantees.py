@@ -2,53 +2,99 @@
 
 A previous round deleted last round's lies and wrote fresh ones no test could
 falsify. Prose is not evidence; the assertion is. This test enforces the ban on
-the four "keep a lie alive" phrases across the EXACT set of files this round
-touched, so a future edit that tries to soften a refusal with one of them fails
-here rather than passing on a green suite. It also checks the two guarantee
-carriers that would otherwise be unverifiable: that every universal claim about
-the verdict is backed by a concrete, runnable test in this tree.
+the "keep a lie alive" phrases across the EXACT set of files this round touched,
+so a future edit that tries to soften a refusal with one of them fails here
+rather than passing on a green suite.
+
+The scan set is DERIVED from git - the round's diff against the base it was
+built from - not typed here: a file the round adds is in scope automatically,
+and the ban cannot be narrowed by editing a list in this file. The phrases are
+assembled from fragments so this file holds no banned literal, which removes
+the earlier hole where a phrase written on the declaration line slipped a
+line-prefix exclusion. There is no exclusion now: any occurrence fails.
 """
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Files this round's change touched (the diff surface). Pre-existing prose in
-# other modules is out of scope; this test is about what THIS round wrote.
-ROUND_FILES = [
-    "api/state_verdict.py",
-    "api/state_http.py",
-    "tests/support/state_author_surface.py",
-    "tests/integration/test_author_surface_generator.py",
-    "tests/integration/test_coverage_measures_judged_not_reached.py",
-    "tests/integration/test_verdict_runs_on_fastapi_machinery.py",
-    "tests/integration/test_private_delivery_before_early_ok.py",
-    # The file that EXECUTES this ban is not exempt from it: it judges itself
-    # too. Excluding itself would be the exact carrier this card has killed
-    # five rounds running, inside the file written to end it.
-    "tests/integration/test_no_unfalsifiable_guarantees.py",
+# The base this round was built from. It anchors the diff; the FILE LIST still
+# comes from git below.
+BASE_SHA = "98bffeac252fc611cec435698070d877d661434d"
+
+# Assembled from fragments so this module contains no banned literal.
+BANNED = [
+    "not a " + "defect",
+    "docu" + "mented",
+    "inten" + "tionally",
+    "by " + "desi" + "gn",
+    "known " + "limita" + "tion",
 ]
 
-BANNED = ["not a defect", "documented", "intentionally", "by design", "known limitation"]
+_SCANNED_SUFFIXES = (".py", ".md", ".ts", ".tsx", ".txt")
+
+
+def _changed_files() -> list[str]:
+    """The files this round's change touches, TAKEN FROM GIT.
+
+    Union of the round's diff against `BASE_SHA` (committed and uncommitted) and
+    the worktree status, so a file added, edited or renamed by the round is in
+    scope - including this test and the guarantee ledger. Only existing text
+    files under the repository are returned.
+    """
+    def git(*args) -> str:
+        result = subprocess.run(["git", *args], cwd=REPO, text=True,
+                                capture_output=True)
+        return result.stdout if result.returncode == 0 else ""
+
+    names: set = set()
+    for args in (("diff", "--name-only", BASE_SHA, "HEAD"),
+                 ("diff", "--name-only", BASE_SHA),
+                 ("diff", "--name-only", "HEAD~1", "HEAD"),
+                 ("show", "--name-only", "--format=", "HEAD"),
+                 ("diff", "--name-only", "HEAD"),
+                 ("status", "--porcelain")):
+        for line in git(*args).splitlines():
+            line = line.rstrip()
+            if not line:
+                continue
+            if args[0] == "status":
+                line = line[3:]
+                if " -> " in line:
+                    line = line.split(" -> ")[-1]
+            names.add(line.strip())
+    return sorted(rel for rel in names
+                  if rel.endswith(_SCANNED_SUFFIXES) and (REPO / rel).is_file())
+
+
+ROUND_FILES = _changed_files()
+
+
+def test_the_scan_scope_is_derived_from_git_and_not_empty():
+    assert ROUND_FILES, "git reported no changed files for this round"
 
 
 @pytest.mark.parametrize("rel", ROUND_FILES)
 def test_a_round_file_carries_no_lie_keeping_phrase(rel):
-    text = (REPO / rel).read_text(encoding="utf-8")
-    if rel == "tests/integration/test_no_unfalsifiable_guarantees.py":
-        # THE DISCOVERY the card asked for: including this file in its own ban
-        # breaks the ban as written, because the phrases appear here as DATA -
-        # the literal list this test enforces. The ban still holds for PROSE:
-        # the declaration lines are excluded exactly, and any other occurrence
-        # (a docstring, a comment, a message) fails like everywhere else.
-        text = "\n".join(line for line in text.splitlines()
-                         if not line.startswith("BANNED = "))
+    text = (REPO / rel).read_text(encoding="utf-8", errors="replace")
     hits = [phrase for phrase in BANNED if phrase in text]
     assert hits == [], f"{rel} uses a banned phrase: {hits}"
+
+
+def test_no_line_prefix_can_exclude_a_banned_phrase():
+    """The hole this replaces: a line-prefix exclusion let a phrase written on
+    the declaration line slip the scan. There is no exclusion now, so planting a
+    phrase on such a line is caught by the very predicate the scan uses."""
+    source = (REPO / "tests/integration/test_no_unfalsifiable_guarantees.py").read_text(
+        encoding="utf-8")
+    assert [p for p in BANNED if p in source] == []
+    planted = source + '    "' + BANNED[0] + '",\n'
+    assert [p for p in BANNED if p in planted] == [BANNED[0]]
 
 
 def test_the_guard_is_still_the_one_router_wide_dependency():

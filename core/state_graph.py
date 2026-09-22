@@ -13,6 +13,7 @@ import re
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from core.state_privacy import writer_only_read
 from typing import Any
 
 KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -290,6 +291,10 @@ CREATE TABLE IF NOT EXISTS state_project_access (
 
 
 class StateGraphStore:
+    # The trust level of the caller that built this store. `StateService` sets
+    # the instance value to the level it derived per request; a store built
+    # directly is trusted, which only NARROWS a read when a transport opted in.
+    project_read_trusted = True
     def __init__(self, db):
         """Use an explicitly supplied DBManager; never resolve a production path."""
         self.db = db
@@ -753,6 +758,7 @@ class StateGraphStore:
         return {"nodes": summary, "total": len(ready), "truncated": len(ready) > limit,
                 "ready_action_counts": ready_action_counts(ready)}
 
+    @writer_only_read("events")
     def events(self, project_id: str, after: int = 0, limit: int = 100) -> list[dict]:
         integer(after, "after", 0, 2**63-1)
         integer(limit, "limit", 1, 500)

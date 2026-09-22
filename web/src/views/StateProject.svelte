@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { rememberProject, nt } from '../lib/navigation.svelte';
   import { authStore } from '../stores/auth';
-  import { stateOverview, stateAttempts, stateRefreshProject } from '../lib/api';
+  import { stateOverview, stateAttempts, stateRefreshProject, stateDriverNote } from '../lib/api';
   import { attemptLabel, exactRunHref, stateReadyActionCounts, type StateOverview, type StateAttempt } from '../lib/stateGraph';
   import { st } from '../lib/stateI18n.svelte';
   import StateGraph from './StateGraph.svelte';
@@ -17,17 +17,29 @@
   let runLoading = $state(false), openAttempt = $state('');
   let syncing = $state(false), syncNext = $state<number | null>(null), notice = $state('');
   let generation = 0, runGeneration = 0, priorProject = '', priorWanted = '';
-  const allowed = $derived($authStore.permissionResolved && $authStore.canWrite);
+  // READ permission and WRITE permission are two different questions, and
+  // conflating them is what made a reader see "Project state is private": the
+  // line used to be `permissionResolved && canWrite`, so "may I write?" decided
+  // "may I read?". State DAG reads are public now (api/state_http classifies
+  // every one of them), so a resolved session is enough to ask for the graph;
+  // `canWrite` still decides write affordances and whether the working notes may
+  // be requested at all. The SERVER is the judge either way — a 403 below still
+  // clears the view and shows the notice.
+  const canRead = $derived($authStore.permissionResolved);
+  const canWrite = $derived($authStore.canWrite);
+  let denied = $state(false);
+  let note = $state<{ revision: number; updated_at: string; permanent: string; temporary: string } | null>(null);
+  let noteError = $state(''), noteGeneration = 0;
   const readyActions = $derived(data ? stateReadyActionCounts(data.nodes, data.ready_action_counts) : { candidate_review: 0, new_attempt: 0 });
   $effect(() => {
-    const project = params.id, wanted = params.nodeKey, canRead = allowed; void retry;
+    const project = params.id, wanted = params.nodeKey, permitted = canRead; void retry;
     const version = ++generation;
     const routeSelectionChanged = project !== priorProject || (wanted ?? '') !== priorWanted;
     priorWanted = wanted ?? '';
-    if (project !== priorProject) { data = null; selected = ''; attempts = []; next = null; tab = 'graph'; notice = ''; syncNext = null; }
+    if (project !== priorProject) { data = null; selected = ''; attempts = []; next = null; tab = 'graph'; notice = ''; syncNext = null; denied = false; }
     priorProject = project;
     error = '';
-    if (!canRead) { data = null; attempts = []; selected = ''; loading = false; return; }
+    if (!permitted) { data = null; attempts = []; selected = ''; loading = false; return; }
     loading = true;
     stateOverview(project).then(result => {
       if (version !== generation) return;
@@ -35,13 +47,25 @@
       if (wanted && (routeSelectionChanged || !selected) && result.nodes.some(n => n.node_key === wanted)) selected = wanted;
       else if (!result.nodes.some(n => n.node_key === selected)) selected = result.nodes[0]?.node_key ?? '';
       detailRefresh++;
-    }).catch(e => { if (version === generation) { error = String(e.message ?? e); if (e.status === 403) data = null; } })
+    }).catch(e => { if (version === generation) { error = String(e.message ?? e); if (e.status === 403) { data = null; denied = true; } } })
       .finally(() => { if (version === generation) loading = false; });
     return () => { generation++; };
   });
   $effect(() => {
-    const project = params.id, activeTab = tab, canRead = allowed; void detailRefresh;
-    if (!canRead || activeTab !== 'runs') return;
+    // The working notes are the one part of a project page a reader may not
+    // read, so they are fetched only for a writer — and the 403 is the server's,
+    // not this branch's. Nothing private is fetched and then hidden.
+    const project = params.id, mayReadNotes = canWrite; void detailRefresh;
+    const version = ++noteGeneration;
+    note = null; noteError = '';
+    if (!mayReadNotes) return;
+    stateDriverNote(project).then(result => { if (version === noteGeneration) note = result; })
+      .catch(e => { if (version === noteGeneration) noteError = String(e.message ?? e); });
+    return () => { noteGeneration++; };
+  });
+  $effect(() => {
+    const project = params.id, activeTab = tab, permitted = canRead; void detailRefresh;
+    if (!permitted || activeTab !== 'runs') return;
     let cancelled = false; const version = ++runGeneration;
     runLoading = true; runError = '';
     stateAttempts(project).then(result => { if (!cancelled && version === runGeneration) { attempts = result.attempts; next = result.next_after; } })
@@ -72,7 +96,7 @@
   // The dashboard follows persisted state without executing a reconciliation
   // or approving anything. Hidden tabs do not generate background requests.
   onMount(()=>{
-    const timer=setInterval(()=>{if(allowed && !loading && !syncing && document.visibilityState==='visible')retry++;},15000);
+    const timer=setInterval(()=>{if(canRead && !loading && !syncing && document.visibilityState==='visible')retry++;},15000);
     return ()=>clearInterval(timer);
   });
   function selectNode(key: string) { selected = key; }
@@ -80,7 +104,7 @@
 
 <section class="state-project" class:compact>
   <nav class="breadcrumbs"><a href="#/state-projects">{st('projects')}</a><span>/</span><span>{params.id}</span></nav>
-  {#if !allowed}<p role="status">{st('private')}</p>
+  {#if !canRead || denied}<p role="status">{st('private')}</p>
   {:else}
     {#if error}<div class="error" role="alert"><p>{data ? st('staleView') : ''} {error}</p><button class="outline" onclick={() => retry++}>{st('retry')}</button></div>{/if}
     {#if !data && loading}<p aria-live="polite">{st('loading')}</p>{/if}
@@ -107,6 +131,17 @@
         <button class:active={tab === 'issues'} aria-pressed={tab === 'issues'} onclick={() => tab = 'issues'}>{st('issues')} · {data.issue_counts?.open ?? 0}</button>
       </nav>
       <p class="snapshot">{st('snapshot')}: {data.observed_at} · event {data.event_seq} {loading ? ' · ' + st('loading') : ''}</p>
+      <section class="working-notes" aria-label={st('workingNotes')}>
+        <h2>{st('workingNotes')}</h2>
+        {#if !canWrite}<p role="status">{st('notePrivate')}</p>
+        {:else if noteError}<p role="alert">{noteError}</p>
+        {:else if !note}<p aria-live="polite">{st('loading')}</p>
+        {:else}
+          <p class="note-meta">{st('revision')} r{note.revision} · {note.updated_at}</p>
+          <details><summary>{st('detail')}</summary>
+            <p class="note-text">{note.permanent}</p><p class="note-text">{note.temporary}</p></details>
+        {/if}
+      </section>
       {#if tab === 'graph'}
         <StateRunSummary projectId={params.id} refresh={detailRefresh} onselect={selectNode}/>
         <div class="workspace"><StateGraph nodes={data.nodes} {selected} onselect={selectNode} />
@@ -158,7 +193,11 @@
   .evidence-workspace { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(0,1.8fr); gap:1rem; }
   .snapshot,.sync-note { font-size:.7rem; color:var(--pico-muted-color,#667085); margin:.45rem 0 .8rem; overflow-wrap:anywhere; }
   .notice { font-size:.8rem; border:1px solid var(--pico-muted-border-color,#ddd); padding:.5rem; }
-  .error { color:#bd433c; } .node-link { border:0; padding:0; background:none; color:var(--pico-primary,#0066cc); font-size:.8rem; text-align:left; overflow-wrap:anywhere; }
+  .working-notes{border:1px solid var(--pico-muted-border-color,#dbe3ec);border-radius:9px;padding:.6rem .75rem;margin:.9rem 0;background:var(--pico-card-background-color,#fff);}
+  .working-notes h2{font-size:.9rem;margin:0 0 .35rem;} .working-notes summary{font-size:.75rem;}
+  .note-meta{font-size:.7rem;color:var(--pico-muted-color,#667085);margin:.2rem 0 .4rem;}
+  .note-text{white-space:pre-wrap;font-size:.78rem;}
+  .node-link { border:0; padding:0; background:none; color:var(--pico-primary,#0066cc); font-size:.8rem; text-align:left; overflow-wrap:anywhere; }  .error { color:#bd433c; } .node-link { border:0; padding:0; background:none; color:var(--pico-primary,#0066cc); font-size:.8rem; text-align:left; overflow-wrap:anywhere; }
   .run-card { padding:.9rem; margin:.7rem 0; }
   .run-row { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; font-size:.8rem; }
   .run-row p { margin:.35rem 0; } .run-actions { display:flex; gap:.7rem; align-items:center; flex-wrap:wrap; }

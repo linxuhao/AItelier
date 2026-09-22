@@ -81,7 +81,7 @@ def test_read_does_not_initialize_or_mutate_state(system):
 
 
 def test_attempt_ownership_filters_one_project_without_hiding_legacy_globally(system):
-    service=StateService(system.db)
+    service=StateService(system.db, project_read_trusted=True)
     service.create_project('game','Game')
     service.store.add_nodes('game',[{'key':'goal','goal':'Goal','acceptance':[{'id':'test','kind':'test','description':'Acceptance'}]}])
     a=service.attempts.reserve('game','goal',1,'feature','fixture')

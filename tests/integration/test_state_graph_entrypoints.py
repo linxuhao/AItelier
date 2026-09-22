@@ -71,7 +71,8 @@ def live(tmp_path, monkeypatch):
         attached.append((run_id, kwargs))
         return True
     monkeypatch.setattr(mcp_router, "_start_driver", attach)
-    service = StateService(db, ws, sf, registry, attach, actor="test-reviewer")
+    service = StateService(db, ws, sf, registry, attach, actor="test-reviewer",
+                           project_read_trusted=True)
     service.create_project("game", "Long-running game")
     service.store.add_nodes("game", [spec("a"), spec("b", ["a"])])
     yield SimpleNamespace(db=db, ws=ws, sf=sf, registry=registry, service=service,
@@ -670,7 +671,15 @@ def test_missing_or_unseeded_workflow_is_refused_before_attempt_creation(live):
     assert live.sf.list_runs() == []
 
 
-def test_private_state_queries_require_writer_authorization(live, monkeypatch):
+def test_anonymous_reader_sees_the_graph_and_not_the_notebook(live, monkeypatch):
+    """The split this replaces the blanket writer gate with.
+
+    Anonymous reads of the graph/attempts/issues are open — that is the point of
+    building in public — while the driver notebook and the director mailbox stay
+    writer-only, and every write stays refused. The notebook pole is proved with
+    the refusal's own words: a READ request must not be answered "to make
+    changes".
+    """
     from api import authz, state_graph_routers as routes
     app = FastAPI()
     app.include_router(routes.router)
@@ -678,9 +687,17 @@ def test_private_state_queries_require_writer_authorization(live, monkeypatch):
     monkeypatch.setattr(authz, "gate_enabled", lambda: True)
     monkeypatch.setattr(authz.cf_access, "email_from_request_headers", lambda *_: None)
     with TestClient(app) as client:
-        assert client.get("/api/state/projects").status_code == 403
-        assert client.get("/api/state/projects/game").status_code == 403
-        assert client.post("/api/state/query/frontier", json={"project_id": "game"}).status_code == 403
+        assert client.get("/api/state/projects").status_code == 200
+        assert client.get("/api/state/projects/game").status_code == 200
+        assert client.get("/api/state/projects/game/overview").status_code == 200
+        assert client.post("/api/state/query/frontier",
+                           json={"project_id": "game"}).status_code == 200
+        refused = client.get("/api/state/projects/game/driver-note")
+        assert refused.status_code == 403
+        assert "to make changes" not in refused.text
+        assert refused.headers["X-AItelier-Denial"] == authz.READ_DENIED_NOT_AUTHENTICATED
+        assert client.post("/api/state/query/driver_note_index",
+                           json={"project_id": "game"}).status_code == 403
         assert client.post("/api/state/commands/add_nodes", json={"project_id": "game", "nodes": [spec("secret")]}).status_code == 403
     assert len(live.service.store.get_graph("game")["nodes"]) == 2
 
@@ -1041,7 +1058,7 @@ def test_state_inspection_does_not_require_a_working_executor(live):
     def unavailable():
         calls.append(1)
         raise RuntimeError("executor unavailable")
-    service = StateService(live.db, live.ws, runtime_factory=unavailable)
+    service = StateService(live.db, live.ws, runtime_factory=unavailable, project_read_trusted=True)
     assert execute(service, "frontier", {"project_id": "game"})["total"] == 1
     execute(service, "add_nodes", {"project_id": "game", "nodes": [spec("offline-plan")]}, allow_write=True)
     assert calls == []
@@ -1267,7 +1284,7 @@ def test_successor_restores_owner_cursor_and_pending_checkpoint_without_duplicat
     }]
 
     successor = StateService(live.db, live.ws, live.sf, live.registry, live.service.attach_driver,
-                             actor="successor")
+                             actor="successor", project_read_trusted=True)
     recovered = successor.recover_attempt(checkpoint["attempt_id"])
     assert recovered["attempt_id"] == checkpoint["attempt_id"]
     assert recovered["run_id"] == checkpoint["run_id"]

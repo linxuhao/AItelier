@@ -699,6 +699,12 @@ export function stateIssue(projectId: string, issueId: string): Promise<import('
 export function stateAttempts(projectId: string, after = 0): Promise<{attempts: import('./stateGraph').StateAttempt[]; next_after: number | null}> {
   return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/attempts?after=' + after + '&limit=30');
 }
+/** The driver's working notes. NOT public: the server refuses this to a reader
+ *  (`core.state_commands.WRITER_ONLY_READS`), so it is requested only for a
+ *  writer. There is no client-side read of it to hide. */
+export function stateDriverNote(projectId: string): Promise<{ project_id: string; revision: number; updated_at: string; permanent: string; temporary: string }> {
+  return _get('/api/state/projects/' + encodeURIComponent(projectId) + '/driver-note');
+}
 export function stateAttemptDetail(attemptId: string): Promise<import('./stateGraph').AttemptDetail> {
   return _get('/api/state/attempts/' + encodeURIComponent(attemptId) + '/detail');
 }

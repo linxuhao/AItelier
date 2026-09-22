@@ -23,7 +23,8 @@ CHECK_SCRIPT = REPO_ROOT / "scripts" / "check_driver_note_index.py"
 @pytest.fixture
 def service(tmp_path):
     db_path = tmp_path / "state.sqlite"
-    svc = StateService(StateDatabase(str(db_path)), actor="director@example.test")
+    svc = StateService(StateDatabase(str(db_path)), actor="director@example.test",
+                       project_read_trusted=True)
     svc.create_project("aitelier", "AItelier")
     svc.create_project("wuxia-myth", "Wuxia")
     svc.db_path = str(db_path)

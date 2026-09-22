@@ -23,7 +23,8 @@ async def execute_state_driver_tool(agent, name: str, arguments: dict):
         from api.mcp_router import _start_driver
         service = StateService(agent.db, agent.ws, attach_driver=_start_driver,
                                actor=getattr(agent, "owner_email", None) or "authorized-driver",
-                               runtime_factory=lambda: (get_skillflow(), get_config_registry()))
+                               runtime_factory=lambda: (get_skillflow(), get_config_registry()),
+                               project_read_trusted=True)
         return {"result": execute(service, arguments["action"], arguments["arguments"],
                                   allow_write=name == "state_graph_write")}
 

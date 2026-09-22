@@ -4,6 +4,7 @@ import anyio
 
 from core.state_driver_guide import (STATE_DRIVER_GUIDE, STATE_DRIVER_GUIDE_INDEX,
                                      guide_index_addresses)
+from api.authz import may_read_private
 from core.state_commands import describe, execute
 from core.state_graph import StateGraphError
 from core.state_service import StateService
@@ -20,9 +21,13 @@ def register_state_tools(tool, mcp, service_factory=None):
             request = _request_from(mcp.get_context())
         except Exception:
             request = None
+        # The MCP service declares its trust from the SAME raw credential the HTTP
+        # transport uses — never from a default. No request object (stdio/CLI) is a
+        # local operator; an HTTP request inherits the anonymous/reader verdict.
         return StateService(get_db_manager(), get_workspace_manager(), attach_driver=_start_driver,
                             actor=authenticated_actor(request),
-                            runtime_factory=lambda: (get_skillflow(), get_config_registry()))
+                            runtime_factory=lambda: (get_skillflow(), get_config_registry()),
+                            project_read_trusted=may_read_private(request) if request is not None else True)
 
     def invoke(action, arguments, write):
         from mcp.server.fastmcp.exceptions import ToolError as MCPToolError

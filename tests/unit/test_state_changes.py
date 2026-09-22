@@ -13,7 +13,7 @@ from core.state_changes import _waiters
 
 @pytest.fixture
 def service(tmp_path):
-    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")))
+    service = StateService(StateDatabase(str(tmp_path / "state.sqlite")), project_read_trusted=True)
     service.create_project("p", "Project")
     service.store.add_nodes("p", [{"key": "a", "goal": "A", "acceptance": [
         {"id": "check", "kind": "test", "description": "Test"}]}])
@@ -24,7 +24,7 @@ def service(tmp_path):
 async def test_replay_filter_paging_and_timeout(service):
     result = await execute(service, "wait_for_state_change", {"project_id": "p", "limit": 1})
     assert len(result["events"]) == 1 and not result["timed_out"]
-    second = StateService(StateDatabase(service.db.db_path))
+    second = StateService(StateDatabase(service.db.db_path), project_read_trusted=True)
     page = await second.wait_for_state_change("p", after=result["next_after"], timeout_seconds=0)
     assert [e["event_type"] for e in page["events"]] == ["node_created"]
     timed = await second.wait_for_state_change("p", after=page["next_after"], timeout_seconds=.02)

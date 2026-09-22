@@ -277,6 +277,12 @@ app.include_router(repo_router)
 app.include_router(model_router)
 app.include_router(state_graph_router)
 
+# A project-privacy refusal raised at the `execute` chokepoint answers 403 on every
+# route of the product app — including one a route author forges by reusing the real
+# guard and declaring a public action, because such a handler still reaches `execute`.
+from api.state_http import apply_project_privacy
+apply_project_privacy(app)
+
 # When running in Docker (and fronted by Cloudflare Access), requests arrive
 # from the Docker bridge gateway / the tunnel — never 127.0.0.1 — so the
 # localhost guard is disabled via AITELIER_ALLOW_EXTERNAL=1. Auth is then
@@ -381,15 +387,35 @@ async def write_gate(request: Request, call_next):
     # this check for every tool declared `write`. Do not remove one half.
     if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
         return await call_next(request)
-    code = authz.write_denial_reason(request)
-    if not code:
-        return await call_next(request)
+    # `/api/state` has the same property as `/mcp`: one path family carries BOTH
+    # classes. `POST /api/state/query/{action}` serves the public reads and the
+    # private ones, and the METHOD cannot tell them apart — gate it and the
+    # public graph breaks for every anonymous visitor, exempt it and the
+    # commands open. `GET /api/state/...` never reached this middleware at all
+    # (the safe-method return above), so gating it here never even covered the
+    # reads this change opens. The verdict therefore moves to the route:
+    # api/state_http declares, on EACH route, the action it serves, and ONE
+    # router-wide guard derives the class from core.state_commands.read_visibility
+    # (which fails CLOSED). A route that declares nothing is REFUSED — there is
+    # no dependency to remember and none to forget. Those two halves only make
+    # sense together. Do not remove one half.    # sense together. Do not remove one half.
+    #
+    # The director-messaging path keeps its closed v2 envelope here: that
+    # envelope IS this middleware's contract with the adapter, so it is
+    # answered before the exemption, not after it.
     state_action = request.url.path.rsplit("/", 1)[-1]
     if request.url.path.startswith("/api/state/") and state_action in {
             "send_director_message", "list_director_messages",
             "acknowledge_director_message", "resolve_director_message"}:
-        from core.director_messaging_protocol import DirectorMessageError
-        return JSONResponse(DirectorMessageError("unauthorized").as_dict(), status_code=403)
+        if authz.write_denial_reason(request):
+            from core.director_messaging_protocol import DirectorMessageError
+            return JSONResponse(DirectorMessageError("unauthorized").as_dict(), status_code=403)
+        return await call_next(request)
+    if request.url.path == "/api/state" or request.url.path.startswith("/api/state/"):
+        return await call_next(request)
+    code = authz.write_denial_reason(request)
+    if not code:
+        return await call_next(request)
     return JSONResponse(authz.denial_body(code), status_code=403)
 
 

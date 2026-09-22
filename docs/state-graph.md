@@ -399,19 +399,55 @@ incremental audit view, not a full transcript dump.
 
 ## REST and SDK
 
-All `/api/state` routes use the existing writer authorization dependency,
-including GETs. MCP's external token is not automatically a REST admin token;
-use the host's supported authenticated channel for each transport.
+Reads of the State DAG are PUBLIC: an anonymous visitor may read the graph, the
+nodes, the acceptance criteria, attempts, evidence, issues, design records and
+the frontier. Two read families stay writer-only — the driver notebooks
+(`get_driver_note`, `driver_note_history`, `search_driver_note_history`,
+`get_driver_note_entry`, `check_driver_note_index`, `driver_note_index`) and the
+director mailbox (`list_director_messages`) — plus the driver guide and the
+event/long-poll plumbing.
+
+The classification is ONE table, `core.state_commands.PUBLIC_READS`, and the
+default is DENY: a read action that is not listed is private, INCLUDING one added
+later. `api/state_http` declares, ON EACH ROUTE, the action that route serves, and
+ONE router-wide guard derives the class from that table (a read of a private
+action is refused with a read-worded 403 before its body is parsed). There is no
+per-route dependency to attach and none to forget: a route that declares nothing
+— including one added later — is REFUSED. Writes still require the writer verdict
+on `/commands/{action}`. MCP's external token is not automatically a REST admin
+token; use the host's supported authenticated channel for each transport.token; use the host's supported authenticated channel for each transport.
 
 ```text
-GET  /api/state/schema
-GET  /api/state/projects
-GET  /api/state/projects/{project_id}
-GET  /api/state/projects/{project_id}/frontier?limit=30
-GET  /api/state/attempts/{attempt_id}
+GET  /api/state/schema                                                 writer-only
+GET  /api/state/projects                                               public
+GET  /api/state/projects/{project_id}                                  public
+GET  /api/state/projects/{project_id}/frontier?limit=30                public
+GET  /api/state/projects/{project_id}/overview                         public
+GET  /api/state/projects/{project_id}/run-summary                      public
+GET  /api/state/projects/{project_id}/nodes/{node_key}                 public
+GET  /api/state/projects/{project_id}/attempts                         public
+GET  /api/state/projects/{project_id}/references                       public
+GET  /api/state/projects/{project_id}/issues                           public
+GET  /api/state/projects/{project_id}/issues/{issue_id}                 public
+GET  /api/state/attempts/{attempt_id}                                  public
+GET  /api/state/attempts/{attempt_id}/detail                           public
+GET  /api/state/runs/{run_id}/owners                                   public
+GET  /api/state/projects/{project_id}/driver-note                      writer-only
+GET  /api/state/projects/{project_id}/driver-note/history              writer-only
+GET  /api/state/projects/{project_id}/driver-note/history/search       writer-only
 POST /api/state/query/{read_action}       JSON body = arguments only
 POST /api/state/commands/{write_action}   JSON body = arguments only
 ```
+
+Seventeen GET routes and thirty-six POST read actions carry the same secret, so
+the anonymous verdict has to be enumerated over BOTH shapes. The enumeration is
+`tests/unit/test_state_read_visibility.py::TestExhaustiveDoors`, which probes
+every action and every GET route read from the mounted app's own OpenAPI
+document. It judges by 403 / non-403 rather than 200: a 403 is the door
+refusing, and any other code (404, 409, 422) means the request reached the
+handler. A route added later is probed by the same loop, so an unclassified
+private door surfaces as an unexpected 403 rather than passing unnoticed.
+
 
 The shared Python implementation is `StateGraphStore`, `StateAttempts`, and
 `StateService` in `core/state_*.py`. Libraries require explicit DB objects;

@@ -4,7 +4,7 @@ import { authStore } from '../../stores/auth';
 import { langStore } from '../../stores/i18n';
 import { overview,detail } from '../fixtures/stateProject';
 import { runSummary } from '../fixtures/stateProject';
-const api=vi.hoisted(()=>({stateProjects:vi.fn(),stateOverview:vi.fn(), stateRunSummary:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
+const api=vi.hoisted(()=>({stateProjects:vi.fn(),stateOverview:vi.fn(), stateRunSummary:vi.fn(),stateNode:vi.fn(),stateAttempts:vi.fn(),stateDriverNote:vi.fn(),stateRefreshProject:vi.fn(),stateAttemptDetail:vi.fn(),
   runHistory:vi.fn(),listPipelines:vi.fn(),pipelineGraph:vi.fn(),pipelineStateFile:vi.fn(),getTrace:vi.fn(),setUserLang:vi.fn(),
   listRepos:vi.fn(),listAllRuns:vi.fn(),createProject:vi.fn(),deleteProject:vi.fn()}));
 vi.mock('../../lib/api',()=>api);
@@ -25,6 +25,7 @@ beforeEach(()=>{
   api.stateOverview.mockImplementation(async(id:string)=>({...overview(),project:{...overview().project,project_id:id,title:id==='game'?'武虾传奇':id}}));
   api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));
   api.stateNode.mockImplementation(async(_p,k)=>detail(k));api.stateAttempts.mockResolvedValue({attempts:[],next_after:null});
+  api.stateDriverNote.mockResolvedValue({project_id:'game',revision:1,updated_at:'2026-09-21T00:00:00Z',permanent:'P',temporary:'T'});
   api.runHistory.mockResolvedValue({runs:[run()],total:1,next_offset:null});
   api.listPipelines.mockResolvedValue({pipelines:[{config_name:'gen_report',label:'Generated report',origin:'generated',step_count:1,state_files:[{name:'notes.md',size:20}]}]});
   api.pipelineGraph.mockResolvedValue({begin:'work',steps:[{id:'work',type:'agent',transitions:[]}]});
@@ -51,12 +52,15 @@ describe('Project-first homepage',()=>{
     await waitFor(()=>expect(api.stateOverview).toHaveBeenCalledWith('game'));
     expect(api.stateOverview).not.toHaveBeenCalledWith('someone-elses-project');
   });
-  it('is private while signed out and erases previously loaded goals after signout',async()=>{
+  it('shows a signed-out reader the dashboard and re-reads it after signout',async()=>{
+    // The project catalog is a public read; being unable to WRITE never was
+    // being unable to read. Signing out still cancels the old identity's view
+    // and re-reads under the new one.
     const view=render(ProjectDashboard);await view.findByRole('heading',{name:'武虾传奇'});
     authStore.set({canWrite:false,permissionResolved:true,email:null});
-    await view.findByText(/Project state is private/);
-    expect(view.container.querySelectorAll('g.goal')).toHaveLength(0);
-    expect(api.stateProjects).toHaveBeenCalledTimes(1);
+    await waitFor(()=>expect(api.stateProjects).toHaveBeenCalledTimes(2));
+    await view.findByRole('heading',{name:'武虾传奇'});
+    expect(view.queryByText(/Project state is private/)).toBeNull();
   });
   it('handles no projects and a failed fetch without pretending either is a loaded graph',async()=>{
     api.stateProjects.mockRejectedValueOnce(new Error('catalog unavailable'));
@@ -64,9 +68,9 @@ describe('Project-first homepage',()=>{
     api.stateProjects.mockResolvedValue({projects:[],next_after:null});await fireEvent.click(view.getByText('Retry'));
     await view.findByText(/No state projects yet/);expect(view.container.querySelectorAll('g.goal')).toHaveLength(0);
   });
-  it('rejects late results from a previous signed-in identity',async()=>{
+  it('rejects late results once permission is unresolved',async()=>{
     let resolve:(r:any)=>void=()=>{};api.stateProjects.mockReturnValueOnce(new Promise(r=>resolve=r));
-    const view=render(ProjectDashboard);authStore.set({canWrite:false,permissionResolved:true,email:null});
+    const view=render(ProjectDashboard);authStore.set({canWrite:false,permissionResolved:false,email:null});
     await view.findByText(/Project state is private/);resolve({projects:[row('private-old')],next_after:null});
     await Promise.resolve();expect(api.stateOverview).not.toHaveBeenCalled();
   });

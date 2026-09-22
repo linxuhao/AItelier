@@ -14,7 +14,8 @@ CRIT = [{"id": "c1", "kind": "test", "description": "works"}]
 
 @pytest.fixture
 def svc(tmp_path):
-    s = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor="alice@example.test")
+    s = StateService(StateDatabase(str(tmp_path / "state.sqlite")), actor="alice@example.test",
+                     project_read_trusted=True)
     s.create_project("p", "P")
     s.create_project("q", "Q")
     s.store.add_nodes("p", [{"key": "a", "goal": "A", "acceptance": CRIT}])

@@ -170,11 +170,10 @@ describe('State graph run summary',()=>{
     expect(view.container.querySelectorAll('a')).toHaveLength(0);
     expect(view.container.querySelector('[data-metric="total"] dd')?.textContent).toBe('—');
   });
-  it('does not fetch private summaries anonymously and erases on logout',async()=>{
+  it('fetches the public summary for a reader and erases when permission is unresolved',async()=>{
     authStore.set({canWrite:false,permissionResolved:true,email:null});const view=render(StateRunSummary,{projectId:'game'});
-    await Promise.resolve();expect(api.stateRunSummary).not.toHaveBeenCalled();
-    authStore.set({canWrite:true,permissionResolved:true,email:'owner@test'});await view.findByText('feature_delivery');
-    authStore.set({canWrite:false,permissionResolved:true,email:null});
+    await view.findByText('feature_delivery');
+    authStore.set({canWrite:false,permissionResolved:false,email:null});
     await waitFor(()=>expect(view.container.querySelector('section')).toBeNull());
   });
   it('ignores a slow response from a previously selected project',async()=>{

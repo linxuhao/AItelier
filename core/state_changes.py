@@ -224,7 +224,7 @@ def reconcile_workflow_project(db, ws, sf, project_id):
         return []
     from core.state_service import StateService
     # Reconciliation needs no workflow registry: the attempt pins its contract.
-    service = StateService(db, ws, sf, registry={})
+    service = StateService(db, ws, sf, registry={}, project_read_trusted=True)
     results = []
     for aid in ids:
         try:

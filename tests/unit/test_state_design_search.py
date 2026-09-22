@@ -29,7 +29,8 @@ def baseline(s, ids, name='b1', previous=None):
 
 @pytest.fixture
 def service(tmp_path):
-    s=StateService(StateDatabase(str(tmp_path/'state.sqlite')), actor='test-author')
+    s=StateService(StateDatabase(str(tmp_path/'state.sqlite')), actor='test-author',
+                   project_read_trusted=True)
     s.create_project('game','Game')
     return s
 

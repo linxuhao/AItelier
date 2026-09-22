@@ -280,6 +280,12 @@ CREATE TRIGGER IF NOT EXISTS state_revisions_no_update BEFORE UPDATE ON state_no
 BEGIN SELECT RAISE(ABORT,'state revisions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS state_revisions_no_delete BEFORE DELETE ON state_node_revisions
 BEGIN SELECT RAISE(ABORT,'state revisions are append-only'); END;
+CREATE TABLE IF NOT EXISTS state_project_access (
+    project_id TEXT PRIMARY KEY,
+    visibility TEXT NOT NULL CHECK(visibility IN ('private','public')),
+    opened_by TEXT, opened_at TEXT, changed_by TEXT NOT NULL, changed_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES state_projects(project_id)
+);
 """
 
 
@@ -365,13 +371,103 @@ class StateGraphStore:
             self._event(conn, project_id, None, "project_created", {"title": title, "source_project_id": source_project_id})
             return self._project(conn, project_id)
 
-    def list_projects(self) -> list[dict]:
+    def list_projects(self, public_only: bool = False) -> list[dict]:
+        """With `public_only`, visibility is part of the SQL itself: the rows an
+        anonymous caller must not know about are excluded BEFORE any caller pages
+        or counts, so a page's size, cursor and emptiness are byte-identical
+        whether or not private projects exist in this database."""
+        where = ("WHERE EXISTS(SELECT 1 FROM state_project_access a "
+                 "WHERE a.project_id=p.project_id AND a.visibility='public')") if public_only else ""
         with self.transaction() as conn:
-            return [dict(r) for r in conn.execute("SELECT * FROM state_projects ORDER BY project_id")]
+            return [dict(r) for r in conn.execute(
+                f"SELECT * FROM state_projects p {where} ORDER BY p.project_id")]
 
     def get_project(self, project_id: str) -> dict:
         with self.transaction() as conn:
             return self._project(conn, project_id)
+
+    def get_project_access(self, project_id: str) -> dict:
+        """Current visibility and the record of who changed it and when.
+
+        Private is the DEFAULT, expressed as the ABSENCE of a row — not a value
+        somebody must remember to write and not a list of ids in a config file.
+        The mechanism decides, so a project created a minute ago is private the
+        instant it exists, and `list_projects`/aggregates can ask this to filter.
+        """
+        with self.transaction() as conn:
+            self._project(conn, project_id)
+            return self._access(conn, project_id)
+
+    @staticmethod
+    def _access(conn, project_id) -> dict:
+        row = conn.execute("SELECT * FROM state_project_access WHERE project_id=?",
+                           (key(project_id),)).fetchone()
+        if row is None:
+            return {"project_id": key(project_id), "visibility": "private",
+                    "opened_by": None, "opened_at": None,
+                    "changed_by": None, "changed_at": None}
+        return dict(row)
+
+    @staticmethod
+    def _visibility(conn, project_id) -> str:
+        row = conn.execute("SELECT visibility FROM state_project_access WHERE project_id=?",
+                           (key(project_id),)).fetchone()
+        return row["visibility"] if row else "private"
+
+    def is_project_public(self, project_id: str) -> bool:
+        with self.transaction() as conn:
+            return self._visibility(conn, project_id) == "public"
+
+    def public_project_ids(self) -> set:
+        """The set of explicitly-opened projects. No row means private."""
+        with self.transaction() as conn:
+            return {r["project_id"] for r in conn.execute(
+                "SELECT project_id FROM state_project_access WHERE visibility='public'")}
+
+    def set_project_access(self, project_id: str, visibility: str, actor: str) -> dict:
+        """The ONLY writer of the visibility table, so no other action can open a
+        project as a side effect. Recording who and when makes it a decision,
+        not a flag; closing is the same kind of recorded write."""
+        if visibility not in {"private", "public"}:
+            raise StateGraphError("visibility must be 'private' or 'public'")
+        pid = key(project_id)
+        stamp = now()
+        with self.transaction(write=True) as conn:
+            self._project(conn, pid)
+            row = conn.execute("SELECT * FROM state_project_access WHERE project_id=?",
+                               (pid,)).fetchone()
+            opened_by = row["opened_by"] if row else None
+            opened_at = row["opened_at"] if row else None
+            if visibility == "public" and (row is None or row["visibility"] != "public"):
+                opened_by, opened_at = actor, stamp
+            conn.execute(
+                "INSERT INTO state_project_access(project_id,visibility,opened_by,opened_at,"
+                "changed_by,changed_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(project_id) DO UPDATE SET visibility=excluded.visibility,"
+                "opened_by=excluded.opened_by,opened_at=excluded.opened_at,"
+                "changed_by=excluded.changed_by,changed_at=excluded.changed_at",
+                (pid, visibility, opened_by, opened_at, actor, stamp))
+            self._event(conn, pid, None,
+                        "project_opened" if visibility == "public" else "project_closed",
+                        {"visibility": visibility, "actor": actor})
+            return self._access(conn, pid)
+
+    def project_for_attempt(self, attempt_id: str):
+        with self.transaction() as conn:
+            row = conn.execute("SELECT project_id FROM state_attempts WHERE attempt_id=?",
+                               (key(attempt_id),)).fetchone()
+        return row["project_id"] if row else None
+
+    def projects_for_run(self, run_id: str) -> set:
+        rid = key(run_id)
+        with self.transaction() as conn:
+            ids = {r["project_id"] for r in conn.execute(
+                "SELECT project_id FROM state_attempts WHERE run_id=?", (rid,))}
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='state_history_links'").fetchone():
+                ids |= {r["project_id"] for r in conn.execute(
+                    "SELECT project_id FROM state_history_links WHERE kind='run' AND ref=?", (rid,))}
+        return ids
 
     def _add(self, conn, project_id, specs):
         self._project(conn, project_id)

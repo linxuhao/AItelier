@@ -47,7 +47,8 @@ class _BearerAuth:
 def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
     if not isinstance(token,str) or len(token.encode('utf-8'))<32 or '\n' in token or '\r' in token:
         raise ValueError('Set a dedicated State-only bearer token of at least 32 bytes')
-    service = StateService(StateDatabase(db_path), actor='authenticated-state-token')
+    service = StateService(StateDatabase(db_path), actor='authenticated-state-token',
+                           project_read_trusted=True)
     mcp = None
     if with_mcp:
         from mcp.server.fastmcp import FastMCP
@@ -76,11 +77,20 @@ def create_app(db_path: str, token: str, *, with_mcp: bool = True) -> FastAPI:
     app.add_middleware(_BearerAuth,token=token)
     app.state.state_service = service
     app.state.mode = 'state-only'
-    def access():
+    def access(request=None):
         # The outer middleware also protects discovery and OpenAPI. This is the
         # same route factory as the full host, without its runtime dependencies.
+        #
+        # `request` is accepted because the router's PRIVATE-READ verdict is
+        # called with the Request — it is a real authorization dependency in the
+        # host, and a no-argument stub would raise instead of returning a verdict.
+        # This deployment decides before either verdict runs: the ASGI bearer
+        # middleware refuses every request that lacks the dedicated token, reads
+        # and writes alike, so nothing reaches these routes unauthenticated.
         return None
-    app.include_router(create_state_router(lambda:service,access))
+    app.include_router(create_state_router(lambda:service,access,access))
+    from api.state_http import apply_project_privacy
+    apply_project_privacy(app)
 
     @app.get('/health')
     def health():

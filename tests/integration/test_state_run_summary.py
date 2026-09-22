@@ -27,7 +27,7 @@ def system(tmp_path,monkeypatch):
     monkeypatch.setenv('AITELIER_HOME',str(tmp_path/'home'))
     sf=SkillFlow(str(tmp_path/'engine.sqlite'))
     sf.register_graph(PipelineGraph(name='feature',begin='work',steps=[StepNode(id='work')]))
-    db=DBManager(str(tmp_path/'host.sqlite'));service=StateService(db,sf=sf)
+    db=DBManager(str(tmp_path/'host.sqlite'));service=StateService(db,sf=sf,project_read_trusted=True)
     service.create_project('game','Game');service.create_project('other','Other')
     service.store.add_nodes('game',[spec('a'),spec('b')]);service.store.add_nodes('other',[spec('other')])
     yield SimpleNamespace(sf=sf,db=db,s=service,tmp=tmp_path)
@@ -132,7 +132,8 @@ def test_projection_reads_actual_status_not_stale_attempt_state_and_never_reconc
 
 def test_external_only_state_does_not_initialize_optional_executor(tmp_path):
     def forbidden():raise AssertionError('No runtime should be initialized for an external-only project')
-    service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=forbidden)
+    service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=forbidden,
+                         project_read_trusted=True)
     service.create_project('game','Game');service.store.add_nodes('game',[spec('a')])
     service.start_external_attempt('game','a',1,'own-harness','job','req')
     out=service.project_run_summary('game')
@@ -147,7 +148,8 @@ def test_external_only_state_does_not_initialize_optional_executor(tmp_path):
 def test_active_external_agents_are_listed_from_their_own_last_report(tmp_path):
     """A held task with no run at all must still be visible, as reported."""
     def forbidden():raise AssertionError('Listing external agents must not initialize a runtime')
-    service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=forbidden,actor='director@example')
+    service=StateService(StateDatabase(str(tmp_path/'bare.sqlite')),runtime_factory=forbidden,actor='director@example',
+                         project_read_trusted=True)
     service.create_project('game','Game')
     service.store.add_nodes('game',[spec('a'),spec('b'),spec('c')])
     silent=service.start_external_attempt('game','a',1,'own-harness','job-a','req-a')
@@ -185,7 +187,7 @@ def test_missing_run_or_unavailable_runtime_is_not_finished_failed_or_zero_activ
     out=system.s.project_run_summary('game')
     assert out['counts']['total']==out['counts']['unavailable']==1
     assert out['counts']['finished']==out['counts']['failed']==0
-    offline=StateService(system.db)
+    offline=StateService(system.db, project_read_trusted=True)
     out=offline.project_run_summary('game')
     assert out['runtime_unavailable'] is True and out['counts']['unavailable']==1
     assert out['usage']['total_tokens'] is None
@@ -232,7 +234,7 @@ def test_usage_queries_follow_per_execution_trace_database(tmp_path,monkeypatch)
     monkeypatch.setenv('AITELIER_HOME',str(tmp_path/'home'))
     sf=SkillFlow(str(tmp_path/'engine.sqlite'),trace_db_path=str(tmp_path/'traces'))
     sf.register_graph(PipelineGraph(name='feature',begin='work',steps=[StepNode(id='work')]))
-    service=StateService(DBManager(str(tmp_path/'host.sqlite')),sf=sf)
+    service=StateService(DBManager(str(tmp_path/'host.sqlite')),sf=sf,project_read_trusted=True)
     service.create_project('game','Game');service.store.add_nodes('game',[spec('a')])
     rid=sf.create_run('feature',project_id='per-project');sf.start_run(rid)
     service.portfolio.add_reference('game','a','ref','run',rid,'Actual relation','fixture',protect=False)
@@ -254,12 +256,20 @@ def test_invalid_json_trace_does_not_remove_valid_usage(system):
     assert result['usage_turns']==2 and result['partial'] is True
 
 
-def test_full_host_summary_keeps_writer_authorization(system,monkeypatch):
+def test_full_host_summary_is_a_public_read_while_notes_and_writes_stay_closed(system,monkeypatch):
+    """The run summary is project progress, so an anonymous reader may see it.
+
+    It used to be writer-only because the whole router carried `require_writer`.
+    What must NOT move: the notebook reads and every write.
+    """
     from api import authz
     from api.state_graph_routers import router,get_service
     app=FastAPI();app.include_router(router);app.dependency_overrides[get_service]=lambda:system.s
     monkeypatch.setattr(authz,'gate_enabled',lambda:True)
     monkeypatch.setattr(authz.cf_access,'email_from_request_headers',lambda *_:None)
     with TestClient(app) as c:
-        assert c.get('/api/state/projects/game/run-summary').status_code==403
-        assert c.post('/api/state/query/project_run_summary',json={'project_id':'game'}).status_code==403
+        assert c.get('/api/state/projects/game/run-summary').status_code==200
+        assert c.post('/api/state/query/project_run_summary',json={'project_id':'game'}).status_code==200
+        assert c.get('/api/state/projects/game/driver-note').status_code==403
+        assert c.post('/api/state/query/driver_note_index',json={'project_id':'game'}).status_code==403
+        assert c.post('/api/state/commands/refresh_project',json={'project_id':'game'}).status_code==403

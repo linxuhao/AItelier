@@ -90,7 +90,8 @@ config graph because it is a config view, not a historical run view.
 
 ## Private project projection APIs
 
-All `/api/state` reads and commands retain writer authorization. These extra
+Writes and the driver notebooks retain writer authorization; the graph reads
+are public (see `docs/state-graph.md` for the classification). These extra
 queries are available through the same typed `state_graph_help/read/write`
 contracts used by MCP and the internal Driver:
 

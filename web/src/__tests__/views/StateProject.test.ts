@@ -6,6 +6,7 @@ import { overview, detail, attempt, goal } from '../fixtures/stateProject';
 import { runSummary } from '../fixtures/stateProject';
 
 const api = vi.hoisted(() => ({ stateOverview: vi.fn(), stateRunSummary:vi.fn(), stateNode: vi.fn(), stateAttempts: vi.fn(),
+  stateDriverNote: vi.fn(),
   stateRefreshProject: vi.fn(), stateAttemptDetail: vi.fn(), stateProjects: vi.fn(), stateRunOwners: vi.fn(),
   getRunDetail: vi.fn(), pipelineGraph: vi.fn(), runWorkflowGraph: vi.fn(), getTrace: vi.fn(), setUserLang: vi.fn() }));
 vi.mock('../../lib/api', () => api);
@@ -24,6 +25,7 @@ beforeEach(() => {
   api.stateRunSummary.mockImplementation(async(id:string)=>({...runSummary(),project_id:id}));
   api.stateNode.mockImplementation(async (_p,key) => detail(key));
   api.stateAttempts.mockResolvedValue({attempts:[attempt()], next_after:null});
+  api.stateDriverNote.mockResolvedValue({project_id:'game',revision:4,updated_at:'2026-09-21T00:00:00Z',permanent:'Permanent note',temporary:'Temporary note'});
   api.stateAttemptDetail.mockResolvedValue({attempt: {...attempt(), context:{}}, evidence:[], receipts:[], evidence_truncated:false});
   api.stateProjects.mockResolvedValue({projects:[], next_after:null});
   api.stateRunOwners.mockResolvedValue({links:[]});
@@ -59,12 +61,27 @@ describe('State graph component', () => {
 });
 
 describe('Long-lived project pages', () => {
-  it('never fetches private data for a reader', async () => {
+  it('a reader sees the graph while the working notes stay private', async () => {
+    // Reads of the graph are public; the notes are not. "May I write?" used to
+    // decide "may I read?", which is why a reader saw nothing but the notice.
     authStore.set({canWrite:false, permissionResolved:true, email:null});
     const view=render(StateProject,{params:{id:'game'}});
-    expect(view.getByText(/Project state is private/)).toBeTruthy();
+    await view.findByRole('heading',{name:'武虾传奇'});
+    expect(view.container.querySelectorAll('g.goal')).toHaveLength(2);
+    expect(view.container.textContent).not.toContain('Project state is private');
+    expect(view.getByText(/driver notes are private/)).toBeTruthy();
     await new Promise(r=>setTimeout(r,0));
-    expect(api.stateOverview).not.toHaveBeenCalled(); expect(api.stateNode).not.toHaveBeenCalled();
+    expect(api.stateOverview).toHaveBeenCalled();
+    // The notes are not requested and then hidden — a server refusal is the
+    // only refusal, so the request is never made.
+    expect(api.stateDriverNote).not.toHaveBeenCalled();
+  });
+  it('shows the notice only when the read itself is refused', async () => {
+    const forbidden=Object.assign(new Error('gateway refused'),{status:403});
+    api.stateOverview.mockRejectedValueOnce(forbidden);
+    const view=render(StateProject,{params:{id:'game'}});
+    await view.findByText(/Project state is private/);
+    expect(view.container.querySelectorAll('g.goal')).toHaveLength(0);
   });
   it('shows project hold and candidate without granting verified status', async () => {
     const view=render(StateProject,{params:{id:'game'}});
@@ -139,10 +156,10 @@ describe('Long-lived project pages', () => {
     await fireEvent.click(view.getByRole('button',{name:'Retry'}));
     await view.findByRole('heading',{name:'武虾传奇'});
   });
-  it('clears private content when access is revoked', async () => {
+  it('clears private content when the session stops being resolved', async () => {
     const view=render(StateProject,{params:{id:'game'}});
     await view.findByRole('heading',{name:'武虾传奇'});
-    authStore.set({canWrite:false, permissionResolved:true, email:null});
+    authStore.set({canWrite:false, permissionResolved:false, email:null});
     await waitFor(()=>expect(view.queryByRole('heading',{name:'武虾传奇'})).toBeNull());
     expect(view.container.querySelector('.node-panel')).toBeNull();
   });

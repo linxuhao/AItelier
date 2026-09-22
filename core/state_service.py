@@ -48,8 +48,25 @@ def state_seed_text(context: dict, dependency_receipts, relay: bool) -> str:
     return seed
 
 
+_UNDECLARED_TRUST = object()
+
+
 class StateService:
-    def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator", runtime_factory=None):
+    def __init__(self, db, ws=None, sf=None, registry=None, attach_driver=None, actor="local-operator",
+                 runtime_factory=None, project_read_trusted=_UNDECLARED_TRUST):
+        # Whether the caller behind THIS service may read a project nobody opened.
+        # The State HTTP transport derives it from the raw request credential; the
+        # internal driver, MCP and every embedder pass it EXPLICITLY. There is no
+        # default on purpose: a service whose trust level was never declared fails
+        # right here at construction, because "forgot to mark" must never be a
+        # synonym for "trusted" — a route author who writes
+        # `StateService(get_db_manager(), get_workspace_manager())` gets a
+        # TypeError, not an anonymous reader of private driver notes.
+        if project_read_trusted is _UNDECLARED_TRUST or not isinstance(project_read_trusted, bool):
+            raise TypeError(
+                "StateService requires an explicit project_read_trusted=True|False: "
+                "a service that never declared its trust level must not come into existence")
+        self.project_read_trusted = project_read_trusted
         self.db, self.ws, self.sf, self.registry = db, ws, sf, registry
         self.store = StateGraphStore(db)
         from core.state_driver_notes import StateDriverNotes
@@ -65,7 +82,7 @@ class StateService:
         self.design = StateDesign(self.store, actor)
         self.runtime_factory = runtime_factory
         from core.state_portfolio import StatePortfolio
-        self.portfolio = StatePortfolio(self.store, actor)
+        self.portfolio = StatePortfolio(self.store, actor, service=self)
         from core.director_messaging import SQLiteDirectorMessaging
         self.director_messages = SQLiteDirectorMessaging(self.store, actor)
 
@@ -81,6 +98,29 @@ class StateService:
         if source_project_id and not self.db.get_project(source_project_id):
             raise StateGraphError("source_project_id must name an existing AItelier source project")
         return self.store.create_project(project_id, title, source_project_id)
+
+    def list_projects(self):
+        """Cross-project listing. A caller that did not declare itself trusted to
+        read private records gets ONLY opened projects — and the filtering happens
+        INSIDE the SQL, before any pagination, so the shape of a page (its size,
+        its cursor, whether it is empty) carries no information about projects
+        this caller is not allowed to know exist."""
+        return self.store.list_projects(public_only=not self.project_read_trusted)
+
+    def open_project(self, project_id):
+        """The recorded, writer-only decision to publish a project to anonymous
+        readers. Opening happens HERE and nowhere else — no other write path
+        reaches it, so creating a project, running a round, verifying a node or
+        importing never opens it. It reads back state/who/when and reverses."""
+        return self.store.set_project_access(project_id, "public", self.actor)
+
+    def close_project(self, project_id):
+        """The recorded decision to withdraw a project from anonymous readers."""
+        return self.store.set_project_access(project_id, "private", self.actor)
+
+    def project_visibility(self, project_id):
+        """Read back the privacy record: current state, who changed it, when."""
+        return self.store.get_project_access(project_id)
 
     def project_run_summary(self, project_id):
         from core.state_run_summary import project_run_summary

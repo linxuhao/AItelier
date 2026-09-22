@@ -35,7 +35,8 @@ def fixture(root):
     registry = ConfigRegistry()
     sf.register_graph(PipelineGraph(name='browser_feature', begin='historical_impl', steps=[StepNode(id='historical_impl')]))
     registry.register_one(sf, 'browser_feature', hint_overrides={'repo_mode':'none','seed_file':'plan.md','output_step':'historical_impl'})
-    service = StateService(db, ws, sf, registry, actor='browser-fixture-verifier')
+    service = StateService(db, ws, sf, registry, actor='browser-fixture-verifier',
+                           project_read_trusted=True)
     service.create_project('shrimp-preview', '武虾传奇 · Migration preview')
     seeds = [
         ('design.phases','两阶段规则与成长契约',[]),
@@ -86,7 +87,7 @@ def main():
         from fastapi.responses import FileResponse,Response
         from fastapi.staticfiles import StaticFiles
         from api.state_graph_routers import router,get_service
-        from api.authz import require_writer
+        from api.authz import require_reader, require_writer
         from core.run_graph_view import pinned_run_graph,RunGraphUnavailable
         import uvicorn
         from playwright.sync_api import sync_playwright,expect
@@ -99,6 +100,13 @@ def main():
         def writer(request:Request):
             if request.cookies.get('fixture-auth')!='writer':raise HTTPException(403,'private project state')
         app.dependency_overrides[require_writer]=writer
+        # The router carries TWO authorization dependencies now: `require_writer`
+        # on the commands and `require_reader` on the reads that stayed private
+        # (the driver notes). Public reads carry none, so they are served
+        # anonymously — which is the behaviour this smoke test asserts below.
+        # Both fixture verdicts are the same writer cookie, mirroring the host,
+        # where one identity check answers both questions.
+        app.dependency_overrides[require_reader]=writer
         requests=[]
         @app.middleware('http')
         async def capture(request,call_next):
@@ -233,16 +241,25 @@ def main():
                 checks.append('server failure displayed as failure, not an empty successful graph')
                 page.unroute('**/api/state/projects/shrimp-preview/overview')
                 anonymous=browser.new_context(viewport={'width':900,'height':700});anon=anonymous.new_page()
-                anon.goto(base+'/#/state-projects/shrimp-preview');expect(anon.get_by_text('Project state is private.',exact=False)).to_be_visible()
-                assert anon.locator('g.goal').count()==0
-                assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/overview').status==403
-                checks.append('anonymous UI has no goals and direct private API denies access')
+                # A visitor with NO credential reads the graph — the whole point
+                # of building in public — while the driver notes stay private and
+                # are refused by the API, not hidden by the page.
+                anon.goto(base+'/#/state-projects/shrimp-preview');expect(anon.locator('g.goal')).to_have_count(8)
+                expect(anon.get_by_text('Working notes (writers only)')).to_be_visible()
+                expect(anon.get_by_text('The driver notes are private; sign in with writer access to read them.')).to_be_visible()
+                assert anon.get_by_text('Project state is private.',exact=False).count()==0
+                assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/overview').status==200
+                assert anonymous.request.get(base+'/api/state/projects/shrimp-preview/driver-note').status==403
+                assert anonymous.request.post(base+'/api/state/query/get_driver_note',
+                    data={'project_id':'shrimp-preview'}).status==403
+                checks.append('anonymous reader sees the public graph; the writer-only notes are refused by the API')
                 # A real external attempt in the isolated API has no workflow.
                 # The test harness, not AItelier, runs and waits for its checker.
                 import subprocess, hashlib
                 from core.state_database import StateDatabase
                 from core.state_service import StateService
-                own=StateService(StateDatabase(str(root/'external-only.sqlite')),actor='browser-external-verifier')
+                own=StateService(StateDatabase(str(root/'external-only.sqlite')),actor='browser-external-verifier',
+                                 project_read_trusted=True)
                 own.create_project('external-only','External harness project')
                 own.store.add_nodes('external-only',[{'key':'external.goal','goal':'外部 harness 验证目标',
                     'acceptance':[{'id':'actual-test','kind':'test','description':'Actual Python assertion passes'}]}])

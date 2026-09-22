@@ -434,7 +434,8 @@ async def test_wait_recovers_missed_workflow_projection(system, tmp_path):
     rid = launch(system, a)
     cursor = store.events("game")[-1]["seq"]
     sf.pause_run(rid)
-    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {})
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {},
+                           project_read_trusted=True)
     result = await service.wait_for_state_change("game", after=cursor, timeout_seconds=2)
     assert result["events"][-1]["payload"]["status"] == "paused"
     assert attempts.get(a["attempt_id"])["status"] == "paused"
@@ -477,7 +478,8 @@ async def test_director_wait_refreshes_stored_paused_before_disposition(system, 
         sf.advance_run(rid)
         assert sf.get_run(rid)["status"] == "completed"
     assert attempts.get(a["attempt_id"])["status"] == "paused"
-    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {})
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {},
+                           project_read_trusted=True)
     result = await service.wait_for_state_change("game", after=cursor,
         return_when_idle=True, timeout_seconds=.2, node_keys=nodes)
     if completed:
@@ -502,7 +504,8 @@ async def test_director_recovery_failure_does_not_return_cached_paused(system, t
     def unavailable(_rid):
         raise OSError("first observation failure")
     monkeypatch.setattr(sf, "get_run", unavailable)
-    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {})
+    service = StateService(store.db, WorkspaceManager(str(tmp_path / "workspaces")), sf, {},
+                           project_read_trusted=True)
     result = await service.wait_for_state_change("game", after=cursor,
         return_when_idle=True, timeout_seconds=2, node_keys=["b"])
     assert result == {"events": [], "next_after": cursor, "timed_out": False,

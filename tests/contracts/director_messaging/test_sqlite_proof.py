@@ -21,7 +21,7 @@ class SQLiteHarness:
     def reset(self, project_ids):
         self.index += 1
         db = StateDatabase(str(self.root / f"vectors-{self.index}.sqlite"))
-        service = StateService(db, actor="bootstrap")
+        service = StateService(db, actor="bootstrap", project_read_trusted=True)
         for project_id in project_ids:
             service.create_project(project_id, project_id)
         self.provider = service.director_messages
@@ -31,7 +31,7 @@ class SQLiteHarness:
 
 
 def _service(path: Path, actor="transport-a"):
-    return StateService(StateDatabase(str(path)), actor=actor)
+    return StateService(StateDatabase(str(path)), actor=actor, project_read_trusted=True)
 
 
 def _projects(service, *project_ids):
@@ -69,7 +69,7 @@ def test_additive_schema_migrates_existing_state_database_and_survives_restart(t
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
             "AND name LIKE 'state_director_%'").fetchone()[0] == 0
-    first = StateService(database, actor="transport-a")
+    first = StateService(database, actor="transport-a", project_read_trusted=True)
     sent = _send(first.director_messages)
     delivery_id = sent["result"]["deliveries"][0]["delivery_id"]
 

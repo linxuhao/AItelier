@@ -40,7 +40,7 @@ def bind(s,nk,did,rev=1,bid='b1',expected=1,purpose='implements'):
 
 @pytest.fixture
 def service(tmp_path):
-    s=StateService(StateDatabase(str(tmp_path/'state.sqlite')),actor='test-author');s.create_project('game','Game')
+    s=StateService(StateDatabase(str(tmp_path/'state.sqlite')),actor='test-author',project_read_trusted=True);s.create_project('game','Game')
     return s
 
 
